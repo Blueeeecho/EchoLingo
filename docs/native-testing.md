@@ -35,11 +35,11 @@ Windows OCR uses the first supported user-profile language, with an installed-la
 
 `show_without_activation(&WebviewWindow)` must be called inside the application's main-thread dispatch. On macOS it sends the existing NSWindow `orderFrontRegardless` without calling `makeKeyAndOrderFront`, `NSApplication.activate`, or Tauri `show()` first. The macOS adapter rejects calls from a non-main thread. On Windows it uses the owned HWND with `ShowWindow(SW_SHOWNOACTIVATE)` and `SetWindowPos(HWND_TOPMOST, SWP_NOACTIVATE | SWP_SHOWWINDOW | SWP_NOMOVE | SWP_NOSIZE)`. These operations show the floating window while retaining source-app focus. macOS window level is set separately by the application; ordering alone does not change it.
 
-`pointer_state()` reads only the current left/right mouse button state and current global pointer position. Windows uses `GetAsyncKeyState(VK_LBUTTON/VK_RBUTTON)` and `GetCursorPos`. macOS uses `CGEventSourceButtonState` plus a temporary `CGEventCreate(NULL)` snapshot, `CGEventGetLocation`, and a matching `CFRelease`. It installs no event tap or hook, posts no input, moves no cursor, requests no Input Monitoring permission, and records no pointer history or content.
+`pointer_state()` reads only the current/recent left/right mouse button activity and current global pointer position. Windows uses `GetAsyncKeyState(VK_LBUTTON/VK_RBUTTON)` (current-state high bit plus a best-effort recent-press low bit) and `GetCursorPos`. macOS uses `CGEventSourceButtonState`, left/right press counters from `CGEventSourceCounterForEventType`, and a temporary `CGEventCreate(NULL)` snapshot with `CGEventGetLocation` and matching `CFRelease`. Atomic previous counts allow it to notice a quick press/release between samples. Only two aggregate press counts are retained in process memory; no coordinates or content are retained. It installs no event tap or hook, posts no input, moves no cursor, requests no Input Monitoring permission, and records no pointer history or content.
 
 **Coordinate contract:** Windows returns physical screen pixels (in the application's DPI-aware context). macOS returns upper-left-origin, global **logical points**, including negative coordinates for displays left/above the primary display. When comparing the macOS pointer to a Tauri window's physical `outer_position`/`outer_size`, multiply **both pointer coordinates by that same window's current `scale_factor()`**. This matches the bundled Tao 0.37.2 macOS implementation, whose `outer_position()` flips the NSWindow frame into top-left logical coordinates then calls `to_physical(window.scale_factor())`. Do not use the primary monitor's scale for a window on another monitor.
 
-The application may poll this state only while its floating window is visible and compare against its bounds to hide on an outside press. Current-state polling is not an event queue, so a complete press/release between polling ticks can be missed. Nonactivation, focus retention, quick outside clicks, and mixed-scale/negative-coordinate displays still require real desktop acceptance; the clipboard smoke fixture does not establish those UI behaviors.
+The application polls this state only while its floating window is visible and compares against its bounds to hide on an outside press. It must discard the first sample on **each hidden-to-visible transition** to establish a fresh baseline, ignoring counters or Windows recent-press bits from activity while hidden. The return boolean means "currently down or a recent press was observed", rather than strictly "currently held". Windows documents that another application can consume the recent-press low bit, so polling should remain frequent and cannot promise event-hook reliability. Aggregate counters report activity, not the original click location; the coordinates are the current pointer snapshot. Nonactivation, focus retention, quick outside clicks, and mixed-scale/negative-coordinate displays still require real desktop acceptance; the clipboard smoke fixture does not establish those UI behaviors.
 
 ## Reproducible noninteractive tests
 
@@ -76,6 +76,8 @@ Run this separately on an **unlocked, dedicated Windows test desktop**. It creat
 ```powershell
 powershell.exe -NoProfile -STA -ExecutionPolicy Bypass -File tests/windows-native-smoke.ps1
 ```
+
+The default helper path is resolved inside the script body for Windows PowerShell 5.1 compatibility. It uses the smoke script's own directory, so it does not depend on the current working directory; `-HelperPath C:\absolute\path\windows.ps1` can override it explicitly. A missing/unresolvable script location is a failing diagnostic, not a skipped test.
 
 The script keeps a live WinForms message loop while a separate STA test thread invokes the actual native helper in child processes. It checks:
 
@@ -131,4 +133,5 @@ Record OS build, application version, permissions, installed OCR languages, disp
 - [Apple: Accessibility selected-text attribute](https://developer.apple.com/documentation/applicationservices/kaxselectedtextattribute)
 - [Apple: Vision text recognition](https://developer.apple.com/documentation/vision/vnrecognizetextrequest)
 - [Apple: CGEvent location](https://developer.apple.com/documentation/coregraphics/cgevent/location)
+- [Apple: Aggregate event counters](https://developer.apple.com/documentation/coregraphics/cgeventsource/counterforeventtype%28_%3Aeventtype%3A%29)
 - [Apple: Ordering a window without making it key](https://developer.apple.com/documentation/appkit/nswindow/orderfrontregardless%28%29)

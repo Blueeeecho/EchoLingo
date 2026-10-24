@@ -38,8 +38,11 @@ pub fn copy_text(text: &str) -> Result<(), String> {
     run_text("copy", Some(text)).map(|_| ())
 }
 
-/// Query current left/right button state and pointer position without hooks,
-/// event taps, input synthesis, or permission prompts. Windows coordinates are
+/// Query current/recent left/right button activity and pointer position without
+/// hooks, event taps, input synthesis, or permission prompts. macOS supplements
+/// current state with press counters; Windows uses best-effort recent-press bits.
+/// The caller must discard the first sample whenever its window becomes visible.
+/// Windows coordinates are
 /// physical screen pixels. macOS coordinates are top-left global logical points:
 /// multiply BOTH coordinates by this window's `scale_factor()` before comparing
 /// against that window's Tauri `outer_position()` and `outer_size()` pixels.
@@ -65,7 +68,12 @@ pub fn pointer_state() -> Result<(bool, f64, f64), String> {
                 std::io::Error::last_os_error()
             ));
         }
-        GetAsyncKeyState(0x01) < 0 || GetAsyncKeyState(0x02) < 0
+        // Query both keys on every call. The low "pressed since last query" bit
+        // helps catch short clicks, but Windows documents that other processes
+        // may consume it, so it cannot replace current-state polling.
+        let left = GetAsyncKeyState(0x01) as u16;
+        let right = GetAsyncKeyState(0x02) as u16;
+        (left | right) & 0x8001 != 0
     };
     Ok((down, f64::from(point.x), f64::from(point.y)))
 }
@@ -73,6 +81,9 @@ pub fn pointer_state() -> Result<(bool, f64, f64), String> {
 #[cfg(target_os = "macos")]
 pub fn pointer_state() -> Result<(bool, f64, f64), String> {
     use std::ffi::c_void;
+    use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+    static PREVIOUS_COUNTS: AtomicU64 = AtomicU64::new(0);
+    static INITIALIZED: AtomicBool = AtomicBool::new(false);
     #[repr(C)]
     struct Point {
         x: f64,
@@ -81,6 +92,7 @@ pub fn pointer_state() -> Result<(bool, f64, f64), String> {
     #[link(name = "CoreGraphics", kind = "framework")]
     unsafe extern "C" {
         fn CGEventSourceButtonState(source: i32, button: u32) -> bool;
+        fn CGEventSourceCounterForEventType(source: i32, event_type: u32) -> u32;
         fn CGEventCreate(source: *const c_void) -> *const c_void;
         fn CGEventGetLocation(event: *const c_void) -> Point;
     }
@@ -91,7 +103,7 @@ pub fn pointer_state() -> Result<(bool, f64, f64), String> {
     // SAFETY: A null source creates a read-only snapshot of current event state.
     // The retained event is released exactly once after reading its coordinates.
     // This never installs an event tap, posts an event, or asks for input access.
-    let (down, point) = unsafe {
+    let (down, point, counts) = unsafe {
         let event = CGEventCreate(std::ptr::null());
         if event.is_null() {
             return Err("POINTER_UNAVAILABLE: Cannot query the current desktop pointer.".into());
@@ -99,12 +111,24 @@ pub fn pointer_state() -> Result<(bool, f64, f64), String> {
         let point = CGEventGetLocation(event);
         CFRelease(event);
         let down = CGEventSourceButtonState(0, 0) || CGEventSourceButtonState(0, 1);
-        (down, point)
+        let left = CGEventSourceCounterForEventType(0, 1);
+        let right = CGEventSourceCounterForEventType(0, 3);
+        (down, point, (u64::from(left) << 32) | u64::from(right))
     };
     if !point.x.is_finite() || !point.y.is_finite() {
         return Err("POINTER_UNAVAILABLE: Desktop pointer coordinates are not finite.".into());
     }
-    Ok((down, point.x, point.y))
+    // One visible-window watcher consumes these counters. Counts contain no
+    // pointer coordinates or text, and are never logged or persisted. The first
+    // process sample establishes a baseline; the caller also discards a sample
+    // after each hidden-to-visible transition to ignore activity while hidden.
+    let previous = PREVIOUS_COUNTS.swap(counts, Ordering::Relaxed);
+    let initialized = INITIALIZED.swap(true, Ordering::Relaxed);
+    Ok((
+        down || (initialized && counts != previous),
+        point.x,
+        point.y,
+    ))
 }
 
 #[cfg(not(any(target_os = "macos", target_os = "windows")))]

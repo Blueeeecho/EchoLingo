@@ -3,7 +3,7 @@
 # clipboard, preserving all supported original formats and restoring in finally.
 [CmdletBinding()]
 param(
-    [string]$HelperPath = (Join-Path $PSScriptRoot '..\src-tauri\native\windows.ps1')
+    [string]$HelperPath = ''
 )
 $ErrorActionPreference = 'Stop'
 [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)
@@ -14,6 +14,18 @@ try {
     }
     if ([Threading.Thread]::CurrentThread.ApartmentState -ne [Threading.ApartmentState]::STA) {
         throw 'TEST_APARTMENT: Run powershell.exe -NoProfile -STA -ExecutionPolicy Bypass -File tests/windows-native-smoke.ps1.'
+    }
+    # Windows PowerShell 5.1 may not initialize PSScriptRoot while evaluating
+    # parameter defaults. Resolve the default only after entering the script body.
+    if ([string]::IsNullOrWhiteSpace($HelperPath)) {
+        $scriptDirectory = $PSScriptRoot
+        if ([string]::IsNullOrWhiteSpace($scriptDirectory)) {
+            $scriptDirectory = Split-Path -Parent $MyInvocation.MyCommand.Path
+        }
+        if ([string]::IsNullOrWhiteSpace($scriptDirectory)) {
+            throw 'TEST_PATH: Cannot locate the smoke script directory. Pass -HelperPath explicitly.'
+        }
+        $HelperPath = Join-Path $scriptDirectory '..\src-tauri\native\windows.ps1'
     }
     $HelperPath = (Resolve-Path -LiteralPath $HelperPath).Path
     Add-Type -AssemblyName System.Windows.Forms

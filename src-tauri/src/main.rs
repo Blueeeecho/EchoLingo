@@ -27,6 +27,7 @@ struct AppState {
     data_dir: PathBuf,
     client: reqwest::Client,
     startup_warnings: Mutex<Vec<String>>,
+    outside_thread: Mutex<Option<std::thread::Thread>>,
 }
 fn now() -> u64 {
     SystemTime::now()
@@ -391,6 +392,14 @@ fn show(app: &tauri::AppHandle) {
         let _ = w.show();
         let _ = w.unminimize();
         let _ = w.set_focus();
+        wake_outside_watcher(app);
+    }
+}
+fn wake_outside_watcher(app: &tauri::AppHandle) {
+    if let Ok(thread) = app.state::<AppState>().outside_thread.lock() {
+        if let Some(thread) = thread.as_ref() {
+            thread.unpark();
+        }
     }
 }
 fn show_inactive(app: &tauri::AppHandle) {
@@ -398,6 +407,7 @@ fn show_inactive(app: &tauri::AppHandle) {
     let _ = app.run_on_main_thread(move || {
         if let Some(window) = handle.get_webview_window("main") {
             let _ = platform::show_without_activation(&window);
+            wake_outside_watcher(&handle);
         }
     });
 }
@@ -495,7 +505,8 @@ fn start_action(app: tauri::AppHandle, action: String) {
     });
 }
 fn outside_click_watcher(app: tauri::AppHandle) {
-    std::thread::spawn(move || {
+    let owner = app.clone();
+    let handle = std::thread::spawn(move || {
         let mut previous = false;
         let mut was_visible = false;
         loop {
@@ -508,6 +519,7 @@ fn outside_click_watcher(app: tauri::AppHandle) {
             {
                 previous = false;
                 was_visible = false;
+                std::thread::park_timeout(Duration::from_secs(60));
                 continue;
             }
             let Ok((down, x, y)) = platform::pointer_state() else {
@@ -541,6 +553,7 @@ fn outside_click_watcher(app: tauri::AppHandle) {
             previous = down;
         }
     });
+    *owner.state::<AppState>().outside_thread.lock().unwrap() = Some(handle.thread().clone());
 }
 #[tauri::command]
 fn run_action(app: tauri::AppHandle, action: String) -> Result<(), String> {
@@ -572,6 +585,7 @@ fn set_pinned(app: tauri::AppHandle, state: State<AppState>, pinned: bool) -> Re
         .set_always_on_top(true)
         .map_err(|_| "无法设置窗口置顶")?;
     state.pinned.store(pinned, Ordering::SeqCst);
+    wake_outside_watcher(&app);
     Ok(())
 }
 #[tauri::command]
@@ -676,6 +690,7 @@ fn main() {
                 data_dir,
                 client,
                 startup_warnings: Mutex::new(warnings),
+                outside_thread: Mutex::new(None),
             });
             if let Err(e) = install_shortcuts(app.handle(), &settings.shortcuts) {
                 app.state::<AppState>()
