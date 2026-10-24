@@ -8,7 +8,8 @@ Updated: 2026-10-24, Asia/Shanghai. Stage: v0.1.0 preview validation.
 - Captured selection/OCR soft wraps are cleaned once before display/API submission. Blank paragraphs, indentation and recognizable code/lists remain. Raw capture is kept in memory for More > restore original line breaks. Typed/pasted text and historical records are untouched.
 - Native OCR uses relative line geometry to mark obvious paragraph gaps; it preserves original line order and handles rotation/structured text conservatively. Plain-text or OCR paragraph reconstruction remains heuristic.
 - Input/capture shortcuts received during a credentials editor are deferred without shrinking the editor or discarding its fields.
-- Current local verification: 45 frontend tests and 30 Rust tests, integrated IPC regressions, 420/520 px short/medium/long layout samples; Mac real OCR and paragraph geometry fixtures passed. Final native builds/Windows geometry check follow the new commit.
+- Verification: 45 frontend tests and 30 Rust tests, integrated IPC regressions, 420/520 px short/medium/long layout samples; Mac real OCR and paragraph geometry fixtures passed. GitHub Actions run 40102326336 on e15deaa passed frontend interactions, both native builds, Windows OCR geometry and selection/clipboard smoke checks. NSIS and DMG artifacts were generated successfully.
+- Latest optimized app is running silently from outputs/EchoLingo-installers/EchoLingo.app. The owner pressed Alt+D and explicitly confirmed the simplified popup is visible on their desktop. Local minimal DMG is generated and its checksum verified.
 
 ## Confirmed product behavior
 - Independent installable Windows-first desktop app, also macOS. Not a browser product.
@@ -27,9 +28,9 @@ Updated: 2026-10-24, Asia/Shanghai. Stage: v0.1.0 preview validation.
 - OCR: native Windows.Media.Ocr / macOS Vision, Baidu OAuth/form, Tencent TC3, compatible Vision API and advanced JSON gateway. Supplier-specific credential fields; new cloud entries do not change the active local engine.
 - OS credentials bound to protocol and normalized endpoint origin, preventing old keys crossing suppliers; bounded history/favorites, themes, provider and hotkey settings.
 - Native clipboard-preserving selection, screenshot capture, inactive floating windows and outside-click handling.
-- 28 Rust tests and 20 frontend tests passed locally; isolated frontend/IPC regressions passed, including dual credentials, partial-field rejection, protocol/origin changes and no secrets in Settings.
+- 30 Rust tests and 45 frontend tests passed locally; isolated frontend/IPC regressions passed, including dual credentials, partial-field rejection, protocol/origin changes, no secrets in Settings and the minimal-popup/captured-text behavior above.
 - macOS OCR fixture + PNG base64 roundtrip passed.
-- GitHub Actions run 40097996277 on commit 3c8d0f8 passed all three jobs: Windows/macOS builds and tests plus frontend interactions. Actual NSIS and DMG packages include supplier adapters and origin-bound credentials. Local optimized Apple Silicon app: 4.78 MiB, ad-hoc signature verified.
+- GitHub Actions run 40102326336 on commit e15deaa passed all three jobs: Windows/macOS builds and tests plus frontend interactions. Actual NSIS and DMG packages include the minimal popup, wrapped-text handling, supplier adapters and origin-bound credentials. Local optimized Apple Silicon executable: 4.82 MiB, ad-hoc signature verified.
 
 ## In progress
 - Local preview acceptance using generated installers; real supplier account testing requires the owner to configure credentials inside EchoLingo.

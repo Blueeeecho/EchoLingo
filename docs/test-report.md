@@ -9,11 +9,11 @@
 | npm 依赖安全审计 | 通过 | 最近审计 0 vulnerabilities |
 | Rust 编译与单测 | 通过，30 项 | 增加弹窗/管理尺寸和负坐标工作区钳制；保留真实 HTTP、签名、脱敏与凭据隔离用例 |
 | macOS 原生 Vision OCR | 通过 | 实际识别生成图 2468、PNG Base64 往返；新增段间距/换列/缩放/结构文字保序几何 fixture |
-| Windows 原生 OCR | 通过 | CI 实际 Windows.Media.Ocr 识别生成图；非模拟结果 |
-| Windows 取词与剪贴板桌面冒烟 | 通过 | run 40097272065：真实 Unicode 复制/读取、选区、空选区、Ctrl+C 回退、HTML/RTF/Unicode 剪贴板恢复、密码框拒绝 |
-| Windows NSIS / macOS DMG | 上版通过；极简版待 CI | commit 3c8d0f8/run 40097996277 已通过；极简版与 Windows OCR 几何需要新提交证据 |
+| Windows 原生 OCR | 通过 | run 40102326336 实际 Windows.Media.Ocr 识别生成图，并通过段落几何、缩放、保序夹具；非模拟识别结果 |
+| Windows 取词与剪贴板桌面冒烟 | 通过 | run 40102326336：真实 Unicode 复制/读取、选区、空选区、Ctrl+C 回退、HTML/RTF/Unicode 剪贴板恢复、密码框拒绝 |
+| Windows NSIS / macOS DMG | 通过 | 极简版 commit e15deaa/run 40102326336，三个任务全部成功；本地 Apple Silicon App 签名验证、极简版 DMG 校验通过 |
 | 真实供应商 API | 未运行 | 使用虚构凭证与本地 HTTP 协议测试；未读取或验证其他应用的供应商凭证 |
-| 用户电脑上的独立窗口 | 用户确认可见 | 原生自动化截图返回白色；不据此判定应用实际白屏 |
+| 用户电脑上的独立窗口 | 用户确认极简弹窗已生效 | 已启动更新后的独立 App，用户按 Alt+D 确认“已是简洁小弹窗”；原生自动化截图返回白色，不据此判定应用实际白屏 |
 | 用户电脑的选文权限、交互截图与取消 | 尚待手动验收 | macOS 辅助功能/屏幕录制流程、Windows 实际目标应用 |
 | Windows 多显示器 / 混合 DPI / 安装卸载 | 未完成 | CI 单屏专用测试窗口不能替代真实使用场景 |
 | 代码签名 / Apple 公证 / 商店 | 未配置 | 安装包仅用于预览验证 |
@@ -23,6 +23,7 @@
 - [run 40093670591](https://github.com/Blueeeecho/EchoLingo/actions/runs/40093670591)：早期 Windows NSIS、macOS DMG 成功。
 - [run 40097272065](https://github.com/Blueeeecho/EchoLingo/actions/runs/40097272065)：包含非激活浮窗、云 OCR 通用接口的三个任务全部成功；Windows 桌面冒烟通过。
 - [run 40097996277](https://github.com/Blueeeecho/EchoLingo/actions/runs/40097996277)：供应商预设、百度/腾讯原生适配及凭据 origin 绑定的最终提交，Windows/macOS 与前端三个任务全部通过。
+- [run 40102326336](https://github.com/Blueeeecho/EchoLingo/actions/runs/40102326336)：极简弹窗、自动换行与 OCR 段落几何，Windows/macOS 原生检查、安装包构建和前端交互全部通过。前一次 CI 暴露测试 HTTP socket 继承非阻塞模式的问题，已在测试夹具中显式恢复阻塞读取并重新验证。
 
 桌面冒烟仅操作临时测试窗口，保存并恢复 CI 桌面的剪贴板，不读取用户应用内容；不覆盖全局快捷键注册、框选操作、多屏或 UAC 桌面。
 
