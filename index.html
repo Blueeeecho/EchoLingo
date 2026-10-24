@@ -1,0 +1,90 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="color-scheme" content="light dark" />
+    <meta name="description" content="EchoLingo · 回声译，轻量、可自定义的桌面翻译工具。" />
+    <title>EchoLingo · 回声译</title>
+  </head>
+  <body>
+    <svg class="icon-definitions" xmlns="http://www.w3.org/2000/svg" aria-hidden="true"><defs>
+      <symbol id="i-translate" viewBox="0 0 24 24"><path d="m4 5 10 0M9 3v2m-3 0c0 5 3 8 7 10M12 5c0 5-3 8-8 11m10 4 4-10 4 10m-6.5-3h5"/></symbol>
+      <symbol id="i-history" viewBox="0 0 24 24"><path d="M3 11a9 9 0 1 1 2.3 7M3 5v6h6m3-5v6l4 2"/></symbol>
+      <symbol id="i-settings" viewBox="0 0 24 24"><path d="m9 3-.6 2.2-2 .9-2-.5-2 3.5L4 10.8v2.4l-1.6 1.7 2 3.5 2-.5 2 .9L9 21h4l.6-2.2 2-.9 2 .5 2-3.5-1.6-1.7v-2.4l1.6-1.7-2-3.5-2 .5-2-.9L13 3Z"/><circle cx="11" cy="12" r="3"/></symbol>
+      <symbol id="i-capture" viewBox="0 0 24 24"><path d="M8 3H4a1 1 0 0 0-1 1v4m13-5h4a1 1 0 0 1 1 1v4m0 8v4a1 1 0 0 1-1 1h-4M8 21H4a1 1 0 0 1-1-1v-4M7 8h10M12 8v9M9 17h6"/></symbol>
+      <symbol id="i-selection" viewBox="0 0 24 24"><path d="M8 3h8m-4 0v18m-4 0h8M4 7v10m16-10v10"/></symbol>
+      <symbol id="i-clipboard" viewBox="0 0 24 24"><rect x="8" y="3" width="8" height="4" rx="1"/><path d="M8 5H5v16h14V5h-3M8 11h8m-8 4h5"/></symbol>
+      <symbol id="i-copy" viewBox="0 0 24 24"><rect x="8" y="8" width="12" height="13" rx="2"/><path d="M15 8V3H3v13h5"/></symbol>
+      <symbol id="i-audio" viewBox="0 0 24 24"><path d="m11 4-6 5H2v6h3l6 5Zm4 4a6 6 0 0 1 0 8m3-11a10 10 0 0 1 0 14"/></symbol>
+      <symbol id="i-pin" viewBox="0 0 24 24"><path d="m8 3 8 0-1 6 4 4v2H5v-2l4-4Zm4 12v7"/></symbol>
+      <symbol id="i-star" viewBox="0 0 24 24"><path d="m12 3 2.8 5.7 6.2.9-4.5 4.4 1.1 6.2-5.6-3-5.6 3 1.1-6.2L3 9.6l6.2-.9Z"/></symbol>
+      <symbol id="i-arrow" viewBox="0 0 24 24"><path d="M4 12h16m-6-6 6 6-6 6"/></symbol>
+      <symbol id="i-swap" viewBox="0 0 24 24"><path d="M3 7h17m-4-4 4 4-4 4M21 17H4m4-4-4 4 4 4"/></symbol>
+      <symbol id="i-search" viewBox="0 0 24 24"><circle cx="10.5" cy="10.5" r="6.5"/><path d="m16 16 5 5"/></symbol>
+      <symbol id="i-plus" viewBox="0 0 24 24"><path d="M12 4v16M4 12h16"/></symbol>
+      <symbol id="i-trash" viewBox="0 0 24 24"><path d="M3 6h18M9 6V3h6v3M5 6l1 15h12l1-15M10 10v7m4-7v7"/></symbol>
+      <symbol id="i-close" viewBox="0 0 24 24"><path d="m5 5 14 14M5 19 19 5"/></symbol>
+      <symbol id="i-shield" viewBox="0 0 24 24"><path d="m12 3 8 3v6c0 5-8 9-8 9s-8-4-8-9V6Zm-4 9 3 3 5-6"/></symbol>
+      <symbol id="i-check" viewBox="0 0 24 24"><path d="m4 12 5 5L20 6"/></symbol>
+      <symbol id="i-key" viewBox="0 0 24 24"><circle cx="8" cy="8" r="5"/><path d="m12 12 9 9m-6-6 3-3m0 6 3-3"/></symbol>
+      <symbol id="i-bolt" viewBox="0 0 24 24"><path d="m13 2-9 12h7l-1 8 10-12h-7Z"/></symbol>
+      <symbol id="i-sun" viewBox="0 0 24 24"><circle cx="12" cy="12" r="4"/><path d="M12 2v2m0 16v2M2 12h2m16 0h2M5 5l1 1m12 12 1 1M5 19l1-1M18 6l1-1"/></symbol>
+    </defs></svg>
+    <div class="app-shell">
+      <aside class="rail" aria-label="主导航">
+        <a href="#translate" class="brand-mark" aria-label="EchoLingo 首页"><span>E</span><i></i></a>
+        <nav class="rail-nav">
+          <button class="nav-button active" data-view="translate" aria-label="翻译" title="翻译" aria-current="page"><svg class="icon"><use href="#i-translate"/></svg><span>翻译</span></button>
+          <button class="nav-button" data-view="history" aria-label="历史与收藏" title="历史与收藏"><svg class="icon"><use href="#i-history"/></svg><span>历史</span></button>
+          <button class="nav-button" data-view="settings" aria-label="设置" title="设置"><svg class="icon"><use href="#i-settings"/></svg><span>设置</span></button>
+        </nav>
+        <div class="rail-bottom"><button class="icon-button" id="theme-cycle" aria-label="切换主题" title="切换主题"><svg class="icon"><use href="#i-sun"/></svg></button><span class="rail-version">0.1</span></div>
+      </aside>
+      <div class="main-shell">
+        <header class="app-header">
+          <div><div class="wordmark">EchoLingo <span>回声译</span></div><div class="brand-caption">让理解，轻一点。</div></div>
+          <div class="header-tools"><span class="runtime-badge" id="runtime-badge"><i></i><span>桌面翻译工具</span></span><button class="icon-button" id="pin-button" aria-label="置顶窗口" title="置顶窗口" aria-pressed="false"><svg class="icon"><use href="#i-pin"/></svg></button></div>
+        </header>
+        <div class="preview-banner" id="preview-banner" hidden><svg class="icon"><use href="#i-bolt"/></svg><span>浏览器界面预览 · 全局快捷键、截图与安全凭据库需要在桌面应用中使用。</span></div>
+        <main>
+          <section class="view" id="view-translate" aria-label="翻译工作台">
+            <div class="section-heading"><div><span class="eyebrow">YOUR EVERYDAY TRANSLATOR</span><h1>跨越语言，保持专注<span class="heading-dot">.</span></h1></div><span class="section-index">01 / TRANSLATE</span></div>
+            <div class="quick-actions" aria-label="快捷翻译操作">
+              <button class="quick-action" data-action="selection"><span class="action-icon violet"><svg class="icon"><use href="#i-selection"/></svg></span><span class="quick-label">划词翻译<small>选中文字后，按快捷键</small></span><kbd data-shortcut="selection">Alt+D</kbd></button>
+              <button class="quick-action" data-action="capture"><span class="action-icon teal"><svg class="icon"><use href="#i-capture"/></svg></span><span class="quick-label">截图翻译<small>框选屏幕上的任何文字</small></span><kbd data-shortcut="capture">Alt+S</kbd></button>
+              <button class="quick-action" data-action="clipboard"><span class="action-icon amber"><svg class="icon"><use href="#i-clipboard"/></svg></span><span class="quick-label">剪贴板翻译<small>读取当前剪贴板文本</small></span><svg class="icon subtle-icon"><use href="#i-arrow"/></svg></button>
+            </div>
+            <div class="translator-panel">
+              <div class="language-bar"><div class="language-pair"><label class="sr-only" for="source-language">源语言</label><select id="source-language"></select><button class="icon-button swap-button" id="swap-language" aria-label="交换语言" title="交换语言"><svg class="icon"><use href="#i-swap"/></svg></button><label class="sr-only" for="target-language">目标语言</label><select id="target-language"></select></div><span class="service-counter" id="service-counter">0 个服务已启用</span></div>
+              <div class="translation-columns">
+                <div class="source-column"><div class="column-caption"><span>原文 <i>ORIGINAL</i></span><button class="text-button" id="clear-source">清空</button></div><label class="sr-only" for="source-text">输入或粘贴需要翻译的文字</label><textarea id="source-text" maxlength="20000" spellcheck="false" placeholder="输入或粘贴文字，&#10;让语言不再成为距离。"></textarea><div class="source-footer"><span class="character-count" id="character-count">0 / 20,000</span><button class="primary-button" id="translate-button"><span id="translate-button-label">翻译</span><svg class="icon" id="translate-arrow"><use href="#i-arrow"/></svg><span class="spinner" id="translate-spinner" hidden></span></button></div></div>
+                <div class="results-column"><div class="column-caption"><span>译文 <i>TRANSLATION</i></span><span id="translation-state" class="translation-state">等候输入</span></div><div id="results" class="results-container" aria-live="polite" aria-busy="false"><div class="translation-empty"><div class="empty-orbit"><span class="orbit-letter">A</span><span class="orbit-letter small">译</span><span class="orbit-dot"></span></div><h2>你的下一次理解，从这里开始</h2><p>添加翻译服务，输入文字<br/>或用快捷键，随时唤起翻译。</p><button class="text-button accent" id="setup-services">配置翻译服务 <span aria-hidden="true">↗</span></button></div></div></div>
+              </div>
+            </div>
+            <div class="workspace-bottom"><div><svg class="icon"><use href="#i-shield"/></svg><span>API 密钥存入系统凭据库</span></div><span><kbd id="translate-key-hint">Ctrl</kbd> + <kbd>Enter</kbd> 翻译 <span class="hint-divider">·</span> <kbd>Esc</kbd> 隐藏窗口</span></div>
+            <div class="tip-card"><span class="tip-tag">小技巧</span><p>无感 OCR 会识别屏幕选区，并将文字复制到剪贴板。<kbd data-shortcut="silentOcr">Alt+C</kbd></p><button class="text-button" data-action="silentOcr">试一试 <span aria-hidden="true">↗</span></button></div>
+          </section>
+          <section class="view" id="view-history" aria-label="历史与收藏" hidden>
+            <div class="section-heading"><div><span class="eyebrow">YOUR LANGUAGE NOTEBOOK</span><h1>理解过的，都留在这里<span class="heading-dot">.</span></h1></div><span class="section-index">02 / HISTORY</span></div>
+            <div class="history-toolbar"><label class="search-field"><svg class="icon"><use href="#i-search"/></svg><input id="history-search" type="search" placeholder="搜索原文或译文" aria-label="搜索历史"/></label><div class="segmented-control"><button id="filter-all" class="active" aria-pressed="true">全部</button><button id="filter-favorites" aria-pressed="false"><svg class="icon"><use href="#i-star"/></svg>收藏</button></div><button class="text-button danger" id="clear-history">清空历史</button></div>
+            <p class="history-summary" id="history-summary">0 条翻译记录 · 仅保存在此设备</p><div id="history-list" class="history-list"></div>
+          </section>
+          <section class="view" id="view-settings" aria-label="设置" hidden>
+            <div class="section-heading"><div><span class="eyebrow">MAKE IT YOURS</span><h1>你的翻译，你来定义<span class="heading-dot">.</span></h1></div><span class="section-index">03 / SETTINGS</span></div>
+            <div class="settings-card"><div class="settings-card-heading"><div><h2>翻译服务</h2><p>同时启用多个服务，对照不同的表达。</p></div><button class="secondary-button" id="add-provider"><svg class="icon"><use href="#i-plus"/></svg>添加服务</button></div><div id="provider-list" class="provider-list"></div><div class="settings-note"><svg class="icon"><use href="#i-shield"/></svg><span>只会将你主动翻译的文字发送给已启用的 API 服务。密钥不会写入历史记录。</span></div></div>
+            <div class="settings-grid"><div class="settings-card"><div class="settings-card-heading"><div><h2>快捷键</h2><p>在任意应用中唤起 EchoLingo。</p></div><svg class="icon muted"><use href="#i-bolt"/></svg></div><form id="shortcuts-form" class="shortcut-form"></form><p class="field-help">格式示例：Alt+D、Ctrl+Shift+T、Command+Shift+T。若被系统或其他应用占用，会显示注册失败提示。</p><button class="secondary-button" id="save-shortcuts">保存快捷键</button></div>
+            <div class="settings-card"><div class="settings-card-heading"><div><h2>偏好与隐私</h2><p>安静工作，只保留你需要的。</p></div><svg class="icon muted"><use href="#i-shield"/></svg></div><label class="preference-row"><span>界面主题</span><select id="theme-select"><option value="system">跟随系统</option><option value="light">浅色</option><option value="dark">深色</option></select></label><label class="preference-row"><span>保存翻译历史<small>原文与译文保存在本机；关闭后不再新增</small></span><input id="save-history" type="checkbox" class="switch"/></label><label class="preference-row"><span>最多保留记录</span><select id="max-history"><option value="50">50 条</option><option value="100">100 条</option><option value="200">200 条</option><option value="500">500 条</option><option value="1000">1000 条</option></select></label><div class="privacy-copy"><p>截图只用于你主动选择的 OCR 操作；文字识别在本机进行。翻译会调用你配置的服务，请按服务商的隐私政策处理敏感文本。</p><p>联网的语音服务可能接收朗读文本；朗读按钮会在系统支持语音合成时显示。</p></div></div></div>
+            <div class="settings-card"><div class="settings-card-heading"><div><h2>权限与诊断</h2><p>检查系统、截图权限、OCR 能力和快捷键状态。</p></div><button class="secondary-button" id="run-diagnostics">运行诊断</button></div><pre id="diagnostics-output" class="diagnostics-output" hidden></pre><p class="field-help">macOS 的截图需要屏幕录制权限，划词可能需要辅助功能权限。Windows 的受保护窗口可能无法读取选中文字。</p></div>
+            <div class="about-line"><div class="mini-brand">EchoLingo <span>· 回声译</span></div><span>v0.1.0 · 让理解，轻一点。</span></div>
+          </section>
+        </main>
+        <footer class="app-footer"><span><i class="status-dot"></i><span id="footer-status">准备就绪</span></span><span>轻量 · 专注 · 由你定义</span></footer>
+      </div>
+    </div>
+    <dialog id="provider-dialog" class="provider-dialog"><form id="provider-form"><div class="dialog-heading"><div><span class="eyebrow">TRANSLATION SERVICE</span><h2 id="provider-dialog-title">添加翻译服务</h2></div><button type="button" class="icon-button" id="close-provider-dialog" aria-label="关闭"><svg class="icon"><use href="#i-close"/></svg></button></div><div class="form-grid"><label>服务名称<input id="provider-name" required maxlength="50" placeholder="例如：我的 DeepSeek" autocomplete="off"/></label><label>API 类型<select id="provider-kind"><option value="openai">OpenAI 兼容</option><option value="deepl">DeepL</option><option value="libretranslate">LibreTranslate</option></select></label><label class="full-width">API Base URL<input id="provider-url" type="url" required placeholder="https://api.openai.com/v1" autocomplete="url"/><small id="provider-url-help">填写 API 基础地址，无需包含 /chat/completions。</small></label><label id="provider-model-field" class="full-width">模型<input id="provider-model" maxlength="200" placeholder="例如：gpt-4o-mini、deepseek-chat" autocomplete="off"/></label><label class="full-width">API 密钥<input id="provider-key" type="password" autocomplete="new-password" placeholder="输入密钥（仅存入系统凭据库）"/><small id="provider-key-help">留空则保留已有密钥。LibreTranslate 可按服务端要求免密钥。</small></label><label class="full-width" id="provider-prompt-field">翻译提示词（可选）<textarea id="provider-prompt" rows="3" maxlength="6000" placeholder="留空使用内置翻译提示词。可用变量：{source}、{target}"></textarea><small>自定义提示词仅适用于 OpenAI 兼容服务。</small></label></div><label class="checkbox-label"><input id="provider-enabled" type="checkbox" checked/>启用此服务</label><p class="dialog-error" id="provider-error" role="alert" hidden></p><div class="dialog-footer"><button type="button" class="text-button danger" id="remove-provider-key" hidden>移除已保存密钥</button><span class="dialog-spacer"></span><button type="button" class="secondary-button" id="cancel-provider-dialog">取消</button><button class="primary-button" id="save-provider" type="submit">保存服务</button></div></form></dialog>
+    <dialog id="confirm-dialog" class="confirm-dialog"><h2 id="confirm-title"></h2><p id="confirm-description"></p><div class="dialog-footer"><button class="secondary-button" id="confirm-cancel">取消</button><button class="primary-button danger-fill" id="confirm-accept">确认删除</button></div></dialog>
+    <div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>
