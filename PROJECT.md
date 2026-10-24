@@ -8,16 +8,19 @@ GitHub: https://github.com/Blueeeecho/EchoLingo
 1. 名称含 Echo，用户已选 EchoLingo，中文名“回声译”。
 2. 轻量，尽量贴近 Bob 的快捷键工作流。
 3. 在其他应用选中文字，通过全局快捷键翻译。
-4. 区域截图后本机 OCR，支持直接翻译或静默复制识别文字。
-5. 支持用户自己的翻译 API、端点、模型与提示词。
+4. 区域截图 OCR，支持直接翻译或静默复制识别文字；默认本机，可明确选择云端。
+5. 支持用户自己的翻译与 OCR API、供应商对应凭据、端点、模型与提示词。
 6. 充分测试后发布，后续持续添加个人功能。
 7. 默认静默托盘启动，按需出现；译文保留到用户点击窗口外立即隐藏，默认不使用倒计时（用户明确选择）。
 8. 用本地文件夹、Git 和文档管理，不能只依赖聊天。
 9. 使用多智能体并行开发；只需 Windows/macOS 桌面套件，不需要鸿蒙套件。
+10. Alt+D 无选区时打开空白浮窗，不激活应用、不自动聚焦输入框、不移动鼠标。Alt+S 直接截图识字翻译。
+11. 浮窗默认在普通窗口之上；钉住仅决定点击外部后是否保留。
 
 ## 项目入口
 - [Bob 详细调研](docs/bob-research.zh-CN.md)
 - [实现计划](docs/implementation-plan.md)
+- [OCR 与翻译 API 配置设计](docs/api-configuration-design.zh-CN.md)
 - [当前进度和交接](docs/status.md)
 - [个性化需求清单](docs/roadmap.zh-CN.md)
 - [原生测试说明](docs/native-testing.md)

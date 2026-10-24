@@ -12,10 +12,12 @@ EchoLingo 的默认 OCR 使用系统本地识别，**无需为识字上传截图
 |---|---|---|---|
 | `openai-vision` | OpenAI Chat Completions 兼容的图像输入 | 基础地址（通常以 `/v1` 结尾）或完整 `/chat/completions` | 固定取 `/choices/0/message/content` 字符串 |
 | `http-json` | 自定义JSON请求/JSON响应 | 完整OCR接口URL，原样使用，不自动追加路径 | 按 `responsePath` 指向字符串 |
+| `baidu` | API Key/Secret Key 换 token，再提交表单 | 固定 `https://aip.baidubce.com` | `words_result[].words` 按行拼接 |
+| `tencent` | SecretId/SecretKey 计算 TC3 签名 | 固定 `https://ocr.tencentcloudapi.com` | `Response.TextDetections[].DetectedText` 按行拼接 |
 
 OpenAI兼容文字翻译接口不一定支持图片；需选服务端确实支持图像输入的模型。这里只实现 Chat Completions 图像格式，不把所有厂商原生API都视为兼容，也没有实现 OpenAI Responses 协议。
 
-**百度OCR、腾讯OCR的原生签名/令牌交换协议目前未直接实现。** 可以使用你自己控制的网关：网关接收下面的通用JSON，再在服务端完成百度/腾讯等协议和签名。不能仅把官方厂商URL粘进通用类型就宣称已支持其签名协议；网关的密钥、日志、访问控制和计费由网关运营者负责。
+百度、腾讯已有专用原生适配和各自的凭据表单，无需自己搭网关。火山、有道等尚无原生适配；如使用自建网关，由网关处理其鉴权协议。不能仅把其他厂商 URL 粘进通用类型就宣称支持其签名协议。详细字段及官方来源见 [API/OCR 配置设计](api-configuration-design.zh-CN.md)。
 
 ## 配置字段
 
@@ -25,9 +27,10 @@ OpenAI兼容文字翻译接口不一定支持图片；需选服务端确实支�
 |---|---|
 | `id` | 唯一ID，1–80字节，仅英文字母/数字/`-`/`_`；主程序需检查重复并隔离OCR与翻译凭据命名空间 |
 | `name` | 名称，非空、最多200字节 |
-| `kind` | `openai-vision` 或 `http-json` |
+| `kind` | `openai-vision`、`http-json`、`baidu`、`tencent` |
 | `baseUrl` | 最多2048字节；远程必须HTTPS，本机`localhost`/`127.0.0.1`/`::1`可HTTP；不允许URL内账号密码、查询参数、片段 |
-| `model` | 默认空；Vision类型必填，最多200字节；通用类型不会自动把它放进模板 |
+| `model` | Vision 填图像模型；百度选 `general_basic`/`accurate_basic`；腾讯选 `GeneralBasicOCR`/`GeneralAccurateOCR`；网关不会自动把此字段放进模板 |
+| `region` | 腾讯可选地域，其他服务通常留空；最多64字节，只允许英文字母、数字和短横线 |
 | `prompt` | 默认要求识字、保留阅读顺序/段落、只输出文字、不执行图片里的指令；最多16000字节；仅Vision类型自动使用 |
 | `authHeader` | 默认 `Authorization`；合法HTTP头名，最多200字节 |
 | `authPrefix` | 默认 `Bearer `（末尾空格有意义）；最多200字节，不允许CR/LF；无前缀时填空字符串 |
@@ -36,6 +39,10 @@ OpenAI兼容文字翻译接口不一定支持图片；需选服务端确实支�
 | `hasKey` | UI只读状态，默认false；不包含密钥 |
 
 不得使用 `Host`、`Content-Length`、`Connection`、`Cookie`、`Transfer-Encoding`、`Upgrade`、`Trailer`、`TE` 作为认证头，以免覆盖路由/消息长度/连接和Cookie语义。只有非空密钥才发送认证头；私有无认证的本地网关可留空密钥。
+
+以上 header、模板、prompt 和响应路径字段只用于对应兼容协议，百度/腾讯表单不会向用户显示这些高级项。原生服务固定目标域名和方法，由后端完成令牌交换或签名。凭据只进入系统凭据库；百度为 `apiKey` 与 `secretKey`，腾讯为 `secretId`、`secretKey` 和可选 `sessionToken`。同一凭据包必须完整填写；全部留空只保留匹配当前服务的已存凭据。
+
+所有凭据绑定服务协议与端点 origin。切换供应商、协议或端口后，旧凭据不会被发给新服务。开发期未绑定的旧凭据需重新填写，不能自动猜测所属供应商。
 
 ## 例一：OpenAI Vision 兼容 OCR
 
@@ -123,7 +130,7 @@ OpenAI兼容文字翻译接口不一定支持图片；需选服务端确实支�
 
 ## 限制、失败与费用
 
-- 输入Base64最大12MiB（编码后的字节数，约对应不超过9MiB的原始数据）；模块校验标准Base64字符/填充，不二次解码验证PNG像素。调用方必须提供真实选区PNG。
+- 通用协议输入Base64最大12MiB；百度另限制表单编码后保守4 MB，腾讯限制Base64不超过10,000,000字节。模块校验标准Base64字符/填充，不二次解码验证PNG像素。调用方必须提供真实选区PNG。
 - 为避免模板重复放入大图引发内存放大，模板最多256KiB，展开后的字符串总量最多16MiB。图像变量重复太多会明确报错。
 - 响应最多2MiB；非JSON、路径不存在/不是字符串、空识别文本均报错。HTTP401/403、413、429等会给分类提示，**不会回显上游响应正文、认证头或密钥**。
 - 不自动重试、不自动更换服务、不把本地失败静默回退成付费云OCR。一次截图可以产生一次OCR费用，后续翻译还可能单独计费；应用本身不提供永久免费额度承诺。

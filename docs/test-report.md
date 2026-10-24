@@ -11,7 +11,7 @@
 | macOS 原生 Vision OCR | 通过 | Swift helper 生成图像并实际识别 EchoLingo translation 2468；PNG Base64 往返 |
 | Windows 原生 OCR | 通过 | CI 实际 Windows.Media.Ocr 识别生成图；非模拟结果 |
 | Windows 取词与剪贴板桌面冒烟 | 通过 | run 40097272065：真实 Unicode 复制/读取、选区、空选区、Ctrl+C 回退、HTML/RTF/Unicode 剪贴板恢复、密码框拒绝 |
-| Windows NSIS / macOS DMG | 通过；新供应商代码待最终 CI | commit 47034037 的 run 40097272065 两个平台均成功构建实际安装包 |
+| Windows NSIS / macOS DMG | 通过 | 新供应商配置 commit 3c8d0f8 的 run 40097996277，两平台均成功构建实际安装包 |
 | 真实供应商 API | 未运行 | 使用虚构凭证与本地 HTTP 协议测试；未读取或验证其他应用的供应商凭证 |
 | 用户电脑上的独立窗口 | 用户确认可见 | 原生自动化截图返回白色；不据此判定应用实际白屏 |
 | 用户电脑的选文权限、交互截图与取消 | 尚待手动验收 | macOS 辅助功能/屏幕录制流程、Windows 实际目标应用 |
@@ -22,10 +22,10 @@
 
 - [run 40093670591](https://github.com/Blueeeecho/EchoLingo/actions/runs/40093670591)：早期 Windows NSIS、macOS DMG 成功。
 - [run 40097272065](https://github.com/Blueeeecho/EchoLingo/actions/runs/40097272065)：包含非激活浮窗、云 OCR 通用接口的三个任务全部成功；Windows 桌面冒烟通过。
-- 供应商预设、百度/腾讯原生适配及凭据 origin 绑定需要对应最终提交的 CI 记录，不能沿用旧提交作为完成证明。
+- [run 40097996277](https://github.com/Blueeeecho/EchoLingo/actions/runs/40097996277)：供应商预设、百度/腾讯原生适配及凭据 origin 绑定的最终提交，Windows/macOS 与前端三个任务全部通过。
 
 桌面冒烟仅操作临时测试窗口，保存并恢复 CI 桌面的剪贴板，不读取用户应用内容；不覆盖全局快捷键注册、框选操作、多屏或 UAC 桌面。
 
 ## 发布状态
 
-公开 GitHub 仓库已创建。安装包完成对应提交的自动验证后才作为预览附件发布；稳定版仍需完成 Windows 手动测试计划与 Bob 行为研究验收项。源码 ZIP 不作为桌面安装包。
+公开 GitHub 仓库已创建，对应提交的安装包已通过自动验证，并保存到本机输出目录供预览验收。稳定版仍需完成 Windows 手动测试计划、真实供应商账户与 Bob 行为研究验收项。源码 ZIP 不作为桌面安装包。

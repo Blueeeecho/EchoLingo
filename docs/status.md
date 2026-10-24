@@ -21,12 +21,11 @@ Updated: 2026-10-24, Asia/Shanghai. Stage: v0.1.0 preview validation.
 - Native clipboard-preserving selection, screenshot capture, inactive floating windows and outside-click handling.
 - 28 Rust tests and 20 frontend tests passed locally; isolated frontend/IPC regressions passed, including dual credentials, partial-field rejection, protocol/origin changes and no secrets in Settings.
 - macOS OCR fixture + PNG base64 roundtrip passed.
-- GitHub Actions run 40097272065 passed Windows native OCR plus real selection/clipboard desktop smoke, frontend interaction tests and actual NSIS/DMG builds. New supplier adapters require a final CI run on their own commit.
+- GitHub Actions run 40097996277 on commit 3c8d0f8 passed all three jobs: Windows/macOS builds and tests plus frontend interactions. Actual NSIS and DMG packages include supplier adapters and origin-bound credentials. Local optimized Apple Silicon app: 4.78 MiB, ad-hoc signature verified.
 
 ## In progress
-- Final native Windows/macOS and frontend CI for supplier adapters and origin-bound credentials.
-- Final optimized desktop bundles after recent feature changes.
-- Review and preview release publication after required automated gates.
+- Local preview acceptance using generated installers; real supplier account testing requires the owner to configure credentials inside EchoLingo.
+- Public release publication after the applicable manual acceptance gates. Source is already public; do not call automated checks a completed end-to-end user test.
 
 ## Verification boundaries
 - User confirmed the independent Mac window is visible. Native automation screenshots returned white even for its normal main view; do not treat that as a proven application rendering failure.
