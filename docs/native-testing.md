@@ -57,6 +57,8 @@ The Rust protocol test is included in `cargo test --manifest-path src-tauri/Carg
 
 On 2026-10-24, this module was compiled locally with Apple Swift 6.4, targeting **arm64 macOS 12.0**, and `--self-test` passed. The real Vision output was exactly `EchoLingo translation 2468`. `--diagnostics` enumerated English, Simplified/Traditional Chinese, Japanese and other supported OCR languages; it reported one Retina display (1710 × 1107 points at scale 2), Screen Recording available, and Accessibility not granted to that test helper. No interactive capture or clipboard operation was performed while building this module.
 
+The complete macOS Rust/Tauri `cargo check --manifest-path src-tauri/Cargo.toml` also passed with Rust 1.99.1, including `build.rs`, the embedded Swift executable and the native adapter. A temporary command-line crates registry mirror was used because the default crates.io connection timed out; this did not modify the user's global Cargo configuration or change package checksums. `cargo check` confirms compilation, not runtime shortcuts or screenshot interactions.
+
 Windows code was initially authored and reviewed on macOS, which has no Windows PowerShell/.NET Framework/WinRT execution environment. Treat Windows runtime, packaged application behavior, UI Automation coverage and DPI behavior as unverified until the Windows CI and manual cases below have actually passed. Do not infer those passes from the macOS OCR test.
 
 ## Required interactive acceptance before a stable release

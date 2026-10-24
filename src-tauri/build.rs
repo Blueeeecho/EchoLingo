@@ -19,10 +19,18 @@ fn main() {
     let status = std::process::Command::new("/usr/bin/swiftc")
         .args(["native/macos.swift", "-O", "-target", &target])
         .args(["-framework", "AppKit", "-framework", "Vision"])
-        .args(["-framework", "ApplicationServices", "-framework", "CoreText"])
+        .args([
+            "-framework",
+            "ApplicationServices",
+            "-framework",
+            "CoreText",
+        ])
         .arg("-o")
         .arg(&output)
         .status()
         .expect("Building the macOS native helper requires Xcode Command Line Tools (swiftc)");
-    assert!(status.success(), "Failed to compile the macOS native helper");
+    assert!(
+        status.success(),
+        "Failed to compile the macOS native helper"
+    );
 }
