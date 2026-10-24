@@ -12,7 +12,7 @@ export const SHORTCUT_LABELS = {
 export const defaultSettings = (): Settings => ({
   providers: [], sourceLanguage: 'auto', targetLanguage: 'zh-Hans',
   shortcuts: { selection: 'Alt+D', capture: 'Alt+S', ocr: 'Alt+Shift+S', silentOcr: 'Alt+C', input: 'Alt+A' },
-  saveHistory: true, theme: 'system', maxHistory: 200,
+  saveHistory: true, theme: 'system', maxHistory: 200, autoHideSeconds: 0, ocrProviders: [], activeOcrProviderId: null,
 });
 export function filterHistory(entries: HistoryEntry[], query: string, favoritesOnly: boolean): HistoryEntry[] {
   const normalized = query.trim().toLocaleLowerCase();

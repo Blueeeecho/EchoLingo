@@ -1,12 +1,27 @@
 # 初版独立只读审查记录
 
-日期：2026-10-24。范围：`src-tauri/src/main.rs`、`model.rs`、`translation.rs`、`platform.rs`、前端 `src/main.ts` 与相关配置。此文件是开发中的快照，行号对应审查时版本；修复需要重新验证，不能把它当最终未解决列表。
+日期：2026-10-24；同日完成第二轮复审。范围：`src-tauri/src/main.rs`、`model.rs`、`translation.rs`、`platform.rs`、前端 `src/main.ts` 与相关配置。初审行号可能因格式化而变化，下方修复证据给出复审位置。
 
-已执行：`npm run check`，TypeScript 检查通过。没有本机 Rust 编译结果；未运行 Windows 原生交互。本次未修改实现文件。
+本审查者已执行：`npm run check`，TypeScript 检查通过。其他代理的 Rust/原生验证请见 `docs/test-report.md`、`docs/native-testing.md`；本审查者没有独立运行 Windows 原生交互。本次仅改审查文档。
 
-## 高优先级发现
+## 复审结论与关闭状态
 
-### R1 / P1：Windows 的 JSON 替换存在丢失设置与历史的崩溃窗口
+五项原 P1 均已核实代码修复，关闭原缺陷；“关闭”不表示 Windows 实机测试已经通过。下一步按 `docs/windows-test-plan.zh-CN.md` 执行原生回归。
+
+| 项目 | 状态 | 复审证据 |
+|---|---|---|
+| R1 Windows数据替换 | 源码修复关闭 | `main.rs:40` 写临时文件并 `sync_all`；59–72 行使用同卷 `MoveFileExW(REPLACE_EXISTING / WRITE_THROUGH)`，没有先删除正式文件 |
+| R2 DeepL路径 | 源码修复关闭 | `translation.rs:9` 根路径补 `/v2/translate`；前端 `main.ts:366` 默认包含 `/v2`；完整路径不再重复追加 |
+| R3 输入快捷键 | 源码修复关闭 | `src/main.ts:611` 监听 `focus-input`，切到翻译页并在下一帧聚焦；612 行监听 `ocr-copied` |
+| R4 历史写入失败吞结果 | 源码修复关闭 | `main.rs:237` 成功写入才替换内存；失败存入诊断 warning，244 行仍返回译文 |
+| R5 Tokio异步测试feature | 源码修复关闭 | `Cargo.toml` 显式加入 `macros` 与 `rt-multi-thread` |
+| R8 提示词变量说明 | 源码修复关闭 | `index.html` 已只宣传 `{source}`、`{target}`，与后端一致 |
+
+R1 的修复解决“主动删除正式文件造成数据缺口”，不等同承诺硬盘/文件系统/断电永不丢数据；故障注入与实际 Windows 文件锁回归仍需执行。R4 的 warning 目前在诊断页可见，运行中的明显提示可以继续改进。
+
+## 原高优先级发现与修复背景
+
+### R1 / 原 P1，已关闭：Windows 的 JSON 替换存在丢失设置与历史的崩溃窗口
 
 位置：`src-tauri/src/main.rs:24`，尤其原 28–31 行；启动读取原 202–206 行。
 
@@ -14,7 +29,7 @@ Windows 路径先把旧文件复制到 `.json.bak`，再删除正式文件，再
 
 建议：使用 Windows 原子替换机制，并给临时文件写入 flush/sync；或至少做严格恢复流程，优先验证新临时文件、其次有效备份，保留坏文件。应做“替换前失败、删除后失败、rename失败、重启恢复”的故障注入测试。
 
-### R2 / P1：默认 DeepL 配置生成错误 API 路径
+### R2 / 原 P1，已关闭：默认 DeepL 配置生成错误 API 路径
 
 位置：`src/main.ts:365` 默认 `https://api-free.deepl.com`，370 行说明无需 `/v2/translate`；`src-tauri/src/translation.rs:9` 只追加 `/translate`。
 
@@ -22,7 +37,7 @@ Windows 路径先把旧文件复制到 `.json.bak`，再删除正式文件，再
 
 建议：以服务类型实现完整路径规范化，覆盖根地址、`/v2`、完整 `/v2/translate` 和末尾斜杠；在本地 Mock HTTP 测试中断言实际请求路径。
 
-### R3 / P1：输入翻译快捷键没有对应前端事件监听
+### R3 / 原 P1，已关闭：输入翻译快捷键没有对应前端事件监听
 
 位置：`src-tauri/src/main.rs:137` 发送 `focus-input`；`src/main.ts:559` 开始的监听注册仅处理 `source-text`、错误事件。
 
@@ -30,7 +45,7 @@ Windows 路径先把旧文件复制到 `.json.bak`，再删除正式文件，再
 
 建议：监听 `focus-input`，切换翻译页并聚焦原文输入框；同时监听 `ocr-copied` 提供静默 OCR 成功反馈。测试应从隐藏窗口、设置页、历史页三种状态触发输入命令。
 
-### R4 / P1：历史保存失败会掩盖已经成功取得的译文
+### R4 / 原 P1，已关闭：历史保存失败会掩盖已经成功取得的译文
 
 位置：`src-tauri/src/main.rs:101`–110，原 107 行 `write_json(...)?`。
 
@@ -38,7 +53,7 @@ API 已成功返回，若磁盘满、权限变化或本地文件被占用，写�
 
 建议：先交付翻译结果，将历史失败作为独立警告；只有成功写入后才更新内存持久化状态。测试用不可写目录模拟，断言译文仍返回且有存储警告。
 
-### R5 / P1：异步测试依赖没有显式启用 Tokio macros
+### R5 / 原 P1，已关闭：异步测试依赖没有显式启用 Tokio macros
 
 位置：`src-tauri/Cargo.toml:21` 只列 `time`、`sync`；`src-tauri/src/translation.rs:103` 使用 `#[tokio::test]`。
 
@@ -67,11 +82,13 @@ Tokio 的测试属性需要 `macros` 与 `rt`。[Tokio 文档](https://docs.rs/t
 
 建议：明确识别截断/过滤并提示，保留可读的部分结果；添加对应响应夹具测试。
 
-### R8 / P2：自定义提示词说明与实现不一致
+### R8 / 原 P2，已关闭：自定义提示词说明与实现不一致
 
 `index.html` 提示支持 `{text}`；`translation.rs:27` 只替换 `{source}`、`{target}`，文本始终独立放在 user message。用户写了 `{text}` 会原样发送该占位符。
 
 建议移除 `{text}` 的宣传并解释正文始终单独发送，或定义模板位置与转义契约。不要随意把不可信原文插进 system message。
+
+复审：当前 `index.html` 已移除 `{text}` 的提示，与实现一致，此项关闭。
 
 ### R9 / P2：历史没有总字节预算
 
@@ -83,6 +100,26 @@ Tokio 的测试属性需要 `macros` 与 `rt`。[Tokio 文档](https://docs.rs/t
 
 `translation.rs:16` / 21 把 `zh-Hans`、`zh-Hant` 合并；界面提供“繁體中文”但某些引擎实际上无法返回该目标。建议按供应商当前语言能力单独映射，缺能力时明确提示，避免静默替换为简体。
 
+## 新 fixed overlay 的安全与焦点复审
+
+检查位置：`src/main.ts:375`–406（浮层显示/关闭）、438–471（异步保存）、530/565（遮罩关闭）、566–579（键盘约束）、606–612（原生事件）；`index.html:85`–86 和 `src/styles.css:109`–112。
+
+已确认的改进：浮层位于 `.app-shell` 外，使用 `role=dialog`、`aria-modal` 与命名；显示后背景设为 inert/aria-hidden，Tab/Shift+Tab 会在可见可用控件内循环，Esc走统一关闭；关闭会恢复可见的先前焦点或导航后备焦点；全局 `[hidden]` 强制隐藏，关闭后的遮罩不会仍占据页面。服务名/错误/译文仍走 textContent，未引入远程 HTML 渲染。`closeProviderDialog` 会清空密码输入，浏览器预览不保存真实密钥。
+
+### R11 / P2，待改进：异步保存期间关闭浮层后存在重入
+
+位置：`src/main.ts:454`–469，仅禁用保存按钮；关闭按钮、取消、遮罩点击和Esc仍可关闭。旧 `saveProvider` 的 await 返回后，会写 `editingProviderId`、刷新设置并无条件 `closeProviderDialog()`。
+
+复现：保存服务时人为延迟IPC/凭据库操作，立即按Esc或点遮罩；再打开另一个服务编辑，输入新的内容。前一个保存继续完成时，可能关闭新表单并清除其密码字段。已发出的保存也不会因用户按“取消”撤回。现有代码使用函数捕获的 provider ID/key，未发现把旧key错存到新provider的直接路径，但会造成编辑内容丢失和操作含义不清。
+
+建议：保存期间禁用关闭/编辑，或给每次浮层会话分配token，旧异步任务只能更新自己的会话；若允许关闭，明确“保存继续”并确保旧任务不能关闭新窗口。把延迟保存→关闭→再打开加入回归。
+
+### R12 / P2，待实机验证：全局事件与浮层的焦点冲突
+
+`focus-input` 和 `source-text` 事件没有先检查浮层是否开启。设置浮层尚未关闭时，用户切到其他软件并触发快捷键，回到EchoLingo会留下浮层；事件同时切换背景页、修改来源文本，尝试把焦点送入 inert 的原文区。在较旧WebKit没有完整inert支持时，程序化focus可能绕过Tab约束；Windows/WebView2也应验证当前焦点是否仍留在活动浮层。
+
+建议：活动浮层开启时，将原生输入事件排队，或明确关闭浮层后再处理；不要悄悄丢弃用户正在填写的配置。还需在系统凭据库弹窗导致主窗口失焦时验证内容保留与恢复。此项目前是代码可达的交互风险，尚无原生运行失败证据。
+
 ## 安全方面的正面观察与未验证边界
 
 - 未发现将 API key 序列化进设置/历史的直接代码；凭据通过 keyring 存储。
@@ -90,4 +127,3 @@ Tokio 的测试属性需要 `macros` 与 `rt`。[Tokio 文档](https://docs.rs/t
 - 结果、历史、错误和名称通过 textContent 构建，没有看到把上游译文塞进 innerHTML 的路径。
 - 远程 API 要求 HTTPS，本机 HTTP 例外；禁重定向，避免自动把 Authorization 跟到其他主机。
 - 这些观察不构成全面安全审计；实际 Keychain/Credential Manager、截图权限、辅助功能、选文焦点、PowerShell/WinRT 和混合 DPI 仍需原生测试。
-

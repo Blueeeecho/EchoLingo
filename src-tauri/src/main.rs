@@ -1,5 +1,6 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 mod model;
+mod ocr;
 mod platform;
 mod translation;
 
@@ -88,11 +89,70 @@ fn load_key(p: &Provider) -> Result<String, String> {
     }
 }
 
+fn load_ocr_key(p: &ocr::OcrProvider) -> Result<String, String> {
+    match secret_entry(&format!("ocr-{}", p.id))?.get_password() {
+        Ok(k) => Ok(k),
+        Err(keyring::Error::NoEntry) => Ok(String::new()),
+        Err(_) => Err("无法读取系统凭据库中的 OCR 密钥".into()),
+    }
+}
+#[tauri::command]
+fn set_ocr_api_key(state: State<AppState>, provider_id: String, key: String) -> Result<(), String> {
+    if !locked(&state.settings)?
+        .ocr_providers
+        .iter()
+        .any(|p| p.id == provider_id)
+    {
+        return Err("请先保存 OCR 服务配置".into());
+    }
+    if key.is_empty() || key.len() > 8192 || key.contains(['\r', '\n']) {
+        return Err("OCR API 密钥为空、过长或包含换行".into());
+    }
+    secret_entry(&format!("ocr-{provider_id}"))?
+        .set_password(&key)
+        .map_err(|_| "无法将 OCR 密钥保存到系统凭据库".into())
+}
+#[tauri::command]
+fn delete_ocr_api_key(provider_id: String) -> Result<(), String> {
+    delete_api_key(format!("ocr-{provider_id}"))
+}
+#[tauri::command]
+async fn test_ocr_provider(
+    state: State<'_, AppState>,
+    provider_id: String,
+) -> Result<String, String> {
+    let _permit = state
+        .translation_busy
+        .try_acquire()
+        .map_err(|_| "请等待当前请求完成后再测试")?;
+    let p = locked(&state.settings)?
+        .ocr_providers
+        .iter()
+        .find(|p| p.id == provider_id)
+        .cloned()
+        .ok_or("OCR 服务不存在")?;
+    let start = std::time::Instant::now();
+    let text = ocr::recognize(
+        &state.client,
+        &p,
+        load_ocr_key(&p),
+        include_str!("../../tests/fixtures/ocr-test.base64").trim(),
+    )
+    .await?;
+    Ok(format!(
+        "OCR 连接成功 · {} ms · {}",
+        start.elapsed().as_millis(),
+        text
+    ))
+}
 #[tauri::command]
 fn get_settings(state: State<AppState>) -> Result<Settings, String> {
     let mut settings = locked(&state.settings)?.clone();
     for p in &mut settings.providers {
         p.has_key = load_key(p).map(|k| !k.is_empty()).unwrap_or(false);
+    }
+    for p in &mut settings.ocr_providers {
+        p.has_key = load_ocr_key(p).map(|k| !k.is_empty()).unwrap_or(false);
     }
     Ok(settings)
 }
@@ -137,6 +197,9 @@ fn save_settings(
     validate_settings(&settings)?;
     parsed_shortcuts(&settings.shortcuts)?;
     for p in &mut settings.providers {
+        p.has_key = false;
+    }
+    for p in &mut settings.ocr_providers {
         p.has_key = false;
     }
     let mut old = locked(&state.settings)?;
@@ -223,7 +286,13 @@ async fn translate(
         let mut history = locked(&state.history)?;
         let created_at = now();
         let entry = HistoryEntry {
-            id: format!("{created_at}-{}", history.len()),
+            id: format!(
+                "{created_at}-{}",
+                SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_nanos()
+            ),
             text,
             source_language,
             target_language,
@@ -243,17 +312,35 @@ async fn translate(
     }
     Ok(results)
 }
+const MAX_HISTORY_BYTES: usize = 8 * 1024 * 1024;
 fn trim_history(history: &mut Vec<HistoryEntry>, max: usize) {
-    while history.len() > max {
-        if let Some(i) = history.iter().rposition(|h| !h.favorite) {
-            history.remove(i);
-        } else {
-            history.truncate(max);
-        }
+    let mut sizes: Vec<usize> = history
+        .iter()
+        .map(|h| {
+            serde_json::to_vec(h)
+                .map(|v| v.len() + 1)
+                .unwrap_or(MAX_HISTORY_BYTES + 1)
+        })
+        .collect();
+    let mut total: usize = sizes.iter().sum();
+    while history.len() > max || total > MAX_HISTORY_BYTES {
+        let Some(index) = history
+            .iter()
+            .rposition(|h| !h.favorite)
+            .or_else(|| history.len().checked_sub(1))
+        else {
+            break;
+        };
+        total = total.saturating_sub(sizes.remove(index));
+        history.remove(index);
     }
 }
 #[tauri::command]
 async fn test_provider(state: State<'_, AppState>, provider_id: String) -> Result<String, String> {
+    let _permit = state
+        .translation_busy
+        .try_acquire()
+        .map_err(|_| "请等待当前请求完成后再测试")?;
     let p = locked(&state.settings)?
         .providers
         .iter()
@@ -306,6 +393,18 @@ fn show(app: &tauri::AppHandle) {
         let _ = w.set_focus();
     }
 }
+fn show_inactive(app: &tauri::AppHandle) {
+    let handle = app.clone();
+    let _ = app.run_on_main_thread(move || {
+        if let Some(window) = handle.get_webview_window("main") {
+            let _ = platform::show_without_activation(&window);
+        }
+    });
+}
+fn empty_selection_window(app: &tauri::AppHandle) {
+    show_inactive(app);
+    let _ = app.emit("source-text", serde_json::json!({"text":"","mode":"input"}));
+}
 fn start_action(app: tauri::AppHandle, action: String) {
     if action == "input" {
         show(&app);
@@ -316,18 +415,29 @@ fn start_action(app: tauri::AppHandle, action: String) {
     if state.native_busy.swap(true, Ordering::SeqCst) {
         return;
     }
-    if matches!(action.as_str(), "capture" | "ocr" | "silentOcr") {
+    let cloud_ocr = if matches!(action.as_str(), "capture" | "ocr" | "silentOcr") {
+        let settings = state.settings.lock().unwrap();
+        let provider = settings
+            .active_ocr_provider_id
+            .as_ref()
+            .and_then(|id| settings.ocr_providers.iter().find(|p| &p.id == id))
+            .cloned();
         if let Some(w) = app.get_webview_window("main") {
             let _ = w.hide();
         }
-    }
+        provider
+    } else {
+        None
+    };
     tauri::async_runtime::spawn(async move {
         let action2 = action.clone();
+        let use_cloud = cloud_ocr.is_some();
         let result = tauri::async_runtime::spawn_blocking(move || {
             std::thread::sleep(Duration::from_millis(180));
             match action2.as_str() {
                 "selection" => platform::selected_text(),
                 "clipboard" => platform::clipboard_text(),
+                "capture" | "ocr" | "silentOcr" if use_cloud => platform::capture_image(),
                 "capture" | "ocr" | "silentOcr" => platform::capture_ocr(),
                 _ => Err("未知操作".into()),
             }
@@ -335,37 +445,101 @@ fn start_action(app: tauri::AppHandle, action: String) {
         .await
         .map_err(|_| "系统操作异常".to_string())
         .and_then(|r| r);
+        let result = if let (Some(provider), Ok(image)) = (&cloud_ocr, &result) {
+            let state = app.state::<AppState>();
+            ocr::recognize(&state.client, provider, load_ocr_key(provider), image).await
+        } else {
+            result
+        };
         match result {
             Ok(text) if !text.trim().is_empty() => {
                 if action == "silentOcr" {
-                    let copy =
+                    let copied =
                         tauri::async_runtime::spawn_blocking(move || platform::copy_text(&text))
                             .await;
-                    if !matches!(copy, Ok(Ok(()))) {
-                        show(&app);
+                    if !matches!(copied, Ok(Ok(()))) {
+                        show_inactive(&app);
                         let _ = app.emit("action-error", "OCR 已完成，但复制到剪贴板失败");
                     } else {
                         let _ = app.emit("ocr-copied", ());
                     }
                 } else {
-                    show(&app);
+                    show_inactive(&app);
                     let mode = if action == "ocr" { "ocr" } else { "translate" };
                     let _ = app.emit("source-text", serde_json::json!({"text":text,"mode":mode}));
                 }
             }
+            Ok(_) if action == "selection" => empty_selection_window(&app),
             Ok(_) => {
-                show(&app);
-                let _ = app.emit("action-error", "没有获取到文字；请选中文本，或改用截图翻译");
+                show_inactive(&app);
+                let _ = app.emit("action-error", "没有识别到文字，请选择更清晰的区域");
             }
             Err(e) if e.starts_with("CANCELLED") => {}
+            Err(e) if action == "selection" => {
+                empty_selection_window(&app);
+                if !e.starts_with("NO_SELECTION") {
+                    let _ = app.emit(
+                        "action-error",
+                        format!("未取得选区，可点击窗口自行输入。{e}"),
+                    );
+                }
+            }
             Err(e) => {
-                show(&app);
+                show_inactive(&app);
                 let _ = app.emit("action-error", e);
             }
         }
         app.state::<AppState>()
             .native_busy
             .store(false, Ordering::SeqCst);
+    });
+}
+fn outside_click_watcher(app: tauri::AppHandle) {
+    std::thread::spawn(move || {
+        let mut previous = false;
+        let mut was_visible = false;
+        loop {
+            std::thread::sleep(Duration::from_millis(20));
+            let Some(window) = app.get_webview_window("main") else {
+                break;
+            };
+            if !window.is_visible().unwrap_or(false)
+                || app.state::<AppState>().pinned.load(Ordering::SeqCst)
+            {
+                previous = false;
+                was_visible = false;
+                continue;
+            }
+            let Ok((down, x, y)) = platform::pointer_state() else {
+                continue;
+            };
+            if !was_visible {
+                was_visible = true;
+                previous = down;
+                continue;
+            }
+            if down && !previous {
+                if let (Ok(position), Ok(size), Ok(scale)) = (
+                    window.outer_position(),
+                    window.outer_size(),
+                    window.scale_factor(),
+                ) {
+                    let (px, py) = if cfg!(target_os = "macos") {
+                        (x * scale, y * scale)
+                    } else {
+                        (x, y)
+                    };
+                    if px < f64::from(position.x)
+                        || py < f64::from(position.y)
+                        || px >= f64::from(position.x) + f64::from(size.width)
+                        || py >= f64::from(position.y) + f64::from(size.height)
+                    {
+                        let _ = window.hide();
+                    }
+                }
+            }
+            previous = down;
+        }
     });
 }
 #[tauri::command]
@@ -395,7 +569,7 @@ async fn copy_text(text: String) -> Result<(), String> {
 fn set_pinned(app: tauri::AppHandle, state: State<AppState>, pinned: bool) -> Result<(), String> {
     app.get_webview_window("main")
         .ok_or("窗口不存在")?
-        .set_always_on_top(pinned)
+        .set_always_on_top(true)
         .map_err(|_| "无法设置窗口置顶")?;
     state.pinned.store(pinned, Ordering::SeqCst);
     Ok(())
@@ -511,6 +685,7 @@ fn main() {
                     .push(e);
             }
             tray(app.handle())?;
+            outside_click_watcher(app.handle().clone());
             Ok(())
         })
         .on_window_event(|window, event| match event {
@@ -528,6 +703,9 @@ fn main() {
         .invoke_handler(tauri::generate_handler![
             get_settings,
             save_settings,
+            set_ocr_api_key,
+            delete_ocr_api_key,
+            test_ocr_provider,
             set_api_key,
             delete_api_key,
             translate,

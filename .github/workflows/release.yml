@@ -34,6 +34,10 @@ jobs:
         if: runner.os == 'Windows'
         shell: powershell
         run: powershell.exe -NoProfile -STA -ExecutionPolicy Bypass -File src-tauri/native/windows.ps1 -Mode self-test
+      - name: Windows selected-text and clipboard desktop smoke
+        if: runner.os == 'Windows'
+        shell: powershell
+        run: powershell.exe -NoProfile -STA -ExecutionPolicy Bypass -File tests/windows-native-smoke.ps1
       - uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

@@ -26,6 +26,9 @@ describe('provider privacy and validation', () => {
     const first = defaultSettings(); const second = defaultSettings();
     first.providers.push(provider);
     expect(second.providers).toEqual([]);
+    expect(second.ocrProviders).toEqual([]);
+    expect(second.activeOcrProviderId).toBeNull();
+    expect(second.autoHideSeconds).toBe(0);
     expect(JSON.stringify(second)).not.toMatch(/apiKey|secret|token|results/);
   });
 });

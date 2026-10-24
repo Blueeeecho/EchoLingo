@@ -32,11 +32,16 @@ func focusedElement() -> AXUIElement? {
     return (value as! AXUIElement)
 }
 
-func accessibilitySelection() -> String? {
+func accessibilitySelection() throws -> String? {
     guard let element = focusedElement() else { return nil }
     var selected: CFTypeRef?
     if AXUIElementCopyAttributeValue(element, kAXSelectedTextAttribute as CFString, &selected) == .success,
-       let text = selected as? String, !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+       let text = selected as? String {
+        guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            // Editors may copy the entire current line when Cmd+C has no
+            // selection. An explicitly empty AX selection must not fall back.
+            throw NativeError("NO_SELECTION: No text is selected in the source application.")
+        }
         return text
     }
     return nil
@@ -77,7 +82,7 @@ struct SavedPasteboard {
 
 func selection() throws -> String {
     try requireAccessibility()
-    if let text = accessibilitySelection() { return text }
+    if let text = try accessibilitySelection() { return text }
     let foregroundPID = NSWorkspace.shared.frontmostApplication?.processIdentifier
     // The shortcut's modifiers must be released before a clean Cmd+C event.
     let modifiers: CGEventFlags = [.maskCommand, .maskControl, .maskAlternate, .maskShift]
@@ -138,7 +143,7 @@ func recognize(_ handler: VNImageRequestHandler) throws -> String {
     return text
 }
 
-func captureOCR() throws -> String {
+func withCapturedRegion<T>(_ operation: (URL) throws -> T) throws -> T {
     if !CGPreflightScreenCaptureAccess() && !CGRequestScreenCaptureAccess() {
         throw NativeError("PERMISSION: Enable Screen Recording for EchoLingo / echolingo-native-helper in System Settings → Privacy & Security, then reopen EchoLingo and retry.")
     }
@@ -169,7 +174,33 @@ func captureOCR() throws -> String {
     guard process.terminationStatus == 0 else {
         throw NativeError("CAPTURE: macOS could not capture the selected region. Check Screen Recording permission.")
     }
-    return try recognize(VNImageRequestHandler(url: file, options: [:]))
+    return try operation(file)
+}
+
+func captureOCR() throws -> String {
+    return try withCapturedRegion { file in
+        try recognize(VNImageRequestHandler(url: file, options: [:]))
+    }
+}
+
+let maximumPNGBytes = 8 * 1024 * 1024
+
+func encodePNG(_ data: Data) throws -> String {
+    guard !data.isEmpty else { throw NativeError("CAPTURE: Captured PNG was empty.") }
+    guard data.count <= maximumPNGBytes else {
+        throw NativeError("CAPTURE_TOO_LARGE: Captured PNG exceeds 8 MiB. Select a smaller region.")
+    }
+    return data.base64EncodedString()
+}
+
+func captureImage() throws -> String {
+    return try withCapturedRegion { file in
+        let attributes = try FileManager.default.attributesOfItem(atPath: file.path)
+        guard let size = attributes[.size] as? NSNumber, size.intValue <= maximumPNGBytes else {
+            throw NativeError("CAPTURE_TOO_LARGE: Captured PNG exceeds 8 MiB. Select a smaller region.")
+        }
+        return try encodePNG(Data(contentsOf: file))
+    }
 }
 
 func diagnostics() -> [String: Any] {
@@ -203,8 +234,12 @@ func selfTest() throws -> [String: Any] {
     guard text.lowercased().contains("echolingo"), text.contains("2468") else {
         throw NativeError("SELF_TEST: Local OCR did not recognize the generated fixture.")
     }
+    guard let png = NSBitmapImageRep(cgImage: image).representation(using: .png, properties: [:]),
+          Data(base64Encoded: try encodePNG(png)) == png else {
+        throw NativeError("SELF_TEST: PNG base64 roundtrip failed.")
+    }
     return ["ocrFixturePassed": true, "recognized": text, "diagnostics": diagnostics(),
-            "interactiveCaptureTested": false, "clipboardChanged": false]
+            "pngBase64RoundtripPassed": true, "interactiveCaptureTested": false, "clipboardChanged": false]
 }
 
 do {
@@ -212,6 +247,7 @@ do {
     switch mode {
     case "--selected-text": emit(["ok": true, "text": try selection()])
     case "--capture-ocr": emit(["ok": true, "text": try captureOCR()])
+    case "--capture-image": emit(["ok": true, "imageBase64": try captureImage()])
     case "--clipboard":
         guard let text = NSPasteboard.general.string(forType: .string), !text.isEmpty else { throw NativeError("CLIPBOARD_EMPTY: The clipboard does not contain text.") }
         emit(["ok": true, "text": text])

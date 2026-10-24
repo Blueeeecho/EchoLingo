@@ -32,6 +32,10 @@ jobs:
         if: runner.os == 'Windows'
         shell: powershell
         run: powershell.exe -NoProfile -STA -ExecutionPolicy Bypass -File src-tauri/native/windows.ps1 -Mode self-test
+      - name: Windows selected-text and clipboard desktop smoke
+        if: runner.os == 'Windows'
+        shell: powershell
+        run: powershell.exe -NoProfile -STA -ExecutionPolicy Bypass -File tests/windows-native-smoke.ps1
       - name: Rust tests
         run: cargo test --manifest-path src-tauri/Cargo.toml
       - name: Rust formatting
@@ -45,3 +49,19 @@ jobs:
           path: |
             src-tauri/target/release/bundle/nsis/*.exe
             src-tauri/target/release/bundle/dmg/*.dmg
+
+  frontend-interactions:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+      - run: npm ci
+      - run: npx playwright install --with-deps chromium
+      - name: Isolated UI / IPC regression tests
+        run: |
+          npm run dev > "$RUNNER_TEMP/echolingo-vite.log" 2>&1 &
+          curl --retry 20 --retry-connrefused --retry-delay 1 -s http://127.0.0.1:1420/ > /dev/null
+          npm run test:ui

@@ -56,12 +56,15 @@ impl Default for Shortcuts {
 #[serde(rename_all = "camelCase", default)]
 pub struct Settings {
     pub providers: Vec<Provider>,
+    pub ocr_providers: Vec<crate::ocr::OcrProvider>,
+    pub active_ocr_provider_id: Option<String>,
     pub source_language: String,
     pub target_language: String,
     pub shortcuts: Shortcuts,
     pub save_history: bool,
     pub max_history: usize,
     pub theme: String,
+    pub auto_hide_seconds: u32,
 }
 impl Default for Settings {
     fn default() -> Self {
@@ -76,12 +79,15 @@ impl Default for Settings {
                 prompt: default_prompt(),
                 has_key: false,
             }],
+            ocr_providers: vec![],
+            active_ocr_provider_id: None,
             source_language: "auto".into(),
             target_language: "zh-Hans".into(),
             shortcuts: Shortcuts::default(),
             save_history: true,
             max_history: 200,
             theme: "system".into(),
+            auto_hide_seconds: 0,
         }
     }
 }
@@ -140,6 +146,24 @@ pub fn validate_settings(s: &Settings) -> Result<(), String> {
         if p.kind == "openai" && p.model.trim().is_empty() {
             return Err("OpenAI 兼容服务需要填写模型名称".into());
         }
+    }
+    if s.ocr_providers.len() > 12 {
+        return Err("最多配置 12 个 OCR 服务".into());
+    }
+    let mut ocr_ids = std::collections::HashSet::new();
+    for p in &s.ocr_providers {
+        crate::ocr::validate_provider(p)?;
+        if !ocr_ids.insert(&p.id) {
+            return Err("OCR 服务 ID 不能重复".into());
+        }
+    }
+    if let Some(id) = &s.active_ocr_provider_id {
+        if !s.ocr_providers.iter().any(|p| &p.id == id) {
+            return Err("当前选择的 OCR 服务不存在".into());
+        }
+    }
+    if s.auto_hide_seconds > 120 {
+        return Err("自动隐藏时间不能超过 120 秒".into());
     }
     if s.max_history > 2000 {
         return Err("历史记录上限不能超过 2000 条".into());

@@ -1,4 +1,5 @@
 import './styles.css';
+import { createOcrUi } from './ocr-ui';
 import { invoke, isTauri } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 import { defaultSettings, errorMessage, filterHistory, LANGUAGES, languageName, MAX_TEXT_LENGTH, normalizeTimestamp, SHORTCUT_LABELS, validateProvider } from './model';
@@ -15,8 +16,11 @@ const sourceLanguage = $<HTMLSelectElement>('#source-language');
 const targetLanguage = $<HTMLSelectElement>('#target-language');
 const translateButton = $<HTMLButtonElement>('#translate-button');
 const resultsContainer = $('#results');
-const providerDialog = $<HTMLDialogElement>('#provider-dialog');
-const confirmDialog = $<HTMLDialogElement>('#confirm-dialog');
+const providerDialog = $('#provider-dialog');
+const confirmDialog = $('#confirm-dialog');
+const ocrDialog = $('#ocr-provider-dialog');
+const allModals = [providerDialog, confirmDialog, ocrDialog];
+const modalReturnFocus = new Map<HTMLElement, HTMLElement | null>();
 let settings = defaultSettings();
 let history: HistoryEntry[] = [];
 let favoritesOnly = false;
@@ -24,6 +28,8 @@ let pinned = false;
 let generation = 0;
 let translating = false;
 let editingProviderId: string | null = null;
+let providerSaving = false;
+let autoHideTimer: ReturnType<typeof setTimeout> | undefined;
 let toastTimer: ReturnType<typeof setTimeout> | undefined;
 let saveQueue: Promise<void> = Promise.resolve();
 let settingsReady = !desktop;
@@ -67,6 +73,40 @@ function toast(message: string, tone: 'info' | 'error' = 'info', duration = 4200
   toastTimer = setTimeout(() => { element.hidden = true; }, duration);
 }
 function status(message: string): void { $('#footer-status').textContent = message; }
+function cancelAutoHide(): void {
+  if (autoHideTimer !== undefined) {
+    clearTimeout(autoHideTimer);
+    autoHideTimer = undefined;
+    status('翻译完成');
+  }
+}
+function canAutoHide(): boolean {
+  return desktop && settings.autoHideSeconds > 0 && currentView === 'translate' && !pinned && !translating
+    && allModals.every((modal) => modal.hidden) && resultSource === source.value.trim()
+    && currentResults.some((result) => !result.error && Boolean(result.text.trim()));
+}
+function scheduleAutoHide(): void {
+  cancelAutoHide();
+  if (!canAutoHide()) return;
+  const deadline = Date.now() + settings.autoHideSeconds * 1000;
+  const token = generation;
+  const tick = (): void => {
+    if (token !== generation || !canAutoHide()) { cancelAutoHide(); return; }
+    const seconds = Math.ceil((deadline - Date.now()) / 1000);
+    if (seconds <= 0) {
+      autoHideTimer = undefined;
+      status('已隐藏到托盘');
+      run(() => invoke('hide_window'));
+      return;
+    }
+    status(`翻译完成 · ${seconds} 秒无操作后隐藏`);
+    autoHideTimer = setTimeout(tick, Math.min(1000, deadline - Date.now()));
+  };
+  tick();
+}
+function resetAutoHideOnInteraction(): void {
+  if (autoHideTimer !== undefined) scheduleAutoHide();
+}
 function requireDesktop(): boolean {
   if (desktop) return true;
   toast('当前是浏览器预览。请在 EchoLingo 桌面应用中使用此功能。');
@@ -76,6 +116,7 @@ function reportError(error: unknown): void { toast(errorMessage(error), 'error',
 function run(work: () => Promise<unknown>): void { void work().catch(reportError); }
 function setView(view: string): void {
   if (!['translate', 'history', 'settings'].includes(view)) return;
+  if (view !== 'translate') cancelAutoHide();
   currentView = view;
   for (const section of document.querySelectorAll<HTMLElement>('.view')) section.hidden = section.id !== `view-${view}`;
   for (const button of document.querySelectorAll<HTMLButtonElement>('[data-view]')) {
@@ -134,6 +175,7 @@ function emptyResults(): void {
   $('#translation-state').textContent = source.value.trim() ? '等待翻译' : '等候输入';
 }
 function invalidateResults(): void {
+  cancelAutoHide();
   generation += 1;
   setLoading(false);
   currentResults = [];
@@ -159,7 +201,7 @@ function speak(text: string, language: string): void {
   }
   window.speechSynthesis.cancel();
   const utterance = new SpeechSynthesisUtterance(text);
-  utterance.lang = ({ 'zh-Hans': 'zh-CN', 'zh-Hant': 'zh-TW', en: 'en-US', ja: 'ja-JP', ko: 'ko-KR' } as Record<string, string>)[language] ?? language;
+  utterance.lang = ({ 'zh-Hans': 'zh-CN', 'zh-Hant': 'zh-TW', en: 'en-US', ja: 'ja-JP', ko: 'ko-KR' } as Record<string, string>)[language] ?? (language === 'auto' ? '' : language);
   utterance.onerror = (event) => { if (!['canceled', 'interrupted'].includes(event.error)) toast('朗读不可用，请检查系统语音与网络设置。', 'error'); };
   window.speechSynthesis.speak(utterance);
 }
@@ -191,6 +233,7 @@ function renderResults(results: TranslationResult[]): void {
   $('#translation-state').textContent = success === results.length ? '翻译完成' : `${success} / ${results.length} 个服务成功`;
 }
 async function translate(): Promise<void> {
+  cancelAutoHide();
   if (!settingsReady) throw new Error('设置正在加载，请稍候。');
   const text = source.value.trim();
   if (!text) { source.focus(); toast('先输入需要翻译的文字。'); return; }
@@ -221,14 +264,16 @@ async function translate(): Promise<void> {
     $('#translation-state').textContent = '翻译失败';
     status('翻译失败');
   } finally {
-    if (token === generation) setLoading(false);
+    if (token === generation) { setLoading(false); scheduleAutoHide(); }
     await loadHistory().catch(() => undefined);
   }
 }
 function renderShortcutHints(): void {
   for (const element of document.querySelectorAll<HTMLElement>('[data-shortcut]')) {
-    element.textContent = settings.shortcuts[element.dataset.shortcut as ShortcutAction];
+    element.textContent = settings.shortcuts[element.dataset.shortcut as ShortcutAction] || '未设置';
   }
+  source.placeholder = settings.shortcuts.selection ? `输入文字，或在任意应用中选中文字后按 ${settings.shortcuts.selection}` : '输入或粘贴需要翻译的文字';
+  for (const button of document.querySelectorAll<HTMLElement>('[data-action="capture"]')) button.title = `截图翻译${settings.shortcuts.capture ? ` · ${settings.shortcuts.capture}` : ''}`;
 }
 async function updateSettings(mutator: (next: Settings) => void): Promise<void> {
   const operation = saveQueue.then(async () => {
@@ -341,13 +386,20 @@ function renderProviders(): void {
 }
 function renderSettings(): void {
   renderProviders();
+  ocrUi.render();
   const shortcutsForm = $('#shortcuts-form'); shortcutsForm.replaceChildren();
   for (const [action, label] of Object.entries(SHORTCUT_LABELS)) {
     const row = node('label', 'shortcut-row'); row.append(node('span', '', label));
-    const input = node('input'); input.type = 'text'; input.value = settings.shortcuts[action as ShortcutAction]; input.name = action; input.maxLength = 80; input.autocomplete = 'off'; input.spellcheck = false;
+    const input = node('input'); input.type = 'text'; input.value = settings.shortcuts[action as ShortcutAction]; input.name = action; input.maxLength = 80; input.autocomplete = 'off'; input.spellcheck = false; input.placeholder = '留空禁用';
     input.setAttribute('aria-label', `${label}快捷键`); row.append(input); shortcutsForm.append(row);
   }
   $<HTMLSelectElement>('#theme-select').value = settings.theme;
+  const autoHideSelect = $<HTMLSelectElement>('#auto-hide-seconds');
+  const autoHideValue = String(settings.autoHideSeconds ?? 0);
+  if (!Array.from(autoHideSelect.options).some((option) => option.value === autoHideValue)) {
+    const option = node('option', '', `${autoHideValue} 秒`); option.value = autoHideValue; autoHideSelect.append(option);
+  }
+  autoHideSelect.value = autoHideValue;
   $<HTMLInputElement>('#save-history').checked = settings.saveHistory;
   const historyLimit = $<HTMLSelectElement>('#max-history');
   if (!Array.from(historyLimit.options).some((option) => option.value === String(settings.maxHistory))) {
@@ -371,7 +423,47 @@ function providerKindChanged(useDefaults = false): void {
     libretranslate: '填写你使用的 LibreTranslate 服务地址，无需包含 /translate。',
   }[kind];
 }
+// Use a plain HTML overlay for consistent focus and keyboard behavior across WebViews.
+// Desktop screenshot / accessibility capture anomalies were observed, but the user
+// confirmed the app was visible; native dialog rendering was not established as a cause.
+function modalFocusable(modal: HTMLElement): HTMLElement[] {
+  return Array.from(modal.querySelectorAll<HTMLElement>('button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), a[href], [tabindex]:not([tabindex="-1"])'))
+    .filter((element) => element.getClientRects().length > 0 && !element.closest('[hidden]'));
+}
+function showModal(modal: HTMLElement): void {
+  cancelAutoHide();
+  modalReturnFocus.set(modal, document.activeElement instanceof HTMLElement ? document.activeElement : null);
+  modal.hidden = false;
+  const panel = modal.querySelector<HTMLElement>('.modal-panel');
+  if (panel) panel.scrollTop = 0;
+  document.body.classList.add('modal-open');
+  (modalFocusable(modal)[0] ?? modal).focus({ preventScroll: true });
+  // Inert is supported by recent WebKit; the focus trap below also protects older engines.
+  $('.app-shell').inert = true;
+  $('.app-shell').setAttribute('aria-hidden', 'true');
+}
+function closeModal(modal: HTMLElement): void {
+  modal.hidden = true;
+  const anotherModal = allModals.find((candidate) => !candidate.hidden);
+  if (!anotherModal) {
+    $('.app-shell').inert = false;
+    $('.app-shell').removeAttribute('aria-hidden');
+    document.body.classList.remove('modal-open');
+  }
+  const previous = modalReturnFocus.get(modal);
+  modalReturnFocus.delete(modal);
+  const fallback = anotherModal ? modalFocusable(anotherModal)[0] : document.querySelector<HTMLElement>('[data-view].active');
+  if (previous?.isConnected && previous.getClientRects().length > 0) previous.focus({ preventScroll: true });
+  else fallback?.focus({ preventScroll: true });
+}
+function setProviderSaving(value: boolean): void {
+  providerSaving = value;
+  providerDialog.setAttribute('aria-busy', String(value));
+  for (const control of providerDialog.querySelectorAll<HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement | HTMLButtonElement>('input, select, textarea, button')) control.disabled = value;
+  $('#save-provider').textContent = value ? '保存中…' : '保存服务';
+}
 function openProviderDialog(provider?: Provider): void {
+  if (providerSaving) return;
   if (!settingsReady) { toast('设置正在加载，请稍候。'); return; }
   if (!provider && settings.providers.length >= 12) { toast('最多可添加 12 个翻译服务。'); return; }
   editingProviderId = provider?.id ?? null;
@@ -388,22 +480,24 @@ function openProviderDialog(provider?: Provider): void {
   $('#remove-provider-key').hidden = !provider?.hasKey;
   $('#provider-error').hidden = true;
   providerKindChanged();
-  providerDialog.showModal();
+  showModal(providerDialog);
 }
 function closeProviderDialog(): void {
+  if (providerSaving) { toast('正在保存服务，请稍候。'); return; }
   $<HTMLInputElement>('#provider-key').value = '';
-  providerDialog.close();
+  closeModal(providerDialog);
   editingProviderId = null;
 }
 function confirmAction(title: string, description: string): Promise<boolean> {
   $('#confirm-title').textContent = title;
   $('#confirm-description').textContent = description;
-  confirmDialog.showModal();
+  showModal(confirmDialog);
   return new Promise((resolve) => { confirmResolve = resolve; });
 }
-function settleConfirm(value: boolean): void { confirmDialog.close(); confirmResolve?.(value); confirmResolve = null; }
+function settleConfirm(value: boolean): void { closeModal(confirmDialog); confirmResolve?.(value); confirmResolve = null; }
 async function saveProvider(event: SubmitEvent): Promise<void> {
   event.preventDefault();
+  if (providerSaving) return;
   if (!desktop) { toast('浏览器预览不保存 API 密钥。请在桌面应用中配置真实服务。'); return; }
   const existing = settings.providers.find((provider) => provider.id === editingProviderId);
   const provider: Provider = {
@@ -418,7 +512,7 @@ async function saveProvider(event: SubmitEvent): Promise<void> {
   const validation = validateProvider(provider);
   const errorOutput = $('#provider-error');
   if (validation) { errorOutput.textContent = validation; errorOutput.hidden = false; return; }
-  const saveButton = $<HTMLButtonElement>('#save-provider'); saveButton.disabled = true;
+  setProviderSaving(true);
   const keyInput = $<HTMLInputElement>('#provider-key');
   const key = keyInput.value.trim();
   try {
@@ -433,20 +527,28 @@ async function saveProvider(event: SubmitEvent): Promise<void> {
     }
     keyInput.value = '';
     settings = await invoke<Settings>('get_settings');
-    renderSettings(); closeProviderDialog(); toast('翻译服务已保存。');
+    renderSettings(); setProviderSaving(false); closeProviderDialog(); toast('翻译服务已保存。');
   } catch (error) { errorOutput.textContent = errorMessage(error); errorOutput.hidden = false; }
-  finally { saveButton.disabled = false; }
+  finally { setProviderSaving(false); }
 }
 async function runAction(action: Action): Promise<void> {
-  if (action === 'selection') { toast(`在其他应用中选中文字后，按 ${settings.shortcuts.selection} 即可划词翻译。`); return; }
+  cancelAutoHide();
+  if (action === 'selection') { toast(settings.shortcuts.selection ? `在其他应用中选中文字后，按 ${settings.shortcuts.selection} 即可划词翻译。` : '划词翻译快捷键尚未启用，请到设置中配置。'); return; }
   if (!requireDesktop()) return;
   await invoke('run_action', { action });
 }
 
+const ocrUi = createOcrUi({
+  desktop, settings: () => settings, updateSettings,
+  reloadSettings: async () => { settings = await invoke<Settings>('get_settings'); renderSettings(); },
+  showModal, closeModal, confirm: confirmAction, toast, reportError,
+});
+
 for (const button of document.querySelectorAll<HTMLButtonElement>('[data-view]')) button.addEventListener('click', () => setView(button.dataset.view ?? 'translate'));
 for (const button of document.querySelectorAll<HTMLButtonElement>('[data-action]')) button.addEventListener('click', () => run(() => runAction(button.dataset.action as Action)));
 $('.brand-mark').addEventListener('click', (event) => { event.preventDefault(); setView('translate'); });
-$('#setup-services').addEventListener('click', () => setView('settings'));
+$('#copy-source').addEventListener('click', () => run(() => copyText(source.value)));
+$('#speak-source').addEventListener('click', () => speak(source.value, sourceLanguage.value));
 translateButton.addEventListener('click', () => run(translate));
 source.addEventListener('input', () => { updateCharacterCount(); invalidateResults(); });
 $('#clear-source').addEventListener('click', () => { setSourceText(''); source.focus(); });
@@ -465,8 +567,9 @@ $('#swap-language').addEventListener('click', () => {
 $('#pin-button').addEventListener('click', () => run(async () => {
   if (!requireDesktop()) return;
   const next = !pinned; await invoke('set_pinned', { pinned: next }); pinned = next;
-  $('#pin-button').setAttribute('aria-pressed', String(pinned)); $('#pin-button').title = pinned ? '取消置顶' : '置顶窗口';
-  toast(pinned ? '窗口已置顶。' : '已取消窗口置顶。');
+  if (pinned) cancelAutoHide(); else scheduleAutoHide();
+  $('#pin-button').setAttribute('aria-pressed', String(pinned)); $('#pin-button').title = pinned ? '取消钉住（点击外部收起）' : '钉住窗口（点击外部保留）';
+  toast(pinned ? '已钉住窗口，点击外部仍保留。' : '已取消钉住，点击外部会收起。');
 }));
 $('#theme-cycle').addEventListener('click', () => run(async () => {
   const order: Settings['theme'][] = ['system', 'light', 'dark'];
@@ -474,6 +577,11 @@ $('#theme-cycle').addEventListener('click', () => run(async () => {
 }));
 prefersDark.addEventListener('change', applyTheme);
 $<HTMLSelectElement>('#theme-select').addEventListener('change', (event) => run(() => updateSettings((next) => { next.theme = (event.target as HTMLSelectElement).value as Settings['theme']; })));
+$<HTMLSelectElement>('#auto-hide-seconds').addEventListener('change', (event) => {
+  const value = Number((event.target as HTMLSelectElement).value);
+  cancelAutoHide();
+  run(() => updateSettings((next) => { next.autoHideSeconds = value; }));
+});
 $<HTMLInputElement>('#save-history').addEventListener('change', (event) => {
   const value = (event.target as HTMLInputElement).checked;
   run(async () => { try { await updateSettings((next) => { next.saveHistory = value; }); toast(value ? '已开启翻译历史。' : '已关闭历史保存；已有记录可在历史页面删除。'); } finally { renderSettings(); } });
@@ -484,8 +592,7 @@ $<HTMLSelectElement>('#max-history').addEventListener('change', (event) => {
 });
 $('#save-shortcuts').addEventListener('click', () => run(async () => {
   const values = Object.fromEntries(new FormData($<HTMLFormElement>('#shortcuts-form')).entries()) as Record<ShortcutAction, string>;
-  const normalized = Object.values(values).map((value) => value.trim().toLowerCase());
-  if (normalized.some((value) => !value)) throw new Error('每个操作都需要一个快捷键。');
+  const normalized = Object.values(values).map((value) => value.trim().toLowerCase()).filter(Boolean);
   if (new Set(normalized).size !== normalized.length) throw new Error('不同操作不能使用相同的快捷键。');
   await updateSettings((next) => { for (const action of Object.keys(SHORTCUT_LABELS) as ShortcutAction[]) next.shortcuts[action] = values[action].trim(); });
   toast(desktop ? '快捷键已保存。若注册失败，将显示系统返回的原因。' : '快捷键已在预览中更新；桌面应用才能注册全局快捷键。');
@@ -494,7 +601,7 @@ $('#add-provider').addEventListener('click', () => openProviderDialog());
 $('#provider-kind').addEventListener('change', () => providerKindChanged(true));
 $('#close-provider-dialog').addEventListener('click', closeProviderDialog);
 $('#cancel-provider-dialog').addEventListener('click', closeProviderDialog);
-providerDialog.addEventListener('close', () => { $<HTMLInputElement>('#provider-key').value = ''; });
+providerDialog.addEventListener('click', (event) => { if (event.target === providerDialog) closeProviderDialog(); });
 $<HTMLFormElement>('#provider-form').addEventListener('submit', (event) => { void saveProvider(event).catch(reportError); });
 $('#remove-provider-key').addEventListener('click', () => run(async () => {
   if (!editingProviderId || !requireDesktop()) return;
@@ -529,17 +636,32 @@ $('#clear-history').addEventListener('click', () => run(async () => {
 }));
 $('#confirm-cancel').addEventListener('click', () => settleConfirm(false));
 $('#confirm-accept').addEventListener('click', () => settleConfirm(true));
-confirmDialog.addEventListener('cancel', (event) => { event.preventDefault(); settleConfirm(false); });
+confirmDialog.addEventListener('click', (event) => { if (event.target === confirmDialog) settleConfirm(false); });
+for (const eventName of ['pointerdown', 'pointermove', 'keydown', 'wheel', 'focusin']) document.addEventListener(eventName, resetAutoHideOnInteraction, { passive: true });
 document.addEventListener('keydown', (event) => {
-  if (event.key === 'Enter' && (event.ctrlKey || event.metaKey) && !providerDialog.open && !confirmDialog.open) {
+  const modal = allModals.find((candidate) => !candidate.hidden);
+  if (modal) {
+    if (event.key === 'Escape') {
+      event.preventDefault(); event.stopPropagation();
+      if (modal === confirmDialog) settleConfirm(false); else if (modal === ocrDialog) ocrUi.close(); else closeProviderDialog();
+    } else if (event.key === 'Tab') {
+      const focusable = modalFocusable(modal);
+      const first = focusable[0], last = focusable[focusable.length - 1];
+      if (!first) { event.preventDefault(); modal.focus(); }
+      else if (event.shiftKey && (document.activeElement === first || !modal.contains(document.activeElement))) { event.preventDefault(); last?.focus(); }
+      else if (!event.shiftKey && (document.activeElement === last || !modal.contains(document.activeElement))) { event.preventDefault(); first.focus(); }
+    }
+    return;
+  }
+  if (event.key === 'Enter' && (event.ctrlKey || event.metaKey)) {
     event.preventDefault(); if (!translating) { setView('translate'); run(translate); }
   }
-  if (event.key === 'Escape' && !providerDialog.open && !confirmDialog.open) {
-    if (desktop) { event.preventDefault(); run(() => invoke('hide_window')); }
+  if (event.key === 'Escape') {
+    if (desktop) { event.preventDefault(); cancelAutoHide(); run(() => invoke('hide_window')); }
     else if (currentView !== 'translate') setView('translate');
   }
 });
-window.addEventListener('beforeunload', () => { for (const unlisten of cleanupListeners) unlisten(); if ('speechSynthesis' in window) window.speechSynthesis.cancel(); });
+window.addEventListener('beforeunload', () => { cancelAutoHide(); for (const unlisten of cleanupListeners) unlisten(); if ('speechSynthesis' in window) window.speechSynthesis.cancel(); });
 
 async function initialize(): Promise<void> {
   if (!desktop) {
@@ -549,6 +671,8 @@ async function initialize(): Promise<void> {
     status('界面预览 · 桌面能力未连接');
   }
   $('#translate-key-hint').textContent = /Mac|iPhone|iPad/.test(navigator.platform) ? '⌘' : 'Ctrl';
+  setView('translate');
+  $('#speak-source').hidden = !('speechSynthesis' in window);
   applyTheme(); renderLanguages(); renderSettings(); renderShortcutHints(); renderHistory(); emptyResults();
   setLoading(false);
   if (!desktop) return;
@@ -557,11 +681,13 @@ async function initialize(): Promise<void> {
   try {
     // Listen before loading settings so an incoming native selection is not lost during startup.
     cleanupListeners.push(await listen<SourceTextEvent>('source-text', (event) => {
+      pendingTranslate = false;
       setView('translate'); setSourceText(event.payload.text);
       if (event.payload.mode === 'translate') { if (settingsReady) run(translate); else pendingTranslate = true; }
-      else { toast('已完成本机文字识别。'); source.focus(); }
+      else if (event.payload.mode === 'input') { /* Empty Alt+D clears the floating view without moving focus. */ }
+      else { toast('文字识别完成。'); }
     }));
-    cleanupListeners.push(await listen('focus-input', () => { setView('translate'); requestAnimationFrame(() => source.focus()); }));
+    cleanupListeners.push(await listen('focus-input', () => { cancelAutoHide(); setView('translate'); requestAnimationFrame(() => source.focus()); }));
     cleanupListeners.push(await listen('ocr-copied', () => { status('OCR 文字已复制到剪贴板'); }));
     for (const eventName of ['action-error', 'shortcut-error']) cleanupListeners.push(await listen<string>(eventName, (event) => toast(event.payload, 'error', 8000)));
     settings = await invoke<Settings>('get_settings');

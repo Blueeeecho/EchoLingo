@@ -8,6 +8,7 @@ Read `PROJECT.md`, `docs/status.md`, `docs/implementation-plan.md`, and `docs/te
 
 ## Working rules
 - Use skills only when necessary or explicitly requested by the owner.
+- Default to silent tray/menu-bar startup. Only user-triggered actions show the window; hide on outside click, with NO automatic timeout by default (explicit owner preference).
 - Keep software lightweight: system WebView, native offline OCR, vanilla TypeScript. Avoid Chromium/Electron and bundled OCR models without a demonstrated need.
 - Native selected-text acquisition must happen before focusing EchoLingo. Never silently replace text in the source app.
 - No API keys in files, Git commits, logs, history, screenshots, or fixtures. Store keys in OS credentials. Fixtures use dummy values and local mock HTTP only.

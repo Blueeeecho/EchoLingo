@@ -9,6 +9,10 @@ export interface Provider {
   prompt?: string;
   hasKey?: boolean;
 }
+export interface OcrProvider {
+  id: string; name: string; kind: 'openai-vision' | 'http-json'; baseUrl: string; model: string; prompt: string;
+  authHeader: string; authPrefix: string; requestTemplate: string; responsePath: string; hasKey?: boolean;
+}
 export type Action = 'selection' | 'capture' | 'ocr' | 'silentOcr' | 'input' | 'clipboard';
 export type ShortcutAction = Exclude<Action, 'clipboard'>;
 export interface Settings {
@@ -19,6 +23,9 @@ export interface Settings {
   saveHistory: boolean;
   theme: 'system' | 'light' | 'dark';
   maxHistory: number;
+  autoHideSeconds: number;
+  ocrProviders: OcrProvider[];
+  activeOcrProviderId: string | null;
 }
 export interface TranslationResult {
   providerId: string;
@@ -36,4 +43,4 @@ export interface HistoryEntry {
   createdAt: number;
   favorite: boolean;
 }
-export interface SourceTextEvent { text: string; mode: 'translate' | 'ocr' }
+export interface SourceTextEvent { text: string; mode: 'translate' | 'ocr' | 'input' }

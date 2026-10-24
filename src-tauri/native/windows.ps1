@@ -2,7 +2,7 @@
 # No download, OCR package, PowerShell module or network access is required.
 [CmdletBinding()]
 param(
-    [ValidateSet('selected-text', 'capture-ocr', 'clipboard', 'copy', 'diagnostics', 'self-test')]
+    [ValidateSet('selected-text', 'capture-ocr', 'capture-image', 'clipboard', 'copy', 'diagnostics', 'self-test')]
     [string]$Mode = $env:ECHOLINGO_NATIVE_MODE
 )
 $ErrorActionPreference = 'Stop'
@@ -77,9 +77,12 @@ public static class EchoLingoNative {
                     if (!String.IsNullOrEmpty(part)) { if (text.Length > 0) text.AppendLine(); text.Append(part); }
                 }
                 if (!String.IsNullOrWhiteSpace(text.ToString())) return text.ToString();
+                // Editors can copy a full line when Ctrl+C has no selection.
+                // A supported provider with an empty range must never fall back.
+                throw new InvalidOperationException("NO_SELECTION: No text is selected in the source application.");
             }
         } catch (InvalidOperationException error) {
-            if (error.Message.StartsWith("PROTECTED:")) throw;
+            if (error.Message.StartsWith("PROTECTED:") || error.Message.StartsWith("NO_SELECTION:")) throw;
         } catch (ElementNotAvailableException) { }
         return null;
     }
@@ -361,21 +364,39 @@ sealed class RegionPicker : Form {
         }
     }
 
+    function Get-PngBase64([string]$Path) {
+        if ((Get-Item -LiteralPath $Path).Length -gt (8 * 1024 * 1024)) {
+            throw 'CAPTURE_TOO_LARGE: Captured PNG exceeds 8 MiB. Select a smaller region.'
+        }
+        $bytes = [IO.File]::ReadAllBytes($Path)
+        if ($bytes.Length -eq 0) { throw 'CAPTURE: Captured PNG was empty.' }
+        if ($bytes.Length -gt (8 * 1024 * 1024)) {
+            throw 'CAPTURE_TOO_LARGE: Captured PNG exceeds 8 MiB. Select a smaller region.'
+        }
+        return [Convert]::ToBase64String($bytes)
+    }
+
     switch ($Mode) {
         'selected-text' { Write-Result @{ ok = $true; text = [EchoLingoNative]::SelectedText() } }
         'clipboard' { Write-Result @{ ok = $true; text = [EchoLingoNative]::ClipboardText() } }
         'copy' { [EchoLingoNative]::CopyText([Console]::In.ReadToEnd()); Write-Result @{ ok = $true; text = '' } }
         'diagnostics' { Write-Result @{ ok = $true; diagnostics = (Get-Diagnostics) } }
-        { $_ -in 'capture-ocr', 'self-test' } {
+        { $_ -in 'capture-ocr', 'capture-image', 'self-test' } {
             $path = [IO.Path]::Combine([IO.Path]::GetTempPath(), ('echolingo-' + [Guid]::NewGuid().ToString('N') + '.png'))
             try {
-                if ($Mode -eq 'capture-ocr') { [EchoLingoNative]::CaptureRegion($path) }
+                if ($Mode -in 'capture-ocr', 'capture-image') { [EchoLingoNative]::CaptureRegion($path) }
                 else { [EchoLingoNative]::CreateFixture($path) }
-                $text = Get-OcrText $path
-                if ($Mode -eq 'self-test') {
-                    if ($text -notmatch '2468') { throw 'SELF_TEST: Local OCR did not recognize the generated fixture.' }
-                    Write-Result @{ ok = $true; diagnostics = @{ ocrFixturePassed = $true; recognized = $text; diagnostics = (Get-Diagnostics); interactiveCaptureTested = $false; clipboardChanged = $false } }
-                } else { Write-Result @{ ok = $true; text = $text } }
+                if ($Mode -eq 'capture-image') {
+                    Write-Result @{ ok = $true; imageBase64 = (Get-PngBase64 $path) }
+                } else {
+                    $text = Get-OcrText $path
+                    if ($Mode -eq 'self-test') {
+                        if ($text -notmatch '2468') { throw 'SELF_TEST: Local OCR did not recognize the generated fixture.' }
+                        $base64 = Get-PngBase64 $path
+                        if ([Convert]::FromBase64String($base64).Length -ne (Get-Item -LiteralPath $path).Length) { throw 'SELF_TEST: PNG base64 roundtrip failed.' }
+                        Write-Result @{ ok = $true; diagnostics = @{ ocrFixturePassed = $true; pngBase64RoundtripPassed = $true; recognized = $text; diagnostics = (Get-Diagnostics); interactiveCaptureTested = $false; clipboardChanged = $false } }
+                    } else { Write-Result @{ ok = $true; text = $text } }
+                }
             } finally { if (Test-Path -LiteralPath $path) { Remove-Item -LiteralPath $path -Force -ErrorAction SilentlyContinue } }
         }
         default { throw 'Unsupported native helper mode.' }

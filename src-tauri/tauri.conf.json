@@ -10,19 +10,58 @@
     "frontendDist": "../dist"
   },
   "app": {
-    "windows": [{
-      "label": "main", "title": "EchoLingo · 回声译", "width": 520, "height": 720,
-      "minWidth": 420, "minHeight": 520, "center": true, "visible": true,
-      "decorations": true, "resizable": true
-    }],
-    "security": { "csp": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' asset: data:; connect-src ipc: http://ipc.localhost; object-src 'none'; base-uri 'none'; frame-src 'none'" }
+    "windows": [
+      {
+        "label": "main",
+        "title": "EchoLingo · 回声译",
+        "width": 520,
+        "height": 720,
+        "minWidth": 420,
+        "minHeight": 520,
+        "center": true,
+        "visible": false,
+        "decorations": true,
+        "resizable": true,
+        "alwaysOnTop": true,
+        "visibleOnAllWorkspaces": true,
+        "focus": false
+      }
+    ],
+    "security": {
+      "csp": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' asset: data:; connect-src ipc: http://ipc.localhost; object-src 'none'; base-uri 'none'; frame-src 'none'"
+    }
   },
   "bundle": {
-    "active": true, "targets": "all", "category": "Productivity",
+    "active": true,
+    "targets": "all",
+    "category": "Productivity",
     "shortDescription": "轻量划词翻译与离线 OCR",
     "longDescription": "EchoLingo is an independent Windows-first translation companion with global shortcuts, offline system OCR, and custom translation providers.",
-    "icon": ["icons/32x32.png", "icons/128x128.png", "icons/128x128@2x.png", "icons/icon.icns", "icons/icon.ico"],
-    "macOS": { "minimumSystemVersion": "12.0", "signingIdentity": "-", "infoPlist": "Info.plist" },
-    "windows": { "nsis": { "installMode": "currentUser", "languages": ["SimpChinese", "English"], "displayLanguageSelector": true }, "webviewInstallMode": { "type": "downloadBootstrapper", "silent": true } }
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns",
+      "icons/icon.ico"
+    ],
+    "macOS": {
+      "minimumSystemVersion": "12.0",
+      "signingIdentity": "-",
+      "infoPlist": "Info.plist"
+    },
+    "windows": {
+      "nsis": {
+        "installMode": "currentUser",
+        "languages": [
+          "SimpChinese",
+          "English"
+        ],
+        "displayLanguageSelector": true
+      },
+      "webviewInstallMode": {
+        "type": "downloadBootstrapper",
+        "silent": true
+      }
+    }
   }
 }

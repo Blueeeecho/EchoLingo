@@ -1,4 +1,5 @@
-//! Blocking native operations. Run these on `tauri::async_runtime::spawn_blocking`.
+//! Run blocking capture/clipboard operations on `tauri::async_runtime::spawn_blocking`.
+//! Showing a nonactivating window is the exception and requires the main thread.
 //! In particular, do not activate the EchoLingo window before `selected_text`.
 
 use serde_json::{json, Value};
@@ -11,6 +12,21 @@ pub fn capture_ocr() -> Result<String, String> {
     run_text("capture-ocr", None)
 }
 
+/// Capture only. The caller chooses whether to submit this PNG to a configured
+/// third-party OCR API; the native helper performs no upload or network request.
+pub fn capture_image() -> Result<String, String> {
+    let result = run("capture-image", None)?;
+    result
+        .get("imageBase64")
+        .and_then(Value::as_str)
+        .filter(|image| !image.is_empty() && image.len() <= (8usize * 1024 * 1024).div_ceil(3) * 4)
+        .map(str::to_owned)
+        .ok_or_else(|| {
+            "NATIVE_PROTOCOL: Native helper returned an empty or oversized PNG imageBase64 field."
+                .into()
+        })
+}
+
 pub fn clipboard_text() -> Result<String, String> {
     run_text("clipboard", None)
 }
@@ -20,6 +36,168 @@ pub fn copy_text(text: &str) -> Result<(), String> {
         return Err("CLIPBOARD: Text exceeds the 2 MiB clipboard safety limit.".into());
     }
     run_text("copy", Some(text)).map(|_| ())
+}
+
+/// Query current left/right button state and pointer position without hooks,
+/// event taps, input synthesis, or permission prompts. Windows coordinates are
+/// physical screen pixels. macOS coordinates are top-left global logical points:
+/// multiply BOTH coordinates by this window's `scale_factor()` before comparing
+/// against that window's Tauri `outer_position()` and `outer_size()` pixels.
+#[cfg(target_os = "windows")]
+pub fn pointer_state() -> Result<(bool, f64, f64), String> {
+    #[repr(C)]
+    struct Point {
+        x: i32,
+        y: i32,
+    }
+    #[link(name = "user32")]
+    unsafe extern "system" {
+        fn GetAsyncKeyState(key: i32) -> i16;
+        fn GetCursorPos(point: *mut Point) -> i32;
+    }
+    let mut point = Point { x: 0, y: 0 };
+    // SAFETY: User32 receives a valid writable POINT. Only the left/right mouse
+    // button virtual keys are queried, and no input is generated or consumed.
+    let down = unsafe {
+        if GetCursorPos(&mut point) == 0 {
+            return Err(format!(
+                "POINTER_UNAVAILABLE: Cannot query the current desktop pointer: {}",
+                std::io::Error::last_os_error()
+            ));
+        }
+        GetAsyncKeyState(0x01) < 0 || GetAsyncKeyState(0x02) < 0
+    };
+    Ok((down, f64::from(point.x), f64::from(point.y)))
+}
+
+#[cfg(target_os = "macos")]
+pub fn pointer_state() -> Result<(bool, f64, f64), String> {
+    use std::ffi::c_void;
+    #[repr(C)]
+    struct Point {
+        x: f64,
+        y: f64,
+    }
+    #[link(name = "CoreGraphics", kind = "framework")]
+    unsafe extern "C" {
+        fn CGEventSourceButtonState(source: i32, button: u32) -> bool;
+        fn CGEventCreate(source: *const c_void) -> *const c_void;
+        fn CGEventGetLocation(event: *const c_void) -> Point;
+    }
+    #[link(name = "CoreFoundation", kind = "framework")]
+    unsafe extern "C" {
+        fn CFRelease(object: *const c_void);
+    }
+    // SAFETY: A null source creates a read-only snapshot of current event state.
+    // The retained event is released exactly once after reading its coordinates.
+    // This never installs an event tap, posts an event, or asks for input access.
+    let (down, point) = unsafe {
+        let event = CGEventCreate(std::ptr::null());
+        if event.is_null() {
+            return Err("POINTER_UNAVAILABLE: Cannot query the current desktop pointer.".into());
+        }
+        let point = CGEventGetLocation(event);
+        CFRelease(event);
+        let down = CGEventSourceButtonState(0, 0) || CGEventSourceButtonState(0, 1);
+        (down, point)
+    };
+    if !point.x.is_finite() || !point.y.is_finite() {
+        return Err("POINTER_UNAVAILABLE: Desktop pointer coordinates are not finite.".into());
+    }
+    Ok((down, point.x, point.y))
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+pub fn pointer_state() -> Result<(bool, f64, f64), String> {
+    Err("UNSUPPORTED_PLATFORM: Pointer state supports Windows and macOS.".into())
+}
+
+/// Show a floating window while keeping the source application active. The
+/// caller MUST invoke this on Tauri's main thread. Do not call `window.show()`
+/// first: Tao's macOS implementation makes that window key when showing it.
+#[cfg(target_os = "macos")]
+pub fn show_without_activation(window: &tauri::WebviewWindow) -> Result<(), String> {
+    use std::ffi::{c_char, c_void};
+    unsafe extern "C" {
+        fn pthread_main_np() -> i32;
+    }
+    #[link(name = "objc")]
+    unsafe extern "C" {
+        fn sel_registerName(name: *const c_char) -> *const c_void;
+        // Typed for NSWindow::orderFrontRegardless, whose signature is void(id, SEL).
+        fn objc_msgSend(receiver: *mut c_void, selector: *const c_void);
+    }
+    // SAFETY: pthread_main_np only reads the current thread identity.
+    if unsafe { pthread_main_np() } == 0 {
+        return Err(
+            "WINDOW_THREAD: Show the floating window on the application main thread.".into(),
+        );
+    }
+    let native = window
+        .ns_window()
+        .map_err(|error| format!("WINDOW_HANDLE: {error}"))?;
+    if native.is_null() {
+        return Err("WINDOW_HANDLE: Native macOS window is unavailable.".into());
+    }
+    // SAFETY: Tauri owns this valid NSWindow. The selector has no arguments or
+    // return value, and AppKit is called on the verified main thread. Ordering
+    // does not make the window key/main or activate NSApplication.
+    unsafe {
+        let selector = sel_registerName(c"orderFrontRegardless".as_ptr());
+        objc_msgSend(native, selector);
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "windows")]
+pub fn show_without_activation(window: &tauri::WebviewWindow) -> Result<(), String> {
+    use std::ffi::c_void;
+    #[link(name = "user32")]
+    unsafe extern "system" {
+        fn ShowWindow(window: *mut c_void, command: i32) -> i32;
+        fn SetWindowPos(
+            window: *mut c_void,
+            insert_after: *mut c_void,
+            x: i32,
+            y: i32,
+            width: i32,
+            height: i32,
+            flags: u32,
+        ) -> i32;
+    }
+    let native = window
+        .hwnd()
+        .map_err(|error| format!("WINDOW_HANDLE: {error}"))?
+        .0;
+    if native.is_null() {
+        return Err("WINDOW_HANDLE: Native Windows window is unavailable.".into());
+    }
+    // SAFETY: Tauri owns the HWND. SW_SHOWNOACTIVATE and SWP_NOACTIVATE preserve
+    // the foreground application; TOPMOST raises only this window's z-order.
+    let positioned = unsafe {
+        ShowWindow(native, 4);
+        SetWindowPos(
+            native,
+            -1isize as *mut c_void,
+            0,
+            0,
+            0,
+            0,
+            0x01 | 0x02 | 0x10 | 0x40,
+        )
+    };
+    if positioned == 0 {
+        return Err(format!(
+            "WINDOW_SHOW: Cannot show floating window without activation: {}",
+            std::io::Error::last_os_error()
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+pub fn show_without_activation(_window: &tauri::WebviewWindow) -> Result<(), String> {
+    Err("UNSUPPORTED_PLATFORM: Nonactivating windows support Windows and macOS.".into())
 }
 
 pub fn diagnostics() -> Value {
@@ -74,16 +252,16 @@ fn run(mode: &str, input: Option<&str>) -> Result<Value, String> {
     // Drain both pipes concurrently so a long OCR result cannot deadlock wait().
     let stdout = child.stdout.take().ok_or("NATIVE: Missing output pipe.")?;
     let stderr = child.stderr.take().ok_or("NATIVE: Missing error pipe.")?;
-    let read_pipe = |pipe: Box<dyn Read + Send>| {
+    let read_pipe = |pipe: Box<dyn Read + Send>, limit: u64| {
         std::thread::spawn(move || {
             let mut bytes = Vec::new();
-            pipe.take(4 * 1024 * 1024)
-                .read_to_end(&mut bytes)
-                .map(|_| bytes)
+            pipe.take(limit).read_to_end(&mut bytes).map(|_| bytes)
         })
     };
-    let output_thread = read_pipe(Box::new(stdout));
-    let error_thread = read_pipe(Box::new(stderr));
+    // An 8 MiB PNG expands to about 10.7 MiB of base64 plus the JSON envelope.
+    let output_limit = if mode == "capture-image" { 12 } else { 4 } * 1024 * 1024;
+    let output_thread = read_pipe(Box::new(stdout), output_limit);
+    let error_thread = read_pipe(Box::new(stderr), 4 * 1024 * 1024);
     let input_thread = if let Some(text) = input {
         let mut stdin = child.stdin.take().ok_or("NATIVE: Missing input pipe.")?;
         let bytes = text.as_bytes().to_vec();
@@ -93,7 +271,11 @@ fn run(mode: &str, input: Option<&str>) -> Result<Value, String> {
     };
     // Helpers cancel their own picker after 120 seconds and OCR after 30 seconds.
     // The longer outer limit gives them time to dispose images and temporary files.
-    let limit = if mode == "capture-ocr" { 180 } else { 60 };
+    let limit = if matches!(mode, "capture-ocr" | "capture-image") {
+        180
+    } else {
+        60
+    };
     let deadline = Instant::now() + Duration::from_secs(limit);
     let status = loop {
         match child.try_wait() {
@@ -304,6 +486,13 @@ fn materialize(
 #[cfg(test)]
 mod tests {
     use super::parse_response;
+
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    #[test]
+    fn pointer_query_returns_finite_screen_coordinates_without_synthesizing_input() {
+        let (_, x, y) = super::pointer_state().expect("Native pointer query must be available");
+        assert!(x.is_finite() && y.is_finite());
+    }
 
     #[test]
     fn native_json_preserves_unicode_and_cancellation() {

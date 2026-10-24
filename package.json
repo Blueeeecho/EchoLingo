@@ -9,7 +9,8 @@
     "build": "tsc --noEmit && vite build",
     "check": "tsc --noEmit",
     "test": "vitest run --passWithNoTests",
-    "tauri": "tauri"
+    "tauri": "tauri",
+    "test:ui": "node tests/frontend-interactions.mjs"
   },
   "dependencies": {
     "@tauri-apps/api": "^2.9.0"
