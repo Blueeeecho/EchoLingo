@@ -314,6 +314,107 @@ sealed class RegionPicker : Form {
         }
         return $task.GetAwaiter().GetResult()
     }
+    function Test-OcrBounds($Line) {
+        foreach ($name in @('X', 'Y', 'Width', 'Height')) {
+            $number = [double]$Line.$name
+            if ([double]::IsNaN($number) -or [double]::IsInfinity($number)) { return $false }
+        }
+        return ([double]$Line.Width -gt 0 -and [double]$Line.Height -gt 0)
+    }
+    function Test-OcrStructuralLine([string]$Text) {
+        return ($Text -match '^\s' -or $Text.Contains("`t") -or $Text.Contains('|') -or
+            $Text -cmatch '^\s*(?:[-*+\u2022]\s|\d+[.)]\s|#{1,6}\s|>\s|```|~~~|//|/\*|\*/|[{}]|(?:if|for|while|def|class|import|return|const|let|var|function)\b|https?://|www\.)')
+    }
+    function Join-OcrLayoutLines([object[]]$OcrLines, [bool]$AllowGeometry = $true) {
+        $heights = @($OcrLines | Where-Object { Test-OcrBounds $_ } | ForEach-Object { [double]$_.Height } | Sort-Object)
+        if (-not $AllowGeometry -or $heights.Count -eq 0) {
+            return (($OcrLines | ForEach-Object { $_.Text }) -join "`n")
+        }
+        $middle = [int][Math]::Floor($heights.Count / 2)
+        $median = [double]$heights[$middle]
+        if (($heights.Count % 2) -eq 0) { $median = ([double]$heights[$middle - 1] + $median) / 2 }
+        $builder = [Text.StringBuilder]::new()
+        $insideCodeFence = $false
+        for ($index = 0; $index -lt $OcrLines.Count; $index++) {
+            $current = $OcrLines[$index]
+            $trimmed = ([string]$current.Text).TrimStart()
+            $fence = $trimmed.StartsWith('```') -or $trimmed.StartsWith('~~~')
+            if ($index -gt 0) {
+                $previous = $OcrLines[$index - 1]
+                $paragraphBreak = $false
+                $structured = $insideCodeFence -or (Test-OcrStructuralLine ([string]$previous.Text)) -or (Test-OcrStructuralLine ([string]$current.Text))
+                if (-not $structured -and (Test-OcrBounds $previous) -and (Test-OcrBounds $current)) {
+                    $referenceHeight = [Math]::Max($median, [Math]::Min([double]$previous.Height, [double]$current.Height))
+                    $verticalGap = [double]$current.Y - ([double]$previous.Y + [double]$previous.Height)
+                    $overlap = [Math]::Max(0, [Math]::Min(([double]$previous.X + [double]$previous.Width), ([double]$current.X + [double]$current.Width)) - [Math]::Max([double]$previous.X, [double]$current.X))
+                    $columnReset = ($overlap -le (0.1 * [Math]::Min([double]$previous.Width, [double]$current.Width))) -and
+                        ([double]$current.Y -lt ([double]$previous.Y - 0.9 * $referenceHeight))
+                    $paragraphBreak = ($verticalGap -ge (0.9 * $referenceHeight)) -or $columnReset
+                }
+                if ($paragraphBreak) { $null = $builder.Append("`n`n") }
+                else { $null = $builder.Append("`n") }
+            }
+            # Keep recognizer order, whitespace, list markers and code lines.
+            # This helper only adds high-confidence paragraph separators.
+            $null = $builder.Append([string]$current.Text)
+            if ($fence) { $insideCodeFence = -not $insideCodeFence }
+        }
+        return $builder.ToString()
+    }
+    function Get-OcrLayoutLines($Result) {
+        $lines = [Collections.Generic.List[object]]::new()
+        foreach ($line in $Result.Lines) {
+            $left = [double]::PositiveInfinity
+            $top = [double]::PositiveInfinity
+            $right = [double]::NegativeInfinity
+            $bottom = [double]::NegativeInfinity
+            try {
+                foreach ($word in $line.Words) {
+                    $box = $word.BoundingRect
+                    $candidate = [pscustomobject]@{ X = $box.X; Y = $box.Y; Width = $box.Width; Height = $box.Height }
+                    if (Test-OcrBounds $candidate) {
+                        $left = [Math]::Min($left, [double]$box.X)
+                        $top = [Math]::Min($top, [double]$box.Y)
+                        $right = [Math]::Max($right, ([double]$box.X + [double]$box.Width))
+                        $bottom = [Math]::Max($bottom, ([double]$box.Y + [double]$box.Height))
+                    }
+                }
+            } catch {
+                # Optional layout metadata must never discard recognized text.
+                $left = [double]::NaN
+                $top = [double]::NaN
+            }
+            $lines.Add([pscustomobject]@{ Text = [string]$line.Text; X = $left; Y = $top; Width = ($right - $left); Height = ($bottom - $top) })
+        }
+        return $lines.ToArray()
+    }
+    function Test-OcrParagraphGeometry {
+        $lines = @(
+            [pscustomobject]@{ Text = 'first line'; X = 0; Y = 0; Width = 100; Height = 10 }
+            [pscustomobject]@{ Text = 'second line'; X = 0; Y = 14; Width = 100; Height = 10 }
+            [pscustomobject]@{ Text = 'next paragraph'; X = 0; Y = 38; Width = 100; Height = 10 }
+            [pscustomobject]@{ Text = 'continued paragraph'; X = 0; Y = 52; Width = 100; Height = 10 }
+            [pscustomobject]@{ Text = 'column two'; X = 130; Y = 0; Width = 100; Height = 10 }
+            [pscustomobject]@{ Text = 'still column two'; X = 130; Y = 14; Width = 100; Height = 10 }
+        )
+        $expected = "first line`nsecond line`n`nnext paragraph`ncontinued paragraph`n`ncolumn two`nstill column two"
+        $scaled = @($lines | ForEach-Object {
+            [pscustomobject]@{ Text = $_.Text; X = ($_.X / 1000.0); Y = ($_.Y / 1000.0); Width = ($_.Width / 1000.0); Height = ($_.Height / 1000.0) }
+        })
+        $flat = ($lines | ForEach-Object { $_.Text }) -join "`n"
+        if ((Join-OcrLayoutLines $lines) -cne $expected -or (Join-OcrLayoutLines $scaled) -cne $expected -or
+            (Join-OcrLayoutLines $lines $false) -cne $flat) {
+            throw 'SELF_TEST: Paragraph geometry, scaling, rotation fallback, or original line order was not preserved.'
+        }
+        $structured = @(
+            [pscustomobject]@{ Text = '- first item'; X = 0; Y = 0; Width = 100; Height = 10 }
+            [pscustomobject]@{ Text = '  indented continuation'; X = 10; Y = 80; Width = 90; Height = 10 }
+            [pscustomobject]@{ Text = '    return value;'; X = 20; Y = 180; Width = 80; Height = 10 }
+        )
+        if ((Join-OcrLayoutLines $structured) -cne "- first item`n  indented continuation`n    return value;") {
+            throw 'SELF_TEST: OCR layout changed a list or indented code line.'
+        }
+    }
     function Get-OcrText([string]$Path) {
         Initialize-Ocr
         $script:OcrDeadline = [DateTime]::UtcNow.AddSeconds(30)
@@ -337,8 +438,16 @@ sealed class RegionPicker : Form {
             }
             $bitmap = Await-WinRt ($decoder.GetSoftwareBitmapAsync([Windows.Graphics.Imaging.BitmapPixelFormat]::Bgra8, [Windows.Graphics.Imaging.BitmapAlphaMode]::Premultiplied)) ([Windows.Graphics.Imaging.SoftwareBitmap])
             $result = Await-WinRt ($engine.RecognizeAsync($bitmap)) ([Windows.Media.Ocr.OcrResult])
-            $lines = @($result.Lines | ForEach-Object { $_.Text })
-            $text = $lines -join "`n"
+            $lines = @(Get-OcrLayoutLines $result)
+            $allowGeometry = $true
+            try {
+                $angle = $result.TextAngle
+                if ($null -ne $angle) {
+                    $degrees = [double]$angle
+                    $allowGeometry = -not ([double]::IsNaN($degrees) -or [double]::IsInfinity($degrees)) -and [Math]::Abs($degrees) -le 10
+                }
+            } catch { $allowGeometry = $false }
+            $text = Join-OcrLayoutLines $lines $allowGeometry
             if ([string]::IsNullOrWhiteSpace($text)) { throw 'NO_TEXT: No text was recognized. Select a larger, clearer area and retry.' }
             return $text
         } finally {
@@ -399,10 +508,11 @@ sealed class RegionPicker : Form {
                 } else {
                     $text = Get-OcrText $path
                     if ($Mode -eq 'self-test') {
+                        Test-OcrParagraphGeometry
                         if ($text -notmatch '2468') { throw 'SELF_TEST: Local OCR did not recognize the generated fixture.' }
                         $base64 = Get-PngBase64 $path
                         if ([Convert]::FromBase64String($base64).Length -ne (Get-Item -LiteralPath $path).Length) { throw 'SELF_TEST: PNG base64 roundtrip failed.' }
-                        Write-Result @{ ok = $true; diagnostics = @{ ocrFixturePassed = $true; pngBase64RoundtripPassed = $true; recognized = $text; diagnostics = (Get-Diagnostics); interactiveCaptureTested = $false; clipboardChanged = $false } }
+                        Write-Result @{ ok = $true; diagnostics = @{ ocrFixturePassed = $true; pngBase64RoundtripPassed = $true; paragraphGeometryFixturePassed = $true; recognized = $text; diagnostics = (Get-Diagnostics); interactiveCaptureTested = $false; clipboardChanged = $false } }
                     } else { Write-Result @{ ok = $true; text = $text } }
                 }
             } finally { if (Test-Path -LiteralPath $path) { Remove-Item -LiteralPath $path -Force -ErrorAction SilentlyContinue } }

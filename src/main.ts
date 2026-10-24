@@ -1,5 +1,7 @@
 import './styles.css';
 import { createOcrUi } from './ocr-ui';
+import { installPanelLayout } from './panel-layout';
+import { normalizeCapturedText } from './text-normalization';
 import { credentialScope } from './credential-scope';
 import { inferProviderPreset, PROVIDER_PRESETS, qwenBaseUrl, qwenSettingsFromUrl } from './provider-presets';
 import type { ProviderPresetId, QwenRegion } from './provider-presets';
@@ -42,9 +44,36 @@ let settingsReady = !desktop;
 let currentView = 'translate';
 let currentResults: TranslationResult[] = [];
 let resultSource = '';
+let pendingTranslate = false;
+let originalCapture: SourceTextEvent | null = null;
+let queuedCapture: SourceTextEvent | null = null;
+let queuedInputFocus = false;
 let confirmResolve: ((value: boolean) => void) | null = null;
 const cleanupListeners: Array<() => void> = [];
 const prefersDark = window.matchMedia('(prefers-color-scheme: dark)');
+const panelLayout = installPanelLayout(desktop);
+let layoutQueued = false;
+function notifyLayout(): void {
+  if (layoutQueued) return;
+  layoutQueued = true;
+  requestAnimationFrame(() => { layoutQueued = false; window.dispatchEvent(new CustomEvent('echolingo:layout')); });
+}
+function closeMoreMenu(restoreFocus = false): void {
+  const menu = $('#popup-more-menu');
+  const wasOpen = !menu.hidden; menu.hidden = true;
+  $('#more-toggle').setAttribute('aria-expanded', 'false');
+  $('.app-shell').classList.remove('menu-open');
+  if (wasOpen) { if (restoreFocus) $('#more-toggle').focus({ preventScroll: true }); notifyLayout(); }
+}
+function openMoreMenu(focusFirst = false): void {
+  cancelAutoHide();
+  const menu = $('#popup-more-menu'); menu.hidden = false;
+  $('#more-toggle').setAttribute('aria-expanded', 'true');
+  document.documentElement.style.setProperty('--popup-menu-height', `${Math.min(380, menu.scrollHeight) + 38}px`);
+  $('.app-shell').classList.add('menu-open');
+  if (focusFirst) menu.querySelector<HTMLButtonElement>('button:not([disabled]):not([hidden])')?.focus({ preventScroll: true });
+  notifyLayout();
+}
 
 function icon(name: string): SVGSVGElement {
   const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
@@ -123,20 +152,26 @@ function run(work: () => Promise<unknown>): void { void work().catch(reportError
 function setView(view: string): void {
   if (!['translate', 'history', 'settings'].includes(view)) return;
   if (view !== 'translate') cancelAutoHide();
-  currentView = view;
+  closeMoreMenu();
+  currentView = view; document.body.dataset.view = view;
+  $('#management-title').textContent = view === 'history' ? '历史与收藏' : '设置';
   for (const section of document.querySelectorAll<HTMLElement>('.view')) section.hidden = section.id !== `view-${view}`;
-  for (const button of document.querySelectorAll<HTMLButtonElement>('[data-view]')) {
+  for (const button of document.querySelectorAll<HTMLButtonElement>('button[data-view]')) {
     const selected = button.dataset.view === view;
     button.classList.toggle('active', selected);
     if (selected) button.setAttribute('aria-current', 'page'); else button.removeAttribute('aria-current');
   }
   if (view === 'history') { run(loadHistory); renderHistory(); }
   window.scrollTo({ top: 0, behavior: 'instant' });
+  if (view === 'translate') resizeSourceEditor();
+  notifyLayout();
 }
 function applyTheme(): void {
   const theme = settings.theme === 'system' ? (prefersDark.matches ? 'dark' : 'light') : settings.theme;
   document.documentElement.dataset.theme = theme;
-  $('#theme-cycle').title = `当前：${{ system: '跟随系统', light: '浅色', dark: '深色' }[settings.theme]}，点击切换`;
+  const themeName = { system: '跟随系统', light: '浅色', dark: '深色' }[settings.theme];
+  $('#theme-cycle').title = `当前：${themeName}，点击切换`;
+  $('#theme-menu-label').textContent = `主题 · ${themeName}`;
 }
 function renderLanguages(): void {
   for (const select of [sourceLanguage, targetLanguage]) {
@@ -153,32 +188,32 @@ function renderLanguages(): void {
     if (!select.value) { const option = node('option', '', value); option.value = value; select.append(option); select.value = value; }
   }
 }
-function updateCharacterCount(): void { $('#character-count').textContent = `${source.value.length.toLocaleString()} / 20,000`; }
+function resizeSourceEditor(): void {
+  if (currentView === 'translate') {
+    source.style.height = '0px';
+    const height = Math.min(100, Math.max(25, source.scrollHeight));
+    source.style.height = `${height}px`;
+    source.style.overflowY = source.scrollHeight > 100 ? 'auto' : 'hidden';
+  }
+  const empty = !source.value.trim();
+  translateButton.disabled = translating || !settingsReady || empty;
+  for (const id of ['#copy-source', '#speak-source', '#clear-source']) $<HTMLButtonElement>(id).disabled = empty;
+  notifyLayout();
+}
 function setLoading(value: boolean): void {
   translating = value;
-  translateButton.disabled = value || !settingsReady;
+  translateButton.disabled = value || !settingsReady || !source.value.trim();
   $('#translate-button-label').textContent = value ? '翻译中' : '翻译';
   $('#translate-arrow').hidden = value;
   $('#translate-spinner').hidden = !value;
   resultsContainer.setAttribute('aria-busy', String(value));
+  notifyLayout();
 }
 function emptyResults(): void {
   resultsContainer.replaceChildren();
-  const empty = node('div', 'translation-empty');
-  const orbit = node('div', 'empty-orbit');
-  orbit.append(node('span', 'orbit-letter', 'A'), node('span', 'orbit-letter small', '译'), node('span', 'orbit-dot'));
-  const title = source.value.trim() ? '准备好，遇见另一种表达' : '你的下一次理解，从这里开始';
-  const description = settings.providers.some((provider) => provider.enabled)
-    ? '输入文字后点击翻译，或按 Ctrl / Cmd + Enter。'
-    : '先添加一个翻译服务，再输入文字开始翻译。';
-  empty.append(orbit, node('h2', '', title), node('p', '', description));
-  if (!settings.providers.some((provider) => provider.enabled)) {
-    const button = node('button', 'text-button accent', '配置翻译服务 ↗');
-    button.addEventListener('click', () => setView('settings'));
-    empty.append(button);
-  }
-  resultsContainer.append(empty);
-  $('#translation-state').textContent = source.value.trim() ? '等待翻译' : '等候输入';
+  $('.results-column').hidden = true;
+  $('#translation-state').textContent = '';
+  notifyLayout();
 }
 function invalidateResults(): void {
   cancelAutoHide();
@@ -189,10 +224,40 @@ function invalidateResults(): void {
   emptyResults();
 }
 function setSourceText(text: string): void {
+  clearOriginalCapture();
   source.value = text.slice(0, MAX_TEXT_LENGTH);
-  updateCharacterCount();
+  resizeSourceEditor();
   invalidateResults();
   if (text.length > MAX_TEXT_LENGTH) toast('文字超过 20,000 字符，已截取前 20,000 字符。', 'error');
+}
+function clearOriginalCapture(): void {
+  originalCapture = null;
+  $('#restore-original-breaks').hidden = true;
+}
+async function receiveCapturedText(payload: SourceTextEvent): Promise<void> {
+  // Preserve an unfinished credentials editor rather than displaying it over a
+  // captured translation or silently discarding its fields. Latest capture wins.
+  if (allModals.some((modal) => !modal.hidden)) { queuedCapture = payload; queuedInputFocus = false; return; }
+  pendingTranslate = false;
+  setView('translate');
+  const normalized = payload.mode === 'input' ? payload.text : normalizeCapturedText(payload.text);
+  setSourceText(normalized);
+  if (normalized !== payload.text && payload.mode !== 'input') {
+    originalCapture = payload;
+    const restore = $('#restore-original-breaks');
+    restore.textContent = payload.mode === 'translate' ? '按原始换行重新翻译' : '恢复原始换行';
+    restore.hidden = false;
+  }
+  const token = generation;
+  await panelLayout.presentPopup();
+  if (token !== generation || currentView !== 'translate') return;
+  if (payload.mode === 'translate') { if (settingsReady) run(translate); else pendingTranslate = true; }
+  else if (payload.mode === 'ocr') status('文字识别完成');
+  // Empty Alt+D never activates the app or focuses the source editor.
+}
+function requestInputFocus(): void {
+  if (allModals.some((modal) => !modal.hidden)) { queuedInputFocus = true; queuedCapture = null; return; }
+  cancelAutoHide(); setView('translate'); requestAnimationFrame(() => source.focus());
 }
 async function copyText(text: string): Promise<void> {
   if (!text) return;
@@ -213,30 +278,26 @@ function speak(text: string, language: string): void {
 }
 function renderResults(results: TranslationResult[]): void {
   resultsContainer.replaceChildren();
-  if (results.length === 0) {
-    emptyResults();
-    $('#translation-state').textContent = '未返回结果';
-    return;
-  }
+  if (results.length === 0) { emptyResults(); return; }
+  $('.results-column').hidden = false;
   for (const result of results) {
-    const card = node('article', 'result-card');
+    const card = node('article', 'result-card'); card.tabIndex = 0;
     const header = node('div', 'result-card-header');
     const name = node('span', 'result-provider');
     name.append(node('span', 'provider-dot'), document.createTextNode(result.providerName));
-    header.append(name, node('span', 'result-timing', `${(result.elapsedMs / 1000).toFixed(1)} s`));
-    card.append(header);
-    if (result.error) card.append(node('p', 'result-error', result.error));
-    else {
-      card.append(node('p', 'result-text', result.text));
-      const actions = node('div', 'result-actions');
+    const actions = node('div', 'result-actions');
+    if (!result.error) {
       actions.append(actionButton('复制译文', 'copy', () => run(() => copyText(result.text))));
       if ('speechSynthesis' in window) actions.append(actionButton('朗读译文', 'audio', () => speak(result.text, targetLanguage.value)));
-      card.append(actions);
     }
+    actions.append(actionButton('重新翻译', 'history', () => run(translate)));
+    header.append(name, actions); card.append(header);
+    card.append(node('p', result.error ? 'result-error' : 'result-text', result.error || result.text));
     resultsContainer.append(card);
   }
   const success = results.filter((result) => !result.error).length;
   $('#translation-state').textContent = success === results.length ? '翻译完成' : `${success} / ${results.length} 个服务成功`;
+  notifyLayout();
 }
 async function translate(): Promise<void> {
   cancelAutoHide();
@@ -250,8 +311,9 @@ async function translate(): Promise<void> {
   const from = sourceLanguage.value, to = targetLanguage.value;
   setLoading(true);
   resultsContainer.replaceChildren();
-  const loading = node('div', 'result-loading'); loading.append(node('span', 'spinner'), document.createTextNode('正在寻找最贴切的表达…'));
-  resultsContainer.append(loading);
+  $('.results-column').hidden = false;
+  const loading = node('div', 'result-loading'); loading.append(node('span', 'spinner'), node('span', 'sr-only', '正在翻译'));
+  resultsContainer.append(loading); notifyLayout();
   $('#translation-state').textContent = '正在请求 API';
   status('正在翻译…');
   try {
@@ -266,7 +328,7 @@ async function translate(): Promise<void> {
     resultsContainer.replaceChildren();
     const card = node('article', 'result-card');
     card.append(node('p', 'result-error', errorMessage(error)));
-    resultsContainer.append(card);
+    resultsContainer.append(card); $('.results-column').hidden = false; notifyLayout();
     $('#translation-state').textContent = '翻译失败';
     status('翻译失败');
   } finally {
@@ -278,7 +340,7 @@ function renderShortcutHints(): void {
   for (const element of document.querySelectorAll<HTMLElement>('[data-shortcut]')) {
     element.textContent = settings.shortcuts[element.dataset.shortcut as ShortcutAction] || '未设置';
   }
-  source.placeholder = settings.shortcuts.selection ? `输入文字，或在任意应用中选中文字后按 ${settings.shortcuts.selection}` : '输入或粘贴需要翻译的文字';
+  source.placeholder = '输入文字…';
   for (const button of document.querySelectorAll<HTMLElement>('[data-action="capture"]')) button.title = `截图翻译${settings.shortcuts.capture ? ` · ${settings.shortcuts.capture}` : ''}`;
 }
 async function updateSettings(mutator: (next: Settings) => void): Promise<void> {
@@ -293,7 +355,6 @@ async function updateSettings(mutator: (next: Settings) => void): Promise<void> 
     applyTheme();
     renderSettings();
     renderShortcutHints();
-    $('#service-counter').textContent = `${settings.providers.filter((provider) => provider.enabled).length} 个服务已启用`;
     if (currentResults.length === 0 && !translating) emptyResults();
   });
   saveQueue = operation.catch(() => undefined);
@@ -489,9 +550,15 @@ function closeModal(modal: HTMLElement): void {
   }
   const previous = modalReturnFocus.get(modal);
   modalReturnFocus.delete(modal);
-  const fallback = anotherModal ? modalFocusable(anotherModal)[0] : document.querySelector<HTMLElement>('[data-view].active');
+  const fallback = anotherModal ? modalFocusable(anotherModal)[0] : document.querySelector<HTMLElement>('button[data-view].active');
   if (previous?.isConnected && previous.getClientRects().length > 0) previous.focus({ preventScroll: true });
   else fallback?.focus({ preventScroll: true });
+  if (!anotherModal && queuedCapture) {
+    const payload = queuedCapture; queuedCapture = null;
+    queueMicrotask(() => run(() => receiveCapturedText(payload)));
+  } else if (!anotherModal && queuedInputFocus) {
+    queuedInputFocus = false; queueMicrotask(requestInputFocus);
+  }
 }
 function setProviderSaving(value: boolean): void {
   providerSaving = value;
@@ -590,14 +657,20 @@ const ocrUi = createOcrUi({
   showModal, closeModal, confirm: confirmAction, toast, reportError,
 });
 
-for (const button of document.querySelectorAll<HTMLButtonElement>('[data-view]')) button.addEventListener('click', () => setView(button.dataset.view ?? 'translate'));
+for (const button of document.querySelectorAll<HTMLButtonElement>('button[data-view]')) button.addEventListener('click', () => setView(button.dataset.view ?? 'translate'));
 for (const button of document.querySelectorAll<HTMLButtonElement>('[data-action]')) button.addEventListener('click', () => run(() => runAction(button.dataset.action as Action)));
-$('.brand-mark').addEventListener('click', (event) => { event.preventDefault(); setView('translate'); });
 $('#copy-source').addEventListener('click', () => run(() => copyText(source.value)));
 $('#speak-source').addEventListener('click', () => speak(source.value, sourceLanguage.value));
 translateButton.addEventListener('click', () => run(translate));
-source.addEventListener('input', () => { updateCharacterCount(); invalidateResults(); });
-$('#clear-source').addEventListener('click', () => { setSourceText(''); source.focus(); });
+source.addEventListener('input', () => { clearOriginalCapture(); resizeSourceEditor(); invalidateResults(); });
+window.addEventListener('resize', resizeSourceEditor);
+$('#restore-original-breaks').addEventListener('click', () => {
+  const original = originalCapture;
+  if (!original) return;
+  closeMoreMenu(); setSourceText(original.text);
+  if (original.mode === 'translate') run(translate);
+});
+$('#clear-source').addEventListener('click', () => { setSourceText(''); });
 for (const select of [sourceLanguage, targetLanguage]) select.addEventListener('change', () => {
   invalidateResults();
   run(() => updateSettings((next) => { next.sourceLanguage = sourceLanguage.value; next.targetLanguage = targetLanguage.value; }));
@@ -610,6 +683,19 @@ $('#swap-language').addEventListener('click', () => {
   else invalidateResults();
   run(() => updateSettings((next) => { next.sourceLanguage = sourceLanguage.value; next.targetLanguage = targetLanguage.value; }));
 });
+$('#more-toggle').addEventListener('click', (event) => {
+  if ($('#popup-more-menu').hidden) openMoreMenu(event.detail === 0); else closeMoreMenu();
+});
+for (const id of ['#close-popup', '#close-management']) $(id).addEventListener('click', () => run(async () => {
+  closeMoreMenu(); cancelAutoHide(); if (requireDesktop()) await invoke('hide_window');
+}));
+$('#popup-more-menu').addEventListener('click', (event) => {
+  if ((event.target as HTMLElement).closest('button[role="menuitem"]')) closeMoreMenu();
+});
+document.addEventListener('pointerdown', (event) => {
+  if (!$('#popup-more-menu').hidden && !(event.target as HTMLElement).closest('.popup-toolbar')) closeMoreMenu();
+});
+window.addEventListener('resize', () => { if (currentView === 'translate') resizeSourceEditor(); });
 $('#pin-button').addEventListener('click', () => run(async () => {
   if (!requireDesktop()) return;
   const next = !pinned; await invoke('set_pinned', { pinned: next }); pinned = next;
@@ -705,6 +791,18 @@ document.addEventListener('keydown', (event) => {
     }
     return;
   }
+  if (event.key === 'Escape' && !$('#popup-more-menu').hidden) {
+    event.preventDefault(); event.stopPropagation(); closeMoreMenu(true); return;
+  }
+  if (event.key === 'ArrowDown' && document.activeElement === $('#more-toggle')) {
+    event.preventDefault(); openMoreMenu(true); return;
+  }
+  if (!$('#popup-more-menu').hidden && ['ArrowDown', 'ArrowUp', 'Home', 'End'].includes(event.key)) {
+    const items = Array.from($('#popup-more-menu').querySelectorAll<HTMLButtonElement>('button')).filter((button) => !button.disabled && !button.hidden);
+    const current = items.indexOf(document.activeElement as HTMLButtonElement);
+    const next = event.key === 'Home' ? 0 : event.key === 'End' ? items.length - 1 : (current + (event.key === 'ArrowUp' ? -1 : 1) + items.length) % items.length;
+    event.preventDefault(); items[next]?.focus({ preventScroll: true }); return;
+  }
   if (event.key === 'Enter' && (event.ctrlKey || event.metaKey)) {
     event.preventDefault(); if (!translating) { setView('translate'); run(translate); }
   }
@@ -713,41 +811,30 @@ document.addEventListener('keydown', (event) => {
     else if (currentView !== 'translate') setView('translate');
   }
 });
-window.addEventListener('beforeunload', () => { cancelAutoHide(); for (const unlisten of cleanupListeners) unlisten(); if ('speechSynthesis' in window) window.speechSynthesis.cancel(); });
+window.addEventListener('beforeunload', () => { panelLayout.dispose(); cancelAutoHide(); for (const unlisten of cleanupListeners) unlisten(); if ('speechSynthesis' in window) window.speechSynthesis.cancel(); });
 
 async function initialize(): Promise<void> {
   const presetSelect = $<HTMLSelectElement>('#provider-preset');
   for (const preset of PROVIDER_PRESETS) { const option = node('option', '', preset.label); option.value = preset.id as ProviderPresetId; presetSelect.append(option); }
   if (!desktop) {
     $('#preview-banner').hidden = false;
-    $('#runtime-badge').classList.add('preview');
-    $('#runtime-badge span').textContent = '浏览器预览';
     status('界面预览 · 桌面能力未连接');
   }
-  $('#translate-key-hint').textContent = /Mac|iPhone|iPad/.test(navigator.platform) ? '⌘' : 'Ctrl';
   setView('translate');
   $('#speak-source').hidden = !('speechSynthesis' in window);
   applyTheme(); renderLanguages(); renderSettings(); renderShortcutHints(); renderHistory(); emptyResults();
   setLoading(false);
   if (!desktop) return;
   status('正在加载设置…');
-  let pendingTranslate = false;
   try {
     // Listen before loading settings so an incoming native selection is not lost during startup.
-    cleanupListeners.push(await listen<SourceTextEvent>('source-text', (event) => {
-      pendingTranslate = false;
-      setView('translate'); setSourceText(event.payload.text);
-      if (event.payload.mode === 'translate') { if (settingsReady) run(translate); else pendingTranslate = true; }
-      else if (event.payload.mode === 'input') { /* Empty Alt+D clears the floating view without moving focus. */ }
-      else { toast('文字识别完成。'); }
-    }));
-    cleanupListeners.push(await listen('focus-input', () => { cancelAutoHide(); setView('translate'); requestAnimationFrame(() => source.focus()); }));
+    cleanupListeners.push(await listen<SourceTextEvent>('source-text', (event) => run(() => receiveCapturedText(event.payload))));
+    cleanupListeners.push(await listen('focus-input', requestInputFocus));
     cleanupListeners.push(await listen('ocr-copied', () => { status('OCR 文字已复制到剪贴板'); }));
     for (const eventName of ['action-error', 'shortcut-error']) cleanupListeners.push(await listen<string>(eventName, (event) => toast(event.payload, 'error', 8000)));
     settings = await invoke<Settings>('get_settings');
     settingsReady = true;
     applyTheme(); renderLanguages(); renderSettings(); renderShortcutHints();
-    $('#service-counter').textContent = `${settings.providers.filter((provider) => provider.enabled).length} 个服务已启用`;
     if (!translating) emptyResults();
     await loadHistory(); status('准备就绪');
     if (pendingTranslate) run(translate);
@@ -756,6 +843,6 @@ async function initialize(): Promise<void> {
   } catch (error) {
     status('启动检查失败'); reportError(error);
     const output = $('#diagnostics-output'); output.hidden = false; output.textContent = `启动检查失败：${errorMessage(error)}`;
-  } finally { translateButton.disabled = translating || !settingsReady; }
+  } finally { resizeSourceEditor(); }
 }
 void initialize();

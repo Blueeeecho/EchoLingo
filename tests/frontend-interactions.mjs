@@ -20,7 +20,7 @@ try {
     const callbacks = new Map(), listeners = new Map(), ocrKeys = new Map(), translationKeys = new Map(); let callbackId = 0;
     const scope = (provider) => `${provider.id}:${provider.kind}:${new URL(provider.baseUrl).origin}`;
     translationKeys.set(scope(state.providers[0]), 'qa-original-translation-key');
-    const fixture = window.__qa = { settings: state, saveCalls: 0, keyCalls: 0, ocrKeyCalls: 0, ocrTestCalls: 0, ocrDeleteCalls: 0, credentialWrites: [], settingsWrites: [], hideCalls: 0, holdSave: false, failSave: false, releaseSave: () => {}, emit: (name, payload) => listeners.get(name)?.({ event: name, payload, id: 1 }) };
+    const fixture = window.__qa = { settings: state, saveCalls: 0, keyCalls: 0, ocrKeyCalls: 0, ocrTestCalls: 0, ocrDeleteCalls: 0, credentialWrites: [], settingsWrites: [], hideCalls: 0, layoutCalls: [], showCalls: [], translationRequests: [], dragCalls: 0, holdSave: false, failSave: false, releaseSave: () => {}, emit: (name, payload) => listeners.get(name)?.({ event: name, payload, id: 1 }) };
     window.__TAURI_INTERNALS__ = {
       transformCallback: (callback) => { const id = ++callbackId; callbacks.set(id, callback); return id; },
       invoke: async (command, args = {}) => {
@@ -42,15 +42,49 @@ try {
         if (command === 'delete_ocr_api_key') { fixture.ocrDeleteCalls++; const provider = fixture.settings.ocrProviders.find(item => item.id === args.providerId); if (provider) { ocrKeys.delete(scope(provider)); provider.hasKey = false; } return; }
         if (command === 'test_ocr_provider') { fixture.ocrTestCalls++; return 'QA OCR test succeeded'; }
         if (command === 'hide_window') { fixture.hideCalls++; return; }
+        if (command === 'fit_window') { fixture.layoutCalls.push(args); return; }
+        if (command === 'start_window_drag') { fixture.dragCalls++; return; }
+        if (command === 'show_popup') { fixture.showCalls.push(structuredClone(fixture.layoutCalls.at(-1))); return; }
         if (command === 'set_pinned') return;
-        if (command === 'translate') return [{ providerId: 'qa-service', providerName: 'QA IPC fixture', text: 'Isolated test translation fixture', elapsedMs: 50 }];
+        if (command === 'translate') { fixture.translationRequests.push(structuredClone(args)); return [{ providerId: 'qa-service', providerName: 'QA IPC fixture', text: 'Isolated test translation fixture', elapsedMs: 50 }]; }
         throw new Error(`Unimplemented QA command: ${command}`);
       },
     };
   });
   await page.goto(process.env.ECHOLINGO_TEST_URL ?? 'http://127.0.0.1:1420/');
-  await page.locator('#footer-status').getByText('准备就绪').waitFor();
-  await page.locator('[data-view="settings"]').click();
+  await page.waitForFunction(() => document.querySelector('#footer-status')?.textContent === '准备就绪');
+  const goView = async (view) => {
+    if (await page.locator('body').getAttribute('data-view') === view) return;
+    if (await page.locator('body').getAttribute('data-view') !== 'translate') {
+      await page.locator('button[data-view="translate"]').click();
+      if (view === 'translate') return;
+    }
+    await page.locator('#more-toggle').click();
+    await page.locator(`button[data-view="${view}"]`).click();
+  };
+  // A blank popup has no app chrome, tutorial, counters, or result placeholder.
+  assert.equal(await page.locator('.management-header').isVisible(), false);
+  assert.equal(await page.locator('.app-footer').isVisible(), false);
+  assert.equal(await page.locator('.preview-banner').isVisible(), false);
+  assert.equal(await page.locator('#view-translate .column-caption, #view-translate .translation-empty, #character-count, #service-counter').count(), 0);
+  assert.equal(await page.locator('#translate-button').isDisabled(), true);
+  assert.equal(await page.locator('#restore-original-breaks').isHidden(), true);
+  assert.equal(await page.locator('.popup-toolbar').getAttribute('data-window-drag'), '');
+  assert.equal(await page.locator('.popup-toolbar').getAttribute('data-tauri-drag-region'), null);
+  await page.locator('#more-toggle').click();
+  await page.locator('#popup-more-menu').waitFor({ state: 'visible' });
+  await page.keyboard.press('ArrowDown');
+  await page.keyboard.press('Escape');
+  assert.equal(await page.locator('#popup-more-menu').isHidden(), true);
+  assert.equal(await page.evaluate(() => window.__qa.hideCalls), 0);
+  await page.locator('#source-text').fill(Array(30).fill('A line for automatic height.').join('\n'));
+  assert.ok(await page.locator('#source-text').evaluate((element) => element.getBoundingClientRect().height <= 100));
+  assert.equal(await page.locator('#translate-button').isEnabled(), true);
+  await page.locator('#source-text').fill('');
+  assert.ok(await page.locator('.app-shell').evaluate((element) => element.getBoundingClientRect().height < 160));
+  await goView('history');
+  assert.equal(await page.locator('.management-header').isVisible(), true);
+  await goView('settings');
 
   // Saving is atomic from the form's perspective: closing or submitting again
   // while the backend is pending cannot replace or close a different editor.
@@ -215,7 +249,7 @@ try {
   await page.waitForFunction(() => window.__qa.settings.ocrProviders.length === 0 && window.__qa.settings.activeOcrProviderId === null);
 
   // Empty Alt+D clears the floating view without focusing its input or making API requests.
-  await page.locator('[data-view="translate"]').click();
+  await goView('translate');
   await page.locator('#source-text').fill('QA text before empty selection');
   await page.locator('#pin-button').focus();
   await page.evaluate(() => window.__qa.emit('source-text', { text: '', mode: 'input' }));
@@ -223,19 +257,73 @@ try {
   assert.equal(await page.evaluate(() => document.activeElement.id), 'pin-button');
   assert.equal(await page.locator('.result-card').count(), 0);
 
+  // Captured text is cleaned before display AND API submission, while manual
+  // input and explicit restoration retain their intentional line breaks.
+  const captured = 'This paragraph uses a deliberately long first line copied from a PDF viewer\nand continues on the following visual line without starting a paragraph.\n\nSecond paragraph remains separate.';
+  const cleaned = captured.replace('viewer\nand', 'viewer and');
+  const beforeCapture = await page.evaluate(() => window.__qa.translationRequests.length);
+  await page.evaluate((text) => window.__qa.emit('source-text', { text, mode: 'translate' }), captured);
+  await page.waitForFunction((length) => window.__qa.translationRequests.length === length + 1, beforeCapture);
+  assert.equal(await page.locator('#source-text').inputValue(), cleaned);
+  assert.equal(await page.evaluate(() => window.__qa.translationRequests.at(-1).text), cleaned);
+  assert.equal(await page.evaluate(() => window.__qa.showCalls.at(-1).presentation), 'popup');
+  await page.locator('#more-toggle').click();
+  await page.locator('#restore-original-breaks').click();
+  await page.waitForFunction((length) => window.__qa.translationRequests.length === length + 2, beforeCapture);
+  assert.equal(await page.locator('#source-text').inputValue(), captured);
+  assert.equal(await page.evaluate(() => window.__qa.translationRequests.at(-1).text), captured);
+  await page.locator('#source-text').fill(captured);
+  await page.locator('#translate-button').click();
+  await page.waitForFunction((length) => window.__qa.translationRequests.length === length + 3, beforeCapture);
+  assert.equal(await page.evaluate(() => window.__qa.translationRequests.at(-1).text), captured);
+  assert.equal(await page.locator('#restore-original-breaks').isHidden(), true);
+
+  // Incoming shortcuts do not reveal or discard an unfinished credentials
+  // editor. The latest captured source is presented after the editor closes.
+  await goView('settings');
+  await page.getByRole('button', { name: '编辑', exact: true }).click();
+  await page.locator('#provider-name').fill('QA unfinished editor');
+  const beforeQueued = await page.evaluate(() => ({ shows: window.__qa.showCalls.length, requests: window.__qa.translationRequests.length }));
+  await page.evaluate(() => window.__qa.emit('source-text', { text: '这是一段自动换行的正文，\n下一行应该连续展示。\n\n这里是新的段落。', mode: 'ocr' }));
+  assert.equal(await page.locator('#provider-dialog').isVisible(), true);
+  assert.equal(await page.locator('#provider-name').inputValue(), 'QA unfinished editor');
+  assert.equal(await page.evaluate(() => window.__qa.showCalls.length), beforeQueued.shows);
+  await page.locator('#cancel-provider-dialog').click();
+  await page.waitForFunction((shows) => window.__qa.showCalls.length === shows + 1, beforeQueued.shows);
+  assert.equal(await page.locator('#source-text').inputValue(), '这是一段自动换行的正文，下一行应该连续展示。\n\n这里是新的段落。');
+  assert.equal(await page.evaluate(() => window.__qa.translationRequests.length), beforeQueued.requests);
+  assert.equal(await page.evaluate(() => window.__qa.showCalls.at(-1).presentation), 'popup');
+  await page.locator('#more-toggle').click();
+  await page.locator('#restore-original-breaks').click();
+  assert.match(await page.locator('#source-text').inputValue(), /正文，\n下一行/);
+  assert.equal(await page.evaluate(() => window.__qa.translationRequests.length), beforeQueued.requests);
+
+  // Alt+A is also deferred while editing a service, and then focuses only when
+  // the user has closed the editor. It must not shrink the open editor.
+  await goView('settings');
+  await page.waitForFunction(() => window.__qa.layoutCalls.at(-1)?.presentation === 'management');
+  await page.getByRole('button', { name: '编辑', exact: true }).click();
+  await page.locator('#provider-name').fill('QA Alt+A unfinished editor');
+  await page.evaluate(() => window.__qa.emit('focus-input'));
+  assert.equal(await page.locator('body').getAttribute('data-view'), 'settings');
+  assert.equal(await page.locator('#provider-name').inputValue(), 'QA Alt+A unfinished editor');
+  assert.equal(await page.evaluate(() => window.__qa.layoutCalls.at(-1).presentation), 'management');
+  await page.locator('#cancel-provider-dialog').click();
+  await page.waitForFunction(() => document.body.dataset.view === 'translate' && document.activeElement.id === 'source-text');
+
   // Default 0 creates no timer. An optional timer waits for idle time and resets
   // on pointer input; pinning prevents it from hiding a completed translation.
   await page.clock.install();
-  await page.locator('[data-view="translate"]').click();
+  await goView('translate');
   await page.locator('#source-text').fill('QA default timer test');
   await page.locator('#translate-button').click();
   await page.getByText('Isolated test translation fixture', { exact: true }).waitFor();
   await page.clock.fastForward(20_000);
   assert.equal(await page.evaluate(() => window.__qa.hideCalls), 0);
-  await page.locator('[data-view="settings"]').click();
+  await goView('settings');
   await page.locator('#auto-hide-seconds').selectOption('3');
   await page.waitForFunction(() => window.__qa.settings.autoHideSeconds === 3);
-  await page.locator('[data-view="translate"]').click();
+  await goView('translate');
   await page.locator('#source-text').fill('QA optional timer test');
   await page.locator('#translate-button').click();
   await page.getByText('Isolated test translation fixture', { exact: true }).waitFor();
@@ -253,7 +341,7 @@ try {
   await page.clock.fastForward(10_000);
   assert.equal(await page.evaluate(() => window.__qa.hideCalls), 1);
   assert.deepEqual(errors, []);
-  console.log('PASS: pending-save close/reentry guard; failure unlock; blank shortcuts; duplicate rejection; default no timer; optional idle reset; pinned timer suppression; OCR dual-key bundles/protocol isolation/no plaintext settings; documented vendor presets; origin-bound saved-key indications; OCR configuration/privacy; empty-selection focus preservation.');
+  console.log('PASS: pending-save close/reentry guard; failure unlock; blank shortcuts; duplicate rejection; default no timer; optional idle reset; pinned timer suppression; OCR dual-key bundles/protocol isolation/no plaintext settings; documented vendor presets; origin-bound saved-key indications; minimal popup/menu/automatic source height; OCR configuration/privacy; empty-selection focus preservation.');
 } finally {
   await browser.close();
 }

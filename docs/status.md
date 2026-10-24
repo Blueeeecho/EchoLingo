@@ -2,6 +2,14 @@
 
 Updated: 2026-10-24, Asia/Shanghai. Stage: v0.1.0 preview validation.
 
+## Latest user refinement: minimal popup and wrapped text
+- Translation is a transient popup: tiny pin/more/close toolbar, auto-sized source editor, language strip and provider text. No brand block, counters, instructional/empty cards, timings or footer. Secondary controls are in More or appear on hover/keyboard focus.
+- Popup starts at 480 px wide, adapts height to intrinsic content with a work-area cap and no OS title bar. Settings/history use a normal management presentation. Fit operations never show or focus the app; captured content is prepared before inactive display. Only actual outside clicks hide an unpinned popup, not general focus changes; management stays open.
+- Captured selection/OCR soft wraps are cleaned once before display/API submission. Blank paragraphs, indentation and recognizable code/lists remain. Raw capture is kept in memory for More > restore original line breaks. Typed/pasted text and historical records are untouched.
+- Native OCR uses relative line geometry to mark obvious paragraph gaps; it preserves original line order and handles rotation/structured text conservatively. Plain-text or OCR paragraph reconstruction remains heuristic.
+- Input/capture shortcuts received during a credentials editor are deferred without shrinking the editor or discarding its fields.
+- Current local verification: 45 frontend tests and 30 Rust tests, integrated IPC regressions, 420/520 px short/medium/long layout samples; Mac real OCR and paragraph geometry fixtures passed. Final native builds/Windows geometry check follow the new commit.
+
 ## Confirmed product behavior
 - Independent installable Windows-first desktop app, also macOS. Not a browser product.
 - EchoLingo / Chinese name: Hui Sheng Yi. No HarmonyOS/DevEco SDK requested.

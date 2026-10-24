@@ -7,7 +7,7 @@
     <meta name="description" content="EchoLingo · 回声译，轻量、可自定义的桌面翻译工具。" />
     <title>EchoLingo · 回声译</title>
   </head>
-  <body>
+  <body data-view="translate">
     <svg class="icon-definitions" xmlns="http://www.w3.org/2000/svg" aria-hidden="true"><defs>
       <symbol id="i-translate" viewBox="0 0 24 24"><path d="m4 5 10 0M9 3v2m-3 0c0 5 3 8 7 10M12 5c0 5-3 8-8 11m10 4 4-10 4 10m-6.5-3h5"/></symbol>
       <symbol id="i-history" viewBox="0 0 24 24"><path d="M3 11a9 9 0 1 1 2.3 7M3 5v6h6m3-5v6l4 2"/></symbol>
@@ -24,6 +24,7 @@
       <symbol id="i-search" viewBox="0 0 24 24"><circle cx="10.5" cy="10.5" r="6.5"/><path d="m16 16 5 5"/></symbol>
       <symbol id="i-plus" viewBox="0 0 24 24"><path d="M12 4v16M4 12h16"/></symbol>
       <symbol id="i-trash" viewBox="0 0 24 24"><path d="M3 6h18M9 6V3h6v3M5 6l1 15h12l1-15M10 10v7m4-7v7"/></symbol>
+      <symbol id="i-more" viewBox="0 0 24 24"><circle cx="5" cy="12" r="1"/><circle cx="12" cy="12" r="1"/><circle cx="19" cy="12" r="1"/></symbol>
       <symbol id="i-close" viewBox="0 0 24 24"><path d="m5 5 14 14M5 19 19 5"/></symbol>
       <symbol id="i-shield" viewBox="0 0 24 24"><path d="m12 3 8 3v6c0 5-8 9-8 9s-8-4-8-9V6Zm-4 9 3 3 5-6"/></symbol>
       <symbol id="i-check" viewBox="0 0 24 24"><path d="m4 12 5 5L20 6"/></symbol>
@@ -33,19 +34,24 @@
     </defs></svg>
     <div class="app-shell">
       <div class="main-shell">
-        <header class="app-header">
-          <div class="header-leading"><a href="#translate" class="brand-mark" aria-label="EchoLingo 首页"><span>E</span><i></i></a><button class="app-home" data-view="translate" aria-label="翻译"><span class="wordmark">EchoLingo <span>回声译</span></span></button><button class="icon-button" id="pin-button" aria-label="钉住窗口" title="钉住窗口（点击外部保留）" aria-pressed="false"><svg class="icon"><use href="#i-pin"/></svg></button></div>
-          <div class="header-tools"><span class="runtime-badge" id="runtime-badge"><i></i><span>桌面翻译工具</span></span><button class="icon-button" data-action="capture" aria-label="截图翻译" title="截图翻译"><svg class="icon"><use href="#i-capture"/></svg></button><button class="icon-button" data-action="clipboard" aria-label="剪贴板翻译" title="剪贴板翻译"><svg class="icon"><use href="#i-clipboard"/></svg></button><button class="icon-button toolbar-nav-button" data-view="history" aria-label="历史与收藏" title="历史与收藏"><svg class="icon"><use href="#i-history"/></svg></button><button class="icon-button toolbar-nav-button" data-view="settings" aria-label="设置" title="设置"><svg class="icon"><use href="#i-settings"/></svg></button><button class="icon-button" id="theme-cycle" aria-label="切换主题" title="切换主题"><svg class="icon"><use href="#i-sun"/></svg></button></div>
+        <header class="popup-toolbar" data-window-drag>
+          <button class="icon-button" id="pin-button" aria-label="钉住窗口" title="钉住窗口" aria-pressed="false"><svg class="icon"><use href="#i-pin"/></svg></button><div class="popup-drag-space" data-window-drag></div>
+          <button class="icon-button" id="more-toggle" aria-label="更多" title="更多" aria-haspopup="menu" aria-expanded="false" aria-controls="popup-more-menu"><svg class="icon"><use href="#i-more"/></svg></button><button class="icon-button" id="close-popup" aria-label="隐藏窗口" title="隐藏窗口"><svg class="icon"><use href="#i-close"/></svg></button>
+          <div id="popup-more-menu" class="popup-menu" role="menu" aria-label="更多操作" hidden>
+            <button role="menuitem" data-view="settings"><svg class="icon"><use href="#i-settings"/></svg>设置</button><button role="menuitem" data-view="history"><svg class="icon"><use href="#i-history"/></svg>历史与收藏</button><div class="menu-separator" role="separator"></div>
+            <button role="menuitem" data-action="capture"><svg class="icon"><use href="#i-capture"/></svg>截图翻译</button><button role="menuitem" data-action="clipboard"><svg class="icon"><use href="#i-clipboard"/></svg>剪贴板翻译</button><button role="menuitem" data-action="ocr"><svg class="icon"><use href="#i-selection"/></svg>截图识别文字</button><button role="menuitem" data-action="silentOcr"><svg class="icon"><use href="#i-bolt"/></svg>无感 OCR → 剪贴板</button><div class="menu-separator" role="separator"></div>
+            <button role="menuitem" id="restore-original-breaks" hidden><svg class="icon"><use href="#i-history"/></svg>按原始换行重新翻译</button><button role="menuitem" id="copy-source"><svg class="icon"><use href="#i-copy"/></svg>复制原文</button><button role="menuitem" id="speak-source"><svg class="icon"><use href="#i-audio"/></svg>朗读原文</button><button role="menuitem" id="clear-source"><svg class="icon"><use href="#i-trash"/></svg>清空原文</button><div class="menu-separator" role="separator"></div><button role="menuitem" id="theme-cycle"><svg class="icon"><use href="#i-sun"/></svg><span id="theme-menu-label">主题 · 跟随系统</span></button>
+          </div>
         </header>
+        <header class="management-header"><button class="icon-button" data-view="translate" aria-label="返回翻译" title="返回翻译"><svg class="icon back-icon"><use href="#i-arrow"/></svg></button><span id="management-title">设置</span><span class="management-spacer"></span><button class="icon-button" id="close-management" aria-label="隐藏管理窗口" title="隐藏窗口"><svg class="icon"><use href="#i-close"/></svg></button></header>
         <div class="preview-banner" id="preview-banner" hidden><svg class="icon"><use href="#i-bolt"/></svg><span>浏览器界面预览 · 全局快捷键、截图与安全凭据库需要在桌面应用中使用。</span></div>
         <main>
           <section class="view" id="view-translate" aria-label="翻译工作台">
             <div class="translator-panel">
-              <div class="source-column"><div class="column-caption"><span>原文 <i>ORIGINAL</i></span><button class="text-button" id="clear-source">清空</button></div><label class="sr-only" for="source-text">输入或粘贴需要翻译的文字</label><textarea id="source-text" maxlength="20000" spellcheck="false" placeholder="输入文字，或在任意应用中选中文字后按 Alt+D"></textarea><div class="source-footer"><div class="source-tools"><button class="icon-button" id="speak-source" aria-label="朗读原文" title="朗读原文"><svg class="icon"><use href="#i-audio"/></svg></button><button class="icon-button" id="copy-source" aria-label="复制原文" title="复制原文"><svg class="icon"><use href="#i-copy"/></svg></button><span class="character-count" id="character-count">0 / 20,000</span></div><button class="primary-button" id="translate-button"><span id="translate-button-label">翻译</span><svg class="icon" id="translate-arrow"><use href="#i-arrow"/></svg><span class="spinner" id="translate-spinner" hidden></span></button></div></div>
-              <div class="language-bar"><div class="language-pair"><label class="sr-only" for="source-language">源语言</label><select id="source-language"></select><button class="icon-button swap-button" id="swap-language" aria-label="交换语言" title="交换语言"><svg class="icon"><use href="#i-swap"/></svg></button><label class="sr-only" for="target-language">目标语言</label><select id="target-language"></select></div><span class="service-counter" id="service-counter">0 个服务已启用</span></div>
-              <div class="results-column"><div class="column-caption"><span>译文 <i>TRANSLATION</i></span><span id="translation-state" class="translation-state">等候输入</span></div><div id="results" class="results-container" aria-live="polite" aria-busy="false"></div></div>
+              <div class="source-column"><label class="sr-only" for="source-text">原文</label><textarea id="source-text" maxlength="20000" rows="1" spellcheck="false" placeholder="输入文字…"></textarea><button class="translate-trigger icon-button" id="translate-button" aria-label="翻译" title="翻译" disabled><span class="sr-only" id="translate-button-label">翻译</span><svg class="icon" id="translate-arrow"><use href="#i-arrow"/></svg><span class="spinner" id="translate-spinner" hidden></span></button></div>
+              <div class="language-bar"><div class="language-pair"><label class="sr-only" for="source-language">源语言</label><select id="source-language"></select><button class="icon-button swap-button" id="swap-language" aria-label="交换语言" title="交换语言"><svg class="icon"><use href="#i-swap"/></svg></button><label class="sr-only" for="target-language">目标语言</label><select id="target-language"></select></div></div>
+              <div class="results-column" hidden><span id="translation-state" class="sr-only" aria-live="polite"></span><div id="results" class="results-container" aria-live="polite" aria-busy="false"></div></div>
             </div>
-            <div class="workspace-bottom"><div><svg class="icon"><use href="#i-shield"/></svg><span>密钥保存在系统凭据库</span></div><span><kbd id="translate-key-hint">Ctrl</kbd> + <kbd>Enter</kbd> 翻译 <span class="hint-divider">·</span> <kbd>Esc</kbd> 隐藏</span></div>
           </section>
           <section class="view" id="view-history" aria-label="历史与收藏" hidden>
             <div class="section-heading"><div><span class="eyebrow">YOUR LANGUAGE NOTEBOOK</span><h1>理解过的，都留在这里<span class="heading-dot">.</span></h1></div><span class="section-index">02 / HISTORY</span></div>

@@ -9,6 +9,8 @@ Read `PROJECT.md`, `docs/status.md`, `docs/implementation-plan.md`, and `docs/te
 ## Working rules
 - Use skills only when necessary or explicitly requested by the owner.
 - Default to silent tray/menu-bar startup. Only user-triggered actions show the window; hide on outside click, with NO automatic timeout by default (explicit owner preference).
+- The translation view is a transient minimal popup, not the app home: tiny pin/more/close toolbar, source, languages and results only. Management screens are an explicit separate presentation; resize never activates/focuses/shows a window.
+- Normalize soft wraps only for captured selection/OCR. Preserve clear paragraphs, code/lists, and raw capture in memory for an unobtrusive restore action. Typed/pasted text and history must not be automatically flattened. Plain text cannot perfectly distinguish every paragraph.
 - Keep software lightweight: system WebView, native offline OCR, vanilla TypeScript. Avoid Chromium/Electron and bundled OCR models without a demonstrated need.
 - Native selected-text acquisition must happen before focusing EchoLingo. Never silently replace text in the source app.
 - No API keys in files, Git commits, logs, history, screenshots, or fixtures. Store keys in OS credentials. Fixtures use dummy values and local mock HTTP only.
@@ -30,6 +32,8 @@ Read `PROJECT.md`, `docs/status.md`, `docs/implementation-plan.md`, and `docs/te
 - `src-tauri/src/translation.rs`: OpenAI-compatible/DeepL/LibreTranslate protocols.
 - `src-tauri/src/ocr.rs` / `ocr_native.rs`: compatible Vision/JSON and native Baidu/Tencent OCR protocols.
 - `src-tauri/src/platform.rs`: native helper process boundary.
+- `src/panel-layout.ts` / `src-tauri/src/window_layout.rs`: intrinsic popup height and native geometry; content must be prepared before inactive presentation.
+- `src/text-normalization.ts`: conservative captured-text wrap cleanup.
 - `src-tauri/native/`: macOS Swift + Windows PowerShell/C# helpers.
 - `.github/workflows/`: native Windows/macOS CI and preview release builds.
 - `docs/`: research, architecture, status, tests and future requirements.

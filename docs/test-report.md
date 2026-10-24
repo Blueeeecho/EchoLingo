@@ -4,14 +4,14 @@
 
 | 验证项 | 结果 | 证据或限制 |
 |---|---|---|
-| TypeScript 类型、前端模型、生产构建 | 通过；20 项前端测试 | npm run check、npm test、npm run build |
-| 前端交互 / IPC 回归 | 通过 | Chromium 隔离桩；覆盖空选区不聚焦、保存中锁定、失败恢复、默认无计时器、双密钥/部分凭据拒绝、跨供应商保存、Settings 无秘密字段 |
+| TypeScript 类型、前端模型、生产构建 | 通过；45 项前端测试 | 增加自动换行、段落、代码、连字符与中英混排；npm run check、npm test、npm run build |
+| 前端交互 / IPC 回归 | 通过 | 极简弹窗/菜单、源框自动高度、原文恢复、捕获先整理再请求/显示、手输不改、编辑期间捕获/Alt+A 排队；保留原有密钥与无焦点回归 |
 | npm 依赖安全审计 | 通过 | 最近审计 0 vulnerabilities |
-| Rust 编译与单测 | 通过，28 项 | 真实本地 HTTP fixture、百度表单/token、腾讯公开已知 TC3 向量、多行响应、错误脱敏、响应上限、拒绝重定向、跨供应商凭据隔离 |
-| macOS 原生 Vision OCR | 通过 | Swift helper 生成图像并实际识别 EchoLingo translation 2468；PNG Base64 往返 |
+| Rust 编译与单测 | 通过，30 项 | 增加弹窗/管理尺寸和负坐标工作区钳制；保留真实 HTTP、签名、脱敏与凭据隔离用例 |
+| macOS 原生 Vision OCR | 通过 | 实际识别生成图 2468、PNG Base64 往返；新增段间距/换列/缩放/结构文字保序几何 fixture |
 | Windows 原生 OCR | 通过 | CI 实际 Windows.Media.Ocr 识别生成图；非模拟结果 |
 | Windows 取词与剪贴板桌面冒烟 | 通过 | run 40097272065：真实 Unicode 复制/读取、选区、空选区、Ctrl+C 回退、HTML/RTF/Unicode 剪贴板恢复、密码框拒绝 |
-| Windows NSIS / macOS DMG | 通过 | 新供应商配置 commit 3c8d0f8 的 run 40097996277，两平台均成功构建实际安装包 |
+| Windows NSIS / macOS DMG | 上版通过；极简版待 CI | commit 3c8d0f8/run 40097996277 已通过；极简版与 Windows OCR 几何需要新提交证据 |
 | 真实供应商 API | 未运行 | 使用虚构凭证与本地 HTTP 协议测试；未读取或验证其他应用的供应商凭证 |
 | 用户电脑上的独立窗口 | 用户确认可见 | 原生自动化截图返回白色；不据此判定应用实际白屏 |
 | 用户电脑的选文权限、交互截图与取消 | 尚待手动验收 | macOS 辅助功能/屏幕录制流程、Windows 实际目标应用 |

@@ -127,6 +127,85 @@ func selection() throws -> String {
     return text
 }
 
+struct OCRLayoutLine {
+    let text: String
+    // Top-left-origin geometry. Values may be normalized or pixels; only
+    // dimensionless ratios are used, so no image-size/pixel threshold is needed.
+    let bounds: CGRect
+}
+
+func validOCRBounds(_ bounds: CGRect) -> Bool {
+    return bounds.minX.isFinite && bounds.minY.isFinite && bounds.width.isFinite &&
+        bounds.height.isFinite && bounds.width > 0 && bounds.height > 0
+}
+
+func structuralOCRLine(_ text: String) -> Bool {
+    if text.hasPrefix(" ") || text.hasPrefix("\t") || text.contains("\t") || text.contains("|") { return true }
+    let pattern = #"^\s*(?:[-*+\u2022]\s|\d+[.)]\s|#{1,6}\s|>\s|```|~~~|//|/\*|\*/|[{}]|(?:if|for|while|def|class|import|return|const|let|var|function)\b|https?://|www\.)"#
+    return text.range(of: pattern, options: .regularExpression) != nil
+}
+
+func joinOCRLines(_ lines: [OCRLayoutLine], allowGeometry: Bool = true) -> String {
+    let heights = lines.filter { validOCRBounds($0.bounds) }.map { $0.bounds.height }.sorted()
+    guard allowGeometry, !heights.isEmpty else { return lines.map { $0.text }.joined(separator: "\n") }
+    let middle = heights.count / 2
+    let median = heights.count.isMultiple(of: 2) ? (heights[middle - 1] + heights[middle]) / 2 : heights[middle]
+    var result = ""
+    var insideCodeFence = false
+    for (index, line) in lines.enumerated() {
+        let trimmed = line.text.trimmingCharacters(in: .whitespaces)
+        let fence = trimmed.hasPrefix("```") || trimmed.hasPrefix("~~~")
+        if index > 0 {
+            let previous = lines[index - 1].bounds
+            let current = line.bounds
+            var paragraphBreak = false
+            let structured = insideCodeFence || structuralOCRLine(lines[index - 1].text) || structuralOCRLine(line.text)
+            if !structured && validOCRBounds(previous) && validOCRBounds(current) {
+                let referenceHeight = max(median, min(previous.height, current.height))
+                let verticalGap = current.minY - previous.maxY
+                let overlap = max(0, min(previous.maxX, current.maxX) - max(previous.minX, current.minX))
+                let columnReset = overlap <= 0.1 * min(previous.width, current.width) &&
+                    current.minY < previous.minY - 0.9 * referenceHeight
+                paragraphBreak = verticalGap >= 0.9 * referenceHeight || columnReset
+            }
+            result += paragraphBreak ? "\n\n" : "\n"
+        }
+        // No sorting, merging, trimming, indentation editing, or list/code
+        // rewriting: the recognizer's original line order and text are retained.
+        result += line.text
+        if fence { insideCodeFence.toggle() }
+    }
+    return result
+}
+
+func paragraphGeometrySelfTest() throws {
+    let lines = [
+        OCRLayoutLine(text: "first line", bounds: CGRect(x: 0, y: 0, width: 100, height: 10)),
+        OCRLayoutLine(text: "second line", bounds: CGRect(x: 0, y: 14, width: 100, height: 10)),
+        OCRLayoutLine(text: "next paragraph", bounds: CGRect(x: 0, y: 38, width: 100, height: 10)),
+        OCRLayoutLine(text: "continued paragraph", bounds: CGRect(x: 0, y: 52, width: 100, height: 10)),
+        OCRLayoutLine(text: "column two", bounds: CGRect(x: 130, y: 0, width: 100, height: 10)),
+        OCRLayoutLine(text: "still column two", bounds: CGRect(x: 130, y: 14, width: 100, height: 10))
+    ]
+    let expected = "first line\nsecond line\n\nnext paragraph\ncontinued paragraph\n\ncolumn two\nstill column two"
+    let scaled = lines.map { OCRLayoutLine(text: $0.text, bounds: CGRect(x: $0.bounds.minX / 1000,
+                                                                       y: $0.bounds.minY / 1000,
+                                                                       width: $0.bounds.width / 1000,
+                                                                       height: $0.bounds.height / 1000)) }
+    guard joinOCRLines(lines) == expected, joinOCRLines(scaled) == expected,
+          joinOCRLines(lines, allowGeometry: false) == lines.map({ $0.text }).joined(separator: "\n") else {
+        throw NativeError("SELF_TEST: Paragraph geometry, scaling, rotation fallback, or original line order was not preserved.")
+    }
+    let structured = [
+        OCRLayoutLine(text: "- first item", bounds: CGRect(x: 0, y: 0, width: 100, height: 10)),
+        OCRLayoutLine(text: "  indented continuation", bounds: CGRect(x: 10, y: 80, width: 90, height: 10)),
+        OCRLayoutLine(text: "    return value;", bounds: CGRect(x: 20, y: 180, width: 80, height: 10))
+    ]
+    guard joinOCRLines(structured) == "- first item\n  indented continuation\n    return value;" else {
+        throw NativeError("SELF_TEST: OCR layout changed a list or indented code line.")
+    }
+}
+
 func recognize(_ handler: VNImageRequestHandler) throws -> String {
     let request = VNRecognizeTextRequest()
     request.recognitionLevel = .accurate
@@ -136,7 +215,24 @@ func recognize(_ handler: VNImageRequestHandler) throws -> String {
     request.recognitionLanguages = preferred.filter { supported.contains($0) }
     if #available(macOS 13.0, *) { request.automaticallyDetectsLanguage = true }
     try handler.perform([request])
-    let text = (request.results ?? []).compactMap { $0.topCandidates(1).first?.string }.joined(separator: "\n")
+    let observations = request.results ?? []
+    // Axis-normalized edge skew avoids treating normalized x/y units as an
+    // undistorted pixel angle. Tall, vertical, or noticeably tilted boxes disable
+    // layout inference for the whole result; their original line breaks remain.
+    let allowGeometry = observations.allSatisfy { observation in
+        let box = observation.boundingBox
+        guard validOCRBounds(box) else { return false }
+        return observation.topRight.x > observation.topLeft.x &&
+            abs(observation.topRight.y - observation.topLeft.y) <= 0.2 * box.height &&
+            abs(observation.topLeft.x - observation.bottomLeft.x) <= 0.2 * box.width
+    }
+    let lines = observations.compactMap { observation -> OCRLayoutLine? in
+        guard let text = observation.topCandidates(1).first?.string else { return nil }
+        let box = observation.boundingBox
+        return OCRLayoutLine(text: text, bounds: CGRect(x: box.minX, y: 1 - box.maxY,
+                                                        width: box.width, height: box.height))
+    }
+    let text = joinOCRLines(lines, allowGeometry: allowGeometry)
     guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
         throw NativeError("NO_TEXT: No text was recognized. Select a larger, clearer area and retry.")
     }
@@ -214,6 +310,7 @@ func diagnostics() -> [String: Any] {
 }
 
 func selfTest() throws -> [String: Any] {
+    try paragraphGeometrySelfTest()
     let width = 1100, height = 160
     guard let context = CGContext(data: nil, width: width, height: height, bitsPerComponent: 8,
                                   bytesPerRow: width * 4, space: CGColorSpaceCreateDeviceRGB(),
@@ -239,7 +336,8 @@ func selfTest() throws -> [String: Any] {
         throw NativeError("SELF_TEST: PNG base64 roundtrip failed.")
     }
     return ["ocrFixturePassed": true, "recognized": text, "diagnostics": diagnostics(),
-            "pngBase64RoundtripPassed": true, "interactiveCaptureTested": false, "clipboardChanged": false]
+            "pngBase64RoundtripPassed": true, "paragraphGeometryFixturePassed": true,
+            "interactiveCaptureTested": false, "clipboardChanged": false]
 }
 
 do {

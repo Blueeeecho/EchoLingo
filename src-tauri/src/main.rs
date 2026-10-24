@@ -4,6 +4,7 @@ mod ocr;
 mod ocr_native;
 mod platform;
 mod translation;
+mod window_layout;
 
 use model::*;
 use serde::{Deserialize, Serialize};
@@ -453,8 +454,11 @@ fn show_inactive(app: &tauri::AppHandle) {
     });
 }
 fn empty_selection_window(app: &tauri::AppHandle) {
-    show_inactive(app);
     let _ = app.emit("source-text", serde_json::json!({"text":"","mode":"input"}));
+}
+#[tauri::command]
+fn show_popup(app: tauri::AppHandle) {
+    show_inactive(&app);
 }
 fn start_action(app: tauri::AppHandle, action: String) {
     if action == "input" {
@@ -515,14 +519,13 @@ fn start_action(app: tauri::AppHandle, action: String) {
                         let _ = app.emit("ocr-copied", ());
                     }
                 } else {
-                    show_inactive(&app);
                     let mode = if action == "ocr" { "ocr" } else { "translate" };
                     let _ = app.emit("source-text", serde_json::json!({"text":text,"mode":mode}));
                 }
             }
             Ok(_) if action == "selection" => empty_selection_window(&app),
             Ok(_) => {
-                show_inactive(&app);
+                empty_selection_window(&app);
                 let _ = app.emit("action-error", "没有识别到文字，请选择更清晰的区域");
             }
             Err(e) if e.starts_with("CANCELLED") => {}
@@ -536,7 +539,7 @@ fn start_action(app: tauri::AppHandle, action: String) {
                 }
             }
             Err(e) => {
-                show_inactive(&app);
+                empty_selection_window(&app);
                 let _ = app.emit("action-error", e);
             }
         }
@@ -557,6 +560,7 @@ fn outside_click_watcher(app: tauri::AppHandle) {
             };
             if !window.is_visible().unwrap_or(false)
                 || app.state::<AppState>().pinned.load(Ordering::SeqCst)
+                || !app.state::<window_layout::LayoutState>().is_popup()
             {
                 previous = false;
                 was_visible = false;
@@ -733,6 +737,7 @@ fn main() {
                 startup_warnings: Mutex::new(warnings),
                 outside_thread: Mutex::new(None),
             });
+            app.manage(window_layout::LayoutState::default());
             if let Err(e) = install_shortcuts(app.handle(), &settings.shortcuts) {
                 app.state::<AppState>()
                     .startup_warnings
@@ -749,14 +754,12 @@ fn main() {
                 api.prevent_close();
                 let _ = window.hide();
             }
-            tauri::WindowEvent::Focused(false) => {
-                if !window.state::<AppState>().pinned.load(Ordering::SeqCst) {
-                    let _ = window.hide();
-                }
-            }
             _ => {}
         })
         .invoke_handler(tauri::generate_handler![
+            window_layout::fit_window,
+            window_layout::start_window_drag,
+            show_popup,
             get_settings,
             save_settings,
             set_ocr_api_key,
