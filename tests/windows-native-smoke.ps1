@@ -7,6 +7,7 @@ param(
 )
 $ErrorActionPreference = 'Stop'
 [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)
+[Console]::InputEncoding = [System.Text.UTF8Encoding]::new($false)
 
 try {
     if ([Environment]::OSVersion.Platform -ne [PlatformID]::Win32NT) {
@@ -175,9 +176,12 @@ public static class EchoLingoDesktopSmoke {
                 lock (processLock) activeHelper = process;
                 Task<string> outputTask = process.StandardOutput.ReadToEndAsync();
                 Task<string> errorTask = process.StandardError.ReadToEndAsync();
-                using (StreamWriter writer = new StreamWriter(process.StandardInput.BaseStream, new UTF8Encoding(false))) {
-                    if (input != null) writer.Write(input);
-                }
+                // Framework Process.StandardInput inherits Console.InputEncoding.
+                // The outer script sets BOM-free UTF-8 before the pipe is made;
+                // creating a second writer after accessing BaseStream can emit
+                // an unwanted BOM from the first writer's AutoFlush initializer.
+                if (input != null) process.StandardInput.Write(input);
+                process.StandardInput.Close();
                 if (!process.WaitForExit(60000)) {
                     process.Kill();
                     process.WaitForExit();
