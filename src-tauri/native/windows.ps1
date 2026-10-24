@@ -379,7 +379,15 @@ sealed class RegionPicker : Form {
     switch ($Mode) {
         'selected-text' { Write-Result @{ ok = $true; text = [EchoLingoNative]::SelectedText() } }
         'clipboard' { Write-Result @{ ok = $true; text = [EchoLingoNative]::ClipboardText() } }
-        'copy' { [EchoLingoNative]::CopyText([Console]::In.ReadToEnd()); Write-Result @{ ok = $true; text = '' } }
+        'copy' {
+            # PowerShell may initialize Console.In before InputEncoding changes.
+            # Read the redirected byte stream explicitly so Unicode survives the
+            # Rust/helper boundary, including when the host console is not UTF-8.
+            $reader = [IO.StreamReader]::new([Console]::OpenStandardInput(), [Text.UTF8Encoding]::new($false, $true), $false)
+            try { [EchoLingoNative]::CopyText($reader.ReadToEnd()) }
+            finally { $reader.Dispose() }
+            Write-Result @{ ok = $true; text = '' }
+        }
         'diagnostics' { Write-Result @{ ok = $true; diagnostics = (Get-Diagnostics) } }
         { $_ -in 'capture-ocr', 'capture-image', 'self-test' } {
             $path = [IO.Path]::Combine([IO.Path]::GetTempPath(), ('echolingo-' + [Guid]::NewGuid().ToString('N') + '.png'))

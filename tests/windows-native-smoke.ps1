@@ -209,7 +209,16 @@ public static class EchoLingoDesktopSmoke {
     }
     static void AssertSuccess(Reply reply, string expected, string label) {
         Assert(reply.Ok && reply.ExitCode == 0, label + " failed: " + reply.Error);
-        Assert(String.Equals(reply.Text, expected, StringComparison.Ordinal), label + " returned different text.");
+        if (!String.Equals(reply.Text, expected, StringComparison.Ordinal)) {
+            // This script only handles its dedicated generated fixture. Report
+            // code points at the first mismatch to diagnose pipe encodings.
+            string actual = reply.Text ?? "";
+            int at = 0;
+            while (at < actual.Length && at < expected.Length && actual[at] == expected[at]) at++;
+            string received = at < actual.Length ? ((int)actual[at]).ToString("X4") : "EOF";
+            string wanted = at < expected.Length ? ((int)expected[at]).ToString("X4") : "EOF";
+            Assert(false, label + " returned different text: expected length " + expected.Length + ", actual length " + actual.Length + ", offset " + at + ", expected U+" + wanted + ", actual U+" + received + ".");
+        }
     }
     static Reply CaptureFixtureSelection(Form form, string helperPath) {
         Assert(GetForegroundWindow() == form.Handle, "Dedicated fixture lost foreground before capture.");
