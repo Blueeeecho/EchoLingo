@@ -481,6 +481,10 @@ mod tests {
         body: String,
     }
     fn read_request(stream: &mut TcpStream) -> Captured {
+        // Accepted sockets can inherit the listener's nonblocking flag on
+        // Windows/macOS. The fixture uses a bounded blocking HTTP reader, so
+        // body fragments must be allowed to arrive before the next read.
+        stream.set_nonblocking(false).unwrap();
         stream
             .set_read_timeout(Some(Duration::from_secs(4)))
             .unwrap();
