@@ -12,30 +12,34 @@ try {
   await page.addInitScript(() => {
     window.isTauri = true;
     const state = {
-      providers: [{ id: 'qa-service', name: 'QA IPC fixture', kind: 'openai', baseUrl: 'https://example.invalid/v1', model: 'test-model', enabled: true, prompt: '', hasKey: false }],
+      providers: [{ id: 'qa-service', name: 'QA IPC fixture', kind: 'openai', baseUrl: 'https://example.invalid/v1', model: 'test-model', enabled: true, prompt: '', hasKey: true }],
       sourceLanguage: 'auto', targetLanguage: 'zh-Hans',
       shortcuts: { selection: 'Alt+D', capture: 'Alt+S', ocr: 'Alt+Shift+S', silentOcr: 'Alt+C', input: 'Alt+A' },
       saveHistory: true, theme: 'light', maxHistory: 200, autoHideSeconds: 0, ocrProviders: [], activeOcrProviderId: null,
     };
-    const callbacks = new Map(), listeners = new Map(); let callbackId = 0;
-    const fixture = window.__qa = { settings: state, saveCalls: 0, keyCalls: 0, ocrKeyCalls: 0, ocrTestCalls: 0, hideCalls: 0, holdSave: false, failSave: false, releaseSave: () => {}, emit: (name, payload) => listeners.get(name)?.({ event: name, payload, id: 1 }) };
+    const callbacks = new Map(), listeners = new Map(), ocrKeys = new Map(), translationKeys = new Map(); let callbackId = 0;
+    const scope = (provider) => `${provider.id}:${provider.kind}:${new URL(provider.baseUrl).origin}`;
+    translationKeys.set(scope(state.providers[0]), 'qa-original-translation-key');
+    const fixture = window.__qa = { settings: state, saveCalls: 0, keyCalls: 0, ocrKeyCalls: 0, ocrTestCalls: 0, ocrDeleteCalls: 0, credentialWrites: [], settingsWrites: [], hideCalls: 0, holdSave: false, failSave: false, releaseSave: () => {}, emit: (name, payload) => listeners.get(name)?.({ event: name, payload, id: 1 }) };
     window.__TAURI_INTERNALS__ = {
       transformCallback: (callback) => { const id = ++callbackId; callbacks.set(id, callback); return id; },
       invoke: async (command, args = {}) => {
         if (command === 'plugin:event|listen') { listeners.set(args.event, callbacks.get(args.handler)); return 1; }
-        if (command === 'get_settings') return structuredClone(fixture.settings);
+        if (command === 'get_settings') { for (const provider of fixture.settings.providers) provider.hasKey = translationKeys.has(scope(provider)); for (const provider of fixture.settings.ocrProviders) provider.hasKey = ocrKeys.has(scope(provider)); return structuredClone(fixture.settings); }
         if (command === 'get_history') return [];
         if (command === 'diagnostics') return { warnings: [] };
         if (command === 'save_settings') {
-          fixture.saveCalls++;
+          fixture.saveCalls++; fixture.settingsWrites.push(structuredClone(args.settings));
           if (fixture.holdSave) await new Promise((resolve) => { fixture.releaseSave = resolve; });
           if (fixture.failSave) throw new Error('QA save failure');
           fixture.settings = structuredClone(args.settings);
+          for (const provider of fixture.settings.ocrProviders ?? []) provider.hasKey = ocrKeys.has(scope(provider));
+          for (const provider of fixture.settings.providers) provider.hasKey = translationKeys.has(scope(provider));
           return;
         }
-        if (command === 'set_api_key') { fixture.keyCalls++; return; }
-        if (command === 'set_ocr_api_key') { fixture.ocrKeyCalls++; const provider = fixture.settings.ocrProviders.find(item => item.id === args.providerId); if (provider) provider.hasKey = true; return; }
-        if (command === 'delete_ocr_api_key') { const provider = fixture.settings.ocrProviders.find(item => item.id === args.providerId); if (provider) provider.hasKey = false; return; }
+        if (command === 'set_api_key') { fixture.keyCalls++; const provider = fixture.settings.providers.find(item => item.id === args.providerId); if (provider) translationKeys.set(scope(provider), args.key); return; }
+        if (command === 'set_ocr_api_key') { fixture.ocrKeyCalls++; const provider = fixture.settings.ocrProviders.find(item => item.id === args.providerId); if (provider) { provider.hasKey = true; ocrKeys.set(scope(provider), args.key); fixture.credentialWrites.push({ providerId: provider.id, kind: provider.kind, key: args.key }); } return; }
+        if (command === 'delete_ocr_api_key') { fixture.ocrDeleteCalls++; const provider = fixture.settings.ocrProviders.find(item => item.id === args.providerId); if (provider) { ocrKeys.delete(scope(provider)); provider.hasKey = false; } return; }
         if (command === 'test_ocr_provider') { fixture.ocrTestCalls++; return 'QA OCR test succeeded'; }
         if (command === 'hide_window') { fixture.hideCalls++; return; }
         if (command === 'set_pinned') return;
@@ -87,6 +91,99 @@ try {
   await page.getByText('不同操作不能使用相同的快捷键。').waitFor();
   assert.equal(await page.evaluate(() => window.__qa.saveCalls), savesBeforeDuplicate);
 
+  // Presets populate the documented protocol/base while model names remain editable.
+  await page.locator('#add-provider').click();
+  for (const [preset, base] of [['deepseek', 'https://api.deepseek.com'], ['zhipu', 'https://open.bigmodel.cn/api/paas/v4'], ['siliconflow', 'https://api.siliconflow.cn/v1']]) {
+    await page.locator('#provider-preset').selectOption(preset);
+    assert.equal(await page.locator('#provider-url').inputValue(), base);
+    assert.equal(await page.locator('#provider-kind').inputValue(), 'openai');
+    assert.equal(await page.locator('#provider-model').isEditable(), true);
+  }
+  await page.locator('#provider-preset').selectOption('qwen');
+  await page.locator('#provider-qwen-region').selectOption('singapore');
+  await page.locator('#provider-qwen-workspace').fill('ws-qa');
+  await page.locator('#provider-qwen-workspace').dispatchEvent('change');
+  assert.equal(await page.locator('#provider-url').inputValue(), 'https://ws-qa.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1');
+  await page.locator('#cancel-provider-dialog').click();
+
+  // Same-origin edits preserve the saved-key indication; a cross-vendor preset
+  // clears typed secrets and cannot claim that the original origin's key is valid.
+  await page.getByRole('button', { name: '编辑', exact: true }).click();
+  await page.locator('#provider-url').fill('https://example.invalid/another/path');
+  await page.locator('#provider-model').fill('qa-other-model');
+  assert.match(await page.locator('#provider-key').getAttribute('placeholder'), /已保存/);
+  await page.locator('#provider-key').fill('qa-discard-on-vendor-change');
+  await page.locator('#provider-preset').selectOption('deepseek');
+  assert.equal(await page.locator('#provider-key').inputValue(), '');
+  assert.doesNotMatch(await page.locator('#provider-key').getAttribute('placeholder'), /已保存/);
+  await page.locator('#save-provider').click();
+  await page.locator('#provider-dialog').waitFor({ state: 'hidden' });
+  assert.equal(await page.evaluate(() => window.__qa.settings.providers[0].hasKey), false);
+  assert.doesNotMatch(await page.locator('#provider-list').textContent(), /密钥已保存/);
+  await page.getByRole('button', { name: '编辑', exact: true }).click();
+  assert.doesNotMatch(await page.locator('#provider-key').getAttribute('placeholder'), /已保存/);
+  await page.locator('#cancel-provider-dialog').click();
+
+  // Native OCR uses complete vendor bundles only in the credential command.
+  await page.locator('#add-ocr-provider').click();
+  assert.equal(await page.locator('#ocr-provider-kind').inputValue(), 'baidu');
+  assert.equal(await page.locator('#ocr-provider-url-field').isHidden(), true);
+  assert.equal(await page.locator('#ocr-provider-auth-header-field').isHidden(), true);
+  await page.locator('#ocr-provider-name').fill('QA Baidu');
+  await page.locator('#ocr-baidu-api-key').fill('qa-baidu-api');
+  const beforePartial = await page.evaluate(() => window.__qa.saveCalls);
+  await page.locator('#save-ocr-provider').click();
+  await page.locator('#ocr-provider-error').getByText('百度 OCR 需要同时填写', { exact: false }).waitFor();
+  assert.equal(await page.evaluate(() => window.__qa.saveCalls), beforePartial);
+  await page.locator('#ocr-baidu-secret-key').fill('qa-baidu-secret');
+  await page.locator('#save-ocr-provider').click();
+  await page.locator('#ocr-provider-dialog').waitFor({ state: 'hidden' });
+  assert.deepEqual(JSON.parse(await page.evaluate(() => window.__qa.credentialWrites.at(-1).key)), { apiKey: 'qa-baidu-api', secretKey: 'qa-baidu-secret' });
+  assert.equal(await page.evaluate(() => window.__qa.settings.activeOcrProviderId), null);
+  const afterBaidu = await page.evaluate(() => window.__qa.credentialWrites.length);
+  await page.getByRole('button', { name: '编辑 OCR QA Baidu', exact: true }).click();
+  assert.equal(await page.locator('#ocr-baidu-api-key').inputValue(), '');
+  assert.equal(await page.locator('#ocr-baidu-secret-key').inputValue(), '');
+  await page.locator('#save-ocr-provider').click();
+  await page.locator('#ocr-provider-dialog').waitFor({ state: 'hidden' });
+  assert.equal(await page.evaluate(() => window.__qa.credentialWrites.length), afterBaidu);
+  await page.getByRole('button', { name: '编辑 OCR QA Baidu', exact: true }).click();
+  await page.locator('#ocr-baidu-api-key').fill('discard-on-protocol-change');
+  await page.locator('#ocr-provider-kind').selectOption('tencent');
+  assert.equal(await page.locator('#ocr-baidu-api-key').inputValue(), '');
+  assert.equal(await page.locator('#remove-ocr-provider-key').isHidden(), true);
+  assert.equal(await page.locator('#ocr-provider-url').inputValue(), 'https://ocr.tencentcloudapi.com');
+  await page.locator('#save-ocr-provider').click();
+  await page.locator('#ocr-provider-error').getByText('切换 OCR 协议或服务地址后必须填写完整的新凭据', { exact: false }).waitFor();
+  await page.locator('#ocr-tencent-secret-id').fill('qa-tencent-id');
+  await page.locator('#save-ocr-provider').click();
+  await page.locator('#ocr-provider-error').getByText('腾讯 OCR 需要同时填写', { exact: false }).waitFor();
+  await page.locator('#ocr-tencent-secret-key').fill('qa-tencent-secret');
+  await page.locator('#ocr-tencent-session-token').fill('qa-tencent-session');
+  await page.locator('#ocr-provider-region').selectOption('ap-shanghai');
+  await page.locator('#ocr-provider-name').fill('QA Tencent');
+  await page.locator('#save-ocr-provider').click();
+  await page.locator('#ocr-provider-dialog').waitFor({ state: 'hidden' });
+  assert.deepEqual(JSON.parse(await page.evaluate(() => window.__qa.credentialWrites.at(-1).key)), { secretId: 'qa-tencent-id', secretKey: 'qa-tencent-secret', sessionToken: 'qa-tencent-session' });
+  assert.equal(await page.evaluate(() => window.__qa.ocrDeleteCalls), 0);
+  assert.equal(await page.evaluate(() => window.__qa.settings.ocrProviders[0].region), 'ap-shanghai');
+  const settingsJson = await page.evaluate(() => JSON.stringify(window.__qa.settingsWrites));
+  for (const secret of ['qa-baidu-api', 'qa-baidu-secret', 'qa-tencent-id', 'qa-tencent-secret', 'qa-tencent-session', 'discard-on-protocol-change', 'qa-original-translation-key', 'qa-discard-on-vendor-change']) assert.equal(settingsJson.includes(secret), false);
+  await page.getByRole('button', { name: '删除 OCR QA Tencent', exact: true }).click();
+  await page.locator('#confirm-accept').click();
+  await page.waitForFunction(() => window.__qa.settings.ocrProviders.length === 0);
+  await page.locator('#add-ocr-provider').click();
+  await page.locator('#ocr-provider-name').fill('QA unconfigured');
+  await page.locator('#save-ocr-provider').click();
+  await page.locator('#ocr-provider-dialog').waitFor({ state: 'hidden' });
+  const unconfiguredId = await page.evaluate(() => window.__qa.settings.ocrProviders[0].id);
+  await page.locator('#active-ocr-provider').selectOption(unconfiguredId);
+  await page.getByText('此 OCR 服务尚未配置完整凭据，请先编辑并保存密钥。').waitFor();
+  assert.equal(await page.evaluate(() => window.__qa.settings.activeOcrProviderId), null);
+  await page.getByRole('button', { name: '删除 OCR QA unconfigured', exact: true }).click();
+  await page.locator('#confirm-accept').click();
+  await page.waitForFunction(() => window.__qa.settings.ocrProviders.length === 0);
+
   // OCR is independent of translation services and remains local until selected.
   await page.locator('#add-ocr-provider').click();
   await page.getByRole('dialog', { name: '添加 OCR 服务' }).waitFor();
@@ -99,7 +196,7 @@ try {
   await page.locator('#save-ocr-provider').click();
   await page.locator('#ocr-provider-dialog').waitFor({ state: 'hidden' });
   assert.equal(await page.evaluate(() => window.__qa.settings.activeOcrProviderId), null);
-  assert.equal(await page.evaluate(() => window.__qa.ocrKeyCalls), 1);
+  assert.equal(await page.evaluate(() => window.__qa.credentialWrites.at(-1).kind), 'http-json');
   const ocrId = await page.evaluate(() => window.__qa.settings.ocrProviders[0].id);
   await page.locator('#active-ocr-provider').selectOption(ocrId);
   await page.locator('#ocr-privacy-notice').getByText('云端 OCR 已启用', { exact: false }).waitFor();
@@ -156,7 +253,7 @@ try {
   await page.clock.fastForward(10_000);
   assert.equal(await page.evaluate(() => window.__qa.hideCalls), 1);
   assert.deepEqual(errors, []);
-  console.log('PASS: pending-save close/reentry guard; failure unlock; blank shortcuts; duplicate rejection; default no timer; optional idle reset; pinned timer suppression; OCR configuration/privacy/key isolation; empty-selection focus preservation.');
+  console.log('PASS: pending-save close/reentry guard; failure unlock; blank shortcuts; duplicate rejection; default no timer; optional idle reset; pinned timer suppression; OCR dual-key bundles/protocol isolation/no plaintext settings; documented vendor presets; origin-bound saved-key indications; OCR configuration/privacy; empty-selection focus preservation.');
 } finally {
   await browser.close();
 }

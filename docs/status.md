@@ -15,22 +15,22 @@ Updated: 2026-10-24, Asia/Shanghai. Stage: v0.1.0 preview validation.
 ## Implemented and verified so far
 - Public GitHub repo and matching local Codex project folder.
 - Detailed Bob research, requirements, review notes, Windows manual test plan.
-- Translation: OpenAI-compatible, DeepL, LibreTranslate.
-- OCR: native Windows.Media.Ocr / macOS Vision, custom Vision-compatible API and JSON gateway.
-- Separate OS credential entries for translation/OCR, bounded history/favorites, themes, provider and hotkey settings.
+- Translation: OpenAI-compatible, DeepL, LibreTranslate, with official supplier presets for DeepSeek, Zhipu, SiliconFlow and Qwen (region/workspace aware).
+- OCR: native Windows.Media.Ocr / macOS Vision, Baidu OAuth/form, Tencent TC3, compatible Vision API and advanced JSON gateway. Supplier-specific credential fields; new cloud entries do not change the active local engine.
+- OS credentials bound to protocol and normalized endpoint origin, preventing old keys crossing suppliers; bounded history/favorites, themes, provider and hotkey settings.
 - Native clipboard-preserving selection, screenshot capture, inactive floating windows and outside-click handling.
-- 21 Rust tests and 9 frontend model tests passed locally; isolated frontend/IPC regressions passed.
+- 28 Rust tests and 20 frontend tests passed locally; isolated frontend/IPC regressions passed, including dual credentials, partial-field rejection, protocol/origin changes and no secrets in Settings.
 - macOS OCR fixture + PNG base64 roundtrip passed.
-- Earlier source revision built actual Windows NSIS and macOS DMG successfully in GitHub Actions run 40093670591. New behavior requires another final CI run.
+- GitHub Actions run 40097272065 passed Windows native OCR plus real selection/clipboard desktop smoke, frontend interaction tests and actual NSIS/DMG builds. New supplier adapters require a final CI run on their own commit.
 
 ## In progress
-- Latest native Windows OCR/selection/empty-selection/clipboard smoke and frontend CI.
+- Final native Windows/macOS and frontend CI for supplier adapters and origin-bound credentials.
 - Final optimized desktop bundles after recent feature changes.
 - Review and preview release publication after required automated gates.
 
 ## Verification boundaries
 - User confirmed the independent Mac window is visible. Native automation screenshots returned white even for its normal main view; do not treat that as a proven application rendering failure.
-- Bob preferences were inspected read-only under explicit user authorization. No transferable personal provider key was identified. Live third-party API calls are NOT claimed as tested; protocol fixtures are clearly labelled.
+- The owner stopped Bob credential inspection. Current research uses official configuration and supplier API documentation only. Live third-party API calls are NOT claimed as tested; protocol fixtures are clearly labelled. Do not resume inspecting another app's secrets.
 - macOS Accessibility permission for this app/helper is still not granted. Actual selected-text permission workflow remains to be accepted on the user's desktop.
 - Interactive region selection, mixed DPI/multiple displays, real Windows ARM VM/x64 machines and installation/uninstallation need the manual plan.
 - No commercial signing, Apple notarization or store submission. Stable release gates are not yet complete.

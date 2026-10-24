@@ -1,11 +1,12 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 mod model;
 mod ocr;
+mod ocr_native;
 mod platform;
 mod translation;
 
 use model::*;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::{
     fs,
     path::{Path, PathBuf},
@@ -82,39 +83,79 @@ fn secret_entry(id: &str) -> Result<keyring::Entry, String> {
     keyring::Entry::new("io.github.blueeeecho.echolingo", id)
         .map_err(|_| "系统凭据库不可用".to_string())
 }
+#[derive(Serialize, Deserialize)]
+struct CredentialEnvelope {
+    scope: String,
+    secret: String,
+}
+fn credential_scope(kind: &str, base_url: &str) -> Result<String, String> {
+    Ok(format!(
+        "{kind}|{}",
+        validate_url(base_url)?.origin().ascii_serialization()
+    ))
+}
+fn decode_credential(stored: &str, scope: &str) -> Result<String, String> {
+    let envelope: CredentialEnvelope = serde_json::from_str(stored)
+        .map_err(|_| "凭据格式已更新，请在服务设置中重新填写密钥".to_string())?;
+    // Editing a service to point at another supplier must not forward the
+    // previous supplier's credential, even when both use the same protocol.
+    Ok(if envelope.scope == scope {
+        envelope.secret
+    } else {
+        String::new()
+    })
+}
+fn encode_credential(scope: String, secret: String) -> Result<String, String> {
+    serde_json::to_string(&CredentialEnvelope { scope, secret })
+        .map_err(|_| "无法准备系统凭据".to_string())
+}
 fn load_key(p: &Provider) -> Result<String, String> {
     match secret_entry(&p.id)?.get_password() {
-        Ok(key) => Ok(key),
+        Ok(key) => decode_credential(&key, &credential_scope(&p.kind, &p.base_url)?),
         Err(keyring::Error::NoEntry) => Ok(String::new()),
         Err(_) => Err("无法读取系统凭据库中的 API 密钥".into()),
     }
 }
 
 fn load_ocr_key(p: &ocr::OcrProvider) -> Result<String, String> {
-    match secret_entry(&format!("ocr-{}", p.id))?.get_password() {
-        Ok(k) => Ok(k),
+    match secret_entry(&ocr_secret_id(p))?.get_password() {
+        Ok(k) => decode_credential(&k, &credential_scope(&p.kind, &p.base_url)?),
         Err(keyring::Error::NoEntry) => Ok(String::new()),
         Err(_) => Err("无法读取系统凭据库中的 OCR 密钥".into()),
     }
 }
+fn ocr_secret_id(p: &ocr::OcrProvider) -> String {
+    // Credentials for a different protocol must never be sent to a new service
+    // just because the user edited an existing service entry.
+    format!("ocr-{}-{}", p.id, p.kind)
+}
 #[tauri::command]
 fn set_ocr_api_key(state: State<AppState>, provider_id: String, key: String) -> Result<(), String> {
-    if !locked(&state.settings)?
+    let provider = locked(&state.settings)?
         .ocr_providers
         .iter()
-        .any(|p| p.id == provider_id)
-    {
-        return Err("请先保存 OCR 服务配置".into());
+        .find(|p| p.id == provider_id)
+        .cloned()
+        .ok_or("请先保存 OCR 服务配置")?;
+    if key.is_empty() || key.len() > 8192 {
+        return Err("OCR API 凭据为空或超过长度上限".into());
     }
-    if key.is_empty() || key.len() > 8192 || key.contains(['\r', '\n']) {
-        return Err("OCR API 密钥为空、过长或包含换行".into());
+    if matches!(provider.kind.as_str(), "baidu" | "tencent") {
+        ocr_native::validate_credentials(&provider.kind, &key)?;
+    } else if key.contains(['\r', '\n']) {
+        return Err("OCR API 密钥不能包含换行".into());
     }
-    secret_entry(&format!("ocr-{provider_id}"))?
-        .set_password(&key)
+    let stored = encode_credential(credential_scope(&provider.kind, &provider.base_url)?, key)?;
+    secret_entry(&ocr_secret_id(&provider))?
+        .set_password(&stored)
         .map_err(|_| "无法将 OCR 密钥保存到系统凭据库".into())
 }
 #[tauri::command]
 fn delete_ocr_api_key(provider_id: String) -> Result<(), String> {
+    for kind in ["openai-vision", "http-json", "baidu", "tencent"] {
+        delete_api_key(format!("ocr-{provider_id}-{kind}"))?;
+    }
+    // Remove the unscoped entry used by development builds as well.
     delete_api_key(format!("ocr-{provider_id}"))
 }
 #[tauri::command]
@@ -217,18 +258,18 @@ fn save_settings(
 }
 #[tauri::command]
 fn set_api_key(state: State<AppState>, provider_id: String, key: String) -> Result<(), String> {
-    if !locked(&state.settings)?
+    let provider = locked(&state.settings)?
         .providers
         .iter()
-        .any(|p| p.id == provider_id)
-    {
-        return Err("请先保存服务配置，再保存密钥".into());
-    }
+        .find(|p| p.id == provider_id)
+        .cloned()
+        .ok_or("请先保存服务配置，再保存密钥")?;
     if key.is_empty() || key.len() > 8192 || key.contains(['\r', '\n']) {
         return Err("API 密钥为空、过长或包含换行".into());
     }
+    let stored = encode_credential(credential_scope(&provider.kind, &provider.base_url)?, key)?;
     secret_entry(&provider_id)?
-        .set_password(&key)
+        .set_password(&stored)
         .map_err(|_| "无法保存到系统凭据库；密钥没有保存到文件".into())
 }
 #[tauri::command]
@@ -741,6 +782,28 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn credentials_do_not_cross_protocols_or_supplier_origins() {
+        let scope = credential_scope("openai", "https://API.EXAMPLE.com:443/v1").unwrap();
+        let stored = encode_credential(scope.clone(), "fixture-only-secret".into()).unwrap();
+        assert_eq!(
+            decode_credential(&stored, &scope).unwrap(),
+            "fixture-only-secret"
+        );
+        assert_eq!(
+            scope,
+            credential_scope("openai", "https://api.example.com/v2/").unwrap()
+        );
+        for other in [
+            credential_scope("openai", "https://different.example.com/v1").unwrap(),
+            credential_scope("deepl", "https://api.example.com/v1").unwrap(),
+            credential_scope("openai", "https://api.example.com:8443/v1").unwrap(),
+        ] {
+            assert!(decode_credential(&stored, &other).unwrap().is_empty());
+        }
+        // Unscoped development credentials must be re-entered, never guessed.
+        assert!(decode_credential("old-unscoped-secret", &scope).is_err());
+    }
     #[test]
     fn duplicate_shortcuts_are_rejected() {
         let mut s = Shortcuts::default();

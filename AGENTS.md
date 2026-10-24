@@ -12,7 +12,9 @@ Read `PROJECT.md`, `docs/status.md`, `docs/implementation-plan.md`, and `docs/te
 - Keep software lightweight: system WebView, native offline OCR, vanilla TypeScript. Avoid Chromium/Electron and bundled OCR models without a demonstrated need.
 - Native selected-text acquisition must happen before focusing EchoLingo. Never silently replace text in the source app.
 - No API keys in files, Git commits, logs, history, screenshots, or fixtures. Store keys in OS credentials. Fixtures use dummy values and local mock HTTP only.
-- Screenshots are local temporary files, deleted after OCR. No telemetry or background clipboard polling.
+- OCR credentials are scoped by service ID and protocol. Baidu/Tencent use dedicated multi-field credentials and native authentication, not a generic Bearer header. Provider presets must use official docs and distinguish Ali machine translation from Qwen.
+- Screenshots are local temporary files, deleted after OCR. Local OCR is default; cloud upload requires explicit OCR service selection, never silent fallback. No telemetry or background clipboard polling.
+- The owner stopped local Bob/keychain verification and asked for official configuration-document research instead. Do not resume inspecting another app's secrets without a new explicit request.
 - Bob is proprietary. Reproduce public behavior independently; do not copy source, UI assets or imply Bob plugin compatibility.
 - Keep exact verification evidence. A Windows build is not an interactive Windows test. Mark unsigned previews and manual tests honestly.
 - Never publish a stable release until the platform acceptance checklist is complete. Preview releases must list limitations.
@@ -26,6 +28,7 @@ Read `PROJECT.md`, `docs/status.md`, `docs/implementation-plan.md`, and `docs/te
 - `src-tauri/src/main.rs`: IPC commands, tray, hotkeys and state.
 - `src-tauri/src/model.rs`: settings/types/validation.
 - `src-tauri/src/translation.rs`: OpenAI-compatible/DeepL/LibreTranslate protocols.
+- `src-tauri/src/ocr.rs` / `ocr_native.rs`: compatible Vision/JSON and native Baidu/Tencent OCR protocols.
 - `src-tauri/src/platform.rs`: native helper process boundary.
 - `src-tauri/native/`: macOS Swift + Windows PowerShell/C# helpers.
 - `.github/workflows/`: native Windows/macOS CI and preview release builds.

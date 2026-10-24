@@ -10,8 +10,8 @@ export interface Provider {
   hasKey?: boolean;
 }
 export interface OcrProvider {
-  id: string; name: string; kind: 'openai-vision' | 'http-json'; baseUrl: string; model: string; prompt: string;
-  authHeader: string; authPrefix: string; requestTemplate: string; responsePath: string; hasKey?: boolean;
+  id: string; name: string; kind: 'baidu' | 'tencent' | 'openai-vision' | 'http-json'; baseUrl: string; model: string; prompt: string;
+  authHeader: string; authPrefix: string; requestTemplate: string; responsePath: string; region?: string; hasKey?: boolean;
 }
 export type Action = 'selection' | 'capture' | 'ocr' | 'silentOcr' | 'input' | 'clipboard';
 export type ShortcutAction = Exclude<Action, 'clipboard'>;

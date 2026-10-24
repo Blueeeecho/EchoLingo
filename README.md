@@ -1,17 +1,18 @@
 <p align="center"><img src="assets/icon.svg" width="90" alt="EchoLingo icon" /></p>
 <h1 align="center">EchoLingo · 回声译</h1>
 <p align="center">选中文字，按下快捷键。翻译就在眼前。</p>
-<p align="center">Windows 优先 · macOS 支持 · 系统离线 OCR · 自定义翻译 API</p>
+<p align="center">Windows 优先 · macOS 支持 · 系统离线 OCR · 自定义翻译与 OCR API</p>
 
 **0.1.0 预览版开发中。** 本项目独立实现 Bob 风格的桌面翻译工作流，非 Bob 官方产品，不使用 Bob 专有代码或素材，也不直接兼容 Bob 插件。
 
 ## 初版功能
 
 - 在其他应用选中文字后，用全局快捷键取词并翻译。
-- 框选屏幕区域，本机 OCR 后翻译；或只识字、静默复制到剪贴板。
+- 框选屏幕区域，OCR 后直接翻译；或只识字、静默复制到剪贴板。默认使用系统离线 OCR。
 - 输入翻译、剪贴板翻译，多服务结果对照。
-- 自定义 OpenAI 兼容 API、DeepL、LibreTranslate 的端点、模型、密钥和提示词。
-- 本地历史与收藏、搜索/清除、窗口置顶、托盘常驻、深浅主题。
+- 自定义 OpenAI 兼容 API、DeepL、LibreTranslate；常用供应商预设可编辑端点、模型和提示词。
+- OCR 可选择本机、百度、腾讯、兼容视觉模型，或高级 HTTP JSON 网关。凭证按各自协议填写。
+- 本地历史与收藏、搜索/清除、浮窗默认置顶、点击外部隐藏、托盘常驻、深浅主题。
 - 原生 WebView + Rust；不捆绑 Chromium 或 OCR 大模型。
 
 ## 获取与运行
@@ -24,12 +25,14 @@
 
 ## 首次配置
 
-1. 打开“设置”，选择服务类型并填写 API 地址和模型。OpenAI 兼容服务可填 `https://your-provider.example/v1` 或完整 `/chat/completions` 端点。
+1. 打开“设置”，选择翻译供应商预设，再确认 API 地址和模型。OpenAI 兼容服务可填 `https://your-provider.example/v1` 或完整 `/chat/completions` 端点。
 2. 填写**自己的** API 密钥。密钥保存到 Windows Credential Manager / macOS Keychain，不写入配置文件。
 3. 点击“测试连接”。测试会发送 `Hello`，可能消耗少量供应商 API 额度。应用不附赠翻译额度。
 4. 回到其他应用选中文字，按快捷键。扫描 PDF 或图片使用截图翻译。
 
 DeepL 可使用 `https://api-free.deepl.com/v2` 或 Pro 的 `https://api.deepl.com/v2`；LibreTranslate 填你自己的实例地址。本地服务可用 `http://127.0.0.1:端口`，远程服务要求 HTTPS。
+
+OCR 默认不需要密钥。需要云端识别时，在“OCR 服务”中添加供应商：百度填写 API Key 与 Secret Key；腾讯填写 SecretId 与 SecretKey，临时凭证另填 Token。保存配置后可用生成的测试图检查连接，再选择它作为当前 OCR。测试会上传该测试图，启用云端 OCR 后会上传你主动框选的截图。通用 JSON 网关供已有自建接口使用，不能代替厂商原生签名协议。详见 [服务配置设计](docs/api-configuration-design.zh-CN.md)。
 
 ## 默认快捷键
 
@@ -41,11 +44,13 @@ DeepL 可使用 `https://api-free.deepl.com/v2` 或 Pro 的 `https://api.deepl.c
 | 静默 OCR 到剪贴板 | Alt+C | Option+C |
 | 输入翻译 | Alt+A | Option+A |
 
-设置中可修改或留空禁用。快捷键冲突会报告错误；若同时运行 Bob 等工具，需为其中一个更换快捷键。输入框中 Ctrl/Cmd+Enter 翻译，Esc 取消截图/隐藏窗口。启动默认只出现在托盘/菜单栏，不主动弹窗口；译文默认保留到点击窗口外时立即隐藏，不使用倒计时；置顶可临时保留窗口。关闭窗口后应用仍在托盘运行，从托盘菜单退出。
+设置中可修改或留空禁用。快捷键冲突会报告错误；若同时运行 Bob 等工具，需为其中一个更换快捷键。没有选中文字时按 Alt+D，会打开空白浮窗，不激活应用或自动聚焦输入框。用户主动点击输入区后可输入，Ctrl/Cmd+Enter 翻译，Esc 取消截图/隐藏窗口。
+
+启动默认只出现在托盘/菜单栏，不主动弹窗口。浮窗默认位于其他普通窗口之上；点击外部立即隐藏，不使用倒计时。“钉住窗口”可让它在点击外部后保留。关闭窗口后应用仍在托盘运行，从托盘菜单退出。
 
 ## 隐私与数据
 
-OCR 在系统内离线执行，截图为临时文件并在处理结束后删除。翻译会把文本发送给你配置的供应商，因此是否联网、如何处理数据取决于所选服务。无遥测、无常驻剪贴板监听。
+本机 OCR 在系统内离线执行；只有明确选择云端 OCR 后，截图才会发送到选定服务。截图临时文件在处理结束后删除。翻译会把文本发送给你启用的供应商。无遥测、无常驻剪贴板监听。
 
 历史默认保存在本机，可关闭或清除。密钥位于系统凭据库；其他设置和历史保存在应用数据目录（可在“权限与诊断”查看）。首次配置前请先阅读 [隐私说明](docs/privacy.md)。
 

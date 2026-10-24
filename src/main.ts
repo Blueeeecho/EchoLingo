@@ -1,5 +1,8 @@
 import './styles.css';
 import { createOcrUi } from './ocr-ui';
+import { credentialScope } from './credential-scope';
+import { inferProviderPreset, PROVIDER_PRESETS, qwenBaseUrl, qwenSettingsFromUrl } from './provider-presets';
+import type { ProviderPresetId, QwenRegion } from './provider-presets';
 import { invoke, isTauri } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 import { defaultSettings, errorMessage, filterHistory, LANGUAGES, languageName, MAX_TEXT_LENGTH, normalizeTimestamp, SHORTCUT_LABELS, validateProvider } from './model';
@@ -29,6 +32,9 @@ let generation = 0;
 let translating = false;
 let editingProviderId: string | null = null;
 let providerSaving = false;
+let providerScopeAtOpen: string | null = null;
+let providerLastInputScope: string | null = null;
+let providerHadKeyAtOpen = false;
 let autoHideTimer: ReturnType<typeof setTimeout> | undefined;
 let toastTimer: ReturnType<typeof setTimeout> | undefined;
 let saveQueue: Promise<void> = Promise.resolve();
@@ -407,6 +413,37 @@ function renderSettings(): void {
   }
   historyLimit.value = String(settings.maxHistory);
 }
+function updateProviderCredentialState(clearOnScopeChange = true): void {
+  const scope = credentialScope($<HTMLSelectElement>('#provider-kind').value, $<HTMLInputElement>('#provider-url').value);
+  if (clearOnScopeChange && scope !== providerLastInputScope) $<HTMLInputElement>('#provider-key').value = '';
+  providerLastInputScope = scope;
+  const changed = providerScopeAtOpen !== null && scope !== providerScopeAtOpen;
+  const currentKey = providerHadKeyAtOpen && !changed;
+  $<HTMLInputElement>('#provider-key').placeholder = currentKey ? '已保存匹配此服务的密钥；留空保持不变' : '输入当前服务的 API 密钥';
+  $('#provider-key-help').textContent = changed ? '服务协议或地址来源已改变，原密钥不会复用。请为当前服务配置新密钥；留空只保存未配置凭据的服务。' : currentKey ? '留空保留匹配当前协议及地址来源的密钥。修改模型或同源路径无需重新填写。' : 'API 密钥单独写入系统凭据库。LibreTranslate 按实例要求可不填。';
+  $('#remove-provider-key').hidden = !currentKey;
+}
+function renderProviderPreset(applyValues = false): void {
+  const preset = PROVIDER_PRESETS.find((item) => item.id === $<HTMLSelectElement>('#provider-preset').value) ?? PROVIDER_PRESETS[0]!;
+  const qwen = preset.id === 'qwen';
+  $('#provider-preset-help').textContent = preset.help;
+  $('#provider-qwen-region-field').hidden = !qwen;
+  $('#provider-qwen-workspace-field').hidden = !qwen;
+  if (!applyValues) return;
+  $<HTMLSelectElement>('#provider-kind').value = preset.kind;
+  const name = $<HTMLInputElement>('#provider-name');
+  if (!name.value.trim() || PROVIDER_PRESETS.some((item) => item.name === name.value)) name.value = preset.name;
+  $<HTMLInputElement>('#provider-url').value = qwen ? qwenBaseUrl($<HTMLSelectElement>('#provider-qwen-region').value as QwenRegion, $<HTMLInputElement>('#provider-qwen-workspace').value) : preset.baseUrl;
+  $<HTMLInputElement>('#provider-model').value = preset.exampleModel;
+  $<HTMLInputElement>('#provider-key').value = '';
+  providerKindChanged(); updateProviderCredentialState();
+}
+function updateQwenBaseUrl(): void {
+  try {
+    $<HTMLInputElement>('#provider-url').value = qwenBaseUrl($<HTMLSelectElement>('#provider-qwen-region').value as QwenRegion, $<HTMLInputElement>('#provider-qwen-workspace').value);
+    $('#provider-error').hidden = true; updateProviderCredentialState();
+  } catch (error) { $('#provider-error').textContent = errorMessage(error); $('#provider-error').hidden = false; }
+}
 function providerKindChanged(useDefaults = false): void {
   const kind = $<HTMLSelectElement>('#provider-kind').value as ProviderKind;
   const openai = kind === 'openai';
@@ -467,9 +504,15 @@ function openProviderDialog(provider?: Provider): void {
   if (!settingsReady) { toast('设置正在加载，请稍候。'); return; }
   if (!provider && settings.providers.length >= 12) { toast('最多可添加 12 个翻译服务。'); return; }
   editingProviderId = provider?.id ?? null;
+  providerScopeAtOpen = provider ? credentialScope(provider.kind, provider.baseUrl) : null;
+  providerHadKeyAtOpen = Boolean(provider?.hasKey); providerLastInputScope = providerScopeAtOpen;
   $<HTMLFormElement>('#provider-form').reset();
+  $<HTMLSelectElement>('#provider-preset').value = provider ? inferProviderPreset(provider) : 'openai';
+  const qwenSettings = qwenSettingsFromUrl(provider?.baseUrl ?? '');
+  $<HTMLSelectElement>('#provider-qwen-region').value = qwenSettings.region;
+  $<HTMLInputElement>('#provider-qwen-workspace').value = qwenSettings.workspaceId;
   $('#provider-dialog-title').textContent = provider ? '编辑翻译服务' : '添加翻译服务';
-  $<HTMLInputElement>('#provider-name').value = provider?.name ?? '';
+  $<HTMLInputElement>('#provider-name').value = provider?.name ?? 'OpenAI 兼容服务';
   $<HTMLSelectElement>('#provider-kind').value = provider?.kind ?? 'openai';
   $<HTMLInputElement>('#provider-url').value = provider?.baseUrl ?? 'https://api.openai.com/v1';
   $<HTMLInputElement>('#provider-model').value = provider?.model ?? 'gpt-4o-mini';
@@ -479,14 +522,14 @@ function openProviderDialog(provider?: Provider): void {
   $<HTMLInputElement>('#provider-enabled').checked = provider?.enabled ?? true;
   $('#remove-provider-key').hidden = !provider?.hasKey;
   $('#provider-error').hidden = true;
-  providerKindChanged();
+  providerKindChanged(); renderProviderPreset(); updateProviderCredentialState(false);
   showModal(providerDialog);
 }
 function closeProviderDialog(): void {
   if (providerSaving) { toast('正在保存服务，请稍候。'); return; }
   $<HTMLInputElement>('#provider-key').value = '';
   closeModal(providerDialog);
-  editingProviderId = null;
+  editingProviderId = null; providerScopeAtOpen = null; providerLastInputScope = null; providerHadKeyAtOpen = false;
 }
 function confirmAction(title: string, description: string): Promise<boolean> {
   $('#confirm-title').textContent = title;
@@ -499,7 +542,6 @@ async function saveProvider(event: SubmitEvent): Promise<void> {
   event.preventDefault();
   if (providerSaving) return;
   if (!desktop) { toast('浏览器预览不保存 API 密钥。请在桌面应用中配置真实服务。'); return; }
-  const existing = settings.providers.find((provider) => provider.id === editingProviderId);
   const provider: Provider = {
     id: editingProviderId ?? crypto.randomUUID(), name: $<HTMLInputElement>('#provider-name').value.trim(),
     kind: $<HTMLSelectElement>('#provider-kind').value as ProviderKind,
@@ -507,9 +549,13 @@ async function saveProvider(event: SubmitEvent): Promise<void> {
     model: $<HTMLInputElement>('#provider-model').value.trim(),
     enabled: $<HTMLInputElement>('#provider-enabled').checked,
     prompt: $<HTMLTextAreaElement>('#provider-prompt').value.trim(),
-    hasKey: existing?.hasKey,
+    hasKey: providerHadKeyAtOpen && credentialScope($<HTMLSelectElement>('#provider-kind').value, $<HTMLInputElement>('#provider-url').value) === providerScopeAtOpen,
   };
-  const validation = validateProvider(provider);
+  let validation = validateProvider(provider);
+  if ($<HTMLSelectElement>('#provider-preset').value === 'qwen') {
+    try { qwenBaseUrl($<HTMLSelectElement>('#provider-qwen-region').value as QwenRegion, $<HTMLInputElement>('#provider-qwen-workspace').value); }
+    catch (error) { validation = errorMessage(error); }
+  }
   const errorOutput = $('#provider-error');
   if (validation) { errorOutput.textContent = validation; errorOutput.hidden = false; return; }
   setProviderSaving(true);
@@ -598,18 +644,24 @@ $('#save-shortcuts').addEventListener('click', () => run(async () => {
   toast(desktop ? '快捷键已保存。若注册失败，将显示系统返回的原因。' : '快捷键已在预览中更新；桌面应用才能注册全局快捷键。');
 }));
 $('#add-provider').addEventListener('click', () => openProviderDialog());
-$('#provider-kind').addEventListener('change', () => providerKindChanged(true));
+$('#provider-kind').addEventListener('change', () => { providerKindChanged(true); updateProviderCredentialState(); });
+$('#provider-url').addEventListener('input', () => updateProviderCredentialState());
+$('#provider-preset').addEventListener('change', () => renderProviderPreset(true));
+$('#provider-qwen-region').addEventListener('change', updateQwenBaseUrl);
+$('#provider-qwen-workspace').addEventListener('change', updateQwenBaseUrl);
 $('#close-provider-dialog').addEventListener('click', closeProviderDialog);
 $('#cancel-provider-dialog').addEventListener('click', closeProviderDialog);
 providerDialog.addEventListener('click', (event) => { if (event.target === providerDialog) closeProviderDialog(); });
 $<HTMLFormElement>('#provider-form').addEventListener('submit', (event) => { void saveProvider(event).catch(reportError); });
 $('#remove-provider-key').addEventListener('click', () => run(async () => {
-  if (!editingProviderId || !requireDesktop()) return;
-  await invoke('delete_api_key', { providerId: editingProviderId });
-  settings = await invoke<Settings>('get_settings'); renderProviders();
-  $('#remove-provider-key').hidden = true;
-  $<HTMLInputElement>('#provider-key').placeholder = '输入密钥（仅存入系统凭据库）';
-  toast('已从系统凭据库移除密钥。');
+  if (!editingProviderId || providerSaving || !requireDesktop()) return;
+  const providerId = editingProviderId; setProviderSaving(true);
+  try {
+    await invoke('delete_api_key', { providerId });
+    settings = await invoke<Settings>('get_settings'); renderProviders();
+    providerHadKeyAtOpen = false; updateProviderCredentialState(false);
+    toast('已从系统凭据库移除密钥。');
+  } finally { setProviderSaving(false); }
 }));
 $('#run-diagnostics').addEventListener('click', () => run(async () => {
   const button = $<HTMLButtonElement>('#run-diagnostics'); const output = $('#diagnostics-output');
@@ -664,6 +716,8 @@ document.addEventListener('keydown', (event) => {
 window.addEventListener('beforeunload', () => { cancelAutoHide(); for (const unlisten of cleanupListeners) unlisten(); if ('speechSynthesis' in window) window.speechSynthesis.cancel(); });
 
 async function initialize(): Promise<void> {
+  const presetSelect = $<HTMLSelectElement>('#provider-preset');
+  for (const preset of PROVIDER_PRESETS) { const option = node('option', '', preset.label); option.value = preset.id as ProviderPresetId; presetSelect.append(option); }
   if (!desktop) {
     $('#preview-banner').hidden = false;
     $('#runtime-badge').classList.add('preview');

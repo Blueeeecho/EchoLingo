@@ -37,6 +37,8 @@ pub struct OcrProvider {
     pub base_url: String,
     #[serde(default)]
     pub model: String,
+    #[serde(default)]
+    pub region: String,
     #[serde(default = "default_prompt")]
     pub prompt: String,
     #[serde(default = "default_auth_header")]
@@ -68,10 +70,13 @@ pub fn validate_provider(p: &OcrProvider) -> Result<(), String> {
     {
         return Err("OCR 服务名称、模型或提示词长度不合法".into());
     }
-    if !["openai-vision", "http-json"].contains(&p.kind.as_str()) {
+    if !["openai-vision", "http-json", "baidu", "tencent"].contains(&p.kind.as_str()) {
         return Err("不支持的 OCR 服务类型".into());
     }
     validate_url(&p.base_url)?;
+    if matches!(p.kind.as_str(), "baidu" | "tencent") {
+        return crate::ocr_native::validate_provider(p);
+    }
     if p.auth_header.is_empty() || p.auth_header.len() > 200 {
         return Err("OCR 认证头名称为空或超过 200 字节".into());
     }
@@ -285,8 +290,14 @@ pub async fn recognize(
     validate_provider(p)?;
     validate_image(image_base64)?;
     let key = key.map_err(|_| "无法读取 OCR 服务的系统凭据".to_string())?;
-    if key.len() > 8192 || key.contains(['\r', '\n']) {
-        return Err("OCR API 密钥过长或包含换行".into());
+    if key.len() > 8192 {
+        return Err("OCR API 凭据超过长度上限".into());
+    }
+    if matches!(p.kind.as_str(), "baidu" | "tencent") {
+        return crate::ocr_native::recognize(client, p, &key, image_base64).await;
+    }
+    if key.contains(['\r', '\n']) {
+        return Err("OCR API 密钥不能包含换行".into());
     }
     let url = endpoint(p)?;
     let body = request_body(p, image_base64)?;

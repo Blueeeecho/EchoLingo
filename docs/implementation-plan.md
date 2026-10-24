@@ -4,9 +4,10 @@ User-approved name: EchoLingo. Windows first, macOS second. No HarmonyOS SDK req
 
 ## Architecture
 - Tauri 2 + Rust backend + vanilla TypeScript/Vite frontend. Reuse system WebView rather than bundling Chromium.
-- Native OS OCR: Windows.Media.Ocr / macOS Vision. No cloud screenshot upload, no bundled OCR neural model.
-- Global shortcuts, tray residency, hide-on-blur with optional pinning. Selected text must be obtained before focusing EchoLingo.
+- Native OS OCR by default: Windows.Media.Ocr / macOS Vision, no bundled OCR neural model. Explicitly selected cloud OCR is an alternative, with its own credentials and visible upload status; no automatic cloud fallback.
+- Global shortcuts, tray residency, always-on-top floating view and hide-on-outside-click with optional pinning. Selected text must be obtained before showing EchoLingo without activation. Empty selection opens a blank view without focusing the textarea.
 - OpenAI-compatible, DeepL, LibreTranslate adapters. API credentials stored in OS Keychain / Credential Manager; endpoint/model/prompt in local JSON.
+- Supplier-specific OCR adapters for Baidu and Tencent, compatible vision models, and an advanced JSON gateway. Authentication protocol and supplier labels remain separate; Ali machine translation is not Qwen.
 - Bounded local history, favorites and clear controls. API requests only on explicit action. No telemetry, no clipboard polling.
 - Bob is a behavior reference only. No Bob proprietary code, names, icons, or plugin compatibility claimed.
 

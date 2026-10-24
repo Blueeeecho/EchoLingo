@@ -1,5 +1,7 @@
+import { credentialScope } from './credential-scope';
 import { invoke } from '@tauri-apps/api/core';
 import { errorMessage, validateProvider } from './model';
+import { buildOcrCredential, OCR_NATIVE_ACTIONS, OCR_NATIVE_URLS } from './ocr-credentials';
 import type { OcrProvider, Settings } from './types';
 
 type UiContext = {
@@ -29,6 +31,12 @@ export function createOcrUi(context: UiContext): { render: () => void; close: ()
   const modal = $('ocr-provider-dialog');
   let editingId: string | null = null;
   let saving = false;
+  let originalHasKey = false;
+  let originalScope: string | null = null;
+  let lastInputScope: string | null = null;
+  const secretIds = ['ocr-provider-key', 'ocr-baidu-api-key', 'ocr-baidu-secret-key', 'ocr-tencent-secret-id', 'ocr-tencent-secret-key', 'ocr-tencent-session-token'];
+  const clearSecrets = (): void => { for (const id of secretIds) input(id).value = ''; };
+  const kindLabel = (kind: OcrProvider['kind']): string => ({ baidu: '百度 OCR', tencent: '腾讯云 OCR', 'openai-vision': '视觉模型', 'http-json': 'HTTP JSON' })[kind];
   const run = (work: () => Promise<unknown>): void => { void work().catch(context.reportError); };
   const setSaving = (value: boolean): void => {
     saving = value; modal.setAttribute('aria-busy', String(value));
@@ -37,33 +45,77 @@ export function createOcrUi(context: UiContext): { render: () => void; close: ()
   };
   const close = (): void => {
     if (saving) { context.toast('正在保存 OCR 服务，请稍候。'); return; }
-    input('ocr-provider-key').value = ''; context.closeModal(modal); editingId = null;
+    clearSecrets(); context.closeModal(modal); editingId = null; originalHasKey = false; originalScope = null; lastInputScope = null;
   };
-  const kindChanged = (): void => {
-    const vision = select('ocr-provider-kind').value === 'openai-vision';
+  const updateCredentialState = (clearOnChange = true): void => {
+    const kind = select('ocr-provider-kind').value as OcrProvider['kind'];
+    const native = kind === 'baidu' || kind === 'tencent';
+    const scope = credentialScope(kind, native ? OCR_NATIVE_URLS[kind] : input('ocr-provider-url').value);
+    if (clearOnChange && scope !== lastInputScope) clearSecrets();
+    lastInputScope = scope;
+    const changed = originalScope !== null && scope !== originalScope;
+    const hasCurrentKey = originalHasKey && !changed;
+    $('remove-ocr-provider-key').hidden = !hasCurrentKey;
+    input('ocr-provider-key').placeholder = hasCurrentKey ? '密钥已保存；留空保持不变' : '输入当前服务密钥（单独存入系统凭据库）';
+    const notice = $('ocr-protocol-notice');
+    notice.hidden = !changed && !native;
+    notice.textContent = changed ? 'OCR 协议或服务地址来源已改变。请完整填写新凭据，原密钥不会复用；保存失败不会删除原服务凭据。' : hasCurrentKey ? '凭据已保存。所有密钥字段留空则保留；修改模型或同源路径无需重新填写，不显示已存密钥。' : '请从所选厂商控制台填写对应的成对凭据。也可先保存配置；未配置凭据时不会启用该云服务。';
+  };
+  const kindChanged = (resetDefaults = false): void => {
+    const kind = select('ocr-provider-kind').value as OcrProvider['kind'];
+    const native = kind === 'baidu' || kind === 'tencent';
+    const vision = kind === 'openai-vision';
+    if (resetDefaults) {
+      clearSecrets();
+      const nameInput = input('ocr-provider-name');
+      if (!nameInput.value.trim() || ['百度 OCR', '腾讯云 OCR', '视觉模型 OCR', 'JSON 网关 OCR'].includes(nameInput.value)) nameInput.value = native ? kindLabel(kind) : vision ? '视觉模型 OCR' : 'JSON 网关 OCR';
+      input('ocr-provider-model').value = vision ? 'gpt-4o-mini' : '';
+      input('ocr-provider-url').value = native ? OCR_NATIVE_URLS[kind] : vision ? 'https://api.openai.com/v1' : '';
+    }
+    $('ocr-provider-url-field').hidden = native;
+    $('ocr-provider-native-action-field').hidden = !native;
+    $('ocr-provider-region-field').hidden = kind !== 'tencent';
+    $('ocr-provider-baidu-credentials').hidden = kind !== 'baidu';
+    $('ocr-provider-tencent-credentials').hidden = kind !== 'tencent';
     $('ocr-provider-model-field').hidden = !vision;
     $('ocr-provider-prompt-field').hidden = !vision;
-    $('ocr-provider-template-field').hidden = vision;
-    $('ocr-provider-response-field').hidden = vision;
+    $('ocr-provider-key-field').hidden = native;
+    $('ocr-provider-auth-header-field').hidden = native;
+    $('ocr-provider-auth-prefix-field').hidden = native;
+    $('ocr-provider-template-field').hidden = kind !== 'http-json';
+    $('ocr-provider-response-field').hidden = kind !== 'http-json';
     input('ocr-provider-model').required = vision;
-    $('ocr-provider-url-help').textContent = vision ? '填写 OpenAI 兼容视觉 API 基础地址，例如 https://api.openai.com/v1。' : '填写你信任的 OCR JSON 网关完整请求地址，例如 https://ocr.example.com/recognize。';
+    if (native) {
+      input('ocr-provider-url').value = OCR_NATIVE_URLS[kind];
+      const actions = select('ocr-provider-native-action'); actions.replaceChildren();
+      for (const [value, label] of OCR_NATIVE_ACTIONS[kind]) { const option = el('option', '', label); option.value = value; actions.append(option); }
+      const savedAction = input('ocr-provider-model').value;
+      if (!resetDefaults && Array.from(actions.options).some((option) => option.value === savedAction)) actions.value = savedAction;
+    }
+    updateCredentialState(false);
+    $('ocr-provider-url-help').textContent = vision ? '填写 OpenAI 兼容视觉 API 基础地址，例如 https://api.openai.com/v1。' : '高级配置：填写你信任的 OCR JSON 网关完整请求地址，例如 https://ocr.example.com/recognize。';
   };
   const open = (provider?: OcrProvider): void => {
     if (saving) return;
     if (!provider && (context.settings().ocrProviders ?? []).length >= 12) { context.toast('最多可添加 12 个 OCR 服务。'); return; }
     editingId = provider?.id ?? null;
+    originalHasKey = Boolean(provider?.hasKey);
+    originalScope = provider ? credentialScope(provider.kind, provider.baseUrl) : null; lastInputScope = originalScope;
     $<HTMLFormElement>('ocr-provider-form').reset();
     $('ocr-provider-dialog-title').textContent = provider ? '编辑 OCR 服务' : '添加 OCR 服务';
-    input('ocr-provider-name').value = provider?.name ?? '';
-    select('ocr-provider-kind').value = provider?.kind ?? 'openai-vision';
-    input('ocr-provider-url').value = provider?.baseUrl ?? 'https://api.openai.com/v1';
-    input('ocr-provider-model').value = provider?.model ?? 'gpt-4o-mini';
+    input('ocr-provider-name').value = provider?.name ?? '百度 OCR';
+    select('ocr-provider-kind').value = provider?.kind ?? 'baidu';
+    input('ocr-provider-url').value = provider?.baseUrl ?? OCR_NATIVE_URLS.baidu;
+    input('ocr-provider-model').value = provider?.model ?? 'general_basic';
     textArea('ocr-provider-prompt').value = provider?.prompt ?? '';
     input('ocr-provider-auth-header').value = provider?.authHeader ?? 'Authorization';
     input('ocr-provider-auth-prefix').value = provider?.authPrefix ?? 'Bearer ';
     textArea('ocr-provider-template').value = provider?.requestTemplate ?? '{\n  "image": "{imageBase64}"\n}';
     input('ocr-provider-response-path').value = provider?.responsePath ?? '/text';
-    input('ocr-provider-key').value = '';
+    const region = select('ocr-provider-region');
+    if (provider?.region && !Array.from(region.options).some((option) => option.value === provider.region)) { const option = el('option', '', provider.region); option.value = provider.region; region.append(option); }
+    region.value = provider?.region ?? '';
+    clearSecrets();
     input('ocr-provider-key').placeholder = provider?.hasKey ? '密钥已保存；留空保持不变' : '输入密钥（单独存入系统凭据库）';
     $('remove-ocr-provider-key').hidden = !provider?.hasKey;
     $('ocr-provider-error').hidden = true;
@@ -74,19 +126,19 @@ export function createOcrUi(context: UiContext): { render: () => void; close: ()
     const providers = settings.ocrProviders ?? [];
     const activeSelect = select('active-ocr-provider'); activeSelect.replaceChildren();
     const localOption = el('option', '', '本机 OCR · 不上传截图'); localOption.value = ''; activeSelect.append(localOption);
-    for (const provider of providers) { const option = el('option', '', provider.name); option.value = provider.id; activeSelect.append(option); }
+    for (const provider of providers) { const native = provider.kind === 'baidu' || provider.kind === 'tencent'; const option = el('option', '', `${provider.name}${native && !provider.hasKey ? '（待配置凭据）' : ''}`); option.value = provider.id; activeSelect.append(option); }
     activeSelect.value = settings.activeOcrProviderId ?? '';
     const active = providers.find((provider) => provider.id === settings.activeOcrProviderId);
     const notice = $('ocr-privacy-notice');
     notice.classList.toggle('cloud-active', Boolean(active));
     notice.textContent = active ? `云端 OCR 已启用：截图将上传到“${active.name}”的端点 ${active.baseUrl}。` : '本机 OCR 已启用：文字识别在此设备进行，不上传截图。';
     const list = $('ocr-provider-list'); list.replaceChildren();
-    if (providers.length === 0) list.append(el('div', 'provider-empty', '无需配置即可使用系统 OCR。需要自定义识别时，再添加云端视觉模型或 JSON 网关。'));
+    if (providers.length === 0) list.append(el('div', 'provider-empty', '默认使用系统 OCR。可添加百度、腾讯云，或选择视觉模型与高级 JSON 网关。'));
     for (const provider of providers) {
       const row = el('div', 'provider-row'); row.append(el('span', 'provider-avatar ocr-avatar', '文'));
       const info = el('div', 'provider-info'); const title = el('div', 'provider-title', provider.name);
-      if (provider.hasKey) title.append(el('span', 'provider-key-badge', '· 密钥已保存'));
-      info.append(title, el('span', 'provider-details', `${provider.kind === 'openai-vision' ? '视觉模型' : 'HTTP JSON'} · ${provider.model || provider.responsePath} · ${provider.baseUrl}`));
+      title.append(el('span', 'provider-key-badge', provider.hasKey ? '· 凭据已保存' : '· 未配置凭据'));
+      info.append(title, el('span', 'provider-details', `${kindLabel(provider.kind)} · ${provider.model || provider.responsePath} · ${provider.baseUrl}`));
       const controls = el('div', 'provider-controls');
       const test = el('button', 'text-button', '测试连接'); test.type = 'button'; test.title = '会上传生成的测试图片，可能消耗 API 额度';
       test.addEventListener('click', () => run(async () => {
@@ -115,9 +167,12 @@ export function createOcrUi(context: UiContext): { render: () => void; close: ()
   $('close-ocr-provider-dialog').addEventListener('click', close);
   $('cancel-ocr-provider-dialog').addEventListener('click', close);
   modal.addEventListener('click', (event) => { if (event.target === modal) close(); });
-  select('ocr-provider-kind').addEventListener('change', kindChanged);
+  select('ocr-provider-kind').addEventListener('change', () => kindChanged(true));
+  input('ocr-provider-url').addEventListener('input', () => updateCredentialState());
   select('active-ocr-provider').addEventListener('change', (event) => {
     const id = (event.target as HTMLSelectElement).value || null;
+    const provider = (context.settings().ocrProviders ?? []).find((item) => item.id === id);
+    if (provider && (provider.kind === 'baidu' || provider.kind === 'tencent') && !provider.hasKey) { context.toast('此 OCR 服务尚未配置完整凭据，请先编辑并保存密钥。', 'error'); render(); return; }
     run(async () => {
       try {
         await context.updateSettings((next) => { next.activeOcrProviderId = id; });
@@ -130,7 +185,8 @@ export function createOcrUi(context: UiContext): { render: () => void; close: ()
     const providerId = editingId; setSaving(true);
     try {
       await invoke('delete_ocr_api_key', { providerId }); await context.reloadSettings();
-      $('remove-ocr-provider-key').hidden = true; input('ocr-provider-key').value = '';
+      originalHasKey = false; clearSecrets(); kindChanged();
+      $('remove-ocr-provider-key').hidden = true;
       input('ocr-provider-key').placeholder = '输入密钥（单独存入系统凭据库）'; context.toast('OCR 密钥已移除。');
     } finally { setSaving(false); }
   }));
@@ -139,12 +195,14 @@ export function createOcrUi(context: UiContext): { render: () => void; close: ()
     run(async () => {
       if (saving) return;
       if (!context.desktop) { context.toast('浏览器预览不保存 OCR API 或密钥，请在桌面应用中配置。'); return; }
+      const kind = select('ocr-provider-kind').value as OcrProvider['kind'];
+      const native = kind === 'baidu' || kind === 'tencent';
       const provider: OcrProvider = {
         id: editingId ?? `ocr-${crypto.randomUUID()}`, name: input('ocr-provider-name').value.trim(),
-        kind: select('ocr-provider-kind').value as OcrProvider['kind'], baseUrl: input('ocr-provider-url').value.trim().replace(/\/+$/, ''),
-        model: input('ocr-provider-model').value.trim(), prompt: textArea('ocr-provider-prompt').value.trim(),
-        authHeader: input('ocr-provider-auth-header').value.trim(), authPrefix: input('ocr-provider-auth-prefix').value,
-        requestTemplate: textArea('ocr-provider-template').value.trim(), responsePath: input('ocr-provider-response-path').value.trim(),
+        kind, baseUrl: native ? OCR_NATIVE_URLS[kind] : input('ocr-provider-url').value.trim().replace(/\/+$/, ''),
+        model: native ? select('ocr-provider-native-action').value : input('ocr-provider-model').value.trim(), prompt: native ? '' : textArea('ocr-provider-prompt').value.trim(),
+        authHeader: native ? 'Authorization' : input('ocr-provider-auth-header').value.trim(), authPrefix: native ? 'Bearer ' : input('ocr-provider-auth-prefix').value,
+        requestTemplate: native ? '' : textArea('ocr-provider-template').value.trim(), responsePath: native ? '/text' : input('ocr-provider-response-path').value.trim(), region: kind === 'tencent' ? select('ocr-provider-region').value : '',
       };
       let validation = validateProvider({ ...provider, kind: provider.kind === 'openai-vision' ? 'openai' : 'libretranslate', enabled: true });
       if (!validation && (!/^[A-Za-z0-9-]+$/.test(provider.authHeader) || /[\r\n]/.test(provider.authPrefix))) validation = '认证 Header 只能包含英文字母、数字和短横线；前缀不能包含换行。';
@@ -162,7 +220,9 @@ export function createOcrUi(context: UiContext): { render: () => void; close: ()
       }
       const errorOutput = $('ocr-provider-error');
       if (validation) { errorOutput.textContent = validation; errorOutput.hidden = false; return; }
-      const key = input('ocr-provider-key').value.trim(); setSaving(true);
+      const credential = buildOcrCredential(kind, { apiKey: input('ocr-baidu-api-key').value, secretId: input('ocr-tencent-secret-id').value, secretKey: input(kind === 'baidu' ? 'ocr-baidu-secret-key' : 'ocr-tencent-secret-key').value, sessionToken: input('ocr-tencent-session-token').value, genericKey: input('ocr-provider-key').value }, originalScope !== null && credentialScope(provider.kind, provider.baseUrl) !== originalScope);
+      if (credential.error) { errorOutput.textContent = credential.error; errorOutput.hidden = false; return; }
+      const key = credential.key; setSaving(true);
       try {
         await context.updateSettings((next) => {
           const providers = next.ocrProviders ?? []; const index = providers.findIndex((item) => item.id === provider.id);
@@ -173,7 +233,7 @@ export function createOcrUi(context: UiContext): { render: () => void; close: ()
           try { await invoke('set_ocr_api_key', { providerId: provider.id, key }); }
           catch (error) { throw new Error(`OCR 服务已保存，但密钥未能写入系统凭据库：${errorMessage(error)}`); }
         }
-        input('ocr-provider-key').value = ''; await context.reloadSettings(); setSaving(false); close(); context.toast('OCR 服务已保存；在识别方式中选择后启用。');
+        clearSecrets(); await context.reloadSettings(); setSaving(false); close(); context.toast('OCR 服务已保存；在识别方式中选择后启用。');
       } catch (error) { errorOutput.textContent = errorMessage(error); errorOutput.hidden = false; }
       finally { setSaving(false); }
     });
