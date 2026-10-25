@@ -1,9 +1,11 @@
 import { invoke } from '@tauri-apps/api/core';
 
+export interface TranslationPresentation { epoch: number; presented: boolean }
+
 // Read intrinsic content rather than viewport height, so a short translation
 // can shrink again after a long result. Requests are coalesced and serialized.
-export function installPanelLayout(desktop: boolean): { dispose: () => void; presentPopup: () => Promise<void> } {
-  if (!desktop) return { dispose: () => {}, presentPopup: async () => {} };
+export function installPanelLayout(desktop: boolean): { dispose: () => void; presentPopup: (presentationEpoch: number) => Promise<TranslationPresentation | null> } {
+  if (!desktop) return { dispose: () => {}, presentPopup: async () => null };
   let frame = 0, pending = false, disposed = false, last = '';
   let inFlight: Promise<void> | null = null;
   const shell = document.querySelector<HTMLElement>('.app-shell');
@@ -54,12 +56,13 @@ export function installPanelLayout(desktop: boolean): { dispose: () => void; pre
     window.removeEventListener('echolingo:layout', schedule);
     document.removeEventListener('pointerdown', drag);
   };
-  const presentPopup = async (): Promise<void> => {
+  const presentPopup = async (presentationEpoch: number): Promise<TranslationPresentation | null> => {
     cancelAnimationFrame(frame); frame = 0; pending = true;
     await drain();
     // The source event has switched the DOM and fitted its content before the
     // native window is shown, so a previous settings page cannot flash first.
-    if (!disposed && document.body.dataset.view === 'translate') await invoke('show_popup');
+    if (!disposed && document.body.dataset.view === 'translate') return invoke<TranslationPresentation>('show_popup', { presentationEpoch });
+    return null;
   };
   return { dispose, presentPopup };
 }

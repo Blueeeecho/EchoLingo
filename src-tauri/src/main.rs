@@ -3,7 +3,10 @@ mod model;
 mod ocr;
 mod ocr_native;
 mod platform;
+#[cfg(test)]
+mod storage_tests;
 mod translation;
+mod translation_requests;
 mod window_layout;
 
 use model::*;
@@ -26,6 +29,7 @@ struct AppState {
     pinned: AtomicBool,
     native_busy: AtomicBool,
     translation_busy: tokio::sync::Semaphore,
+    translation_requests: translation_requests::TranslationRequests,
     data_dir: PathBuf,
     client: reqwest::Client,
     startup_warnings: Mutex<Vec<String>>,
@@ -281,8 +285,36 @@ fn delete_api_key(provider_id: String) -> Result<(), String> {
     }
 }
 #[tauri::command]
+fn begin_translation(state: State<AppState>, presentation_epoch: u64) -> Result<u64, String> {
+    state.translation_requests.begin(presentation_epoch)
+}
+#[tauri::command]
+fn get_translation_presentation(
+    state: State<AppState>,
+) -> Result<translation_requests::Presentation, String> {
+    state.translation_requests.presentation()
+}
+#[tauri::command]
+fn cancel_translation(state: State<AppState>, request_id: u64) -> Result<(), String> {
+    state.translation_requests.cancel(Some(request_id))?;
+    Ok(())
+}
+fn announce_presentation(app: &tauri::AppHandle, presentation: translation_requests::Presentation) {
+    let _ = app.emit("translation-presentation", presentation);
+}
+fn cancel_active_translation(app: &tauri::AppHandle) -> Option<translation_requests::Presentation> {
+    let presentation = app
+        .state::<AppState>()
+        .translation_requests
+        .suspend()
+        .ok()?;
+    announce_presentation(app, presentation);
+    Some(presentation)
+}
+#[tauri::command]
 async fn translate(
     state: State<'_, AppState>,
+    request_id: u64,
     text: String,
     source_language: String,
     target_language: String,
@@ -321,39 +353,65 @@ async fn translate(
             &target_language,
         )
     });
-    let results = futures_util::future::join_all(jobs).await;
-    if settings.save_history
-        && settings.max_history > 0
-        && results.iter().any(|r| r.error.is_none())
-    {
-        let mut history = locked(&state.history)?;
-        let created_at = now();
-        let entry = HistoryEntry {
-            id: format!(
-                "{created_at}-{}",
-                SystemTime::now()
-                    .duration_since(UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .as_nanos()
-            ),
-            text,
-            source_language,
-            target_language,
-            results: results.clone(),
-            created_at,
-            favorite: false,
-        };
-        let mut updated = history.clone();
-        updated.insert(0, entry);
-        trim_history(&mut updated, settings.max_history);
-        if write_json(&state.data_dir.join("history.json"), &updated).is_ok() {
-            *history = updated;
-        } else {
-            locked(&state.startup_warnings)?
-                .push("最近一次翻译的历史记录保存失败，译文仍正常返回".into());
-        }
-    }
+    let results = state
+        .translation_requests
+        .execute(request_id, futures_util::future::join_all(jobs))
+        .await?;
+    finish_translation(
+        &state,
+        request_id,
+        text,
+        source_language,
+        target_language,
+        &results,
+    )?;
     Ok(results)
+}
+fn finish_translation(
+    state: &AppState,
+    request_id: u64,
+    text: String,
+    source_language: String,
+    target_language: String,
+    results: &[TranslationResult],
+) -> Result<(), String> {
+    state.translation_requests.finish(request_id, || {
+        // Read the privacy preference at completion, not from the request snapshot.
+        // Holding this lock through persistence orders this against disabling history.
+        let current = locked(&state.settings)?;
+        if current.save_history
+            && current.max_history > 0
+            && results.iter().any(|r| r.error.is_none())
+        {
+            let mut history = locked(&state.history)?;
+            let created_at = now();
+            let entry = HistoryEntry {
+                id: format!(
+                    "{created_at}-{}",
+                    SystemTime::now()
+                        .duration_since(UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_nanos()
+                ),
+                text,
+                source_language,
+                target_language,
+                results: results.to_vec(),
+                created_at,
+                favorite: false,
+            };
+            let mut updated = history.clone();
+            updated.insert(0, entry);
+            trim_history(&mut updated, current.max_history);
+            if write_json(&state.data_dir.join("history.json"), &updated).is_ok() {
+                *history = updated;
+            } else {
+                locked(&state.startup_warnings)?
+                    .push("最近一次翻译的历史记录保存失败，译文仍正常返回".into());
+            }
+        }
+        Ok(())
+    })
 }
 const MAX_HISTORY_BYTES: usize = 8 * 1024 * 1024;
 fn trim_history(history: &mut Vec<HistoryEntry>, max: usize) {
@@ -365,7 +423,17 @@ fn trim_history(history: &mut Vec<HistoryEntry>, max: usize) {
                 .unwrap_or(MAX_HISTORY_BYTES + 1)
         })
         .collect();
-    let mut total: usize = sizes.iter().sum();
+    // Discard entries that cannot fit alone before evicting healthy records.
+    for index in (0..sizes.len()).rev() {
+        if sizes[index].saturating_add(1) > MAX_HISTORY_BYTES {
+            sizes.remove(index);
+            history.remove(index);
+        }
+    }
+    let mut total: usize = sizes
+        .iter()
+        .sum::<usize>()
+        .saturating_add(if history.is_empty() { 2 } else { 1 });
     while history.len() > max || total > MAX_HISTORY_BYTES {
         let Some(index) = history
             .iter()
@@ -376,6 +444,9 @@ fn trim_history(history: &mut Vec<HistoryEntry>, max: usize) {
         };
         total = total.saturating_sub(sizes.remove(index));
         history.remove(index);
+        if history.is_empty() {
+            total = 2;
+        }
     }
 }
 #[tauri::command]
@@ -416,7 +487,15 @@ fn toggle_favorite(state: State<AppState>, id: String) -> Result<(), String> {
     Ok(())
 }
 #[tauri::command]
-fn delete_history(state: State<AppState>, id: Option<String>) -> Result<(), String> {
+fn delete_history(
+    app: tauri::AppHandle,
+    state: State<AppState>,
+    id: Option<String>,
+) -> Result<(), String> {
+    // Clearing history must not be undone by an older in-flight request.
+    if id.is_none() {
+        announce_presentation(&app, state.translation_requests.invalidate()?);
+    }
     let mut h = locked(&state.history)?;
     let mut updated = h.clone();
     if let Some(id) = id {
@@ -431,6 +510,9 @@ fn delete_history(state: State<AppState>, id: Option<String>) -> Result<(), Stri
 
 fn show(app: &tauri::AppHandle) {
     if let Some(w) = app.get_webview_window("main") {
+        if let Ok(presentation) = app.state::<AppState>().translation_requests.resume(None) {
+            announce_presentation(app, presentation);
+        }
         let _ = w.show();
         let _ = w.unminimize();
         let _ = w.set_focus();
@@ -444,17 +526,41 @@ fn wake_outside_watcher(app: &tauri::AppHandle) {
         }
     }
 }
-fn show_inactive(app: &tauri::AppHandle) {
+fn show_inactive(
+    app: &tauri::AppHandle,
+    expected_epoch: u64,
+) -> Result<translation_requests::Presentation, String> {
+    let presentation = app
+        .state::<AppState>()
+        .translation_requests
+        .resume(Some(expected_epoch))?;
+    announce_presentation(app, presentation);
     let handle = app.clone();
-    let _ = app.run_on_main_thread(move || {
+    app.run_on_main_thread(move || {
+        // A hide can race the queued native presentation. Do not reopen an
+        // abandoned popup after its epoch has already been invalidated.
+        if handle
+            .state::<AppState>()
+            .translation_requests
+            .presentation()
+            .ok()
+            != Some(presentation)
+        {
+            return;
+        }
         if let Some(window) = handle.get_webview_window("main") {
             let _ = platform::show_without_activation(&window);
             wake_outside_watcher(&handle);
         }
-    });
+    })
+    .map_err(|_| "无法显示翻译窗口")?;
+    Ok(presentation)
 }
-fn empty_selection_window(app: &tauri::AppHandle) {
-    let _ = app.emit("source-text", serde_json::json!({"text":"","mode":"input"}));
+fn empty_selection_window(app: &tauri::AppHandle, presentation_epoch: u64) {
+    let _ = app.emit(
+        "source-text",
+        serde_json::json!({"text":"","mode":"input","presentationEpoch":presentation_epoch}),
+    );
 }
 fn visible_action_error(action: &str, error: &str) -> Option<String> {
     if error.starts_with("CANCELLED") {
@@ -478,8 +584,11 @@ fn visible_action_error(action: &str, error: &str) -> Option<String> {
     )
 }
 #[tauri::command]
-fn show_popup(app: tauri::AppHandle) {
-    show_inactive(&app);
+fn show_popup(
+    app: tauri::AppHandle,
+    presentation_epoch: u64,
+) -> Result<translation_requests::Presentation, String> {
+    show_inactive(&app, presentation_epoch)
 }
 fn start_action(app: tauri::AppHandle, action: String) {
     if action == "input" {
@@ -491,6 +600,10 @@ fn start_action(app: tauri::AppHandle, action: String) {
     if state.native_busy.swap(true, Ordering::SeqCst) {
         return;
     }
+    let Some(presentation) = cancel_active_translation(&app) else {
+        state.native_busy.store(false, Ordering::SeqCst);
+        return;
+    };
     let cloud_ocr = if matches!(action.as_str(), "capture" | "ocr" | "silentOcr") {
         let settings = state.settings.lock().unwrap();
         let provider = settings
@@ -534,24 +647,24 @@ fn start_action(app: tauri::AppHandle, action: String) {
                         tauri::async_runtime::spawn_blocking(move || platform::copy_text(&text))
                             .await;
                     if !matches!(copied, Ok(Ok(()))) {
-                        show_inactive(&app);
+                        let _ = show_inactive(&app, presentation.epoch);
                         let _ = app.emit("action-error", "OCR 已完成，但复制到剪贴板失败");
                     } else {
                         let _ = app.emit("ocr-copied", ());
                     }
                 } else {
                     let mode = if action == "ocr" { "ocr" } else { "translate" };
-                    let _ = app.emit("source-text", serde_json::json!({"text":text,"mode":mode}));
+                    let _ = app.emit("source-text", serde_json::json!({"text":text,"mode":mode,"presentationEpoch":presentation.epoch}));
                 }
             }
-            Ok(_) if action == "selection" => empty_selection_window(&app),
+            Ok(_) if action == "selection" => empty_selection_window(&app, presentation.epoch),
             Ok(_) => {
-                empty_selection_window(&app);
+                empty_selection_window(&app, presentation.epoch);
                 let _ = app.emit("action-error", "没有识别到文字，请选择更清晰的区域");
             }
             Err(e) if e.starts_with("CANCELLED") => {}
             Err(e) => {
-                empty_selection_window(&app);
+                empty_selection_window(&app, presentation.epoch);
                 if let Some(message) = visible_action_error(&action, &e) {
                     let _ = app.emit("action-error", message);
                 }
@@ -605,6 +718,7 @@ fn outside_click_watcher(app: tauri::AppHandle) {
                         || px >= f64::from(position.x) + f64::from(size.width)
                         || py >= f64::from(position.y) + f64::from(size.height)
                     {
+                        cancel_active_translation(&app);
                         let _ = window.hide();
                     }
                 }
@@ -649,6 +763,7 @@ fn set_pinned(app: tauri::AppHandle, state: State<AppState>, pinned: bool) -> Re
 }
 #[tauri::command]
 fn hide_window(app: tauri::AppHandle) -> Result<(), String> {
+    cancel_active_translation(&app);
     app.get_webview_window("main")
         .ok_or("窗口不存在")?
         .hide()
@@ -764,6 +879,7 @@ fn main() {
                 pinned: AtomicBool::new(false),
                 native_busy: AtomicBool::new(false),
                 translation_busy: tokio::sync::Semaphore::new(2),
+                translation_requests: translation_requests::TranslationRequests::default(),
                 data_dir,
                 client,
                 startup_warnings: Mutex::new(warnings),
@@ -784,6 +900,7 @@ fn main() {
         .on_window_event(|window, event| match event {
             tauri::WindowEvent::CloseRequested { api, .. } => {
                 api.prevent_close();
+                cancel_active_translation(window.app_handle());
                 let _ = window.hide();
             }
             _ => {}
@@ -800,6 +917,9 @@ fn main() {
             set_api_key,
             delete_api_key,
             translate,
+            begin_translation,
+            cancel_translation,
+            get_translation_presentation,
             test_provider,
             get_history,
             toggle_favorite,
@@ -820,6 +940,62 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn history_uses_current_privacy_and_cancelled_requests_cannot_repopulate_it() {
+        let directory = std::env::temp_dir().join(format!(
+            "echolingo-history-fixture-{}-{}",
+            std::process::id(),
+            now()
+        ));
+        fs::create_dir_all(&directory).unwrap();
+        let state = AppState {
+            settings: Mutex::new(Settings::default()),
+            history: Mutex::new(vec![]),
+            pinned: AtomicBool::new(false),
+            native_busy: AtomicBool::new(false),
+            translation_busy: tokio::sync::Semaphore::new(2),
+            translation_requests: translation_requests::TranslationRequests::default(),
+            data_dir: directory.clone(),
+            client: reqwest::Client::new(),
+            startup_warnings: Mutex::new(vec![]),
+            outside_thread: Mutex::new(None),
+        };
+        let result = vec![TranslationResult {
+            provider_id: "fixture".into(),
+            provider_name: "fixture".into(),
+            text: "fixture translation".into(),
+            error: None,
+            elapsed_ms: 1,
+        }];
+        let finish = |id| {
+            finish_translation(
+                &state,
+                id,
+                "fixture source".into(),
+                "en".into(),
+                "zh-Hans".into(),
+                &result,
+            )
+        };
+        let epoch = state.translation_requests.resume(None).unwrap().epoch;
+        let old = state.translation_requests.begin(epoch).unwrap();
+        state.settings.lock().unwrap().save_history = false;
+        finish(old).unwrap();
+        assert!(state.history.lock().unwrap().is_empty());
+        assert!(!directory.join("history.json").exists());
+        state.settings.lock().unwrap().save_history = true;
+        let cancelled = state.translation_requests.begin(epoch).unwrap();
+        state.translation_requests.cancel(None).unwrap();
+        assert!(finish(cancelled).is_err());
+        assert!(!directory.join("history.json").exists());
+        let accepted = state.translation_requests.begin(epoch).unwrap();
+        finish(accepted).unwrap();
+        assert_eq!(state.history.lock().unwrap().len(), 1);
+        let saved: Vec<HistoryEntry> =
+            serde_json::from_slice(&fs::read(directory.join("history.json")).unwrap()).unwrap();
+        assert_eq!(saved[0].text, "fixture source");
+        fs::remove_dir_all(directory).unwrap();
+    }
     #[test]
     fn empty_selection_is_quiet_but_other_actions_keep_actionable_errors() {
         for error in [

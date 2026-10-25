@@ -1,0 +1,159 @@
+{
+  "recorded_at": "2026-10-25T15:11:55.691451+08:00",
+  "local_checks": {
+    "rust_tests": 50,
+    "frontend_unit_tests": 45,
+    "installer_fixture_tests": 22,
+    "frontend_ipc_regression": "passed",
+    "npm_audit_vulnerabilities": 0
+  },
+  "installed_app": {
+    "installed": {
+      "path": "/Users/wwq/Applications/EchoLingo.app",
+      "bundle_id": "io.github.blueeeecho.echolingo",
+      "version": "0.1.0",
+      "executable": "/Users/wwq/Applications/EchoLingo.app/Contents/MacOS/echolingo",
+      "signature": {
+        "verified": true,
+        "identifier": "io.github.blueeeecho.echolingo",
+        "kind": "adhoc",
+        "team_identifier": "not set",
+        "cdhash": "d51460df24ad7002f5352f6701b0b6c9db4330f5",
+        "gatekeeper_or_notarization_verified": false
+      },
+      "executable_sha256": "f7872bc7ed1e0cd792b7d85f85f07bac3341ddd08bc251ff6269a15f42b264ae"
+    },
+    "backup": null,
+    "other_copies_deleted": false
+  },
+  "main_process_benchmark": {
+    "measured_at_utc": "2026-10-25T07:09:59.317508+00:00",
+    "macos": "27.2",
+    "architecture": "arm64",
+    "app": {
+      "path": "/Users/wwq/Applications/EchoLingo.app",
+      "bundle_id": "io.github.blueeeecho.echolingo",
+      "version": "0.1.0",
+      "executable": "/Users/wwq/Applications/EchoLingo.app/Contents/MacOS/echolingo",
+      "signature": {
+        "verified": true,
+        "identifier": "io.github.blueeeecho.echolingo",
+        "kind": "adhoc",
+        "team_identifier": "not set",
+        "cdhash": "d51460df24ad7002f5352f6701b0b6c9db4330f5",
+        "gatekeeper_or_notarization_verified": false
+      },
+      "executable_sha256": "f7872bc7ed1e0cd792b7d85f85f07bac3341ddd08bc251ff6269a15f42b264ae"
+    },
+    "bundle_bytes": 5011832,
+    "executable_bytes": 4906848,
+    "scope": "Main EchoLingo process only; excludes separate WebKit/system helper processes.",
+    "cpu_method": "Delta of ps accumulated CPU time / elapsed interval; 100% equals one CPU core; CPU time has 0.01 s display resolution.",
+    "limitations": [
+      "Process observation does not measure tray, WebView, first paint, OCR or API latency.",
+      "App launch uses Launch Services; this script does not verify TCC responsible-code attribution or retained privacy authorization.",
+      "Idle is the operator's condition: leave the popup hidden and do not use hotkeys during samples.",
+      "No application content, credentials, clipboard, screenshots, process arguments or environment are inspected."
+    ],
+    "launched": true,
+    "launch_method": "Launch Services via /usr/bin/open -g -j and the verified bundle path",
+    "launch_to_process_observation_ms": 114.89,
+    "launch_metric_definition": "Elapsed from background bundle launch request to OS reporting the expected executable path and nonzero RSS; not application readiness or render latency.",
+    "pid": 48339,
+    "samples": [
+      {
+        "rss_kib": 97584,
+        "cpu_percent_one_core": 0.986,
+        "interval_seconds": 1.014
+      },
+      {
+        "rss_kib": 97536,
+        "cpu_percent_one_core": 0.0,
+        "interval_seconds": 1.014
+      },
+      {
+        "rss_kib": 97536,
+        "cpu_percent_one_core": 0.0,
+        "interval_seconds": 1.014
+      },
+      {
+        "rss_kib": 97536,
+        "cpu_percent_one_core": 0.0,
+        "interval_seconds": 1.011
+      },
+      {
+        "rss_kib": 97536,
+        "cpu_percent_one_core": 0.0,
+        "interval_seconds": 1.008
+      },
+      {
+        "rss_kib": 92720,
+        "cpu_percent_one_core": 0.0,
+        "interval_seconds": 1.011
+      },
+      {
+        "rss_kib": 92720,
+        "cpu_percent_one_core": 0.0,
+        "interval_seconds": 1.011
+      },
+      {
+        "rss_kib": 92720,
+        "cpu_percent_one_core": 0.0,
+        "interval_seconds": 1.014
+      }
+    ],
+    "summary": {
+      "rss_kib_median": 97536.0,
+      "rss_kib_max": 97584,
+      "cpu_percent_one_core_mean": 0.123
+    },
+    "left_running": true
+  },
+  "startup_window_probe": {
+    "applicationIsHidden": false,
+    "bundleIdentifier": "io.github.blueeeecho.echolingo",
+    "frontmostIsEchoLingo": false,
+    "onscreenRegularWindowCount": 0,
+    "permissionRequestsMade": false,
+    "processId": 48339,
+    "screenshotsTaken": false,
+    "windowTitlesCollected": false
+  },
+  "native_fixture_batch_during_build": {
+    "all_passed": true,
+    "samples": 5,
+    "recognized": "EchoLingo translation 2468",
+    "ocr_fixture_elapsed_ms": [
+      24548.988,
+      101.69,
+      92.171,
+      105.336,
+      112.071
+    ],
+    "median_ms": 105.336,
+    "scope": "Generated 1100x160 image; Vision recognize only; excludes capture, image drawing and application startup",
+    "private_pasteboard_fixture_passed": true,
+    "general_clipboard_touched": false,
+    "interactive_capture_tested": false
+  },
+  "native_fixture_batch_after_build": {
+    "samples": [
+      120.749,
+      96.287,
+      95.984,
+      92.893,
+      98.588
+    ],
+    "median_ms": 96.287,
+    "scope": "Generated 1100x160 image; Vision recognize only; excludes capture, image drawing and application startup",
+    "interactive_capture_tested": false
+  },
+  "boundaries": {
+    "real_supplier_accounts_tested": false,
+    "installed_ime_tested": false,
+    "interactive_region_capture_tested": false,
+    "windows_interactive_acceptance_complete": false,
+    "tcc_retention_tested": false,
+    "desktop_automation": "CUA full-path app selection timed out; bundle-ID selection was ambiguous due development copies. No installed UI pass claimed."
+  }
+}

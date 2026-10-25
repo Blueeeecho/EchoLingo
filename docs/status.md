@@ -1,52 +1,40 @@
 # EchoLingo status and handoff
 
-Updated: 2026-10-25, Asia/Shanghai. Stage: v0.1.0 preview validation.
+Updated: 2026-10-25, Asia/Shanghai. Stage: v0.1.0 preview hardening and acceptance.
 
-## Latest refinement: quiet empty popup, Enter submission and app-owned permissions
-- Alt+D with no obtainable selection, including missing Accessibility permission, presents only the blank popup. It does not autofocus, request access, call a translation API or show a selection-error toast. Clipboard-restoration failures remain visible.
-- Source Enter submits once; Shift+Enter inserts a line break. Composition lifecycle, isComposing, legacy keyCode 229 and key repeat are guarded. Empty input is a no-op; other settings fields keep their own Enter behavior.
-- Blank layout uses a soft input surface, a distinct language strip and a single collapsible service row; secondary operations remain in More. Translation/OCR errors are not silently swallowed.
-- macOS Swift is now a static library inside the app process, removing the former cached helper's separate TCC identity. Hotkeys and status refresh only preflight; explicit Settings actions request access or open one of two fixed privacy panes.
-- Local native verification: 34 Rust tests, including the actual Swift static entry, real Vision OCR/PNG/paragraph fixture, Unicode/NUL ABI roundtrip, host PID identity and permission-kind rejection. The Intel macOS 12 static library also cross-compiles; it was not executed on Intel.
-- Code was independently reviewed. Installed-app TCC/real IME acceptance and final native installer CI are recorded after packaging. Ad hoc signing can still invalidate authorization after a rebuild; a stable installation path alone does not replace Developer ID signing.
-
-## Latest user refinement: minimal popup and wrapped text
-- Translation is a transient popup: tiny pin/more/close toolbar, auto-sized source editor, language strip and provider text. No brand block, counters, instructional/empty cards, timings or footer. Secondary controls are in More or appear on hover/keyboard focus.
-- Popup starts at 480 px wide, adapts height to intrinsic content with a work-area cap and no OS title bar. Settings/history use a normal management presentation. Fit operations never show or focus the app; captured content is prepared before inactive display. Only actual outside clicks hide an unpinned popup, not general focus changes; management stays open.
-- Captured selection/OCR soft wraps are cleaned once before display/API submission. Blank paragraphs, indentation and recognizable code/lists remain. Raw capture is kept in memory for More > restore original line breaks. Typed/pasted text and historical records are untouched.
-- Native OCR uses relative line geometry to mark obvious paragraph gaps; it preserves original line order and handles rotation/structured text conservatively. Plain-text or OCR paragraph reconstruction remains heuristic.
-- Input/capture shortcuts received during a credentials editor are deferred without shrinking the editor or discarding its fields.
-- Verification: 45 frontend tests and 30 Rust tests, integrated IPC regressions, 420/520 px short/medium/long layout samples; Mac real OCR and paragraph geometry fixtures passed. GitHub Actions run 40102326336 on e15deaa passed frontend interactions, both native builds, Windows OCR geometry and selection/clipboard smoke checks. NSIS and DMG artifacts were generated successfully.
-- Latest optimized app is running silently from outputs/EchoLingo-installers/EchoLingo.app. The owner pressed Alt+D and explicitly confirmed the simplified popup is visible on their desktop. Local minimal DMG is generated and its checksum verified.
+## Latest work: cancellation, language fidelity and repeatable verification
+- Translation requests now have backend tickets and a presentation epoch. Edit, clear, Stop, Escape, close, outside-click hide and a new capture abort the old HTTP future. A hide before ticket allocation also invalidates the request; stale hide/source events or delayed layout cannot resurrect an abandoned popup.
+- Cancelled/superseded translations cannot commit history. Completion uses current privacy settings; clearing all history invalidates pending begins. Byte accounting includes JSON array delimiters, and a single oversized result is discarded before it can evict other healthy records.
+- DeepL preserves Simplified/Traditional targets with ZH-HANS/ZH-HANT; LibreTranslate uses zh/zt. A missing model or rejected target remains an explicit error; there is no silent Simplified fallback.
+- Native macOS checks now cover a unique private pasteboard's multiple Unicode/HTML/RTF/binary representations, empty restoration, PNG size boundaries and additional OCR geometry. They never touch the general clipboard or request access. The private AppKit fixture runs in the standalone CLI main thread; background Rust tests report that fixture skipped and still exercise the production static OCR/ABI entry.
+- New local preview tooling verifies bundle/signature identity, stages installation, preserves a rollback backup, refuses unsafe paths/processes, supports ancestor path aliases and uses Launch Services for a background hidden launch. Development outputs are retained; one canonical daily entry is ~/Applications/EchoLingo.app.
+- Independent review found and repaired pending-ticket native-hide and stale-result races plus aliased install-path identity. Storage fault tests cover replacement failures and Windows sharing locks.
 
 ## Confirmed product behavior
-- Independent installable Windows-first desktop app, also macOS. Not a browser product.
-- EchoLingo / Chinese name: Hui Sheng Yi. No HarmonyOS/DevEco SDK requested.
-- Silent tray/menu-bar startup; no window until a user action.
-- Alt+D translates selected text. No selection opens an empty floating view WITHOUT activating the app, focusing its textarea, moving the pointer, or calling an API.
-- Alt+S selects a screen region, OCRs it, then translates directly. No intermediate OCR result window.
-- Floating window is above other ordinary apps by default. Clicking outside hides it; no default timeout. Pin means retain on outside click, not a different z-order.
-- Original text, language bar, then multiple provider results; original EchoLingo styling inspired only by the reference information order.
-- Custom translation AND OCR APIs; local system OCR remains the default. Cloud OCR uploads only after explicit provider selection.
+- Independent lightweight Windows-first desktop app, also macOS; Tauri 2, vanilla TypeScript and system WebView. No HarmonyOS/DevEco SDK, bundled Chromium or OCR models.
+- Default startup is silent tray/menu-bar residency. Translation is a transient minimal popup: tiny pin/more/close toolbar, source, language strip and multiple provider results. Settings/history are a separate management presentation.
+- Alt+D acquires selection before presenting inactive content. Unavailable/empty selection opens a quiet blank popup without autofocus, permission prompts or an API request. Clipboard-restoration failures remain visible.
+- Alt+S region OCR translates directly. Local system OCR is default; cloud uploads require an explicitly selected OCR provider. No silent fallback, telemetry or background clipboard polling.
+- Popup is above ordinary windows; an outside click hides unless pinned. No default timeout. Fit/resize never shows or focuses a window.
+- Enter submits, Shift+Enter inserts a line break; IME confirmation and key repeat do not submit.
+- Only captured selection/OCR soft wraps are normalized; paragraphs/code/lists and raw restore are preserved. Typed/pasted text and history are untouched. Paragraph inference remains heuristic.
+- Translation: OpenAI-compatible, DeepL, LibreTranslate plus official DeepSeek/Zhipu/SiliconFlow/Qwen presets. OCR: macOS Vision/Windows.Media.Ocr, Baidu, Tencent, compatible vision and JSON gateway. Credentials stay in OS storage, bound to protocol and endpoint origin.
+- macOS native Swift is statically linked in the app process. Permission refresh/hotkeys only check; explicit Settings actions request/open access. Ad hoc signing can still invalidate TCC authorization across rebuilds.
 
-## Implemented and verified so far
-- Public GitHub repo and matching local Codex project folder.
-- Detailed Bob research, requirements, review notes, Windows manual test plan.
-- Translation: OpenAI-compatible, DeepL, LibreTranslate, with official supplier presets for DeepSeek, Zhipu, SiliconFlow and Qwen (region/workspace aware).
-- OCR: native Windows.Media.Ocr / macOS Vision, Baidu OAuth/form, Tencent TC3, compatible Vision API and advanced JSON gateway. Supplier-specific credential fields; new cloud entries do not change the active local engine.
-- OS credentials bound to protocol and normalized endpoint origin, preventing old keys crossing suppliers; bounded history/favorites, themes, provider and hotkey settings.
-- Native clipboard-preserving selection, screenshot capture, inactive floating windows and outside-click handling.
-- 30 Rust tests and 45 frontend tests passed locally; isolated frontend/IPC regressions passed, including dual credentials, partial-field rejection, protocol/origin changes, no secrets in Settings and the minimal-popup/captured-text behavior above.
-- macOS OCR fixture + PNG base64 roundtrip passed.
-- GitHub Actions run 40102326336 on commit e15deaa passed all three jobs: Windows/macOS builds and tests plus frontend interactions. Actual NSIS and DMG packages include the minimal popup, wrapped-text handling, supplier adapters and origin-bound credentials. Local optimized Apple Silicon executable: 4.82 MiB, ad-hoc signature verified.
+## Verification evidence
+- Current local checks: 50 Rust tests, 45 frontend unit tests, complete isolated UI/IPC regression, 22 installer safety/rollback fixtures; typecheck, production build, formatting and npm audit passed.
+- Optimized macOS app/DMG, ad hoc signature integrity and hdiutil checksum verification passed. The canonical ~/Applications app is installed and running; a read-only probe found zero onscreen regular windows and no foreground activation. Main-process metrics and the retained OCR timing outlier are in docs/test-report.md and docs/validation/macos-preview-20261025.json.
+- Baseline latest main CI: run 40167604502 on 856e1a7 passed Windows/macOS native builds and frontend interactions. This predates the current hardening branch; current branch results are recorded separately, never inferred from the baseline.
+- Prior user confirmation of the minimal popup belongs to the older e15deaa installation. It is not acceptance of the latest permission/cancellation changes.
 
-## In progress
-- Local preview acceptance using generated installers; real supplier account testing requires the owner to configure credentials inside EchoLingo.
-- Public release publication after the applicable manual acceptance gates. Source is already public; do not call automated checks a completed end-to-end user test.
+## Remaining external acceptance
+- Installed-app real IME; actual selection and region capture/cancel; same-version restart and cross-version TCC behavior on the owner's Mac.
+- Windows actual target apps, global shortcuts, region selector, mixed DPI/multiple displays, installation/upgrade/uninstall on a real Windows desktop. Controlled CI fixtures do not establish all of these.
+- Live supplier-account translation/OCR. Tests use dummy credentials and local HTTP; do not inspect Bob credentials. The owner stopped that inspection and requested official-document research instead.
+- Full WebView process-group memory, end-to-end cold startup/capture latency, commercial signing/Apple notarization, auto-update/store distribution.
+- No stable release until the platform acceptance checklist is complete. A preview must retain explicit limitations. Candidate features in roadmap.zh-CN.md are not all promised for v0.1.
 
-## Verification boundaries
-- User confirmed the independent Mac window is visible. Native automation screenshots returned white even for its normal main view; do not treat that as a proven application rendering failure.
-- The owner stopped Bob credential inspection. Current research uses official configuration and supplier API documentation only. Live third-party API calls are NOT claimed as tested; protocol fixtures are clearly labelled. Do not resume inspecting another app's secrets.
-- macOS Accessibility permission for this app/helper is still not granted. Actual selected-text permission workflow remains to be accepted on the user's desktop.
-- Interactive region selection, mixed DPI/multiple displays, real Windows ARM VM/x64 machines and installation/uninstallation need the manual plan.
-- No commercial signing, Apple notarization or store submission. Stable release gates are not yet complete.
+## Local entry and sources
+- Use the canonical app after installation: ~/Applications/EchoLingo.app. Other .app outputs are build/recovery artifacts, not separate products to run simultaneously.
+- See [local preview tooling](local-preview.zh-CN.md), [test report](test-report.md), [Windows acceptance plan](windows-test-plan.zh-CN.md), and [native verification](native-testing.md).
+- The main source checkout remains this repository. Previous development chat is titled “查询 GitHub 多账号连接”, associated with the parent ni-ne directory; project files and Codex chat history are stored separately.

@@ -26,14 +26,25 @@ pub fn endpoint(p: &Provider) -> Result<String, String> {
 pub fn deepl_language(language: &str, source: bool) -> Option<String> {
     match language {
         "auto" if source => None,
-        "zh-Hans" | "zh-Hant" | "zh" => Some("ZH".into()),
+        // DeepL accepts Chinese sources as ZH, but its target variants are
+        // distinct. Never turn a Traditional Chinese target into legacy ZH.
+        // https://github.com/DeepL/deepl-api-prompts/blob/main/mcp.md
+        "zh-Hans" | "zh-Hant" if source => Some("ZH".into()),
+        "zh-Hans" => Some("ZH-HANS".into()),
+        "zh-Hant" => Some("ZH-HANT".into()),
+        "zh" => Some("ZH".into()),
         "en" => Some(if source { "EN" } else { "EN-US" }.into()),
         other => Some(other.to_ascii_uppercase()),
     }
 }
 fn libre_language(language: &str) -> &str {
     match language {
-        "zh-Hans" | "zh-Hant" => "zh",
+        // LibreTranslate/Argos uses zt for Traditional Chinese in either
+        // direction. A self-hosted instance must have that language installed;
+        // an upstream rejection must remain an error, with no zh fallback.
+        // https://docs.libretranslate.com/guides/supported_languages/
+        "zh-Hans" => "zh",
+        "zh-Hant" => "zt",
         other => other,
     }
 }
@@ -119,6 +130,8 @@ pub async fn translate_one(
         if !status.is_success() {
             // Do not return raw upstream bodies: gateways may echo credentials or source text.
             return Err(match status.as_u16() {
+                400 if matches!(p.kind.as_str(), "deepl" | "libretranslate") =>
+                    "服务不接受当前语言或请求参数（HTTP 400）；请确认服务已支持所选语言，目标语言不会自动替换".into(),
                 401 | 403 => format!(
                     "API 认证失败（HTTP {}），请检查密钥和服务权限",
                     status.as_u16()
@@ -208,6 +221,178 @@ mod tests {
         let v = request_body(&p, "hello", "auto", "en", "");
         assert!(v.get("source_lang").is_none());
         assert_eq!(v["target_lang"], "EN-US");
+    }
+
+    #[test]
+    fn chinese_scripts_remain_distinct_for_each_protocol() {
+        let mut p = provider();
+        for (language, deepl_target, libre_code) in
+            [("zh-Hans", "ZH-HANS", "zh"), ("zh-Hant", "ZH-HANT", "zt")]
+        {
+            p.kind = "deepl".into();
+            let v = request_body(&p, "paragraph 1\n\nparagraph 2", language, language, "");
+            assert_eq!(v["target_lang"], deepl_target);
+            assert_eq!(v["source_lang"], "ZH");
+            assert_eq!(v["text"][0], "paragraph 1\n\nparagraph 2");
+            p.kind = "libretranslate".into();
+            let v = request_body(&p, "paragraph 1\n\nparagraph 2", language, language, "");
+            assert_eq!(v["source"], libre_code);
+            assert_eq!(v["target"], libre_code);
+            assert_eq!(v["q"], "paragraph 1\n\nparagraph 2");
+            assert_eq!(
+                request_body(&p, "hello", "auto", language, "")["source"],
+                "auto"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn chinese_script_http_requests_never_fall_back_after_rejection() {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+        use std::time::Duration;
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let address = listener.local_addr().unwrap();
+        let worker = std::thread::spawn(move || {
+            let mut received = Vec::new();
+            // Each target succeeds once and is rejected once. Count every
+            // request so a hidden retry using a different script cannot pass.
+            for kind in ["deepl", "libretranslate"] {
+                for (language, translated) in [("zh-Hans", "软件"), ("zh-Hant", "軟體")] {
+                    for reject in [false, true] {
+                        let deadline = Instant::now() + Duration::from_secs(8);
+                        let mut stream = loop {
+                            match listener.accept() {
+                                Ok((stream, _)) => break stream,
+                                Err(e)
+                                    if e.kind() == std::io::ErrorKind::WouldBlock
+                                        && Instant::now() < deadline =>
+                                {
+                                    std::thread::sleep(Duration::from_millis(5))
+                                }
+                                Err(e) => panic!("Fixture accept failed or timed out: {e}"),
+                            }
+                        };
+                        stream.set_nonblocking(false).unwrap();
+                        stream
+                            .set_read_timeout(Some(Duration::from_secs(5)))
+                            .unwrap();
+                        let mut bytes = Vec::new();
+                        let header_end = loop {
+                            let mut chunk = [0_u8; 4096];
+                            let n = stream.read(&mut chunk).unwrap();
+                            assert!(n > 0);
+                            bytes.extend_from_slice(&chunk[..n]);
+                            if let Some(i) = bytes.windows(4).position(|w| w == b"\r\n\r\n") {
+                                break i + 4;
+                            }
+                            assert!(bytes.len() < 64 * 1024);
+                        };
+                        let headers = String::from_utf8(bytes[..header_end].to_vec()).unwrap();
+                        let length: usize = headers
+                            .lines()
+                            .find_map(|line| {
+                                let (name, value) = line.split_once(':')?;
+                                name.eq_ignore_ascii_case("content-length")
+                                    .then(|| value.trim().parse().unwrap())
+                            })
+                            .unwrap();
+                        assert!(length < 64 * 1024);
+                        while bytes.len() < header_end + length {
+                            let mut chunk = [0_u8; 4096];
+                            let n = stream.read(&mut chunk).unwrap();
+                            assert!(n > 0);
+                            bytes.extend_from_slice(&chunk[..n]);
+                        }
+                        let body: Value =
+                            serde_json::from_slice(&bytes[header_end..header_end + length])
+                                .unwrap();
+                        let response = if reject {
+                            json!({"error":"NEVER-ECHO-KEY software source text"})
+                        } else if kind == "deepl" {
+                            json!({"translations":[{"text":translated}]})
+                        } else {
+                            json!({"translatedText":translated})
+                        }
+                        .to_string();
+                        let status = if reject { "400 Bad Request" } else { "200 OK" };
+                        write!(stream, "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{response}", response.len()).unwrap();
+                        received.push((kind, language, headers.to_ascii_lowercase(), body));
+                    }
+                }
+            }
+            // The client must not open a ninth connection for a fallback.
+            assert_eq!(
+                listener.accept().unwrap_err().kind(),
+                std::io::ErrorKind::WouldBlock
+            );
+            received
+        });
+        let client = reqwest::Client::builder()
+            .timeout(Duration::from_secs(5))
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+            .unwrap();
+        let mut p = provider();
+        for kind in ["deepl", "libretranslate"] {
+            p.kind = kind.into();
+            p.base_url = format!("http://{address}");
+            for (language, translated) in [("zh-Hans", "软件"), ("zh-Hant", "軟體")] {
+                for reject in [false, true] {
+                    let result = translate_one(
+                        &client,
+                        &p,
+                        Ok("NEVER-ECHO-KEY".into()),
+                        "software\n\nsource text",
+                        "auto",
+                        language,
+                    )
+                    .await;
+                    if reject {
+                        assert!(result.text.is_empty());
+                        let error = result.error.unwrap();
+                        assert!(error.contains("HTTP 400"));
+                        assert!(error.contains("目标语言不会自动替换"));
+                        assert!(!error.contains("NEVER-ECHO-KEY"));
+                        assert!(!error.contains("source text"));
+                    } else {
+                        assert!(result.error.is_none(), "{:?}", result.error);
+                        assert_eq!(result.text, translated);
+                    }
+                }
+            }
+        }
+        let received = worker.join().unwrap();
+        assert_eq!(received.len(), 8);
+        for (kind, language, headers, body) in received {
+            if kind == "deepl" {
+                assert!(headers.starts_with("post /v2/translate "));
+                assert!(headers.contains("authorization: deepl-auth-key never-echo-key"));
+                assert!(body.get("source_lang").is_none());
+                assert_eq!(
+                    body["target_lang"],
+                    if language == "zh-Hans" {
+                        "ZH-HANS"
+                    } else {
+                        "ZH-HANT"
+                    }
+                );
+                assert_eq!(body["text"][0], "software\n\nsource text");
+                assert!(!body.to_string().contains("NEVER-ECHO-KEY"));
+            } else {
+                assert!(headers.starts_with("post /translate "));
+                assert!(!headers.contains("authorization:"));
+                assert_eq!(body["source"], "auto");
+                assert_eq!(
+                    body["target"],
+                    if language == "zh-Hans" { "zh" } else { "zt" }
+                );
+                assert_eq!(body["q"], "software\n\nsource text");
+                assert_eq!(body["api_key"], "NEVER-ECHO-KEY");
+            }
+        }
     }
     #[tokio::test]
     async fn actual_http_request_is_parsed_and_errors_are_redacted() {

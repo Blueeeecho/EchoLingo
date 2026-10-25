@@ -20,7 +20,7 @@
 安装包通过 [GitHub Actions](https://github.com/Blueeeecho/EchoLingo/actions) 构建，验证后的预览版位于 [Releases](https://github.com/Blueeeecho/EchoLingo/releases)。没有附件时说明尚未完成验证，请勿把源代码 ZIP 当安装包。
 
 - Windows：Windows 10 1809+ / Windows 11 x64，需系统 OCR 语言包与 WebView2。安装包可安装缺失的 WebView2（需要联网）。
-- macOS：macOS 12+，当前优先 Apple Silicon。取词可能需要辅助功能权限，截图需要屏幕录制权限。原生 helper 的授权与应用本身可能不同，见诊断与 [原生说明](docs/native-testing.md)。
+- macOS：macOS 12+，当前优先 Apple Silicon。取词可能需要辅助功能权限，截图需要屏幕录制权限。原生代码运行在应用自身进程中；快捷键只检查权限，在设置中明确授权。预览版的临时签名仍可能在重建后使授权失效，见 [原生说明](docs/native-testing.md)。
 - 初版安装包尚无商业代码签名/Apple 公证，会出现系统来源提示；不包含商店上架或自动更新。
 
 ## 首次配置
@@ -44,7 +44,7 @@ OCR 默认不需要密钥。需要云端识别时，在“OCR 服务”中添加
 | 静默 OCR 到剪贴板 | Alt+C | Option+C |
 | 输入翻译 | Alt+A | Option+A |
 
-设置中可修改或留空禁用。快捷键冲突会报告错误；若同时运行 Bob 等工具，需为其中一个更换快捷键。没有选中文字时按 Alt+D，会打开空白浮窗，不激活应用或自动聚焦输入框。用户主动点击输入区后可输入，Ctrl/Cmd+Enter 翻译，Esc 取消截图/隐藏窗口。
+设置中可修改或留空禁用。快捷键冲突会报告错误；若同时运行 Bob 等工具，需为其中一个更换快捷键。没有选中文字时按 Alt+D，会打开空白浮窗，不激活应用或自动聚焦输入框。用户主动点击输入区后可输入，Enter 翻译、Shift+Enter 换行；输入法确认不提交。翻译按钮在请求期间变为停止按钮；编辑、清空或隐藏浮窗也会取消当前翻译，取消的任务不会再写入历史。已经发送到供应商的请求可能仍计费，停止本机等待不表示供应商退款。Esc 取消截图/隐藏窗口。
 
 启动默认只出现在托盘/菜单栏，不主动弹窗口。浮窗默认位于其他普通窗口之上；点击外部立即隐藏，不使用倒计时。“钉住窗口”可让它在点击外部后保留。关闭窗口后应用仍在托盘运行，从托盘菜单退出。
 
@@ -61,6 +61,7 @@ OCR 默认不需要密钥。需要云端识别时，在“OCR 服务”中添加
 ```sh
 npm ci
 npm test
+npm run test:ui # 另一个终端先启动 npm run dev；需 Playwright Chromium
 npm run build
 cargo test --manifest-path src-tauri/Cargo.toml
 npm run tauri dev
@@ -81,6 +82,7 @@ powershell.exe -NoProfile -STA -ExecutionPolicy Bypass -File src-tauri/native/wi
 - [开发进度](docs/status.md) · [验证报告](docs/test-report.md)
 - [个性化需求与路线图](docs/roadmap.zh-CN.md)
 - [原生平台说明](docs/native-testing.md)
+- [macOS 固定预览入口、安装回滚与性能采样](docs/local-preview.zh-CN.md)
 
 原图覆盖翻译、连续 OCR、任意插件执行和完整词典功能尚未实现。Windows 多屏、混合 DPI、特定应用选文等必须按报告补真实桌面验收，不能用构建成功替代。
 

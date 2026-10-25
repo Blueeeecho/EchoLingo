@@ -1,6 +1,7 @@
 import './styles.css';
 import { createOcrUi } from './ocr-ui';
 import { installPanelLayout } from './panel-layout';
+import type { TranslationPresentation } from './panel-layout';
 import { normalizeCapturedText } from './text-normalization';
 import { credentialScope } from './credential-scope';
 import { inferProviderPreset, PROVIDER_PRESETS, qwenBaseUrl, qwenSettingsFromUrl } from './provider-presets';
@@ -32,6 +33,9 @@ let favoritesOnly = false;
 let pinned = false;
 let generation = 0;
 let translating = false;
+let activeTranslationId: number | null = null;
+let translationPresentation: TranslationPresentation = { epoch: 0, presented: false };
+let translationStartQueue: Promise<void> = Promise.resolve();
 let sourceComposing = false;
 let permissionBusy = false;
 const macDesktop = desktop && /Mac/.test(navigator.platform);
@@ -208,14 +212,16 @@ function resizeSourceEditor(): void {
   }
   const empty = !source.value.trim();
   document.body.classList.toggle('source-empty', empty);
-  translateButton.disabled = translating || !settingsReady || empty;
+  translateButton.disabled = !settingsReady || (!translating && empty);
   for (const id of ['#copy-source', '#speak-source', '#clear-source']) $<HTMLButtonElement>(id).disabled = empty;
   notifyLayout();
 }
 function setLoading(value: boolean): void {
   translating = value;
-  translateButton.disabled = value || !settingsReady || !source.value.trim();
-  $('#translate-button-label').textContent = value ? '翻译中' : '翻译';
+  translateButton.disabled = !settingsReady || (!value && !source.value.trim());
+  translateButton.title = value ? '停止当前翻译' : '翻译';
+  translateButton.setAttribute('aria-label', value ? '停止翻译' : '翻译');
+  $('#translate-button-label').textContent = value ? '停止' : '翻译';
   $('#translate-arrow').hidden = value;
   $('#translate-spinner').hidden = !value;
   resultsContainer.setAttribute('aria-busy', String(value));
@@ -231,11 +237,37 @@ function emptyResults(): void {
 }
 function invalidateResults(): void {
   cancelAutoHide();
+  cancelActiveTranslation();
   generation += 1;
   setLoading(false);
   currentResults = [];
   resultSource = '';
   emptyResults();
+}
+function cancelActiveTranslation(): void {
+  const requestId = activeTranslationId;
+  activeTranslationId = null;
+  if (desktop && requestId !== null) void invoke('cancel_translation', { requestId }).catch(reportError);
+}
+function stopPendingTranslation(): void {
+  if (!translating) return;
+  invalidateResults();
+  status('翻译已取消');
+}
+function applyTranslationPresentation(presentation: TranslationPresentation): void {
+  // Native events and IPC responses may arrive out of order. Only newer
+  // presentation epochs may invalidate an in-progress UI generation.
+  if (presentation.epoch < translationPresentation.epoch) return;
+  const changed = presentation.epoch > translationPresentation.epoch;
+  translationPresentation = presentation;
+  if (changed) stopPendingTranslation();
+}
+function beginTranslation(presentationEpoch: number): Promise<number> {
+  // IPC handlers can run concurrently. Preserve ticket allocation order when
+  // the user edits and submits again before an earlier allocation returns.
+  const ticket = translationStartQueue.then(() => invoke<number>('begin_translation', { presentationEpoch }));
+  translationStartQueue = ticket.then(() => undefined, () => undefined);
+  return ticket;
 }
 function setSourceText(text: string): void {
   clearOriginalCapture();
@@ -248,7 +280,9 @@ function clearOriginalCapture(): void {
   originalCapture = null;
   $('#restore-original-breaks').hidden = true;
 }
-async function receiveCapturedText(payload: SourceTextEvent): Promise<void> {
+async function receiveCapturedText(payload: SourceTextEvent & { presentationEpoch?: number }): Promise<void> {
+  const presentationEpoch = payload.presentationEpoch ?? translationPresentation.epoch;
+  if (presentationEpoch < translationPresentation.epoch) return;
   // Preserve an unfinished credentials editor rather than displaying it over a
   // captured translation or silently discarding its fields. Latest capture wins.
   if (allModals.some((modal) => !modal.hidden)) { queuedCapture = payload; queuedInputFocus = false; return; }
@@ -264,7 +298,14 @@ async function receiveCapturedText(payload: SourceTextEvent): Promise<void> {
     restore.hidden = false;
   }
   const token = generation;
-  await panelLayout.presentPopup();
+  try {
+    const presentation = await panelLayout.presentPopup(presentationEpoch);
+    if (presentation) applyTranslationPresentation(presentation);
+    else if (desktop) return;
+  } catch (error) {
+    if (errorMessage(error).startsWith('CANCELLED:')) return;
+    throw error;
+  }
   if (token !== generation || currentView !== 'translate') return;
   if (payload.mode === 'translate') { if (settingsReady) run(translate); else pendingTranslate = true; }
   else if (payload.mode === 'ocr') status('文字识别完成');
@@ -324,7 +365,9 @@ async function translate(): Promise<void> {
   if (!requireDesktop()) return;
   if (!settings.providers.some((provider) => provider.enabled)) { setView('settings'); toast('请先添加并启用一个翻译服务。'); return; }
   const token = ++generation;
+  const presentationEpoch = translationPresentation.epoch;
   const from = sourceLanguage.value, to = targetLanguage.value;
+  currentResults = []; resultSource = '';
   setLoading(true);
   resultsContainer.replaceChildren();
   $('.results-column').hidden = false;
@@ -333,7 +376,10 @@ async function translate(): Promise<void> {
   $('#translation-state').textContent = '正在请求 API';
   status('正在翻译…');
   try {
-    const results = await invoke<TranslationResult[]>('translate', { text, sourceLanguage: from, targetLanguage: to });
+    const requestId = await beginTranslation(presentationEpoch);
+    if (token !== generation) { await invoke('cancel_translation', { requestId }); return; }
+    activeTranslationId = requestId;
+    const results = await invoke<TranslationResult[]>('translate', { requestId, text, sourceLanguage: from, targetLanguage: to });
     if (token !== generation) return;
     currentResults = results;
     resultSource = text;
@@ -341,6 +387,7 @@ async function translate(): Promise<void> {
     status(results.some((result) => !result.error) ? '翻译完成' : '服务返回错误');
   } catch (error) {
     if (token !== generation) return;
+    if (errorMessage(error).startsWith('CANCELLED:')) { invalidateResults(); status('翻译已取消'); return; }
     resultsContainer.replaceChildren();
     const card = node('article', 'result-card');
     card.append(node('p', 'result-error', errorMessage(error)));
@@ -348,7 +395,7 @@ async function translate(): Promise<void> {
     $('#translation-state').textContent = '翻译失败';
     status('翻译失败');
   } finally {
-    if (token === generation) { setLoading(false); scheduleAutoHide(); }
+    if (token === generation) { activeTranslationId = null; setLoading(false); scheduleAutoHide(); }
     await loadHistory().catch(() => undefined);
   }
 }
@@ -757,7 +804,7 @@ for (const button of document.querySelectorAll<HTMLButtonElement>('[data-open-pe
   }).finally(() => setPermissionBusy(false));
 });
 window.addEventListener('focus', () => { if (currentView === 'settings') void refreshPermissionStatus(); });
-translateButton.addEventListener('click', () => run(translate));
+translateButton.addEventListener('click', () => { if (translating) stopPendingTranslation(); else run(translate); });
 source.addEventListener('input', () => { clearOriginalCapture(); resizeSourceEditor(); invalidateResults(); });
 window.addEventListener('resize', resizeSourceEditor);
 $('#restore-original-breaks').addEventListener('click', () => {
@@ -783,7 +830,7 @@ $('#more-toggle').addEventListener('click', (event) => {
   if ($('#popup-more-menu').hidden) openMoreMenu(event.detail === 0); else closeMoreMenu();
 });
 for (const id of ['#close-popup', '#close-management']) $(id).addEventListener('click', () => run(async () => {
-  closeMoreMenu(); cancelAutoHide(); if (requireDesktop()) await invoke('hide_window');
+  closeMoreMenu(); cancelAutoHide(); stopPendingTranslation(); if (requireDesktop()) await invoke('hide_window');
 }));
 $('#popup-more-menu').addEventListener('click', (event) => {
   if ((event.target as HTMLElement).closest('button[role="menuitem"]')) closeMoreMenu();
@@ -904,11 +951,11 @@ document.addEventListener('keydown', (event) => {
     event.preventDefault(); if (!event.repeat && !translating && source.value.trim()) { setView('translate'); run(translate); }
   }
   if (event.key === 'Escape') {
-    if (desktop) { event.preventDefault(); cancelAutoHide(); run(() => invoke('hide_window')); }
+    if (desktop) { event.preventDefault(); cancelAutoHide(); stopPendingTranslation(); run(() => invoke('hide_window')); }
     else if (currentView !== 'translate') setView('translate');
   }
 });
-window.addEventListener('beforeunload', () => { panelLayout.dispose(); cancelAutoHide(); for (const unlisten of cleanupListeners) unlisten(); if ('speechSynthesis' in window) window.speechSynthesis.cancel(); });
+window.addEventListener('beforeunload', () => { cancelActiveTranslation(); panelLayout.dispose(); cancelAutoHide(); for (const unlisten of cleanupListeners) unlisten(); if ('speechSynthesis' in window) window.speechSynthesis.cancel(); });
 
 async function initialize(): Promise<void> {
   const presetSelect = $<HTMLSelectElement>('#provider-preset');
@@ -925,11 +972,13 @@ async function initialize(): Promise<void> {
   status('正在加载设置…');
   try {
     // Listen before loading settings so an incoming native selection is not lost during startup.
-    cleanupListeners.push(await listen<SourceTextEvent>('source-text', (event) => run(() => receiveCapturedText(event.payload))));
+    cleanupListeners.push(await listen<SourceTextEvent & { presentationEpoch?: number }>('source-text', (event) => run(() => receiveCapturedText(event.payload))));
     cleanupListeners.push(await listen('focus-input', requestInputFocus));
+    cleanupListeners.push(await listen<TranslationPresentation>('translation-presentation', (event) => applyTranslationPresentation(event.payload)));
     cleanupListeners.push(await listen('ocr-copied', () => { status('OCR 文字已复制到剪贴板'); }));
     cleanupListeners.push(await listen<string>('action-error', (event) => handleActionError(event.payload)));
     cleanupListeners.push(await listen<string>('shortcut-error', (event) => toast(event.payload, 'error', 8000)));
+    applyTranslationPresentation(await invoke<TranslationPresentation>('get_translation_presentation'));
     settings = await invoke<Settings>('get_settings');
     settingsReady = true;
     applyTheme(); renderLanguages(); renderSettings(); renderShortcutHints();

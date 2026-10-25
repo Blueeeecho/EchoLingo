@@ -47,9 +47,17 @@ The application polls this state only while its floating window is visible and c
 
 ## Reproducible noninteractive tests
 
-Run commands from the repository root. None of the self-tests take screenshots, inspect the current selection, or alter the clipboard.
+Run commands from the repository root. None of the self-tests take screenshots, inspect the current selection, request system permissions, or alter the user's general clipboard. The macOS self-test writes only a uniquely named private fixture pasteboard, which is released after testing.
 
 ### macOS
+
+The repeatable runner compiles for the current Mac architecture in a temporary directory, runs the fixture suite, and removes the standalone executable afterward:
+
+```sh
+bash tests/macos-native-self-test.sh
+```
+
+To keep a CLI for additional local diagnostics, compile it explicitly:
 
 ```sh
 mkdir -p work/native-check
@@ -60,7 +68,13 @@ work/native-check/echolingo-native-helper --diagnostics
 work/native-check/echolingo-native-helper --self-test
 ```
 
-Use `x86_64-apple-macosx12.0` on Intel. This optional CLI is only a standalone development self-test; the installed app does not execute it. `build.rs` chooses the Rust target architecture automatically, so CI can build Intel and Apple Silicon independently. The self-test draws `EchoLingo translation 2468` into an in-memory CoreText image, runs the real Vision recognizer, and requires the app name and digits to be recognized. It also checks the generated PNG's base64 roundtrip (`pngBase64RoundtripPassed`). Rust tests additionally call the same statically linked entry point used by the app, verify the process identity and read-only permission status, and reject unknown permission kinds. These tests never invoke the grant/request path. `ocrFixturePassed: true` confirms the OCR path, not interactive selection, permissions, or shortcut registration.
+Use `x86_64-apple-macosx12.0` on Intel. This optional CLI is only a standalone development self-test; the installed app does not execute it. `build.rs` chooses the Rust target architecture automatically, so CI can build Intel and Apple Silicon independently. The self-test draws `EchoLingo translation 2468` into an in-memory CoreText image, runs the real Vision recognizer, and requires the app name and digits to be recognized. It also checks the generated PNG's base64 roundtrip (`pngBase64RoundtripPassed`), rejects empty/over-8-MiB encoder input, and accepts the inclusive 8-MiB boundary (`pngSizeGuardsPassed`). The exact boundary case tests the byte limit and encoding, not image decoding.
+
+`privatePasteboardFixturePassed` runs the production `SavedPasteboard` snapshot/restore against a unique private pasteboard. It verifies multiple items and every materialized representation byte-for-byte: Unicode with NUL, UTF-8/UTF-16, HTML, RTF, custom binary and zero-length data. It also checks restoration of an originally empty private pasteboard. This fixture requires the standalone CLI's actual main thread: AppKit may synchronously fulfill a synthesized clipboard-format promise and warns when asked to do so on a background thread. A Rust unit-test worker has no active main event loop, so its static-entry self-test deliberately reports `privatePasteboardFixturePassed: false` / `privatePasteboardFixtureSkipped: true` and still runs OCR, geometry, PNG and ABI checks. Use the shell runner to obtain the private pasteboard pass; no synchronous main-thread dispatch is attempted from a worker.
+
+`generalClipboardTouched: false` and `interactiveCaptureTested: false` explicitly mark the boundary: this is no evidence of real Cmd+C injection, source-app compatibility, clipboard races or TCC grants. Paragraph fixtures verify spacing/column reset, scale invariance, original ordering, lists, fenced code, invalid/zero geometry and empty input.
+
+Rust tests additionally call the same statically linked entry point used by the app, verify the process identity and read-only permission status, and reject unknown permission kinds. These tests never invoke the grant/request path. `ocrFixturePassed: true` confirms the OCR path, not interactive selection, permissions, or shortcut registration.
 
 ### Windows PowerShell 5.1
 

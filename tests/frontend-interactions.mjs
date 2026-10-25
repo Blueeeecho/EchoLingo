@@ -22,12 +22,34 @@ try {
     const scope = (provider) => `${provider.id}:${provider.kind}:${new URL(provider.baseUrl).origin}`;
     translationKeys.set(scope(state.providers[0]), 'qa-original-translation-key');
     const fixture = window.__qa = { permissionState: { platform: 'macos', supported: true, identity: 'application-process', runningBundledApp: true, bundleIdentifier: 'io.github.qa.echolingo', processId: 1, accessibilityGranted: false, screenCaptureGranted: false }, permissionReads: 0, permissionRequests: [], permissionSettings: [], holdTranslation: false, releaseTranslation: () => {}, translationError: null, settings: state, saveCalls: 0, keyCalls: 0, ocrKeyCalls: 0, ocrTestCalls: 0, ocrDeleteCalls: 0, credentialWrites: [], settingsWrites: [], hideCalls: 0, layoutCalls: [], showCalls: [], translationRequests: [], dragCalls: 0, holdSave: false, failSave: false, releaseSave: () => {}, emit: (name, payload) => listeners.get(name)?.({ event: name, payload, id: 1 }) };
+    Object.assign(fixture, { nextTranslationId: 0, cancellationRequests: [], holdBegin: false, holdBeginBeforeAllocate: false, beginAttempts: [], releaseBegin: () => {}, presentation: { epoch: 0, presented: true }, holdFit: false, fitWaits: 0, releaseFit: () => {}, showPopupAttempts: [] });
+    const pendingTranslations = new Map(), cancelledTranslations = new Set();
+    let activeTranslationId = null;
+    const cancelTranslation = (id) => {
+      cancelledTranslations.add(id);
+      pendingTranslations.get(id)?.reject(new Error('CANCELLED: fixture translation cancelled'));
+      pendingTranslations.delete(id);
+      if (activeTranslationId === id) activeTranslationId = null;
+    };
+    const announcePresentation = () => fixture.emit('translation-presentation', structuredClone(fixture.presentation));
+    fixture.nativeHide = (announce = true) => {
+      fixture.presentation = { epoch: fixture.presentation.epoch + 1, presented: false };
+      if (activeTranslationId !== null) cancelTranslation(activeTranslationId);
+      if (announce) announcePresentation();
+      return structuredClone(fixture.presentation);
+    };
+    fixture.nativeShow = () => {
+      if (!fixture.presentation.presented) fixture.presentation = { epoch: fixture.presentation.epoch + 1, presented: true };
+      announcePresentation();
+      return structuredClone(fixture.presentation);
+    };
     window.__TAURI_INTERNALS__ = {
       transformCallback: (callback) => { const id = ++callbackId; callbacks.set(id, callback); return id; },
       invoke: async (command, args = {}) => {
         if (command === 'plugin:event|listen') { listeners.set(args.event, callbacks.get(args.handler)); return 1; }
         if (command === 'get_settings') { for (const provider of fixture.settings.providers) provider.hasKey = translationKeys.has(scope(provider)); for (const provider of fixture.settings.ocrProviders) provider.hasKey = ocrKeys.has(scope(provider)); return structuredClone(fixture.settings); }
         if (command === 'get_history') return [];
+        if (command === 'get_translation_presentation') return structuredClone(fixture.presentation);
         if (command === 'permission_status') { fixture.permissionReads++; return structuredClone(fixture.permissionState); }
         if (command === 'request_permission') { fixture.permissionRequests.push(args.kind); if (args.kind === 'accessibility') fixture.permissionState.accessibilityGranted = true; else fixture.permissionState.screenCaptureGranted = true; return structuredClone(fixture.permissionState); }
         if (command === 'open_permission_settings') { fixture.permissionSettings.push(args.kind); return; }
@@ -45,12 +67,36 @@ try {
         if (command === 'set_ocr_api_key') { fixture.ocrKeyCalls++; const provider = fixture.settings.ocrProviders.find(item => item.id === args.providerId); if (provider) { provider.hasKey = true; ocrKeys.set(scope(provider), args.key); fixture.credentialWrites.push({ providerId: provider.id, kind: provider.kind, key: args.key }); } return; }
         if (command === 'delete_ocr_api_key') { fixture.ocrDeleteCalls++; const provider = fixture.settings.ocrProviders.find(item => item.id === args.providerId); if (provider) { ocrKeys.delete(scope(provider)); provider.hasKey = false; } return; }
         if (command === 'test_ocr_provider') { fixture.ocrTestCalls++; return 'QA OCR test succeeded'; }
-        if (command === 'hide_window') { fixture.hideCalls++; return; }
-        if (command === 'fit_window') { fixture.layoutCalls.push(args); return; }
+        if (command === 'hide_window') { fixture.hideCalls++; fixture.nativeHide(); return; }
+        if (command === 'fit_window') { fixture.layoutCalls.push(args); if (fixture.holdFit) { fixture.fitWaits++; await new Promise((resolve) => { fixture.releaseFit = resolve; }); } return; }
         if (command === 'start_window_drag') { fixture.dragCalls++; return; }
-        if (command === 'show_popup') { fixture.showCalls.push(structuredClone(fixture.layoutCalls.at(-1))); return; }
+        if (command === 'show_popup') {
+          fixture.showPopupAttempts.push(structuredClone(args));
+          if (args.presentationEpoch !== fixture.presentation.epoch) throw new Error('CANCELLED: stale popup presentation');
+          fixture.showCalls.push(structuredClone(fixture.layoutCalls.at(-1))); return fixture.nativeShow();
+        }
         if (command === 'set_pinned') return;
-        if (command === 'translate') { fixture.translationRequests.push(structuredClone(args)); if (fixture.holdTranslation) await new Promise((resolve) => { fixture.releaseTranslation = resolve; }); if (fixture.translationError) throw new Error(fixture.translationError); return [{ providerId: 'qa-service', providerName: 'QA IPC fixture', text: 'Isolated test translation fixture', elapsedMs: 50 }]; }
+        if (command === 'begin_translation') {
+          fixture.beginAttempts.push(structuredClone(args));
+          if (fixture.holdBeginBeforeAllocate) await new Promise((resolve) => { fixture.releaseBegin = resolve; });
+          if (!fixture.presentation.presented || args.presentationEpoch !== fixture.presentation.epoch) throw new Error('CANCELLED: stale translation presentation');
+          if (activeTranslationId !== null) cancelTranslation(activeTranslationId);
+          const id = ++fixture.nextTranslationId; activeTranslationId = id;
+          if (fixture.holdBegin) await new Promise((resolve) => { fixture.releaseBegin = resolve; });
+          return id;
+        }
+        if (command === 'cancel_translation') { fixture.cancellationRequests.push(args.requestId); cancelTranslation(args.requestId); return; }
+        if (command === 'translate') {
+          if (cancelledTranslations.has(args.requestId) || activeTranslationId !== args.requestId) throw new Error('CANCELLED: fixture translation cancelled');
+          fixture.translationRequests.push(structuredClone(args));
+          if (fixture.holdTranslation) await new Promise((resolve, reject) => {
+            pendingTranslations.set(args.requestId, { resolve, reject });
+            fixture.releaseTranslation = () => { pendingTranslations.delete(args.requestId); resolve(); };
+          });
+          if (fixture.translationError) throw new Error(fixture.translationError);
+          activeTranslationId = null;
+          return [{ providerId: 'qa-service', providerName: 'QA IPC fixture', text: 'Isolated test translation fixture', elapsedMs: 50 }];
+        }
         throw new Error(`Unimplemented QA command: ${command}`);
       },
     };
@@ -414,6 +460,124 @@ try {
   await page.locator('#cancel-provider-dialog').click();
   await page.waitForFunction(() => document.body.dataset.view === 'translate' && document.activeElement.id === 'source-text');
 
+  // Editing/clearing/stopping/hiding cancel the backend ticket. Native hide
+  // events also reset the UI, and a late ticket cannot start an abandoned HTTP job.
+  for (const action of ['edit', 'clear', 'stop', 'native-hide', 'escape', 'close']) {
+    await page.evaluate(() => { window.__qa.holdTranslation = true; });
+    await page.locator('#source-text').fill(`QA cancellation ${action}`);
+    const count = await page.evaluate(() => window.__qa.translationRequests.length);
+    await page.locator('#source-text').press('Enter');
+    await page.waitForFunction((count) => window.__qa.translationRequests.length === count + 1, count);
+    const requestId = await page.evaluate(() => window.__qa.translationRequests.at(-1).requestId);
+    assert.equal(await page.locator('#translate-button').getAttribute('aria-label'), '停止翻译');
+    if (action === 'edit') await page.locator('#source-text').fill('QA replacement text');
+    else if (action === 'clear') { await page.locator('#more-toggle').click(); await page.locator('#clear-source').click(); }
+    else if (action === 'stop') await page.locator('#translate-button').click();
+    else if (action === 'native-hide') await page.evaluate(() => window.__qa.nativeHide());
+    else if (action === 'escape') await page.keyboard.press('Escape');
+    else await page.locator('#close-popup').click();
+    await page.waitForFunction((id) => window.__qa.cancellationRequests.includes(id), requestId);
+    assert.equal(await page.locator('#results').getAttribute('aria-busy'), 'false');
+    assert.equal(await page.locator('.result-error').count(), 0);
+    assert.equal(await page.locator('#translate-button').getAttribute('aria-label'), '翻译');
+    await page.evaluate(() => window.__qa.nativeShow());
+  }
+  await page.evaluate(() => { window.__qa.holdTranslation = false; window.__qa.holdBegin = true; });
+  const beforeLateTicket = await page.evaluate(() => ({ requests: window.__qa.translationRequests.length, tickets: window.__qa.nextTranslationId }));
+  await page.locator('#source-text').fill('QA cancelled before ticket returned');
+  await page.locator('#source-text').press('Enter');
+  await page.waitForFunction((id) => window.__qa.nextTranslationId > id, beforeLateTicket.tickets);
+  await page.locator('#more-toggle').click(); await page.locator('#clear-source').click();
+  await page.evaluate(() => { window.__qa.holdBegin = false; window.__qa.releaseBegin(); });
+  await page.waitForFunction((id) => window.__qa.cancellationRequests.includes(id), beforeLateTicket.tickets + 1);
+  assert.equal(await page.evaluate(() => window.__qa.translationRequests.length), beforeLateTicket.requests);
+  await page.evaluate(() => { window.__qa.holdBegin = true; });
+  const beforeReplacement = await page.evaluate(() => ({ requests: window.__qa.translationRequests.length, tickets: window.__qa.nextTranslationId }));
+  await page.locator('#source-text').fill('QA old ticket delayed');
+  await page.locator('#source-text').press('Enter');
+  await page.waitForFunction((id) => window.__qa.nextTranslationId > id, beforeReplacement.tickets);
+  await page.locator('#source-text').fill('QA latest ticket wins');
+  await page.locator('#source-text').press('Enter');
+  assert.equal(await page.evaluate(() => window.__qa.nextTranslationId), beforeReplacement.tickets + 1);
+  await page.evaluate(() => { window.__qa.holdBegin = false; window.__qa.releaseBegin(); });
+  await page.waitForFunction((count) => window.__qa.translationRequests.length === count + 1, beforeReplacement.requests);
+  await page.getByText('Isolated test translation fixture', { exact: true }).waitFor();
+  assert.equal(await page.evaluate(() => window.__qa.translationRequests.at(-1).text), 'QA latest ticket wins');
+
+  // A cancellation returned only by the backend must also clear the previous
+  // successful result's state, so its service row/auto-hide/swap logic is inert.
+  await page.evaluate(() => { window.__qa.translationError = 'CANCELLED: backend fixture cancellation'; });
+  await page.locator('#translate-button').click();
+  await page.waitForFunction(() => document.querySelector('#results').getAttribute('aria-busy') === 'false');
+  assert.equal(await page.locator('#popup-services').isVisible(), true);
+  assert.equal(await page.locator('.result-text, .result-error').count(), 0);
+  await page.evaluate(() => { window.__qa.translationError = null; window.__qa.holdBeginBeforeAllocate = true; });
+
+  // Hide before the backend has even allocated a ticket. Withhold the native
+  // event entirely: the epoch check, rather than event delivery order, must
+  // prevent an abandoned translation from starting its HTTP work.
+  const beforeNativeHide = await page.evaluate(() => ({ requests: window.__qa.translationRequests.length, attempts: window.__qa.beginAttempts.length }));
+  await page.locator('#source-text').fill('QA hidden before ticket allocation');
+  await page.locator('#source-text').press('Enter');
+  await page.waitForFunction((count) => window.__qa.beginAttempts.length > count, beforeNativeHide.attempts);
+  const delayedHide = await page.evaluate(() => window.__qa.nativeHide(false));
+  await page.evaluate(() => { window.__qa.holdBeginBeforeAllocate = false; window.__qa.releaseBegin(); });
+  await page.waitForFunction(() => document.querySelector('#results').getAttribute('aria-busy') === 'false');
+  assert.equal(await page.evaluate(() => window.__qa.translationRequests.length), beforeNativeHide.requests);
+  assert.equal(await page.locator('#popup-services').isVisible(), true);
+
+  // The user reopens the native input window (tray/hotkey/single-instance path)
+  // and starts a valid translation. A delayed hide event from the old popup
+  // must not stop it or overwrite it with an old captured-source event.
+  await page.evaluate(() => { window.__qa.nativeShow(); window.__qa.holdTranslation = true; });
+  await page.locator('#source-text').fill('QA reopened input remains usable');
+  await page.locator('#source-text').press('Enter');
+  await page.waitForFunction((count) => window.__qa.translationRequests.length === count + 1, beforeNativeHide.requests);
+  await page.evaluate((old) => {
+    window.__qa.emit('translation-presentation', old);
+    window.__qa.emit('source-text', { text: 'STALE NATIVE CAPTURE', mode: 'translate', presentationEpoch: old.epoch });
+  }, delayedHide);
+  assert.equal(await page.locator('#source-text').inputValue(), 'QA reopened input remains usable');
+  assert.equal(await page.locator('#translate-button').getAttribute('aria-label'), '停止翻译');
+  await page.evaluate(() => { window.__qa.holdTranslation = false; window.__qa.releaseTranslation(); });
+  await page.getByText('Isolated test translation fixture', { exact: true }).waitFor();
+
+  // Reopening can itself overtake an old begin IPC. The old epoch is still
+  // rejected after resume; the serialized new ticket then translates normally.
+  await page.evaluate(() => { window.__qa.holdBeginBeforeAllocate = true; });
+  const beforeOvertaken = await page.evaluate(() => ({ requests: window.__qa.translationRequests.length, attempts: window.__qa.beginAttempts.length }));
+  await page.locator('#source-text').fill('QA old begin overtaken by reopen');
+  await page.locator('#source-text').press('Enter');
+  await page.waitForFunction((count) => window.__qa.beginAttempts.length > count, beforeOvertaken.attempts);
+  const overtakenHide = await page.evaluate(() => { const hidden = window.__qa.nativeHide(false); window.__qa.nativeShow(); return hidden; });
+  await page.locator('#source-text').fill('QA latest reopened ticket wins');
+  await page.locator('#source-text').press('Enter');
+  await page.evaluate(() => { window.__qa.holdBeginBeforeAllocate = false; window.__qa.releaseBegin(); });
+  await page.waitForFunction((count) => window.__qa.translationRequests.length === count + 1, beforeOvertaken.requests);
+  await page.getByText('Isolated test translation fixture', { exact: true }).waitFor();
+  await page.evaluate((old) => window.__qa.emit('translation-presentation', old), overtakenHide);
+  assert.equal(await page.evaluate(() => window.__qa.translationRequests.at(-1).text), 'QA latest reopened ticket wins');
+  assert.equal(await page.locator('.result-text').isVisible(), true);
+
+  // Fitting content is asynchronous. An older capture must not show its popup
+  // after the user has already hidden it and reopened a newer input window.
+  await page.evaluate(() => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+  const beforeDelayedPopup = await page.evaluate(() => {
+    const before = { fits: window.__qa.fitWaits, shows: window.__qa.showCalls.length, attempts: window.__qa.showPopupAttempts.length, requests: window.__qa.translationRequests.length };
+    const hidden = window.__qa.nativeHide(); window.__qa.holdFit = true;
+    window.__qa.emit('source-text', { text: 'QA captured source awaiting fit\n'.repeat(12), mode: 'translate', presentationEpoch: hidden.epoch });
+    return before;
+  });
+  await page.waitForFunction((count) => window.__qa.fitWaits > count, beforeDelayedPopup.fits);
+  await page.evaluate(() => { window.__qa.nativeHide(false); window.__qa.nativeShow(); });
+  await page.locator('#source-text').fill('QA newer input survives delayed popup');
+  await page.evaluate(() => { window.__qa.holdFit = false; window.__qa.releaseFit(); });
+  await page.waitForFunction((count) => window.__qa.showPopupAttempts.length > count, beforeDelayedPopup.attempts);
+  assert.equal(await page.evaluate(() => window.__qa.showCalls.length), beforeDelayedPopup.shows);
+  assert.equal(await page.evaluate(() => window.__qa.translationRequests.length), beforeDelayedPopup.requests);
+  assert.equal(await page.locator('#source-text').inputValue(), 'QA newer input survives delayed popup');
+  await page.evaluate(() => { window.__qa.hideCalls = 0; });
+
   // Default 0 creates no timer. An optional timer waits for idle time and resets
   // on pointer input; pinning prevents it from hiding a completed translation.
   await page.clock.install();
@@ -437,6 +601,7 @@ try {
   assert.equal(await page.evaluate(() => window.__qa.hideCalls), 0);
   await page.clock.fastForward(1100);
   assert.equal(await page.evaluate(() => window.__qa.hideCalls), 1);
+  await page.evaluate(() => window.__qa.nativeShow());
   await page.locator('#pin-button').click();
   await page.locator('#source-text').fill('QA pinned timer test');
   await page.locator('#translate-button').click();
@@ -444,7 +609,7 @@ try {
   await page.clock.fastForward(10_000);
   assert.equal(await page.evaluate(() => window.__qa.hideCalls), 1);
   assert.deepEqual(errors, []);
-  console.log('PASS: pending-save close/reentry guard; failure unlock; blank shortcuts; duplicate rejection; default no timer; optional idle reset; pinned timer suppression; OCR dual-key bundles/protocol isolation/no plaintext settings; documented vendor presets; origin-bound saved-key indications; minimal popup/menu/automatic source height; OCR configuration/privacy; empty-selection focus preservation; Enter/ShiftEnter/IME/repeat; passive permissions; real capture and translation error preservation.');
+  console.log('PASS: backend cancellation tickets on edit/clear/stop/Escape/close/native hide; native presentation epochs cover unallocated tickets, omitted/stale hide events, reopen overtaking pending begin and stale delayed popup fitting; backend-only cancellation clears old result state; late-ticket and replacement ordering; pending-save close/reentry guard; failure unlock; blank shortcuts; duplicate rejection; default no timer; optional idle reset; pinned timer suppression; OCR dual-key bundles/protocol isolation/no plaintext settings; documented vendor presets; origin-bound saved-key indications; minimal popup/menu/automatic source height; OCR configuration/privacy; empty-selection focus preservation; Enter/ShiftEnter/IME/repeat; passive permissions; real capture and translation error preservation.');
 } finally {
   await browser.close();
 }

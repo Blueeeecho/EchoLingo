@@ -207,6 +207,115 @@ func paragraphGeometrySelfTest() throws {
     guard joinOCRLines(structured) == "- first item\n  indented continuation\n    return value;" else {
         throw NativeError("SELF_TEST: OCR layout changed a list or indented code line.")
     }
+    let fenced = ["```text", "literal line", "another literal line", "```", "normal paragraph", "next paragraph"].enumerated().map {
+        OCRLayoutLine(text: $0.element, bounds: CGRect(x: 0, y: $0.offset * 40, width: 100, height: 10))
+    }
+    guard joinOCRLines(fenced) == "```text\nliteral line\nanother literal line\n```\nnormal paragraph\n\nnext paragraph" else {
+        throw NativeError("SELF_TEST: OCR layout inferred paragraph breaks inside a fenced block.")
+    }
+    let invalid = [
+        OCRLayoutLine(text: "invalid bounds", bounds: CGRect(x: CGFloat.nan, y: 0, width: 100, height: 10)),
+        OCRLayoutLine(text: "keep line break", bounds: CGRect(x: 0, y: 80, width: 100, height: 10)),
+        OCRLayoutLine(text: "zero height", bounds: CGRect(x: 0, y: 180, width: 100, height: 0))
+    ]
+    guard joinOCRLines(invalid) == "invalid bounds\nkeep line break\nzero height",
+          joinOCRLines([]).isEmpty else {
+        throw NativeError("SELF_TEST: OCR invalid or empty geometry was not handled conservatively.")
+    }
+}
+
+// Exercise the same snapshot/restore used by selection fallback, on an isolated
+// pasteboard. Never inspect or overwrite NSPasteboard.general or another app.
+func privatePasteboardSelfTest() throws {
+    let pasteboard = NSPasteboard.withUniqueName()
+    defer { pasteboard.releaseGlobally() }
+    let custom = NSPasteboard.PasteboardType("org.echolingo.self-test.binary")
+    let unicode = "回声译 🪞\nquotes: \" ' ` $() ; & | \\ end\0"
+    let second = "second fixture item 日本語"
+    let fixtures: [[NSPasteboard.PasteboardType: Data]] = [
+        [.string: Data(unicode.utf8),
+         .html: Data("<p>EchoLingo <strong>回声译</strong></p>".utf8),
+         .rtf: Data(#"{\rtf1\ansi EchoLingo fixture 2468}"#.utf8),
+         custom: Data([0, 255, 128, 1, 13, 10])],
+        [.string: Data(second.utf8), custom: Data()]
+    ]
+    let items = try fixtures.map { formats -> NSPasteboardItem in
+        let item = NSPasteboardItem()
+        for (type, data) in formats {
+            guard item.setData(data, forType: type) else {
+                throw NativeError("SELF_TEST: Could not seed a private clipboard fixture.")
+            }
+        }
+        return item
+    }
+    pasteboard.clearContents()
+    guard pasteboard.writeObjects(items) else {
+        throw NativeError("SELF_TEST: Could not write a private clipboard fixture.")
+    }
+    // AppKit may synthesize UTF-16 alongside UTF-8. Snapshot the materialized
+    // fixture's full native representation set, then require all of it back.
+    let materialized = try (pasteboard.pasteboardItems ?? []).map { item -> [NSPasteboard.PasteboardType: Data] in
+        var formats: [NSPasteboard.PasteboardType: Data] = [:]
+        for type in item.types {
+            guard let data = item.data(forType: type) else {
+                throw NativeError("SELF_TEST: A seeded clipboard fixture format was unavailable.")
+            }
+            formats[type] = data
+        }
+        return formats
+    }
+    guard materialized.count == fixtures.count,
+          zip(materialized, fixtures).allSatisfy({ actual, expected in
+              expected.allSatisfy { actual[$0.key] == $0.value }
+          }) else {
+        throw NativeError("SELF_TEST: Private clipboard fixture seeding changed an expected representation.")
+    }
+    let saved = try SavedPasteboard(pasteboard)
+    pasteboard.clearContents()
+    guard pasteboard.setString("temporary copied fixture", forType: .string) else {
+        throw NativeError("SELF_TEST: Could not simulate a private clipboard copy.")
+    }
+    try saved.restore(pasteboard)
+    let restored = pasteboard.pasteboardItems ?? []
+    guard restored.count == materialized.count else {
+        throw NativeError("SELF_TEST: Clipboard snapshot lost a pasteboard item.")
+    }
+    for (item, formats) in zip(restored, materialized) {
+        guard Set(item.types) == Set(formats.keys) else {
+            throw NativeError("SELF_TEST: Clipboard fixture type mismatch: \(item.types.map { $0.rawValue }.sorted()) vs \(formats.keys.map { $0.rawValue }.sorted()).")
+        }
+        for (type, expected) in formats {
+            guard item.data(forType: type) == expected else {
+                throw NativeError("SELF_TEST: Clipboard snapshot changed fixture format \(type.rawValue).")
+            }
+        }
+    }
+    pasteboard.clearContents()
+    let empty = try SavedPasteboard(pasteboard)
+    guard pasteboard.setString("temporary copy over an empty fixture", forType: .string) else {
+        throw NativeError("SELF_TEST: Could not seed an empty-clipboard restoration fixture.")
+    }
+    try empty.restore(pasteboard)
+    guard (pasteboard.pasteboardItems ?? []).isEmpty, (pasteboard.types ?? []).isEmpty else {
+        throw NativeError("SELF_TEST: Restoring an empty clipboard retained copied data.")
+    }
+}
+
+func pngSizeGuardSelfTest() throws {
+    for (data, expectedPrefix) in [(Data(), "CAPTURE:"), (Data(repeating: 0, count: maximumPNGBytes + 1), "CAPTURE_TOO_LARGE:")] {
+        do {
+            _ = try encodePNG(data)
+            throw NativeError("SELF_TEST: Invalid PNG byte count was accepted.")
+        } catch let error as NativeError {
+            guard error.message.hasPrefix(expectedPrefix) else { throw error }
+        }
+    }
+    // The encoder's inclusive byte limit is separate from image decoding. Exact
+    // boundary bytes verify it without capturing a screen or retaining a file.
+    let boundary = Data(repeating: 0, count: maximumPNGBytes)
+    guard Data(base64Encoded: try encodePNG(boundary)) == boundary else {
+        throw NativeError("SELF_TEST: The exact PNG byte limit did not roundtrip.")
+    }
 }
 
 func recognize(_ handler: VNImageRequestHandler) throws -> String {
@@ -387,6 +496,12 @@ func selfTest(input: Data = Data()) throws -> [String: Any] {
         throw NativeError("SELF_TEST: Native bridge input did not preserve UTF-8 and NUL.")
     }
     try paragraphGeometrySelfTest()
+    // AppKit can fulfill synthesized clipboard-format promises synchronously.
+    // Run this fixture only in the CLI's actual main thread; a Rust unit-test
+    // worker has no main event loop, so main.sync would deadlock there.
+    let privatePasteboardTested = Thread.isMainThread
+    if privatePasteboardTested { try privatePasteboardSelfTest() }
+    try pngSizeGuardSelfTest()
     let width = 1100, height = 160
     guard let context = CGContext(data: nil, width: width, height: height, bitsPerComponent: 8,
                                   bytesPerRow: width * 4, space: CGColorSpaceCreateDeviceRGB(),
@@ -403,7 +518,9 @@ func selfTest(input: Data = Data()) throws -> [String: Any] {
     context.textPosition = CGPoint(x: 30, y: 65)
     CTLineDraw(line, context)
     guard let image = context.makeImage() else { throw NativeError("SELF_TEST: Could not create test bitmap.") }
+    let recognitionStart = ProcessInfo.processInfo.systemUptime
     let text = try recognize(VNImageRequestHandler(cgImage: image, options: [:]))
+    let recognitionMilliseconds = (ProcessInfo.processInfo.systemUptime - recognitionStart) * 1000
     guard text.lowercased().contains("echolingo"), text.contains("2468") else {
         throw NativeError("SELF_TEST: Local OCR did not recognize the generated fixture.")
     }
@@ -417,8 +534,13 @@ func selfTest(input: Data = Data()) throws -> [String: Any] {
         throw NativeError("SELF_TEST: PNG base64 roundtrip failed.")
     }
     return ["ocrFixturePassed": true, "recognized": text, "diagnostics": diagnostics(),
+            "ocrFixtureElapsedMs": recognitionMilliseconds,
+            "ocrFixtureTimingScope": "Generated 1100x160 image; Vision recognize only; excludes capture, image drawing and application startup",
             "pngBase64RoundtripPassed": true, "paragraphGeometryFixturePassed": true,
-            "interactiveCaptureTested": false, "clipboardChanged": false, "bridgeInputPassed": !input.isEmpty]
+            "privatePasteboardFixturePassed": privatePasteboardTested,
+            "privatePasteboardFixtureSkipped": !privatePasteboardTested, "pngSizeGuardsPassed": true,
+            "interactiveCaptureTested": false, "generalClipboardTouched": false,
+            "clipboardChanged": false, "bridgeInputPassed": !input.isEmpty]
 }
 
 func nativeResponse(mode: String, input: Data = Data()) -> [String: Any] {

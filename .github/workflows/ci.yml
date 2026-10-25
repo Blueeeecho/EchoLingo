@@ -32,6 +32,9 @@ jobs:
         if: runner.os == 'Windows'
         shell: powershell
         run: powershell.exe -NoProfile -STA -ExecutionPolicy Bypass -File src-tauri/native/windows.ps1 -Mode self-test
+      - name: Native macOS OCR and private pasteboard self-test
+        if: runner.os == 'macOS'
+        run: bash tests/macos-native-self-test.sh
       - name: Windows selected-text and clipboard desktop smoke
         if: runner.os == 'Windows'
         shell: powershell
@@ -58,6 +61,11 @@ jobs:
         with:
           node-version: '24'
           cache: npm
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Preview installer safety and rollback fixtures
+        run: python -m unittest discover -s scripts -p 'test_*.py' -v
       - run: npm ci
       - run: npx playwright install --with-deps chromium
       - name: Isolated UI / IPC regression tests
