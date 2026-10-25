@@ -1,6 +1,14 @@
 # EchoLingo status and handoff
 
-Updated: 2026-10-24, Asia/Shanghai. Stage: v0.1.0 preview validation.
+Updated: 2026-10-25, Asia/Shanghai. Stage: v0.1.0 preview validation.
+
+## Latest refinement: quiet empty popup, Enter submission and app-owned permissions
+- Alt+D with no obtainable selection, including missing Accessibility permission, presents only the blank popup. It does not autofocus, request access, call a translation API or show a selection-error toast. Clipboard-restoration failures remain visible.
+- Source Enter submits once; Shift+Enter inserts a line break. Composition lifecycle, isComposing, legacy keyCode 229 and key repeat are guarded. Empty input is a no-op; other settings fields keep their own Enter behavior.
+- Blank layout uses a soft input surface, a distinct language strip and a single collapsible service row; secondary operations remain in More. Translation/OCR errors are not silently swallowed.
+- macOS Swift is now a static library inside the app process, removing the former cached helper's separate TCC identity. Hotkeys and status refresh only preflight; explicit Settings actions request access or open one of two fixed privacy panes.
+- Local native verification: 34 Rust tests, including the actual Swift static entry, real Vision OCR/PNG/paragraph fixture, Unicode/NUL ABI roundtrip, host PID identity and permission-kind rejection. The Intel macOS 12 static library also cross-compiles; it was not executed on Intel.
+- Code was independently reviewed. Installed-app TCC/real IME acceptance and final native installer CI are recorded after packaging. Ad hoc signing can still invalidate authorization after a rebuild; a stable installation path alone does not replace Developer ID signing.
 
 ## Latest user refinement: minimal popup and wrapped text
 - Translation is a transient popup: tiny pin/more/close toolbar, auto-sized source editor, language strip and provider text. No brand block, counters, instructional/empty cards, timings or footer. Secondary controls are in More or appear on hover/keyboard focus.

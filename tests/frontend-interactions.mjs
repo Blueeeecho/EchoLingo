@@ -11,6 +11,7 @@ try {
   page.on('pageerror', (error) => errors.push(error.message));
   await page.addInitScript(() => {
     window.isTauri = true;
+    Object.defineProperty(navigator, 'platform', { configurable: true, get: () => 'MacIntel' });
     const state = {
       providers: [{ id: 'qa-service', name: 'QA IPC fixture', kind: 'openai', baseUrl: 'https://example.invalid/v1', model: 'test-model', enabled: true, prompt: '', hasKey: true }],
       sourceLanguage: 'auto', targetLanguage: 'zh-Hans',
@@ -20,13 +21,16 @@ try {
     const callbacks = new Map(), listeners = new Map(), ocrKeys = new Map(), translationKeys = new Map(); let callbackId = 0;
     const scope = (provider) => `${provider.id}:${provider.kind}:${new URL(provider.baseUrl).origin}`;
     translationKeys.set(scope(state.providers[0]), 'qa-original-translation-key');
-    const fixture = window.__qa = { settings: state, saveCalls: 0, keyCalls: 0, ocrKeyCalls: 0, ocrTestCalls: 0, ocrDeleteCalls: 0, credentialWrites: [], settingsWrites: [], hideCalls: 0, layoutCalls: [], showCalls: [], translationRequests: [], dragCalls: 0, holdSave: false, failSave: false, releaseSave: () => {}, emit: (name, payload) => listeners.get(name)?.({ event: name, payload, id: 1 }) };
+    const fixture = window.__qa = { permissionState: { platform: 'macos', supported: true, identity: 'application-process', runningBundledApp: true, bundleIdentifier: 'io.github.qa.echolingo', processId: 1, accessibilityGranted: false, screenCaptureGranted: false }, permissionReads: 0, permissionRequests: [], permissionSettings: [], holdTranslation: false, releaseTranslation: () => {}, translationError: null, settings: state, saveCalls: 0, keyCalls: 0, ocrKeyCalls: 0, ocrTestCalls: 0, ocrDeleteCalls: 0, credentialWrites: [], settingsWrites: [], hideCalls: 0, layoutCalls: [], showCalls: [], translationRequests: [], dragCalls: 0, holdSave: false, failSave: false, releaseSave: () => {}, emit: (name, payload) => listeners.get(name)?.({ event: name, payload, id: 1 }) };
     window.__TAURI_INTERNALS__ = {
       transformCallback: (callback) => { const id = ++callbackId; callbacks.set(id, callback); return id; },
       invoke: async (command, args = {}) => {
         if (command === 'plugin:event|listen') { listeners.set(args.event, callbacks.get(args.handler)); return 1; }
         if (command === 'get_settings') { for (const provider of fixture.settings.providers) provider.hasKey = translationKeys.has(scope(provider)); for (const provider of fixture.settings.ocrProviders) provider.hasKey = ocrKeys.has(scope(provider)); return structuredClone(fixture.settings); }
         if (command === 'get_history') return [];
+        if (command === 'permission_status') { fixture.permissionReads++; return structuredClone(fixture.permissionState); }
+        if (command === 'request_permission') { fixture.permissionRequests.push(args.kind); if (args.kind === 'accessibility') fixture.permissionState.accessibilityGranted = true; else fixture.permissionState.screenCaptureGranted = true; return structuredClone(fixture.permissionState); }
+        if (command === 'open_permission_settings') { fixture.permissionSettings.push(args.kind); return; }
         if (command === 'diagnostics') return { warnings: [] };
         if (command === 'save_settings') {
           fixture.saveCalls++; fixture.settingsWrites.push(structuredClone(args.settings));
@@ -46,7 +50,7 @@ try {
         if (command === 'start_window_drag') { fixture.dragCalls++; return; }
         if (command === 'show_popup') { fixture.showCalls.push(structuredClone(fixture.layoutCalls.at(-1))); return; }
         if (command === 'set_pinned') return;
-        if (command === 'translate') { fixture.translationRequests.push(structuredClone(args)); return [{ providerId: 'qa-service', providerName: 'QA IPC fixture', text: 'Isolated test translation fixture', elapsedMs: 50 }]; }
+        if (command === 'translate') { fixture.translationRequests.push(structuredClone(args)); if (fixture.holdTranslation) await new Promise((resolve) => { fixture.releaseTranslation = resolve; }); if (fixture.translationError) throw new Error(fixture.translationError); return [{ providerId: 'qa-service', providerName: 'QA IPC fixture', text: 'Isolated test translation fixture', elapsedMs: 50 }]; }
         throw new Error(`Unimplemented QA command: ${command}`);
       },
     };
@@ -81,10 +85,32 @@ try {
   assert.ok(await page.locator('#source-text').evaluate((element) => element.getBoundingClientRect().height <= 100));
   assert.equal(await page.locator('#translate-button').isEnabled(), true);
   await page.locator('#source-text').fill('');
-  assert.ok(await page.locator('.app-shell').evaluate((element) => element.getBoundingClientRect().height < 160));
+  assert.ok(await page.locator('.app-shell').evaluate((element) => element.getBoundingClientRect().height < 190));
+  assert.ok(await page.locator('#source-text').evaluate((element) => element.getBoundingClientRect().height >= 44));
   await goView('history');
   assert.equal(await page.locator('.management-header').isVisible(), true);
   await goView('settings');
+
+  // Permission reads are passive, and only explicit management actions request
+  // authorization or open a system pane. Unsupported platforms show no Mac UI.
+  await page.locator('#accessibility-permission-state').getByText('待授权').waitFor();
+  assert.deepEqual(await page.evaluate(() => window.__qa.permissionRequests), []);
+  const readsBeforeRefresh = await page.evaluate(() => window.__qa.permissionReads);
+  await page.locator('#refresh-permissions').click();
+  await page.waitForFunction((reads) => window.__qa.permissionReads > reads, readsBeforeRefresh);
+  assert.deepEqual(await page.evaluate(() => window.__qa.permissionRequests), []);
+  await page.locator('[data-request-permission="accessibility"]').click();
+  await page.locator('#accessibility-permission-state').getByText('已授权').waitFor();
+  assert.deepEqual(await page.evaluate(() => window.__qa.permissionRequests), ['accessibility']);
+  await page.locator('[data-open-permission="screenCapture"]').click();
+  assert.deepEqual(await page.evaluate(() => window.__qa.permissionSettings), ['screenCapture']);
+  assert.deepEqual(await page.evaluate(() => window.__qa.permissionRequests), ['accessibility']);
+  await page.evaluate(() => { window.__qa.permissionState.platform = 'windows'; window.__qa.permissionState.supported = false; });
+  await page.locator('#refresh-permissions').click();
+  await page.locator('#mac-permission-card').waitFor({ state: 'hidden' });
+  await page.evaluate(() => { window.__qa.permissionState.platform = 'macos'; window.__qa.permissionState.supported = true; });
+  await goView('translate'); await goView('settings');
+  await page.locator('#mac-permission-card').waitFor({ state: 'visible' });
 
   // Saving is atomic from the form's perspective: closing or submitting again
   // while the backend is pending cannot replace or close a different editor.
@@ -257,6 +283,83 @@ try {
   assert.equal(await page.evaluate(() => document.activeElement.id), 'pin-button');
   assert.equal(await page.locator('.result-card').count(), 0);
 
+  // Empty selection clears an old error without adding a tip or requesting an API.
+  const emptyRequestCount = await page.evaluate(() => window.__qa.translationRequests.length);
+  await page.evaluate(() => window.__qa.emit('action-error', 'OCR 已完成，但复制到剪贴板失败'));
+  await page.locator('#toast').getByText('OCR 已完成，但复制到剪贴板失败').waitFor();
+  await page.evaluate(() => window.__qa.emit('source-text', { text: '', mode: 'input' }));
+  assert.equal(await page.locator('#toast').isHidden(), true);
+  for (const error of ['NO_SELECTION: No selected text', 'SELECTION_EMPTY: empty', 'CANCELLED: picker closed', '未取得选区，已打开输入框。PERMISSION: Accessibility']) {
+    await page.evaluate((message) => window.__qa.emit('action-error', message), error);
+    assert.equal(await page.locator('#toast').isHidden(), true);
+  }
+  assert.equal(await page.evaluate(() => window.__qa.translationRequests.length), emptyRequestCount);
+  // Real screenshot permission/NO_TEXT/OCR failures remain visible and explain
+  // where the user can inspect permissions; translating API errors are separate.
+  await page.evaluate(() => window.__qa.emit('action-error', 'PERMISSION: Screen capture is not granted'));
+  await page.locator('#toast').getByText('Screen capture is not granted', { exact: false }).waitFor();
+  assert.match(await page.locator('#toast').textContent(), /更多 → 设置 → 系统权限/);
+  await page.evaluate(() => window.__qa.emit('source-text', { text: '', mode: 'input' }));
+  await page.evaluate(() => window.__qa.emit('action-error', 'NO_TEXT: OCR did not recognize any text'));
+  await page.locator('#toast').getByText('NO_TEXT: OCR did not recognize any text').waitFor();
+  await page.evaluate(() => window.__qa.emit('source-text', { text: '', mode: 'input' }));
+  await page.evaluate(() => window.__qa.emit('action-error', 'OCR provider request failed: HTTP 503'));
+  await page.locator('#toast').getByText('OCR provider request failed: HTTP 503').waitFor();
+  await page.evaluate(() => window.__qa.emit('source-text', { text: '', mode: 'input' }));
+  await page.evaluate(() => window.__qa.emit('shortcut-error', '快捷键已被占用'));
+  await page.locator('#toast').getByText('快捷键已被占用').waitFor();
+  await page.evaluate(() => window.__qa.emit('source-text', { text: '', mode: 'input' }));
+
+  // Source Enter submits once; Shift+Enter inserts a real newline. Composition
+  // Enter/Escape, the legacy 229 confirmation event and key-repeat never submit.
+  await page.locator('#source-text').fill('   ');
+  await page.locator('#source-text').press('Enter');
+  assert.equal(await page.evaluate(() => window.__qa.translationRequests.length), emptyRequestCount);
+  assert.equal(await page.locator('#toast').isHidden(), true);
+  await page.locator('#source-text').fill('QA Enter submits');
+  await page.locator('#source-text').press('Enter');
+  await page.waitForFunction((count) => window.__qa.translationRequests.length === count + 1, emptyRequestCount);
+  await page.getByText('Isolated test translation fixture', { exact: true }).waitFor();
+  await page.locator('#source-text').dispatchEvent('keydown', { key: 'Enter', code: 'Enter', keyCode: 13, repeat: true });
+  assert.equal(await page.evaluate(() => window.__qa.translationRequests.length), emptyRequestCount + 1);
+  await page.locator('#source-text').fill('First line');
+  await page.locator('#source-text').press('End');
+  await page.locator('#source-text').press('Shift+Enter');
+  await page.locator('#source-text').press('x');
+  assert.equal(await page.locator('#source-text').inputValue(), 'First line\nx');
+  assert.equal(await page.evaluate(() => window.__qa.translationRequests.length), emptyRequestCount + 1);
+  const hidesBeforeComposition = await page.evaluate(() => window.__qa.hideCalls);
+  await page.locator('#source-text').dispatchEvent('compositionstart', { data: '中' });
+  await page.locator('#source-text').dispatchEvent('keydown', { key: 'Enter', isComposing: true });
+  await page.locator('#source-text').dispatchEvent('keydown', { key: 'Enter', ctrlKey: true, isComposing: true });
+  await page.locator('#source-text').dispatchEvent('keydown', { key: 'Escape', isComposing: true });
+  await page.locator('#source-text').dispatchEvent('compositionend', { data: '中' });
+  await page.locator('#source-text').dispatchEvent('keydown', { key: 'Enter', keyCode: 229, isComposing: false });
+  await page.locator('#source-text').dispatchEvent('keydown', { key: 'Enter', keyCode: 229, metaKey: true, isComposing: false });
+  assert.equal(await page.evaluate(() => window.__qa.translationRequests.length), emptyRequestCount + 1);
+  assert.equal(await page.evaluate(() => window.__qa.hideCalls), hidesBeforeComposition);
+  await page.evaluate(() => { window.__qa.holdTranslation = true; });
+  await page.locator('#source-text').press('Enter');
+  await page.waitForFunction((count) => window.__qa.translationRequests.length === count + 2, emptyRequestCount);
+  await page.locator('#source-text').press('Enter');
+  assert.equal(await page.evaluate(() => window.__qa.translationRequests.length), emptyRequestCount + 2);
+  await page.evaluate(() => { window.__qa.holdTranslation = false; window.__qa.releaseTranslation(); });
+  await page.getByText('Isolated test translation fixture', { exact: true }).waitFor();
+  await page.locator('#source-text').dispatchEvent('keydown', { key: 'Enter', keyCode: 13, repeat: true });
+  assert.equal(await page.evaluate(() => window.__qa.translationRequests.length), emptyRequestCount + 2);
+  await goView('settings');
+  await page.getByRole('button', { name: '编辑', exact: true }).click();
+  await page.locator('#provider-name').press('Enter');
+  await page.locator('#provider-dialog').waitFor({ state: 'hidden' });
+  assert.equal(await page.evaluate(() => window.__qa.translationRequests.length), emptyRequestCount + 2);
+  await goView('translate');
+  await page.evaluate(() => { window.__qa.translationError = '供应商 API 返回 403：PERMISSION_DENIED'; });
+  await page.locator('#source-text').fill('QA real translation error');
+  await page.locator('#source-text').press('Enter');
+  await page.locator('.result-error').getByText('供应商 API 返回 403：PERMISSION_DENIED').waitFor();
+  await page.evaluate(() => { window.__qa.translationError = null; });
+  await page.evaluate(() => window.__qa.emit('source-text', { text: '', mode: 'input' }));
+
   // Captured text is cleaned before display AND API submission, while manual
   // input and explicit restoration retain their intentional line breaks.
   const captured = 'This paragraph uses a deliberately long first line copied from a PDF viewer\nand continues on the following visual line without starting a paragraph.\n\nSecond paragraph remains separate.';
@@ -341,7 +444,7 @@ try {
   await page.clock.fastForward(10_000);
   assert.equal(await page.evaluate(() => window.__qa.hideCalls), 1);
   assert.deepEqual(errors, []);
-  console.log('PASS: pending-save close/reentry guard; failure unlock; blank shortcuts; duplicate rejection; default no timer; optional idle reset; pinned timer suppression; OCR dual-key bundles/protocol isolation/no plaintext settings; documented vendor presets; origin-bound saved-key indications; minimal popup/menu/automatic source height; OCR configuration/privacy; empty-selection focus preservation.');
+  console.log('PASS: pending-save close/reentry guard; failure unlock; blank shortcuts; duplicate rejection; default no timer; optional idle reset; pinned timer suppression; OCR dual-key bundles/protocol isolation/no plaintext settings; documented vendor presets; origin-bound saved-key indications; minimal popup/menu/automatic source height; OCR configuration/privacy; empty-selection focus preservation; Enter/ShiftEnter/IME/repeat; passive permissions; real capture and translation error preservation.');
 } finally {
   await browser.close();
 }

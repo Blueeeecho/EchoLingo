@@ -32,6 +32,9 @@ let favoritesOnly = false;
 let pinned = false;
 let generation = 0;
 let translating = false;
+let sourceComposing = false;
+let permissionBusy = false;
+const macDesktop = desktop && /Mac/.test(navigator.platform);
 let editingProviderId: string | null = null;
 let providerSaving = false;
 let providerScopeAtOpen: string | null = null;
@@ -107,6 +110,13 @@ function toast(message: string, tone: 'info' | 'error' = 'info', duration = 4200
   element.hidden = false;
   toastTimer = setTimeout(() => { element.hidden = true; }, duration);
 }
+function clearToast(): void {
+  if (toastTimer) clearTimeout(toastTimer);
+  toastTimer = undefined; $('#toast').hidden = true; $('#toast').textContent = '';
+}
+function isCompositionKey(event: KeyboardEvent): boolean {
+  return sourceComposing || event.isComposing || event.keyCode === 229;
+}
 function status(message: string): void { $('#footer-status').textContent = message; }
 function cancelAutoHide(): void {
   if (autoHideTimer !== undefined) {
@@ -162,6 +172,7 @@ function setView(view: string): void {
     if (selected) button.setAttribute('aria-current', 'page'); else button.removeAttribute('aria-current');
   }
   if (view === 'history') { run(loadHistory); renderHistory(); }
+  if (view === 'settings' && macDesktop) void refreshPermissionStatus();
   window.scrollTo({ top: 0, behavior: 'instant' });
   if (view === 'translate') resizeSourceEditor();
   notifyLayout();
@@ -191,11 +202,12 @@ function renderLanguages(): void {
 function resizeSourceEditor(): void {
   if (currentView === 'translate') {
     source.style.height = '0px';
-    const height = Math.min(100, Math.max(25, source.scrollHeight));
+    const height = Math.min(100, Math.max(source.value.trim() ? 25 : 46, source.scrollHeight));
     source.style.height = `${height}px`;
     source.style.overflowY = source.scrollHeight > 100 ? 'auto' : 'hidden';
   }
   const empty = !source.value.trim();
+  document.body.classList.toggle('source-empty', empty);
   translateButton.disabled = translating || !settingsReady || empty;
   for (const id of ['#copy-source', '#speak-source', '#clear-source']) $<HTMLButtonElement>(id).disabled = empty;
   notifyLayout();
@@ -207,11 +219,13 @@ function setLoading(value: boolean): void {
   $('#translate-arrow').hidden = value;
   $('#translate-spinner').hidden = !value;
   resultsContainer.setAttribute('aria-busy', String(value));
+  $('#popup-services').hidden = value || currentResults.length > 0;
   notifyLayout();
 }
 function emptyResults(): void {
   resultsContainer.replaceChildren();
   $('.results-column').hidden = true;
+  $('#popup-services').hidden = false;
   $('#translation-state').textContent = '';
   notifyLayout();
 }
@@ -238,10 +252,11 @@ async function receiveCapturedText(payload: SourceTextEvent): Promise<void> {
   // Preserve an unfinished credentials editor rather than displaying it over a
   // captured translation or silently discarding its fields. Latest capture wins.
   if (allModals.some((modal) => !modal.hidden)) { queuedCapture = payload; queuedInputFocus = false; return; }
-  pendingTranslate = false;
+  pendingTranslate = false; clearToast();
   setView('translate');
   const normalized = payload.mode === 'input' ? payload.text : normalizeCapturedText(payload.text);
   setSourceText(normalized);
+  if (payload.mode === 'input') $<HTMLDetailsElement>('#popup-services').open = false;
   if (normalized !== payload.text && payload.mode !== 'input') {
     originalCapture = payload;
     const restore = $('#restore-original-breaks');
@@ -280,6 +295,7 @@ function renderResults(results: TranslationResult[]): void {
   resultsContainer.replaceChildren();
   if (results.length === 0) { emptyResults(); return; }
   $('.results-column').hidden = false;
+  $('#popup-services').hidden = true;
   for (const result of results) {
     const card = node('article', 'result-card'); card.tabIndex = 0;
     const header = node('div', 'result-card-header');
@@ -301,9 +317,9 @@ function renderResults(results: TranslationResult[]): void {
 }
 async function translate(): Promise<void> {
   cancelAutoHide();
-  if (!settingsReady) throw new Error('设置正在加载，请稍候。');
   const text = source.value.trim();
-  if (!text) { source.focus(); toast('先输入需要翻译的文字。'); return; }
+  if (!text || translating) return;
+  if (!settingsReady) throw new Error('设置正在加载，请稍候。');
   if (text.length > MAX_TEXT_LENGTH) throw new Error('每次最多翻译 20,000 字符。');
   if (!requireDesktop()) return;
   if (!settings.providers.some((provider) => provider.enabled)) { setView('settings'); toast('请先添加并启用一个翻译服务。'); return; }
@@ -340,7 +356,7 @@ function renderShortcutHints(): void {
   for (const element of document.querySelectorAll<HTMLElement>('[data-shortcut]')) {
     element.textContent = settings.shortcuts[element.dataset.shortcut as ShortcutAction] || '未设置';
   }
-  source.placeholder = '输入文字…';
+  source.placeholder = '输入或粘贴文字';
   for (const button of document.querySelectorAll<HTMLElement>('[data-action="capture"]')) button.title = `截图翻译${settings.shortcuts.capture ? ` · ${settings.shortcuts.capture}` : ''}`;
 }
 async function updateSettings(mutator: (next: Settings) => void): Promise<void> {
@@ -451,8 +467,26 @@ function renderProviders(): void {
     controls.append(enabled, test, edit, remove); row.append(info, controls); list.append(row);
   }
 }
+function renderPopupServices(): void {
+  const enabled = settings.providers.filter((provider) => provider.enabled);
+  $('#popup-services-summary').textContent = enabled.map((provider) => provider.name).join(' · ');
+  const list = $('#popup-services-list'); list.replaceChildren();
+  for (const provider of settings.providers) {
+    const label = node('label', 'popup-service-option'); const checkbox = node('input');
+    checkbox.type = 'checkbox'; checkbox.checked = provider.enabled; checkbox.disabled = !settingsReady;
+    checkbox.addEventListener('change', () => run(async () => {
+      const enabled = checkbox.checked; checkbox.disabled = true;
+      try { await updateSettings((next) => { const item = next.providers.find((candidate) => candidate.id === provider.id); if (item) item.enabled = enabled; }); }
+      finally { renderPopupServices(); }
+    }));
+    label.append(checkbox, node('span', '', provider.name)); list.append(label);
+  }
+  const manage = node('button', 'text-button', '管理翻译服务'); manage.type = 'button';
+  manage.addEventListener('click', () => setView('settings')); list.append(manage);
+  notifyLayout();
+}
 function renderSettings(): void {
-  renderProviders();
+  renderProviders(); renderPopupServices();
   ocrUi.render();
   const shortcutsForm = $('#shortcuts-form'); shortcutsForm.replaceChildren();
   for (const [action, label] of Object.entries(SHORTCUT_LABELS)) {
@@ -651,6 +685,40 @@ async function runAction(action: Action): Promise<void> {
   await invoke('run_action', { action });
 }
 
+type PermissionKind = 'accessibility' | 'screenCapture';
+interface PermissionStatus {
+  platform: string; supported: boolean; identity?: string; runningBundledApp?: boolean;
+  bundleIdentifier?: string; processId?: number; accessibilityGranted?: boolean; screenCaptureGranted?: boolean;
+}
+function renderPermissionStatus(state: PermissionStatus): void {
+  $('#mac-permission-card').hidden = !state.supported || state.platform !== 'macos';
+  if (!state.supported || state.platform !== 'macos') return;
+  for (const [kind, id, granted] of [['accessibility', '#accessibility-permission-state', state.accessibilityGranted], ['screenCapture', '#screen-capture-permission-state', state.screenCaptureGranted]] as const) {
+    $(id).textContent = granted ? '已授权' : '待授权'; $(id).dataset.granted = String(Boolean(granted));
+    const button = document.querySelector<HTMLButtonElement>(`[data-request-permission="${kind}"]`);
+    if (button) button.hidden = Boolean(granted);
+  }
+  $('#permission-context').textContent = state.runningBundledApp === false ? '当前为开发进程，请在安装后的 EchoLingo 应用中完成授权。' : '授权对象为此 EchoLingo 应用。系统要求重新打开时，请退出后从应用目录重新启动。';
+}
+function setPermissionBusy(busy: boolean): void {
+  permissionBusy = busy;
+  for (const button of $('#mac-permission-card').querySelectorAll<HTMLButtonElement>('button')) button.disabled = busy;
+}
+async function refreshPermissionStatus(): Promise<void> {
+  if (!macDesktop || permissionBusy) return;
+  $('#mac-permission-card').hidden = false; $('#permission-error').hidden = true; setPermissionBusy(true);
+  try { renderPermissionStatus(await invoke<PermissionStatus>('permission_status')); }
+  catch (error) { $('#permission-error').textContent = errorMessage(error); $('#permission-error').hidden = false; }
+  finally { setPermissionBusy(false); }
+}
+function handleActionError(message: string): void {
+  // Selection/cancellation compatibility only. Screenshot permission, NO_TEXT,
+  // OCR service failures and translation failures remain actionable errors.
+  if (/^(?:NO_SELECTION|SELECTION_EMPTY|CANCELLED):/i.test(message.trim()) || /^未取得选区/.test(message.trim())) return;
+  const guidance = /^PERMISSION:/i.test(message.trim()) ? '\n可在“更多 → 设置 → 系统权限”中检查或授权。' : '';
+  toast(`${message}${guidance}`, 'error', 8000);
+}
+
 const ocrUi = createOcrUi({
   desktop, settings: () => settings, updateSettings,
   reloadSettings: async () => { settings = await invoke<Settings>('get_settings'); renderSettings(); },
@@ -661,6 +729,34 @@ for (const button of document.querySelectorAll<HTMLButtonElement>('button[data-v
 for (const button of document.querySelectorAll<HTMLButtonElement>('[data-action]')) button.addEventListener('click', () => run(() => runAction(button.dataset.action as Action)));
 $('#copy-source').addEventListener('click', () => run(() => copyText(source.value)));
 $('#speak-source').addEventListener('click', () => speak(source.value, sourceLanguage.value));
+source.addEventListener('compositionstart', () => { sourceComposing = true; });
+source.addEventListener('compositionend', () => { sourceComposing = false; resizeSourceEditor(); });
+source.addEventListener('blur', () => { sourceComposing = false; });
+source.addEventListener('keydown', (event) => {
+  if (event.key !== 'Enter' || isCompositionKey(event)) return;
+  if (event.shiftKey || event.altKey) return;
+  event.preventDefault(); event.stopPropagation();
+  if (!event.repeat && source.value.trim() && !translating) run(translate);
+});
+$('#popup-services').addEventListener('toggle', notifyLayout);
+$('#refresh-permissions').addEventListener('click', () => { void refreshPermissionStatus(); });
+for (const button of document.querySelectorAll<HTMLButtonElement>('[data-request-permission]')) button.addEventListener('click', () => {
+  if (!macDesktop || permissionBusy) return;
+  const kind = button.dataset.requestPermission as PermissionKind;
+  setPermissionBusy(true); $('#permission-error').hidden = true;
+  void invoke<PermissionStatus>('request_permission', { kind }).then(renderPermissionStatus).catch((error) => {
+    $('#permission-error').textContent = errorMessage(error); $('#permission-error').hidden = false;
+  }).finally(() => setPermissionBusy(false));
+});
+for (const button of document.querySelectorAll<HTMLButtonElement>('[data-open-permission]')) button.addEventListener('click', () => {
+  if (!macDesktop || permissionBusy) return;
+  const kind = button.dataset.openPermission as PermissionKind;
+  setPermissionBusy(true); $('#permission-error').hidden = true;
+  void invoke('open_permission_settings', { kind }).catch((error) => {
+    $('#permission-error').textContent = errorMessage(error); $('#permission-error').hidden = false;
+  }).finally(() => setPermissionBusy(false));
+});
+window.addEventListener('focus', () => { if (currentView === 'settings') void refreshPermissionStatus(); });
 translateButton.addEventListener('click', () => run(translate));
 source.addEventListener('input', () => { clearOriginalCapture(); resizeSourceEditor(); invalidateResults(); });
 window.addEventListener('resize', resizeSourceEditor);
@@ -777,6 +873,7 @@ $('#confirm-accept').addEventListener('click', () => settleConfirm(true));
 confirmDialog.addEventListener('click', (event) => { if (event.target === confirmDialog) settleConfirm(false); });
 for (const eventName of ['pointerdown', 'pointermove', 'keydown', 'wheel', 'focusin']) document.addEventListener(eventName, resetAutoHideOnInteraction, { passive: true });
 document.addEventListener('keydown', (event) => {
+  if (isCompositionKey(event)) return;
   const modal = allModals.find((candidate) => !candidate.hidden);
   if (modal) {
     if (event.key === 'Escape') {
@@ -803,8 +900,8 @@ document.addEventListener('keydown', (event) => {
     const next = event.key === 'Home' ? 0 : event.key === 'End' ? items.length - 1 : (current + (event.key === 'ArrowUp' ? -1 : 1) + items.length) % items.length;
     event.preventDefault(); items[next]?.focus({ preventScroll: true }); return;
   }
-  if (event.key === 'Enter' && (event.ctrlKey || event.metaKey)) {
-    event.preventDefault(); if (!translating) { setView('translate'); run(translate); }
+  if (event.key === 'Enter' && (event.ctrlKey || event.metaKey) && !event.shiftKey && !event.altKey) {
+    event.preventDefault(); if (!event.repeat && !translating && source.value.trim()) { setView('translate'); run(translate); }
   }
   if (event.key === 'Escape') {
     if (desktop) { event.preventDefault(); cancelAutoHide(); run(() => invoke('hide_window')); }
@@ -831,7 +928,8 @@ async function initialize(): Promise<void> {
     cleanupListeners.push(await listen<SourceTextEvent>('source-text', (event) => run(() => receiveCapturedText(event.payload))));
     cleanupListeners.push(await listen('focus-input', requestInputFocus));
     cleanupListeners.push(await listen('ocr-copied', () => { status('OCR 文字已复制到剪贴板'); }));
-    for (const eventName of ['action-error', 'shortcut-error']) cleanupListeners.push(await listen<string>(eventName, (event) => toast(event.payload, 'error', 8000)));
+    cleanupListeners.push(await listen<string>('action-error', (event) => handleActionError(event.payload)));
+    cleanupListeners.push(await listen<string>('shortcut-error', (event) => toast(event.payload, 'error', 8000)));
     settings = await invoke<Settings>('get_settings');
     settingsReady = true;
     applyTheme(); renderLanguages(); renderSettings(); renderShortcutHints();

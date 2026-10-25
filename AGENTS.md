@@ -13,6 +13,9 @@ Read `PROJECT.md`, `docs/status.md`, `docs/implementation-plan.md`, and `docs/te
 - Normalize soft wraps only for captured selection/OCR. Preserve clear paragraphs, code/lists, and raw capture in memory for an unobtrusive restore action. Typed/pasted text and history must not be automatically flattened. Plain text cannot perfectly distinguish every paragraph.
 - Keep software lightweight: system WebView, native offline OCR, vanilla TypeScript. Avoid Chromium/Electron and bundled OCR models without a demonstrated need.
 - Native selected-text acquisition must happen before focusing EchoLingo. Never silently replace text in the source app.
+- Empty/unavailable Alt+D selection opens a quiet blank popup, including missing Accessibility permission. Permission requests belong to explicit Settings actions; hotkeys and status refreshes only check. Keep clipboard-restoration failures visible.
+- Source Enter submits translation; Shift+Enter inserts a newline. Never submit Enter while an IME composition is being confirmed. Empty input is a no-op.
+- macOS native code runs as a statically linked library in the app process, not a separately extracted helper. Ad hoc signing still cannot guarantee retained TCC authorization across rebuilds.
 - No API keys in files, Git commits, logs, history, screenshots, or fixtures. Store keys in OS credentials. Fixtures use dummy values and local mock HTTP only.
 - OCR credentials are scoped by service ID and protocol. Baidu/Tencent use dedicated multi-field credentials and native authentication, not a generic Bearer header. Provider presets must use official docs and distinguish Ali machine translation from Qwen.
 - Screenshots are local temporary files, deleted after OCR. Local OCR is default; cloud upload requires explicit OCR service selection, never silent fallback. No telemetry or background clipboard polling.

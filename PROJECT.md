@@ -16,6 +16,8 @@ GitHub: https://github.com/Blueeeecho/EchoLingo
 9. 使用多智能体并行开发；只需 Windows/macOS 桌面套件，不需要鸿蒙套件。
 10. Alt+D 无选区时打开空白浮窗，不激活应用、不自动聚焦输入框、不移动鼠标。Alt+S 直接截图识字翻译。
 11. 浮窗默认在普通窗口之上；钉住仅决定点击外部后是否保留。
+12. 空按 Alt+D 只显示空白输入框，不显示取词失败或权限提示。系统权限在设置中明确授权；快捷键不反复申请。
+13. 输入区 Enter 完成并翻译，Shift+Enter 换行；输入法确认候选词时不触发翻译。
 
 ## 项目入口
 - [Bob 详细调研](docs/bob-research.zh-CN.md)

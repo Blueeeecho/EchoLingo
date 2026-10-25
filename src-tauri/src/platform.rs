@@ -233,6 +233,65 @@ pub fn diagnostics() -> Value {
     }
 }
 
+/// A read-only preflight. This never requests a permission or opens Settings.
+/// On macOS the Swift library executes inside this app, giving TCC one app
+/// identity rather than a second executable materialized in the user cache.
+pub fn permission_status() -> Result<Value, String> {
+    #[cfg(target_os = "macos")]
+    {
+        return run("permissions", None)?
+            .get("permissions")
+            .filter(|value| value.is_object())
+            .cloned()
+            .ok_or_else(|| "NATIVE_PROTOCOL: Missing native permission status.".into());
+    }
+    #[cfg(not(target_os = "macos"))]
+    Ok(json!({
+        "platform": std::env::consts::OS,
+        "supported": false,
+        "identity": "system-native",
+        "runningBundledApp": false,
+        "bundleIdentifier": "",
+        "processId": std::process::id(),
+        "accessibilityGranted": cfg!(target_os = "windows"),
+        "screenCaptureGranted": cfg!(target_os = "windows")
+    }))
+}
+
+fn validate_permission_kind(kind: &str) -> Result<(), String> {
+    match kind {
+        "accessibility" | "screenCapture" => Ok(()),
+        _ => Err("PERMISSION_KIND: 不支持的权限类型。".into()),
+    }
+}
+
+/// Call only for an explicit user action in Settings, never from a hotkey or
+/// startup. macOS schedules the actual system permission request on main.
+pub fn request_permission(kind: &str) -> Result<Value, String> {
+    validate_permission_kind(kind)?;
+    #[cfg(target_os = "macos")]
+    {
+        return run(&format!("request-{kind}"), None)?
+            .get("permissions")
+            .filter(|value| value.is_object())
+            .cloned()
+            .ok_or_else(|| "NATIVE_PROTOCOL: Missing native permission status.".into());
+    }
+    #[cfg(not(target_os = "macos"))]
+    Err("PERMISSION_UNSUPPORTED: 此平台不需要 macOS 隐私授权。".into())
+}
+
+/// Open only one of two fixed privacy panes. No arbitrary URL is accepted.
+pub fn open_permission_settings(kind: &str) -> Result<(), String> {
+    validate_permission_kind(kind)?;
+    #[cfg(target_os = "macos")]
+    {
+        return run(&format!("open-settings-{kind}"), None).map(|_| ());
+    }
+    #[cfg(not(target_os = "macos"))]
+    Err("PERMISSION_UNSUPPORTED: 此平台不需要 macOS 隐私授权。".into())
+}
+
 fn run_text(mode: &str, input: Option<&str>) -> Result<String, String> {
     let result = run(mode, input)?;
     result
@@ -255,7 +314,7 @@ fn parse_response(bytes: &[u8], successful: bool) -> Result<Value, String> {
         .to_owned())
 }
 
-#[cfg(any(target_os = "macos", target_os = "windows"))]
+#[cfg(target_os = "windows")]
 fn run(mode: &str, input: Option<&str>) -> Result<Value, String> {
     use std::io::{Read, Write};
     use std::process::Stdio;
@@ -357,28 +416,64 @@ fn run(_mode: &str, _input: Option<&str>) -> Result<Value, String> {
 }
 
 #[cfg(target_os = "macos")]
-fn native_command(mode: &str) -> Result<std::process::Command, String> {
-    use std::sync::OnceLock;
-    static HELPER: OnceLock<Result<std::path::PathBuf, String>> = OnceLock::new();
-    let path = HELPER
-        .get_or_init(|| {
-            let home = std::env::var_os("HOME").ok_or("NATIVE: HOME is unavailable.")?;
-            let folder = std::path::PathBuf::from(home).join("Library/Caches/com.echolingo.app");
-            ensure_private_directory(&folder)?;
-            let folder = folder.join("native");
-            ensure_private_directory(&folder)?;
-            materialize(
-                &folder,
-                "echolingo-native-helper",
-                include_bytes!(concat!(env!("OUT_DIR"), "/echolingo-native-helper")),
-                true,
-            )
-        })
-        .as_ref()
-        .map_err(Clone::clone)?;
-    let mut command = std::process::Command::new(path);
-    command.arg(format!("--{mode}"));
-    Ok(command)
+fn run(mode: &str, input: Option<&str>) -> Result<Value, String> {
+    use std::ffi::{c_char, CString};
+    use std::sync::Mutex;
+    // Serialize operations that can touch the clipboard. Permission preflight
+    // remains independent so Settings can inspect state during a region picker.
+    static CAPTURE: Mutex<()> = Mutex::new(());
+    let _capture = if matches!(
+        mode,
+        "selected-text" | "clipboard" | "copy" | "capture-ocr" | "capture-image"
+    ) {
+        Some(
+            CAPTURE
+                .lock()
+                .map_err(|_| "NATIVE: 原生操作状态不可用。".to_string())?,
+        )
+    } else {
+        None
+    };
+    unsafe extern "C" {
+        fn echolingo_native_run(
+            mode: *const c_char,
+            input: *const u8,
+            input_len: usize,
+            output_len: *mut usize,
+        ) -> *mut u8;
+        fn echolingo_native_free(output: *mut u8);
+    }
+    let mode = CString::new(format!("--{mode}"))
+        .map_err(|_| "NATIVE_MODE: Invalid native operation.".to_string())?;
+    let input = input.unwrap_or("").as_bytes();
+    if input.len() > 2 * 1024 * 1024 {
+        return Err("NATIVE_INPUT: 原生输入超过 2 MiB。".into());
+    }
+    let mut output_len = 0usize;
+    // SAFETY: Swift is statically linked into the same executable. The mode is
+    // NUL-terminated and the input slice remains alive for the synchronous call.
+    // Its output is a byte buffer with an explicit length, released exactly once
+    // using the matching Swift allocator after parsing. No Swift object or Rust
+    // ownership crosses this C ABI, and this entry never calls exit().
+    let output = unsafe {
+        echolingo_native_run(mode.as_ptr(), input.as_ptr(), input.len(), &mut output_len)
+    };
+    if output.is_null() {
+        return Err("NATIVE_PROTOCOL: 原生模块未返回结果。".into());
+    }
+    let result = if output_len == 0 || output_len > 12 * 1024 * 1024 {
+        Err("NATIVE_PROTOCOL: 原生返回结果为空或超限。".into())
+    } else {
+        // SAFETY: The native ABI guarantees an allocated buffer of output_len
+        // bytes, and it stays allocated through parse_response.
+        parse_response(
+            unsafe { std::slice::from_raw_parts(output, output_len) },
+            true,
+        )
+    };
+    // SAFETY: This buffer was returned by echolingo_native_run and is freed once.
+    unsafe { echolingo_native_free(output) };
+    result
 }
 
 #[cfg(target_os = "windows")]
@@ -395,7 +490,7 @@ fn native_command(mode: &str) -> Result<std::process::Command, String> {
             // Windows PowerShell 5.1 needs a BOM to decode non-ASCII source reliably.
             let mut bytes = vec![0xef, 0xbb, 0xbf];
             bytes.extend_from_slice(include_bytes!("../native/windows.ps1"));
-            materialize(&folder, "echolingo-native-helper.ps1", &bytes, false)
+            materialize(&folder, "echolingo-native-helper.ps1", &bytes)
         })
         .as_ref()
         .map_err(Clone::clone)?;
@@ -421,7 +516,7 @@ fn native_command(mode: &str) -> Result<std::process::Command, String> {
     Ok(command)
 }
 
-#[cfg(any(target_os = "macos", target_os = "windows"))]
+#[cfg(target_os = "windows")]
 fn ensure_private_directory(path: &std::path::Path) -> Result<(), String> {
     std::fs::create_dir_all(path)
         .map_err(|error| format!("NATIVE_CACHE: Cannot create helper directory: {error}"))?;
@@ -432,27 +527,14 @@ fn ensure_private_directory(path: &std::path::Path) -> Result<(), String> {
             "NATIVE_CACHE: The helper cache must be a real directory, not a symlink.".into(),
         );
     }
-    #[cfg(target_os = "macos")]
-    {
-        use std::os::unix::fs::{MetadataExt, PermissionsExt};
-        unsafe extern "C" {
-            fn geteuid() -> u32;
-        }
-        if metadata.uid() != unsafe { geteuid() } {
-            return Err("NATIVE_CACHE: The helper cache is not owned by the current user.".into());
-        }
-        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700))
-            .map_err(|error| format!("NATIVE_CACHE: Cannot secure helper cache: {error}"))?;
-    }
     Ok(())
 }
 
-#[cfg(any(target_os = "macos", target_os = "windows"))]
+#[cfg(target_os = "windows")]
 fn materialize(
     folder: &std::path::Path,
     name: &str,
     bytes: &[u8],
-    executable: bool,
 ) -> Result<std::path::PathBuf, String> {
     use std::io::Write;
     let destination = folder.join(name);
@@ -461,14 +543,6 @@ fn materialize(
             return Err("NATIVE_CACHE: The helper path is not a regular file.".into());
         }
         if std::fs::read(&destination).ok().as_deref() == Some(bytes) {
-            #[cfg(target_os = "macos")]
-            {
-                use std::os::unix::fs::PermissionsExt;
-                if executable {
-                    std::fs::set_permissions(&destination, std::fs::Permissions::from_mode(0o700))
-                        .map_err(|error| format!("NATIVE_CACHE: Cannot secure helper: {error}"))?;
-                }
-            }
             return Ok(destination);
         }
     }
@@ -480,13 +554,6 @@ fn materialize(
     let result = (|| -> std::io::Result<()> {
         let mut options = std::fs::OpenOptions::new();
         options.create_new(true).write(true);
-        #[cfg(target_os = "macos")]
-        {
-            use std::os::unix::fs::OpenOptionsExt;
-            options.mode(if executable { 0o700 } else { 0o600 });
-        }
-        #[cfg(target_os = "windows")]
-        let _ = executable;
         let mut file = options.open(&temporary)?;
         file.write_all(bytes)?;
         file.sync_all()?;
@@ -534,5 +601,50 @@ mod tests {
         assert!(parse_response(b"not JSON", true)
             .unwrap_err()
             .starts_with("NATIVE_PROTOCOL:"));
+    }
+
+    #[test]
+    fn permission_actions_reject_arbitrary_destinations_before_native_ui() {
+        for kind in [
+            "",
+            "screen-capture",
+            "https://example.com",
+            "accessibility\0",
+        ] {
+            assert!(super::request_permission(kind)
+                .unwrap_err()
+                .starts_with("PERMISSION_KIND:"));
+            assert!(super::open_permission_settings(kind)
+                .unwrap_err()
+                .starts_with("PERMISSION_KIND:"));
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn mac_permission_preflight_uses_this_process_without_requesting_access() {
+        let status = super::permission_status().unwrap();
+        assert_eq!(status["identity"], "application-process");
+        assert_eq!(status["processId"], std::process::id());
+        assert!(status["accessibilityGranted"].is_boolean());
+        assert!(status["screenCaptureGranted"].is_boolean());
+        assert!(status["runningBundledApp"].is_boolean());
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn mac_static_entry_runs_real_ocr_and_preserves_unicode_nul_input() {
+        // This uses the exact production C ABI and statically linked Swift;
+        // it never reads the clipboard, selection or desktop pixels.
+        let result = super::run("self-test", Some("回声译\0EchoLingo 🪞")).unwrap();
+        let diagnostic = &result["diagnostics"];
+        assert_eq!(diagnostic["ocrFixturePassed"], true);
+        assert_eq!(diagnostic["pngBase64RoundtripPassed"], true);
+        assert_eq!(diagnostic["paragraphGeometryFixturePassed"], true);
+        assert_eq!(diagnostic["bridgeInputPassed"], true);
+        assert_eq!(
+            diagnostic["diagnostics"]["permissions"]["processId"],
+            std::process::id()
+        );
     }
 }

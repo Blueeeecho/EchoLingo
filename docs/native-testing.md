@@ -9,7 +9,7 @@ The native adapter is `src-tauri/src/platform.rs`. Its capture and clipboard fun
 | Windows 10/11 | UI Automation `TextPattern.GetSelection()`, followed by Ctrl+C when necessary | Per-monitor-aware WinForms selector over a desktop `BitBlt` snapshot; built-in `Windows.Media.Ocr` | Built-in Windows PowerShell 5.1, .NET Framework, and at least one installed OCR language. The desktop application also needs WebView2. |
 | macOS 12+ | Accessibility selected-text attribute, followed by Cmd+C when necessary | Native `/usr/sbin/screencapture -i -x` region selection; Apple Vision | Accessibility for selection capture; Screen Recording for capture. System OCR needs no model download. |
 
-Both helpers return one UTF-8 JSON object. Errors beginning with `CANCELLED:` are ordinary user cancellation and should not trigger alarming UI. Escape/right click cancel the Windows selector. Escape cancels the native macOS selector. Both selectors time out after 120 seconds. Windows OCR has a separate 30-second operation budget. The Rust process supervisor has a 180-second outer capture limit and a 60-second limit for other modes.
+Both adapters use one UTF-8 JSON object per operation. Windows uses a supervised helper process; macOS links the Swift adapter into the EchoLingo application process. Errors beginning with `CANCELLED:` are ordinary user cancellation and should not trigger alarming UI. Escape/right click cancel the Windows selector. Escape cancels the native macOS selector. Both selectors time out after 120 seconds. Windows OCR has a separate 30-second operation budget. The Windows process supervisor has a 180-second outer capture limit and a 60-second limit for other modes.
 
 Local system OCR remains the default: `capture_ocr()` returns recognized text and sends no image to a server. Third-party OCR requires explicitly selecting/configuring an OCR API in the application. For that route, `capture_image()` uses the same native region picker and returns a **plain PNG base64 string without a `data:` prefix**. The helper protocol is `{ "ok": true, "imageBase64": "..." }`. The native helper only captures and encodes; the application handles any explicitly configured OCR upload afterward. Image capture does not require an installed Windows OCR language because it never initializes the recognizer.
 
@@ -17,7 +17,11 @@ Captured PNG data is limited to **8 MiB before base64 encoding**. Larger images 
 
 The Windows helper is embedded, extracted under `%LOCALAPPDATA%\EchoLingo\native`, and launched with the system `powershell.exe -NoProfile -NonInteractive -STA`. `-ExecutionPolicy Bypass` applies only to that child process; no persistent policy is changed. Managed computers that prohibit PowerShell may block the helper. User text is sent through UTF-8 stdin, never interpolated into PowerShell or command-line code. The script uses no third-party OCR module and performs no network requests.
 
-The macOS helper is compiled by `build.rs` with Swift and embedded into the Rust executable. It is extracted under `~/Library/Caches/com.echolingo.app/native/echolingo-native-helper`. The directory and executable are restricted to the current user; symlink targets are rejected. The helper never activates the source application or the EchoLingo window. A stable helper path reduces repeated permission prompts, but macOS may still attribute permissions to the helper, the containing app, or the launching terminal. A signed/notarized distribution needs a separate clean-machine TCC and Gatekeeper test; an ad hoc development signature does not establish that result.
+The macOS adapter is compiled by `build.rs` as a Swift static library and linked into the Rust executable. It no longer extracts or launches a cached `echolingo-native-helper`. Accessibility and Screen Recording checks therefore execute in the application process, eliminating the former separate helper identity. The adapter never activates the source application or the EchoLingo window. Use the installed `/Applications/EchoLingo.app` consistently rather than alternating between debug builds and output copies.
+
+Shortcut operations only preflight permissions. Settings exposes read-only `permission_status`, explicit `request_permission` and fixed-pane `open_permission_settings` commands, with only `accessibility` / `screenCapture` accepted. A status refresh never requests access. Empty or unavailable selection opens a blank, nonactivating popup without an error toast; failed clipboard restoration remains an actionable warning. macOS still controls permission grants, and a new application identity may require the owner to authorize it once.
+
+This fixes the separate-helper and repeated-request paths; it does not make an ad hoc signature stable across rebuilds. Apple explains that ad hoc designated requirements are tied to a specific code version, so upgrades can invalidate recorded authorization. A distribution needs a consistent Apple signing identity and separate clean-machine TCC/Gatekeeper acceptance. See [Apple TN3127: code identity and designated requirements](https://developer.apple.com/documentation/technotes/tn3127-inside-code-signing-requirements).
 
 ## Clipboard guarantees and limits
 
@@ -49,14 +53,14 @@ Run commands from the repository root. None of the self-tests take screenshots, 
 
 ```sh
 mkdir -p work/native-check
-swiftc src-tauri/native/macos.swift -O -target arm64-apple-macosx12.0 \
+swiftc src-tauri/native/macos.swift -parse-as-library -O -target arm64-apple-macosx12.0 \
   -framework AppKit -framework Vision -framework ApplicationServices -framework CoreText \
   -o work/native-check/echolingo-native-helper
 work/native-check/echolingo-native-helper --diagnostics
 work/native-check/echolingo-native-helper --self-test
 ```
 
-Use `x86_64-apple-macosx12.0` on Intel. `build.rs` chooses the Rust target architecture automatically, so CI can build Intel and Apple Silicon independently. The self-test draws `EchoLingo translation 2468` into an in-memory CoreText image, runs the real Vision recognizer, and requires the app name and digits to be recognized. It also checks the generated PNG's base64 roundtrip (`pngBase64RoundtripPassed`). `ocrFixturePassed: true` confirms the OCR path, not interactive selection, permissions, or shortcut registration.
+Use `x86_64-apple-macosx12.0` on Intel. This optional CLI is only a standalone development self-test; the installed app does not execute it. `build.rs` chooses the Rust target architecture automatically, so CI can build Intel and Apple Silicon independently. The self-test draws `EchoLingo translation 2468` into an in-memory CoreText image, runs the real Vision recognizer, and requires the app name and digits to be recognized. It also checks the generated PNG's base64 roundtrip (`pngBase64RoundtripPassed`). Rust tests additionally call the same statically linked entry point used by the app, verify the process identity and read-only permission status, and reject unknown permission kinds. These tests never invoke the grant/request path. `ocrFixturePassed: true` confirms the OCR path, not interactive selection, permissions, or shortcut registration.
 
 ### Windows PowerShell 5.1
 
@@ -108,14 +112,14 @@ Record OS build, application version, permissions, installed OCR languages, disp
 | Case | Expected result |
 | --- | --- |
 | Global selection shortcut in browser, Notepad/TextEdit, VS Code, Word and a PDF viewer | Captures the source selection before app activation; no unexpected keystrokes |
-| UI Automation/Accessibility unavailable, protected app, no selected text | Actionable error or deliberate clipboard fallback; source window is not focused by our code |
+| UI Automation/Accessibility unavailable, protected app, no selected text | Blank popup without an error toast or autofocus; permission status remains available in Settings; a clipboard restoration failure still warns |
 | Preexisting rich HTML/RTF, image, file list, empty clipboard and unsupported custom format | Existing formats restore, or fallback aborts before changing the clipboard |
 | A separate application copies while capture is running | Newer clipboard preserved and a clear retry error returned |
 | English, Chinese, mixed-language, small-font and dark-background OCR | Readable output with installed-language limitations documented |
 | Windows 100%, 125%, 150%, 200%; monitors at mixed scale; monitor left/above primary | Rectangle and recognized crop match selected physical pixels |
 | macOS Retina and non-Retina, two displays, display to left of primary | Native selector and OCR match the selected area |
 | Escape, right click, sub-3-pixel crop, 120-second timeout | Clean cancellation; no blank result or leftover temporary image |
-| Denied/revoked macOS Accessibility or Screen Recording | Clear permission guidance, recoverable after OS permission changes |
+| Denied/revoked macOS Accessibility or Screen Recording | Shortcut never requests system permission; Settings provides explicit grant/open/refresh actions and remains recoverable after OS changes |
 | Empty-selection shortcut, inactive always-on-top float, typing in source, outside click, pinned retention | Empty source remains empty; showing float preserves source focus; outside press hides unless retention is enabled |
 | Explicit third-party OCR provider selected; local provider selected; oversized image | Only the selected API receives a screenshot; local OCR sends none; PNGs over 8 MiB fail before upload |
 | Repeated shortcuts, text copy containing Unicode, quotes, backticks, dollar signs and newlines | One operation at a time; text preserved exactly and never executed |

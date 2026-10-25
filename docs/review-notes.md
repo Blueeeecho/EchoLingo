@@ -1,5 +1,13 @@
 # 初版独立只读审查记录
 
+## 空白弹窗、回车与权限专项复审（2026-10-25）
+
+已核实此次截图根因：取词先检查 Accessibility，未授权时返回 PERMISSION；旧 main.rs 将除 NO_SELECTION 外的错误都拼成红 toast。真实 start_action 错误路由现已静默空取词及权限不足，并保留剪贴板恢复失败告警，不只修 UI 测试桩。前端清理空捕获的旧 toast，保留真正的截图/OCR/翻译错误。
+
+独立复审核对了源框 Enter/Shift+Enter、IME lifecycle/isComposing/229、长按防重、空输入及事件冒泡；权限刷新与显式请求分离，permissionBusy 防止并发；Swift C ABI 的长度、配对释放与权限 kind 白名单；macOS 生产路径不再提取缓存 helper。当前未发现新增可复现阻塞。34 项本地 Rust 测试含真实静态入口 OCR 与宿主 PID 证明。
+
+剩余验收为安装包中的真 IME、同版本重启 TCC 与跨版本更新。临时签名的指定要求随代码版本变化，不能承诺跨构建保留授权；固定安装路径只能减少多副本混淆。参见 [Apple TN3127](https://developer.apple.com/documentation/technotes/tn3127-inside-code-signing-requirements)。
+
 ## 极简弹窗与换行专项复审（2026-10-24）
 
 独立复审确认两项可复现问题并已关闭：Alt+A 在凭据编辑期间会把编辑器缩成 popup，现统一排队至编辑器关闭；普通无缩进函数调用/赋值/注释可能被误合并，现增加明确代码语法保护与反例测试。原文恢复仅对捕获内容显示，手输/粘贴/历史不走自动整理。单窗口使用独立管理/弹窗模式，fit 请求串行处理且测量当前DOM，不用焦点改变触发隐藏。

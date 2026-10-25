@@ -456,6 +456,27 @@ fn show_inactive(app: &tauri::AppHandle) {
 fn empty_selection_window(app: &tauri::AppHandle) {
     let _ = app.emit("source-text", serde_json::json!({"text":"","mode":"input"}));
 }
+fn visible_action_error(action: &str, error: &str) -> Option<String> {
+    if error.starts_with("CANCELLED") {
+        return None;
+    }
+    if action == "selection" {
+        // A shortcut with no obtainable selection is also the user's manual
+        // input shortcut. Permission setup belongs in Settings, not a toast on
+        // an otherwise empty popup. Preserve a warning only if the clipboard
+        // could not be restored after our copy fallback changed it.
+        return error
+            .starts_with("CLIPBOARD_RESTORE_FAILED")
+            .then(|| "原剪贴板恢复失败，当前剪贴板可能仍是刚才复制的选中文字。".into());
+    }
+    Some(
+        error
+            .strip_prefix("PERMISSION:")
+            .unwrap_or(error)
+            .trim()
+            .to_owned(),
+    )
+}
 #[tauri::command]
 fn show_popup(app: tauri::AppHandle) {
     show_inactive(&app);
@@ -529,18 +550,11 @@ fn start_action(app: tauri::AppHandle, action: String) {
                 let _ = app.emit("action-error", "没有识别到文字，请选择更清晰的区域");
             }
             Err(e) if e.starts_with("CANCELLED") => {}
-            Err(e) if action == "selection" => {
-                empty_selection_window(&app);
-                if !e.starts_with("NO_SELECTION") {
-                    let _ = app.emit(
-                        "action-error",
-                        format!("未取得选区，可点击窗口自行输入。{e}"),
-                    );
-                }
-            }
             Err(e) => {
                 empty_selection_window(&app);
-                let _ = app.emit("action-error", e);
+                if let Some(message) = visible_action_error(&action, &e) {
+                    let _ = app.emit("action-error", message);
+                }
             }
         }
         app.state::<AppState>()
@@ -651,6 +665,24 @@ async fn diagnostics(state: State<'_, AppState>) -> Result<serde_json::Value, St
     value["dataDirectory"] = serde_json::json!(state.data_dir.display().to_string());
     value["ocrUpload"] = serde_json::json!(false);
     Ok(value)
+}
+#[tauri::command]
+async fn permission_status() -> Result<serde_json::Value, String> {
+    tauri::async_runtime::spawn_blocking(platform::permission_status)
+        .await
+        .map_err(|_| "无法检查系统权限".to_string())?
+}
+#[tauri::command]
+async fn request_permission(kind: String) -> Result<serde_json::Value, String> {
+    tauri::async_runtime::spawn_blocking(move || platform::request_permission(&kind))
+        .await
+        .map_err(|_| "无法请求系统权限".to_string())?
+}
+#[tauri::command]
+async fn open_permission_settings(kind: String) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || platform::open_permission_settings(&kind))
+        .await
+        .map_err(|_| "无法打开系统权限设置".to_string())?
 }
 
 fn tray(app: &tauri::AppHandle) -> tauri::Result<()> {
@@ -776,7 +808,10 @@ fn main() {
             copy_text,
             set_pinned,
             hide_window,
-            diagnostics
+            diagnostics,
+            permission_status,
+            request_permission,
+            open_permission_settings
         ])
         .run(tauri::generate_context!())
         .expect("EchoLingo could not start");
@@ -785,6 +820,30 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn empty_selection_is_quiet_but_other_actions_keep_actionable_errors() {
+        for error in [
+            "NO_SELECTION: Nothing selected",
+            "PERMISSION: Accessibility is not granted",
+            "SELECTION: Foreground changed",
+            "NATIVE_START: Helper unavailable",
+        ] {
+            assert_eq!(visible_action_error("selection", error), None);
+        }
+        assert_eq!(
+            visible_action_error("capture", "CANCELLED: User cancelled"),
+            None
+        );
+        assert_eq!(
+            visible_action_error("capture", "PERMISSION: Screen capture is not granted"),
+            Some("Screen capture is not granted".into())
+        );
+        assert!(visible_action_error(
+            "selection",
+            "CLIPBOARD_RESTORE_FAILED: Original formats unavailable"
+        )
+        .is_some());
+    }
     #[test]
     fn credentials_do_not_cross_protocols_or_supplier_origins() {
         let scope = credential_scope("openai", "https://API.EXAMPLE.com:443/v1").unwrap();

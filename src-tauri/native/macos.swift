@@ -3,10 +3,13 @@ import ApplicationServices
 import CoreGraphics
 import CoreText
 import Foundation
+import ImageIO
 import Vision
 
-// This command-line helper never activates an application or opens a main window.
-// The Tauri caller must keep the previously focused application in the foreground.
+// Production links this code into the EchoLingo process so Accessibility and
+// screen-capture permissions belong to the app, not a changing cached helper.
+// A CLI build remains available for noninteractive native CI self-tests.
+// Capture/selection never activates EchoLingo; the source app stays foreground.
 struct NativeError: Error {
     let message: String
     init(_ message: String) { self.message = message }
@@ -21,7 +24,7 @@ func emit(_ object: [String: Any]) {
 
 func requireAccessibility() throws {
     guard AXIsProcessTrusted() else {
-        throw NativeError("PERMISSION: Enable Accessibility for EchoLingo / echolingo-native-helper in System Settings → Privacy & Security → Accessibility, then retry. Clipboard translation does not require this permission.")
+        throw NativeError("PERMISSION: 请在 EchoLingo 设置中开启辅助功能权限后重试；也可以直接输入或粘贴文字。")
     }
 }
 
@@ -208,13 +211,21 @@ func paragraphGeometrySelfTest() throws {
 
 func recognize(_ handler: VNImageRequestHandler) throws -> String {
     let request = VNRecognizeTextRequest()
+    // Vision cancellation is cooperative; unlike the former subprocess, the
+    // in-process bridge cannot forcibly kill OCR without killing the app.
+    let deadline = DispatchSource.makeTimerSource(queue: .global(qos: .utility))
+    deadline.schedule(deadline: .now() + 30)
+    deadline.setEventHandler { request.cancel() }
+    deadline.resume()
+    defer { deadline.setEventHandler {}; deadline.cancel() }
     request.recognitionLevel = .accurate
     request.usesLanguageCorrection = true
     let supported = try request.supportedRecognitionLanguages()
     let preferred = ["zh-Hans", "zh-Hant", "en-US", "ja-JP", "ko-KR"]
     request.recognitionLanguages = preferred.filter { supported.contains($0) }
     if #available(macOS 13.0, *) { request.automaticallyDetectsLanguage = true }
-    try handler.perform([request])
+    do { try handler.perform([request]) }
+    catch is CancellationError { throw NativeError("OCR_TIMEOUT: 文字识别超时，请缩小区域后重试。") }
     let observations = request.results ?? []
     // Axis-normalized edge skew avoids treating normalized x/y units as an
     // undistorted pixel angle. Tall, vertical, or noticeably tilted boxes disable
@@ -240,8 +251,10 @@ func recognize(_ handler: VNImageRequestHandler) throws -> String {
 }
 
 func withCapturedRegion<T>(_ operation: (URL) throws -> T) throws -> T {
-    if !CGPreflightScreenCaptureAccess() && !CGRequestScreenCaptureAccess() {
-        throw NativeError("PERMISSION: Enable Screen Recording for EchoLingo / echolingo-native-helper in System Settings → Privacy & Security, then reopen EchoLingo and retry.")
+    // Hotkeys only inspect permission. Requests must come from the explicit
+    // Settings action; never reopen a system prompt on each capture attempt.
+    guard CGPreflightScreenCaptureAccess() else {
+        throw NativeError("PERMISSION: 请在 EchoLingo 设置中开启屏幕录制权限后重试；系统可能要求重新打开应用。")
     }
     let folder = FileManager.default.temporaryDirectory.appendingPathComponent("echolingo-\(UUID().uuidString)", isDirectory: true)
     try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: false,
@@ -299,17 +312,80 @@ func captureImage() throws -> String {
     }
 }
 
+func permissionStatus() -> [String: Any] {
+    return ["platform": "macos", "supported": true, "identity": "application-process",
+            "runningBundledApp": Bundle.main.bundleURL.pathExtension == "app",
+            "bundleIdentifier": Bundle.main.bundleIdentifier ?? "",
+            "processId": ProcessInfo.processInfo.processIdentifier,
+            "accessibilityGranted": AXIsProcessTrusted(),
+            "screenCaptureGranted": CGPreflightScreenCaptureAccess()]
+}
+
+func onMainThread<T>(_ action: () throws -> T) rethrows -> T {
+    if Thread.isMainThread { return try action() }
+    return try DispatchQueue.main.sync(execute: action)
+}
+
+func requestPermission(_ kind: String) throws -> [String: Any] {
+    // Only the explicit Settings IPC reaches this function. Both APIs inspect
+    // this app process; permission checks in hotkeys never set a prompt option.
+    switch kind {
+    case "accessibility":
+        if !AXIsProcessTrusted() {
+            let options = [kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: true] as CFDictionary
+            _ = onMainThread { AXIsProcessTrustedWithOptions(options) }
+        }
+    case "screenCapture":
+        if !CGPreflightScreenCaptureAccess() { _ = onMainThread { CGRequestScreenCaptureAccess() } }
+    default: throw NativeError("PERMISSION_KIND: 不支持的权限类型。")
+    }
+    return permissionStatus()
+}
+
+func openPermissionSettings(_ kind: String) throws {
+    let pane: String
+    switch kind {
+    case "accessibility": pane = "Privacy_Accessibility"
+    case "screenCapture": pane = "Privacy_ScreenCapture"
+    default: throw NativeError("PERMISSION_KIND: 不支持的权限类型。")
+    }
+    // Fixed local System Settings destination; no user-controlled URL/scheme.
+    guard let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?\(pane)"),
+          onMainThread({ NSWorkspace.shared.open(url) }) else {
+        throw NativeError("PERMISSION_SETTINGS: 无法打开系统设置，请手动进入隐私与安全性。")
+    }
+}
+
 func diagnostics() -> [String: Any] {
     let languages = (try? VNRecognizeTextRequest().supportedRecognitionLanguages()) ?? []
     return ["platform": "macos", "helper": "swift-appkit-vision", "localOcr": true,
+            "nativeExecution": "in-process-static", "permissions": permissionStatus(),
             "accessibilityGranted": AXIsProcessTrusted(),
             "screenCaptureGranted": CGPreflightScreenCaptureAccess(),
             "ocrLanguages": languages, "ocrEngine": "Apple Vision",
             "selection": "Accessibility selected text, then Cmd+C with clipboard restoration",
-            "screens": NSScreen.screens.map { ["width": $0.frame.width, "height": $0.frame.height, "scale": $0.backingScaleFactor] }]
+            "screens": displayDiagnostics()]
 }
 
-func selfTest() throws -> [String: Any] {
+func displayDiagnostics() -> [[String: Any]] {
+    // CoreGraphics display inspection works on the worker used by Rust tests
+    // and IPC. Do not ask AppKit for NSScreen.screens off the main thread or
+    // synchronously dispatch to an absent main-loop in the CLI/test host.
+    var displays = [CGDirectDisplayID](repeating: 0, count: 32)
+    var count: UInt32 = 0
+    guard CGGetActiveDisplayList(UInt32(displays.count), &displays, &count) == .success else { return [] }
+    return displays.prefix(Int(count)).map { display in
+        let bounds = CGDisplayBounds(display)
+        let mode = CGDisplayCopyDisplayMode(display)
+        let scale = mode.map { $0.width > 0 ? Double($0.pixelWidth) / Double($0.width) : 1 } ?? 1
+        return ["width": bounds.width, "height": bounds.height, "scale": scale]
+    }
+}
+
+func selfTest(input: Data = Data()) throws -> [String: Any] {
+    if !input.isEmpty && String(data: input, encoding: .utf8) != "回声译\0EchoLingo 🪞" {
+        throw NativeError("SELF_TEST: Native bridge input did not preserve UTF-8 and NUL.")
+    }
     try paragraphGeometrySelfTest()
     let width = 1100, height = 160
     guard let context = CGContext(data: nil, width: width, height: height, bitsPerComponent: 8,
@@ -331,39 +407,91 @@ func selfTest() throws -> [String: Any] {
     guard text.lowercased().contains("echolingo"), text.contains("2468") else {
         throw NativeError("SELF_TEST: Local OCR did not recognize the generated fixture.")
     }
-    guard let png = NSBitmapImageRep(cgImage: image).representation(using: .png, properties: [:]),
-          Data(base64Encoded: try encodePNG(png)) == png else {
+    let png = NSMutableData()
+    guard let destination = CGImageDestinationCreateWithData(png, "public.png" as CFString, 1, nil) else {
+        throw NativeError("SELF_TEST: Could not create PNG encoder.")
+    }
+    CGImageDestinationAddImage(destination, image, nil)
+    guard CGImageDestinationFinalize(destination),
+          Data(base64Encoded: try encodePNG(png as Data)) == png as Data else {
         throw NativeError("SELF_TEST: PNG base64 roundtrip failed.")
     }
     return ["ocrFixturePassed": true, "recognized": text, "diagnostics": diagnostics(),
             "pngBase64RoundtripPassed": true, "paragraphGeometryFixturePassed": true,
-            "interactiveCaptureTested": false, "clipboardChanged": false]
+            "interactiveCaptureTested": false, "clipboardChanged": false, "bridgeInputPassed": !input.isEmpty]
 }
 
-do {
-    let mode = CommandLine.arguments.dropFirst().first ?? "--diagnostics"
-    switch mode {
-    case "--selected-text": emit(["ok": true, "text": try selection()])
-    case "--capture-ocr": emit(["ok": true, "text": try captureOCR()])
-    case "--capture-image": emit(["ok": true, "imageBase64": try captureImage()])
-    case "--clipboard":
-        guard let text = NSPasteboard.general.string(forType: .string), !text.isEmpty else { throw NativeError("CLIPBOARD_EMPTY: The clipboard does not contain text.") }
-        emit(["ok": true, "text": text])
-    case "--copy":
-        let data = FileHandle.standardInput.readDataToEndOfFile()
-        guard let text = String(data: data, encoding: .utf8) else { throw NativeError("CLIPBOARD: Invalid UTF-8 input.") }
-        let pasteboard = NSPasteboard.general
-        pasteboard.clearContents()
-        guard pasteboard.setString(text, forType: .string) else { throw NativeError("CLIPBOARD: Cannot write to clipboard.") }
-        emit(["ok": true, "text": ""])
-    case "--diagnostics": emit(["ok": true, "diagnostics": diagnostics()])
-    case "--self-test": emit(["ok": true, "diagnostics": try selfTest()])
-    default: throw NativeError("Unsupported native helper mode.")
+func nativeResponse(mode: String, input: Data = Data()) -> [String: Any] {
+    do {
+        switch mode {
+        case "--selected-text": return ["ok": true, "text": try selection()]
+        case "--capture-ocr": return ["ok": true, "text": try captureOCR()]
+        case "--capture-image": return ["ok": true, "imageBase64": try captureImage()]
+        case "--clipboard":
+            guard let text = NSPasteboard.general.string(forType: .string), !text.isEmpty else {
+                throw NativeError("CLIPBOARD_EMPTY: The clipboard does not contain text.")
+            }
+            return ["ok": true, "text": text]
+        case "--copy":
+            guard input.count <= 2 * 1024 * 1024, let text = String(data: input, encoding: .utf8) else {
+                throw NativeError("CLIPBOARD: Invalid or oversized UTF-8 input.")
+            }
+            let pasteboard = NSPasteboard.general
+            pasteboard.clearContents()
+            guard pasteboard.setString(text, forType: .string) else { throw NativeError("CLIPBOARD: Cannot write to clipboard.") }
+            return ["ok": true, "text": ""]
+        case "--permissions": return ["ok": true, "permissions": permissionStatus()]
+        case "--request-accessibility", "--request-screenCapture":
+            let kind = String(mode.dropFirst("--request-".count))
+            return ["ok": true, "permissions": try requestPermission(kind)]
+        case "--open-settings-accessibility", "--open-settings-screenCapture":
+            try openPermissionSettings(String(mode.dropFirst("--open-settings-".count)))
+            return ["ok": true, "text": ""]
+        case "--diagnostics": return ["ok": true, "diagnostics": diagnostics()]
+        case "--self-test": return ["ok": true, "diagnostics": try selfTest(input: input)]
+        default: throw NativeError("NATIVE_MODE: Unsupported native operation.")
+        }
+    } catch let error as NativeError {
+        return ["ok": false, "error": error.message]
+    } catch {
+        return ["ok": false, "error": "NATIVE: \(error.localizedDescription)"]
     }
-} catch let error as NativeError {
-    emit(["ok": false, "error": error.message])
-    exit(1)
-} catch {
-    emit(["ok": false, "error": "NATIVE: \(error.localizedDescription)"])
-    exit(1)
 }
+
+#if ECHOLINGO_LIBRARY
+// An explicit length preserves NUL/Unicode clipboard input. The caller owns the
+// returned buffer until echolingo_native_free; no Swift object crosses the ABI.
+@_cdecl("echolingo_native_run")
+public func echolingoNativeRun(_ mode: UnsafePointer<CChar>?, _ input: UnsafePointer<UInt8>?,
+                               _ inputLength: Int, _ outputLength: UnsafeMutablePointer<Int>?) -> UnsafeMutablePointer<UInt8>? {
+    return autoreleasepool {
+        guard let mode = mode, let outputLength = outputLength else { return nil }
+        outputLength.pointee = 0
+        guard inputLength >= 0, inputLength <= 2 * 1024 * 1024,
+              inputLength == 0 || input != nil else { return nil }
+        let data = inputLength == 0 ? Data() : Data(bytes: input!, count: inputLength)
+        let object = nativeResponse(mode: String(cString: mode), input: data)
+        guard let encoded = try? JSONSerialization.data(withJSONObject: object, options: [.sortedKeys]) else { return nil }
+        let result = UnsafeMutablePointer<UInt8>.allocate(capacity: max(1, encoded.count))
+        encoded.copyBytes(to: result, count: encoded.count)
+        outputLength.pointee = encoded.count
+        return result
+    }
+}
+
+@_cdecl("echolingo_native_free")
+public func echolingoNativeFree(_ buffer: UnsafeMutablePointer<UInt8>?) {
+    buffer?.deallocate()
+}
+#else
+@main
+struct EchoLingoNativeCLI {
+    static func main() {
+        let mode = CommandLine.arguments.dropFirst().first ?? "--diagnostics"
+        let input = mode == "--copy" ? FileHandle.standardInput.readDataToEndOfFile() : Data()
+        let response = nativeResponse(mode: mode, input: input)
+        emit(response)
+        if response["ok"] as? Bool != true { exit(1) }
+    }
+}
+#endif
