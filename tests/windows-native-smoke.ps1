@@ -36,7 +36,7 @@ try {
     $selectionPolicyOutput = @(& powershell.exe -NoProfile -STA -ExecutionPolicy Bypass -File $selectionPolicyScript -HelperPath $HelperPath)
     if ($LASTEXITCODE -ne 0) { throw 'SELECTION_POLICY_TEST: Pure selection-policy fixture failed.' }
     $selectionPolicy = ($selectionPolicyOutput -join "`n") | ConvertFrom-Json
-    if (-not $selectionPolicy.ok -or -not $selectionPolicy.selectionPolicyFixturePassed -or $selectionPolicy.assertions -lt 42 -or
+    if (-not $selectionPolicy.ok -or -not $selectionPolicy.selectionPolicyFixturePassed -or $selectionPolicy.assertions -lt 49 -or
         $selectionPolicy.windowsInteractiveTested -or $selectionPolicy.clipboardAccessed -or $selectionPolicy.inputSent -or $selectionPolicy.screenCaptured) {
         throw 'SELECTION_POLICY_TEST: Fixture did not report a safe pass.'
     }
@@ -84,6 +84,7 @@ public static class EchoLingoDesktopSmoke {
     static readonly object processLock = new object();
     static Process activeHelper;
     static volatile bool cancelled;
+    static readonly List<string> selectionCopyTrace = new List<string>();
 
     sealed class SavedClipboard : IDisposable {
         readonly DataObject data = new DataObject();
@@ -208,6 +209,9 @@ public static class EchoLingoDesktopSmoke {
         info.RedirectStandardError = true;
         info.StandardOutputEncoding = new UTF8Encoding(false);
         info.StandardErrorEncoding = new UTF8Encoding(false);
+        // This opt-in applies only to our generated synthetic source control.
+        // Native traces contain sequence/timing/state metadata, never its text.
+        info.EnvironmentVariables["ECHOLINGO_SELECTION_TRACE"] = "1";
         using (Process process = new Process()) {
             process.StartInfo = info;
             try {
@@ -228,6 +232,7 @@ public static class EchoLingoDesktopSmoke {
                 }
                 string output = outputTask.Result.Trim(new char[] { '\uFEFF', ' ', '\r', '\n' });
                 string errors = errorTask.Result;
+                if (mode == "selected-text" && !String.IsNullOrWhiteSpace(errors)) selectionCopyTrace.Add(errors.Trim());
                 if (String.IsNullOrWhiteSpace(output)) throw new InvalidOperationException("HELPER_PROTOCOL: No JSON for " + mode + ". Exit " + process.ExitCode + ". " + errors);
                 Dictionary<string, object> result;
                 try { result = new JavaScriptSerializer().Deserialize<Dictionary<string, object>>(output); }
@@ -322,6 +327,8 @@ public static class EchoLingoDesktopSmoke {
         report["screenshotsTested"] = false;
         report["multiMonitorTested"] = false;
         report["globalShortcutRegistrationTested"] = false;
+        selectionCopyTrace.Clear();
+        report["selectionCopyTrace"] = selectionCopyTrace;
         try { report["inputDesktop"] = InputDesktopName(); }
         catch (Exception error) { report["error"] = error.Message; return report; }
 

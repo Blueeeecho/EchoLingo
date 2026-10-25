@@ -59,10 +59,16 @@ public static class SelectionCopyPolicy {
         long stableSince;
         public uint CompletedSequence { get; private set; }
         public string CompletedText { get; private set; }
+        public uint? CandidateSequence { get { return candidate; } }
         public Completion(uint initialSequence) { initial = initialSequence; }
         public Observation Observe(uint before, string text, uint after, long elapsedMilliseconds) {
-            if (before != after || (candidate.HasValue && candidate.Value != after)) return Observation.Superseded;
             bool expired = elapsedMilliseconds >= 1200;
+            if (candidate.HasValue && (before != after || candidate.Value != after)) return Observation.Superseded;
+            // OleGetClipboard/GetData may render a delayed format and advance
+            // the sequence during the first read. Discard that torn read in
+            // full; only a coherent before/after snapshot can become the first
+            // candidate. After that, every generation change still aborts.
+            if (before != after) return expired ? Observation.UnfinishedTimeout : Observation.Waiting;
             if (after == initial) return expired ? Observation.UnchangedTimeout : Observation.Waiting;
             if (expired) return Observation.UnfinishedTimeout;
             if (!String.IsNullOrWhiteSpace(text)) {
@@ -97,7 +103,8 @@ public static class SelectionCopyPolicy {
     // failure. With zero/one inserted event, no copy was sent: do not claim or
     // restore an unrelated clipboard generation. No key input is retried here.
     public static string CompleteCopy(uint initial, uint inserted, Func<uint> sequence, Func<string> readText,
-                                      Action<uint> restore, Func<long> elapsedMilliseconds, Action wait) {
+                                      Action<uint> restore, Func<long> elapsedMilliseconds, Action wait,
+                                      Action<string> trace = null) {
         bool inputFailed = inserted != 4;
         if (inserted < 2) throw new InvalidOperationException(InputBlocked);
         Completion completion = new Completion(initial);
@@ -109,7 +116,16 @@ public static class SelectionCopyPolicy {
                 throw new InvalidOperationException("CLIPBOARD_RESTORE_SKIPPED: Copied text could not be read safely. The original clipboard was not restored over this uncertain update; current contents were preserved.");
             }
             uint after = sequence();
-            switch (completion.Observe(before, text, after, elapsedMilliseconds())) {
+            long elapsed = elapsedMilliseconds();
+            uint? candidateBefore = completion.CandidateSequence;
+            Observation observation = completion.Observe(before, text, after, elapsed);
+            // Explicit synthetic-desktop diagnostics only: no copied text,
+            // window titles, application identities or clipboard formats.
+            if (trace != null) trace("SELECTION_TRACE before=" + before + " after=" + after
+                + " candidateBefore=" + (candidateBefore.HasValue ? candidateBefore.Value.ToString() : "none")
+                + " candidateAfter=" + (completion.CandidateSequence.HasValue ? completion.CandidateSequence.Value.ToString() : "none")
+                + " elapsedMs=" + elapsed + " observation=" + observation);
+            switch (observation) {
                 case Observation.Waiting: wait(); break;
                 case Observation.Completed:
                     RequireCurrentSequence(completion.CompletedSequence, sequence());
@@ -264,7 +280,9 @@ public static class EchoLingoNative {
                             } catch (Exception error) {
                                 throw new InvalidOperationException("CLIPBOARD_RESTORE_FAILED: Could not restore original clipboard formats. " + error.Message);
                             }
-                        }, delegate { return clock.ElapsedMilliseconds; }, delegate { Thread.Sleep(5); });
+                        }, delegate { return clock.ElapsedMilliseconds; }, delegate { Thread.Sleep(5); },
+                        Environment.GetEnvironmentVariable("ECHOLINGO_SELECTION_TRACE") == "1"
+                            ? (Action<string>)delegate(string message) { Console.Error.WriteLine(message); } : null);
             });
         } finally { foreach (IDisposable resource in resources) resource.Dispose(); }
     }

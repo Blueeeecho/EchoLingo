@@ -111,7 +111,24 @@ public static class WindowsSelectionPolicyFixture {
             Assert(unchanged.RestoreCount == 0 && unchanged.ReadCount == 0, "No clipboard change means no restoration");
 
             SelectionCopyPolicy.Completion torn = new SelectionCopyPolicy.Completion(10);
-            Assert(torn.Observe(11, "text", 12, 0) == SelectionCopyPolicy.Observation.Superseded, "A generation change during text read is rejected");
+            Assert(torn.Observe(11, "discarded torn text", 12, 0) == SelectionCopyPolicy.Observation.Waiting, "First materialization race is discarded and reread");
+            Assert(!torn.CandidateSequence.HasValue, "A torn first read cannot establish clipboard ownership");
+            Assert(torn.Observe(12, "coherent text", 12, 5) == SelectionCopyPolicy.Observation.Waiting, "Only a coherent snapshot establishes the first candidate");
+            Assert(torn.Observe(12, "newer text", 13, 10) == SelectionCopyPolicy.Observation.Superseded, "A torn read after a candidate still preserves the newer generation");
+            SelectionCopyPolicy.Completion expiredTorn = new SelectionCopyPolicy.Completion(10);
+            Assert(expiredTorn.Observe(11, "late torn text", 12, 1200) == SelectionCopyPolicy.Observation.UnfinishedTimeout, "An initial materialization race cannot extend the deadline");
+            uint renderSequence = 11;
+            int renderStep = 0, renderRestores = 0;
+            List<string> metadataTrace = new List<string>();
+            string rendered = SelectionCopyPolicy.CompleteCopy(10, 4, delegate { return renderSequence; },
+                delegate { if (renderStep == 0) { renderSequence = 12; return "discarded torn text"; } return "coherent text"; },
+                delegate(uint expected) { SelectionCopyPolicy.RequireCurrentSequence(expected, renderSequence); renderRestores++; },
+                delegate { return renderStep * 10; }, delegate { if (++renderStep > 4) throw new Exception("Unbounded materialization retry"); },
+                delegate(string trace) { metadataTrace.Add(trace); });
+            Assert(rendered == "coherent text" && renderRestores == 1 && renderStep == 3, "First read render race is reread, stabilized, then restored exactly once");
+            Assert(metadataTrace[0].Contains("before=11 after=12 candidateBefore=none candidateAfter=none")
+                && metadataTrace[0].Contains("observation=Waiting"), "Numeric trace proves the torn first snapshot was discarded");
+            Assert(metadataTrace.TrueForAll(delegate(string trace) { return !trace.Contains("discarded torn text") && !trace.Contains("coherent text"); }), "Diagnostic trace contains no copied content");
             SelectionCopyPolicy.Completion changedText = new SelectionCopyPolicy.Completion(10);
             Assert(changedText.Observe(11, "part", 11, 0) == SelectionCopyPolicy.Observation.Waiting, "First candidate waits");
             Assert(changedText.Observe(11, "whole", 11, 10) == SelectionCopyPolicy.Observation.Waiting, "Same-generation materialization resets stability");

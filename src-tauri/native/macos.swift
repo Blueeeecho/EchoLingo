@@ -249,6 +249,10 @@ struct SelectionCopyCompletion {
     private var observedSince: TimeInterval?
     static let settleInterval: TimeInterval = 0.02
 
+    init(initialCount: Int) {
+        self.initialCount = initialCount
+    }
+
     mutating func observe(countBefore: Int, text: String?, countAfter: Int,
                           now: TimeInterval, expired: Bool) -> SelectionCopyObservation {
         guard countBefore == countAfter else { return .superseded }
