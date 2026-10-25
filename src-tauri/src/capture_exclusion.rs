@@ -148,7 +148,9 @@ mod win32 {
 
     type Hwnd = *mut c_void;
 
-    // RTL_OSVERSIONINFOW/OSVERSIONINFOW contains only DWORDs and WCHARs.
+    // RTL_OSVERSIONINFOW (not the larger OSVERSIONINFOEXW): five 32-bit
+    // ULONGs followed by 128 16-bit WCHARs, exactly 276 bytes, alignment 4.
+    // https://learn.microsoft.com/windows-hardware/drivers/ddi/wdm/ns-wdm-_osversioninfow
     #[repr(C)]
     struct OsVersionInfo {
         size: u32,
@@ -229,7 +231,15 @@ mod win32 {
     #[cfg(test)]
     #[test]
     fn version_buffer_matches_windows_abi() {
-        assert_eq!(size_of::<OsVersionInfo>(), 284);
+        assert_eq!(size_of::<OsVersionInfo>(), 276);
+        assert_eq!(std::mem::align_of::<OsVersionInfo>(), 4);
+        assert_eq!(std::mem::offset_of!(OsVersionInfo, service_pack), 20);
+        // This Windows-only test also exercises the real ntdll call with that
+        // exact buffer and size, rather than only testing a duplicated layout.
+        let (major, build) = WindowsDisplayAffinity
+            .version()
+            .expect("RtlGetVersion must accept RTL_OSVERSIONINFOW");
+        assert!(major > 0 && build > 0);
     }
 }
 

@@ -36,6 +36,13 @@ jobs:
         if: runner.os == 'Windows'
         shell: powershell
         run: powershell.exe -NoProfile -STA -ExecutionPolicy Bypass -File tests/windows-native-smoke.ps1 -CaptureStateOnly
+      - name: macOS native toolchain versions
+        if: runner.os == 'macOS'
+        run: |
+          sw_vers
+          xcodebuild -version
+          swiftc --version
+          xcrun --show-sdk-version
       - name: Native macOS OCR and private pasteboard self-test
         if: runner.os == 'macOS'
         run: bash tests/macos-native-self-test.sh
@@ -54,6 +61,11 @@ jobs:
         run: cargo fmt --manifest-path src-tauri/Cargo.toml --check
       - name: Build desktop installer
         run: npm run tauri build -- --bundles ${{ runner.os == 'Windows' && 'nsis' || 'dmg' }}
+      - name: Windows application shortcut and OCR integration smoke
+        if: runner.os == 'Windows'
+        timeout-minutes: 5
+        shell: powershell
+        run: powershell.exe -NoProfile -STA -ExecutionPolicy Bypass -File tests/windows-application-smoke.ps1 -ApplicationPath src-tauri/target/release/echolingo.exe
       - uses: actions/upload-artifact@v4
         with:
           name: EchoLingo-${{ runner.os }}

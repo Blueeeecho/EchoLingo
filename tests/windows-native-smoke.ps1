@@ -405,6 +405,19 @@ public static class EchoLingoDesktopSmoke {
                         AssertRichClipboard(seeded);
                         passed.Add("Clipboard clear followed by 80ms delayed text is awaited; one Ctrl+C and rich format restoration");
 
+                        // Every call launches a fresh helper/OLE apartment so
+                        // first-read materialization is tested repeatedly,
+                        // with immediate and delayed source publication alike.
+                        for (int trial = 0; trial < 4; trial++) {
+                            bool delayed = trial % 2 != 0;
+                            FocusFixture(form, fallback, delegate { fallback.DelayPublication = delayed; });
+                            AssertSuccess(CaptureFixtureSelection(form, helperPath), CopyFallbackControl.Selection, "Repeated fresh-helper Ctrl+C trial " + trial);
+                            OnUi(form, delegate { copyCount = fallback.CopyCount; fallback.DelayPublication = false; });
+                            Assert(copyCount == 3 + trial, "Fresh-helper copy must send one Ctrl+C per trial; received " + copyCount);
+                            AssertRichClipboard(seeded);
+                        }
+                        passed.Add("Four fresh-helper Ctrl+C repetitions (immediate/delayed) preserve rich clipboard and send one copy each");
+
                         FocusFixture(form, password, delegate { password.SelectAll(); });
                         Reply protectedReply = CaptureFixtureSelection(form, helperPath);
                         Assert(!protectedReply.Ok && protectedReply.ExitCode != 0 && protectedReply.Error != null && protectedReply.Error.StartsWith("PROTECTED:", StringComparison.Ordinal), "Password control must return PROTECTED, received " + protectedReply.Error);
