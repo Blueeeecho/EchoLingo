@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { defaultSettings, errorMessage, filterHistory, languageName, normalizeTimestamp, validateProvider } from '../src/model';
+import { defaultSettings, errorMessage, userFacingError, filterHistory, languageName, normalizeTimestamp, validateProvider } from '../src/model';
 import type { HistoryEntry, Provider } from '../src/types';
 
 const provider: Provider = { id: 'private-api', name: '我的服务', kind: 'openai', baseUrl: 'https://api.example.com/v1', model: 'small-model', enabled: true };
@@ -29,6 +29,9 @@ describe('provider privacy and validation', () => {
     expect(second.ocrProviders).toEqual([]);
     expect(second.activeOcrProviderId).toBeNull();
     expect(second.autoHideSeconds).toBe(0);
+    expect(second.targetLanguage).toBe('auto');
+    expect(second.shortcuts.silentOcr).toBe('Alt+S');
+    expect(second.shortcuts.capture).toBe('');
     expect(JSON.stringify(second)).not.toMatch(/apiKey|secret|token|results/);
   });
 });
@@ -57,5 +60,10 @@ describe('display compatibility', () => {
     expect(errorMessage('请求超时')).toBe('请求超时');
     expect(errorMessage(new Error('网络不可用'))).toBe('网络不可用');
     expect(languageName('xx-custom')).toBe('xx-custom');
+  });
+  it('shows actionable system translation messages without internal diagnostic codes', () => {
+    expect(userFacingError('SYSTEM_TRANSLATION_DOWNLOAD_REQUIRED: 请在设置中准备语言包')).toBe('请在设置中准备语言包');
+    expect(userFacingError('SYSTEM_TRANSLATION_UNSUPPORTED: 当前语言组合不可用')).toBe('当前语言组合不可用');
+    expect(userFacingError('服务返回 HTTP 401')).toBe('服务返回 HTTP 401');
   });
 });

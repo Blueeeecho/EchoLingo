@@ -1,6 +1,8 @@
 fn main() {
     tauri_build::build();
     println!("cargo:rerun-if-changed=native/macos.swift");
+    println!("cargo:rerun-if-changed=native/macos_capture.swift");
+    println!("cargo:rerun-if-changed=native/macos_window.swift");
     println!("cargo:rerun-if-changed=native/windows.ps1");
     println!("cargo:rerun-if-env-changed=MACOSX_DEPLOYMENT_TARGET");
 
@@ -17,7 +19,14 @@ fn main() {
     let out_dir = std::path::PathBuf::from(std::env::var_os("OUT_DIR").unwrap());
     let output = out_dir.join("libecholingo_native.a");
     let status = std::process::Command::new("/usr/bin/swiftc")
-        .args(["native/macos.swift", "-O", "-target", &target])
+        .args([
+            "native/macos.swift",
+            "native/macos_capture.swift",
+            "native/macos_window.swift",
+            "-O",
+            "-target",
+            &target,
+        ])
         .args([
             "-D",
             "ECHOLINGO_LIBRARY",
@@ -28,6 +37,7 @@ fn main() {
             "EchoLingoNative",
         ])
         .args(["-framework", "AppKit", "-framework", "Vision"])
+        .args(["-framework", "NaturalLanguage"])
         .args([
             "-framework",
             "ApplicationServices",
@@ -47,6 +57,10 @@ fn main() {
     // executing a cached helper with a separate, changing TCC code identity.
     println!("cargo:rustc-link-search=native={}", out_dir.display());
     println!("cargo:rustc-link-lib=static=echolingo_native");
+    // Translation.framework is absent on older supported macOS versions.
+    // Swift availability guards keep all Translation symbols out of that path.
+    println!("cargo:rustc-link-arg=-Wl,-weak_framework,Translation");
+    println!("cargo:rustc-link-arg=-Wl,-weak_framework,ScreenCaptureKit");
     let compiler = std::process::Command::new("/usr/bin/xcrun")
         .args(["--find", "swiftc"])
         .output()

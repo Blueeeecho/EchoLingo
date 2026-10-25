@@ -32,6 +32,10 @@ jobs:
         if: runner.os == 'Windows'
         shell: powershell
         run: powershell.exe -NoProfile -STA -ExecutionPolicy Bypass -File src-tauri/native/windows.ps1 -Mode self-test
+      - name: Windows transparent selector state regression
+        if: runner.os == 'Windows'
+        shell: powershell
+        run: powershell.exe -NoProfile -STA -ExecutionPolicy Bypass -File tests/windows-native-smoke.ps1 -CaptureStateOnly
       - name: Native macOS OCR and private pasteboard self-test
         if: runner.os == 'macOS'
         run: bash tests/macos-native-self-test.sh
@@ -39,6 +43,11 @@ jobs:
         if: runner.os == 'Windows'
         shell: powershell
         run: powershell.exe -NoProfile -STA -ExecutionPolicy Bypass -File tests/windows-native-smoke.ps1
+      - name: Windows live transparent region selector desktop smoke
+        if: runner.os == 'Windows'
+        timeout-minutes: 3
+        shell: powershell
+        run: powershell.exe -NoProfile -STA -ExecutionPolicy Bypass -File tests/windows-live-capture-smoke.ps1
       - name: Rust tests
         run: cargo test --manifest-path src-tauri/Cargo.toml
       - name: Rust formatting

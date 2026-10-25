@@ -23,6 +23,39 @@ describe('native capture text normalization', () => {
     expect(normalizeCapturedText(`${first}\n${second}\n${third}`)).toBe(`${first} ${second} ${third}`);
   });
 
+  it('joins narrow English screenshot rows within an unfinished sentence', () => {
+    expect(normalizeCapturedText('With macOS Sonoma,\nwork and play on your\nMac are even more\npowerful.'))
+      .toBe('With macOS Sonoma, work and play on your Mac are even more powerful.');
+    expect(normalizeCapturedText('Select text in any app\nand press the shortcut\nto translate it.'))
+      .toBe('Select text in any app and press the shortcut to translate it.');
+    expect(normalizeCapturedText('Our app translates\nEnglish text and\nkeeps the paragraphs.'))
+      .toBe('Our app translates English text and keeps the paragraphs.');
+  });
+
+  it('keeps blank paragraphs, short completed sentences and structure beside narrow prose', () => {
+    const input = 'Select text in any app\nand press the shortcut.\n\n- quiet-pin:\n- another item';
+    expect(normalizeCapturedText(input)).toBe('Select text in any app and press the shortcut.\n\n- quiet-pin:\n- another item');
+    expect(normalizeCapturedText('This is complete.\nAnother short paragraph')).toBe('This is complete.\nAnother short paragraph');
+  });
+
+  it('preserves short shell commands and configuration keys', () => {
+    for (const input of [
+      'git fetch origin\ngit checkout main\nnpm run build',
+      'description: a short description\nenabled: true\nmode: offline',
+      '$ echo hello\n$ echo world',
+    ]) expect(normalizeCapturedText(input)).toBe(input);
+  });
+
+  it('does not borrow continuation evidence across a completed narrow sentence', () => {
+    const input = 'This first line wraps\nonto a second line.\nImportant notice\nDo not share this.';
+    expect(normalizeCapturedText(input)).toBe('This first line wraps onto a second line.\nImportant notice\nDo not share this.');
+  });
+
+  it('joins a split proper name or single-word row within established prose', () => {
+    expect(normalizeCapturedText('The weather in San\nFrancisco is nice.')).toBe('The weather in San Francisco is nice.');
+    expect(normalizeCapturedText('Please confirm the\npassword\nbefore continuing.')).toBe('Please confirm the password before continuing.');
+  });
+
   it('merges layout boundary spaces without collapsing spaces inside prose', () => {
     const first = 'This sufficiently long captured line contains an ordinary word ';
     expect(normalizeCapturedText(`${first}\n followed by more text.`)).toBe(`${first}followed by more text.`);

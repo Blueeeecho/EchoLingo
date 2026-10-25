@@ -515,6 +515,43 @@ mod tests {
     }
 
     #[test]
+    fn vision_reasoning_is_never_recognized_text_or_an_empty_result_fallback() {
+        let p = provider("openai-vision");
+        let reasoning = "PRIVATE-REASONING-FIXTURE: guessed image text";
+        assert_eq!(
+            parse_response(
+                &p,
+                &json!({"choices":[{"finish_reason":"stop","message":{
+                    "reasoning_content":reasoning,"content":"EchoLingo 2468\n第二行"
+                }}]})
+            )
+            .unwrap(),
+            "EchoLingo 2468\n第二行"
+        );
+        for final_content in [Value::Null, json!(""), json!(" \n ")] {
+            let error = parse_response(
+                &p,
+                &json!({"choices":[{"finish_reason":"stop","message":{
+                    "reasoning_content":reasoning,"content":final_content
+                }}]}),
+            )
+            .unwrap_err();
+            assert!(!error.contains(reasoning));
+        }
+        for reason in ["length", "content_filter"] {
+            let error = parse_response(
+                &p,
+                &json!({"choices":[{"finish_reason":reason,"message":{
+                    "reasoning_content":reasoning,"content":"partial image text"
+                }}]}),
+            )
+            .unwrap_err();
+            assert!(!error.contains(reasoning));
+            assert!(!error.contains("partial image text"));
+        }
+    }
+
+    #[test]
     fn image_base64_and_size_limits() {
         for image in ["AAAA", "aGVsbG8=", "AA=="] {
             assert!(validate_image(image).is_ok());
@@ -539,7 +576,7 @@ mod tests {
             let responses = [
                 (
                     "200 OK",
-                    json!({"choices":[{"finish_reason":"stop","message":{"content":"图中文字"}}]})
+                    json!({"choices":[{"finish_reason":"stop","message":{"reasoning_content":"PRIVATE-REASONING-FIXTURE","content":"图中文字"}}]})
                         .to_string(),
                 ),
                 (

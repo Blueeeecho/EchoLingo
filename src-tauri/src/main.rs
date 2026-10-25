@@ -1,4 +1,8 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+mod credential_cache;
+mod language_detection;
+#[cfg(target_os = "macos")]
+mod macos_startup;
 mod model;
 mod ocr;
 mod ocr_native;
@@ -25,6 +29,8 @@ use tauri_plugin_global_shortcut::{GlobalShortcutExt, Shortcut, ShortcutState};
 
 struct AppState {
     settings: Mutex<Settings>,
+    credentials: credential_cache::CredentialCache<String>,
+    credential_reads: Mutex<()>,
     history: Mutex<Vec<HistoryEntry>>,
     pinned: AtomicBool,
     native_busy: AtomicBool,
@@ -34,6 +40,143 @@ struct AppState {
     client: reqwest::Client,
     startup_warnings: Mutex<Vec<String>>,
     outside_thread: Mutex<Option<std::thread::Thread>>,
+    pending_settings: Mutex<Option<u64>>,
+}
+
+#[cfg(target_os = "macos")]
+#[derive(Default)]
+struct ApplicationPolicyDiagnostics(Mutex<std::collections::BTreeMap<String, serde_json::Value>>);
+
+// This bounded support record contains this process's native role only, never
+// window contents, other apps, permissions, clipboard, settings or credentials.
+// It diagnoses a failed launch policy without toggling it at runtime.
+fn verify_application_policy(app: &tauri::AppHandle, phase: &'static str) -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    {
+        let metadata = macos_startup::application_policy_metadata()?;
+        let accessory = metadata.ns_application_policy == 1;
+        let diagnostics = app.state::<ApplicationPolicyDiagnostics>();
+        let mut observations = locked(&diagnostics.0)?;
+        observations.insert(
+            phase.to_owned(),
+            serde_json::json!({ "recordedAtUnixMs": now(), "metadata": metadata }),
+        );
+        let _ = write_json(
+            &app.state::<AppState>()
+                .data_dir
+                .join("window-policy-diagnostics.json"),
+            &*observations,
+        );
+        if !accessory {
+            return Err("WINDOW_POLICY: macOS 菜单栏应用模式未生效，请重新打开 EchoLingo。".into());
+        }
+    }
+    #[cfg(not(target_os = "macos"))]
+    let _ = (app, phase);
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+async fn verify_capture_application_policy(app: &tauri::AppHandle) -> Result<(), String> {
+    let (send, receive) = tokio::sync::oneshot::channel();
+    let handle = app.clone();
+    app.run_on_main_thread(move || {
+        let _ = send.send(verify_application_policy(&handle, "beforeCapture"));
+    })
+    .map_err(|_| "WINDOW_THREAD: Cannot verify capture startup policy.".to_string())?;
+    receive
+        .await
+        .map_err(|_| "WINDOW_THREAD: Capture startup policy check was interrupted.".to_string())?
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct OpenSettingsEvent {
+    presentation_epoch: u64,
+}
+
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct TranslationProgress {
+    request_id: u64,
+    presentation_epoch: u64,
+    sequence: u64,
+    done: bool,
+    result: TranslationResult,
+}
+
+fn publish_translation_progress(
+    app: &tauri::AppHandle,
+    state: &AppState,
+    request_id: u64,
+    sequence: u64,
+    done: bool,
+    result: TranslationResult,
+) {
+    let _ = state
+        .translation_requests
+        .publish(request_id, |presentation| {
+            let _ = app.emit(
+                "translation-progress",
+                TranslationProgress {
+                    request_id,
+                    presentation_epoch: presentation.epoch,
+                    sequence,
+                    done,
+                    result,
+                },
+            );
+        });
+}
+
+fn pending_settings_event(
+    pending: Option<u64>,
+    presentation: translation_requests::Presentation,
+) -> Option<OpenSettingsEvent> {
+    pending
+        .filter(|epoch| *epoch == presentation.epoch)
+        .map(|presentation_epoch| OpenSettingsEvent { presentation_epoch })
+}
+
+const PERMISSION_DIAGNOSTICS_FLAG: &str = "--permission-diagnostics";
+
+fn permission_diagnostics_requested(args: &[String]) -> bool {
+    args.iter()
+        .skip(1)
+        .any(|argument| argument == PERMISSION_DIAGNOSTICS_FLAG)
+}
+
+fn permission_diagnostic_payload(permissions: serde_json::Value) -> serde_json::Value {
+    serde_json::json!({
+        "diagnostic": "permission-status",
+        "recordedAtUnixMs": now(),
+        "appVersion": env!("CARGO_PKG_VERSION"),
+        "processId": std::process::id(),
+        "executablePath": std::env::current_exe().ok().map(|path| path.display().to_string()),
+        "permissions": permissions,
+    })
+}
+
+// An explicitly requested support snapshot only. Fixed destination, no capture,
+// clipboard, app settings, history, credentials, prompts or background polling.
+fn write_permission_diagnostics(app: &tauri::AppHandle) -> Result<(), String> {
+    static WRITE: Mutex<()> = Mutex::new(());
+    let _write = locked(&WRITE)?;
+    let permissions = platform::permission_status()?;
+    write_json(
+        &app.state::<AppState>()
+            .data_dir
+            .join("permission-diagnostics.json"),
+        &permission_diagnostic_payload(permissions),
+    )
+}
+
+fn explicit_launch(app: &tauri::AppHandle, args: &[String]) {
+    if permission_diagnostics_requested(args) {
+        let _ = write_permission_diagnostics(app);
+    } else {
+        request_settings(app);
+    }
 }
 fn now() -> u64 {
     SystemTime::now()
@@ -114,20 +257,172 @@ fn encode_credential(scope: String, secret: String) -> Result<String, String> {
     serde_json::to_string(&CredentialEnvelope { scope, secret })
         .map_err(|_| "无法准备系统凭据".to_string())
 }
-fn load_key(p: &Provider) -> Result<String, String> {
-    match secret_entry(&p.id)?.get_password() {
-        Ok(key) => decode_credential(&key, &credential_scope(&p.kind, &p.base_url)?),
-        Err(keyring::Error::NoEntry) => Ok(String::new()),
-        Err(_) => Err("无法读取系统凭据库中的 API 密钥".into()),
+fn translation_credential_key(p: &Provider) -> Result<credential_cache::CredentialKey, String> {
+    Ok(credential_cache::CredentialKey::new(
+        &p.id,
+        credential_scope(&p.kind, &p.base_url)?,
+    ))
+}
+fn ocr_credential_key(p: &ocr::OcrProvider) -> Result<credential_cache::CredentialKey, String> {
+    Ok(credential_cache::CredentialKey::new(
+        ocr_secret_id(p),
+        credential_scope(&p.kind, &p.base_url)?,
+    ))
+}
+fn load_key(
+    cache: &credential_cache::CredentialCache<String>,
+    p: &Provider,
+) -> Result<String, String> {
+    if p.kind == "system" {
+        return Ok(String::new());
+    }
+    cached_credential(
+        cache,
+        &p.id,
+        &credential_scope(&p.kind, &p.base_url)?,
+        || {
+            match secret_entry(&p.id)?.get_password() {
+        Ok(key) => Ok(Some(key)),
+        Err(keyring::Error::NoEntry) => Ok(None),
+        Err(_) => Err("API 密钥读取未完成，本次运行不会反复申请。请在设置中点击“测试连接”主动重试，或重新保存密钥".into()),
+    }
+        },
+    )
+}
+
+fn load_ocr_key(
+    cache: &credential_cache::CredentialCache<String>,
+    p: &ocr::OcrProvider,
+) -> Result<String, String> {
+    cached_credential(
+        cache,
+        &ocr_secret_id(p),
+        &credential_scope(&p.kind, &p.base_url)?,
+        || {
+            match secret_entry(&ocr_secret_id(p))?.get_password() {
+        Ok(key) => Ok(Some(key)),
+        Err(keyring::Error::NoEntry) => Ok(None),
+        Err(_) => Err("OCR 凭据读取未完成，本次运行不会反复申请。请在设置中点击“测试连接”主动重试，或重新保存凭据".into()),
+    }
+        },
+    )
+}
+
+fn cached_credential(
+    cache: &credential_cache::CredentialCache<String>,
+    account: &str,
+    scope: &str,
+    read: impl FnOnce() -> Result<Option<String>, String>,
+) -> Result<String, String> {
+    cache.get_or_load(
+        &credential_cache::CredentialKey::new(account, scope),
+        || match read()? {
+            Some(stored) => decode_credential(&stored, scope),
+            None => Ok(String::new()),
+        },
+    )
+}
+
+fn credential_display_state(
+    cache: &credential_cache::CredentialCache<String>,
+    key: &credential_cache::CredentialKey,
+) -> (bool, &'static str) {
+    match cache.peek(key) {
+        Ok(Some(Ok(value))) if !value.is_empty() => (true, "ready"),
+        Ok(Some(Ok(_))) => (false, "missing"),
+        Ok(Some(Err(_))) | Err(_) => (false, "blocked"),
+        Ok(None) => (false, "unloaded"),
     }
 }
 
-fn load_ocr_key(p: &ocr::OcrProvider) -> Result<String, String> {
-    match secret_entry(&ocr_secret_id(p))?.get_password() {
-        Ok(k) => decode_credential(&k, &credential_scope(&p.kind, &p.base_url)?),
-        Err(keyring::Error::NoEntry) => Ok(String::new()),
-        Err(_) => Err("无法读取系统凭据库中的 OCR 密钥".into()),
+fn retry_unavailable_credential(
+    cache: &credential_cache::CredentialCache<String>,
+    key: &credential_cache::CredentialKey,
+) -> Result<(), String> {
+    cache.retry_if(key, |value| {
+        value.as_ref().map_or(true, |secret| secret.is_empty())
+    })?;
+    Ok(())
+}
+
+fn serialized_credential_read<T>(
+    gate: &Mutex<()>,
+    current: impl FnOnce() -> Result<bool, String>,
+    read: impl FnOnce() -> Result<T, String>,
+) -> Result<T, String> {
+    let _gate = locked(gate)?;
+    if !current()? {
+        return Err(translation_requests::CANCELLED.into());
     }
+    read()
+}
+
+async fn load_translation_key_async(
+    app: tauri::AppHandle,
+    provider: Provider,
+    request_id: Option<u64>,
+) -> Result<String, String> {
+    if provider.kind == "system" {
+        return Ok(String::new());
+    }
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        if let Some(id) = request_id {
+            // A queued blocking worker can start after its request was hidden
+            // or replaced. Never start a new OS read for that stale ticket.
+            if !state.translation_requests.is_current(id)? {
+                return Err(translation_requests::CANCELLED.into());
+            }
+        }
+        let key = translation_credential_key(&provider)?;
+        if let Some(cached) = state.credentials.peek(&key)? {
+            if request_id.is_some() || matches!(&cached, Ok(secret) if !secret.is_empty()) {
+                return cached;
+            }
+        }
+        // Only one new account read can ask the OS at a time. Cancellation is
+        // checked again after waiting, so it cannot queue more dialogs.
+        serialized_credential_read(
+            &state.credential_reads,
+            || request_id.map_or(Ok(true), |id| state.translation_requests.is_current(id)),
+            || {
+                if request_id.is_none() {
+                    retry_unavailable_credential(&state.credentials, &key)?;
+                }
+                load_key(&state.credentials, &provider)
+            },
+        )
+    })
+    .await
+    .map_err(|_| "系统凭据读取任务未完成，请在设置中重试".to_string())?
+}
+
+async fn load_ocr_key_async(
+    app: tauri::AppHandle,
+    provider: ocr::OcrProvider,
+    explicit_retry: bool,
+) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        let key = ocr_credential_key(&provider)?;
+        if let Some(cached) = state.credentials.peek(&key)? {
+            if !explicit_retry || matches!(&cached, Ok(secret) if !secret.is_empty()) {
+                return cached;
+            }
+        }
+        serialized_credential_read(
+            &state.credential_reads,
+            || Ok(true),
+            || {
+                if explicit_retry {
+                    retry_unavailable_credential(&state.credentials, &key)?;
+                }
+                load_ocr_key(&state.credentials, &provider)
+            },
+        )
+    })
+    .await
+    .map_err(|_| "OCR 凭据读取任务未完成，请在设置中重试".to_string())?
 }
 fn ocr_secret_id(p: &ocr::OcrProvider) -> String {
     // Credentials for a different protocol must never be sent to a new service
@@ -150,21 +445,27 @@ fn set_ocr_api_key(state: State<AppState>, provider_id: String, key: String) -> 
     } else if key.contains(['\r', '\n']) {
         return Err("OCR API 密钥不能包含换行".into());
     }
-    let stored = encode_credential(credential_scope(&provider.kind, &provider.base_url)?, key)?;
+    let cache_key = ocr_credential_key(&provider)?;
+    let stored = encode_credential(
+        credential_scope(&provider.kind, &provider.base_url)?,
+        key.clone(),
+    )?;
     secret_entry(&ocr_secret_id(&provider))?
         .set_password(&stored)
-        .map_err(|_| "无法将 OCR 密钥保存到系统凭据库".into())
+        .map_err(|_| "无法将 OCR 密钥保存到系统凭据库".to_string())?;
+    state.credentials.store(&cache_key, Ok(key))
 }
 #[tauri::command]
-fn delete_ocr_api_key(provider_id: String) -> Result<(), String> {
+fn delete_ocr_api_key(state: State<AppState>, provider_id: String) -> Result<(), String> {
     for kind in ["openai-vision", "http-json", "baidu", "tencent"] {
-        delete_api_key(format!("ocr-{provider_id}-{kind}"))?;
+        delete_stored_key(&state.credentials, &format!("ocr-{provider_id}-{kind}"))?;
     }
     // Remove the unscoped entry used by development builds as well.
-    delete_api_key(format!("ocr-{provider_id}"))
+    delete_stored_key(&state.credentials, &format!("ocr-{provider_id}"))
 }
 #[tauri::command]
 async fn test_ocr_provider(
+    app: tauri::AppHandle,
     state: State<'_, AppState>,
     provider_id: String,
 ) -> Result<String, String> {
@@ -179,10 +480,11 @@ async fn test_ocr_provider(
         .cloned()
         .ok_or("OCR 服务不存在")?;
     let start = std::time::Instant::now();
+    let key = load_ocr_key_async(app, p.clone(), true).await;
     let text = ocr::recognize(
         &state.client,
         &p,
-        load_ocr_key(&p),
+        key,
         include_str!("../../tests/fixtures/ocr-test.base64").trim(),
     )
     .await?;
@@ -193,15 +495,41 @@ async fn test_ocr_provider(
     ))
 }
 #[tauri::command]
-fn get_settings(state: State<AppState>) -> Result<Settings, String> {
-    let mut settings = locked(&state.settings)?.clone();
-    for p in &mut settings.providers {
-        p.has_key = load_key(p).map(|k| !k.is_empty()).unwrap_or(false);
+fn get_settings(state: State<AppState>) -> Result<serde_json::Value, String> {
+    let settings = locked(&state.settings)?;
+    settings_snapshot(&settings, &state.credentials)
+}
+
+// Startup and Settings refresh must never touch Keychain, even for presence
+// checks. An unread entry is unknown, not missing. Only explicit use loads it.
+fn settings_snapshot(
+    settings: &Settings,
+    cache: &credential_cache::CredentialCache<String>,
+) -> Result<serde_json::Value, String> {
+    let mut value = serde_json::to_value(settings).map_err(|_| "无法读取设置".to_string())?;
+    for (provider, item) in settings
+        .providers
+        .iter()
+        .zip(value["providers"].as_array_mut().ok_or("设置格式无效")?)
+    {
+        let (has_key, status) = if provider.kind == "system" {
+            (false, "missing")
+        } else {
+            credential_display_state(cache, &translation_credential_key(provider)?)
+        };
+        item["hasKey"] = serde_json::json!(has_key);
+        item["credentialState"] = serde_json::json!(status);
     }
-    for p in &mut settings.ocr_providers {
-        p.has_key = load_ocr_key(p).map(|k| !k.is_empty()).unwrap_or(false);
+    for (provider, item) in settings
+        .ocr_providers
+        .iter()
+        .zip(value["ocrProviders"].as_array_mut().ok_or("设置格式无效")?)
+    {
+        let (has_key, status) = credential_display_state(cache, &ocr_credential_key(provider)?);
+        item["hasKey"] = serde_json::json!(has_key);
+        item["credentialState"] = serde_json::json!(status);
     }
-    Ok(settings)
+    Ok(value)
 }
 
 fn parsed_shortcuts(s: &Shortcuts) -> Result<Vec<(String, Shortcut)>, String> {
@@ -250,15 +578,78 @@ fn save_settings(
         p.has_key = false;
     }
     let mut old = locked(&state.settings)?;
+    let changed_accounts = changed_credential_accounts(&old, &settings);
     if let Err(e) = install_shortcuts(&app, &settings.shortcuts) {
         let _ = install_shortcuts(&app, &old.shortcuts);
         return Err(e);
     }
-    if let Err(e) = write_json(&state.data_dir.join("settings.json"), &settings) {
+    let persisted = locked(&state.history).and_then(|mut history| {
+        persist_settings_and_history(&state.data_dir, &mut old, &mut history, settings)
+    });
+    if let Err(e) = persisted {
         let _ = install_shortcuts(&app, &old.shortcuts);
         return Err(e);
     }
-    *old = settings;
+    for account in changed_accounts {
+        state.credentials.invalidate_account(&account)?;
+    }
+    Ok(())
+}
+
+fn changed_credential_accounts(old: &Settings, next: &Settings) -> Vec<String> {
+    let mut changed = std::collections::HashSet::new();
+    for provider in &old.providers {
+        if provider.kind == "system" {
+            continue;
+        }
+        if !next.providers.iter().any(|candidate| {
+            candidate.id == provider.id
+                && credential_scope(&candidate.kind, &candidate.base_url).ok()
+                    == credential_scope(&provider.kind, &provider.base_url).ok()
+        }) {
+            changed.insert(provider.id.clone());
+        }
+    }
+    for provider in &old.ocr_providers {
+        if !next.ocr_providers.iter().any(|candidate| {
+            candidate.id == provider.id
+                && credential_scope(&candidate.kind, &candidate.base_url).ok()
+                    == credential_scope(&provider.kind, &provider.base_url).ok()
+        }) {
+            changed.insert(ocr_secret_id(provider));
+        }
+    }
+    changed.into_iter().collect()
+}
+
+// The caller holds settings before history, matching translation completion.
+// Applying a smaller history limit must be visible and durable immediately,
+// without requiring another successful translation or an app restart.
+fn persist_settings_and_history(
+    data_dir: &Path,
+    current: &mut Settings,
+    history: &mut Vec<HistoryEntry>,
+    settings: Settings,
+) -> Result<(), String> {
+    let mut updated = history.clone();
+    trim_history(&mut updated, settings.max_history);
+    let settings_path = data_dir.join("settings.json");
+    write_json(&settings_path, &settings)?;
+    if updated.len() != history.len() {
+        if let Err(error) = write_json(&data_dir.join("history.json"), &updated) {
+            if write_json(&settings_path, current).is_err() {
+                // Both writes failed independently. Keep memory consistent with
+                // the settings that did reach disk and enforce the new limit;
+                // startup will retry trimming the older history file.
+                *current = settings;
+                *history = updated;
+                return Err("设置已保存，但历史文件更新失败；本次运行已应用条数限制，请检查本地数据目录后重试".into());
+            }
+            return Err(format!("历史记录未能更新，设置没有更改：{error}"));
+        }
+        *history = updated;
+    }
+    *current = settings;
     Ok(())
 }
 #[tauri::command]
@@ -269,20 +660,35 @@ fn set_api_key(state: State<AppState>, provider_id: String, key: String) -> Resu
         .find(|p| p.id == provider_id)
         .cloned()
         .ok_or("请先保存服务配置，再保存密钥")?;
+    if provider.kind == "system" {
+        return Err("系统翻译无需 API 密钥".into());
+    }
     if key.is_empty() || key.len() > 8192 || key.contains(['\r', '\n']) {
         return Err("API 密钥为空、过长或包含换行".into());
     }
-    let stored = encode_credential(credential_scope(&provider.kind, &provider.base_url)?, key)?;
+    let cache_key = translation_credential_key(&provider)?;
+    let stored = encode_credential(
+        credential_scope(&provider.kind, &provider.base_url)?,
+        key.clone(),
+    )?;
     secret_entry(&provider_id)?
         .set_password(&stored)
-        .map_err(|_| "无法保存到系统凭据库；密钥没有保存到文件".into())
+        .map_err(|_| "无法保存到系统凭据库；密钥没有保存到文件".to_string())?;
+    state.credentials.store(&cache_key, Ok(key))
 }
 #[tauri::command]
-fn delete_api_key(provider_id: String) -> Result<(), String> {
-    match secret_entry(&provider_id)?.delete_credential() {
+fn delete_api_key(state: State<AppState>, provider_id: String) -> Result<(), String> {
+    delete_stored_key(&state.credentials, &provider_id)
+}
+fn delete_stored_key(
+    cache: &credential_cache::CredentialCache<String>,
+    account: &str,
+) -> Result<(), String> {
+    match secret_entry(account)?.delete_credential() {
         Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
-        Err(_) => Err("无法删除凭据库中的密钥".into()),
-    }
+        Err(_) => Err("无法删除凭据库中的密钥".to_string()),
+    }?;
+    cache.delete_account(account, String::new())
 }
 #[tauri::command]
 fn begin_translation(state: State<AppState>, presentation_epoch: u64) -> Result<u64, String> {
@@ -313,6 +719,7 @@ fn cancel_active_translation(app: &tauri::AppHandle) -> Option<translation_reque
 }
 #[tauri::command]
 async fn translate(
+    app: tauri::AppHandle,
     state: State<'_, AppState>,
     request_id: u64,
     text: String,
@@ -342,27 +749,78 @@ async fn translate(
     if providers.is_empty() {
         return Err("请在设置中添加并启用翻译服务".into());
     }
-    let keys: Vec<_> = providers.iter().map(load_key).collect();
-    let jobs = providers.iter().zip(keys).map(|(p, key)| {
-        translation::translate_one(
-            &state.client,
-            p,
-            key,
-            &text,
-            &source_language,
-            &target_language,
-        )
-    });
-    let results = state
+    let (resolved_source, resolved_target, results) = state
         .translation_requests
-        .execute(request_id, futures_util::future::join_all(jobs))
-        .await?;
+        .execute(request_id, async {
+            let detected = if source_language == "auto" {
+                platform::detect_language(&text).await.ok()
+            } else {
+                None
+            };
+            let (resolved_source, resolved_target) =
+                language_detection::resolve_translation_languages(
+                    &text,
+                    &source_language,
+                    &target_language,
+                    detected.as_deref(),
+                )?;
+            let jobs = providers.iter().map(|p| {
+                let app = &app;
+                let state = &state;
+                let text = &text;
+                let resolved_source = &resolved_source;
+                let resolved_target = &resolved_target;
+                async move {
+                    let key =
+                        load_translation_key_async(app.clone(), p.clone(), Some(request_id)).await;
+                    let sequence = std::sync::atomic::AtomicU64::new(0);
+                    let started = std::time::Instant::now();
+                    let result = translation::translate_one_streaming(
+                        &state.client,
+                        p,
+                        key,
+                        &text,
+                        &resolved_source,
+                        &resolved_target,
+                        |partial| {
+                            publish_translation_progress(
+                                &app,
+                                &state,
+                                request_id,
+                                sequence.fetch_add(1, Ordering::SeqCst) + 1,
+                                false,
+                                TranslationResult {
+                                    provider_id: p.id.clone(),
+                                    provider_name: p.name.clone(),
+                                    text: partial.to_owned(),
+                                    error: None,
+                                    elapsed_ms: started.elapsed().as_millis() as u64,
+                                },
+                            );
+                        },
+                    )
+                    .await;
+                    publish_translation_progress(
+                        &app,
+                        &state,
+                        request_id,
+                        sequence.fetch_add(1, Ordering::SeqCst) + 1,
+                        true,
+                        result.clone(),
+                    );
+                    result
+                }
+            });
+            let results = futures_util::future::join_all(jobs).await;
+            Ok::<_, String>((resolved_source, resolved_target, results))
+        })
+        .await??;
     finish_translation(
         &state,
         request_id,
         text,
-        source_language,
-        target_language,
+        resolved_source,
+        resolved_target,
         &results,
     )?;
     Ok(results)
@@ -450,7 +908,11 @@ fn trim_history(history: &mut Vec<HistoryEntry>, max: usize) {
     }
 }
 #[tauri::command]
-async fn test_provider(state: State<'_, AppState>, provider_id: String) -> Result<String, String> {
+async fn test_provider(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+    provider_id: String,
+) -> Result<String, String> {
     let _permit = state
         .translation_busy
         .try_acquire()
@@ -461,8 +923,8 @@ async fn test_provider(state: State<'_, AppState>, provider_id: String) -> Resul
         .find(|p| p.id == provider_id)
         .cloned()
         .ok_or("服务不存在")?;
-    let r =
-        translation::translate_one(&state.client, &p, load_key(&p), "Hello", "en", "zh-Hans").await;
+    let key = load_translation_key_async(app, p.clone(), None).await;
+    let r = translation::translate_one(&state.client, &p, key, "Hello", "en", "zh-Hans").await;
     if let Some(e) = r.error {
         Err(e)
     } else {
@@ -509,15 +971,121 @@ fn delete_history(
 }
 
 fn show(app: &tauri::AppHandle) {
-    if let Some(w) = app.get_webview_window("main") {
-        if let Ok(presentation) = app.state::<AppState>().translation_requests.resume(None) {
-            announce_presentation(app, presentation);
+    let Ok(presentation) = app.state::<AppState>().translation_requests.resume(None) else {
+        return;
+    };
+    announce_presentation(app, presentation);
+    let handle = app.clone();
+    let _ = app.run_on_main_thread(move || {
+        if handle
+            .state::<AppState>()
+            .translation_requests
+            .presentation()
+            .ok()
+            != Some(presentation)
+        {
+            return;
         }
-        let _ = w.show();
-        let _ = w.unminimize();
-        let _ = w.set_focus();
-        wake_outside_watcher(app);
+        if let Some(window) = handle.get_webview_window("main") {
+            if let Err(error) = verify_application_policy(&handle, "beforeInput") {
+                let _ = handle.emit("action-error", error);
+                return;
+            }
+            if let Err(error) = platform::ensure_popup_behavior(&window) {
+                let _ = handle.emit("action-error", error);
+                return;
+            }
+            let _ = window.show();
+            let _ = window.unminimize();
+            let _ = window.set_focus();
+            wake_outside_watcher(&handle);
+        }
+    });
+}
+
+// Only explicit tray/menu/reopen actions reach this path. The frontend prepares
+// the management DOM and geometry before show_management activates the window.
+fn request_settings(app: &tauri::AppHandle) {
+    let Some(presentation) = cancel_active_translation(app) else {
+        return;
+    };
+    let state = app.state::<AppState>();
+    let Ok(mut pending) = state.pending_settings.lock() else {
+        return;
+    };
+    *pending = Some(presentation.epoch);
+    drop(pending);
+    if let Some(window) = app.get_webview_window("main") {
+        let _ = window.hide();
     }
+    let _ = app.emit(
+        "open-settings",
+        OpenSettingsEvent {
+            presentation_epoch: presentation.epoch,
+        },
+    );
+}
+
+#[tauri::command]
+fn get_pending_settings(state: State<AppState>) -> Result<Option<OpenSettingsEvent>, String> {
+    let pending = *locked(&state.pending_settings)?;
+    Ok(pending_settings_event(
+        pending,
+        state.translation_requests.presentation()?,
+    ))
+}
+
+fn prepare_management_presentation(
+    requests: &translation_requests::TranslationRequests,
+    presentation_epoch: u64,
+    management_layout: bool,
+) -> Result<translation_requests::Presentation, String> {
+    if !management_layout {
+        return Err("MANAGEMENT_NOT_READY: 请先准备设置窗口".into());
+    }
+    requests.resume(Some(presentation_epoch))
+}
+
+#[tauri::command]
+fn show_management(
+    app: tauri::AppHandle,
+    presentation_epoch: u64,
+) -> Result<translation_requests::Presentation, String> {
+    let state = app.state::<AppState>();
+    let presentation = prepare_management_presentation(
+        &state.translation_requests,
+        presentation_epoch,
+        !app.state::<window_layout::LayoutState>().is_popup(),
+    )?;
+    {
+        let mut pending = locked(&state.pending_settings)?;
+        if *pending == Some(presentation_epoch) {
+            *pending = None;
+        }
+    }
+    announce_presentation(&app, presentation);
+    let handle = app.clone();
+    app.run_on_main_thread(move || {
+        if handle
+            .state::<AppState>()
+            .translation_requests
+            .presentation()
+            .ok()
+            != Some(presentation)
+            || handle.state::<window_layout::LayoutState>().is_popup()
+        {
+            return;
+        }
+        if let Some(window) = handle.get_webview_window("main") {
+            let _ = verify_application_policy(&handle, "beforeManagement");
+            let _ = window.show();
+            let _ = window.unminimize();
+            let _ = window.set_focus();
+            wake_outside_watcher(&handle);
+        }
+    })
+    .map_err(|_| "无法显示设置窗口")?;
+    Ok(presentation)
 }
 fn wake_outside_watcher(app: &tauri::AppHandle) {
     if let Ok(thread) = app.state::<AppState>().outside_thread.lock() {
@@ -526,9 +1094,11 @@ fn wake_outside_watcher(app: &tauri::AppHandle) {
         }
     }
 }
-fn show_inactive(
+fn show_prepared_popup(
     app: &tauri::AppHandle,
     expected_epoch: u64,
+    focus_input: bool,
+    reuse_visible_popup: bool,
 ) -> Result<translation_requests::Presentation, String> {
     let presentation = app
         .state::<AppState>()
@@ -545,22 +1115,59 @@ fn show_inactive(
             .presentation()
             .ok()
             != Some(presentation)
+            || !handle.state::<window_layout::LayoutState>().is_popup()
         {
             return;
         }
         if let Some(window) = handle.get_webview_window("main") {
-            let _ = platform::show_without_activation(&window);
+            if let Err(error) = verify_application_policy(&handle, "beforePopup") {
+                let _ = handle.emit("action-error", error);
+                return;
+            }
+            // Floating level is independent from pin retention. Reassert it
+            // even when an in-place OCR update needs no ordering/show action.
+            if let Err(error) = platform::ensure_popup_behavior(&window) {
+                let _ = handle.emit("action-error", error);
+                return;
+            }
+            if focus_input {
+                let _ = window.show();
+                let _ = window.unminimize();
+                let _ = window.set_focus();
+            } else if popup_needs_native_show(
+                reuse_visible_popup,
+                window.is_visible().unwrap_or(false),
+                handle.state::<window_layout::LayoutState>().is_popup(),
+                handle.state::<AppState>().pinned.load(Ordering::SeqCst),
+            ) {
+                let _ = platform::show_without_activation(&window);
+            }
             wake_outside_watcher(&handle);
         }
     })
     .map_err(|_| "无法显示翻译窗口")?;
     Ok(presentation)
 }
+fn popup_needs_native_show(
+    reuse_requested: bool,
+    visible: bool,
+    popup_layout: bool,
+    pinned: bool,
+) -> bool {
+    // Ordinary hotkeys always order the popup forward. NSWindow.isVisible
+    // alone cannot establish frontmost ordering or visibility on this Space.
+    !(reuse_requested && visible && popup_layout && pinned)
+}
+fn empty_input_payload(presentation_epoch: u64) -> serde_json::Value {
+    serde_json::json!({"text":"","mode":"input","presentationEpoch":presentation_epoch})
+}
 fn empty_selection_window(app: &tauri::AppHandle, presentation_epoch: u64) {
-    let _ = app.emit(
-        "source-text",
-        serde_json::json!({"text":"","mode":"input","presentationEpoch":presentation_epoch}),
-    );
+    let _ = app.emit("source-text", empty_selection_payload(presentation_epoch));
+}
+fn empty_selection_payload(presentation_epoch: u64) -> serde_json::Value {
+    let mut payload = empty_input_payload(presentation_epoch);
+    payload["focusInput"] = serde_json::json!(true);
+    payload
 }
 fn visible_action_error(action: &str, error: &str) -> Option<String> {
     if error.starts_with("CANCELLED") {
@@ -571,9 +1178,15 @@ fn visible_action_error(action: &str, error: &str) -> Option<String> {
         // input shortcut. Permission setup belongs in Settings, not a toast on
         // an otherwise empty popup. Preserve a warning only if the clipboard
         // could not be restored after our copy fallback changed it.
-        return error
-            .starts_with("CLIPBOARD_RESTORE_FAILED")
-            .then(|| "原剪贴板恢复失败，当前剪贴板可能仍是刚才复制的选中文字。".into());
+        return if error.starts_with("CLIPBOARD_RESTORE_FAILED") {
+            Some("原剪贴板恢复失败，当前剪贴板可能仍是刚才复制的选中文字。".into())
+        } else if error.starts_with("CLIPBOARD_RESTORE_SKIPPED") {
+            Some(
+                "复制未能安全完成，暂未恢复原剪贴板，已保留当前内容。请重试或使用截图识别。".into(),
+            )
+        } else {
+            None
+        };
     }
     Some(
         error
@@ -583,12 +1196,51 @@ fn visible_action_error(action: &str, error: &str) -> Option<String> {
             .to_owned(),
     )
 }
+struct ActionFailurePresentation {
+    source: serde_json::Value,
+    error: Option<String>,
+}
+fn action_failure_presentation(
+    action: &str,
+    error: &str,
+    presentation_epoch: u64,
+) -> Option<ActionFailurePresentation> {
+    if error.starts_with("CANCELLED") {
+        return None;
+    }
+    let mut source = empty_input_payload(presentation_epoch);
+    if action == "selection" {
+        source["focusInput"] = serde_json::json!(true);
+    }
+    if matches!(action, "capture" | "ocr" | "silentOcr") && error.starts_with("PERMISSION:") {
+        // Keep permission guidance and the blank capture view in one event so
+        // the frontend can prepare both before presenting the inactive popup.
+        // Neither this mapping nor a shortcut requests permission or opens
+        // System Settings; those remain explicit user actions in the view.
+        source["permissionRequired"] = serde_json::json!("screenCapture");
+        return Some(ActionFailurePresentation {
+            source,
+            error: None,
+        });
+    }
+    Some(ActionFailurePresentation {
+        source,
+        error: visible_action_error(action, error),
+    })
+}
 #[tauri::command]
 fn show_popup(
     app: tauri::AppHandle,
     presentation_epoch: u64,
+    focus_input: Option<bool>,
+    reuse_visible_popup: Option<bool>,
 ) -> Result<translation_requests::Presentation, String> {
-    show_inactive(&app, presentation_epoch)
+    show_prepared_popup(
+        &app,
+        presentation_epoch,
+        focus_input.unwrap_or(false),
+        reuse_visible_popup.unwrap_or(false),
+    )
 }
 fn start_action(app: tauri::AppHandle, action: String) {
     if action == "input" {
@@ -600,73 +1252,138 @@ fn start_action(app: tauri::AppHandle, action: String) {
     if state.native_busy.swap(true, Ordering::SeqCst) {
         return;
     }
-    let Some(presentation) = cancel_active_translation(&app) else {
+    let capture = is_capture_action(&action);
+    let window = app.get_webview_window("main");
+    let keep_popup = state
+        .translation_requests
+        .presentation()
+        .is_ok_and(|current| {
+            should_keep_native_popup(
+                current,
+                app.state::<window_layout::LayoutState>().is_popup(),
+                window
+                    .as_ref()
+                    .is_some_and(|window| window.is_visible().unwrap_or(false)),
+                state.pinned.load(Ordering::SeqCst),
+            )
+        });
+    // A pinned window must remain on screen, but must never enter an OCR image.
+    // macOS excludes this process's windows in its capture implementation.
+    #[cfg(target_os = "windows")]
+    let capture_exclusion = if capture && keep_popup {
+        match platform::CaptureWindowExclusion::acquire(window.as_ref().unwrap()) {
+            Ok(exclusion) => Some(exclusion),
+            Err(error) => {
+                state.native_busy.store(false, Ordering::SeqCst);
+                let _ = app.emit("action-error", error);
+                return;
+            }
+        }
+    } else {
+        None
+    };
+    let Ok(presentation) =
+        begin_native_action_presentation(&state.translation_requests, keep_popup)
+    else {
         state.native_busy.store(false, Ordering::SeqCst);
         return;
     };
-    let cloud_ocr = if matches!(action.as_str(), "capture" | "ocr" | "silentOcr") {
+    announce_presentation(&app, presentation);
+    let cloud_ocr = if capture {
         let settings = state.settings.lock().unwrap();
         let provider = settings
             .active_ocr_provider_id
             .as_ref()
             .and_then(|id| settings.ocr_providers.iter().find(|p| &p.id == id))
             .cloned();
-        if let Some(w) = app.get_webview_window("main") {
-            let _ = w.hide();
+        if !keep_popup {
+            if let Some(w) = &window {
+                let _ = w.hide();
+            }
         }
         provider
     } else {
         None
     };
     tauri::async_runtime::spawn(async move {
+        #[cfg(target_os = "macos")]
+        if capture {
+            if let Err(error) = verify_capture_application_policy(&app).await {
+                app.state::<AppState>()
+                    .native_busy
+                    .store(false, Ordering::SeqCst);
+                if native_action_result_is_current(&app, presentation, keep_popup) {
+                    let _ = app.emit("action-error", error);
+                }
+                return;
+            }
+        }
         let action2 = action.clone();
         let use_cloud = cloud_ocr.is_some();
         let result = tauri::async_runtime::spawn_blocking(move || {
             std::thread::sleep(Duration::from_millis(180));
-            match action2.as_str() {
+            let result = match action2.as_str() {
                 "selection" => platform::selected_text(),
                 "clipboard" => platform::clipboard_text(),
                 "capture" | "ocr" | "silentOcr" if use_cloud => platform::capture_image(),
                 "capture" | "ocr" | "silentOcr" => platform::capture_ocr(),
                 _ => Err("未知操作".into()),
+            };
+            #[cfg(target_os = "windows")]
+            if let Some(exclusion) = capture_exclusion {
+                // Restore immediately after capture, before credentials/network OCR.
+                exclusion.restore()?;
             }
+            result
         })
         .await
         .map_err(|_| "系统操作异常".to_string())
         .and_then(|r| r);
+        if !native_action_result_is_current(&app, presentation, keep_popup && capture) {
+            app.state::<AppState>()
+                .native_busy
+                .store(false, Ordering::SeqCst);
+            return;
+        }
         let result = if let (Some(provider), Ok(image)) = (&cloud_ocr, &result) {
             let state = app.state::<AppState>();
-            ocr::recognize(&state.client, provider, load_ocr_key(provider), image).await
+            let key = load_ocr_key_async(app.clone(), provider.clone(), false).await;
+            ocr::recognize(&state.client, provider, key, image).await
         } else {
             result
         };
+        if !native_action_result_is_current(&app, presentation, keep_popup && capture) {
+            app.state::<AppState>()
+                .native_busy
+                .store(false, Ordering::SeqCst);
+            return;
+        }
         match result {
             Ok(text) if !text.trim().is_empty() => {
-                if action == "silentOcr" {
-                    let copied =
-                        tauri::async_runtime::spawn_blocking(move || platform::copy_text(&text))
-                            .await;
-                    if !matches!(copied, Ok(Ok(()))) {
-                        let _ = show_inactive(&app, presentation.epoch);
-                        let _ = app.emit("action-error", "OCR 已完成，但复制到剪贴板失败");
-                    } else {
-                        let _ = app.emit("ocr-copied", ());
-                    }
-                } else {
-                    let mode = if action == "ocr" { "ocr" } else { "translate" };
-                    let _ = app.emit("source-text", serde_json::json!({"text":text,"mode":mode,"presentationEpoch":presentation.epoch}));
-                }
+                let mode = captured_text_mode(&action);
+                let _ = app.emit("source-text", serde_json::json!({"text":text,"mode":mode,"presentationEpoch":presentation.epoch,"updateVisiblePopup":keep_popup && capture}));
             }
             Ok(_) if action == "selection" => empty_selection_window(&app, presentation.epoch),
             Ok(_) => {
-                empty_selection_window(&app, presentation.epoch);
+                if !keep_popup {
+                    let _ = app.emit("source-text", empty_input_payload(presentation.epoch));
+                }
                 let _ = app.emit("action-error", "没有识别到文字，请选择更清晰的区域");
             }
-            Err(e) if e.starts_with("CANCELLED") => {}
             Err(e) => {
-                empty_selection_window(&app, presentation.epoch);
-                if let Some(message) = visible_action_error(&action, &e) {
-                    let _ = app.emit("action-error", message);
+                if keep_popup && capture {
+                    // Cancellation, empty OCR and failures keep the completed
+                    // source/result. Only a successful capture replaces them.
+                    if !e.starts_with("CANCELLED") {
+                        let _ = app.emit("action-error", e);
+                    }
+                } else if let Some(failure) =
+                    action_failure_presentation(&action, &e, presentation.epoch)
+                {
+                    let _ = app.emit("source-text", failure.source);
+                    if let Some(message) = failure.error {
+                        let _ = app.emit("action-error", message);
+                    }
                 }
             }
         }
@@ -674,6 +1391,61 @@ fn start_action(app: tauri::AppHandle, action: String) {
             .native_busy
             .store(false, Ordering::SeqCst);
     });
+}
+fn is_capture_action(action: &str) -> bool {
+    matches!(action, "capture" | "ocr" | "silentOcr")
+}
+fn native_action_result_is_current(
+    app: &tauri::AppHandle,
+    expected: translation_requests::Presentation,
+    retained_capture: bool,
+) -> bool {
+    let current = app
+        .state::<AppState>()
+        .translation_requests
+        .presentation()
+        .ok();
+    retained_capture_result_is_current(
+        expected,
+        current,
+        retained_capture,
+        app.state::<window_layout::LayoutState>().is_popup(),
+    )
+}
+fn retained_capture_result_is_current(
+    expected: translation_requests::Presentation,
+    current: Option<translation_requests::Presentation>,
+    retained_capture: bool,
+    popup_layout: bool,
+) -> bool {
+    current == Some(expected) && (!retained_capture || popup_layout)
+}
+fn should_keep_native_popup(
+    presentation: translation_requests::Presentation,
+    popup_layout: bool,
+    visible: bool,
+    pinned: bool,
+) -> bool {
+    presentation.presented && popup_layout && visible && pinned
+}
+fn begin_native_action_presentation(
+    requests: &translation_requests::TranslationRequests,
+    keep_popup: bool,
+) -> Result<translation_requests::Presentation, String> {
+    if keep_popup {
+        requests.invalidate()
+    } else {
+        requests.suspend()
+    }
+}
+fn captured_text_mode(action: &str) -> &'static str {
+    // Owner's “无感 OCR” means capture → source text → automatic translation.
+    // Only the explicitly chosen recognition-only action suppresses translation.
+    if action == "ocr" {
+        "ocr"
+    } else {
+        "translate"
+    }
 }
 fn outside_click_watcher(app: tauri::AppHandle) {
     let owner = app.clone();
@@ -694,6 +1466,11 @@ fn outside_click_watcher(app: tauri::AppHandle) {
                 std::thread::park_timeout(Duration::from_secs(60));
                 continue;
             }
+            let Ok(observed_presentation) =
+                app.state::<AppState>().translation_requests.presentation()
+            else {
+                continue;
+            };
             let Ok((down, x, y)) = platform::pointer_state() else {
                 continue;
             };
@@ -718,8 +1495,26 @@ fn outside_click_watcher(app: tauri::AppHandle) {
                         || px >= f64::from(position.x) + f64::from(size.width)
                         || py >= f64::from(position.y) + f64::from(size.height)
                     {
-                        cancel_active_translation(&app);
-                        let _ = window.hide();
+                        let handle = app.clone();
+                        let _ = app.run_on_main_thread(move || {
+                            let Some(window) = handle.get_webview_window("main") else {
+                                return;
+                            };
+                            let state = handle.state::<AppState>();
+                            let Ok(current) = state.translation_requests.presentation() else {
+                                return;
+                            };
+                            if should_hide_observed_popup(
+                                observed_presentation,
+                                current,
+                                handle.state::<window_layout::LayoutState>().is_popup(),
+                                window.is_visible().unwrap_or(false),
+                                state.pinned.load(Ordering::SeqCst),
+                            ) {
+                                cancel_active_translation(&handle);
+                                let _ = window.hide();
+                            }
+                        });
                     }
                 }
             }
@@ -728,22 +1523,30 @@ fn outside_click_watcher(app: tauri::AppHandle) {
     });
     *owner.state::<AppState>().outside_thread.lock().unwrap() = Some(handle.thread().clone());
 }
+
+fn should_hide_observed_popup(
+    observed: translation_requests::Presentation,
+    current: translation_requests::Presentation,
+    popup_layout: bool,
+    visible: bool,
+    pinned: bool,
+) -> bool {
+    observed == current && popup_layout && visible && !pinned
+}
 #[tauri::command]
 fn run_action(app: tauri::AppHandle, action: String) -> Result<(), String> {
-    if ![
-        "selection",
-        "capture",
-        "ocr",
-        "silentOcr",
-        "input",
-        "clipboard",
-    ]
-    .contains(&action.as_str())
-    {
+    if !is_native_action(&action) {
         return Err("未知操作".into());
     }
     start_action(app, action);
     Ok(())
+}
+
+fn is_native_action(action: &str) -> bool {
+    matches!(
+        action,
+        "selection" | "capture" | "ocr" | "silentOcr" | "input" | "clipboard"
+    )
 }
 #[tauri::command]
 async fn copy_text(text: String) -> Result<(), String> {
@@ -752,14 +1555,24 @@ async fn copy_text(text: String) -> Result<(), String> {
         .map_err(|_| "复制失败".to_string())?
 }
 #[tauri::command]
-fn set_pinned(app: tauri::AppHandle, state: State<AppState>, pinned: bool) -> Result<(), String> {
-    app.get_webview_window("main")
-        .ok_or("窗口不存在")?
-        .set_always_on_top(true)
-        .map_err(|_| "无法设置窗口置顶")?;
-    state.pinned.store(pinned, Ordering::SeqCst);
-    wake_outside_watcher(&app);
-    Ok(())
+async fn set_pinned(app: tauri::AppHandle, pinned: bool) -> Result<(), String> {
+    let (reply, result) = tokio::sync::oneshot::channel();
+    let handle = app.clone();
+    app.run_on_main_thread(move || {
+        let operation = (|| {
+            let window = handle.get_webview_window("main").ok_or("窗口不存在")?;
+            platform::ensure_popup_behavior(&window)?;
+            handle
+                .state::<AppState>()
+                .pinned
+                .store(pinned, Ordering::SeqCst);
+            wake_outside_watcher(&handle);
+            Ok(())
+        })();
+        let _ = reply.send(operation);
+    })
+    .map_err(|_| "无法设置浮窗状态")?;
+    result.await.map_err(|_| "无法设置浮窗状态".to_string())?
 }
 #[tauri::command]
 fn hide_window(app: tauri::AppHandle) -> Result<(), String> {
@@ -770,7 +1583,10 @@ fn hide_window(app: tauri::AppHandle) -> Result<(), String> {
         .map_err(|_| "无法隐藏窗口".into())
 }
 #[tauri::command]
-async fn diagnostics(state: State<'_, AppState>) -> Result<serde_json::Value, String> {
+async fn diagnostics(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+) -> Result<serde_json::Value, String> {
     let warnings = locked(&state.startup_warnings)?.clone();
     let mut value = tauri::async_runtime::spawn_blocking(platform::diagnostics)
         .await
@@ -779,6 +1595,14 @@ async fn diagnostics(state: State<'_, AppState>) -> Result<serde_json::Value, St
     value["warnings"] = serde_json::json!(warnings);
     value["dataDirectory"] = serde_json::json!(state.data_dir.display().to_string());
     value["ocrUpload"] = serde_json::json!(false);
+    #[cfg(target_os = "macos")]
+    {
+        let policy_diagnostics = app.state::<ApplicationPolicyDiagnostics>();
+        value["windowPolicy"] = serde_json::to_value(&*locked(&policy_diagnostics.0)?)
+            .map_err(|_| "无法读取窗口策略诊断")?;
+    }
+    #[cfg(not(target_os = "macos"))]
+    let _ = app;
     Ok(value)
 }
 #[tauri::command]
@@ -786,6 +1610,30 @@ async fn permission_status() -> Result<serde_json::Value, String> {
     tauri::async_runtime::spawn_blocking(platform::permission_status)
         .await
         .map_err(|_| "无法检查系统权限".to_string())?
+}
+
+#[tauri::command]
+async fn get_system_translation_status(
+    source_language: String,
+    target_language: String,
+) -> Result<serde_json::Value, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        platform::system_translation_status(&source_language, &target_language)
+    })
+    .await
+    .map_err(|_| "无法检查系统翻译状态".to_string())?
+}
+
+#[tauri::command]
+async fn prepare_system_translation(
+    source_language: String,
+    target_language: String,
+) -> Result<serde_json::Value, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        platform::prepare_system_translation(&source_language, &target_language)
+    })
+    .await
+    .map_err(|_| "系统翻译准备未能完成".to_string())?
 }
 #[tauri::command]
 async fn request_permission(kind: String) -> Result<serde_json::Value, String> {
@@ -803,11 +1651,12 @@ async fn open_permission_settings(kind: String) -> Result<(), String> {
 fn tray(app: &tauri::AppHandle) -> tauri::Result<()> {
     use tauri::menu::{Menu, MenuItem, PredefinedMenuItem};
     let definitions = [
+        ("settings", "设置与服务"),
         ("input", "打开翻译窗口"),
         ("selection", "划词翻译"),
         ("capture", "截图翻译"),
         ("ocr", "截图 OCR"),
-        ("silentOcr", "静默 OCR → 剪贴板"),
+        ("silentOcr", "无感 OCR"),
         ("clipboard", "翻译剪贴板"),
     ];
     let menu = Menu::new(app)?;
@@ -828,7 +1677,11 @@ fn tray(app: &tauri::AppHandle) -> tauri::Result<()> {
         .on_menu_event(|app, event| {
             if event.id().as_ref() == "quit" {
                 app.exit(0);
-            } else {
+            } else if event.id().as_ref() == "settings" {
+                request_settings(app);
+            } else if is_native_action(event.id().as_ref()) {
+                // Tauri dispatches all application/window/tray menu events to
+                // tray listeners too. Ignore Edit/About/app-settings IDs.
                 start_action(app.clone(), event.id().as_ref().to_string());
             }
         });
@@ -839,9 +1692,41 @@ fn tray(app: &tauri::AppHandle) -> tauri::Result<()> {
     Ok(())
 }
 
+#[cfg(target_os = "macos")]
+fn management_menu(app: &tauri::AppHandle) -> tauri::Result<()> {
+    use tauri::menu::{Menu, MenuItem, PredefinedMenuItem};
+    // Keep the standard Edit menu and native copy/paste accelerators.
+    let menu = Menu::default(app)?;
+    if let Some(submenu) = menu.items()?.first().and_then(|item| item.as_submenu()) {
+        submenu.insert(
+            &MenuItem::with_id(
+                app,
+                "app-settings",
+                "设置与服务…",
+                true,
+                Some("CmdOrCtrl+,"),
+            )?,
+            2,
+        )?;
+        submenu.insert(&PredefinedMenuItem::separator(app)?, 3)?;
+    }
+    app.set_menu(menu)?;
+    app.on_menu_event(|app, event| {
+        if event.id().as_ref() == "app-settings" {
+            request_settings(app);
+        }
+    });
+    Ok(())
+}
+
 fn main() {
-    tauri::Builder::default()
-        .plugin(tauri_plugin_single_instance::init(|app, _, _| show(app)))
+    let builder = tauri::Builder::default();
+    #[cfg(target_os = "macos")]
+    let builder = builder.activate_ignoring_other_apps(false);
+    let mut app = builder
+        .plugin(tauri_plugin_single_instance::init(|app, args, _| {
+            explicit_launch(app, &args)
+        }))
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
         .setup(|app| {
             let data_dir = app.path().app_data_dir()?;
@@ -852,8 +1737,14 @@ fn main() {
                 fs::set_permissions(&data_dir, fs::Permissions::from_mode(0o700))?;
             }
             let mut warnings = Vec::new();
-            let settings = match fs::read(data_dir.join("settings.json")) {
-                Ok(bytes) => match serde_json::from_slice::<Settings>(&bytes) {
+            let mut settings = match fs::read(data_dir.join("settings.json")) {
+                Ok(bytes) => match serde_json::from_slice::<Settings>(&bytes).map(|mut s| {
+                    // Upgrade former defaults before enforcing the new cap.
+                    // Otherwise a healthy legacy 200-entry config would be
+                    // misclassified as corrupt and lose its provider choices.
+                    migrate_core_preferences(&mut s);
+                    s
+                }) {
                     Ok(s) if validate_settings(&s).is_ok() => s,
                     _ => {
                         warnings.push("设置文件损坏，已使用默认设置；原文件保留".into());
@@ -862,6 +1753,9 @@ fn main() {
                 },
                 Err(_) => Settings::default(),
             };
+            add_system_translation_option(&mut settings);
+            migrate_language_direction(&mut settings);
+            migrate_shortcut_defaults(&mut settings);
             let mut history: Vec<HistoryEntry> = fs::read(data_dir.join("history.json"))
                 .ok()
                 .and_then(|b| serde_json::from_slice(&b).ok())
@@ -873,8 +1767,11 @@ fn main() {
                 .redirect(reqwest::redirect::Policy::none())
                 .user_agent("EchoLingo/0.1.0")
                 .build()?;
+            let layout_data_dir = data_dir.clone();
             app.manage(AppState {
                 settings: Mutex::new(settings.clone()),
+                credentials: credential_cache::CredentialCache::default(),
+                credential_reads: Mutex::new(()),
                 history: Mutex::new(history),
                 pinned: AtomicBool::new(false),
                 native_busy: AtomicBool::new(false),
@@ -884,8 +1781,20 @@ fn main() {
                 client,
                 startup_warnings: Mutex::new(warnings),
                 outside_thread: Mutex::new(None),
+                pending_settings: Mutex::new(None),
             });
-            app.manage(window_layout::LayoutState::default());
+            app.manage(window_layout::LayoutState::new(layout_data_dir));
+            #[cfg(target_os = "macos")]
+            {
+                app.manage(ApplicationPolicyDiagnostics::default());
+                if let Err(error) = verify_application_policy(app.handle(), "setup") {
+                    app.state::<AppState>()
+                        .startup_warnings
+                        .lock()
+                        .unwrap()
+                        .push(error);
+                }
+            }
             if let Err(e) = install_shortcuts(app.handle(), &settings.shortcuts) {
                 app.state::<AppState>()
                     .startup_warnings
@@ -894,6 +1803,11 @@ fn main() {
                     .push(e);
             }
             tray(app.handle())?;
+            #[cfg(target_os = "macos")]
+            management_menu(app.handle())?;
+            if permission_diagnostics_requested(&std::env::args().collect::<Vec<_>>()) {
+                let _ = write_permission_diagnostics(app.handle());
+            }
             outside_click_watcher(app.handle().clone());
             Ok(())
         })
@@ -908,7 +1822,11 @@ fn main() {
         .invoke_handler(tauri::generate_handler![
             window_layout::fit_window,
             window_layout::start_window_drag,
+            window_layout::start_window_resize,
+            window_layout::resize_popup_width,
             show_popup,
+            show_management,
+            get_pending_settings,
             get_settings,
             save_settings,
             set_ocr_api_key,
@@ -930,16 +1848,522 @@ fn main() {
             hide_window,
             diagnostics,
             permission_status,
+            get_system_translation_status,
+            prepare_system_translation,
             request_permission,
             open_permission_settings
         ])
-        .run(tauri::generate_context!())
+        .build(tauri::generate_context!())
         .expect("EchoLingo could not start");
+    // App still owns the runtime here, so this seeds Tao's initial launch role
+    // before applicationDidFinishLaunching rather than changing it during setup.
+    #[cfg(target_os = "macos")]
+    macos_startup::configure(&mut app);
+    app.run(|app, event| {
+        if matches!(&event, tauri::RunEvent::Exit) {
+            let _ = app.state::<window_layout::LayoutState>().flush();
+        }
+        #[cfg(target_os = "macos")]
+        if let tauri::RunEvent::Reopen { .. } = event {
+            let _ = verify_application_policy(app, "reopen");
+            request_settings(app);
+        }
+        #[cfg(not(target_os = "macos"))]
+        let _ = (app, event);
+    });
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn ocr_hotkey_fills_translation_while_recognition_only_stays_explicit() {
+        assert_eq!(captured_text_mode("silentOcr"), "translate");
+        assert_eq!(captured_text_mode("capture"), "translate");
+        assert_eq!(captured_text_mode("ocr"), "ocr");
+        let empty = empty_selection_payload(12);
+        assert_eq!(empty["focusInput"], true);
+        assert!(empty["text"].as_str().unwrap().is_empty());
+        assert!(empty_input_payload(12).get("focusInput").is_none());
+    }
+    #[test]
+    fn built_in_translation_never_reads_an_api_credential() {
+        let p = system_translation_provider(true);
+        assert_eq!(
+            load_key(&credential_cache::CredentialCache::default(), &p).unwrap(),
+            ""
+        );
+    }
+
+    #[test]
+    fn settings_snapshot_is_memory_only_and_never_contains_cached_secrets() {
+        let cache = credential_cache::CredentialCache::default();
+        let settings = Settings::default();
+        let provider = settings
+            .providers
+            .iter()
+            .find(|p| p.kind == "openai")
+            .unwrap();
+        let key = translation_credential_key(provider).unwrap();
+        let snapshot = settings_snapshot(&settings, &cache).unwrap();
+        let item = snapshot["providers"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|p| p["id"] == provider.id)
+            .unwrap();
+        assert_eq!(item["credentialState"], "unloaded");
+        assert_eq!(item["hasKey"], false);
+        let fake = "FIXTURE-ONLY-NOT-A-REAL-KEY";
+        cache.store(&key, Ok(fake.to_string())).unwrap();
+        let snapshot = settings_snapshot(&settings, &cache).unwrap();
+        assert!(!snapshot.to_string().contains(fake));
+        let item = snapshot["providers"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|p| p["id"] == provider.id)
+            .unwrap();
+        assert_eq!(item["credentialState"], "ready");
+        assert_eq!(item["hasKey"], true);
+        cache.store(&key, Err("fixture-denied".into())).unwrap();
+        let snapshot = settings_snapshot(&settings, &cache).unwrap();
+        assert!(!snapshot.to_string().contains("fixture-denied"));
+        let item = snapshot["providers"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|p| p["id"] == provider.id)
+            .unwrap();
+        assert_eq!(item["credentialState"], "blocked");
+        assert_eq!(item["hasKey"], false);
+    }
+
+    #[test]
+    fn repeated_translation_credential_loads_decode_once_and_respect_scopes() {
+        let cache = credential_cache::CredentialCache::default();
+        let scope = "openai|https://example.invalid";
+        let stored = encode_credential(scope.into(), "fixture-secret".into()).unwrap();
+        let reads = std::cell::Cell::new(0);
+        for _ in 0..10 {
+            let loaded = cached_credential(&cache, "fixture-provider", scope, || {
+                reads.set(reads.get() + 1);
+                Ok(Some(stored.clone()))
+            })
+            .unwrap();
+            assert_eq!(loaded, "fixture-secret");
+        }
+        assert_eq!(reads.get(), 1);
+        for other in [
+            "deepl|https://example.invalid",
+            "openai|https://other.invalid",
+        ] {
+            assert!(
+                cached_credential(&cache, "fixture-provider", other, || Ok(Some(
+                    stored.clone()
+                )))
+                .unwrap()
+                .is_empty()
+            );
+        }
+        assert_eq!(
+            credential_display_state(
+                &cache,
+                &credential_cache::CredentialKey::new("fixture-provider", scope)
+            ),
+            (true, "ready")
+        );
+    }
+
+    #[test]
+    fn cancelled_credential_reads_stay_blocked_until_explicit_settings_retry() {
+        let cache = credential_cache::CredentialCache::default();
+        let account = "fixture-denied-provider";
+        let scope = "openai|https://example.invalid";
+        let key = credential_cache::CredentialKey::new(account, scope);
+        let attempts = std::cell::Cell::new(0);
+        for _ in 0..10 {
+            assert!(cached_credential(&cache, account, scope, || {
+                attempts.set(attempts.get() + 1);
+                Err("fixture-user-cancelled".into())
+            })
+            .is_err());
+            assert_eq!(credential_display_state(&cache, &key), (false, "blocked"));
+        }
+        assert_eq!(attempts.get(), 1);
+        retry_unavailable_credential(&cache, &key).unwrap();
+        let stored = encode_credential(scope.into(), "fixture-after-retry".into()).unwrap();
+        assert_eq!(
+            cached_credential(&cache, account, scope, || {
+                attempts.set(attempts.get() + 1);
+                Ok(Some(stored))
+            })
+            .unwrap(),
+            "fixture-after-retry"
+        );
+        assert_eq!(attempts.get(), 2);
+        retry_unavailable_credential(&cache, &key).unwrap();
+        assert_eq!(
+            cached_credential(&cache, account, scope, || panic!(
+                "ready credential must not be re-read"
+            ))
+            .unwrap(),
+            "fixture-after-retry"
+        );
+    }
+
+    #[test]
+    fn cancelled_queued_account_read_never_reaches_the_os_loader() {
+        use std::sync::{Arc, Barrier};
+        let gate = Arc::new(Mutex::new(()));
+        let requests = Arc::new(translation_requests::TranslationRequests::default());
+        let epoch = requests.resume(None).unwrap().epoch;
+        let ticket = requests.begin(epoch).unwrap();
+        let held = gate.lock().unwrap();
+        let started = Arc::new(Barrier::new(2));
+        let worker = {
+            let gate = gate.clone();
+            let requests = requests.clone();
+            let started = started.clone();
+            std::thread::spawn(move || {
+                started.wait();
+                serialized_credential_read(
+                    &gate,
+                    || requests.is_current(ticket),
+                    || panic!("cancelled queued credential must not start OS authentication"),
+                )
+            })
+        };
+        started.wait();
+        requests.cancel(Some(ticket)).unwrap();
+        drop(held);
+        let result: Result<(), String> = worker.join().unwrap();
+        assert_eq!(result.unwrap_err(), translation_requests::CANCELLED);
+    }
+
+    #[test]
+    fn settings_changes_invalidate_only_removed_or_rebound_credential_accounts() {
+        let old = Settings::default();
+        let mut next = old.clone();
+        let provider = next
+            .providers
+            .iter_mut()
+            .find(|p| p.kind == "openai")
+            .unwrap();
+        let account = provider.id.clone();
+        provider.name = "renamed".into();
+        provider.model = "another-model".into();
+        provider.base_url = "https://api.openai.com/v9".into();
+        assert!(changed_credential_accounts(&old, &next).is_empty());
+        next.providers
+            .iter_mut()
+            .find(|p| p.id == account)
+            .unwrap()
+            .base_url = "https://other.invalid/v1".into();
+        assert_eq!(
+            changed_credential_accounts(&old, &next),
+            vec![account.clone()]
+        );
+        next.providers.retain(|p| p.id != account);
+        assert_eq!(changed_credential_accounts(&old, &next), vec![account]);
+    }
+
+    #[test]
+    fn permission_diagnostics_require_an_exact_explicit_launch_flag() {
+        for args in [
+            vec!["EchoLingo", "--permission-diagnostics"],
+            vec!["EchoLingo", "other", "--permission-diagnostics"],
+        ] {
+            assert!(permission_diagnostics_requested(
+                &args.into_iter().map(String::from).collect::<Vec<_>>()
+            ));
+        }
+        for args in [
+            vec!["EchoLingo"],
+            vec!["--permission-diagnostics"],
+            vec!["EchoLingo", "--permission-diagnostics=other-path"],
+            vec!["EchoLingo", "permission-diagnostics"],
+        ] {
+            assert!(!permission_diagnostics_requested(
+                &args.into_iter().map(String::from).collect::<Vec<_>>()
+            ));
+        }
+    }
+
+    #[test]
+    fn permission_diagnostic_contains_only_support_metadata_and_permission_status() {
+        let permissions = serde_json::json!({
+            "platform":"macos", "supported":true, "identity":"application-process",
+            "bundleIdentifier":"io.github.blueeeecho.echolingo", "runningBundledApp":true,
+            "processId":std::process::id(), "accessibilityGranted":false, "screenCaptureGranted":false
+        });
+        let payload = permission_diagnostic_payload(permissions.clone());
+        assert_eq!(payload["permissions"], permissions);
+        assert_eq!(payload["processId"], std::process::id());
+        assert!(payload["recordedAtUnixMs"].as_u64().unwrap() > 0);
+        let fields: std::collections::BTreeSet<_> = payload
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect();
+        assert_eq!(
+            fields,
+            [
+                "diagnostic",
+                "recordedAtUnixMs",
+                "appVersion",
+                "processId",
+                "executablePath",
+                "permissions"
+            ]
+            .into_iter()
+            .collect()
+        );
+    }
+
+    #[test]
+    fn stale_outside_click_cannot_hide_management_or_a_reopened_popup() {
+        let requests = translation_requests::TranslationRequests::default();
+        let old_popup = requests.resume(None).unwrap();
+        assert!(should_hide_observed_popup(
+            old_popup, old_popup, true, true, false
+        ));
+        assert!(!should_hide_observed_popup(
+            old_popup, old_popup, true, true, true
+        ));
+        assert!(!should_hide_observed_popup(
+            old_popup, old_popup, true, false, false
+        ));
+        assert!(!should_hide_observed_popup(
+            old_popup, old_popup, false, true, false
+        ));
+        let settings_request = requests.suspend().unwrap();
+        let management =
+            prepare_management_presentation(&requests, settings_request.epoch, true).unwrap();
+        assert!(!should_hide_observed_popup(
+            old_popup, management, false, true, false
+        ));
+        // A subsequent translation has popup layout again, but belongs to a
+        // newer presentation than the click the watcher originally observed.
+        let hidden = requests.suspend().unwrap();
+        let next_popup = requests.resume(Some(hidden.epoch)).unwrap();
+        assert!(!should_hide_observed_popup(
+            old_popup, next_popup, true, true, false
+        ));
+    }
+
+    #[tokio::test]
+    async fn pinned_native_tasks_cancel_old_work_without_hiding_or_reopening_the_popup() {
+        let requests = translation_requests::TranslationRequests::default();
+        let mut popup = requests.resume(None).unwrap();
+        for action in ["silentOcr", "silentOcr", "capture", "ocr", "selection"] {
+            let old_request = requests.begin(popup.epoch).unwrap();
+            let keep = should_keep_native_popup(popup, true, true, true);
+            assert!(keep);
+            let next = begin_native_action_presentation(&requests, keep).unwrap();
+            assert!(
+                next.presented,
+                "{action} must keep the pinned popup presented"
+            );
+            assert!(next.epoch > popup.epoch);
+            assert_eq!(
+                requests.begin(popup.epoch).unwrap_err(),
+                translation_requests::CANCELLED
+            );
+            assert_eq!(
+                requests.execute(old_request, async {}).await.unwrap_err(),
+                translation_requests::CANCELLED
+            );
+            assert!(!requests
+                .publish(old_request, |_| panic!("old progress survived OCR"))
+                .unwrap());
+            assert!(requests.finish(old_request, || Ok(())).is_err());
+            // A cancelled/failed capture leaves this presentation alone. A
+            // successful source's show_popup is an idempotent resume, so it
+            // cannot add a hidden/reopened transition or focus the window.
+            assert_eq!(requests.presentation().unwrap(), next);
+            assert_eq!(requests.resume(Some(next.epoch)).unwrap(), next);
+            assert!(!popup_needs_native_show(true, true, true, true));
+            let current = requests.begin(next.epoch).unwrap();
+            assert_eq!(
+                requests
+                    .execute(current, async { "new OCR" })
+                    .await
+                    .unwrap(),
+                "new OCR"
+            );
+            assert_eq!(
+                requests.finish(current, || Ok("new result")).unwrap(),
+                "new result"
+            );
+            popup = next;
+        }
+        // A real close remains authoritative, even if OCR has not returned.
+        let hidden = requests.suspend().unwrap();
+        assert!(!hidden.presented);
+        assert_eq!(
+            requests.resume(Some(popup.epoch)).unwrap_err(),
+            translation_requests::CANCELLED
+        );
+    }
+
+    #[test]
+    fn pin_retention_applies_only_to_an_already_visible_translation_popup() {
+        let requests = translation_requests::TranslationRequests::default();
+        let hidden = requests.presentation().unwrap();
+        assert!(!should_keep_native_popup(hidden, true, true, true));
+        let popup = requests.resume(None).unwrap();
+        assert!(should_keep_native_popup(popup, true, true, true));
+        for (layout, visible, pinned) in [
+            (false, true, true),
+            (true, false, true),
+            (true, true, false),
+        ] {
+            assert!(!should_keep_native_popup(popup, layout, visible, pinned));
+        }
+        assert!(
+            !begin_native_action_presentation(&requests, false)
+                .unwrap()
+                .presented
+        );
+        assert!(popup_needs_native_show(true, false, true, true));
+        assert!(popup_needs_native_show(true, true, false, true));
+        assert!(popup_needs_native_show(true, false, false, true));
+        for action in ["silentOcr", "capture", "ocr"] {
+            assert!(is_capture_action(action));
+        }
+        for action in ["selection", "clipboard", "input"] {
+            assert!(!is_capture_action(action));
+        }
+    }
+
+    #[test]
+    fn ordinary_shortcuts_raise_even_visible_popups_and_only_pinned_ocr_can_reuse() {
+        for pinned in [false, true] {
+            for visible in [false, true] {
+                assert!(popup_needs_native_show(false, visible, true, pinned));
+            }
+        }
+        assert!(popup_needs_native_show(true, true, true, false));
+        assert!(popup_needs_native_show(true, false, true, true));
+        assert!(popup_needs_native_show(true, true, false, true));
+        assert!(!popup_needs_native_show(true, true, true, true));
+    }
+
+    #[test]
+    fn retained_capture_cannot_replace_management_or_a_later_presentation() {
+        let requests = translation_requests::TranslationRequests::default();
+        requests.resume(None).unwrap();
+        let capture = begin_native_action_presentation(&requests, true).unwrap();
+        assert!(retained_capture_result_is_current(
+            capture,
+            Some(capture),
+            true,
+            true
+        ));
+        // In-popup Settings/history navigation may keep its epoch; the layout
+        // check still rejects a cloud OCR completion in that management view.
+        assert!(!retained_capture_result_is_current(
+            capture,
+            Some(capture),
+            true,
+            false
+        ));
+        let closed = requests.suspend().unwrap();
+        assert!(!retained_capture_result_is_current(
+            capture,
+            Some(closed),
+            true,
+            true
+        ));
+        let reopened = requests.resume(Some(closed.epoch)).unwrap();
+        assert!(!retained_capture_result_is_current(
+            capture,
+            Some(reopened),
+            true,
+            true
+        ));
+        assert!(!retained_capture_result_is_current(
+            capture, None, true, true
+        ));
+        // A new explicit non-retained shortcut may leave management normally.
+        assert!(retained_capture_result_is_current(
+            reopened,
+            Some(reopened),
+            false,
+            false
+        ));
+    }
+
+    #[test]
+    fn tray_dispatch_ignores_unrelated_application_menu_events() {
+        for action in [
+            "selection",
+            "capture",
+            "ocr",
+            "silentOcr",
+            "input",
+            "clipboard",
+        ] {
+            assert!(is_native_action(action));
+        }
+        for action in ["app-settings", "settings", "quit", "copy", "about", ""] {
+            assert!(!is_native_action(action));
+        }
+    }
+
+    #[test]
+    fn pending_settings_recovery_is_epoch_bound_and_cold_start_is_silent() {
+        let requests = translation_requests::TranslationRequests::default();
+        assert_eq!(
+            pending_settings_event(None, requests.presentation().unwrap()),
+            None
+        );
+        let pending = requests.suspend().unwrap();
+        let event = pending_settings_event(Some(pending.epoch), pending).unwrap();
+        assert_eq!(
+            serde_json::to_value(event).unwrap(),
+            serde_json::json!({ "presentationEpoch": pending.epoch })
+        );
+        // Listener startup can recover the same request, while a later hide or
+        // selection supersedes it even if the frontend has not handled it yet.
+        assert_eq!(
+            pending_settings_event(Some(pending.epoch), pending),
+            Some(event)
+        );
+        let replacement = requests.suspend().unwrap();
+        assert_eq!(
+            pending_settings_event(Some(pending.epoch), replacement),
+            None
+        );
+    }
+
+    #[test]
+    fn management_show_requires_prepared_layout_and_current_presentation() {
+        let requests = translation_requests::TranslationRequests::default();
+        let pending = requests.suspend().unwrap();
+        assert!(
+            prepare_management_presentation(&requests, pending.epoch, false)
+                .unwrap_err()
+                .starts_with("MANAGEMENT_NOT_READY:")
+        );
+        assert_eq!(requests.presentation().unwrap(), pending);
+        assert_eq!(
+            prepare_management_presentation(&requests, pending.epoch - 1, true).unwrap_err(),
+            translation_requests::CANCELLED
+        );
+        let presented = prepare_management_presentation(&requests, pending.epoch, true).unwrap();
+        assert!(presented.presented);
+        assert!(presented.epoch > pending.epoch);
+        assert_eq!(pending_settings_event(Some(pending.epoch), presented), None);
+        requests.suspend().unwrap();
+        assert_eq!(
+            prepare_management_presentation(&requests, presented.epoch, true).unwrap_err(),
+            translation_requests::CANCELLED
+        );
+    }
+
     #[test]
     fn history_uses_current_privacy_and_cancelled_requests_cannot_repopulate_it() {
         let directory = std::env::temp_dir().join(format!(
@@ -950,6 +2374,8 @@ mod tests {
         fs::create_dir_all(&directory).unwrap();
         let state = AppState {
             settings: Mutex::new(Settings::default()),
+            credentials: credential_cache::CredentialCache::default(),
+            credential_reads: Mutex::new(()),
             history: Mutex::new(vec![]),
             pinned: AtomicBool::new(false),
             native_busy: AtomicBool::new(false),
@@ -959,6 +2385,7 @@ mod tests {
             client: reqwest::Client::new(),
             startup_warnings: Mutex::new(vec![]),
             outside_thread: Mutex::new(None),
+            pending_settings: Mutex::new(None),
         };
         let result = vec![TranslationResult {
             provider_id: "fixture".into(),
@@ -1003,6 +2430,7 @@ mod tests {
             "PERMISSION: Accessibility is not granted",
             "SELECTION: Foreground changed",
             "NATIVE_START: Helper unavailable",
+            "CLIPBOARD_CHANGED: A newer user copy was preserved",
         ] {
             assert_eq!(visible_action_error("selection", error), None);
         }
@@ -1019,6 +2447,72 @@ mod tests {
             "CLIPBOARD_RESTORE_FAILED: Original formats unavailable"
         )
         .is_some());
+        assert!(visible_action_error(
+            "selection",
+            "CLIPBOARD_RESTORE_SKIPPED: Copy completion is uncertain"
+        )
+        .is_some());
+    }
+    #[test]
+    fn blocked_capture_presents_permission_guidance_in_one_source_event() {
+        for action in ["capture", "ocr", "silentOcr"] {
+            for error in [
+                "PERMISSION: Screen capture is not granted",
+                "PERMISSION: 请在 EchoLingo 设置中开启屏幕录制权限后重试；系统可能要求重新打开应用。",
+            ] {
+                let failure = action_failure_presentation(action, error, 42).unwrap();
+                assert_eq!(
+                    failure.source,
+                    serde_json::json!({
+                        "text":"",
+                        "mode":"input",
+                        "presentationEpoch":42,
+                        "permissionRequired":"screenCapture"
+                    })
+                );
+                // A second action-error event could arrive after presentation
+                // and turn this actionable view back into a transient toast.
+                assert_eq!(failure.error, None);
+            }
+        }
+    }
+    #[test]
+    fn action_failure_guidance_preserves_quiet_selection_cancel_and_real_errors() {
+        for action in ["selection", "capture", "ocr", "silentOcr"] {
+            assert!(action_failure_presentation(action, "CANCELLED: User cancelled", 7).is_none());
+        }
+        let unavailable =
+            action_failure_presentation("selection", "PERMISSION: Accessibility is not granted", 7)
+                .unwrap();
+        assert_eq!(unavailable.source, empty_selection_payload(7));
+        assert_eq!(unavailable.error, None);
+
+        let restoration = action_failure_presentation(
+            "selection",
+            "CLIPBOARD_RESTORE_FAILED: Original formats unavailable",
+            8,
+        )
+        .unwrap();
+        assert_eq!(restoration.source, empty_selection_payload(8));
+        assert!(restoration.error.unwrap().contains("剪贴板恢复失败"));
+        let skipped = action_failure_presentation(
+            "selection",
+            "CLIPBOARD_RESTORE_SKIPPED: Copy completion is uncertain",
+            8,
+        )
+        .unwrap();
+        assert_eq!(skipped.source, empty_selection_payload(8));
+        assert!(skipped.error.unwrap().contains("暂未恢复原剪贴板"));
+        for (action, error) in [
+            ("capture", "OCR 服务返回 HTTP 403，请检查服务凭据或额度"),
+            ("silentOcr", "NATIVE_START: Helper unavailable"),
+            ("clipboard", "PERMISSION: Clipboard unavailable"),
+            ("ocr", "PERMISSION_SETTINGS: 无法打开系统设置"),
+        ] {
+            let failure = action_failure_presentation(action, error, 9).unwrap();
+            assert_eq!(failure.source, empty_input_payload(9));
+            assert!(failure.error.is_some());
+        }
     }
     #[test]
     fn credentials_do_not_cross_protocols_or_supplier_origins() {
@@ -1045,14 +2539,121 @@ mod tests {
     #[test]
     fn duplicate_shortcuts_are_rejected() {
         let mut s = Shortcuts::default();
-        s.ocr = s.capture.clone();
+        s.ocr = s.silent_ocr.clone();
         assert!(parsed_shortcuts(&s).is_err());
     }
     #[test]
     fn empty_shortcut_disables_action() {
         let mut s = Shortcuts::default();
+        let before = parsed_shortcuts(&s).unwrap().len();
         s.ocr.clear();
-        assert_eq!(parsed_shortcuts(&s).unwrap().len(), 4);
+        assert_eq!(parsed_shortcuts(&s).unwrap().len(), before - 1);
+    }
+    #[test]
+    fn settings_history_limit_is_immediate_durable_and_includes_favorites() {
+        let directory = std::env::temp_dir().join(format!(
+            "echolingo-settings-history-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir(&directory).unwrap();
+        let entry = |id: &str, favorite| HistoryEntry {
+            id: id.into(),
+            text: "fixture source".into(),
+            source_language: "en".into(),
+            target_language: "zh-Hans".into(),
+            results: vec![],
+            created_at: 0,
+            favorite,
+        };
+        let mut current = Settings::default();
+        let mut history = vec![
+            entry("new", false),
+            entry("middle", false),
+            entry("favorite", true),
+        ];
+        let mut changed = current.clone();
+        changed.max_history = 2;
+        persist_settings_and_history(&directory, &mut current, &mut history, changed).unwrap();
+        assert_eq!(current.max_history, 2);
+        assert_eq!(
+            history
+                .iter()
+                .map(|entry| entry.id.as_str())
+                .collect::<Vec<_>>(),
+            ["new", "favorite"]
+        );
+        let saved: Vec<HistoryEntry> =
+            serde_json::from_slice(&fs::read(directory.join("history.json")).unwrap()).unwrap();
+        assert_eq!(
+            saved
+                .iter()
+                .map(|entry| entry.id.as_str())
+                .collect::<Vec<_>>(),
+            ["new", "favorite"]
+        );
+
+        // Favorites stay available, but cannot exceed the owner's hard cap.
+        history[0].favorite = true;
+        let mut changed = current.clone();
+        changed.max_history = 1;
+        persist_settings_and_history(&directory, &mut current, &mut history, changed).unwrap();
+        assert_eq!(history.len(), 1);
+        assert_eq!(history[0].id, "new");
+        assert!(history[0].favorite);
+        let saved_settings: Settings =
+            serde_json::from_slice(&fs::read(directory.join("settings.json")).unwrap()).unwrap();
+        assert_eq!(saved_settings.max_history, 1);
+        let saved: Vec<HistoryEntry> =
+            serde_json::from_slice(&fs::read(directory.join("history.json")).unwrap()).unwrap();
+        assert_eq!(saved.len(), 1);
+        assert_eq!(saved[0].id, "new");
+        fs::remove_dir_all(directory).unwrap();
+    }
+    #[test]
+    fn settings_history_write_failure_restores_settings_and_keeps_history() {
+        let directory = std::env::temp_dir().join(format!(
+            "echolingo-settings-history-failure-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir(&directory).unwrap();
+        let mut current = Settings::default();
+        let mut history: Vec<_> = (0..3)
+            .map(|index| HistoryEntry {
+                id: index.to_string(),
+                text: "fixture source".into(),
+                source_language: "en".into(),
+                target_language: "zh-Hans".into(),
+                results: vec![],
+                created_at: 0,
+                favorite: false,
+            })
+            .collect();
+        let settings_path = directory.join("settings.json");
+        let history_path = directory.join("history.json");
+        write_json(&settings_path, &current).unwrap();
+        write_json(&history_path, &history).unwrap();
+        let settings_before = fs::read(&settings_path).unwrap();
+        let history_before = fs::read(&history_path).unwrap();
+        // A directory reliably blocks the history replacement on both platforms.
+        fs::create_dir(history_path.with_extension("json.tmp")).unwrap();
+        let mut changed = current.clone();
+        changed.max_history = 1;
+        assert!(
+            persist_settings_and_history(&directory, &mut current, &mut history, changed).is_err()
+        );
+        assert_eq!(current.max_history, 20);
+        assert_eq!(history.len(), 3);
+        assert_eq!(fs::read(&settings_path).unwrap(), settings_before);
+        assert_eq!(fs::read(&history_path).unwrap(), history_before);
+        fs::remove_dir_all(directory).unwrap();
     }
     #[test]
     fn history_prefers_retaining_favorites() {

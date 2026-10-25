@@ -1,6 +1,7 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0"><dict>
+<key>LSUIElement</key><true/>
 <key>NSAccessibilityUsageDescription</key><string>EchoLingo uses Accessibility only when you request selected-text translation.</string>
 <key>NSScreenCaptureUsageDescription</key><string>EchoLingo captures only the region you select to recognize text locally.</string>
 </dict></plist>

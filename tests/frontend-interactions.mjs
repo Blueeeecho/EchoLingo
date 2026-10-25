@@ -16,13 +16,25 @@ try {
       providers: [{ id: 'qa-service', name: 'QA IPC fixture', kind: 'openai', baseUrl: 'https://example.invalid/v1', model: 'test-model', enabled: true, prompt: '', hasKey: true }],
       sourceLanguage: 'auto', targetLanguage: 'zh-Hans',
       shortcuts: { selection: 'Alt+D', capture: 'Alt+S', ocr: 'Alt+Shift+S', silentOcr: 'Alt+C', input: 'Alt+A' },
-      saveHistory: true, theme: 'light', maxHistory: 200, autoHideSeconds: 0, ocrProviders: [], activeOcrProviderId: null,
+      saveHistory: true, theme: 'light', maxHistory: 20, autoHideSeconds: 0, ocrProviders: [], activeOcrProviderId: null,
     };
     const callbacks = new Map(), listeners = new Map(), ocrKeys = new Map(), translationKeys = new Map(); let callbackId = 0;
-    const scope = (provider) => `${provider.id}:${provider.kind}:${new URL(provider.baseUrl).origin}`;
+    const scope = (provider) => provider.kind === 'system' ? `${provider.id}:system` : `${provider.id}:${provider.kind}:${new URL(provider.baseUrl).origin}`;
     translationKeys.set(scope(state.providers[0]), 'qa-original-translation-key');
     const fixture = window.__qa = { permissionState: { platform: 'macos', supported: true, identity: 'application-process', runningBundledApp: true, bundleIdentifier: 'io.github.qa.echolingo', processId: 1, accessibilityGranted: false, screenCaptureGranted: false }, permissionReads: 0, permissionRequests: [], permissionSettings: [], holdTranslation: false, releaseTranslation: () => {}, translationError: null, settings: state, saveCalls: 0, keyCalls: 0, ocrKeyCalls: 0, ocrTestCalls: 0, ocrDeleteCalls: 0, credentialWrites: [], settingsWrites: [], hideCalls: 0, layoutCalls: [], showCalls: [], translationRequests: [], dragCalls: 0, holdSave: false, failSave: false, releaseSave: () => {}, emit: (name, payload) => listeners.get(name)?.({ event: name, payload, id: 1 }) };
-    Object.assign(fixture, { nextTranslationId: 0, cancellationRequests: [], holdBegin: false, holdBeginBeforeAllocate: false, beginAttempts: [], releaseBegin: () => {}, presentation: { epoch: 0, presented: true }, holdFit: false, fitWaits: 0, releaseFit: () => {}, showPopupAttempts: [] });
+    Object.assign(fixture, { nextTranslationId: 0, cancellationRequests: [], holdBegin: false, holdBeginBeforeAllocate: false, beginAttempts: [], releaseBegin: () => {}, presentation: { epoch: 0, presented: true }, holdFit: false, fitWaits: 0, releaseFit: () => {}, showPopupAttempts: [], permissionAtShow: [], failPermissionSettings: false, holdPermissionSettings: false, releasePermissionSettings: () => {} });
+    Object.assign(fixture, { systemStatus: { platform: 'macos', supported: true, ready: false, requiresSetup: true, status: 'downloadRequired', message: 'QA 语言包尚未准备', minimumVersion: '26.0' }, systemStatusCalls: [], systemPrepareCalls: [], keyDeleteCalls: 0 });
+    Object.assign(fixture, { copies: [], spoken: [], permissionOverride: null, managementShows: [] });
+    Object.assign(fixture, { credentialStates: {}, credentialReadCalls: 0, translationTestCalls: 0, settingsReads: 0 });
+    Object.assign(fixture, { resizeRequests: [], nativeResizeRequests: [], holdResize: false, releaseResize: () => {} });
+    Object.assign(fixture, { pinned: false, nativeVisible: true, popupReveals: 0, nativeHideTransitions: 0 });
+    const decorateCredential = (provider, keys) => {
+      const cached = fixture.credentialStates[scope(provider)];
+      if (cached) provider.credentialState = cached; else delete provider.credentialState;
+      provider.hasKey = cached ? cached === 'ready' : keys.has(scope(provider));
+    };
+    fixture.setCredentialState = (provider, value) => { fixture.credentialStates[scope(provider)] = value; };
+    Object.defineProperty(window, 'speechSynthesis', { configurable: true, value: { cancel() {}, speak(value) { fixture.spoken.push({ text: value.text, lang: value.lang }); } } });
     const pendingTranslations = new Map(), cancelledTranslations = new Set();
     let activeTranslationId = null;
     const cancelTranslation = (id) => {
@@ -33,13 +45,26 @@ try {
     };
     const announcePresentation = () => fixture.emit('translation-presentation', structuredClone(fixture.presentation));
     fixture.nativeHide = (announce = true) => {
+      if (fixture.nativeVisible) fixture.nativeHideTransitions++;
+      fixture.nativeVisible = false;
       fixture.presentation = { epoch: fixture.presentation.epoch + 1, presented: false };
       if (activeTranslationId !== null) cancelTranslation(activeTranslationId);
       if (announce) announcePresentation();
       return structuredClone(fixture.presentation);
     };
     fixture.nativeShow = () => {
+      if (!fixture.nativeVisible) fixture.popupReveals++;
+      fixture.nativeVisible = true;
       if (!fixture.presentation.presented) fixture.presentation = { epoch: fixture.presentation.epoch + 1, presented: true };
+      announcePresentation();
+      return structuredClone(fixture.presentation);
+    };
+    // Models the backend's pinned-visible-popup decision, not screen capture.
+    // Invalidate old translation work while keeping the presentation visible.
+    fixture.nativePinnedCaptureStart = () => {
+      if (!fixture.pinned || !fixture.nativeVisible || !fixture.presentation.presented || document.body.dataset.view !== 'translate') throw new Error('QA pinned popup must already be visible');
+      fixture.presentation = { epoch: fixture.presentation.epoch + 1, presented: true };
+      if (activeTranslationId !== null) cancelTranslation(activeTranslationId);
       announcePresentation();
       return structuredClone(fixture.presentation);
     };
@@ -47,12 +72,22 @@ try {
       transformCallback: (callback) => { const id = ++callbackId; callbacks.set(id, callback); return id; },
       invoke: async (command, args = {}) => {
         if (command === 'plugin:event|listen') { listeners.set(args.event, callbacks.get(args.handler)); return 1; }
-        if (command === 'get_settings') { for (const provider of fixture.settings.providers) provider.hasKey = translationKeys.has(scope(provider)); for (const provider of fixture.settings.ocrProviders) provider.hasKey = ocrKeys.has(scope(provider)); return structuredClone(fixture.settings); }
-        if (command === 'get_history') return [];
+        if (command === 'get_settings') { fixture.settingsReads++; for (const provider of fixture.settings.providers) decorateCredential(provider, translationKeys); for (const provider of fixture.settings.ocrProviders) decorateCredential(provider, ocrKeys); return structuredClone(fixture.settings); }
+        if (command === 'get_history') return structuredClone(fixture.history ?? []);
+        if (command === 'toggle_favorite') { const entry = fixture.history?.find(item => item.id === args.id); if (entry) entry.favorite = !entry.favorite; return; }
+        if (command === 'copy_text') { fixture.copies.push(args.text); return; }
         if (command === 'get_translation_presentation') return structuredClone(fixture.presentation);
+        if (command === 'get_pending_settings') return fixture.pendingSettings ?? null;
+        if (command === 'get_system_translation_status') { fixture.systemStatusCalls.push(structuredClone(args)); return structuredClone(fixture.systemStatus); }
+        if (command === 'prepare_system_translation') { fixture.systemPrepareCalls.push(structuredClone(args)); fixture.systemStatus = { ...fixture.systemStatus, ready: true, requiresSetup: false, status: 'installed', message: 'QA 本机语言包已就绪' }; return structuredClone(fixture.systemStatus); }
         if (command === 'permission_status') { fixture.permissionReads++; return structuredClone(fixture.permissionState); }
-        if (command === 'request_permission') { fixture.permissionRequests.push(args.kind); if (args.kind === 'accessibility') fixture.permissionState.accessibilityGranted = true; else fixture.permissionState.screenCaptureGranted = true; return structuredClone(fixture.permissionState); }
-        if (command === 'open_permission_settings') { fixture.permissionSettings.push(args.kind); return; }
+        if (command === 'request_permission') { fixture.permissionRequests.push(args.kind); if (fixture.permissionOverride) return structuredClone(fixture.permissionOverride); if (args.kind === 'accessibility') fixture.permissionState.accessibilityGranted = true; else fixture.permissionState.screenCaptureGranted = true; return structuredClone(fixture.permissionState); }
+        if (command === 'open_permission_settings') {
+          fixture.permissionSettings.push(args.kind);
+          if (fixture.holdPermissionSettings) await new Promise((resolve) => { fixture.releasePermissionSettings = resolve; });
+          if (fixture.failPermissionSettings) throw new Error('QA internal permission-link failure detail');
+          return;
+        }
         if (command === 'diagnostics') return { warnings: [] };
         if (command === 'save_settings') {
           fixture.saveCalls++; fixture.settingsWrites.push(structuredClone(args.settings));
@@ -64,18 +99,30 @@ try {
           return;
         }
         if (command === 'set_api_key') { fixture.keyCalls++; const provider = fixture.settings.providers.find(item => item.id === args.providerId); if (provider) translationKeys.set(scope(provider), args.key); return; }
+        if (command === 'delete_api_key') { fixture.keyDeleteCalls++; const provider = fixture.settings.providers.find(item => item.id === args.providerId); if (provider) translationKeys.delete(scope(provider)); return; }
         if (command === 'set_ocr_api_key') { fixture.ocrKeyCalls++; const provider = fixture.settings.ocrProviders.find(item => item.id === args.providerId); if (provider) { provider.hasKey = true; ocrKeys.set(scope(provider), args.key); fixture.credentialWrites.push({ providerId: provider.id, kind: provider.kind, key: args.key }); } return; }
         if (command === 'delete_ocr_api_key') { fixture.ocrDeleteCalls++; const provider = fixture.settings.ocrProviders.find(item => item.id === args.providerId); if (provider) { ocrKeys.delete(scope(provider)); provider.hasKey = false; } return; }
-        if (command === 'test_ocr_provider') { fixture.ocrTestCalls++; return 'QA OCR test succeeded'; }
+        if (command === 'test_provider') { fixture.translationTestCalls++; fixture.credentialReadCalls++; const provider = fixture.settings.providers.find(item => item.id === args.providerId); if (provider) fixture.setCredentialState(provider, 'ready'); return 'QA translation credential test succeeded'; }
+        if (command === 'test_ocr_provider') { fixture.ocrTestCalls++; fixture.credentialReadCalls++; const provider = fixture.settings.ocrProviders.find(item => item.id === args.providerId); if (provider && fixture.credentialStates[scope(provider)]) fixture.setCredentialState(provider, 'ready'); return 'QA OCR test succeeded'; }
         if (command === 'hide_window') { fixture.hideCalls++; fixture.nativeHide(); return; }
         if (command === 'fit_window') { fixture.layoutCalls.push(args); if (fixture.holdFit) { fixture.fitWaits++; await new Promise((resolve) => { fixture.releaseFit = resolve; }); } return; }
         if (command === 'start_window_drag') { fixture.dragCalls++; return; }
+        if (command === 'start_window_resize') { fixture.nativeResizeRequests.push(structuredClone(args)); return; }
+        if (command === 'resize_popup_width') { fixture.resizeRequests.push(structuredClone(args)); if (fixture.holdResize) await new Promise((resolve) => { fixture.releaseResize = resolve; }); return; }
+        if (command === 'show_management') {
+          if (args.presentationEpoch !== fixture.presentation.epoch) throw new Error('CANCELLED: stale management presentation');
+          if (fixture.layoutCalls.at(-1)?.presentation !== 'management') throw new Error('MANAGEMENT_NOT_READY');
+          (fixture.managementShows ??= []).push({ view: document.body.dataset.view, layout: structuredClone(fixture.layoutCalls.at(-1)) });
+          fixture.pendingSettings = null;
+          return fixture.nativeShow();
+        }
         if (command === 'show_popup') {
           fixture.showPopupAttempts.push(structuredClone(args));
           if (args.presentationEpoch !== fixture.presentation.epoch) throw new Error('CANCELLED: stale popup presentation');
+          fixture.permissionAtShow.push({ visible: !document.querySelector('#permission-guidance').hidden, title: document.querySelector('#permission-guidance-title').textContent, layout: structuredClone(fixture.layoutCalls.at(-1)) });
           fixture.showCalls.push(structuredClone(fixture.layoutCalls.at(-1))); return fixture.nativeShow();
         }
-        if (command === 'set_pinned') return;
+        if (command === 'set_pinned') { fixture.pinned = args.pinned; (fixture.pinRequests ??= []).push(args.pinned); return; }
         if (command === 'begin_translation') {
           fixture.beginAttempts.push(structuredClone(args));
           if (fixture.holdBeginBeforeAllocate) await new Promise((resolve) => { fixture.releaseBegin = resolve; });
@@ -95,7 +142,7 @@ try {
           });
           if (fixture.translationError) throw new Error(fixture.translationError);
           activeTranslationId = null;
-          return [{ providerId: 'qa-service', providerName: 'QA IPC fixture', text: 'Isolated test translation fixture', elapsedMs: 50 }];
+          return [{ providerId: 'qa-service', providerName: 'QA IPC fixture', text: fixture.translationResultText ?? 'Isolated test translation fixture', elapsedMs: 50 }];
         }
         throw new Error(`Unimplemented QA command: ${command}`);
       },
@@ -118,9 +165,145 @@ try {
   assert.equal(await page.locator('.preview-banner').isVisible(), false);
   assert.equal(await page.locator('#view-translate .column-caption, #view-translate .translation-empty, #character-count, #service-counter').count(), 0);
   assert.equal(await page.locator('#translate-button').isDisabled(), true);
+  assert.equal(await page.locator('#permission-guidance').isHidden(), true);
+  assert.deepEqual(await page.evaluate(() => window.__qa.permissionSettings), []);
+  assert.deepEqual(await page.evaluate(() => window.__qa.permissionRequests), []);
   assert.equal(await page.locator('#restore-original-breaks').isHidden(), true);
-  assert.equal(await page.locator('.popup-toolbar').getAttribute('data-window-drag'), '');
+  // Empty Alt+D neither pins the window nor revives old toolbar focus. Pinning
+  // uses the icon state, without a block background or success notification.
+  const pin = page.locator('#pin-button');
+  const pinBounds = await pin.boundingBox();
+  assert.ok(pinBounds && pinBounds.width >= 32 && pinBounds.height >= 32);
+  assert.ok(await pin.locator('svg').evaluate((element) => element.getBoundingClientRect().width >= 18));
+  assert.equal(await pin.getAttribute('aria-pressed'), 'false');
+  assert.notEqual(await pin.locator('svg').evaluate((element) => getComputedStyle(element).transform), 'none');
+  assert.equal(await pin.locator('svg').evaluate((element) => getComputedStyle(element).fill), 'none');
+  await pin.focus();
+  await page.evaluate(() => window.__qa.emit('source-text', { text: '', mode: 'input' }));
+  assert.equal(await page.evaluate(() => document.activeElement.id), '');
+  await page.waitForFunction(() => window.__qa.showPopupAttempts.at(-1)?.reuseVisiblePopup === false);
+  assert.equal(await page.evaluate(() => window.__qa.showPopupAttempts.at(-1).focusInput), false);
+  assert.equal(await pin.getAttribute('aria-pressed'), 'false');
+  assert.deepEqual(await page.evaluate(() => window.__qa.pinRequests ?? []), []);
+  assert.equal(await page.locator('#toast').isHidden(), true);
+
+  // Native empty Alt+D explicitly focuses only after the popup is prepared.
+  // Actual typing requires no click; passive nonempty source stays passive.
+  const emptyRequestsBefore = await page.evaluate(() => window.__qa.translationRequests.length);
+  await page.evaluate(() => window.__qa.emit('source-text', { text: '', mode: 'input', focusInput: true }));
+  await page.waitForFunction(() => document.activeElement.id === 'source-text');
+  await page.keyboard.type('QA immediate keyboard input');
+  assert.equal(await page.locator('#source-text').inputValue(), 'QA immediate keyboard input');
+  assert.equal(await page.evaluate(() => window.__qa.showPopupAttempts.at(-1).focusInput), true);
+  assert.equal(await page.evaluate(() => window.__qa.showPopupAttempts.at(-1).reuseVisiblePopup), false);
+  assert.equal(await page.evaluate(() => window.__qa.translationRequests.length), emptyRequestsBefore);
+  assert.equal(await page.locator('#speak-source').isVisible(), true);
+  assert.equal(await page.locator('#copy-source').isVisible(), true);
+  await page.locator('#copy-source').click();
+  await page.locator('#speak-source').click();
+  assert.equal(await page.evaluate(() => window.__qa.copies.at(-1)), 'QA immediate keyboard input');
+  assert.equal(await page.evaluate(() => window.__qa.spoken.at(-1).text), 'QA immediate keyboard input');
+  await page.locator('.app-shell').screenshot({ path: 'test-results/source-actions.png' });
+  await page.evaluate(() => window.__qa.emit('source-text', { text: '', mode: 'input' }));
+  await page.waitForFunction(() => document.activeElement.id !== 'source-text');
+  assert.equal(await page.locator('.source-actions').isVisible(), false);
+  // Padding belongs to the button's hit area, and must never start a drag.
+  const pinDragCalls = await page.evaluate(() => window.__qa.dragCalls);
+  await pin.click({ position: { x: 3, y: 3 } });
+  await page.waitForFunction(() => document.querySelector('#pin-button').getAttribute('aria-pressed') === 'true');
+  assert.equal(await pin.getAttribute('aria-label'), '取消钉住');
+  assert.equal(await page.evaluate(() => window.__qa.dragCalls), pinDragCalls);
+  assert.equal(await pin.evaluate((element) => getComputedStyle(element).backgroundColor), 'rgba(0, 0, 0, 0)');
+  assert.equal(await page.locator('#toast').isHidden(), true);
+  await page.evaluate(() => window.__qa.emit('source-text', { text: '', mode: 'input' }));
+  assert.equal(await page.evaluate(() => document.activeElement.id), '');
+  assert.equal(await pin.getAttribute('aria-pressed'), 'true');
+  assert.deepEqual(await page.evaluate(() => window.__qa.pinRequests), [true]);
+  assert.equal(await pin.locator('svg').evaluate((element) => getComputedStyle(element).transform), 'none');
+  assert.notEqual(await pin.locator('svg').evaluate((element) => getComputedStyle(element).fill), 'none');
+  await page.locator('.app-shell').screenshot({ path: 'test-results/quiet-pin-blank.png' });
+  await pin.press('Space');
+  await page.waitForFunction(() => document.querySelector('#pin-button').getAttribute('aria-pressed') === 'false');
+  assert.equal(await pin.evaluate((element) => element.matches(':focus-visible')), true);
+  assert.equal(await pin.getAttribute('aria-label'), '钉住窗口');
+  assert.deepEqual(await page.evaluate(() => window.__qa.pinRequests), [true, false]);
+  assert.equal(await page.locator('#toast').isHidden(), true);
+
+  // Hitting the icon itself also reaches pinning without entering drag mode.
+  await pin.locator('svg').click();
+  await page.waitForFunction(() => document.querySelector('#pin-button').getAttribute('aria-pressed') === 'true');
+  await pin.locator('svg').click();
+  await page.waitForFunction(() => document.querySelector('#pin-button').getAttribute('aria-pressed') === 'false');
+  assert.deepEqual(await page.evaluate(() => window.__qa.pinRequests), [true, false, true, false]);
+  assert.equal(await page.evaluate(() => window.__qa.dragCalls), pinDragCalls);
+  assert.equal(await page.locator('#toast').isHidden(), true);
+
+  assert.equal(await page.locator('.popup-toolbar').getAttribute('data-window-drag'), null);
+  assert.equal(await page.locator('.popup-drag-space').getAttribute('data-window-drag'), '');
   assert.equal(await page.locator('.popup-toolbar').getAttribute('data-tauri-drag-region'), null);
+  await page.locator('.popup-drag-space').click();
+  assert.equal(await page.evaluate(() => window.__qa.dragCalls), pinDragCalls + 1);
+  assert.deepEqual(await page.evaluate(() => window.__qa.resizeRequests), []);
+  assert.deepEqual(await page.evaluate(() => window.__qa.nativeResizeRequests), []);
+  // The actual macOS tao backend has no native drag-resize implementation.
+  // Thin edges capture the pointer and send only bounded width/epoch requests.
+  await page.setViewportSize({ width: 680, height: 820 });
+  await page.waitForFunction(() => window.__qa.layoutCalls.at(-1)?.contentWidth === 680);
+  const geometryBaseline = await page.evaluate(() => ({ height: window.__qa.layoutCalls.at(-1).contentHeight,
+    shows: window.__qa.showCalls.length, hides: window.__qa.hideCalls, drags: window.__qa.dragCalls,
+    source: document.querySelector('#source-text').value, pins: window.__qa.pinRequests.length }));
+  const westEdge = page.locator('[data-window-resize="west"]'), eastEdge = page.locator('[data-window-resize="east"]');
+  for (const edge of [westEdge, eastEdge]) {
+    assert.equal(await edge.isVisible(), true);
+    assert.equal(await edge.getAttribute('aria-hidden'), 'true');
+    assert.equal(await edge.getAttribute('tabindex'), null);
+    assert.equal(await edge.getAttribute('title'), '拖动调整窗口宽度');
+    assert.equal(await edge.evaluate((element) => getComputedStyle(element).cursor), 'ew-resize');
+    assert.equal((await edge.boundingBox()).width, 4);
+  }
+  for (const [edge, movement, expected, direction] of [[eastEdge, -80, 600, 'east'], [westEdge, 75, 605, 'west']]) {
+    const bounds = await edge.boundingBox(), count = await page.evaluate(() => window.__qa.resizeRequests.length);
+    await page.mouse.move(bounds.x + 2, 45); await page.mouse.down();
+    await page.mouse.move(bounds.x + 2 + movement, 45, { steps: 4 }); await page.mouse.up();
+    await page.waitForFunction(({ count, width }) => window.__qa.resizeRequests.length > count && window.__qa.resizeRequests.at(-1).width === width, { count, width: expected });
+    assert.equal(await page.evaluate(() => window.__qa.resizeRequests.at(-1).direction), direction);
+    assert.equal(await page.evaluate(() => window.__qa.resizeRequests.at(-1).presentationEpoch === window.__qa.presentation.epoch), true);
+    assert.equal(await page.locator('body').evaluate((element) => element.classList.contains('popup-resizing')), false);
+  }
+  assert.deepEqual(await page.evaluate(() => window.__qa.nativeResizeRequests), []);
+  assert.equal(await page.evaluate(() => window.__qa.dragCalls), geometryBaseline.drags);
+  assert.equal(await page.evaluate(() => window.__qa.showCalls.length), geometryBaseline.shows);
+  assert.equal(await page.evaluate(() => window.__qa.hideCalls), geometryBaseline.hides);
+  assert.equal(await page.locator('#source-text').inputValue(), geometryBaseline.source);
+  assert.equal(await page.evaluate(() => window.__qa.pinRequests.length), geometryBaseline.pins);
+  await page.setViewportSize({ width: 850, height: 820 });
+  await page.waitForFunction(() => window.__qa.layoutCalls.at(-1)?.contentWidth === 850);
+  assert.equal(await page.evaluate(() => window.__qa.layoutCalls.at(-1).contentHeight), geometryBaseline.height);
+  await page.locator('#source-text').fill(Array(5).fill('A later height fit must retain the actual 850 pixel viewport width.').join('\n'));
+  await page.waitForFunction((height) => window.__qa.layoutCalls.at(-1)?.contentWidth === 850 && window.__qa.layoutCalls.at(-1).contentHeight > height, geometryBaseline.height);
+  assert.deepEqual(await page.evaluate(() => Object.keys(window.__qa.layoutCalls.at(-1)).sort()), ['contentHeight', 'contentWidth', 'presentation']);
+  await page.locator('#source-text').fill('');
+  // Hiding while one width IPC is pending discards the coalesced follow-up.
+  const beforeHiddenResize = await page.evaluate(() => { window.__qa.holdResize = true; return window.__qa.resizeRequests.length; });
+  await page.mouse.move(848, 45); await page.mouse.down(); await page.mouse.move(810, 45);
+  await page.waitForFunction((count) => window.__qa.resizeRequests.length > count, beforeHiddenResize);
+  await page.mouse.move(790, 45);
+  await page.evaluate(() => { window.__qa.nativeHide(); window.__qa.holdResize = false; window.__qa.releaseResize(); });
+  await page.mouse.move(770, 45); await page.mouse.up();
+  assert.equal(await page.evaluate(() => window.__qa.resizeRequests.length), beforeHiddenResize + 1);
+  assert.equal(await page.locator('body').evaluate((element) => element.classList.contains('popup-resizing')), false);
+  await page.evaluate(() => window.__qa.nativeShow());
+  const beforeChangedEpoch = await page.evaluate(() => window.__qa.resizeRequests.length);
+  await page.mouse.move(848, 45); await page.mouse.down();
+  await page.evaluate(() => { window.__qa.presentation.epoch++; window.__qa.emit('translation-presentation', structuredClone(window.__qa.presentation)); });
+  await page.mouse.move(800, 45); await page.mouse.up();
+  assert.equal(await page.evaluate(() => window.__qa.resizeRequests.length), beforeChangedEpoch);
+  // Windows uses its native resize API; this fixture only verifies dispatch.
+  await page.evaluate(() => Object.defineProperty(navigator, 'platform', { configurable: true, get: () => 'Win32' }));
+  await eastEdge.click({ position: { x: 2, y: 45 } });
+  assert.deepEqual(await page.evaluate(() => window.__qa.nativeResizeRequests.at(-1)), { direction: 'east', presentationEpoch: await page.evaluate(() => window.__qa.presentation.epoch) });
+  await page.evaluate(() => Object.defineProperty(navigator, 'platform', { configurable: true, get: () => 'MacIntel' }));
+  await page.setViewportSize({ width: 800, height: 820 });
   await page.locator('#more-toggle').click();
   await page.locator('#popup-more-menu').waitFor({ state: 'visible' });
   await page.keyboard.press('ArrowDown');
@@ -133,9 +316,118 @@ try {
   await page.locator('#source-text').fill('');
   assert.ok(await page.locator('.app-shell').evaluate((element) => element.getBoundingClientRect().height < 190));
   assert.ok(await page.locator('#source-text').evaluate((element) => element.getBoundingClientRect().height >= 44));
+
+  // A blocked screenshot is an atomic source event: its persistent guidance is
+  // prepared before the native popup is shown. Receiving it is always passive.
+  await page.clock.install();
+  const emitPermissionCapture = () => page.evaluate(() => window.__qa.emit('source-text', { text: '', mode: 'input', presentationEpoch: window.__qa.presentation.epoch, permissionRequired: 'screenCapture' }));
+  const beforePermission = await page.evaluate(() => ({ shows: window.__qa.showCalls.length, requests: window.__qa.translationRequests.length }));
+  await page.locator('#pin-button').focus();
+  await emitPermissionCapture();
+  await page.locator('#permission-guidance').waitFor({ state: 'visible' });
+  await page.waitForFunction((shows) => window.__qa.showCalls.length === shows + 1, beforePermission.shows);
+  assert.match(await page.locator('#permission-guidance-title').textContent(), /截图.*屏幕录制权限/);
+  assert.equal(await page.evaluate(() => window.__qa.permissionAtShow.at(-1).visible), true);
+  assert.equal(await page.evaluate(() => window.__qa.permissionAtShow.at(-1).layout.presentation), 'popup');
+  assert.equal(await page.evaluate(() => document.activeElement.id), '');
+  assert.equal(await page.evaluate(() => window.__qa.translationRequests.length), beforePermission.requests);
+  assert.deepEqual(await page.evaluate(() => window.__qa.permissionSettings), []);
+  assert.deepEqual(await page.evaluate(() => window.__qa.permissionRequests), []);
+  await page.clock.fastForward(8_100);
+  assert.equal(await page.locator('#permission-guidance').isVisible(), true);
+  assert.equal(await page.locator('#toast').isHidden(), true);
+
+  // The direct link opens only the correct pane on a click. Failure keeps a
+  // usable manual path visible beyond the old toast timeout, without raw IPC data.
+  await page.evaluate(() => { window.__qa.failPermissionSettings = true; });
+  await page.locator('#permission-guidance-open').click();
+  await page.locator('#permission-guidance-error').getByText('未能打开系统设置。', { exact: false }).waitFor();
+  assert.match(await page.locator('#permission-guidance-error').textContent(), /系统设置 → 隐私与安全（性）.*屏幕录制/);
+  assert.doesNotMatch(await page.locator('#permission-guidance-error').textContent(), /QA internal/);
+  await page.clock.fastForward(8_100);
+  assert.equal(await page.locator('#permission-guidance-error').isVisible(), true);
+  assert.deepEqual(await page.evaluate(() => window.__qa.permissionSettings), ['screenCapture']);
+  assert.deepEqual(await page.evaluate(() => window.__qa.permissionRequests), []);
+
+  // Capture only the isolated fixture: light/narrow/dark screenshots include no
+  // desktop contents, credentials or live API output. Both actions fit at the
+  // supported minimum popup width of 420 px.
+  await page.locator('.app-shell').screenshot({ path: 'test-results/permission-light-800.png' });
+  await page.setViewportSize({ width: 420, height: 600 });
+  const guidanceBounds = await page.locator('#permission-guidance').boundingBox();
+  for (const id of ['#permission-guidance-open', '#permission-guidance-help']) {
+    const bounds = await page.locator(id).boundingBox();
+    assert.ok(bounds.x >= guidanceBounds.x && bounds.x + bounds.width <= guidanceBounds.x + guidanceBounds.width + 1, `${id} fits within narrow guidance`);
+  }
+  assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true);
+  await page.locator('.app-shell').screenshot({ path: 'test-results/permission-narrow-420.png' });
+  await page.evaluate(() => { document.documentElement.dataset.theme = 'dark'; });
+  await page.locator('.app-shell').screenshot({ path: 'test-results/permission-dark-420.png' });
+  await page.evaluate(() => { document.documentElement.dataset.theme = 'light'; });
+  await page.setViewportSize({ width: 800, height: 820 });
+
+  // A first visit to the help still exposes and focuses the steps when opening
+  // System Settings is pending. No authorization is requested by either action.
+  assert.equal(await page.locator('#mac-permission-card').isHidden(), true);
+  await page.evaluate(() => { window.__qa.failPermissionSettings = false; window.__qa.holdPermissionSettings = true; });
+  await page.locator('#permission-guidance-open').click();
+  await page.waitForFunction(() => window.__qa.permissionSettings.length === 2);
+  assert.equal(await page.locator('#permission-guidance-open').isDisabled(), true);
+  await page.locator('#permission-guidance-help').click();
+  await page.locator('#mac-permission-card').waitFor({ state: 'visible' });
+
+  await page.waitForFunction(() => document.activeElement.id === 'mac-permission-card');
+  assert.equal(await page.locator('body').getAttribute('data-view'), 'settings');
+  assert.equal(await page.locator('#permission-setup-steps').getAttribute('open'), '');
+  assert.equal(await page.locator('#permission-setup-steps li').count(), 4);
+  assert.match(await page.locator('#permission-setup-steps').textContent(), /EchoLingo\.app/);
+  assert.match(await page.locator('#permission-setup-steps').textContent(), /重新打开.*刷新状态/);
+  assert.deepEqual(await page.evaluate(() => window.__qa.permissionRequests), []);
+  await page.evaluate(() => { window.__qa.holdPermissionSettings = false; window.__qa.releasePermissionSettings(); });
+  await page.waitForFunction(() => !document.querySelector('[data-open-permission="screenCapture"]').disabled);
+  await goView('translate');
+  assert.equal(await page.locator('#permission-guidance').isVisible(), true);
+  assert.equal(await page.locator('#permission-guidance-error').isHidden(), true);
+  await page.locator('#permission-guidance-dismiss').click();
+  assert.equal(await page.locator('#permission-guidance').isHidden(), true);
+  await emitPermissionCapture();
+  await page.locator('#permission-guidance').waitFor({ state: 'visible' });
+  await page.locator('#source-text').fill('QA manual input after denied capture');
+  assert.equal(await page.locator('#permission-guidance').isHidden(), true);
+
+  // Empty selection and Alt+A recover quietly. Obsolete capture events cannot
+  // expose a guide or replace text after a newer native presentation wins.
+  await emitPermissionCapture();
+  await page.locator('#permission-guidance').waitFor({ state: 'visible' });
+  await page.evaluate(() => window.__qa.emit('source-text', { text: '', mode: 'input', presentationEpoch: window.__qa.presentation.epoch }));
+  assert.equal(await page.locator('#permission-guidance').isHidden(), true);
+  await emitPermissionCapture();
+  await page.locator('#permission-guidance').waitFor({ state: 'visible' });
+  await page.evaluate(() => window.__qa.emit('focus-input'));
+  assert.equal(await page.locator('#permission-guidance').isHidden(), true);
+  const beforeStalePermission = await page.evaluate(() => {
+    const epoch = window.__qa.presentation.epoch;
+    window.__qa.nativeHide(); window.__qa.nativeShow();
+    return { epoch, shows: window.__qa.showCalls.length };
+  });
+  await page.locator('#source-text').fill('QA newer input survives old permission capture');
+  await page.evaluate(({ epoch }) => window.__qa.emit('source-text', { text: '', mode: 'input', presentationEpoch: epoch, permissionRequired: 'screenCapture' }), beforeStalePermission);
+  assert.equal(await page.locator('#permission-guidance').isHidden(), true);
+  assert.equal(await page.locator('#source-text').inputValue(), 'QA newer input survives old permission capture');
+  assert.equal(await page.evaluate(() => window.__qa.showCalls.length), beforeStalePermission.shows);
+  assert.deepEqual(await page.evaluate(() => window.__qa.permissionSettings), ['screenCapture', 'screenCapture']);
+  assert.deepEqual(await page.evaluate(() => window.__qa.permissionRequests), []);
+  await page.locator('#source-text').fill('');
   await goView('history');
   assert.equal(await page.locator('.management-header').isVisible(), true);
   await goView('settings');
+  assert.equal(await westEdge.isVisible(), false);
+  assert.equal(await eastEdge.isVisible(), false);
+  const managementResizeCount = await page.evaluate(() => window.__qa.resizeRequests.length);
+  await eastEdge.dispatchEvent('pointerdown', { button: 0, pointerId: 110, screenX: 798 });
+  await eastEdge.dispatchEvent('pointermove', { pointerId: 110, screenX: 700 });
+  await eastEdge.dispatchEvent('pointerup', { pointerId: 110, screenX: 700 });
+  assert.equal(await page.evaluate(() => window.__qa.resizeRequests.length), managementResizeCount);
 
   // Permission reads are passive, and only explicit management actions request
   // authorization or open a system pane. Unsupported platforms show no Mac UI.
@@ -148,8 +440,10 @@ try {
   await page.locator('[data-request-permission="accessibility"]').click();
   await page.locator('#accessibility-permission-state').getByText('已授权').waitFor();
   assert.deepEqual(await page.evaluate(() => window.__qa.permissionRequests), ['accessibility']);
+  const settingsBeforeExplicitOpen = await page.evaluate(() => window.__qa.permissionSettings.length);
   await page.locator('[data-open-permission="screenCapture"]').click();
-  assert.deepEqual(await page.evaluate(() => window.__qa.permissionSettings), ['screenCapture']);
+  assert.equal(await page.evaluate(() => window.__qa.permissionSettings.length), settingsBeforeExplicitOpen + 1);
+  assert.equal(await page.evaluate(() => window.__qa.permissionSettings.at(-1)), 'screenCapture');
   assert.deepEqual(await page.evaluate(() => window.__qa.permissionRequests), ['accessibility']);
   await page.evaluate(() => { window.__qa.permissionState.platform = 'windows'; window.__qa.permissionState.supported = false; });
   await page.locator('#refresh-permissions').click();
@@ -157,6 +451,15 @@ try {
   await page.evaluate(() => { window.__qa.permissionState.platform = 'macos'; window.__qa.permissionState.supported = true; });
   await goView('translate'); await goView('settings');
   await page.locator('#mac-permission-card').waitFor({ state: 'visible' });
+
+  // A verified modern request may contradict the old passive preflight. Do
+  // not incorrectly tell the owner the system switch was never enabled.
+  await page.evaluate(() => { window.__qa.permissionOverride = { ...window.__qa.permissionState, screenCaptureGranted: false, screenCaptureState: 'inconsistent', screenCaptureRequestState: 'available', screenCaptureAuthorizationConsistent: false }; });
+  await page.locator('[data-request-permission="screenCapture"]').click();
+  await page.locator('#screen-capture-permission-state').getByText('授权状态不一致').waitFor();
+  assert.match(await page.locator('#permission-context').textContent(), /不一致.*重新打开/);
+  await page.evaluate(() => { window.__qa.permissionOverride = null; });
+  await page.locator('#refresh-permissions').click();
 
   // Saving is atomic from the form's perspective: closing or submitting again
   // while the backend is pending cannot replace or close a different editor.
@@ -320,13 +623,13 @@ try {
   await page.locator('#confirm-accept').click();
   await page.waitForFunction(() => window.__qa.settings.ocrProviders.length === 0 && window.__qa.settings.activeOcrProviderId === null);
 
-  // Empty Alt+D clears the floating view without focusing its input or making API requests.
+  // A passive blank event clears the floating view without focus or API requests.
   await goView('translate');
   await page.locator('#source-text').fill('QA text before empty selection');
   await page.locator('#pin-button').focus();
   await page.evaluate(() => window.__qa.emit('source-text', { text: '', mode: 'input' }));
   assert.equal(await page.locator('#source-text').inputValue(), '');
-  assert.equal(await page.evaluate(() => document.activeElement.id), 'pin-button');
+  assert.equal(await page.evaluate(() => document.activeElement.id), '');
   assert.equal(await page.locator('.result-card').count(), 0);
 
   // Empty selection clears an old error without adding a tip or requesting an API.
@@ -447,6 +750,39 @@ try {
   assert.match(await page.locator('#source-text').inputValue(), /正文，\n下一行/);
   assert.equal(await page.evaluate(() => window.__qa.translationRequests.length), beforeQueued.requests);
 
+  // Blocked capture keeps its permission metadata while a service editor owns
+  // the window, then presents the guide after the user closes that editor.
+  await goView('settings');
+  await page.getByRole('button', { name: '编辑', exact: true }).click();
+  await page.locator('#provider-name').fill('QA permission capture unfinished editor');
+  const beforeQueuedPermission = await page.evaluate(() => ({ shows: window.__qa.showCalls.length, requests: window.__qa.translationRequests.length, opens: window.__qa.permissionSettings.length, authorizations: window.__qa.permissionRequests.length }));
+  await emitPermissionCapture();
+  assert.equal(await page.locator('#provider-dialog').isVisible(), true);
+  assert.equal(await page.locator('#provider-name').inputValue(), 'QA permission capture unfinished editor');
+  assert.equal(await page.locator('#permission-guidance').isHidden(), true);
+  assert.equal(await page.evaluate(() => window.__qa.showCalls.length), beforeQueuedPermission.shows);
+  await page.locator('#cancel-provider-dialog').click();
+  await page.locator('#permission-guidance').waitFor({ state: 'visible' });
+  await page.waitForFunction((shows) => window.__qa.showCalls.length === shows + 1, beforeQueuedPermission.shows);
+  assert.equal(await page.locator('#source-text').inputValue(), '');
+  assert.equal(await page.evaluate(() => window.__qa.permissionAtShow.at(-1).visible), true);
+  assert.equal(await page.evaluate(() => window.__qa.translationRequests.length), beforeQueuedPermission.requests);
+  assert.equal(await page.evaluate(() => window.__qa.permissionSettings.length), beforeQueuedPermission.opens);
+  assert.equal(await page.evaluate(() => window.__qa.permissionRequests.length), beforeQueuedPermission.authorizations);
+
+  // A user-triggered passive refresh clears obsolete guidance once macOS reports
+  // that the corresponding permission is granted, without requesting it again.
+  await page.locator('#permission-guidance-help').click();
+  await page.waitForFunction(() => document.activeElement.id === 'mac-permission-card');
+  await page.evaluate(() => { window.__qa.permissionState.screenCaptureGranted = true; });
+  await page.locator('#refresh-permissions').click();
+  await page.locator('#screen-capture-permission-state').getByText('已授权').waitFor();
+  assert.equal(await page.locator('#permission-guidance').evaluate((element) => element.hidden), true);
+  assert.equal(await page.evaluate(() => window.__qa.permissionRequests.length), beforeQueuedPermission.authorizations);
+  await goView('translate');
+  assert.equal(await page.locator('#permission-guidance').isHidden(), true);
+  await page.evaluate(() => { window.__qa.permissionState.screenCaptureGranted = false; });
+
   // Alt+A is also deferred while editing a service, and then focuses only when
   // the user has closed the editor. It must not shrink the open editor.
   await goView('settings');
@@ -459,6 +795,75 @@ try {
   assert.equal(await page.evaluate(() => window.__qa.layoutCalls.at(-1).presentation), 'management');
   await page.locator('#cancel-provider-dialog').click();
   await page.waitForFunction(() => document.body.dataset.view === 'translate' && document.activeElement.id === 'source-text');
+
+  // Tray, Cmd+, and reopen use an explicit Settings event. Configuration is
+  // prepared in management geometry before the native focused presentation.
+  const openNativeSettings = () => page.evaluate(() => {
+    const state = window.__qa.nativeHide();
+    window.__qa.pendingSettings = { presentationEpoch: state.epoch };
+    window.__qa.emit('open-settings', window.__qa.pendingSettings);
+    return state.epoch;
+  });
+  const managementBefore = await page.evaluate(() => window.__qa.managementShows?.length ?? 0);
+  const settingsEpoch = await openNativeSettings();
+  await page.waitForFunction((count) => window.__qa.managementShows?.length === count + 1, managementBefore);
+  assert.equal(await page.locator('body').getAttribute('data-view'), 'settings');
+  assert.equal(await page.locator('#provider-list').isVisible(), true);
+  assert.equal(await page.locator('#ocr-provider-list').isVisible(), true);
+  assert.equal(await page.locator('#shortcuts-form').isVisible(), true);
+  assert.deepEqual(await page.evaluate(() => window.__qa.managementShows.at(-1)), { view: 'settings', layout: await page.evaluate(() => window.__qa.layoutCalls.at(-1)) });
+  await page.evaluate((presentationEpoch) => window.__qa.emit('open-settings', { presentationEpoch }), settingsEpoch);
+  assert.equal(await page.evaluate(() => window.__qa.managementShows.length), managementBefore + 1);
+  // Built-in translation never prepares/downloads from a status refresh. Its
+  // service configuration has no endpoint or credential writes/deletions.
+  await page.waitForFunction(() => document.querySelector('#system-translation-status').textContent === 'QA 语言包尚未准备');
+  assert.deepEqual(await page.evaluate(() => window.__qa.systemPrepareCalls), []);
+  await page.locator('#system-translation-source').selectOption('zh-Hans');
+  await page.locator('#system-translation-target').selectOption('en');
+  await page.waitForFunction(() => window.__qa.systemStatusCalls.at(-1)?.sourceLanguage === 'zh-Hans' && window.__qa.systemStatusCalls.at(-1)?.targetLanguage === 'en');
+  await page.locator('#prepare-system-translation').click();
+  await page.waitForFunction(() => document.querySelector('#system-translation-status').textContent === 'QA 本机语言包已就绪');
+  assert.deepEqual(await page.evaluate(() => window.__qa.systemPrepareCalls), [{ sourceLanguage: 'zh-Hans', targetLanguage: 'en' }]);
+  assert.equal(await page.locator('#prepare-system-translation').isDisabled(), true);
+  await page.evaluate(() => { window.__qa.systemStatus = { platform: 'windows', supported: false, ready: false, requiresSetup: false, message: 'QA 此系统暂无通用内置翻译接口' }; });
+  await page.locator('#refresh-system-translation').click();
+  await page.waitForFunction(() => document.querySelector('#system-translation-status').textContent === 'QA 此系统暂无通用内置翻译接口');
+  assert.equal(await page.locator('#prepare-system-translation').isDisabled(), true);
+  assert.equal(await page.locator('#enable-system-translation').isHidden(), true);
+  await page.evaluate(() => { window.__qa.systemStatus = { platform: 'macos', supported: true, ready: true, requiresSetup: false, message: 'QA 本机语言包已就绪' }; });
+  await page.locator('#refresh-system-translation').click();
+  await page.locator('#enable-system-translation').waitFor({ state: 'visible' });
+  const systemKeysBefore = await page.evaluate(() => ({ writes: window.__qa.keyCalls, deletes: window.__qa.keyDeleteCalls }));
+  await page.locator('#enable-system-translation').click();
+  await page.waitForFunction(() => window.__qa.settings.providers.some(p => p.kind === 'system' && p.enabled));
+  assert.equal(await page.evaluate(() => window.__qa.settings.providers.find(p => p.id === 'qa-service').enabled), true);
+  const systemName = await page.evaluate(() => window.__qa.settings.providers.find(p => p.kind === 'system').name);
+  const systemRow = page.locator('.provider-row').filter({ hasText: '无需 API Key' });
+  await systemRow.getByRole('button', { name: '编辑', exact: true }).click();
+  assert.equal(await page.locator('#provider-url').isVisible(), false);
+  assert.equal(await page.locator('#provider-key').isVisible(), false);
+  assert.equal(await page.locator('#provider-model').isVisible(), false);
+  await page.locator('#save-provider').click();
+  await page.locator('#provider-dialog').waitFor({ state: 'hidden' });
+  await page.locator('.app-shell').screenshot({ path: 'test-results/system-translation-settings.png' });
+  await systemRow.getByRole('button', { name: `删除 ${systemName}`, exact: true }).click();
+  await page.locator('#confirm-accept').click();
+  await page.waitForFunction(() => !window.__qa.settings.providers.some(p => p.kind === 'system'));
+  assert.deepEqual(await page.evaluate(() => ({ writes: window.__qa.keyCalls, deletes: window.__qa.keyDeleteCalls })), systemKeysBefore);
+  await page.locator('.app-shell').screenshot({ path: 'test-results/settings-main.png' });
+  await goView('translate');
+  await page.waitForFunction(() => window.__qa.layoutCalls.at(-1)?.presentation === 'popup');
+  const beforeDelayedManagement = await page.evaluate(() => ({ waits: window.__qa.fitWaits, shows: window.__qa.managementShows.length }));
+  await page.evaluate(() => { window.__qa.holdFit = true; });
+  await openNativeSettings();
+  await page.waitForFunction((count) => window.__qa.fitWaits > count, beforeDelayedManagement.waits);
+  await page.evaluate(() => {
+    const state = window.__qa.nativeHide();
+    window.__qa.emit('source-text', { text: '', mode: 'input', presentationEpoch: state.epoch });
+    window.__qa.holdFit = false; window.__qa.releaseFit();
+  });
+  await page.waitForFunction(() => document.body.dataset.view === 'translate' && window.__qa.layoutCalls.at(-1)?.presentation === 'popup');
+  assert.equal(await page.evaluate(() => window.__qa.managementShows.length), beforeDelayedManagement.shows);
 
   // Editing/clearing/stopping/hiding cancel the backend ticket. Native hide
   // events also reset the UI, and a late ticket cannot start an abandoned HTTP job.
@@ -576,40 +981,414 @@ try {
   assert.equal(await page.evaluate(() => window.__qa.showCalls.length), beforeDelayedPopup.shows);
   assert.equal(await page.evaluate(() => window.__qa.translationRequests.length), beforeDelayedPopup.requests);
   assert.equal(await page.locator('#source-text').inputValue(), 'QA newer input survives delayed popup');
-  await page.evaluate(() => { window.__qa.hideCalls = 0; });
-
-  // Default 0 creates no timer. An optional timer waits for idle time and resets
-  // on pointer input; pinning prevents it from hiding a completed translation.
-  await page.clock.install();
-  await goView('translate');
-  await page.locator('#source-text').fill('QA default timer test');
+  // Auto direction is a first-class target; fixed targets remain selectable.
+  await page.locator('#target-language').selectOption('auto');
+  await page.waitForFunction(() => window.__qa.settings.targetLanguage === 'auto');
+  await page.locator('#source-text').fill('你好');
+  await page.locator('#source-text').press('Enter');
+  await page.getByText('Isolated test translation fixture', { exact: true }).waitFor();
+  assert.equal(await page.evaluate(() => window.__qa.translationRequests.at(-1).targetLanguage), 'auto');
+  await page.locator('#target-language').selectOption('en');
+  await page.waitForFunction(() => window.__qa.settings.targetLanguage === 'en');
   await page.locator('#translate-button').click();
   await page.getByText('Isolated test translation fixture', { exact: true }).waitFor();
-  await page.clock.fastForward(20_000);
-  assert.equal(await page.evaluate(() => window.__qa.hideCalls), 0);
+  assert.equal(await page.evaluate(() => window.__qa.translationRequests.at(-1).targetLanguage), 'en');
+  // The countdown feature was removed; theme/favorites and bounded history remain.
   await goView('settings');
-  await page.locator('#auto-hide-seconds').selectOption('3');
-  await page.waitForFunction(() => window.__qa.settings.autoHideSeconds === 3);
+  assert.equal(await page.locator('#auto-hide-seconds').count(), 0);
+  assert.equal(await page.locator('#theme-select').isVisible(), true);
+  assert.equal(await page.locator('#max-history').getAttribute('max'), '100');
+  assert.equal(await page.locator('#max-history').inputValue(), '20');
+  await page.locator('#max-history').fill('37');
+  await page.locator('#max-history').dispatchEvent('change');
+  await page.waitForFunction(() => window.__qa.settings.maxHistory === 37);
+  await page.locator('#max-history').fill('101');
+  await page.locator('#max-history').dispatchEvent('change');
+  assert.equal(await page.evaluate(() => window.__qa.settings.maxHistory), 37);
+  assert.equal(await page.locator('#max-history').inputValue(), '37');
+  await page.locator('#theme-select').selectOption('dark');
+  await page.waitForFunction(() => window.__qa.settings.theme === 'dark' && document.documentElement.dataset.theme === 'dark');
+  await page.locator('#theme-select').selectOption('system');
+  await page.waitForFunction(() => window.__qa.settings.theme === 'system');
+  await page.evaluate(() => { window.__qa.history = [
+    { id: 'qa-history-a', createdAt: 1792890000000, text: 'QA history first', sourceLanguage: 'en', targetLanguage: 'zh-Hans', results: [], favorite: false },
+    { id: 'qa-history-b', createdAt: 1792880000000, text: 'QA history second', sourceLanguage: 'en', targetLanguage: 'zh-Hans', results: [], favorite: false },
+  ]; });
+  await goView('history');
+  await page.locator('.history-item').first().waitFor();
+  assert.equal(await page.locator('.history-item').count(), 2);
+  await page.locator('.history-item').first().getByRole('button', { name: '收藏翻译', exact: true }).click();
+  await page.locator('.history-item').first().getByRole('button', { name: '取消收藏', exact: true }).waitFor();
+  await page.locator('#filter-favorites').click();
+  assert.equal(await page.locator('.history-item').count(), 1);
+  assert.equal(await page.locator('.history-original').textContent(), 'QA history first');
+  await page.getByRole('button', { name: '取消收藏', exact: true }).click();
+  await page.getByText('暂无收藏', { exact: true }).waitFor();
+  await page.locator('#filter-all').click();
+  assert.equal(await page.locator('.history-item').count(), 2);
+  // Captures stay editable after completion and while an automatic request is
+  // pending. Use an actual click/key sequence, preserving the captured text.
   await goView('translate');
-  await page.locator('#source-text').fill('QA optional timer test');
-  await page.locator('#translate-button').click();
+  await page.evaluate(() => window.__qa.emit('source-text', { text: 'Select text in any app\nand press the shortcut.', mode: 'translate', presentationEpoch: window.__qa.presentation.epoch }));
   await page.getByText('Isolated test translation fixture', { exact: true }).waitFor();
-  await page.clock.fastForward(2000);
-  assert.equal(await page.evaluate(() => window.__qa.hideCalls), 0);
-  await page.mouse.move(150, 150);
-  await page.clock.fastForward(2000);
-  assert.equal(await page.evaluate(() => window.__qa.hideCalls), 0);
-  await page.clock.fastForward(1100);
-  assert.equal(await page.evaluate(() => window.__qa.hideCalls), 1);
+  assert.equal(await page.evaluate(() => window.__qa.showPopupAttempts.at(-1).reuseVisiblePopup), false);
+  assert.equal(await page.evaluate(() => window.__qa.showPopupAttempts.at(-1).focusInput), false);
+  assert.equal(await page.locator('#source-text').inputValue(), 'Select text in any app and press the shortcut.');
+  assert.equal(await page.locator('#source-text').isEditable(), true);
+  await page.locator('#source-text').click();
+  await page.keyboard.press('ControlOrMeta+End');
+  await page.keyboard.type(' Edited.');
+  assert.equal(await page.locator('#source-text').inputValue(), 'Select text in any app and press the shortcut. Edited.');
+  await page.keyboard.press('Enter');
+  await page.getByText('Isolated test translation fixture', { exact: true }).waitFor();
+  assert.equal(await page.evaluate(() => window.__qa.translationRequests.at(-1).text), 'Select text in any app and press the shortcut. Edited.');
+  const pendingEdit = await page.evaluate(() => { window.__qa.holdTranslation = true; return { requests: window.__qa.translationRequests.length, cancellations: window.__qa.cancellationRequests.length }; });
+  await page.evaluate(() => window.__qa.emit('source-text', { text: 'QA OCR captured words', mode: 'translate', presentationEpoch: window.__qa.presentation.epoch }));
+  await page.waitForFunction((count) => window.__qa.translationRequests.length > count, pendingEdit.requests);
+  await page.locator('#source-text').click();
+  await page.keyboard.press('ControlOrMeta+End');
+  await page.keyboard.type(' corrected');
+  await page.waitForFunction((count) => window.__qa.cancellationRequests.length > count, pendingEdit.cancellations);
+  assert.equal(await page.locator('#source-text').inputValue(), 'QA OCR captured words corrected');
+  await page.evaluate(() => { window.__qa.holdTranslation = false; });
+  await page.keyboard.press('Enter');
+  await page.getByText('Isolated test translation fixture', { exact: true }).waitFor();
+  assert.equal(await page.evaluate(() => window.__qa.translationRequests.at(-1).text), 'QA OCR captured words corrected');
+  // A second capture keeps an already pinned, completed result readable. Only
+  // successful recognition replaces source text; cancel/error sends no source.
+  await pin.click();
+  await page.waitForFunction(() => document.querySelector('#pin-button').getAttribute('aria-pressed') === 'true');
+  const pinnedCaptureBaseline = await page.evaluate(() => {
+    window.__qa.pinnedOldCard = document.querySelector('.result-card');
+    return { text: document.querySelector('#source-text').value, result: document.querySelector('.result-text').textContent,
+      requests: window.__qa.translationRequests.length, reveals: window.__qa.popupReveals, hides: window.__qa.nativeHideTransitions,
+      pinRequests: window.__qa.pinRequests.length, permissions: window.__qa.permissionRequests.length,
+      oldRequest: window.__qa.translationRequests.at(-1), oldEpoch: window.__qa.presentation.epoch };
+  });
+  let previousPinnedEpoch = pinnedCaptureBaseline.oldEpoch;
+  for (const failure of [null, 'NO_TEXT: QA no text in this region', 'OCR: QA recognition failed', 'PERMISSION: QA screen capture is not granted']) {
+    const capture = await page.evaluate(() => window.__qa.nativePinnedCaptureStart());
+    assert.ok(capture.epoch > previousPinnedEpoch); previousPinnedEpoch = capture.epoch;
+    assert.equal(capture.presented, true);
+    // Escape/selection cancellation emits nothing. Actionable failures use the
+    // existing error event and must not synthesize an empty source payload.
+    if (failure) {
+      await page.evaluate((message) => window.__qa.emit('action-error', message), failure);
+      assert.equal(await page.locator('#toast').isVisible(), true);
+      assert.match(await page.locator('#toast').textContent(), /QA/);
+      if (failure.startsWith('PERMISSION:')) assert.match(await page.locator('#toast').textContent(), /更多.*设置.*系统权限/);
+    }
+    assert.equal(await page.locator('#source-text').inputValue(), pinnedCaptureBaseline.text);
+    assert.equal(await page.locator('.result-text').textContent(), pinnedCaptureBaseline.result);
+    assert.equal(await page.evaluate(() => window.__qa.pinnedOldCard.isConnected), true);
+    assert.equal(await pin.getAttribute('aria-pressed'), 'true');
+    assert.equal(await page.evaluate(() => window.__qa.nativeVisible && window.__qa.presentation.presented), true);
+  }
+  assert.equal(await page.evaluate(() => window.__qa.translationRequests.length), pinnedCaptureBaseline.requests);
+  assert.equal(await page.evaluate(() => window.__qa.popupReveals), pinnedCaptureBaseline.reveals);
+  assert.equal(await page.evaluate(() => window.__qa.nativeHideTransitions), pinnedCaptureBaseline.hides);
+  assert.equal(await page.evaluate(() => window.__qa.pinRequests.length), pinnedCaptureBaseline.pinRequests);
+  assert.equal(await page.evaluate(() => window.__qa.permissionRequests.length), pinnedCaptureBaseline.permissions);
+  const beforeUnmatchedMarked = await page.evaluate(() => ({ source: document.querySelector('#source-text').value,
+    requests: window.__qa.translationRequests.length, shows: window.__qa.showPopupAttempts.length }));
+  await page.evaluate(() => {
+    window.__qa.emit('source-text', { text: 'QA marked OCR missing epoch', mode: 'translate', updateVisiblePopup: true });
+    window.__qa.emit('source-text', { text: 'QA marked OCR future epoch', mode: 'translate', presentationEpoch: window.__qa.presentation.epoch + 1, updateVisiblePopup: true });
+  });
+  assert.equal(await page.locator('#source-text').inputValue(), beforeUnmatchedMarked.source);
+  assert.equal(await page.evaluate(() => window.__qa.translationRequests.length), beforeUnmatchedMarked.requests);
+  assert.equal(await page.evaluate(() => window.__qa.showPopupAttempts.length), beforeUnmatchedMarked.shows);
+  const nextPinnedCapture = await page.evaluate(() => { window.__qa.holdTranslation = true; return window.__qa.nativePinnedCaptureStart(); });
+  await page.evaluate((epoch) => window.__qa.emit('source-text', { text: 'QA next pinned OCR capture result', mode: 'translate', presentationEpoch: epoch, updateVisiblePopup: true }), nextPinnedCapture.epoch);
+  await page.waitForFunction((count) => window.__qa.translationRequests.length === count + 1, pinnedCaptureBaseline.requests);
+  assert.equal(await page.evaluate(() => window.__qa.showPopupAttempts.at(-1).reuseVisiblePopup), true);
+  assert.equal(await page.evaluate(() => window.__qa.showPopupAttempts.at(-1).focusInput), false);
+  assert.equal(await page.locator('#source-text').inputValue(), 'QA next pinned OCR capture result');
+  assert.equal(await page.evaluate(() => window.__qa.pinnedOldCard.isConnected), false);
+  const stalePinnedProgress = { requestId: pinnedCaptureBaseline.oldRequest.requestId, presentationEpoch: pinnedCaptureBaseline.oldEpoch,
+    sequence: 100, done: true, result: { providerId: 'qa-service', providerName: 'QA stale pinned capture', text: 'STALE PINNED TRANSLATION', elapsedMs: 1 } };
+  await page.evaluate(({ epoch, progress }) => {
+    window.__qa.emit('source-text', { text: 'STALE PINNED OCR SOURCE', mode: 'translate', presentationEpoch: epoch, updateVisiblePopup: true });
+    window.__qa.emit('translation-presentation', { epoch, presented: false });
+    window.__qa.emit('translation-progress', progress);
+  }, { epoch: pinnedCaptureBaseline.oldEpoch, progress: stalePinnedProgress });
+  assert.equal(await page.locator('#source-text').inputValue(), 'QA next pinned OCR capture result');
+  assert.equal(await page.getByText('STALE PINNED TRANSLATION', { exact: true }).count(), 0);
+  await page.evaluate(() => { window.__qa.holdTranslation = false; window.__qa.releaseTranslation(); });
+  await page.getByText('Isolated test translation fixture', { exact: true }).waitFor();
+  assert.equal(await page.evaluate(() => window.__qa.translationRequests.at(-1).text), 'QA next pinned OCR capture result');
+  assert.equal(await pin.getAttribute('aria-pressed'), 'true');
+  assert.equal(await page.evaluate(() => window.__qa.popupReveals), pinnedCaptureBaseline.reveals);
+  assert.equal(await page.evaluate(() => window.__qa.nativeHideTransitions), pinnedCaptureBaseline.hides);
+  // An ordinary selection is a fresh presentation request even when this
+  // pinned popup is already visible. Only marked OCR may request reuse.
+  const ordinaryPinnedCount = await page.evaluate(() => window.__qa.translationRequests.length);
+  await page.evaluate(() => window.__qa.emit('source-text', { text: 'QA ordinary selection requests a passive raise', mode: 'translate',
+    presentationEpoch: window.__qa.presentation.epoch, updateVisiblePopup: false }));
+  await page.waitForFunction((count) => window.__qa.translationRequests.length > count, ordinaryPinnedCount);
+  await page.getByText('Isolated test translation fixture', { exact: true }).waitFor();
+  assert.equal(await page.evaluate(() => window.__qa.showPopupAttempts.at(-1).reuseVisiblePopup), false);
+  assert.equal(await page.evaluate(() => window.__qa.showPopupAttempts.at(-1).focusInput), false);
+  assert.equal(await pin.getAttribute('aria-pressed'), 'true');
+  // A pinned capture result is an update to the existing translation view,
+  // never an instruction to navigate away from later management actions.
+  for (const managementView of ['settings', 'history']) {
+    const capture = await page.evaluate(() => window.__qa.nativePinnedCaptureStart());
+    const before = await page.evaluate(() => ({ source: document.querySelector('#source-text').value,
+      requests: window.__qa.translationRequests.length, shows: window.__qa.showPopupAttempts.length }));
+    await goView(managementView);
+    await page.evaluate((epoch) => window.__qa.emit('source-text', { text: 'QA late OCR must not replace management', mode: 'translate', presentationEpoch: epoch, updateVisiblePopup: true }), capture.epoch);
+    assert.equal(await page.locator('body').getAttribute('data-view'), managementView);
+    assert.equal(await page.locator('#source-text').inputValue(), before.source);
+    assert.equal(await page.evaluate(() => window.__qa.translationRequests.length), before.requests);
+    assert.equal(await page.evaluate(() => window.__qa.showPopupAttempts.length), before.shows);
+    await goView('translate');
+  }
+  // Direct edits and Alt+A typing advance the UI generation without changing
+  // the native presentation epoch; a late OCR update must respect both.
+  for (const action of ['edit', 'focus-input']) {
+    const capture = await page.evaluate(() => window.__qa.nativePinnedCaptureStart());
+    if (action === 'edit') await page.locator('#source-text').fill('QA manual edit wins over pending OCR');
+    else {
+      await page.evaluate(() => window.__qa.emit('focus-input', null));
+      await page.waitForFunction(() => document.activeElement.id === 'source-text');
+      await page.keyboard.press('ControlOrMeta+End'); await page.keyboard.type(' with Alt+A typing');
+    }
+    const before = await page.evaluate(() => ({ source: document.querySelector('#source-text').value,
+      requests: window.__qa.translationRequests.length, shows: window.__qa.showPopupAttempts.length }));
+    await page.evaluate((epoch) => window.__qa.emit('source-text', { text: 'QA late OCR must not replace edited input', mode: 'translate', presentationEpoch: epoch, updateVisiblePopup: true }), capture.epoch);
+    assert.equal(await page.locator('#source-text').inputValue(), before.source);
+    assert.equal(await page.locator('body').getAttribute('data-view'), 'translate');
+    assert.equal(await page.evaluate(() => window.__qa.translationRequests.length), before.requests);
+    assert.equal(await page.evaluate(() => window.__qa.showPopupAttempts.length), before.shows);
+  }
+  const manuallyTranslatedCapture = await page.evaluate(() => { window.__qa.holdTranslation = true; return window.__qa.nativePinnedCaptureStart(); });
+  const manualTranslationCount = await page.evaluate(() => window.__qa.translationRequests.length);
+  await page.locator('#translate-button').click();
+  await page.waitForFunction((count) => window.__qa.translationRequests.length > count, manualTranslationCount);
+  const manualTranslationBefore = await page.evaluate(() => ({ source: document.querySelector('#source-text').value,
+    cancellations: window.__qa.cancellationRequests.length, requestId: window.__qa.translationRequests.at(-1).requestId }));
+  await page.evaluate((epoch) => window.__qa.emit('source-text', { text: 'QA late OCR must not cancel manual translation', mode: 'translate', presentationEpoch: epoch, updateVisiblePopup: true }), manuallyTranslatedCapture.epoch);
+  assert.equal(await page.locator('#source-text').inputValue(), manualTranslationBefore.source);
+  assert.equal(await page.evaluate(() => window.__qa.translationRequests.length), manualTranslationCount + 1);
+  assert.equal(await page.evaluate(() => window.__qa.cancellationRequests.length), manualTranslationBefore.cancellations);
+  assert.equal(await page.locator('#translate-button').getAttribute('aria-label'), '停止翻译');
+  await page.evaluate(() => { window.__qa.holdTranslation = false; window.__qa.releaseTranslation(); });
+  await page.getByText('Isolated test translation fixture', { exact: true }).waitFor();
+  assert.equal(await pin.getAttribute('aria-pressed'), 'true');
+  // In-flight partial translations retain the existing cancellation policy;
+  // a capture start must not leave a partial result looking completed.
+  await page.locator('#source-text').fill('QA pending translation before pinned OCR');
+  const pendingPinnedCount = await page.evaluate(() => { window.__qa.holdTranslation = true; return window.__qa.translationRequests.length; });
+  await page.locator('#translate-button').click();
+  await page.waitForFunction((count) => window.__qa.translationRequests.length > count, pendingPinnedCount);
+  await page.evaluate(() => {
+    const provider = window.__qa.settings.providers.find((item) => item.enabled);
+    window.__qa.emit('translation-progress', { requestId: window.__qa.translationRequests.at(-1).requestId,
+      presentationEpoch: window.__qa.presentation.epoch, sequence: 1, done: false,
+      result: { providerId: provider.id, providerName: provider.name, text: 'QA partial result before capture', elapsedMs: 1 } });
+  });
+  await page.getByText('QA partial result before capture', { exact: true }).waitFor();
+  await page.evaluate(() => { window.__qa.nativePinnedCaptureStart(); window.__qa.holdTranslation = false; });
+  await page.waitForFunction(() => document.querySelectorAll('.result-card').length === 0);
+  assert.equal(await page.locator('#source-text').inputValue(), 'QA pending translation before pinned OCR');
+  assert.equal(await pin.getAttribute('aria-pressed'), 'true');
+  assert.equal(await page.evaluate(() => window.__qa.popupReveals), pinnedCaptureBaseline.reveals);
+  assert.equal(await page.evaluate(() => window.__qa.nativeHideTransitions), pinnedCaptureBaseline.hides);
+  const closedPinned = await page.evaluate(() => { const hidden = window.__qa.nativeHide(); return { ...hidden,
+    source: document.querySelector('#source-text').value, shows: window.__qa.showPopupAttempts.length }; });
+  await page.evaluate((epoch) => window.__qa.emit('source-text', { text: 'QA marked OCR cannot reopen closed popup', mode: 'translate', presentationEpoch: epoch, updateVisiblePopup: true }), closedPinned.epoch);
+  assert.equal(await page.locator('#source-text').inputValue(), closedPinned.source);
+  assert.equal(await page.evaluate(() => window.__qa.showPopupAttempts.length), closedPinned.shows);
+  assert.equal(await page.evaluate(() => window.__qa.nativeVisible), false);
   await page.evaluate(() => window.__qa.nativeShow());
-  await page.locator('#pin-button').click();
-  await page.locator('#source-text').fill('QA pinned timer test');
+  await pin.click();
+  await page.waitForFunction(() => document.querySelector('#pin-button').getAttribute('aria-pressed') === 'false');
+  // Real progress events update one stable card before the translate IPC ends.
+  // Partial content remains plain text; copy/read use the latest snapshot and
+  // stay visible without hover. Stale requests/epochs/sequences cannot repaint.
+  const streamStart = await page.evaluate(() => { window.__qa.holdTranslation = true; return window.__qa.translationRequests.length; });
+  await page.locator('#source-text').fill('QA incremental translation');
   await page.locator('#translate-button').click();
+  await page.waitForFunction((count) => window.__qa.translationRequests.length > count, streamStart);
+  const streamEvent = await page.evaluate(() => {
+    const provider = window.__qa.settings.providers.find((item) => item.enabled);
+    return { requestId: window.__qa.translationRequests.at(-1).requestId, presentationEpoch: window.__qa.presentation.epoch,
+      sequence: 1, done: false, result: { providerId: provider.id, providerName: provider.name, text: '<b>First</b>', elapsedMs: 1 } };
+  });
+  await page.evaluate((event) => window.__qa.emit('translation-progress', event), streamEvent);
+  const streamingCard = page.locator('.result-card').filter({ has: page.locator('.result-text', { hasText: '<b>First</b>' }) });
+  await streamingCard.waitFor();
+  assert.equal(await streamingCard.locator('.result-text b').count(), 0);
+  assert.equal(await streamingCard.getAttribute('aria-busy'), 'true');
+  assert.equal(await page.locator('#translate-button').getAttribute('aria-label'), '停止翻译');
+  await streamingCard.evaluate((element) => { window.__qa.streamCard = element; });
+  const progressed = { ...streamEvent, sequence: 2, result: { ...streamEvent.result, text: '<b>First</b> second segment' } };
+  await page.evaluate((event) => window.__qa.emit('translation-progress', event), progressed);
+  assert.equal(await page.evaluate(() => window.__qa.streamCard.isConnected), true);
+  await page.mouse.move(790, 810);
+  assert.equal(await streamingCard.locator('.result-actions').evaluate((element) => getComputedStyle(element).opacity), '1');
+  assert.equal(await streamingCard.getByRole('button', { name: '复制译文', exact: true }).isVisible(), true);
+  assert.equal(await streamingCard.getByRole('button', { name: '朗读译文', exact: true }).isVisible(), true);
+  assert.equal(await streamingCard.locator('.result-actions').evaluate((element) => element.previousElementSibling.className), 'result-text');
+  await streamingCard.getByRole('button', { name: '复制译文', exact: true }).click();
+  await streamingCard.getByRole('button', { name: '朗读译文', exact: true }).click();
+  assert.equal(await page.evaluate(() => window.__qa.copies.at(-1)), progressed.result.text);
+  assert.equal(await page.evaluate(() => window.__qa.spoken.at(-1).text), progressed.result.text);
+  for (const ignored of [streamEvent, { ...progressed, sequence: 9, requestId: streamEvent.requestId - 1 },
+    { ...progressed, sequence: 9, presentationEpoch: streamEvent.presentationEpoch - 1 },
+    { ...progressed, sequence: 9, result: { ...progressed.result, providerId: 'unknown-service' } }]) {
+    await page.evaluate((event) => window.__qa.emit('translation-progress', event), ignored);
+    assert.equal(await streamingCard.locator('.result-text').textContent(), progressed.result.text);
+  }
+  const failedStream = { ...progressed, sequence: 3, done: true, result: { ...progressed.result, text: '', error: 'QA stream interrupted' } };
+  await page.evaluate((event) => window.__qa.emit('translation-progress', event), failedStream);
+  await page.locator('.result-error', { hasText: 'QA stream interrupted' }).waitFor();
+  assert.equal(await page.locator('.result-text', { hasText: progressed.result.text }).count(), 0);
+  await page.evaluate((event) => window.__qa.emit('translation-progress', event), { ...progressed, sequence: 4 });
+  assert.equal(await page.locator('.result-error', { hasText: 'QA stream interrupted' }).count(), 1);
+  await page.locator('#source-text').fill('QA cancel completed stream');
+  await page.evaluate((event) => window.__qa.emit('translation-progress', event), { ...progressed, sequence: 5 });
+  assert.equal(await page.locator('.result-card').count(), 0);
+  // A fast provider's completed result is shown while other work/IPC is pending.
+  const nextStreamCount = await page.evaluate(() => window.__qa.translationRequests.length);
+  await page.locator('#translate-button').click();
+  await page.waitForFunction((count) => window.__qa.translationRequests.length > count, nextStreamCount);
+  const completeProgress = await page.evaluate((event) => ({ ...event, requestId: window.__qa.translationRequests.at(-1).requestId,
+    presentationEpoch: window.__qa.presentation.epoch, sequence: 1, done: true,
+    result: { ...event.result, text: 'QA provider finished early' } }), streamEvent);
+  await page.evaluate((event) => window.__qa.emit('translation-progress', event), completeProgress);
+  await page.getByText('QA provider finished early', { exact: true }).waitFor();
+  await page.getByText('QA provider finished early', { exact: true }).evaluate((element) => { window.__qa.finishedStreamCard = element.closest('.result-card'); });
+  await page.locator('.result-card').filter({ hasText: 'QA provider finished early' }).getByRole('button', { name: '复制译文', exact: true }).focus();
+  assert.equal(await page.locator('#translate-button').getAttribute('aria-label'), '停止翻译');
+  await page.evaluate((event) => window.__qa.emit('translation-progress', event), { ...completeProgress, sequence: 2, done: false });
+  assert.equal(await page.getByText('QA provider finished early', { exact: true }).count(), 1);
+  await page.evaluate(() => { window.__qa.holdTranslation = false; window.__qa.releaseTranslation(); });
   await page.getByText('Isolated test translation fixture', { exact: true }).waitFor();
-  await page.clock.fastForward(10_000);
-  assert.equal(await page.evaluate(() => window.__qa.hideCalls), 1);
+  assert.equal(await page.evaluate(() => window.__qa.finishedStreamCard.isConnected), true);
+  assert.equal(await page.evaluate(() => document.activeElement?.getAttribute('aria-label')), '复制译文');
+  await page.getByRole('button', { name: '复制译文', exact: true }).click();
+  await page.getByRole('button', { name: '朗读译文', exact: true }).click();
+  assert.equal(await page.evaluate(() => window.__qa.copies.at(-1)), 'Isolated test translation fixture');
+  assert.equal(await page.evaluate(() => window.__qa.spoken.at(-1).text), 'Isolated test translation fixture');
+  const panelSurfaces = await page.evaluate(() => {
+    const source = getComputedStyle(document.querySelector('.source-column'));
+    const result = getComputedStyle(document.querySelector('.result-card'));
+    return { source: { radius: source.borderRadius, background: source.backgroundColor, width: source.borderTopWidth },
+      result: { radius: result.borderRadius, background: result.backgroundColor, width: result.borderTopWidth } };
+  });
+  assert.deepEqual(panelSurfaces.result, panelSurfaces.source);
+  await page.locator('.app-shell').screenshot({ path: 'test-results/streaming-result-actions.png' });
+  await page.setViewportSize({ width: 420, height: 820 });
+  await page.evaluate(() => { document.documentElement.dataset.theme = 'dark'; });
+  assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true);
+  for (const label of ['复制译文', '朗读译文']) assert.equal(await page.getByRole('button', { name: label, exact: true }).isVisible(), true);
+  await page.locator('.app-shell').screenshot({ path: 'test-results/streaming-result-actions-dark-narrow.png' });
+
+  // The wider default is illustrated with synthetic long prose, never an API
+  // account or user capture. Both themes retain visible result actions.
+  await page.setViewportSize({ width: 680, height: 820 });
+  await page.evaluate(() => {
+    document.documentElement.dataset.theme = 'light';
+    window.__qa.translationResultText = '选中文字后按下翻译快捷键，即可在当前应用上方查看译文。窗口默认提供更舒适的阅读宽度，也可以从左右边缘拖动调整。后续译文会按照用户选择的宽度重新排版，复制和朗读按钮始终位于正文下方。';
+  });
+  await page.locator('#source-text').fill('Select text and press the translation shortcut to read the result above the current application. The popup starts at a comfortable reading width, and either side can be dragged to resize it. Later results follow your chosen width while copy and pronunciation remain visible below the translation.');
+  await page.locator('#translate-button').click();
+  await page.getByText('选中文字后按下翻译快捷键，即可在当前应用上方查看译文。窗口默认提供更舒适的阅读宽度，也可以从左右边缘拖动调整。后续译文会按照用户选择的宽度重新排版，复制和朗读按钮始终位于正文下方。', { exact: true }).waitFor();
+  assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true);
+  await page.locator('.app-shell').screenshot({ path: 'test-results/popup-width-680-light.png' });
+  await page.evaluate(() => { document.documentElement.dataset.theme = 'dark'; });
+  for (const label of ['复制译文', '朗读译文']) assert.equal(await page.getByRole('button', { name: label, exact: true }).isVisible(), true);
+  await page.locator('.app-shell').screenshot({ path: 'test-results/popup-width-680-dark.png' });
+  await page.evaluate(() => { delete window.__qa.translationResultText; });
+
+  // Opening settings uses passive cache facts. Unread/blocked credentials must
+  // not appear missing, unlock automatically, or block an explicitly selected
+  // OCR service merely because its OS credential has not been read this run.
+  await page.setViewportSize({ width: 800, height: 900 });
+  await goView('settings');
+  const credentialBaseline = await page.evaluate(() => ({ reads: window.__qa.credentialReadCalls,
+    translations: window.__qa.translationRequests.length, translationTests: window.__qa.translationTestCalls,
+    ocrTests: window.__qa.ocrTestCalls, keyWrites: window.__qa.keyCalls + window.__qa.ocrKeyCalls,
+    providerName: window.__qa.settings.providers[0].name }));
+  const refreshCachedSettings = async () => {
+    await page.locator('#save-history').setChecked(!await page.locator('#save-history').isChecked());
+    await page.waitForFunction(() => window.__qa.settings.saveHistory === document.querySelector('#save-history').checked);
+  };
+  const translationCredentialRow = page.locator('#provider-list .provider-row').filter({ has: page.locator('.provider-title', { hasText: credentialBaseline.providerName }) });
+  await page.evaluate(() => window.__qa.setCredentialState(window.__qa.settings.providers[0], 'unloaded'));
+  await refreshCachedSettings();
+  await translationCredentialRow.getByText('· 凭据未读取', { exact: true }).waitFor();
+  assert.equal(await page.evaluate(() => window.__qa.settings.providers[0].hasKey), false);
+  await translationCredentialRow.getByRole('button', { name: '编辑', exact: true }).click();
+  assert.match(await page.locator('#provider-key').getAttribute('placeholder'), /尚未读取.*留空保留/);
+  assert.match(await page.locator('#provider-key-help').textContent(), /打开设置不会读取.*不会删除已有凭据/);
+  assert.equal(await page.locator('#provider-key').inputValue(), '');
+  await page.locator('#provider-url').fill('https://changed-credential-origin.invalid/v1');
+  assert.match(await page.locator('#provider-key-help').textContent(), /原密钥不会复用/);
+  assert.doesNotMatch(await page.locator('#provider-key').getAttribute('placeholder'), /尚未读取|已保存/);
+  await page.locator('#cancel-provider-dialog').click();
+  await page.evaluate(() => window.__qa.setCredentialState(window.__qa.settings.providers[0], 'blocked'));
+  await refreshCachedSettings();
+  await translationCredentialRow.getByText('· 凭据读取受阻', { exact: true }).waitFor();
+  await translationCredentialRow.getByRole('button', { name: '编辑', exact: true }).click();
+  assert.match(await page.locator('#provider-key').getAttribute('placeholder'), /读取受阻.*留空保留/);
+  assert.match(await page.locator('#provider-key-help').textContent(), /测试连接.*不会删除已有凭据/);
+  await page.locator('#cancel-provider-dialog').click();
+  assert.equal(await page.evaluate(() => window.__qa.credentialReadCalls), credentialBaseline.reads);
+  assert.equal(await page.evaluate(() => window.__qa.translationRequests.length), credentialBaseline.translations);
+  assert.equal(await page.evaluate(() => window.__qa.keyCalls + window.__qa.ocrKeyCalls), credentialBaseline.keyWrites);
+  const readsBeforeExplicitTest = await page.evaluate(() => window.__qa.settingsReads);
+  await translationCredentialRow.getByRole('button', { name: '测试连接', exact: true }).click();
+  await translationCredentialRow.getByText('· 凭据已就绪', { exact: true }).waitFor();
+  assert.equal(await page.evaluate(() => window.__qa.credentialReadCalls), credentialBaseline.reads + 1);
+  assert.equal(await page.evaluate(() => window.__qa.translationTestCalls), credentialBaseline.translationTests + 1);
+  assert.equal(await page.evaluate(() => window.__qa.settingsReads), readsBeforeExplicitTest + 1);
+  assert.equal(await page.evaluate(() => window.__qa.translationRequests.length), credentialBaseline.translations);
+
+  await page.locator('#add-ocr-provider').click();
+  await page.locator('#ocr-provider-name').fill('QA unread native OCR');
+  await page.locator('#save-ocr-provider').click();
+  await page.locator('#ocr-provider-dialog').waitFor({ state: 'hidden' });
+  const unreadOcrId = await page.evaluate(() => {
+    const provider = window.__qa.settings.ocrProviders.find(item => item.name === 'QA unread native OCR');
+    window.__qa.setCredentialState(provider, 'unloaded'); return provider.id;
+  });
+  await refreshCachedSettings();
+  const unreadOcrRow = page.locator('#ocr-provider-list .provider-row').filter({ hasText: 'QA unread native OCR' });
+  await unreadOcrRow.getByText('· 凭据未读取', { exact: true }).waitFor();
+  await page.locator('#active-ocr-provider').selectOption(unreadOcrId);
+  await page.waitForFunction((id) => window.__qa.settings.activeOcrProviderId === id, unreadOcrId);
+  await unreadOcrRow.getByRole('button', { name: '编辑 OCR QA unread native OCR', exact: true }).click();
+  assert.match(await page.locator('#ocr-protocol-notice').textContent(), /尚未|不会读取系统凭据/);
+  assert.match(await page.locator('#ocr-protocol-notice').textContent(), /不会删除已有凭据/);
+  assert.equal(await page.locator('#ocr-baidu-api-key').inputValue(), '');
+  assert.equal(await page.locator('#ocr-baidu-secret-key').inputValue(), '');
+  await page.locator('#cancel-ocr-provider-dialog').click();
+  assert.equal(await page.evaluate(() => window.__qa.credentialReadCalls), credentialBaseline.reads + 1);
+  assert.equal(await page.evaluate(() => window.__qa.translationRequests.length), credentialBaseline.translations);
+  await page.locator('#active-ocr-provider').selectOption('');
+  await page.waitForFunction(() => window.__qa.settings.activeOcrProviderId === null);
+  await page.evaluate((id) => window.__qa.setCredentialState(window.__qa.settings.ocrProviders.find(item => item.id === id), 'missing'), unreadOcrId);
+  await refreshCachedSettings();
+  await unreadOcrRow.getByText('· 未配置凭据', { exact: true }).waitFor();
+  await page.locator('#active-ocr-provider').selectOption(unreadOcrId);
+  await page.getByText('此 OCR 服务尚未配置完整凭据，请先编辑并保存密钥。', { exact: true }).waitFor();
+  assert.equal(await page.evaluate(() => window.__qa.settings.activeOcrProviderId), null);
+  await page.evaluate((id) => window.__qa.setCredentialState(window.__qa.settings.ocrProviders.find(item => item.id === id), 'unloaded'), unreadOcrId);
+  await refreshCachedSettings();
+  await unreadOcrRow.getByRole('button', { name: '测试连接', exact: true }).click();
+  await unreadOcrRow.getByText('· 凭据已就绪', { exact: true }).waitFor();
+  assert.equal(await page.evaluate(() => window.__qa.credentialReadCalls), credentialBaseline.reads + 2);
+  assert.equal(await page.evaluate(() => window.__qa.ocrTestCalls), credentialBaseline.ocrTests + 1);
+  assert.equal(await page.evaluate(() => window.__qa.translationRequests.length), credentialBaseline.translations);
   assert.deepEqual(errors, []);
-  console.log('PASS: backend cancellation tickets on edit/clear/stop/Escape/close/native hide; native presentation epochs cover unallocated tickets, omitted/stale hide events, reopen overtaking pending begin and stale delayed popup fitting; backend-only cancellation clears old result state; late-ticket and replacement ordering; pending-save close/reentry guard; failure unlock; blank shortcuts; duplicate rejection; default no timer; optional idle reset; pinned timer suppression; OCR dual-key bundles/protocol isolation/no plaintext settings; documented vendor presets; origin-bound saved-key indications; minimal popup/menu/automatic source height; OCR configuration/privacy; empty-selection focus preservation; Enter/ShiftEnter/IME/repeat; passive permissions; real capture and translation error preservation.');
+  console.log('PASS: repeated pinned capture epochs keep completed source/result DOM visible through cancel/no-text/OCR/permission errors; successful OCR replaces source and auto-translates without a modeled hide/reveal; pin remains active; stale source/presentation/progress cannot overwrite; in-flight partial results are cancelled and removed. Fake IPC only, no real capture or native visibility pass.');
+  console.log('PASS: marked visible-popup OCR updates cannot navigate away from settings/history, overwrite newer edits or Alt+A typing, or cancel a newer manual translation; accepted marked capture still auto-translates; ordinary unmarked source workflows remain covered.');
+  console.log('PASS: show_popup IPC explicitly requests reuseVisiblePopup=false for ordinary blank/input/selection, including an already visible pinned popup; only marked pinned OCR sends true. Payload dispatch only; no native physical raise/z-order acceptance is claimed.');
+  console.log('PASS: popup left/right pointer-captured width requests; native Windows resize dispatch fixture; pin/input/toolbar drag isolation; bounded actual viewport width participates in same-height680→850 layout fits; later height fits retain850; coalesced pending resize invalidated by hide/epoch; management edges hidden/inert;680px light/dark long-prose screenshots inspected separately.');
+  console.log('PASS: persistent screenshot permission guidance prepared before presentation; click-only correct pane without authorization; retained sanitized link failure and manual path; first-use pending-open help navigation/focus; 800 px light and 420 px narrow/dark screenshots; dismiss/input/quiet Alt+D/Alt+A/stale-epoch recovery; deferred-modal permission payload and granted-status clearing; backend cancellation tickets on edit/clear/stop/Escape/close/native hide; native presentation epochs cover unallocated tickets, omitted/stale hide events, reopen overtaking pending begin and stale delayed popup fitting; backend-only cancellation clears old result state; late-ticket and replacement ordering; pending-save close/reentry guard; failure unlock; blank shortcuts; duplicate rejection; no countdown; theme/favorites and history bounds; OCR dual-key bundles/protocol isolation/no plaintext settings; documented vendor presets; origin-bound saved-key indications; minimal popup/menu/automatic source height; OCR configuration/privacy; empty-selection immediate typing; persistent source copy/speech; pin edge/icon/keyboard hit areas and drag isolation; captured source editing after completion and pending cancellation/retranslation; narrow-wrap source presentation; inconsistent permission feedback; automatic/fixed targets; Enter/ShiftEnter/IME/repeat; passive permissions; real capture and translation error preservation.');
 } finally {
   await browser.close();
 }

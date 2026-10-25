@@ -1,7 +1,15 @@
 use crate::model::{validate_url, Provider, TranslationResult, DEFAULT_PROMPT};
 use futures_util::StreamExt;
 use serde_json::{json, Value};
-use std::time::Instant;
+use std::time::{Duration, Instant};
+
+#[path = "translation_stream.rs"]
+mod streaming;
+use streaming::{OpenAiStream, MAX_RESPONSE};
+
+#[cfg(test)]
+#[path = "translation_stream_tests.rs"]
+mod stream_tests;
 
 pub fn endpoint(p: &Provider) -> Result<String, String> {
     validate_url(&p.base_url)?;
@@ -103,13 +111,80 @@ pub async fn translate_one(
     source: &str,
     target: &str,
 ) -> TranslationResult {
+    translate_one_inner(client, p, key, text, source, target, false, |_| {}).await
+}
+
+/// Incremental pure answer snapshots for compatible SSE providers. The caller
+/// owns request/epoch validation when publishing them. Dropping this future
+/// cancels HTTP reading; no detached task can publish later progress.
+pub async fn translate_one_streaming(
+    client: &reqwest::Client,
+    p: &Provider,
+    key: Result<String, String>,
+    text: &str,
+    source: &str,
+    target: &str,
+    on_progress: impl Fn(&str) + Send + Sync,
+) -> TranslationResult {
+    translate_one_inner(client, p, key, text, source, target, true, on_progress).await
+}
+
+fn minimax_provider(p: &Provider) -> bool {
+    p.kind == "openai"
+        && reqwest::Url::parse(&p.base_url)
+            .ok()
+            .and_then(|url| url.host_str().map(str::to_ascii_lowercase))
+            .is_some_and(|host| matches!(host.as_str(), "api.minimax.cn" | "api.minimax.io"))
+}
+
+fn streaming_request_body(
+    p: &Provider,
+    text: &str,
+    source: &str,
+    target: &str,
+    key: &str,
+) -> Value {
+    let mut body = request_body(p, text, source, target, key);
+    if p.kind == "openai" {
+        body["stream"] = json!(true);
+        // Official MiniMax-only extension; unknown gateways must not receive
+        // provider-private parameters or be retried with a different body.
+        if minimax_provider(p) {
+            body["reasoning_split"] = json!(true);
+        }
+    }
+    body
+}
+
+async fn translate_one_inner(
+    client: &reqwest::Client,
+    p: &Provider,
+    key: Result<String, String>,
+    text: &str,
+    source: &str,
+    target: &str,
+    want_stream: bool,
+    on_progress: impl Fn(&str) + Send + Sync,
+) -> TranslationResult {
     let start = Instant::now();
     let result = async {
+        if p.kind == "system" {
+            // Never consult a credential, build an HTTP request, download a
+            // model or activate a UI from this path. Preparation is explicit.
+            return crate::platform::system_translate(text, source, target).await;
+        }
         let key = key?;
         let url = endpoint(p)?;
-        let mut request = client
-            .post(url)
-            .json(&request_body(p, text, source, target, &key));
+        let body = if want_stream {
+            streaming_request_body(p, text, source, target, &key)
+        } else {
+            request_body(p, text, source, target, &key)
+        };
+        let mut request = client.post(url).json(&body);
+        let stream_answer = want_stream && p.kind == "openai";
+        if stream_answer {
+            request = request.header(reqwest::header::ACCEPT, "text/event-stream, application/json");
+        }
         if !key.is_empty() {
             request = if p.kind == "deepl" {
                 request.header("Authorization", format!("DeepL-Auth-Key {key}"))
@@ -140,18 +215,66 @@ pub async fn translate_one(
                 n => format!("服务返回 HTTP {n}，请检查端点与模型配置"),
             });
         }
-        const MAX_RESPONSE: usize = 2 * 1024 * 1024;
         let mut stream = response.bytes_stream();
         let mut bytes = Vec::new();
+        let mut sse: Option<OpenAiStream> = None;
+        let mut json_response = !stream_answer;
+        let mut received = 0_usize;
+        let last_progress = std::cell::Cell::new(None::<Instant>);
+        let publish = move |answer: &str| {
+            let now = Instant::now();
+            if last_progress.get().is_none_or(|last| now.duration_since(last) >= Duration::from_millis(35)) {
+                on_progress(answer);
+                last_progress.set(Some(now));
+            }
+        };
         while let Some(chunk) = stream.next().await {
-            let chunk = chunk.map_err(|_| "接收 API 响应失败")?;
-            if bytes.len() + chunk.len() > MAX_RESPONSE {
+            let chunk = chunk.map_err(|e| if e.is_timeout() {
+                "服务响应超时（45 秒），请检查网络或缩短输入"
+            } else { "接收 API 响应失败，译文可能尚未完成" })?;
+            received = received.saturating_add(chunk.len());
+            if received > MAX_RESPONSE {
                 return Err("API 响应超过 2 MiB 上限".into());
             }
-            bytes.extend_from_slice(&chunk);
+            if let Some(parser) = &mut sse {
+                parser.push(&chunk, &publish)?;
+                if parser.done() { break; }
+            } else {
+                bytes.extend_from_slice(&chunk);
+                if !json_response {
+                    // Some compatible servers ignore stream:true and naturally
+                    // return JSON. Sniff this same response, never resend it.
+                    // Buffer the UTF-8 BOM if it is split across TCP chunks.
+                    let prefix = if bytes.starts_with(&[0xef, 0xbb, 0xbf]) {
+                        &bytes[3..]
+                    } else if [0xef, 0xbb, 0xbf].starts_with(&bytes) {
+                        continue;
+                    } else { &bytes[..] };
+                    let first = prefix.iter().copied().find(|byte| !byte.is_ascii_whitespace());
+                    if let Some(first) = first {
+                        if matches!(first, b'{' | b'[') {
+                            json_response = true;
+                        } else {
+                            let mut parser = OpenAiStream::new(minimax_provider(p));
+                            parser.push(&bytes, &publish)?;
+                            bytes.clear();
+                            let done = parser.done();
+                            sse = Some(parser);
+                            if done { break; }
+                        }
+                    }
+                }
+            }
         }
+        if let Some(parser) = sse {
+            return parser.finish(&publish);
+        }
+        let bytes = bytes.strip_prefix(&[0xef, 0xbb, 0xbf]).unwrap_or(&bytes);
         let value = serde_json::from_slice(&bytes).map_err(|_| "服务没有返回有效 JSON")?;
-        parse_response(&p.kind, &value)
+        let answer = parse_response(&p.kind, &value)?;
+        if stream_answer && minimax_provider(p) {
+            streaming::split_minimax_answer(&answer)
+        } else { Ok(answer) }
     }
     .await;
     TranslationResult {
@@ -166,8 +289,30 @@ pub async fn translate_one(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[tokio::test]
+    async fn system_route_does_not_require_a_key_or_use_http() {
+        let mut p = crate::model::system_translation_provider(true);
+        // Invalid language stops before a native model is used. Even a bogus
+        // endpoint and failed credential cannot turn this into an HTTP request.
+        p.base_url = "http://127.0.0.1:1/never".into();
+        let result = translate_one(
+            &reqwest::Client::new(),
+            &p,
+            Err("credential must not be read".into()),
+            "fixture",
+            "invalid language",
+            "zh-Hans",
+        )
+        .await;
+        assert_eq!(result.error.as_deref(), Some("系统翻译的语言参数无效"));
+        assert!(result.text.is_empty());
+    }
     fn provider() -> Provider {
-        crate::model::Settings::default().providers.remove(0)
+        crate::model::Settings::default()
+            .providers
+            .into_iter()
+            .find(|p| p.kind == "openai")
+            .unwrap()
     }
     #[test]
     fn endpoint_does_not_duplicate_full_paths() {
@@ -213,6 +358,44 @@ mod tests {
         assert!(
             parse_response("openai", &json!({"choices":[{"message":{"content":" "}}]})).is_err()
         );
+    }
+
+    #[test]
+    fn openai_reasoning_never_becomes_a_translation_or_hides_truncation() {
+        // Reasoning-capable compatible models (including MiniMax-M3.1-Flash)
+        // return separate reasoning_content. Only the final content is a result.
+        let reasoning = "PRIVATE-REASONING-FIXTURE: draft translation";
+        assert_eq!(
+            parse_response(
+                "openai",
+                &json!({"choices":[{"finish_reason":"stop","message":{
+                    "reasoning_content":reasoning,"content":"第一段。\n\n第二段。"
+                }}]})
+            )
+            .unwrap(),
+            "第一段。\n\n第二段。"
+        );
+        for final_content in [Value::Null, json!(""), json!(" \n ")] {
+            let error = parse_response(
+                "openai",
+                &json!({"choices":[{"finish_reason":"stop","message":{
+                    "reasoning_content":reasoning,"content":final_content
+                }}]}),
+            )
+            .unwrap_err();
+            assert!(!error.contains(reasoning));
+        }
+        for reason in ["length", "content_filter"] {
+            let error = parse_response(
+                "openai",
+                &json!({"choices":[{"finish_reason":reason,"message":{
+                    "reasoning_content":reasoning,"content":"partial translation"
+                }}]}),
+            )
+            .unwrap_err();
+            assert!(!error.contains(reasoning));
+            assert!(!error.contains("partial translation"));
+        }
     }
     #[test]
     fn deepl_auto_source_is_omitted() {
@@ -411,7 +594,7 @@ mod tests {
                     .to_ascii_lowercase()
                     .contains("authorization: bearer test-only"));
                 let body = if i == 0 {
-                    "{\"choices\":[{\"message\":{\"content\":\"你好\"}}]}"
+                    "{\"choices\":[{\"finish_reason\":\"stop\",\"message\":{\"reasoning_content\":\"PRIVATE-REASONING-FIXTURE\",\"content\":\"你好\"}}]}"
                 } else {
                     "secret test-only"
                 };

@@ -1,0 +1,332 @@
+//! Resolve the user's direction once for every provider and the history entry.
+//! Detection is local and never reads a clipboard, requests permission or uses
+//! a network service. The native detector is optional; Unicode handles the
+//! common Chinese/English cases when it is unavailable.
+
+fn valid_language(value: &str) -> bool {
+    let mut parts = value.split('-');
+    let Some(first) = parts.next() else {
+        return false;
+    };
+    (2..=8).contains(&first.len())
+        && first.bytes().all(|c| c.is_ascii_alphabetic())
+        && parts.clone().count() <= 3
+        && parts.all(|part| {
+            (1..=8).contains(&part.len()) && part.bytes().all(|c| c.is_ascii_alphanumeric())
+        })
+}
+
+fn chinese(value: &str) -> bool {
+    value
+        .split('-')
+        .next()
+        .is_some_and(|code| code.eq_ignore_ascii_case("zh"))
+}
+
+fn is_han(c: char) -> bool {
+    matches!(c as u32, 0x3400..=0x4dbf | 0x4e00..=0x9fff | 0xf900..=0xfaff | 0x20000..=0x3134f)
+}
+
+/// Strong script evidence is useful for short Chinese phrases for which an OS
+/// recognizer can report Traditional Chinese even when every character is shared
+/// by both scripts (for example, 你好). This is a conservative hint, not a full
+/// script converter or a claim to distinguish every ambiguous Chinese sentence.
+fn chinese_script_hint(text: &str) -> &'static str {
+    const TRADITIONAL: &str = "體國學術語譯軟電腦網頁開關設置權錄螢幕選擇輸歡應簡實現測試錯誤請這個為與來說對會時後過還讓無發現經驗點擊備註書寫讀畫圖區裡處動視務預設總廣東臺灣樂萬億專業聲";
+    const SIMPLIFIED: &str = "体国学术语译软电脑网页开关设置权录荧选择输欢应简实现测试错误请这个为与来说对会时后过还让无发现经验点击备书写读画图区里处动视务预总广东台万亿专业声";
+    let traditional = text.chars().filter(|c| TRADITIONAL.contains(*c)).count();
+    let simplified = text.chars().filter(|c| SIMPLIFIED.contains(*c)).count();
+    if traditional > simplified {
+        "zh-Hant"
+    } else {
+        "zh-Hans"
+    }
+}
+
+/// Useful for Windows and for short text that a general-purpose recognizer
+/// cannot identify. Kana/Hangul take precedence over Han, so Japanese/Korean
+/// text is not silently labelled Chinese. Non-Latin scripts remain unknown.
+pub fn fallback_language(text: &str) -> Option<String> {
+    let mut han = 0usize;
+    let mut latin = 0usize;
+    let mut other_letters = false;
+    for c in text.chars() {
+        if matches!(c as u32, 0x3040..=0x30ff | 0x31f0..=0x31ff) {
+            return Some("ja".into());
+        }
+        if matches!(c as u32, 0x1100..=0x11ff | 0x3130..=0x318f | 0xac00..=0xd7af) {
+            return Some("ko".into());
+        }
+        if is_han(c) {
+            han += 1;
+        } else if c.is_ascii_alphabetic() {
+            latin += 1;
+        } else if c.is_alphabetic() {
+            other_letters = true;
+        }
+    }
+    if other_letters {
+        return None;
+    }
+    if han > 0 && han.saturating_mul(2) >= latin {
+        Some(chinese_script_hint(text).into())
+    } else if latin > 0 {
+        Some("en".into())
+    } else {
+        None
+    }
+}
+
+/// A language recognizer has very little evidence in short technical labels:
+/// e.g. `quiet-pin` is reported as Catalan and `task:` as Danish by macOS.
+/// Treat ASCII identifiers/labels as English in the default bilingual workflow.
+/// Ordinary words and sentences still use the native language result, and a
+/// manually chosen source always wins. This only examines structure; it never
+/// changes the source text sent to a provider.
+fn ascii_technical_label(text: &str) -> bool {
+    let text = text.trim();
+    if text.len() > 240
+        || text.lines().filter(|line| !line.trim().is_empty()).count() > 1
+        || !text.chars().any(|c| c.is_ascii_alphabetic())
+        || text.chars().any(|c| {
+            c.is_alphabetic() && !c.is_ascii_alphabetic()
+                || matches!(c as u32, 0x0300..=0x036f | 0x1ab0..=0x1aff | 0x1dc0..=0x1dff | 0x20d0..=0x20ff | 0xfe20..=0xfe2f)
+        })
+        || text
+            .split(|c: char| !c.is_ascii_alphanumeric())
+            .filter(|part| !part.is_empty())
+            .count()
+            > 10
+    {
+        return false;
+    }
+    let chars: Vec<_> = text.chars().collect();
+    if chars
+        .windows(2)
+        .any(|pair| pair[0].is_ascii_lowercase() && pair[1].is_ascii_uppercase())
+        || chars.windows(3).any(|part| {
+            part[0].is_ascii_uppercase()
+                && part[1].is_ascii_uppercase()
+                && part[2].is_ascii_lowercase()
+        })
+    {
+        return true;
+    }
+    // Internal identifier separators also cover repeated underscores, paths,
+    // dotted names, and symbols surrounding those identifiers.
+    let mut before_separator = false;
+    let mut separator = false;
+    for c in chars {
+        if c.is_ascii_alphanumeric() {
+            if before_separator && separator {
+                return true;
+            }
+            before_separator = true;
+            separator = false;
+        } else if "_-./\\:+*=&%@#$^~|[]{}<>\u{ff1a}\u{ff5c}".contains(c) {
+            separator |= before_separator;
+        } else {
+            before_separator = false;
+            separator = false;
+        }
+    }
+    let after_list_number = text.trim_start_matches(|c: char| c.is_ascii_digit());
+    let ordered_list = after_list_number.len() != text.len()
+        && (after_list_number.starts_with(". ") || after_list_number.starts_with(") "));
+    ordered_list
+        || text.ends_with([':', '\u{ff1a}'])
+        || text.starts_with(['#', '$', '@', '_', '~', '[', '{', '<', '`'])
+        || text.starts_with("- ")
+        || text.starts_with("* ")
+        || text.starts_with("+ ")
+        || text.starts_with("\u{2022} ")
+        || text.starts_with("\u{25aa} ")
+}
+
+pub fn resolve_translation_languages(
+    text: &str,
+    source: &str,
+    target: &str,
+    detected: Option<&str>,
+) -> Result<(String, String), String> {
+    if source != "auto" && !valid_language(source) || target != "auto" && !valid_language(target) {
+        return Err("语言设置无效，请重新选择源语言和目标语言".into());
+    }
+    let source = if source != "auto" {
+        source.to_owned()
+    } else {
+        let has_letters = text.chars().any(char::is_alphabetic);
+        let native = detected.filter(|value| {
+            has_letters && valid_language(value) && !matches!(*value, "und" | "unknown" | "auto")
+        });
+        let fallback = fallback_language(text);
+        match (native, fallback) {
+            (_, Some(language)) if language == "en" && ascii_technical_label(text) => language,
+            // Stabilize shared short Han text. For longer text, retain the
+            // native Chinese script; both still choose English as the target.
+            (Some(language), Some(fallback))
+                if chinese(language)
+                    && chinese(&fallback)
+                    && text.chars().filter(|c| c.is_alphabetic()).count() <= 8 =>
+            {
+                fallback
+            }
+            (Some(language), _) => language.into(),
+            (None, Some(language)) => language,
+            (None, None) => "auto".into(),
+        }
+    };
+    let target = if target == "auto" {
+        if chinese(&source) {
+            "en"
+        } else {
+            "zh-Hans"
+        }
+    } else {
+        target
+    };
+    Ok((source, target.into()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn auto_direction_covers_english_chinese_and_short_shared_han() {
+        for (text, detected, expected) in [
+            ("Hello world", Some("en"), ("en", "zh-Hans")),
+            ("你好", Some("zh-Hant"), ("zh-Hans", "en")),
+            ("你好", None, ("zh-Hans", "en")),
+            ("歡迎使用翻譯", None, ("zh-Hant", "en")),
+            ("hello", None, ("en", "zh-Hans")),
+            ("日本語です", Some("ja"), ("ja", "zh-Hans")),
+            ("한국어", None, ("ko", "zh-Hans")),
+            ("12345?!", None, ("auto", "zh-Hans")),
+        ] {
+            let (source, target) =
+                resolve_translation_languages(text, "auto", "auto", detected).unwrap();
+            assert_eq!((&*source, &*target), expected, "{text}");
+        }
+    }
+
+    #[test]
+    fn explicit_choices_are_preserved_and_bad_detector_output_is_ignored() {
+        for (source, target, expected) in [
+            ("en", "auto", ("en", "zh-Hans")),
+            ("zh-Hant", "auto", ("zh-Hant", "en")),
+            ("fr", "de", ("fr", "de")),
+            ("auto", "zh-Hant", ("zh-Hans", "zh-Hant")),
+            ("auto", "en", ("zh-Hans", "en")),
+        ] {
+            let pair = resolve_translation_languages("你好", source, target, Some(";bad")).unwrap();
+            assert_eq!((&*pair.0, &*pair.1), expected);
+        }
+        assert_eq!(
+            resolve_translation_languages("你好", "auto", "auto", Some("und")).unwrap(),
+            ("zh-Hans".into(), "en".into())
+        );
+        for (source, target) in [("", "en"), ("auto", "en\n"), ("en;open", "zh-Hans")] {
+            assert!(resolve_translation_languages("hello", source, target, None).is_err());
+        }
+    }
+
+    #[test]
+    fn fallback_is_conservative_about_other_scripts_and_mixed_content() {
+        assert_eq!(fallback_language("こんにちは 世界"), Some("ja".into()));
+        assert_eq!(fallback_language("한국 漢字"), Some("ko".into()));
+        assert_eq!(fallback_language("Bonjour à tous"), None);
+        assert_eq!(fallback_language("Привет"), None);
+        assert_eq!(fallback_language("这是 API 测试"), Some("zh-Hans".into()));
+        assert_eq!(
+            fallback_language("A long English sentence 你好"),
+            Some("en".into())
+        );
+        assert_eq!(fallback_language("\n 123 🪞"), None);
+    }
+
+    #[test]
+    fn technical_identifiers_and_markdown_labels_override_short_native_misclassification() {
+        for text in [
+            "- quiet-pin:",
+            "quiet_pin",
+            "quiet.pin",
+            "quiet/pin",
+            "#quiet-pin",
+            "`quiet_pin`",
+            "[quiet_pin]:",
+            "$quiet_pin",
+            "quiet__pin",
+            "quietPin",
+            "- task:",
+            "* task:",
+            "+ task:",
+            "task:",
+            "[ ] quiet_pin",
+            "`arbitrary_identifier`",
+            "someNovelIdentifier",
+            "module/path_name.rs",
+            "HTTPServer",
+            "1. task",
+            "2) task",
+            "quiet+pin",
+            "quiet=pin",
+            "module::name",
+            "\u{2022} task",
+            "task\u{ff1a}",
+            "quiet\u{ff5c}pin",
+        ] {
+            for detected in [Some("ca"), Some("tr"), Some("da"), Some("und"), None] {
+                assert_eq!(
+                    resolve_translation_languages(text, "auto", "auto", detected).unwrap(),
+                    ("en".into(), "zh-Hans".into()),
+                    "{text} / {detected:?}"
+                );
+            }
+            assert_eq!(
+                resolve_translation_languages(text, "fr", "de", Some("ca")).unwrap(),
+                ("fr".into(), "de".into())
+            );
+        }
+    }
+
+    #[test]
+    fn identifier_hint_does_not_override_natural_languages_or_invent_symbol_languages() {
+        for (text, detected, expected) in [
+            ("bonjour", "fr", "fr"),
+            ("Hola", "es", "es"),
+            ("bonjour tout le monde", "fr", "fr"),
+            ("café_label", "fr", "fr"),
+            ("cafe\u{301}_label", "fr", "fr"),
+            ("- 任务:", "zh-Hans", "zh-Hans"),
+            ("مرحبا_label", "ar", "ar"),
+            ("こんにちは_label", "ja", "ja"),
+            ("한국어_label", "ko", "ko"),
+            ("Привет_label", "ru", "ru"),
+            (
+                "French paragraph here\nwith_identifier on another line",
+                "fr",
+                "fr",
+            ),
+        ] {
+            assert!(!ascii_technical_label(text), "{text}");
+            assert_eq!(
+                resolve_translation_languages(text, "auto", "auto", Some(detected))
+                    .unwrap()
+                    .0,
+                expected
+            );
+        }
+        for text in ["---:", "___", "$$$", "#[]:", "123 :", " 🪞 ", ""] {
+            for detected in [Some("en"), Some("unknown"), Some("und"), None] {
+                assert_eq!(
+                    resolve_translation_languages(text, "auto", "auto", detected)
+                        .unwrap()
+                        .0,
+                    "auto",
+                    "{text}"
+                );
+            }
+        }
+    }
+}

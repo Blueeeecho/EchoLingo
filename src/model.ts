@@ -10,8 +10,9 @@ export const SHORTCUT_LABELS = {
   selection: '划词翻译', capture: '截图翻译', ocr: '截图识别', silentOcr: '无感 OCR', input: '输入翻译',
 } as const;
 export const defaultSettings = (): Settings => ({
-  providers: [], sourceLanguage: 'auto', targetLanguage: 'zh-Hans',
-  shortcuts: { selection: 'Alt+D', capture: 'Alt+S', ocr: 'Alt+Shift+S', silentOcr: 'Alt+C', input: 'Alt+A' },
+  providers: [], sourceLanguage: 'auto', targetLanguage: 'auto', languageDirectionVersion: 1,
+  shortcutDefaultsVersion: 1,
+  shortcuts: { selection: 'Alt+D', capture: '', ocr: 'Alt+Shift+S', silentOcr: 'Alt+S', input: 'Alt+A' },
   saveHistory: true, theme: 'system', maxHistory: 200, autoHideSeconds: 0, ocrProviders: [], activeOcrProviderId: null,
 });
 export function filterHistory(entries: HistoryEntry[], query: string, favoritesOnly: boolean): HistoryEntry[] {
@@ -26,8 +27,15 @@ export function errorMessage(error: unknown): string {
   if (error instanceof Error) return error.message;
   return '操作失败，请稍后重试。';
 }
+export function userFacingError(error: unknown): string {
+  return errorMessage(error).replace(/^(?:SYSTEM_TRANSLATION_[A-Z_]+|NATIVE_[A-Z_]+|CAPTURE(?:_[A-Z_]+)?):\s*/, '');
+}
 export function validateProvider(provider: Provider): string | null {
   if (!provider.name.trim()) return '请输入服务名称。';
+  if (provider.kind === 'system') {
+    if (provider.baseUrl || provider.model || provider.prompt || provider.hasKey) return '系统翻译不使用 API 地址、模型、提示词或密钥。';
+    return null;
+  }
   let url: URL;
   try { url = new URL(provider.baseUrl); } catch { return '请输入完整的 API URL，例如 https://api.openai.com/v1。'; }
   const local = ['localhost', '127.0.0.1', '[::1]', '::1'].includes(url.hostname);

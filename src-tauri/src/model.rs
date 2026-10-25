@@ -21,6 +21,53 @@ fn default_prompt() -> String {
     DEFAULT_PROMPT.into()
 }
 
+pub fn system_translation_provider(enabled: bool) -> Provider {
+    Provider {
+        id: "system-translation".into(),
+        name: "Apple 系统翻译".into(),
+        kind: "system".into(),
+        base_url: String::new(),
+        model: String::new(),
+        enabled,
+        prompt: String::new(),
+        has_key: false,
+    }
+}
+
+fn default_providers() -> Vec<Provider> {
+    let api = Provider {
+        id: "default-openai".into(),
+        name: "OpenAI 兼容服务".into(),
+        kind: "openai".into(),
+        base_url: "https://api.openai.com/v1".into(),
+        model: "gpt-4o-mini".into(),
+        enabled: false,
+        prompt: default_prompt(),
+        has_key: false,
+    };
+    if cfg!(target_os = "macos") {
+        vec![system_translation_provider(true), api]
+    } else {
+        vec![api]
+    }
+}
+
+/// Existing installations retain all enabled API choices. Make the built-in
+/// option discoverable without re-enabling one the owner already disabled.
+pub fn add_system_translation_option(settings: &mut Settings) {
+    if cfg!(target_os = "macos")
+        && settings.providers.len() < 12
+        && !settings
+            .providers
+            .iter()
+            .any(|p| p.kind == "system" || p.id == "system-translation")
+    {
+        settings
+            .providers
+            .insert(0, system_translation_provider(false));
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Shortcuts {
@@ -45,9 +92,9 @@ impl Default for Shortcuts {
     fn default() -> Self {
         Self {
             selection: "Alt+D".into(),
-            capture: "Alt+S".into(),
+            capture: String::new(),
             ocr: "Alt+Shift+S".into(),
-            silent_ocr: "Alt+C".into(),
+            silent_ocr: "Alt+S".into(),
             input: "Alt+A".into(),
         }
     }
@@ -60,6 +107,12 @@ pub struct Settings {
     pub active_ocr_provider_id: Option<String>,
     pub source_language: String,
     pub target_language: String,
+    // A missing field identifies the old fixed-Chinese default. The field-level
+    // default deliberately differs from the current Settings::default version.
+    #[serde(default)]
+    pub language_direction_version: u8,
+    #[serde(default)]
+    pub shortcut_defaults_version: u8,
     pub shortcuts: Shortcuts,
     pub save_history: bool,
     pub max_history: usize,
@@ -69,27 +122,53 @@ pub struct Settings {
 impl Default for Settings {
     fn default() -> Self {
         Self {
-            providers: vec![Provider {
-                id: "default-openai".into(),
-                name: "OpenAI 兼容服务".into(),
-                kind: "openai".into(),
-                base_url: "https://api.openai.com/v1".into(),
-                model: "gpt-4o-mini".into(),
-                enabled: true,
-                prompt: default_prompt(),
-                has_key: false,
-            }],
+            providers: default_providers(),
             ocr_providers: vec![],
             active_ocr_provider_id: None,
             source_language: "auto".into(),
-            target_language: "zh-Hans".into(),
+            target_language: "auto".into(),
+            language_direction_version: 1,
+            shortcut_defaults_version: 1,
             shortcuts: Shortcuts::default(),
             save_history: true,
-            max_history: 200,
+            max_history: 20,
             theme: "system".into(),
             auto_hide_seconds: 0,
         }
     }
+}
+
+/// Upgrade only the former untouched auto-source / Simplified-Chinese pair.
+/// Once migrated, an explicitly chosen fixed target survives future launches.
+pub fn migrate_language_direction(settings: &mut Settings) {
+    if settings.language_direction_version == 0 {
+        if settings.source_language == "auto" && settings.target_language == "zh-Hans" {
+            settings.target_language = "auto".into();
+        }
+        settings.language_direction_version = 1;
+    }
+}
+
+/// Alt+S uses the owner's named OCR action (which fills and translates). Only
+/// replace the exact old capture/silent pair; retain all customized shortcuts.
+pub fn migrate_shortcut_defaults(settings: &mut Settings) {
+    if settings.shortcut_defaults_version == 0 {
+        if settings.shortcuts.capture == "Alt+S" && settings.shortcuts.silent_ocr == "Alt+C" {
+            settings.shortcuts.capture.clear();
+            settings.shortcuts.silent_ocr = "Alt+S".into();
+        }
+        settings.shortcut_defaults_version = 1;
+    }
+}
+
+/// Normalize legacy on-disk preferences before validating them. New saves must
+/// still reject out-of-range history limits rather than silently clamping them.
+pub fn migrate_core_preferences(settings: &mut Settings) {
+    settings.max_history = match settings.max_history {
+        0 | 200 => 20,
+        value => value.min(100),
+    };
+    settings.auto_hide_seconds = 0;
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -139,6 +218,12 @@ pub fn validate_settings(s: &Settings) -> Result<(), String> {
         {
             return Err("服务名称、模型或提示词长度不合法".into());
         }
+        if p.kind == "system" {
+            if !p.base_url.is_empty() || !p.model.is_empty() || !p.prompt.is_empty() {
+                return Err("系统翻译不接受 API 地址、模型或提示词".into());
+            }
+            continue;
+        }
         if !["openai", "deepl", "libretranslate"].contains(&p.kind.as_str()) {
             return Err("不支持的服务类型".into());
         }
@@ -162,11 +247,11 @@ pub fn validate_settings(s: &Settings) -> Result<(), String> {
             return Err("当前选择的 OCR 服务不存在".into());
         }
     }
-    if s.auto_hide_seconds > 120 {
-        return Err("自动隐藏时间不能超过 120 秒".into());
+    if s.auto_hide_seconds != 0 {
+        return Err("翻译窗口不使用自动隐藏倒计时".into());
     }
-    if s.max_history > 2000 {
-        return Err("历史记录上限不能超过 2000 条".into());
+    if !(1..=100).contains(&s.max_history) {
+        return Err("历史记录上限需为 1–100 条".into());
     }
     if !["system", "light", "dark"].contains(&s.theme.as_str()) {
         return Err("主题无效".into());
@@ -208,6 +293,165 @@ mod tests {
     #[test]
     fn defaults_are_valid() {
         assert!(validate_settings(&Settings::default()).is_ok());
+        assert_eq!(Settings::default().target_language, "auto");
+        assert_eq!(Settings::default().language_direction_version, 1);
+        assert_eq!(Settings::default().shortcut_defaults_version, 1);
+        assert_eq!(Settings::default().max_history, 20);
+        assert!(Shortcuts::default().capture.is_empty());
+        assert_eq!(Shortcuts::default().silent_ocr, "Alt+S");
+    }
+    #[test]
+    fn old_default_language_pair_migrates_once_and_preserves_later_fixed_choices() {
+        let mut json = serde_json::to_value(Settings::default()).unwrap();
+        json.as_object_mut()
+            .unwrap()
+            .remove("languageDirectionVersion");
+        json["targetLanguage"] = serde_json::json!("zh-Hans");
+        let mut settings: Settings = serde_json::from_value(json).unwrap();
+        assert_eq!(settings.language_direction_version, 0);
+        migrate_language_direction(&mut settings);
+        assert_eq!(settings.target_language, "auto");
+        assert_eq!(settings.language_direction_version, 1);
+        settings.target_language = "zh-Hans".into();
+        migrate_language_direction(&mut settings);
+        assert_eq!(settings.target_language, "zh-Hans");
+    }
+    #[test]
+    fn language_migration_preserves_other_explicit_pairs_and_new_defaults() {
+        for (source, target) in [
+            ("en", "zh-Hans"),
+            ("auto", "en"),
+            ("auto", "zh-Hant"),
+            ("fr", "de"),
+        ] {
+            let mut settings = Settings::default();
+            settings.source_language = source.into();
+            settings.target_language = target.into();
+            settings.language_direction_version = 0;
+            migrate_language_direction(&mut settings);
+            assert_eq!(
+                (&*settings.source_language, &*settings.target_language),
+                (source, target)
+            );
+            assert_eq!(settings.language_direction_version, 1);
+        }
+    }
+    #[test]
+    fn old_capture_shortcut_pair_migrates_to_silent_ocr_once() {
+        let mut json = serde_json::to_value(Settings::default()).unwrap();
+        json.as_object_mut()
+            .unwrap()
+            .remove("shortcutDefaultsVersion");
+        json["shortcuts"]["capture"] = serde_json::json!("Alt+S");
+        json["shortcuts"]["silentOcr"] = serde_json::json!("Alt+C");
+        let mut settings: Settings = serde_json::from_value(json).unwrap();
+        assert_eq!(settings.shortcut_defaults_version, 0);
+        migrate_shortcut_defaults(&mut settings);
+        assert!(settings.shortcuts.capture.is_empty());
+        assert_eq!(settings.shortcuts.silent_ocr, "Alt+S");
+        assert_eq!(settings.shortcut_defaults_version, 1);
+        settings.shortcuts.capture = "Alt+S".into();
+        settings.shortcuts.silent_ocr = "Alt+C".into();
+        migrate_shortcut_defaults(&mut settings);
+        assert_eq!(settings.shortcuts.capture, "Alt+S");
+        assert_eq!(settings.shortcuts.silent_ocr, "Alt+C");
+    }
+    #[test]
+    fn shortcut_migration_preserves_custom_assignments() {
+        for (capture, silent) in [
+            ("Alt+S", "Alt+X"),
+            ("Alt+X", "Alt+C"),
+            ("", "Alt+S"),
+            ("", ""),
+        ] {
+            let mut settings = Settings::default();
+            settings.shortcut_defaults_version = 0;
+            settings.shortcuts.capture = capture.into();
+            settings.shortcuts.silent_ocr = silent.into();
+            migrate_shortcut_defaults(&mut settings);
+            assert_eq!(
+                (
+                    &*settings.shortcuts.capture,
+                    &*settings.shortcuts.silent_ocr
+                ),
+                (capture, silent)
+            );
+            assert_eq!(settings.shortcut_defaults_version, 1);
+        }
+    }
+    #[test]
+    fn history_limit_accepts_only_one_to_one_hundred_even_when_history_is_off() {
+        for save in [true, false] {
+            let mut settings = Settings::default();
+            settings.save_history = save;
+            for limit in [1, 20, 100] {
+                settings.max_history = limit;
+                assert!(validate_settings(&settings).is_ok());
+            }
+            for limit in [0, 101, 200, usize::MAX] {
+                settings.max_history = limit;
+                assert!(validate_settings(&settings).is_err());
+            }
+        }
+    }
+    #[test]
+    fn legacy_core_preferences_migrate_and_never_enable_a_countdown() {
+        for (old, expected) in [
+            (0, 20),
+            (200, 20),
+            (500, 100),
+            (101, 100),
+            (37, 37),
+            (1, 1),
+            (100, 100),
+        ] {
+            let mut settings = Settings::default();
+            settings.max_history = old;
+            settings.auto_hide_seconds = 15;
+            migrate_core_preferences(&mut settings);
+            assert_eq!(settings.max_history, expected);
+            assert_eq!(settings.auto_hide_seconds, 0);
+            assert!(validate_settings(&settings).is_ok());
+            migrate_core_preferences(&mut settings);
+            assert_eq!(settings.max_history, expected);
+        }
+        let mut settings = Settings::default();
+        settings.auto_hide_seconds = 1;
+        assert!(validate_settings(&settings).is_err());
+    }
+    #[test]
+    fn system_translation_has_no_network_configuration_and_preserves_existing_choices() {
+        let mut settings = Settings::default();
+        settings.providers = vec![system_translation_provider(true)];
+        assert!(validate_settings(&settings).is_ok());
+        for field in ["base", "model", "prompt"] {
+            let mut changed = settings.clone();
+            match field {
+                "base" => changed.providers[0].base_url = "https://example.com".into(),
+                "model" => changed.providers[0].model = "remote".into(),
+                _ => changed.providers[0].prompt = "remote instructions".into(),
+            }
+            assert!(validate_settings(&changed).is_err());
+        }
+        settings.providers[0].enabled = false;
+        add_system_translation_option(&mut settings);
+        assert_eq!(settings.providers.len(), 1);
+        assert!(!settings.providers[0].enabled);
+        let mut existing = Settings::default();
+        existing.providers.retain(|p| p.kind != "system");
+        let old = serde_json::to_value(&existing.providers).unwrap();
+        add_system_translation_option(&mut existing);
+        let apis: Vec<_> = existing
+            .providers
+            .iter()
+            .filter(|p| p.kind != "system")
+            .collect();
+        assert_eq!(serde_json::to_value(apis).unwrap(), old);
+        assert!(existing
+            .providers
+            .iter()
+            .filter(|p| p.kind == "system")
+            .all(|p| !p.enabled));
     }
     #[test]
     fn reject_insecure_remote_and_embedded_secrets() {

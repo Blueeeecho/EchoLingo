@@ -3,7 +3,10 @@
 # clipboard, preserving all supported original formats and restoring in finally.
 [CmdletBinding()]
 param(
-    [string]$HelperPath = ''
+    [string]$HelperPath = '',
+    # Runs only the production pure capture-state fixtures. It creates no
+    # windows and neither reads nor writes the real desktop/clipboard.
+    [switch]$CaptureStateOnly
 )
 $ErrorActionPreference = 'Stop'
 [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)
@@ -29,6 +32,27 @@ try {
         $HelperPath = Join-Path $scriptDirectory '..\src-tauri\native\windows.ps1'
     }
     $HelperPath = (Resolve-Path -LiteralPath $HelperPath).Path
+    $selectionPolicyScript = Join-Path (Split-Path -Parent $MyInvocation.MyCommand.Path) 'windows-selection-policy-smoke.ps1'
+    $selectionPolicyOutput = @(& powershell.exe -NoProfile -STA -ExecutionPolicy Bypass -File $selectionPolicyScript -HelperPath $HelperPath)
+    if ($LASTEXITCODE -ne 0) { throw 'SELECTION_POLICY_TEST: Pure selection-policy fixture failed.' }
+    $selectionPolicy = ($selectionPolicyOutput -join "`n") | ConvertFrom-Json
+    if (-not $selectionPolicy.ok -or -not $selectionPolicy.selectionPolicyFixturePassed -or $selectionPolicy.assertions -lt 42 -or
+        $selectionPolicy.windowsInteractiveTested -or $selectionPolicy.clipboardAccessed -or $selectionPolicy.inputSent -or $selectionPolicy.screenCaptured) {
+        throw 'SELECTION_POLICY_TEST: Fixture did not report a safe pass.'
+    }
+    $captureStateOutput = @(& powershell.exe -NoProfile -STA -ExecutionPolicy Bypass -File $HelperPath -Mode capture-state-self-test)
+    if ($LASTEXITCODE -ne 0) { throw 'CAPTURE_STATE_TEST: Native capture-state helper failed.' }
+    $captureState = ($captureStateOutput -join "`n") | ConvertFrom-Json
+    if (-not $captureState.ok -or -not $captureState.diagnostics.captureStateFixturePassed -or
+        $captureState.diagnostics.screenCaptured -or $captureState.diagnostics.clipboardChanged) {
+        throw 'CAPTURE_STATE_TEST: Capture-state fixture did not report a safe pass.'
+    }
+    $captureState.diagnostics | Add-Member -NotePropertyName selectionPolicyFixturePassed -NotePropertyValue $true
+    $captureState.diagnostics | Add-Member -NotePropertyName selectionPolicyFixtureAssertions -NotePropertyValue $selectionPolicy.assertions
+    if ($CaptureStateOnly) {
+        [Console]::Out.WriteLine(($captureState | ConvertTo-Json -Depth 8 -Compress))
+        exit 0
+    }
     Add-Type -AssemblyName System.Windows.Forms
     Add-Type -AssemblyName System.Drawing
     Add-Type -AssemblyName System.Web.Extensions
@@ -113,6 +137,8 @@ public static class EchoLingoDesktopSmoke {
     // selection. A genuine injected Ctrl+C is observable through CopyCount.
     sealed class CopyFallbackControl : Control {
         public int CopyCount;
+        public bool DelayPublication;
+        System.Windows.Forms.Timer publicationTimer;
         public const string Selection = "EchoLingo real Ctrl+C fallback 97531";
         public CopyFallbackControl() {
             SetStyle(ControlStyles.Selectable, true);
@@ -123,8 +149,17 @@ public static class EchoLingoDesktopSmoke {
         }
         protected override bool ProcessCmdKey(ref Message message, Keys keyData) {
             if (keyData == (Keys.Control | Keys.C)) {
-                Clipboard.SetText(Selection, TextDataFormat.UnicodeText);
                 CopyCount++;
+                if (DelayPublication) {
+                    Clipboard.Clear();
+                    publicationTimer = new System.Windows.Forms.Timer();
+                    publicationTimer.Interval = 80;
+                    publicationTimer.Tick += delegate {
+                        publicationTimer.Stop(); publicationTimer.Dispose(); publicationTimer = null;
+                        Clipboard.SetText(Selection, TextDataFormat.UnicodeText);
+                    };
+                    publicationTimer.Start();
+                } else Clipboard.SetText(Selection, TextDataFormat.UnicodeText);
                 return true;
             }
             return base.ProcessCmdKey(ref message, keyData);
@@ -132,6 +167,10 @@ public static class EchoLingoDesktopSmoke {
         protected override void OnPaint(PaintEventArgs e) {
             e.Graphics.DrawString("Dedicated Ctrl+C fallback fixture", Font, Brushes.Black, 10, 12);
             base.OnPaint(e);
+        }
+        protected override void Dispose(bool disposing) {
+            if (disposing && publicationTimer != null) { publicationTimer.Stop(); publicationTimer.Dispose(); publicationTimer = null; }
+            base.Dispose(disposing);
         }
     }
 
@@ -352,6 +391,13 @@ public static class EchoLingoDesktopSmoke {
                         AssertRichClipboard(seeded);
                         passed.Add("Real injected Ctrl+C observed once; Unicode/HTML/RTF clipboard restored");
 
+                        FocusFixture(form, fallback, delegate { fallback.DelayPublication = true; });
+                        AssertSuccess(CaptureFixtureSelection(form, helperPath), CopyFallbackControl.Selection, "Clear then delayed Ctrl+C publication");
+                        OnUi(form, delegate { copyCount = fallback.CopyCount; fallback.DelayPublication = false; });
+                        Assert(copyCount == 2, "Delayed publication must not resend Ctrl+C; received " + copyCount);
+                        AssertRichClipboard(seeded);
+                        passed.Add("Clipboard clear followed by 80ms delayed text is awaited; one Ctrl+C and rich format restoration");
+
                         FocusFixture(form, password, delegate { password.SelectAll(); });
                         Reply protectedReply = CaptureFixtureSelection(form, helperPath);
                         Assert(!protectedReply.Ok && protectedReply.ExitCode != 0 && protectedReply.Error != null && protectedReply.Error.StartsWith("PROTECTED:", StringComparison.Ordinal), "Password control must return PROTECTED, received " + protectedReply.Error);
@@ -384,6 +430,10 @@ public static class EchoLingoDesktopSmoke {
 '@
     Add-Type -TypeDefinition $source -ReferencedAssemblies $references
     $result = [EchoLingoDesktopSmoke]::Run($HelperPath)
+    $result['captureStateFixturePassed'] = $captureState.diagnostics.captureStateFixturePassed
+    $result['captureStateFixtureAssertions'] = $captureState.diagnostics.fixtureAssertions
+    $result['selectionPolicyFixturePassed'] = $true
+    $result['selectionPolicyFixtureAssertions'] = $selectionPolicy.assertions
     [Console]::Out.WriteLine(($result | ConvertTo-Json -Depth 8 -Compress))
     if (-not $result['ok']) { exit 1 }
 } catch {

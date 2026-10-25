@@ -4,6 +4,12 @@
 
 use serde_json::{json, Value};
 
+#[cfg(any(target_os = "windows", test))]
+#[path = "capture_exclusion.rs"]
+mod capture_exclusion;
+#[cfg(target_os = "windows")]
+pub use capture_exclusion::CaptureWindowExclusion;
+
 pub fn selected_text() -> Result<String, String> {
     run_text("selected-text", None)
 }
@@ -29,6 +35,23 @@ pub fn capture_image() -> Result<String, String> {
 
 pub fn clipboard_text() -> Result<String, String> {
     run_text("clipboard", None)
+}
+
+pub async fn detect_language(text: &str) -> Result<String, String> {
+    if text.trim().is_empty() || text.chars().count() > 20_000 {
+        return Err("语言检测的文本无效".into());
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let text = text.to_owned();
+        tauri::async_runtime::spawn_blocking(move || run_text("detect-language", Some(&text)))
+            .await
+            .map_err(|_| "本机语言检测未能完成".to_string())?
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        crate::language_detection::fallback_language(text).ok_or_else(|| "无法确认原文语言".into())
+    }
 }
 
 pub fn copy_text(text: &str) -> Result<(), String> {
@@ -134,6 +157,82 @@ pub fn pointer_state() -> Result<(bool, f64, f64), String> {
 #[cfg(not(any(target_os = "macos", target_os = "windows")))]
 pub fn pointer_state() -> Result<(bool, f64, f64), String> {
     Err("UNSUPPORTED_PLATFORM: Pointer state supports Windows and macOS.".into())
+}
+
+/// Restore popup stacking/space behavior without showing, ordering, activating,
+/// focusing or moving the window. macOS callers must use the app main thread.
+#[cfg(target_os = "macos")]
+pub fn ensure_popup_behavior(window: &tauri::WebviewWindow) -> Result<(), String> {
+    use std::ffi::c_void;
+    unsafe extern "C" {
+        fn pthread_main_np() -> i32;
+        fn echolingo_ensure_popup_behavior(window: *mut c_void) -> i32;
+    }
+    // SAFETY: This only checks the current thread, before obtaining AppKit's
+    // borrowed NSWindow. The linked Swift ABI checks the thread again.
+    if unsafe { pthread_main_np() } == 0 {
+        return Err("WINDOW_THREAD: Popup behavior requires the application main thread.".into());
+    }
+    let native = window
+        .ns_window()
+        .map_err(|_| "WINDOW_HANDLE: Native macOS window is unavailable.")?;
+    if native.is_null() {
+        return Err("WINDOW_HANDLE: Native macOS window is unavailable.".into());
+    }
+    // SAFETY: Tauri owns this valid NSWindow and the main thread was verified.
+    match unsafe { echolingo_ensure_popup_behavior(native) } {
+        0 => Ok(()),
+        -1 => Err("WINDOW_THREAD: Popup behavior requires the application main thread.".into()),
+        -2 => Err("WINDOW_HANDLE: Native macOS window is unavailable.".into()),
+        _ => Err("WINDOW_BEHAVIOR: Cannot restore floating popup behavior.".into()),
+    }
+}
+
+#[cfg(target_os = "windows")]
+pub fn ensure_popup_behavior(window: &tauri::WebviewWindow) -> Result<(), String> {
+    use std::ffi::c_void;
+    #[link(name = "user32")]
+    unsafe extern "system" {
+        fn SetWindowPos(
+            window: *mut c_void,
+            insert_after: *mut c_void,
+            x: i32,
+            y: i32,
+            width: i32,
+            height: i32,
+            flags: u32,
+        ) -> i32;
+    }
+    let native = window
+        .hwnd()
+        .map_err(|_| "WINDOW_HANDLE: Native Windows window is unavailable.")?
+        .0;
+    if native.is_null() {
+        return Err("WINDOW_HANDLE: Native Windows window is unavailable.".into());
+    }
+    // SAFETY: Tauri owns the HWND. TOPMOST changes stacking only; NOMOVE,
+    // NOSIZE and NOACTIVATE preserve geometry and the foreground application.
+    // In particular, SHOWWINDOW is absent so hidden windows remain hidden.
+    if unsafe {
+        SetWindowPos(
+            native,
+            -1isize as *mut c_void,
+            0,
+            0,
+            0,
+            0,
+            0x01 | 0x02 | 0x10,
+        )
+    } == 0
+    {
+        return Err("WINDOW_BEHAVIOR: Cannot restore floating popup behavior.".into());
+    }
+    Ok(())
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+pub fn ensure_popup_behavior(_window: &tauri::WebviewWindow) -> Result<(), String> {
+    Err("UNSUPPORTED_PLATFORM: Popup behavior supports Windows and macOS.".into())
 }
 
 /// Show a floating window while keeping the source application active. The
@@ -290,6 +389,147 @@ pub fn open_permission_settings(kind: &str) -> Result<(), String> {
     }
     #[cfg(not(target_os = "macos"))]
     Err("PERMISSION_UNSUPPORTED: 此平台不需要 macOS 隐私授权。".into())
+}
+
+fn system_translation_input(
+    source: &str,
+    target: &str,
+    text: Option<&str>,
+) -> Result<String, String> {
+    let language = |value: &str| {
+        !value.is_empty()
+            && value.len() <= 40
+            && value
+                .bytes()
+                .all(|c| c.is_ascii_alphanumeric() || c == b'-')
+    };
+    if !language(source) || !language(target) || target == "auto" {
+        return Err("系统翻译的语言参数无效".into());
+    }
+    if text.is_some_and(|text| text.trim().is_empty() || text.chars().count() > 20_000) {
+        return Err("系统翻译需要 1–20,000 字符的文本".into());
+    }
+    serde_json::to_string(&json!({"source":source,"target":target,"text":text}))
+        .map_err(|_| "无法准备系统翻译参数".into())
+}
+
+pub fn system_translation_status(source: &str, target: &str) -> Result<Value, String> {
+    let input = system_translation_input(source, target, None)?;
+    #[cfg(target_os = "macos")]
+    {
+        let result = run("system-translation-status", Some(&input))?;
+        let mut status = result
+            .get("systemTranslation")
+            .filter(|v| v.is_object())
+            .cloned()
+            .ok_or_else(|| "NATIVE_PROTOCOL: 系统翻译状态不可用。".to_string())?;
+        status["ready"] = json!(status
+            .get("available")
+            .and_then(Value::as_bool)
+            .unwrap_or(false));
+        Ok(status)
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = input;
+        Ok(json!({
+            "platform":std::env::consts::OS,"supported":false,"ready":false,
+            "requiresSetup":false,"status":"unsupported",
+            "message":"此系统暂无可供 EchoLingo 调用的内置文本翻译接口，请在翻译服务中配置你选择的 API。"
+        }))
+    }
+}
+
+/// Explicit Settings action only. This may show Apple's language-download UI;
+/// translation/hotkeys/status checks never invoke it.
+pub fn prepare_system_translation(source: &str, target: &str) -> Result<Value, String> {
+    let input = system_translation_input(source, target, None)?;
+    #[cfg(target_os = "macos")]
+    {
+        run("prepare-system-translation", Some(&input))?;
+        system_translation_status(source, target)
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = input;
+        Err("此平台尚不支持系统文本翻译，请配置翻译 API".into())
+    }
+}
+
+pub async fn system_translate(text: &str, source: &str, target: &str) -> Result<String, String> {
+    let input = system_translation_input(source, target, Some(text))?;
+    #[cfg(target_os = "macos")]
+    {
+        use std::sync::{
+            atomic::{AtomicBool, AtomicU64, Ordering},
+            Arc, OnceLock,
+        };
+        static SERIAL: OnceLock<Arc<tokio::sync::Semaphore>> = OnceLock::new();
+        static NEXT: AtomicU64 = AtomicU64::new(0);
+        // Keep capacity in the blocking worker even if its JoinHandle is dropped.
+        let permit = SERIAL
+            .get_or_init(|| Arc::new(tokio::sync::Semaphore::new(1)))
+            .clone()
+            .try_acquire_owned()
+            .map_err(|_| "上一次系统翻译正在结束，请稍后重试".to_string())?;
+        let operation_id = format!(
+            "rust-{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        );
+        let mut input: Value = serde_json::from_str(&input).map_err(|_| "系统翻译参数无效")?;
+        input["operationId"] = json!(operation_id);
+        let input = input.to_string();
+        let mut cancellation = SystemTranslationCancellation {
+            operation_id,
+            cancelled: Arc::new(AtomicBool::new(false)),
+            finished: false,
+        };
+        let cancelled = cancellation.cancelled.clone();
+        let result = tauri::async_runtime::spawn_blocking(move || {
+            let _permit = permit;
+            if cancelled.load(Ordering::Acquire) {
+                return Err("SYSTEM_TRANSLATION_CANCELLED: 已取消系统翻译。".into());
+            }
+            run_text("system-translate", Some(&input))
+        })
+        .await
+        .map_err(|_| "系统翻译任务未能完成".to_string())?;
+        cancellation.finished = true;
+        result.and_then(|result| {
+            if result.trim().is_empty() || result.len() > 2 * 1024 * 1024 {
+                Err("系统翻译返回的译文为空或超过大小上限".into())
+            } else {
+                Ok(result)
+            }
+        })
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = input;
+        Err("此平台尚不支持系统文本翻译，请在设置中配置翻译 API".into())
+    }
+}
+
+#[cfg(target_os = "macos")]
+struct SystemTranslationCancellation {
+    operation_id: String,
+    cancelled: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    finished: bool,
+}
+
+#[cfg(target_os = "macos")]
+impl Drop for SystemTranslationCancellation {
+    fn drop(&mut self) {
+        if !self.finished {
+            self.cancelled
+                .store(true, std::sync::atomic::Ordering::Release);
+            // Fast C ABI cancellation of this Swift Task only; no source text,
+            // AppKit dispatch, prompt, keychain access or waiting.
+            let input = json!({"operationId":self.operation_id}).to_string();
+            let _ = run("cancel-system-translation", Some(&input));
+        }
+    }
 }
 
 fn run_text(mode: &str, input: Option<&str>) -> Result<String, String> {
@@ -576,6 +816,56 @@ fn materialize(
 
 #[cfg(test)]
 mod tests {
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn mac_popup_behavior_mask_uses_production_abi_without_window_or_permission_operations() {
+        unsafe extern "C" {
+            fn echolingo_popup_behavior_mask_for_version(current: u64, modern: i32) -> u64;
+        }
+        let join_all_spaces = 1;
+        let move_to_active_space = 1 << 1;
+        let primary = 1 << 7;
+        let auxiliary = 1 << 8;
+        let none = 1 << 9;
+        let modern_roles = (1 << 16) | (1 << 17) | (1 << 18);
+        let conflicting = move_to_active_space | primary | none | modern_roles;
+        let unrelated = (1 << 4) | (1 << 6) | (1 << 12) | (1 << 40);
+        for modern in [0, 1] {
+            let required = join_all_spaces | auxiliary | if modern != 0 { 1 << 18 } else { 0 };
+            for mask in [0, conflicting, required, unrelated, unrelated | conflicting] {
+                // SAFETY: This ABI only transforms an integer mask. It does not
+                // instantiate NSApplication, touch windows or request permissions.
+                let result = unsafe { echolingo_popup_behavior_mask_for_version(mask, modern) };
+                assert_eq!(result, (mask & !conflicting) | required);
+                assert_eq!(
+                    unsafe { echolingo_popup_behavior_mask_for_version(result, modern) },
+                    result
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn system_translation_input_rejects_invalid_languages_and_unbounded_text() {
+        for (source, target) in [
+            ("", "en"),
+            ("en", "auto"),
+            ("en;open", "zh-Hans"),
+            ("auto", ""),
+        ] {
+            assert!(super::system_translation_input(source, target, Some("fixture")).is_err());
+        }
+        assert!(super::system_translation_input("auto", "zh-Hans", Some(" ")).is_err());
+        assert!(
+            super::system_translation_input("en", "zh-Hans", Some(&"a".repeat(20_001))).is_err()
+        );
+        let encoded =
+            super::system_translation_input("auto", "zh-Hant", Some("段落一。\n\nparagraph two\0"))
+                .unwrap();
+        let value: serde_json::Value = serde_json::from_str(&encoded).unwrap();
+        assert_eq!(value["text"], "段落一。\n\nparagraph two\0");
+        assert_eq!(value["target"], "zh-Hant");
+    }
     use super::parse_response;
 
     #[cfg(any(target_os = "macos", target_os = "windows"))]
@@ -622,12 +912,57 @@ mod tests {
 
     #[cfg(target_os = "macos")]
     #[test]
+    fn mac_capture_selector_fixture_checks_geometry_without_capturing_the_desktop() {
+        let result = super::run("capture-selection-self-test", None).unwrap();
+        assert_eq!(result["diagnostics"]["captureSelectionFixturePassed"], true);
+        assert_eq!(result["diagnostics"]["screenCaptured"], false);
+        assert_eq!(result["diagnostics"]["permissionRequested"], false);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn mac_system_translation_policy_and_cancellation_use_the_production_abi_without_models() {
+        let result = super::run("system-translation-self-test", None).unwrap();
+        let diagnostic = &result["diagnostics"];
+        assert_eq!(diagnostic["systemTranslationPolicyFixturePassed"], true);
+        assert_eq!(diagnostic["systemTranslationOutputFixturePassed"], true);
+        assert_eq!(diagnostic["systemTranslationOutputFixtureCount"], 19);
+        assert_eq!(diagnostic["translationEngineCalled"], false);
+        assert_eq!(diagnostic["languageDownloadRequested"], false);
+        assert!(
+            diagnostic["systemTranslationCancellationFixturePassed"] == true
+                || diagnostic["systemTranslationCancellationFixtureSkipped"] == true
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn mac_screen_permission_policy_never_caches_authority_or_opens_concurrent_requests() {
+        let result = super::run("permission-policy-self-test", None).unwrap();
+        let diagnostic = &result["diagnostics"];
+        assert_eq!(diagnostic["permissionPolicyFixturePassed"], true);
+        assert_eq!(diagnostic["permissionRequested"], false);
+        assert_eq!(diagnostic["screenCaptured"], false);
+        assert_eq!(diagnostic["passiveStatusUsesPreflightOnly"], true);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
     fn mac_permission_preflight_uses_this_process_without_requesting_access() {
         let status = super::permission_status().unwrap();
         assert_eq!(status["identity"], "application-process");
         assert_eq!(status["processId"], std::process::id());
         assert!(status["accessibilityGranted"].is_boolean());
         assert!(status["screenCaptureGranted"].is_boolean());
+        assert_eq!(
+            status["screenCapturePreflightGranted"],
+            status["screenCaptureGranted"]
+        );
+        assert!(matches!(
+            status["screenCaptureState"].as_str(),
+            Some("granted" | "unconfirmed")
+        ));
+        assert!(status.get("screenCaptureRequestState").is_none());
         assert!(status["runningBundledApp"].is_boolean());
     }
 

@@ -25,6 +25,14 @@ struct Request {
 }
 
 impl TranslationRequests {
+    pub fn is_current(&self, id: u64) -> Result<bool, String> {
+        let requests = self.0.lock().map_err(|_| "翻译状态异常")?;
+        Ok(requests.presentation.presented
+            && requests
+                .active
+                .as_ref()
+                .is_some_and(|active| active.id == id && !active.abort.is_aborted()))
+    }
     pub fn presentation(&self) -> Result<Presentation, String> {
         Ok(self.0.lock().map_err(|_| "翻译状态异常")?.presentation)
     }
@@ -122,6 +130,22 @@ impl TranslationRequests {
             .map_err(|_| CANCELLED.into())
     }
 
+    // Progress and cancellation share the same ordering boundary. A cancelled
+    // or superseded request must never publish another chunk into a new popup.
+    pub fn publish(&self, id: u64, emit: impl FnOnce(Presentation)) -> Result<bool, String> {
+        let requests = self.0.lock().map_err(|_| "翻译状态异常")?;
+        if !requests.presentation.presented
+            || !requests
+                .active
+                .as_ref()
+                .is_some_and(|active| active.id == id && !active.abort.is_aborted())
+        {
+            return Ok(false);
+        }
+        emit(requests.presentation);
+        Ok(true)
+    }
+
     // Keep cancellation and history commit in one ordering boundary. No await
     // occurs while locked; a superseded/cancelled request cannot commit afterward.
     pub fn finish<T>(
@@ -151,6 +175,33 @@ mod tests {
         Arc,
     };
     use std::time::Duration;
+
+    #[test]
+    fn progress_only_publishes_for_the_current_visible_request() {
+        let requests = TranslationRequests::default();
+        let epoch = requests.resume(None).unwrap().epoch;
+        let old = requests.begin(epoch).unwrap();
+        assert!(requests.is_current(old).unwrap());
+        assert!(requests
+            .publish(old, |p| assert_eq!(p.epoch, epoch))
+            .unwrap());
+        let current = requests.begin(epoch).unwrap();
+        assert!(!requests.is_current(old).unwrap());
+        assert!(!requests
+            .publish(old, |_| panic!("superseded progress"))
+            .unwrap());
+        assert!(requests.publish(current, |_| {}).unwrap());
+        requests.cancel(Some(current)).unwrap();
+        assert!(!requests.is_current(current).unwrap());
+        assert!(!requests
+            .publish(current, |_| panic!("cancelled progress"))
+            .unwrap());
+        let last = requests.begin(epoch).unwrap();
+        requests.suspend().unwrap();
+        assert!(!requests
+            .publish(last, |_| panic!("hidden progress"))
+            .unwrap());
+    }
 
     #[tokio::test]
     async fn cancellation_before_ipc_start_and_stale_cancellation_are_safe() {
@@ -271,7 +322,11 @@ mod tests {
         let id = requests.begin(epoch).unwrap();
         let task_requests = requests.clone();
         let task = tokio::spawn(async move {
-            let mut provider = crate::model::Settings::default().providers.remove(0);
+            let mut provider = crate::model::Settings::default()
+                .providers
+                .into_iter()
+                .find(|p| p.kind == "openai")
+                .unwrap();
             provider.base_url = format!("http://{address}/v1");
             let client = reqwest::Client::new();
             task_requests
