@@ -23,9 +23,13 @@ Updated: 2026-10-25, Asia/Shanghai. Stage: v0.1.0 preview hardening and acceptan
 
 ## Verification evidence
 - Current local checks: 50 Rust tests, 45 frontend unit tests, complete isolated UI/IPC regression, 22 installer safety/rollback fixtures; typecheck, production build, formatting and npm audit passed.
+- Current branch CI run 40172215129 on 3ec4f81 passed all three jobs. Windows ran 49 Rust tests including the real exclusive-file-lock failure/retry, native OCR and selection/clipboard desktop smoke; macOS ran 50 Rust tests and the standalone private-pasteboard/OCR suite. Both NSIS and DMG artifacts were generated. See https://github.com/Blueeeecho/EchoLingo/actions/runs/40172215129 and draft PR https://github.com/Blueeeecho/EchoLingo/pull/1.
 - Optimized macOS app/DMG, ad hoc signature integrity and hdiutil checksum verification passed. The canonical ~/Applications app is installed and running; a read-only probe found zero onscreen regular windows and no foreground activation. Main-process metrics and the retained OCR timing outlier are in docs/test-report.md and docs/validation/macos-preview-20261025.json.
-- Baseline latest main CI: run 40167604502 on 856e1a7 passed Windows/macOS native builds and frontend interactions. This predates the current hardening branch; current branch results are recorded separately, never inferred from the baseline.
+- Baseline main CI run 40167604502 on 856e1a7 also passed Windows/macOS native builds and frontend interactions; current branch evidence above supersedes that baseline for this work.
 - Prior user confirmation of the minimal popup belongs to the older e15deaa installation. It is not acceptance of the latest permission/cancellation changes.
+
+## Preview distribution
+- Draft prerelease v0.1.0-preview.1 contains the Apple Silicon DMG, Windows x64 NSIS and SHA-256 checksums. It remains unpublished: https://github.com/Blueeeecho/EchoLingo/releases/tag/untagged-c8da17a22fa76e07d45f. Local packages are in sibling EchoLingo-installers; the Windows ZIP digest matched GitHub artifact metadata and its PE header was checked. This is not a real Windows install/uninstall pass.
 
 ## Remaining external acceptance
 - Installed-app real IME; actual selection and region capture/cancel; same-version restart and cross-version TCC behavior on the owner's Mac.

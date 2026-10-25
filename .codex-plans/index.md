@@ -1,10 +1,10 @@
 # Task index
 
 ## Current Focus
-preview-completion
+`preview-completion/`
 
 ## Active Tasks
-- preview-completion: close actionable preview gaps, test and package one current app.
+- None.
 
 ## Completed Tasks
-- None in this planning directory yet.
+- preview-completion: actionable preview hardening, automated checks, local install/metrics, cross-platform CI and unpublished installer draft completed. External manual/account/signing gates remain in docs/status.md and docs/test-report.md.
