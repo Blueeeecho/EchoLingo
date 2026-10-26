@@ -57,6 +57,7 @@ function Verify-Resources([string]$ResourceRoot) {
     $manifest = Get-Content -LiteralPath $manifestPath -Raw -Encoding UTF8 | ConvertFrom-Json
     Assert-Fixture ($manifest.formatVersion -eq 1 -and @($manifest.files).Count -ge 6) 'Installed model manifest is missing or has an unsupported format.'
     $checked = @()
+    [long]$totalModelBytes = 0
     $directions = @{}
     $prefix = [IO.Path]::GetFullPath($ResourceRoot).TrimEnd('\') + '\'
     foreach ($file in @($manifest.files)) {
@@ -70,6 +71,7 @@ function Verify-Resources([string]$ResourceRoot) {
         Assert-Fixture ($hash -eq ([string]$file.sha256).ToLowerInvariant()) ('Installed model hash mismatch: ' + $file.path)
         $direction = ([string]$file.path).Split('/')[1]
         $directions[$direction] = 1 + [int]$directions[$direction]
+        $totalModelBytes += $item.Length
         $checked += [ordered]@{ path = $file.path; size = $item.Length; sha256 = $hash }
     }
     Assert-Fixture ($directions['en-zh'] -ge 3 -and $directions['zh-en'] -ge 3) 'Both installed model directions need original model, lexical and vocabulary files.'
@@ -91,7 +93,7 @@ function Verify-Resources([string]$ResourceRoot) {
         Assert-Fixture ($hash -eq ([string]$license.sha256).ToLowerInvariant()) ('Installed original license hash mismatch: ' + $license.path)
         $checkedLicenses += [ordered]@{ path = $license.path; sha256 = $hash }
     }
-    return [ordered]@{ manifestSha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $manifestPath).Hash.ToLowerInvariant(); files = $checked; totalModelBytes = ($checked | Measure-Object -Property size -Sum).Sum; licenseManifestSha256 = $licenseManifestHash; checkedOriginalLicenses = $checkedLicenses }
+    return [ordered]@{ manifestSha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $manifestPath).Hash.ToLowerInvariant(); files = $checked; totalModelBytes = $totalModelBytes; licenseManifestSha256 = $licenseManifestHash; checkedOriginalLicenses = $checkedLicenses }
 }
 function Invoke-RealCase($Process, $Case) {
     $watch = [Diagnostics.Stopwatch]::StartNew()
@@ -231,6 +233,9 @@ public static class EchoLingoOwnedDirectory {
     Assert-Fixture ((Get-FileHash -Algorithm SHA256 -LiteralPath $engine).Hash.ToLowerInvariant() -eq $report.engineSha256 -and (Get-FileHash -Algorithm SHA256 -LiteralPath $app).Hash.ToLowerInvariant() -eq $report.applicationSha256) 'Installed executable changed during the real-model test.'
     $report.ok = $true
 } catch {
+    $report.errorScriptLineNumber = $_.InvocationInfo.ScriptLineNumber
+    $report.errorCommand = $_.InvocationInfo.MyCommand.Name
+    $report.errorScriptStackTrace = $_.ScriptStackTrace
     $message = $_.Exception.Message
     $inner = $_.Exception.InnerException
     while ($null -ne $inner) { $message = $inner.Message; $inner = $inner.InnerException }
