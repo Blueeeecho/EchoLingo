@@ -76,7 +76,11 @@ def main():
             if destination.is_symlink():
                 raise ValueError("refusing notice symlink destination")
             destination.write_bytes(data)
-    locked_bytes = LOCK.read_bytes()
+    # This is generated provenance metadata, not an upstream license. Git for
+    # Windows may check out the script-side lock as CRLF while the resource
+    # copy is deliberately -text/LF. Canonicalize metadata line endings only;
+    # all original license bytes above remain subject to exact hash checks.
+    locked_bytes = LOCK.read_bytes().replace(b"\r\n", b"\n")
     locked_copy = RESOURCE / "engine-sources.lock.json"
     if args.verify_only:
         if locked_copy.read_bytes() != locked_bytes:

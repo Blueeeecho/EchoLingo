@@ -35,6 +35,33 @@ function Start-Captured([string]$Path, [string]$Arguments) {
     $start.StandardErrorEncoding = [Text.UTF8Encoding]::new($false)
     return [Diagnostics.Process]::Start($start)
 }
+function Verify-NsisApplicationIdentity([string]$StagePath, [string]$InstalledPath) {
+    # Pinned tauri-cli2.12.4 patches this single bundle marker before NSIS
+    # packaging, then restores the original target/release executable.
+    # https://github.com/tauri-apps/tauri/blob/tauri-cli-v2.12.4/crates/tauri-bundler/src/bundle.rs
+    # Derive the expected installed bytes from the complete current-stage file;
+    # never alter either executable or ignore any PE header/resource bytes.
+    $stageBytes = [IO.File]::ReadAllBytes($StagePath)
+    $installedBytes = [IO.File]::ReadAllBytes($InstalledPath)
+    $unknownMarker = '__TAURI_BUNDLE_TYPE_VAR_UNK'
+    $nsisMarker = '__TAURI_BUNDLE_TYPE_VAR_NSS'
+    $stageText = [Text.Encoding]::ASCII.GetString($stageBytes)
+    $offset = $stageText.IndexOf($unknownMarker, [StringComparison]::Ordinal)
+    Assert-Fixture ($offset -ge 0 -and $stageText.IndexOf($unknownMarker, $offset + 1, [StringComparison]::Ordinal) -eq -1) 'Current stage app needs exactly one unknown Tauri bundle marker.'
+    Assert-Fixture ($installedBytes.Length -eq $stageBytes.Length) 'NSIS installed app size differs from the complete current-stage app.'
+    Assert-Fixture ([Text.Encoding]::ASCII.GetString($installedBytes, $offset, $nsisMarker.Length) -eq $nsisMarker) 'Installed app is missing its NSIS marker at the verified stage offset.'
+    [byte[]]$expectedBytes = $stageBytes.Clone()
+    $replacement = [Text.Encoding]::ASCII.GetBytes($nsisMarker)
+    [Buffer]::BlockCopy($replacement, 0, $expectedBytes, $offset, $replacement.Length)
+    $algorithm = [Security.Cryptography.SHA256]::Create()
+    try {
+        $stageHash = [BitConverter]::ToString($algorithm.ComputeHash($stageBytes)).Replace('-', '').ToLowerInvariant()
+        $expectedHash = [BitConverter]::ToString($algorithm.ComputeHash($expectedBytes)).Replace('-', '').ToLowerInvariant()
+        $installedHash = [BitConverter]::ToString($algorithm.ComputeHash($installedBytes)).Replace('-', '').ToLowerInvariant()
+    } finally { $algorithm.Dispose() }
+    Assert-Fixture ($expectedHash -eq $installedHash) 'Installed NSIS app differs from the current build beyond the exact Tauri bundle marker.'
+    return [ordered]@{ stageSha256 = $stageHash; installedSha256 = $installedHash; expectedNsisSha256 = $expectedHash; markerOffset = $offset; stageMarker = $unknownMarker; installedMarker = $nsisMarker; changedBytes = 3; comparedBytes = $stageBytes.Length; actualExecutablesModified = $false }
+}
 function Assert-OfflinePolicy {
     Assert-Fixture ((Get-Service -Name MpsSvc).Status -eq 'Running') 'Windows Defender Firewall is not running; offline proof unavailable.'
     $active = @(Get-NetConnectionProfile | ForEach-Object {
@@ -179,7 +206,7 @@ public static class EchoLingoOwnedDirectory {
     $expectedApp = Join-Path $PSScriptRoot '..\src-tauri\target\release\echolingo.exe'
     $expectedEngine = Join-Path $PSScriptRoot '..\resources\offline-translation\bin\echolingo-offline-engine.exe'
     $expectedManifest = Join-Path $PSScriptRoot '..\resources\offline-translation\manifest.json'
-    Assert-Fixture ($report.applicationSha256 -eq (Get-FileHash -Algorithm SHA256 -LiteralPath $expectedApp).Hash.ToLowerInvariant()) 'NSIS installed a different app from this build.'
+    $report.applicationIdentity = Verify-NsisApplicationIdentity $expectedApp $app
     Assert-Fixture ($report.engineSha256 -eq (Get-FileHash -Algorithm SHA256 -LiteralPath $expectedEngine).Hash.ToLowerInvariant()) 'NSIS installed a different engine from staging.'
     Assert-Fixture ($report.resources.manifestSha256 -eq (Get-FileHash -Algorithm SHA256 -LiteralPath $expectedManifest).Hash.ToLowerInvariant()) 'NSIS installed a different model manifest from this source.'
     $report.chineseInstallationPath = $true

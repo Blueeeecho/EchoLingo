@@ -45,6 +45,17 @@ jobs:
         with:
           path: ${{ runner.temp }}/echolingo-offline-model-cache
           key: ${{ runner.os }}-offline-models-${{ hashFiles('resources/offline-translation/manifest.json') }}
+      - name: Windows offline isolation prerequisites (read-only)
+        if: runner.os == 'Windows'
+        shell: powershell
+        run: |
+          $state = [ordered]@{ readOnly = $true }
+          try {
+            $state.firewallServiceStatus = [string](Get-Service MpsSvc -ErrorAction Stop).Status
+            $state.connections = @(Get-NetConnectionProfile -ErrorAction Stop | Select-Object NetworkCategory, IPv4Connectivity, IPv6Connectivity)
+            $state.effectiveProfiles = @(Get-NetFirewallProfile -PolicyStore ActiveStore -ErrorAction Stop | Select-Object Name, Enabled)
+          } catch { $state.readError = $_.Exception.Message }
+          $state | ConvertTo-Json -Depth 5 -Compress
       - name: Prepare verified offline English-Chinese models
         if: runner.os == 'Windows'
         timeout-minutes: 10
@@ -128,5 +139,6 @@ jobs:
             ${{ runner.temp }}/echolingo-offline-validation.json
             ${{ runner.temp }}/EchoLingo-offline-engine-source.zip
             resources/offline-translation/manifest.json
+            src-tauri/target/release/echolingo.exe
             ${{ runner.temp }}/echolingo-offline-engine-build/build-windows/CMakeCache.txt
             ${{ runner.temp }}/echolingo-offline-engine-build/build-windows/build.ninja
