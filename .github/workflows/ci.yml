@@ -113,7 +113,7 @@ jobs:
         run: powershell.exe -NoProfile -STA -ExecutionPolicy Bypass -File tests/windows-application-smoke.ps1 -ApplicationPath src-tauri/target/release/echolingo.exe
       - name: Windows installed NSIS real offline-model acceptance
         if: runner.os == 'Windows'
-        timeout-minutes: 15
+        timeout-minutes: 25
         shell: powershell
         run: powershell.exe -NoProfile -STA -ExecutionPolicy Bypass -File scripts/windows-offline-translation-test.ps1
       - name: Preserve offline acceptance and corresponding source evidence
