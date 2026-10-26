@@ -24,20 +24,21 @@ UNUSED_MOZILLA = (
     "inference/marian-fork/src/3rd_party/nccl", "inference/marian-fork/src/3rd_party/fbgemm",
     "inference/marian-fork/src/3rd_party/simple-websocket-server",
     "inference/marian-fork/src/3rd_party/onnxjs",
-    "inference/marian-fork/src/3rd_party/sentencepiece/python/test/botchan.txt",
+    "inference/marian-fork/src/3rd_party/sentencepiece/python/test",
 )
 SKIP_SUFFIXES = {".o", ".obj", ".a", ".lib", ".dll", ".exe", ".dylib", ".so", ".pyc", ".pdb", ".ninja", ".log"}
 NOTICE = """# EchoLingo offline inference corresponding source
 
 This archive accompanies the EchoLingo preview installer. Mozilla covered files
 remain under MPL 2.0; Marian and each dependency retain their original licenses.
-The complete original notices are in the source tree and notices/ directory.
-See notices/SOURCE-OFFER.md and SOURCE-MANIFEST.json for provenance and hashes.
+Original notices are in the source tree and resources/offline-translation/licenses/.
+See that directory's SOURCE-OFFER.md and SOURCE-MANIFEST.json for provenance.
 
 The application does not load or distribute ssplit nonbreaking-prefix data;
-those unused LGPL data and disabled GPU/server/WASM dependencies are omitted.
+those unused LGPL data, SentencePiece Python test fixtures/models, and disabled
+GPU/server/WASM dependencies are omitted.
 No model weights, user text, credentials, build outputs or toolchain are included.
-Model source URLs/hashes are in resources/manifest.json; weights accompany the
+Model source URLs/hashes are in resources/offline-translation/manifest.json; weights accompany the
 installer. This source archive does not include private application data.
 
 Build with a C++17 compiler, CMake and Ninja (or a platform CMake generator):
@@ -146,9 +147,9 @@ def main():
         entries[path.relative_to(ROOT).as_posix()] = path.read_bytes()
     for path in sorted((ROOT / "resources/offline-translation/licenses").glob("*")):
         if path.is_file():
-            entries["notices/" + path.name] = path.read_bytes()
+            entries["resources/offline-translation/licenses/" + path.name] = path.read_bytes()
     for name in ("manifest.json", "license-files.json", "engine-sources.lock.json", "selected-models.json", "mozilla-model-registry-20261026.json"):
-        entries["resources/" + name] = (ROOT / "resources/offline-translation" / name).read_bytes()
+        entries["resources/offline-translation/" + name] = (ROOT / "resources/offline-translation" / name).read_bytes()
     entries["README.md"] = NOTICE.encode("utf-8")
     inventory = {"formatVersion": 1, "mozillaCommit": MOZILLA_COMMIT,
                  "excludedUnusedSourcePaths": list(UNUSED_MOZILLA),

@@ -5,6 +5,7 @@
 param([string]$InstallerPath = '', [string]$ApplicationSmokePath = '')
 $ErrorActionPreference = 'Stop'
 [Console]::OutputEncoding = [Text.UTF8Encoding]::new($false)
+[Console]::InputEncoding = [Text.UTF8Encoding]::new($false)
 $report = [ordered]@{ ok = $false; windowsRuntimeExecuted = $false; installerExecuted = $false; realModelExecuted = $false; mockTranslationUsed = $false; rulesRemoved = $false; ownedInstallRemoved = $false }
 $rules = @()
 $installRoot = $null
@@ -30,7 +31,6 @@ function Start-Captured([string]$Path, [string]$Arguments) {
     $start.RedirectStandardInput = $true
     $start.RedirectStandardOutput = $true
     $start.RedirectStandardError = $true
-    $start.StandardInputEncoding = [Text.UTF8Encoding]::new($false)
     $start.StandardOutputEncoding = [Text.UTF8Encoding]::new($false)
     $start.StandardErrorEncoding = [Text.UTF8Encoding]::new($false)
     return [Diagnostics.Process]::Start($start)
@@ -96,8 +96,11 @@ function Verify-Resources([string]$ResourceRoot) {
 function Invoke-RealCase($Process, $Case) {
     $watch = [Diagnostics.Stopwatch]::StartNew()
     $request = [ordered]@{ id = [string]$Case.id; source = $Case.source; target = $Case.target; text = $Case.text }
-    $Process.StandardInput.WriteLine(($request | ConvertTo-Json -Compress))
-    $Process.StandardInput.Flush()
+    # .NETFramework4.8 has no ProcessStartInfo.StandardInputEncoding property.
+    # Write exact UTF8 bytes so PS5.1's OEM defaults cannot corrupt Chinese.
+    $requestBytes = [Text.Encoding]::UTF8.GetBytes(($request | ConvertTo-Json -Compress) + "`n")
+    $Process.StandardInput.BaseStream.Write($requestBytes, 0, $requestBytes.Length)
+    $Process.StandardInput.BaseStream.Flush()
     $read = $Process.StandardOutput.ReadLineAsync()
     Assert-Fixture ($read.Wait(120000)) ('Real model response timed out: ' + $Case.id)
     $line = $read.Result
