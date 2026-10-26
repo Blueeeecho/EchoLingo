@@ -173,6 +173,9 @@ async fn translate_one_inner(
             // model or activate a UI from this path. Preparation is explicit.
             return crate::platform::system_translate(text, source, target).await;
         }
+        if p.kind == "offline" {
+            return Err("请使用包含离线模型的 EchoLingo 安装包执行本机翻译".into());
+        }
         let key = key?;
         let url = endpoint(p)?;
         let body = if want_stream {

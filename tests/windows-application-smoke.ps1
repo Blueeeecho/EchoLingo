@@ -2,7 +2,7 @@
 # desktop. Never run this against a user's installed app or existing app data.
 # It creates generated source content, a loopback mock and empty owned app dirs.
 [CmdletBinding()]
-param([string]$ApplicationPath = '')
+param([string]$ApplicationPath = '', [switch]$OfflineTranslation, [switch]$InstalledPackage)
 $ErrorActionPreference = 'Stop'
 [Console]::OutputEncoding = [Text.UTF8Encoding]::new($false)
 try {
@@ -40,9 +40,11 @@ using System.Windows.Forms;
 
 public static class EchoLingoApplicationSmoke {
     const string Identifier = "io.github.blueeeecho.echolingo";
-    const string Selected = "EchoLingo application selection 97531";
-    const string Typed = "EchoLingo typed input 86420";
-    const string OcrText = "EchoLingo OCR 2468";
+    static bool Offline;
+    static readonly Dictionary<string, object> ActualTranslations = new Dictionary<string, object>();
+    static string Selected { get { return Offline ? "Hello world. This is a translation test." : "EchoLingo application selection 97531"; } }
+    static string Typed { get { return Offline ? "\u4f60\u597d\uff0c\u4e16\u754c\u3002\u8fd9\u662f\u4e00\u6b21\u7ffb\u8bd1\u6d4b\u8bd5\u3002" : "EchoLingo typed input 86420"; } }
+    static string OcrText { get { return Offline ? "Hello world 2468" : "EchoLingo OCR 2468"; } }
     const string MarkerName = ".echolingo-ci-owned";
     delegate bool EnumWindow(IntPtr window, IntPtr parameter);
     [DllImport("shell32.dll")] static extern int SHGetKnownFolderPath(ref Guid folder, uint flags, IntPtr token, out IntPtr path);
@@ -214,6 +216,13 @@ public static class EchoLingoApplicationSmoke {
         }
         public void Dispose() { stopping = true; listener.Stop(); thread.Join(2000); }
     }
+    static bool ValidOfflineResult(string text, string kind) {
+        if (String.IsNullOrWhiteSpace(text)) return false;
+        if (kind == "typed") return text.IndexOf("world", StringComparison.OrdinalIgnoreCase) >= 0 && text.IndexOf("test", StringComparison.OrdinalIgnoreCase) >= 0;
+        bool greeting = text.Contains("\u4e16\u754c") || text.Contains("\u4f60\u597d");
+        if (kind == "ocr") return greeting && text.Contains("2468");
+        return greeting && (text.Contains("\u6d4b\u8bd5") || text.Contains("\u8bd5\u9a8c"));
+    }
     static bool HasHistory(string path, string source, string kind, string providerId) {
         if (!File.Exists(path)) return false;
         try {
@@ -224,7 +233,14 @@ public static class EchoLingoApplicationSmoke {
                 if (entry == null || !String.Equals((string)entry["text"], source, kind == "ocr" ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal)) continue;
                 foreach (object value in (IEnumerable)entry["results"]) {
                     Dictionary<string, object> result = (Dictionary<string, object>)value;
-                    if ((string)result["providerId"] == providerId && (string)result["text"] == MockServer.Result(kind) && !result.ContainsKey("error")) return true;
+                    if ((string)result["providerId"] != providerId || result.ContainsKey("error")) continue;
+                    string translated = (string)result["text"];
+                    if (Offline) {
+                        Assert(ValidOfflineResult(translated, kind), "Real offline result failed direction/semantic checks for " + kind + ": " + translated);
+                        ActualTranslations[kind] = new Dictionary<string, object> { { "text", translated }, { "sourceLanguage", entry["sourceLanguage"] }, { "targetLanguage", entry["targetLanguage"] }, { "backendElapsedMs", result["elapsedMs"] } };
+                        return true;
+                    }
+                    if (translated == MockServer.Result(kind)) return true;
                 }
             }
         } catch (IOException) { } catch (ArgumentException) { }
@@ -237,13 +253,15 @@ public static class EchoLingoApplicationSmoke {
         using (Process command = Process.Start(stop)) { command.StandardOutput.ReadToEnd(); command.StandardError.ReadToEnd(); Assert(command.WaitForExit(10000), "Own process-tree cleanup timed out."); }
         Assert(app.WaitForExit(5000), "Own application did not exit during cleanup.");
     }
-    public static Dictionary<string, object> Run(string executable) {
+    public static Dictionary<string, object> Run(string executable, bool offline, bool installed) {
+        Offline = offline; ActualTranslations.Clear();
         Dictionary<string, object> report = new Dictionary<string, object>(); List<string> passed = new List<string>();
         report["ok"] = false; report["passed"] = passed; report["actualApplicationTested"] = false;
         report["singleHotkeyPerAction"] = true; report["uiAutomationSelectorsUsed"] = false;
-        report["credentialsCreated"] = false; report["credentialAccessScope"] = "One random absent provider account; no existing credential or key supplied";
-        report["multiMonitorTested"] = false; report["fullscreenTested"] = false; report["installedPackageTested"] = false;
-        string token = Guid.NewGuid().ToString("N"), providerId = "ci-application-" + Guid.NewGuid().ToString("N");
+        report["credentialsCreated"] = false; report["credentialAccessScope"] = offline ? "None: bundled offline provider" : "One random absent provider account; no existing credential or key supplied";
+        report["translationBackend"] = offline ? "real-bundled-offline-model" : "loopback-mock";
+        report["multiMonitorTested"] = false; report["fullscreenTested"] = false; report["installedPackageTested"] = installed;
+        string token = Guid.NewGuid().ToString("N"), providerId = offline ? "offline-translation" : "ci-application-" + Guid.NewGuid().ToString("N");
         List<string> owned = new List<string>(); Process app = null;
         string root = Path.Combine(Path.GetTempPath(), "echolingo-app-smoke-" + token);
         string roaming = Path.Combine(KnownFolder("3EB685DB-65F9-4CF6-A03A-E3EF65729F3D"), Identifier);
@@ -257,10 +275,10 @@ public static class EchoLingoApplicationSmoke {
             string childLocal = Path.Combine(root, "LocalAppData"); Directory.CreateDirectory(childLocal);
             string childTemp = Path.Combine(root, "Temp"); Directory.CreateDirectory(childTemp);
             string history = Path.Combine(roaming, "history.json");
-            using (MockServer server = new MockServer()) {
+            using (MockServer server = offline ? null : new MockServer()) {
                 JavaScriptSerializer json = new JavaScriptSerializer();
                 Dictionary<string, object> settings = new Dictionary<string, object> {
-                    { "providers", new object[] { new Dictionary<string, object> { { "id", providerId }, { "name", "Loopback generated fixture" }, { "kind", "libretranslate" }, { "baseUrl", server.Url }, { "model", "" }, { "enabled", true }, { "prompt", "" } } } },
+                    { "providers", new object[] { new Dictionary<string, object> { { "id", providerId }, { "name", offline ? "Real bundled offline model" : "Loopback generated fixture" }, { "kind", offline ? "offline" : "libretranslate" }, { "baseUrl", offline ? "" : server.Url }, { "model", "" }, { "enabled", true }, { "prompt", "" } } } },
                     { "ocrProviders", new object[0] }, { "activeOcrProviderId", null }, { "sourceLanguage", "auto" }, { "targetLanguage", "auto" },
                     { "languageDirectionVersion", 1 }, { "shortcutDefaultsVersion", 1 }, { "saveHistory", true }, { "maxHistory", 20 }, { "theme", "light" }, { "autoHideSeconds", 0 },
                     { "shortcuts", new Dictionary<string, object> { { "selection", "Alt+D" }, { "capture", "" }, { "ocr", "Alt+Shift+S" }, { "silentOcr", "Alt+S" }, { "input", "Alt+A" } } }
@@ -295,17 +313,17 @@ public static class EchoLingoApplicationSmoke {
                                 Thread.Sleep(4000);
                                 OnUi(form, delegate { form.Activate(); SetForegroundWindow(form.Handle); source.Focus(); source.Select(7, Selected.Length); }); Thread.Sleep(150);
                                 Shortcut(form, 0x44);
-                                WaitFor(delegate { if (server.Error != null) throw new InvalidOperationException(server.Error); return HasHistory(history, Selected, "selection", providerId); }, 45, "Alt+D never produced exact mock translation/history.", app);
-                                Assert(server.Count == 1, "Selection triggered duplicate or unrelated requests.");
+                                WaitFor(delegate { if (server != null && server.Error != null) throw new InvalidOperationException(server.Error); return HasHistory(history, Selected, "selection", providerId); }, 45, "Alt+D never produced valid translation/history from the configured backend.", app);
+                                Assert(server == null || server.Count == 1, "Selection triggered duplicate or unrelated requests.");
                                 RequireForeground(form); List<Dictionary<string, object>> passive = AppWindows(app.Id, true);
                                 Assert(passive.Count == 1 && (bool)passive[0]["topmost"], "Selection popup was not a visible topmost own window."); report["selectionWindow"] = passive[0];
-                                passed.Add("Actual Alt+D -> native source selection -> frontend automatic translation -> loopback -> durable synthetic history; source foreground preserved");
+                                passed.Add("Actual Alt+D -> native source selection -> frontend automatic translation -> " + (offline ? "real offline en-zh model" : "loopback mock") + " -> durable synthetic history; source foreground preserved");
                                 OnUi(form, delegate { form.Activate(); SetForegroundWindow(form.Handle); source.Focus(); source.Select(0, 0); }); Thread.Sleep(150);
                                 Shortcut(form, 0x44);
                                 WaitFor(delegate { return ForegroundPid() == app.Id; }, 15, "Empty Alt+D did not focus the actual application.", app); Thread.Sleep(150); TypeIntoApp(app.Id);
-                                WaitFor(delegate { if (server.Error != null) throw new InvalidOperationException(server.Error); return HasHistory(history, Typed, "typed", providerId); }, 45, "Blank popup typing+Enter did not translate exact full text.", app);
-                                Assert(server.Count == 2, "Empty selection or typed submission sent duplicate/unexpected requests.");
-                                passed.Add("Actual empty Alt+D -> focused blank source -> first Unicode SendInput text + Enter -> second mock/history");
+                                WaitFor(delegate { if (server != null && server.Error != null) throw new InvalidOperationException(server.Error); return HasHistory(history, Typed, "typed", providerId); }, 45, "Blank popup typing+Enter did not translate exact full text.", app);
+                                Assert(server == null || server.Count == 2, "Empty selection or typed submission sent duplicate/unexpected requests.");
+                                passed.Add("Actual empty Alt+D -> focused blank source -> first Unicode SendInput text + Enter -> " + (offline ? "real offline zh-en model" : "second mock") + "/history");
                                 OnUi(form, delegate { form.Activate(); SetForegroundWindow(form.Handle); source.Focus(); source.Select(0, 0); }); Thread.Sleep(150);
                                 Shortcut(form, 0x53);
                                 WaitFor(delegate { return AppOverlays(app.Id) == Screen.AllScreens.Length; }, 25, "Actual Alt+S did not create production transparent helper overlays.", app);
@@ -315,12 +333,16 @@ public static class EchoLingoApplicationSmoke {
                                 Action<Point> move = delegate(Point point) { RequireForeground(form); INPUT input = new INPUT(); input.data.mouse.dx = (int)Math.Round((point.X - desktop.Left) * 65535.0 / (desktop.Width - 1)); input.data.mouse.dy = (int)Math.Round((point.Y - desktop.Top) * 65535.0 / (desktop.Height - 1)); input.data.mouse.flags = 0x8000 | 0x4000 | 1; Send(new INPUT[] { input }); };
                                 move(first); Thread.Sleep(100); INPUT down = new INPUT(); down.data.mouse.flags = 2; Send(new INPUT[] { down }); Thread.Sleep(100); move(last); Thread.Sleep(100);
                                 RequireForeground(form); INPUT up = new INPUT(); up.data.mouse.flags = 4; Send(new INPUT[] { up });
-                                WaitFor(delegate { if (server.Error != null) throw new InvalidOperationException(server.Error); return HasHistory(history, OcrText, "ocr", providerId); }, 50, "Actual Alt+S left-drag OCR did not fill/translate exact generated text.", app);
-                                Assert(server.Count == 3, "OCR caused duplicate or unexpected translations."); RequireForeground(form);
+                                WaitFor(delegate { if (server != null && server.Error != null) throw new InvalidOperationException(server.Error); return HasHistory(history, OcrText, "ocr", providerId); }, 50, "Actual Alt+S left-drag OCR did not fill/translate exact generated text.", app);
+                                Assert(server == null || server.Count == 3, "OCR caused duplicate or unexpected translations."); RequireForeground(form);
                                 OnUi(form, delegate { Assert(sourceMouseEvents == 0, "OCR drag reached generated source control."); });
                                 Assert(AppOverlays(app.Id) == 0, "Actual OCR left selection overlays behind.");
-                                passed.Add("Actual Alt+S -> production transparent overlays -> left-drag -> WinRT OCR -> frontend source/automatic mock translation -> history; foreground preserved");
-                                report["mockRequests"] = server.Requests; report["ok"] = true;
+                                passed.Add("Actual Alt+S -> production transparent overlays -> left-drag -> WinRT OCR -> frontend source/automatic " + (offline ? "real offline model" : "mock") + " translation -> history; foreground preserved");
+                                report["mockRequests"] = server == null ? new List<Dictionary<string, object>>() : server.Requests;
+                                if (offline) {
+                                    Assert(ActualTranslations.Count == 3 && new JavaScriptSerializer().Deserialize<object[]>(File.ReadAllText(history)).Length == 3, "Offline flows did not produce exactly three successful synthetic histories.");
+                                }
+                                report["actualOfflineTranslations"] = ActualTranslations; report["ok"] = true;
                             } catch (Exception error) { report["error"] = error.Message; }
                             finally {
                                 if (!(bool)report["ok"]) ReleaseOwnInput(form, app);
@@ -353,7 +375,7 @@ public static class EchoLingoApplicationSmoke {
     $references = @([Windows.Forms.Form].Assembly.Location, [Drawing.Bitmap].Assembly.Location,
         [Web.Script.Serialization.JavaScriptSerializer].Assembly.Location, [Management.ManagementObject].Assembly.Location) | Select-Object -Unique
     Add-Type -TypeDefinition $source -ReferencedAssemblies $references
-    $result = [EchoLingoApplicationSmoke]::Run($ApplicationPath)
+    $result = [EchoLingoApplicationSmoke]::Run($ApplicationPath, [bool]$OfflineTranslation, [bool]$InstalledPackage)
     $result['powerShellVersion'] = $PSVersionTable.PSVersion.ToString()
     $result['applicationSha256'] = (Get-FileHash -Algorithm SHA256 -LiteralPath $ApplicationPath).Hash.ToLowerInvariant()
     [Console]::Out.WriteLine(($result | ConvertTo-Json -Depth 12 -Compress))

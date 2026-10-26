@@ -1,4 +1,4 @@
-export type ProviderKind = 'system' | 'openai' | 'deepl' | 'libretranslate';
+export type ProviderKind = 'system' | 'offline' | 'openai' | 'deepl' | 'libretranslate';
 export type CredentialState = 'ready' | 'missing' | 'blocked' | 'unloaded';
 export interface SystemTranslationStatus {
   supported: boolean;

@@ -1,0 +1,75 @@
+{
+  "en-zh": {
+    "architecture": "base-memory",
+    "releaseStatus": "Release",
+    "sourceLanguage": "en",
+    "targetLanguage": "zh",
+    "files": {
+      "lexicalShortlist": {
+        "path": "models/en-zh/llmaat_finetune10M_qe8_f2_ByQcSxGXQRqGi-UTxYE43g/exported/lex.50.50.enzh.s2t.bin.gz"
+      },
+      "model": {
+        "path": "models/en-zh/llmaat_finetune10M_qe8_f2_ByQcSxGXQRqGi-UTxYE43g/exported/model.enzh.intgemm.alphas.bin.gz",
+        "uncompressedSize": 43849787,
+        "uncompressedHash": "4e5accc141373565ddc8fa1565bceaa8d0c3482a82cab8131c719ebcc6c2157c"
+      },
+      "srcVocab": {
+        "path": "models/en-zh/llmaat_finetune10M_qe8_f2_ByQcSxGXQRqGi-UTxYE43g/exported/srcvocab.enzh.spm.gz"
+      },
+      "trgVocab": {
+        "path": "models/en-zh/llmaat_finetune10M_qe8_f2_ByQcSxGXQRqGi-UTxYE43g/exported/trgvocab.enzh.spm.gz"
+      }
+    },
+    "modelStatistics": {
+      "parameters": 43536965,
+      "encoderParameters": 22934820,
+      "decoderParameters": 20602145
+    },
+    "metrics": {
+      "flores200-plus": {
+        "chrf": 33.0941,
+        "chrfpp": 24.8848,
+        "comet22": 0.8628,
+        "llm-ref": 4.278,
+        "metricx24-qe": 1.7076,
+        "metricx24": 1.978,
+        "spbleu": 34.3413
+      }
+    }
+  },
+  "zh-en": {
+    "architecture": "base-memory",
+    "releaseStatus": "Release Android",
+    "sourceLanguage": "zh",
+    "targetLanguage": "en",
+    "files": {
+      "lexicalShortlist": {
+        "path": "models/zh-en/cjk_retrain_base-memory_cNY_yaJCStGwnTeXgW8A5w/exported/lex.50.50.zhen.s2t.bin.gz"
+      },
+      "model": {
+        "path": "models/zh-en/cjk_retrain_base-memory_cNY_yaJCStGwnTeXgW8A5w/exported/model.zhen.intgemm.alphas.bin.gz",
+        "uncompressedSize": 43977787,
+        "uncompressedHash": "5cd149601802fc8a18124a1c1306144dbbedc058630c4ddb2d53aa76fa9c7c06"
+      },
+      "vocab": {
+        "path": "models/zh-en/cjk_retrain_base-memory_cNY_yaJCStGwnTeXgW8A5w/exported/vocab.zhen.spm.gz"
+      }
+    },
+    "modelStatistics": {
+      "parameters": 43568966,
+      "encoderParameters": 10646820,
+      "decoderParameters": 8346144
+    },
+    "metrics": {
+      "flores200-plus": {
+        "chrf": 57.3879,
+        "chrfpp": 54.646,
+        "comet22": 0.8596,
+        "llm-ref": 4.416,
+        "metricx24-qe": 1.4902,
+        "metricx24": 1.8566,
+        "spbleu": 31.0608
+      }
+    }
+  }
+}

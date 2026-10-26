@@ -19,7 +19,7 @@ try {
       saveHistory: true, theme: 'light', maxHistory: 20, autoHideSeconds: 0, ocrProviders: [], activeOcrProviderId: null,
     };
     const callbacks = new Map(), listeners = new Map(), ocrKeys = new Map(), translationKeys = new Map(); let callbackId = 0;
-    const scope = (provider) => provider.kind === 'system' ? `${provider.id}:system` : `${provider.id}:${provider.kind}:${new URL(provider.baseUrl).origin}`;
+    const scope = (provider) => ['system', 'offline'].includes(provider.kind) ? `${provider.id}:${provider.kind}` : `${provider.id}:${provider.kind}:${new URL(provider.baseUrl).origin}`;
     translationKeys.set(scope(state.providers[0]), 'qa-original-translation-key');
     const fixture = window.__qa = { permissionState: { platform: 'macos', supported: true, identity: 'application-process', runningBundledApp: true, bundleIdentifier: 'io.github.qa.echolingo', processId: 1, accessibilityGranted: false, screenCaptureGranted: false }, permissionReads: 0, permissionRequests: [], permissionSettings: [], holdTranslation: false, releaseTranslation: () => {}, translationError: null, settings: state, saveCalls: 0, keyCalls: 0, ocrKeyCalls: 0, ocrTestCalls: 0, ocrDeleteCalls: 0, credentialWrites: [], settingsWrites: [], hideCalls: 0, layoutCalls: [], showCalls: [], translationRequests: [], dragCalls: 0, holdSave: false, failSave: false, releaseSave: () => {}, emit: (name, payload) => listeners.get(name)?.({ event: name, payload, id: 1 }) };
     Object.assign(fixture, { nextTranslationId: 0, cancellationRequests: [], holdBegin: false, holdBeginBeforeAllocate: false, beginAttempts: [], releaseBegin: () => {}, presentation: { epoch: 0, presented: true }, holdFit: false, fitWaits: 0, releaseFit: () => {}, showPopupAttempts: [], permissionAtShow: [], failPermissionSettings: false, holdPermissionSettings: false, releasePermissionSettings: () => {} });
@@ -850,6 +850,25 @@ try {
   await page.locator('#confirm-accept').click();
   await page.waitForFunction(() => !window.__qa.settings.providers.some(p => p.kind === 'system'));
   assert.deepEqual(await page.evaluate(() => ({ writes: window.__qa.keyCalls, deletes: window.__qa.keyDeleteCalls })), systemKeysBefore);
+  // Offline service edits/removal must not query, write or delete credentials.
+  const offlineKeysBefore = await page.evaluate(() => ({ writes: window.__qa.keyCalls, deletes: window.__qa.keyDeleteCalls, reads: window.__qa.credentialReadCalls }));
+  await page.locator('#add-provider').click();
+  await page.locator('#provider-preset').selectOption('offline');
+  assert.equal(await page.locator('#provider-url-field').isHidden(), true);
+  assert.equal(await page.locator('#provider-key-field').isHidden(), true);
+  assert.equal(await page.locator('#provider-model-field').isHidden(), true);
+  await page.locator('#save-provider').click();
+  await page.locator('#provider-dialog').waitFor({ state: 'hidden' });
+  const offlineRow = page.locator('.provider-row').filter({ hasText: '本机离线翻译' });
+  assert.equal(await offlineRow.getByText('内置中英模型 · 离线使用 · 无需配置').isVisible(), true);
+  await offlineRow.getByRole('button', { name: '编辑', exact: true }).click();
+  assert.equal(await page.locator('#provider-preset').inputValue(), 'offline');
+  await page.locator('#save-provider').click();
+  await page.locator('#provider-dialog').waitFor({ state: 'hidden' });
+  await offlineRow.getByRole('button', { name: '删除 本机离线翻译', exact: true }).click();
+  await page.locator('#confirm-accept').click();
+  await page.waitForFunction(() => !window.__qa.settings.providers.some(p => p.kind === 'offline'));
+  assert.deepEqual(await page.evaluate(() => ({ writes: window.__qa.keyCalls, deletes: window.__qa.keyDeleteCalls, reads: window.__qa.credentialReadCalls })), offlineKeysBefore);
   await page.locator('.app-shell').screenshot({ path: 'test-results/settings-main.png' });
   await goView('translate');
   await page.waitForFunction(() => window.__qa.layoutCalls.at(-1)?.presentation === 'popup');

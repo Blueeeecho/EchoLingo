@@ -1,6 +1,6 @@
 import type { Provider, ProviderKind } from './types';
 
-export type ProviderPresetId = 'system' | 'openai' | 'minimax' | 'deepseek' | 'zhipu' | 'siliconflow' | 'qwen' | 'deepl' | 'libretranslate';
+export type ProviderPresetId = 'system' | 'offline' | 'openai' | 'minimax' | 'deepseek' | 'zhipu' | 'siliconflow' | 'qwen' | 'deepl' | 'libretranslate';
 export type QwenRegion = 'beijing' | 'singapore';
 export interface ProviderPreset {
   id: ProviderPresetId; label: string; name: string; kind: ProviderKind; baseUrl: string; exampleModel: string; help: string; docs: string;
@@ -9,6 +9,7 @@ export interface ProviderPreset {
 // Model IDs are editable examples, not a statement that a model is newest or available to every account.
 export const PROVIDER_PRESETS: readonly ProviderPreset[] = [
   { id: 'system', label: '系统翻译 · 无需 API Key', name: '系统翻译', kind: 'system', baseUrl: '', exampleModel: '', help: '使用当前系统公开提供的翻译能力，无需 API Key。macOS 26 及以上支持；首次可能需要在设置中准备语言包。其他系统的实际可用性以检查结果为准。', docs: 'https://developer.apple.com/documentation/translation/translationsession/init(installedsource:target:)' },
+  { id: 'offline', label: '本机离线翻译 · 中英互译', name: '本机离线翻译', kind: 'offline', baseUrl: '', exampleModel: '', help: '使用 Windows 安装包内的 Mozilla 中英模型，无需 API Key 或下载语言包。支持简体中文与英语互译；其他语言请选择系统翻译或 API 服务。', docs: 'https://github.com/mozilla/translations' },
   { id: 'openai', label: 'OpenAI / 自定义兼容接口', name: 'OpenAI 兼容服务', kind: 'openai', baseUrl: 'https://api.openai.com/v1', exampleModel: 'gpt-4o-mini', help: 'OpenAI Chat Completions 兼容协议。可改为你自己的兼容服务地址与模型。', docs: 'https://developers.openai.com/api/reference/overview' },
   { id: 'minimax', label: 'MiniMax · 中国站', name: 'MiniMax', kind: 'openai', baseUrl: 'https://api.minimax.cn/v1', exampleModel: 'MiniMax-M3.1-Flash', help: 'MiniMax 中国站接口，请使用对应地域和账号的 Key；订阅 Key 使用套餐额度。模型可修改，M3.1 Flash 默认深度思考可能增加耗时。', docs: 'https://platform.minimax.cn/docs/api-reference/text-openai-api' },
   { id: 'deepseek', label: 'DeepSeek', name: 'DeepSeek', kind: 'openai', baseUrl: 'https://api.deepseek.com', exampleModel: 'deepseek-flash', help: 'DeepSeek 官方 OpenAI 兼容接口，填写 DeepSeek 平台 API Key。模型名称可修改。', docs: 'https://api-docs.deepseek.com/' },
@@ -19,7 +20,7 @@ export const PROVIDER_PRESETS: readonly ProviderPreset[] = [
   { id: 'libretranslate', label: 'LibreTranslate · 自托管', name: 'LibreTranslate', kind: 'libretranslate', baseUrl: 'http://127.0.0.1:5000', exampleModel: '', help: '填写自己的 LibreTranslate 实例地址。示例为本机服务；远程服务需 HTTPS，密钥按实例要求填写。', docs: 'https://docs.libretranslate.com/guides/api_usage/' },
 ];
 export function inferProviderPreset(provider: Provider): ProviderPresetId {
-  if (provider.kind === 'system') return 'system';
+  if (provider.kind === 'system' || provider.kind === 'offline') return provider.kind;
   if (provider.kind === 'deepl' || provider.kind === 'libretranslate') return provider.kind;
   let host = ''; try { host = new URL(provider.baseUrl).hostname; } catch { return 'openai'; }
   if (host === 'api.minimax.cn') return 'minimax';

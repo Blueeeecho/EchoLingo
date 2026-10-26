@@ -28,6 +28,16 @@ describe('system translation configuration', () => {
   });
 });
 
+describe('bundled offline translation configuration', () => {
+  const offline: Provider = { id: 'offline-translation', name: '本机离线翻译', kind: 'offline', baseUrl: '', model: '', prompt: '', enabled: true, hasKey: false };
+  it('accepts an offline provider while refusing network or credential fields', () => {
+    expect(validateProvider(offline)).toBeNull();
+    for (const fields of [{ baseUrl: 'https://example.com' }, { model: 'cloud' }, { prompt: 'send' }, { hasKey: true }]) expect(validateProvider({ ...offline, ...fields })).toMatch(/不使用 API/);
+    expect(inferProviderPreset(offline)).toBe('offline');
+    expect(PROVIDER_PRESETS.find(preset => preset.id === 'offline')).toMatchObject({ baseUrl: '', exampleModel: '' });
+  });
+});
+
 describe('native OCR credential bundles', () => {
   it('requires both Baidu credential components whenever either is supplied', () => {
     expect(buildOcrCredential('baidu', { apiKey: 'qa-api' }, false).error).toBeTruthy();

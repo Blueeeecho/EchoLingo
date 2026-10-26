@@ -1,0 +1,18 @@
+{
+  "formatVersion": 1,
+  "mozillaCommit": "69455acaecbe8650cdba988dbcf7c10ca20e7c48",
+  "files": [
+    {"sourceUrl":"https://raw.githubusercontent.com/nlohmann/json/55f93686c01528224f448c19128836e7df245f72/single_include/nlohmann/json.hpp","destination":"nlohmann-json/json.hpp","sha256":"aaf127c04cb31c406e5b04a63f1ae89369fccde6d8fa7cdda1ed4f32dfc5de63"},
+    {"sourceUrl":"https://raw.githubusercontent.com/nlohmann/json/55f93686c01528224f448c19128836e7df245f72/LICENSE.MIT","destination":"nlohmann-json/LICENSE.MIT","sha256":"46a65cffd1ea955132d95a8dd921640714a8d6b537d2e4e482d31145ae95b603"}
+  ],
+  "archives": [
+    {"repository":"mozilla/translations","commit":"69455acaecbe8650cdba988dbcf7c10ca20e7c48","destination":"translations-69455acaecbe8650cdba988dbcf7c10ca20e7c48","sha256":"d55b241742191d634622dbaf21d6af50d911bb5bf46fc781a32080f20823f2a4"},
+    {"repository":"browsermt/ssplit-cpp","commit":"a311f9865ade34db1e8e080e6cc146f55dafb067","destination":"translations-69455acaecbe8650cdba988dbcf7c10ca20e7c48/inference/3rd_party/ssplit-cpp","sha256":"937ded1229ee69f340772056a4ff6daaede5b899f12c4c7b091c40f430c56fd8"},
+    {"repository":"browsermt/sentencepiece","commit":"ae41b7740d7006596bb9257e83340b2620db9d00","destination":"translations-69455acaecbe8650cdba988dbcf7c10ca20e7c48/inference/marian-fork/src/3rd_party/sentencepiece","sha256":"4d2148ae7e240cd113586004d2cf0102f7ab1bae363b91b2934ee83c5ae3dbbe"},
+    {"repository":"kpu/intgemm","commit":"f7401513da71758dacce52fed1c7855549abee59","destination":"translations-69455acaecbe8650cdba988dbcf7c10ca20e7c48/inference/marian-fork/src/3rd_party/intgemm","sha256":"8e827c445dbb1b117a9667616bac23b3c945e626da0a3466786cfd058ed2f41d"},
+    {"repository":"google/ruy","commit":"2d950b3bfa7ebfbe7a97ecb44b1cc4da5ac1d6f0","destination":"translations-69455acaecbe8650cdba988dbcf7c10ca20e7c48/inference/marian-fork/src/3rd_party/ruy","sha256":"6593ec4323ae69e542bde97711d5680069cb802301512063289b1103c5374244"},
+    {"repository":"pytorch/cpuinfo","commit":"5916273f79a21551890fd3d56fc5375a78d1598d","destination":"translations-69455acaecbe8650cdba988dbcf7c10ca20e7c48/inference/marian-fork/src/3rd_party/ruy/third_party/cpuinfo","sha256":"f3c16d5d393d6d1fa6b6ed8621dd0a535552df9bc88cbba739375dde38a93142"},
+    {"repository":"browsermt/simd_utils","commit":"d0793d86aea9036a5bc77b9ca7791dff024168ca","destination":"translations-69455acaecbe8650cdba988dbcf7c10ca20e7c48/inference/marian-fork/src/3rd_party/simd_utils","sha256":"829325e164ee2be5dffed51ccf8cc4b776edbb4269d174e79f6708fd89fca59f"},
+    {"repository":"PCRE2Project/pcre2","commit":"b2bd4254b379b9d7dc9a3dda060a7e27009ccdff","destination":"pcre2-10.46","sha256":"a5076fb46eaa1bae6d6596de73269ed0fb84204d40846cc5c7fdc27374912b70"}
+  ]
+}

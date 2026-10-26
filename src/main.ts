@@ -9,7 +9,7 @@ import { inferProviderPreset, PROVIDER_PRESETS, qwenBaseUrl, qwenSettingsFromUrl
 import type { ProviderPresetId, QwenRegion } from './provider-presets';
 import { invoke, isTauri } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
-import { defaultSettings, errorMessage, userFacingError, filterHistory, LANGUAGES, languageName, MAX_TEXT_LENGTH, normalizeTimestamp, SHORTCUT_LABELS, validateProvider } from './model';
+import { defaultSettings, errorMessage, userFacingError, filterHistory, LANGUAGES, languageName, MAX_TEXT_LENGTH, normalizeTimestamp, SHORTCUT_LABELS, validateProvider, isLocalProvider } from './model';
 import type { Action, CredentialState, HistoryEntry, PermissionKind, Provider, ProviderKind, Settings, ShortcutAction, SourceTextEvent, SystemTranslationStatus, TranslationProgress, TranslationResult } from './types';
 
 const desktop = isTauri();
@@ -534,7 +534,7 @@ function renderHistory(): void {
     item.append(reopen); list.append(item);
   }
 }
-function providerKindLabel(kind: ProviderKind): string { return { system: '系统翻译', openai: 'OpenAI 兼容', deepl: 'DeepL', libretranslate: 'LibreTranslate' }[kind]; }
+function providerKindLabel(kind: ProviderKind): string { return { offline: '本机离线翻译', system: '系统翻译', openai: 'OpenAI 兼容', deepl: 'DeepL', libretranslate: 'LibreTranslate' }[kind]; }
 function renderProviders(): void {
   const list = $('#provider-list'); list.replaceChildren();
   $<HTMLButtonElement>('#add-provider').disabled = !settingsReady || settings.providers.length >= 12;
@@ -548,9 +548,9 @@ function renderProviders(): void {
     row.append(node('span', 'provider-avatar', provider.name.slice(0, 1).toUpperCase()));
     const info = node('div', 'provider-info');
     const title = node('div', 'provider-title', provider.name);
-    if (provider.kind === 'system') title.append(node('span', 'provider-key-badge', '· 无需 API Key'));
+    if (isLocalProvider(provider.kind)) title.append(node('span', 'provider-key-badge', '· 无需 API Key'));
     else title.append(node('span', 'provider-key-badge', `· ${credentialStatusLabel(provider)}`));
-    info.append(title, node('span', 'provider-details', provider.kind === 'system' ? '本机语言包 · 首次使用请检查下方准备状态' : `${providerKindLabel(provider.kind)}${provider.model ? ` · ${provider.model}` : ''} · ${provider.baseUrl}`));
+    info.append(title, node('span', 'provider-details', provider.kind === 'offline' ? '内置中英模型 · 离线使用 · 无需配置' : provider.kind === 'system' ? '本机语言包 · 首次使用请检查下方准备状态' : `${providerKindLabel(provider.kind)}${provider.model ? ` · ${provider.model}` : ''} · ${provider.baseUrl}`));
     const controls = node('div', 'provider-controls');
     const enabled = node('input', 'switch'); enabled.type = 'checkbox'; enabled.checked = provider.enabled;
     enabled.setAttribute('aria-label', `启用 ${provider.name}`);
@@ -558,13 +558,13 @@ function renderProviders(): void {
       const value = enabled.checked; enabled.disabled = true;
       run(async () => { try { await updateSettings((next) => { const found = next.providers.find((item) => item.id === provider.id); if (found) found.enabled = value; }); } finally { renderProviders(); } });
     });
-    const testLabel = provider.kind === 'system' ? '测试翻译' : '测试连接';
+    const testLabel = isLocalProvider(provider.kind) ? '测试翻译' : '测试连接';
     const test = node('button', 'text-button', testLabel);
-    test.title = provider.kind === 'system' ? '使用已准备的本机语言包翻译 Hello，不会自动下载' : '发送 Hello 测试服务，可能消耗少量 API 额度';
+    test.title = provider.kind === 'offline' ? '使用内置模型离线翻译 Hello' : provider.kind === 'system' ? '使用已准备的本机语言包翻译 Hello，不会自动下载' : '发送 Hello 测试服务，可能消耗少量 API 额度';
     test.addEventListener('click', () => run(async () => {
       if (!requireDesktop()) return;
       test.disabled = true; test.textContent = '测试中…';
-      toast(provider.kind === 'system' ? '正在使用本机语言包翻译 Hello。' : '正在发送 Hello 测试连接，可能消耗少量 API 额度。');
+      toast(provider.kind === 'offline' ? '正在使用内置模型离线翻译 Hello。' : provider.kind === 'system' ? '正在使用本机语言包翻译 Hello。' : '正在发送 Hello 测试连接，可能消耗少量 API 额度。');
       try {
         const message = await invoke<string>('test_provider', { providerId: provider.id });
         toast(message || '服务连接成功。');
@@ -576,8 +576,8 @@ function renderProviders(): void {
     }));
     const edit = node('button', 'text-button', '编辑'); edit.addEventListener('click', () => openProviderDialog(provider));
     const remove = actionButton(`删除 ${provider.name}`, 'trash', () => run(async () => {
-      if (!await confirmAction('删除翻译服务？', provider.kind === 'system' ? `将移除“${provider.name}”配置。已安装的系统语言包会保留。` : `将移除“${provider.name}”及其已保存的 API 密钥。`)) return;
-      if (desktop && provider.kind !== 'system') await invoke('delete_api_key', { providerId: provider.id });
+      if (!await confirmAction('删除翻译服务？', isLocalProvider(provider.kind) ? `将移除“${provider.name}”配置。已安装的本机语言资源会保留。` : `将移除“${provider.name}”及其已保存的 API 密钥。`)) return;
+      if (desktop && !isLocalProvider(provider.kind)) await invoke('delete_api_key', { providerId: provider.id });
       await updateSettings((next) => { next.providers = next.providers.filter((item) => item.id !== provider.id); });
       toast('翻译服务已删除。');
     }));
@@ -672,7 +672,7 @@ function renderSettings(): void {
   $<HTMLInputElement>('#max-history').value = String(settings.maxHistory);
 }
 function updateProviderCredentialState(clearOnScopeChange = true): void {
-  if ($<HTMLSelectElement>('#provider-kind').value === 'system') {
+  if (isLocalProvider($<HTMLSelectElement>('#provider-kind').value)) {
     $<HTMLInputElement>('#provider-key').value = '';
     providerLastInputScope = null;
     $('#remove-provider-key').hidden = true;
@@ -708,7 +708,7 @@ function renderProviderPreset(applyValues = false): void {
   if (!name.value.trim() || PROVIDER_PRESETS.some((item) => item.name === name.value)) name.value = preset.name;
   $<HTMLInputElement>('#provider-url').value = qwen ? qwenBaseUrl($<HTMLSelectElement>('#provider-qwen-region').value as QwenRegion, $<HTMLInputElement>('#provider-qwen-workspace').value) : preset.baseUrl;
   $<HTMLInputElement>('#provider-model').value = preset.exampleModel;
-  if (preset.kind === 'system') $<HTMLTextAreaElement>('#provider-prompt').value = '';
+  if (isLocalProvider(preset.kind)) $<HTMLTextAreaElement>('#provider-prompt').value = '';
   $<HTMLInputElement>('#provider-key').value = '';
   providerKindChanged(); updateProviderCredentialState();
 }
@@ -721,14 +721,14 @@ function updateQwenBaseUrl(): void {
 function providerKindChanged(useDefaults = false): void {
   const kind = $<HTMLSelectElement>('#provider-kind').value as ProviderKind;
   const openai = kind === 'openai';
-  const system = kind === 'system';
+  const system = isLocalProvider(kind);
   $('#provider-url-field').hidden = system;
   $('#provider-key-field').hidden = system;
   $('#provider-model-field').hidden = !openai;
   $('#provider-prompt-field').hidden = !openai;
   $<HTMLInputElement>('#provider-model').required = openai;
   const url = $<HTMLInputElement>('#provider-url');
-  const defaults = { system: '', openai: 'https://api.openai.com/v1', deepl: 'https://api-free.deepl.com/v2', libretranslate: 'http://127.0.0.1:5000' };
+  const defaults = { offline: '', system: '', openai: 'https://api.openai.com/v1', deepl: 'https://api-free.deepl.com/v2', libretranslate: 'http://127.0.0.1:5000' };
   url.required = !system;
   url.placeholder = defaults[kind];
   if (useDefaults) url.value = defaults[kind];
@@ -736,6 +736,7 @@ function providerKindChanged(useDefaults = false): void {
     url.value = ''; $<HTMLInputElement>('#provider-model').value = ''; $<HTMLTextAreaElement>('#provider-prompt').value = ''; $<HTMLInputElement>('#provider-key').value = '';
   }
   $('#provider-url-help').textContent = {
+    offline: '内置离线翻译无需 API 地址。',
     system: '系统翻译无需 API 地址。',
     openai: '填写 API 基础地址，无需包含 /chat/completions。DeepSeek、Ollama 等请填写对应地址。',
     deepl: '免费账户通常使用 api-free.deepl.com，付费账户使用 api.deepl.com。无需包含 /v2/translate。',
@@ -793,7 +794,7 @@ function openProviderDialog(provider?: Provider): void {
   editingProviderId = provider?.id ?? null;
   providerScopeAtOpen = provider ? credentialScope(provider.kind, provider.baseUrl) : null;
   providerCredentialStateAtOpen = credentialStateOf(provider);
-  providerHadKeyAtOpen = provider?.kind !== 'system' && providerCredentialStateAtOpen === 'ready'; providerLastInputScope = providerScopeAtOpen;
+  providerHadKeyAtOpen = !isLocalProvider(provider?.kind ?? '') && providerCredentialStateAtOpen === 'ready'; providerLastInputScope = providerScopeAtOpen;
   $<HTMLFormElement>('#provider-form').reset();
   $<HTMLSelectElement>('#provider-preset').value = provider ? inferProviderPreset(provider) : 'openai';
   const qwenSettings = qwenSettingsFromUrl(provider?.baseUrl ?? '');
@@ -835,10 +836,10 @@ async function saveProvider(event: SubmitEvent): Promise<void> {
     model: $<HTMLInputElement>('#provider-model').value.trim(),
     enabled: $<HTMLInputElement>('#provider-enabled').checked,
     prompt: $<HTMLTextAreaElement>('#provider-prompt').value.trim(),
-    hasKey: $<HTMLSelectElement>('#provider-kind').value !== 'system' && providerHadKeyAtOpen && credentialScope($<HTMLSelectElement>('#provider-kind').value, $<HTMLInputElement>('#provider-url').value) === providerScopeAtOpen,
+    hasKey: !isLocalProvider($<HTMLSelectElement>('#provider-kind').value) && providerHadKeyAtOpen && credentialScope($<HTMLSelectElement>('#provider-kind').value, $<HTMLInputElement>('#provider-url').value) === providerScopeAtOpen,
   };
   let validation = validateProvider(provider);
-  if (provider.kind === 'system' && settings.providers.some((item) => item.kind === 'system' && item.id !== provider.id)) validation = '已存在系统翻译服务。请编辑或启用已有服务。';
+  if (isLocalProvider(provider.kind) && settings.providers.some((item) => item.kind === provider.kind && item.id !== provider.id)) validation = '已存在此本机翻译服务。请编辑或启用已有服务。';
   if ($<HTMLSelectElement>('#provider-preset').value === 'qwen') {
     try { qwenBaseUrl($<HTMLSelectElement>('#provider-qwen-region').value as QwenRegion, $<HTMLInputElement>('#provider-qwen-workspace').value); }
     catch (error) { validation = errorMessage(error); }
@@ -854,7 +855,7 @@ async function saveProvider(event: SubmitEvent): Promise<void> {
       if (index === -1) next.providers.push(provider); else next.providers[index] = provider;
     });
     editingProviderId = provider.id;
-    if (key && provider.kind !== 'system') {
+    if (key && !isLocalProvider(provider.kind)) {
       try { await invoke('set_api_key', { providerId: provider.id, key }); }
       catch (error) { throw new Error(`服务已保存，但密钥未能存入系统凭据库：${errorMessage(error)}`); }
     }
@@ -1106,7 +1107,7 @@ providerDialog.addEventListener('click', (event) => { if (event.target === provi
 $<HTMLFormElement>('#provider-form').addEventListener('submit', (event) => { void saveProvider(event).catch(reportError); });
 $('#remove-provider-key').addEventListener('click', () => run(async () => {
   if (!editingProviderId || providerSaving || !requireDesktop()) return;
-  if ($<HTMLSelectElement>('#provider-kind').value === 'system') return;
+  if (isLocalProvider($<HTMLSelectElement>('#provider-kind').value)) return;
   const providerId = editingProviderId; setProviderSaving(true);
   try {
     await invoke('delete_api_key', { providerId });

@@ -6,6 +6,7 @@ mod macos_startup;
 mod model;
 mod ocr;
 mod ocr_native;
+mod offline_translation;
 mod platform;
 #[cfg(test)]
 mod storage_tests;
@@ -38,6 +39,7 @@ struct AppState {
     translation_requests: translation_requests::TranslationRequests,
     data_dir: PathBuf,
     client: reqwest::Client,
+    offline: offline_translation::OfflineTranslation,
     startup_warnings: Mutex<Vec<String>>,
     outside_thread: Mutex<Option<std::thread::Thread>>,
     pending_settings: Mutex<Option<u64>>,
@@ -273,7 +275,7 @@ fn load_key(
     cache: &credential_cache::CredentialCache<String>,
     p: &Provider,
 ) -> Result<String, String> {
-    if p.kind == "system" {
+    if local_translation_provider(&p.kind) {
         return Ok(String::new());
     }
     cached_credential(
@@ -362,7 +364,7 @@ async fn load_translation_key_async(
     provider: Provider,
     request_id: Option<u64>,
 ) -> Result<String, String> {
-    if provider.kind == "system" {
+    if local_translation_provider(&provider.kind) {
         return Ok(String::new());
     }
     tauri::async_runtime::spawn_blocking(move || {
@@ -512,7 +514,7 @@ fn settings_snapshot(
         .iter()
         .zip(value["providers"].as_array_mut().ok_or("设置格式无效")?)
     {
-        let (has_key, status) = if provider.kind == "system" {
+        let (has_key, status) = if local_translation_provider(&provider.kind) {
             (false, "missing")
         } else {
             credential_display_state(cache, &translation_credential_key(provider)?)
@@ -599,7 +601,7 @@ fn save_settings(
 fn changed_credential_accounts(old: &Settings, next: &Settings) -> Vec<String> {
     let mut changed = std::collections::HashSet::new();
     for provider in &old.providers {
-        if provider.kind == "system" {
+        if local_translation_provider(&provider.kind) {
             continue;
         }
         if !next.providers.iter().any(|candidate| {
@@ -660,8 +662,8 @@ fn set_api_key(state: State<AppState>, provider_id: String, key: String) -> Resu
         .find(|p| p.id == provider_id)
         .cloned()
         .ok_or("请先保存服务配置，再保存密钥")?;
-    if provider.kind == "system" {
-        return Err("系统翻译无需 API 密钥".into());
+    if local_translation_provider(&provider.kind) {
+        return Err("本机翻译无需 API 密钥".into());
     }
     if key.is_empty() || key.len() > 8192 || key.contains(['\r', '\n']) {
         return Err("API 密钥为空、过长或包含换行".into());
@@ -678,6 +680,13 @@ fn set_api_key(state: State<AppState>, provider_id: String, key: String) -> Resu
 }
 #[tauri::command]
 fn delete_api_key(state: State<AppState>, provider_id: String) -> Result<(), String> {
+    if locked(&state.settings)?
+        .providers
+        .iter()
+        .any(|p| p.id == provider_id && local_translation_provider(&p.kind))
+    {
+        return Err("本机翻译不使用 API 密钥".into());
+    }
     delete_stored_key(&state.credentials, &provider_id)
 }
 fn delete_stored_key(
@@ -775,31 +784,38 @@ async fn translate(
                         load_translation_key_async(app.clone(), p.clone(), Some(request_id)).await;
                     let sequence = std::sync::atomic::AtomicU64::new(0);
                     let started = std::time::Instant::now();
-                    let result = translation::translate_one_streaming(
-                        &state.client,
-                        p,
-                        key,
-                        &text,
-                        &resolved_source,
-                        &resolved_target,
-                        |partial| {
-                            publish_translation_progress(
-                                &app,
-                                &state,
-                                request_id,
-                                sequence.fetch_add(1, Ordering::SeqCst) + 1,
-                                false,
-                                TranslationResult {
-                                    provider_id: p.id.clone(),
-                                    provider_name: p.name.clone(),
-                                    text: partial.to_owned(),
-                                    error: None,
-                                    elapsed_ms: started.elapsed().as_millis() as u64,
-                                },
-                            );
-                        },
-                    )
-                    .await;
+                    let result = if p.kind == "offline" {
+                        state
+                            .offline
+                            .translate_result(p, text, resolved_source, resolved_target)
+                            .await
+                    } else {
+                        translation::translate_one_streaming(
+                            &state.client,
+                            p,
+                            key,
+                            &text,
+                            &resolved_source,
+                            &resolved_target,
+                            |partial| {
+                                publish_translation_progress(
+                                    &app,
+                                    &state,
+                                    request_id,
+                                    sequence.fetch_add(1, Ordering::SeqCst) + 1,
+                                    false,
+                                    TranslationResult {
+                                        provider_id: p.id.clone(),
+                                        provider_name: p.name.clone(),
+                                        text: partial.to_owned(),
+                                        error: None,
+                                        elapsed_ms: started.elapsed().as_millis() as u64,
+                                    },
+                                );
+                            },
+                        )
+                        .await
+                    };
                     publish_translation_progress(
                         &app,
                         &state,
@@ -924,7 +940,14 @@ async fn test_provider(
         .cloned()
         .ok_or("服务不存在")?;
     let key = load_translation_key_async(app, p.clone(), None).await;
-    let r = translation::translate_one(&state.client, &p, key, "Hello", "en", "zh-Hans").await;
+    let r = if p.kind == "offline" {
+        state
+            .offline
+            .translate_result(&p, "Hello", "en", "zh-Hans")
+            .await
+    } else {
+        translation::translate_one(&state.client, &p, key, "Hello", "en", "zh-Hans").await
+    };
     if let Some(e) = r.error {
         Err(e)
     } else {
@@ -1754,6 +1777,7 @@ fn main() {
                 Err(_) => Settings::default(),
             };
             add_system_translation_option(&mut settings);
+            add_offline_translation_option(&mut settings);
             migrate_language_direction(&mut settings);
             migrate_shortcut_defaults(&mut settings);
             let mut history: Vec<HistoryEntry> = fs::read(data_dir.join("history.json"))
@@ -1779,6 +1803,9 @@ fn main() {
                 translation_requests: translation_requests::TranslationRequests::default(),
                 data_dir,
                 client,
+                offline: offline_translation::OfflineTranslation::new(
+                    app.path().resource_dir()?.join("offline-translation"),
+                ),
                 startup_warnings: Mutex::new(warnings),
                 outside_thread: Mutex::new(None),
                 pending_settings: Mutex::new(None),
@@ -1888,11 +1915,21 @@ mod tests {
     }
     #[test]
     fn built_in_translation_never_reads_an_api_credential() {
-        let p = system_translation_provider(true);
-        assert_eq!(
-            load_key(&credential_cache::CredentialCache::default(), &p).unwrap(),
-            ""
-        );
+        for p in [
+            system_translation_provider(true),
+            offline_translation_provider(true),
+        ] {
+            assert_eq!(
+                load_key(&credential_cache::CredentialCache::default(), &p).unwrap(),
+                ""
+            );
+            let mut settings = Settings::default();
+            settings.providers = vec![p];
+            let snapshot =
+                settings_snapshot(&settings, &credential_cache::CredentialCache::default())
+                    .unwrap();
+            assert_eq!(snapshot["providers"][0]["hasKey"], false);
+        }
     }
 
     #[test]
@@ -2383,6 +2420,9 @@ mod tests {
             translation_requests: translation_requests::TranslationRequests::default(),
             data_dir: directory.clone(),
             client: reqwest::Client::new(),
+            offline: offline_translation::OfflineTranslation::new(
+                directory.join("offline-translation"),
+            ),
             startup_warnings: Mutex::new(vec![]),
             outside_thread: Mutex::new(None),
             pending_settings: Mutex::new(None),

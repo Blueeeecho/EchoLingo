@@ -1,0 +1,3 @@
+
+# Preserve upstream license bytes, including original trailing whitespace.
+resources/offline-translation/licenses/** -whitespace

@@ -30,10 +30,11 @@ export function errorMessage(error: unknown): string {
 export function userFacingError(error: unknown): string {
   return errorMessage(error).replace(/^(?:SYSTEM_TRANSLATION_[A-Z_]+|NATIVE_[A-Z_]+|CAPTURE(?:_[A-Z_]+)?):\s*/, '');
 }
+export function isLocalProvider(kind: string): boolean { return kind === 'system' || kind === 'offline'; }
 export function validateProvider(provider: Provider): string | null {
   if (!provider.name.trim()) return '请输入服务名称。';
-  if (provider.kind === 'system') {
-    if (provider.baseUrl || provider.model || provider.prompt || provider.hasKey) return '系统翻译不使用 API 地址、模型、提示词或密钥。';
+  if (isLocalProvider(provider.kind)) {
+    if (provider.baseUrl || provider.model || provider.prompt || provider.hasKey) return '本机翻译不使用 API 地址、模型、提示词或密钥。';
     return null;
   }
   let url: URL;

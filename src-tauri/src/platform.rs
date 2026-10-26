@@ -435,7 +435,7 @@ pub fn system_translation_status(source: &str, target: &str) -> Result<Value, St
         Ok(json!({
             "platform":std::env::consts::OS,"supported":false,"ready":false,
             "requiresSetup":false,"status":"unsupported",
-            "message":"此系统暂无可供 EchoLingo 调用的内置文本翻译接口，请在翻译服务中配置你选择的 API。"
+            "message":"此系统暂无通用系统翻译接口。Windows 安装包可使用“本机离线翻译”进行中英互译，也可配置自己的 API。"
         }))
     }
 }

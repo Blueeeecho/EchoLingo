@@ -34,6 +34,23 @@ pub fn system_translation_provider(enabled: bool) -> Provider {
     }
 }
 
+pub fn offline_translation_provider(enabled: bool) -> Provider {
+    Provider {
+        id: "offline-translation".into(),
+        name: "本机离线翻译".into(),
+        kind: "offline".into(),
+        base_url: String::new(),
+        model: String::new(),
+        enabled,
+        prompt: String::new(),
+        has_key: false,
+    }
+}
+
+pub fn local_translation_provider(kind: &str) -> bool {
+    matches!(kind, "system" | "offline")
+}
+
 fn default_providers() -> Vec<Provider> {
     let api = Provider {
         id: "default-openai".into(),
@@ -47,8 +64,27 @@ fn default_providers() -> Vec<Provider> {
     };
     if cfg!(target_os = "macos") {
         vec![system_translation_provider(true), api]
+    } else if cfg!(target_os = "windows") {
+        vec![offline_translation_provider(true), api]
     } else {
         vec![api]
+    }
+}
+
+/// Preserve enabled APIs and a disabled local model. A legacy installation
+/// without any enabled service gets the new offline default.
+pub fn add_offline_translation_option(settings: &mut Settings) {
+    if cfg!(target_os = "windows")
+        && settings.providers.len() < 12
+        && !settings
+            .providers
+            .iter()
+            .any(|p| p.kind == "offline" || p.id == "offline-translation")
+    {
+        let enabled = !settings.providers.iter().any(|p| p.enabled);
+        settings
+            .providers
+            .insert(0, offline_translation_provider(enabled));
     }
 }
 
@@ -218,9 +254,9 @@ pub fn validate_settings(s: &Settings) -> Result<(), String> {
         {
             return Err("服务名称、模型或提示词长度不合法".into());
         }
-        if p.kind == "system" {
+        if local_translation_provider(&p.kind) {
             if !p.base_url.is_empty() || !p.model.is_empty() || !p.prompt.is_empty() {
-                return Err("系统翻译不接受 API 地址、模型或提示词".into());
+                return Err("本机翻译不接受 API 地址、模型或提示词".into());
             }
             continue;
         }
@@ -300,6 +336,46 @@ mod tests {
         assert!(Shortcuts::default().capture.is_empty());
         assert_eq!(Shortcuts::default().silent_ocr, "Alt+S");
     }
+    #[test]
+    fn bundled_offline_provider_is_local_and_existing_choices_survive_migration() {
+        let mut settings = Settings::default();
+        settings.providers = vec![offline_translation_provider(true)];
+        assert!(validate_settings(&settings).is_ok());
+        for field in ["url", "model", "prompt"] {
+            let mut invalid = settings.clone();
+            match field {
+                "url" => invalid.providers[0].base_url = "https://example.com".into(),
+                "model" => invalid.providers[0].model = "cloud".into(),
+                _ => invalid.providers[0].prompt = "translate".into(),
+            }
+            assert!(validate_settings(&invalid).is_err());
+        }
+        settings.providers[0].enabled = false;
+        add_offline_translation_option(&mut settings);
+        assert_eq!(settings.providers.len(), 1);
+        assert!(!settings.providers[0].enabled);
+        if cfg!(target_os = "windows") {
+            let defaults = Settings::default();
+            assert!(defaults
+                .providers
+                .iter()
+                .any(|p| p.kind == "offline" && p.enabled));
+            settings.providers = defaults
+                .providers
+                .into_iter()
+                .filter(|p| p.kind != "offline")
+                .collect();
+            settings.providers[0].enabled = true;
+            add_offline_translation_option(&mut settings);
+            assert!(!settings.providers[0].enabled);
+            assert!(settings.providers[1].enabled);
+            settings.providers.remove(0);
+            settings.providers[0].enabled = false;
+            add_offline_translation_option(&mut settings);
+            assert!(settings.providers[0].enabled);
+        }
+    }
+
     #[test]
     fn old_default_language_pair_migrates_once_and_preserves_later_fixed_choices() {
         let mut json = serde_json::to_value(Settings::default()).unwrap();
