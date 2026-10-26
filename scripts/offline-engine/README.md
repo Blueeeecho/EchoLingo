@@ -69,8 +69,10 @@ The engine/model license is MPL-2.0; PCRE2, SentencePiece, Ruy, INTGEMM, CPUINFO
 SIMD utilities and nlohmann JSON have their own retained notices. The package's
 third-party notices and source offer supply the exact license texts.
 
-`build.py` makes three explicit compatibility changes in the supplied upstream
+`build.py` makes four explicit compatibility changes in the supplied upstream
 source: a fixed revision header instead of reading a nonexistent archive `.git`,
 a non-constexpr tokenizer sentinel accepted by modern Clang, and an explicit
-`fenv.h` include in the SIMD helper. These modified files are included in the
-source offer. No model weights are modified.
+`fenv.h` include in the SIMD helper; compiler-specific diagnostics around Ruy's
+third-party declarations suppress MSVC's zero-point conversion warning only for
+those headers while preserving Marian's `/W4 /WX`. These modified files are
+included in the source offer. No model weights are modified.

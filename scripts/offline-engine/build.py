@@ -100,6 +100,42 @@ def patch_sentencepiece_enum(source):
         path.write_text(text.replace("#include <math.h>", "#include <math.h>\n" + marker), encoding="utf-8")
 
 
+def patch_ruy_msvc_diagnostics(source):
+    # Real MSVC CI reported C4068 for GCC pragmas and C4244 in Ruy's
+    # float/quantized zero-point template conversions. Limit the suppression to
+    # third-party Ruy declarations; keep Marian's /W4 /WX unchanged.
+    path = source / "inference/marian-fork/src/tensors/cpu/prod_blas.h"
+    text = path.read_text(encoding="utf-8")
+    old = '''#elif USE_RUY_SGEMM
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wcomment"
+    #include "ruy/ruy.h"
+    #include "ruy/system_aligned_alloc.h"
+#pragma GCC pop
+#endif'''
+    new = '''#elif USE_RUY_SGEMM
+// EchoLingo: compiler-specific diagnostics around third-party Ruy declarations.
+#if defined(_MSC_VER)
+#pragma warning(push)
+#pragma warning(disable: 4244)
+#else
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wcomment"
+#endif
+    #include "ruy/ruy.h"
+    #include "ruy/system_aligned_alloc.h"
+#if defined(_MSC_VER)
+#pragma warning(pop)
+#else
+#pragma GCC diagnostic pop
+#endif
+#endif'''
+    if new not in text:
+        if text.count(old) != 1:
+            raise RuntimeError("Unexpected Ruy include diagnostics source revision")
+        path.write_text(text.replace(old, new), encoding="utf-8")
+
+
 def prepare(work):
     cache = work / "archives"
     cache.mkdir(parents=True, exist_ok=True)
@@ -122,6 +158,7 @@ def prepare(work):
     source = work / ("translations-" + LOCK["mozillaCommit"])
     patch_archive_revision(source)
     patch_sentencepiece_enum(source)
+    patch_ruy_msvc_diagnostics(source)
     return source, work / "pcre2-10.46"
 
 
@@ -146,6 +183,7 @@ def main():
             raise RuntimeError("Incomplete prepared source-offer tree")
         patch_archive_revision(source)
         patch_sentencepiece_enum(source)
+        patch_ruy_msvc_diagnostics(source)
         json_source = prepared / "nlohmann-json"
     else:
         source, pcre = prepare(work)
