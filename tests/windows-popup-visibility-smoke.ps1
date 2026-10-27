@@ -194,8 +194,10 @@ public static class EchoLingoPopupVisibilitySmoke {
     static void Invoke(IntPtr app, string name) {
         AutomationElement element = null;
         Wait(delegate { element = Element(app, name); return element != null; }, 5000, "New app accessibility control missing: " + name);
-        object pattern; Require(element.TryGetCurrentPattern(InvokePattern.Pattern, out pattern), "Control cannot be invoked: " + name);
-        ((InvokePattern)pattern).Invoke();
+        object pattern;
+        if (element.TryGetCurrentPattern(InvokePattern.Pattern, out pattern)) ((InvokePattern)pattern).Invoke();
+        else if (element.TryGetCurrentPattern(TogglePattern.Pattern, out pattern)) ((TogglePattern)pattern).Toggle();
+        else throw new InvalidOperationException("Control has neither Invoke nor Toggle action: " + name);
     }
     static Dictionary<string, object> ReadinessMetadata(Process app, IntPtr main) {
         Dictionary<string, object> value = new Dictionary<string, object>();
@@ -224,6 +226,7 @@ public static class EchoLingoPopupVisibilitySmoke {
                     control["controlType"] = element.Current.ControlType.ProgrammaticName;
                     control["enabled"] = element.Current.IsEnabled; control["offscreen"] = element.Current.IsOffscreen;
                     object pattern; control["supportsInvoke"] = element.TryGetCurrentPattern(InvokePattern.Pattern, out pattern);
+                    control["supportsToggle"] = element.TryGetCurrentPattern(TogglePattern.Pattern, out pattern);
                 }
             } catch (Exception error) { control["metadataError"] = error.GetType().Name; }
             controls.Add(control);

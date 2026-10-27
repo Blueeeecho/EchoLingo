@@ -1106,7 +1106,7 @@ fn request_settings(app: &tauri::AppHandle) {
     *pending = Some(presentation.epoch);
     drop(pending);
     if let Some(window) = app.get_webview_window("main") {
-        let _ = window.hide();
+        let _ = platform::hide_webview_window(&window);
     }
     let _ = app.emit(
         "open-settings",
@@ -1412,7 +1412,7 @@ fn start_action(app: tauri::AppHandle, action: String) {
             .cloned();
         if !keep_popup {
             if let Some(w) = &window {
-                let _ = w.hide();
+                let _ = platform::hide_webview_window(w);
             }
         }
         provider
@@ -1613,7 +1613,7 @@ fn outside_click_watcher(app: tauri::AppHandle) {
                             size.height,
                         ) {
                             cancel_active_translation(&handle);
-                            let _ = window.hide();
+                            let _ = platform::hide_webview_window(&window);
                         }
                     }
                 });
@@ -1689,7 +1689,7 @@ fn outside_click_watcher(app: tauri::AppHandle) {
                                 state.pinned.load(Ordering::SeqCst),
                             ) {
                                 cancel_active_translation(&handle);
-                                let _ = window.hide();
+                                let _ = platform::hide_webview_window(&window);
                             }
                         });
                     }
@@ -1744,7 +1744,7 @@ fn windows_popup_focus_changed(app: &tauri::AppHandle, focused: bool) {
         platform::popup_foreground_is_external(&window),
     ) {
         cancel_active_translation(app);
-        let _ = window.hide();
+        let _ = platform::hide_webview_window(&window);
     }
 }
 
@@ -1820,10 +1820,8 @@ async fn set_pinned(app: tauri::AppHandle, pinned: bool) -> Result<(), String> {
 #[tauri::command]
 fn hide_window(app: tauri::AppHandle) -> Result<(), String> {
     cancel_active_translation(&app);
-    app.get_webview_window("main")
-        .ok_or("窗口不存在")?
-        .hide()
-        .map_err(|_| "无法隐藏窗口".into())
+    let window = app.get_webview_window("main").ok_or("窗口不存在")?;
+    platform::hide_webview_window(&window)
 }
 #[tauri::command]
 async fn diagnostics(
@@ -2070,7 +2068,7 @@ fn main() {
             tauri::WindowEvent::CloseRequested { api, .. } => {
                 api.prevent_close();
                 cancel_active_translation(window.app_handle());
-                let _ = window.hide();
+                let _ = platform::hide_window(window);
             }
             _ => {}
         })

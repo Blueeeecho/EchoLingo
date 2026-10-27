@@ -332,6 +332,66 @@ pub fn show_without_activation(window: &tauri::WebviewWindow) -> Result<(), Stri
     Ok(())
 }
 
+/// Keep Tao's visibility bookkeeping and the actual native window in sync.
+/// A passive Windows show bypasses Tao's VISIBLE flag, so its hide alone can
+/// return successfully without changing the HWND. Never show or focus here.
+#[cfg(target_os = "windows")]
+pub fn hide_window(window: &tauri::Window) -> Result<(), String> {
+    use std::ffi::c_void;
+    #[link(name = "user32")]
+    unsafe extern "system" {
+        fn ShowWindow(window: *mut c_void, command: i32) -> i32;
+        fn IsWindowVisible(window: *mut c_void) -> i32;
+    }
+    // Update the runtime's cache first, even if the native window was shown by
+    // SW_SHOWNOACTIVATE while Tao still considered it hidden.
+    let cached_hide = window.hide().map_err(|_| "无法隐藏窗口".to_owned());
+    let native = window
+        .hwnd()
+        .map_err(|_| "WINDOW_HANDLE: Native Windows window is unavailable.".to_owned())?
+        .0;
+    if native.is_null() {
+        return Err("WINDOW_HANDLE: Native Windows window is unavailable.".into());
+    }
+    finish_window_hide(
+        cached_hide,
+        || {
+            // SAFETY: Tauri owns the HWND. SW_HIDE only hides it. ShowWindow's
+            // return value reports previous visibility, not operation success.
+            unsafe {
+                ShowWindow(native, 0);
+            }
+        },
+        || unsafe { IsWindowVisible(native) != 0 },
+    )
+}
+
+#[cfg(not(target_os = "windows"))]
+pub fn hide_window(window: &tauri::Window) -> Result<(), String> {
+    window.hide().map_err(|_| "无法隐藏窗口".to_owned())
+}
+
+/// WebviewWindow exposes its owning Window through AsRef<Webview>. Keep one
+/// actual hide implementation for this adapter and CloseRequested's Window.
+pub fn hide_webview_window(window: &tauri::WebviewWindow) -> Result<(), String> {
+    let webview: &tauri::Webview = window.as_ref();
+    hide_window(&webview.window())
+}
+
+#[cfg(any(target_os = "windows", test))]
+fn finish_window_hide(
+    cached_hide: Result<(), String>,
+    native_hide: impl FnOnce(),
+    native_visible: impl FnOnce() -> bool,
+) -> Result<(), String> {
+    // A cached no-op or dispatch error must not skip the native hide attempt.
+    native_hide();
+    if native_visible() {
+        return Err("WINDOW_HIDE: 隐藏后窗口仍然可见，请重试。".into());
+    }
+    cached_hide
+}
+
 #[cfg(not(any(target_os = "macos", target_os = "windows")))]
 pub fn show_without_activation(_window: &tauri::WebviewWindow) -> Result<(), String> {
     Err("UNSUPPORTED_PLATFORM: Nonactivating windows support Windows and macOS.".into())
@@ -841,6 +901,36 @@ fn materialize(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn hide_confirms_native_state_when_runtime_hide_was_a_cached_noop() {
+        let visible = std::cell::Cell::new(true);
+        // Runtime returns Ok with its VISIBLE flag already false, although
+        // passive native presentation left the real window on screen.
+        let result = super::finish_window_hide(Ok(()), || visible.set(false), || visible.get());
+        assert!(result.is_ok());
+        assert!(!visible.get());
+    }
+
+    #[test]
+    fn hide_reports_a_still_visible_native_window_after_successful_dispatch() {
+        let attempted = std::cell::Cell::new(false);
+        let result = super::finish_window_hide(Ok(()), || attempted.set(true), || true);
+        assert!(attempted.get());
+        assert!(result.unwrap_err().starts_with("WINDOW_HIDE:"));
+    }
+
+    #[test]
+    fn runtime_hide_failure_does_not_skip_native_hide_or_hide_its_error() {
+        let visible = std::cell::Cell::new(true);
+        let result = super::finish_window_hide(
+            Err("runtime dispatch failed".into()),
+            || visible.set(false),
+            || visible.get(),
+        );
+        assert!(!visible.get());
+        assert_eq!(result.unwrap_err(), "runtime dispatch failed");
+    }
+
     #[cfg(target_os = "macos")]
     #[test]
     fn mac_popup_behavior_mask_uses_production_abi_without_window_or_permission_operations() {
