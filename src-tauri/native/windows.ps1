@@ -505,6 +505,9 @@ public static class EchoLingoNative {
         SelectionTrace trace = new SelectionTrace();
         int index = ++selectionQueryCount;
         Stopwatch elapsed = Stopwatch.StartNew();
+        bool deadlineExceeded = false, drainAttempted = false, completionObserved = false, drainCancelled = false;
+        double outcomeMilliseconds = -1, drainMilliseconds = 0, completionObservedMilliseconds = 0;
+        int outcomeStage = -1, outcomeDepth = 0, outcomeExceptionKind = 0;
         Task<T> task = worker.Enqueue(delegate {
             selectionTrace = trace; SelectionStage(1, 0);
             try { return query(); } catch (Exception error) { SelectionException(error); throw; }
@@ -513,22 +516,48 @@ public static class EchoLingoNative {
         try {
             while (!task.IsCompleted) {
                 NativeCancellation.ThrowIfRequested();
-                if (elapsed.ElapsedMilliseconds >= 2000)
+                if (elapsed.ElapsedMilliseconds >= 2000) {
+                    deadlineExceeded = true;
                     throw new InvalidOperationException("SELECTION: The source accessibility provider did not answer in time; no copy input was sent.");
+                }
                 Thread.Sleep(5); // Condition polling, never a fixed preparation delay.
             }
             NativeCancellation.ThrowIfRequested();
             if (task.IsFaulted) throw task.Exception.InnerException;
             return task.Result;
-        } catch { trace.Abandoned = true; worker.Abandon(); throw; }
+        } catch {
+            outcomeMilliseconds = elapsed.Elapsed.TotalMilliseconds;
+            outcomeStage = trace.Stage; outcomeDepth = trace.Depth; outcomeExceptionKind = trace.ExceptionKind;
+            trace.Abandoned = true; worker.Abandon();
+            // Only explicit diagnostics observe the one already-in-flight task.
+            // The original deadline error remains the outcome. Never use its
+            // late result, issue another provider call or hold up a new intent.
+            if (deadlineExceeded && CapturePerformance.Enabled) {
+                drainCancelled = NativeCancellation.Requested;
+                if (!drainCancelled) {
+                    drainAttempted = true; Stopwatch drain = Stopwatch.StartNew();
+                    while (!task.IsCompleted && drain.ElapsedMilliseconds < 3000) {
+                        if (NativeCancellation.Requested) { drainCancelled = true; break; }
+                        Thread.Sleep(5); // Conditional observation, not a settling delay.
+                    }
+                    drainMilliseconds = drain.Elapsed.TotalMilliseconds;
+                }
+                completionObserved = task.IsCompleted;
+                if (completionObserved) {
+                    completionObservedMilliseconds = elapsed.Elapsed.TotalMilliseconds;
+                    if (task.IsFaulted) GC.KeepAlive(task.Exception); // Observe, never serialize an error/result.
+                }
+            }
+            throw;
+        }
         finally {
             // Numeric diagnostics are opt-in. Only this calling thread writes
             // CapturePerformance, even when a timed-out provider is still busy.
             if (CapturePerformance.Enabled && index <= 16) {
                 string prefix = "selectionQuery" + index;
-                CapturePerformance.Set(prefix + "Milliseconds", elapsed.Elapsed.TotalMilliseconds);
-                CapturePerformance.Set(prefix + "Stage", trace.Stage);
-                CapturePerformance.Set(prefix + "Depth", trace.Depth);
+                CapturePerformance.Set(prefix + "Milliseconds", outcomeMilliseconds < 0 ? elapsed.Elapsed.TotalMilliseconds : outcomeMilliseconds);
+                CapturePerformance.Set(prefix + "Stage", outcomeStage < 0 ? trace.Stage : outcomeStage);
+                CapturePerformance.Set(prefix + "Depth", outcomeStage < 0 ? trace.Depth : outcomeDepth);
                 CapturePerformance.Set(prefix + "InitialRoleId", trace.InitialRoleId);
                 CapturePerformance.Set(prefix + "FreshRoleId", trace.FreshRoleId);
                 CapturePerformance.Set(prefix + "InitialIdentityLength", trace.InitialIdentityLength);
@@ -536,7 +565,18 @@ public static class EchoLingoNative {
                 CapturePerformance.Set(prefix + "IdentityCompared", trace.IdentityCompared);
                 CapturePerformance.Set(prefix + "IdentityEqual", trace.IdentityEqual);
                 CapturePerformance.Set(prefix + "RootWalkReason", trace.RootWalkReason);
-                CapturePerformance.Set(prefix + "ExceptionKind", trace.ExceptionKind);
+                CapturePerformance.Set(prefix + "ExceptionKind", outcomeStage < 0 ? trace.ExceptionKind : outcomeExceptionKind);
+                if (deadlineExceeded) {
+                    CapturePerformance.Set(prefix + "DeadlineExceeded", 1);
+                    CapturePerformance.Set(prefix + "DrainAttempted", drainAttempted ? 1 : 0);
+                    CapturePerformance.Set(prefix + "DrainMilliseconds", drainMilliseconds);
+                    CapturePerformance.Set(prefix + "DrainCancelled", drainCancelled ? 1 : 0);
+                    CapturePerformance.Set(prefix + "WorkerCompletionObserved", completionObserved ? 1 : 0);
+                    CapturePerformance.Set(prefix + "WorkerCompletionObservedMilliseconds", completionObservedMilliseconds);
+                    CapturePerformance.Set(prefix + "WorkerStillBlocked", completionObserved ? 0 : 1);
+                    CapturePerformance.Set(prefix + "WorkerStageAtDrainEnd", trace.Stage);
+                    CapturePerformance.Set(prefix + "WorkerExceptionKindAtDrainEnd", trace.ExceptionKind);
+                }
             }
         }
     }
@@ -584,7 +624,10 @@ public static class EchoLingoNative {
             CacheRequest cache = SelectionCache(); AutomationElement focused;
             SelectionStage(2, 0);
             focused = SelectionCopyPolicy.RequireFocus(AutomationElement.FocusedElement);
+            SelectionStage(21, 0); RequireSelectionQueryActive();
+            SelectionStage(22, 0);
             focused = focused.GetUpdatedCache(cache);
+            SelectionStage(23, 0);
             RequireSelectionQueryActive(); int roleId = 0;
             // Cached role reads add no provider RPC. Diagnostic unavailability
             // must not become a new acquisition failure or weaken a guard.

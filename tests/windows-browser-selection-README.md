@@ -57,6 +57,18 @@ Root-walk reason is 0 not reached, 1 complete, 2 no root, 3 other root, 4 depth
 limit, 5 ended, 6 password. Exception kind is 0 none observed, 1 unavailable
 element, 2 cancellation, 3 argument, 4 COM, 5 invalid operation, 6 other. These
 are numeric enums, never exception messages, runtime IDs, names or content.
+Stage 21 means the single ordinary FocusedElement returned, 22 the same-element
+cache update started, and 23 that cache update returned. An active-query check
+between these calls prevents a late focus reply from starting another RPC.
+Only an explicit diagnostic query that already failed its unchanged 2000ms
+deadline may conditionally observe that same abandoned task for up to 3000ms.
+The task is poisoned first; cancellation ends the observation immediately.
+No late result is consumed and no request is retried. Original query duration,
+failure stage and exception enum stay frozen at failure. Separate numeric drain
+fields report observation duration, whether the worker finished, its stage and
+exception category at observation end. WorkerCompletionObservedMilliseconds is
+the caller's observation time (5ms polling), not a naturally completed selection
+or an acceptance pass. Non-diagnostic calls receive no added observation wait.
 No accessibility warm-up or timeout/retry change accompanies these diagnostics.
 
 A failed case keeps the overall result false. Only after generated clipboard
