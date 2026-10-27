@@ -20,6 +20,7 @@
 | 来源根初始化8e/40553539117 |48/47、冷5/6、0setup失败；新增两次root UIA调用未解决Pane→Group，所有前台/富剪贴板/0copy仍成立。29行无效对照撤回，原红保留 |
 | 获焦MSAA初始化93b/40555594514 |48实际/42通过、冷0/6；6次nativefocus实为root，MSAA均S_OK/nonnull但Pane→Group身份失配，未超时。该初始化回归后精确撤回，未称有效激活/修复 |
 | 最终f65双order/40556538688 |两独立Windows runner总95/96，整体failure。Chrome-first48/48及冷6/6；Edge-first47/48及冷5/6，首例query1约1084ms、query2约12ms，Pane→Group身份拒绝而非超时。两浏览器各有作为机器首测对象的独立结果，不用Edge预先初始化后的Chrome冒充首次。新stage full40556538469结果另列，不能覆盖这1次失败 |
+| 初始选区探针c9/40562621965 |诊断专用，96实际/94通过，两order各47/48；两首例Pane均无祖先Document。84次probe中82初始role不适用、2无Document、0eligible；12password在probe前正确挡住。首次未取得可核验A，故不采用后绑定锚点。两失败均非截止；前台/富clipboard/postaudit/单helper/清理全部保持。不是f65通过率或生产修复 |
 | 剪贴板810/40550008709 |3执行/2通过：基线、实际第二Ctrl+C取消且不覆盖通过；背景同PID发布仍错文+helper恢复覆盖，原始failure保留 |
 | 最终full f65/40556538469 |原failure保持：11门禁10成功/1失败。新stage SHA3e767c70…4539/5,825,536B，严格App16/16（7真鼠标、一次热键/意图、mock翻译）；连续任务4/4，403pin采样hidden0/maxgap26.1682ms。生成Document11/11、delegated8/8、live8/8、Windows228Rust/1ignored。唯一shortcutsUi在owned-fixture-setup powershell ETIMEDOUT，0case/0key，不等于设置界面已通过或产品错误已确认 |
 | 最终NSIS真实离线 |75,281,557B/a22b586b…ce4c9；实际安装6模型+选词/空框输入/OCR3离线链通过，mock=false，出站规则与安装目录清理true。完整内嵌DLL100,864B/069b3617…5f8e；API ZIP SHA/size/CRC、stage/源码ZIP及仅3B NSIS marker身份独立核验 |

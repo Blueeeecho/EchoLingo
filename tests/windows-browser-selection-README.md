@@ -131,7 +131,7 @@ https://learn.microsoft.com/en-us/windows/win32/winauto/uiauto-threading
 
 ## Initial source-data eligibility diagnostic (after f65 candidate)
 
-A subsequent diagnostic-only Q1 probe, enabled solely by PerformanceDiagnostics,
+A subsequent diagnostic-only Q1 probe in immutable commit c9bc277, enabled solely by PerformanceDiagnostics,
 reads from the first already validated focus ancestor chain. It never accepts a
 changed focus or seeds an anchor later. It checks for the nearest existing
 Document, nonempty raw selected ranges and a strictly Boolean true read-only
@@ -140,3 +140,15 @@ Only nine numeric outcomes are reported; text and runtime IDs remain private to
 that invocation. Extra provider calls can change timing, so a passing diagnostic
 run is not evidence that the frozen f65 candidate or normal path was repaired.
 No initial Document/A means no basis for a later anchor exception.
+
+Actual diagnostic run40562621965/source c9bc277 executed both independent
+orders:94/96 expectations passed, each order47/48. Both first-tested helpers
+started on Pane with no Document in the original validated ancestor chain;
+neither had an initial anchor and neither exhausted its budget. Of84 probes,
+82 had an unsupported initial role and2 had no ancestor Document;12 password
+cases were correctly rejected before probing. This rejects the proposed
+initial-Document-anchor path for these observed failures. It does not prove
+that the platform has no other solution, or modify the frozen f65 candidate.
+After this negative prerequisite check, helper and bridge were restored exactly
+to f65; the probe is not retained in the production path. The immutable diagnostic
+commit and raw run preserve its source and observations.

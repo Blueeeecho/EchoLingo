@@ -705,7 +705,7 @@
     }
   ],
   "sourceSync": {
-    "inventory": "work/alt-d-strict-20261028/source-sync-selection-rigorous-final-inventory.json",
+    "inventory": "work/alt-d-strict-20261028/source-sync-selection-rigorous-diagnostic-closure-inventory.json",
     "cumulativeFiles": 69,
     "changedPaths": 23,
     "oldFilesGuarded": 57,
@@ -713,17 +713,40 @@
     "historicalDocsPreserved": true,
     "independentAudit": "initial69file sync passed; final docs refreshed with prior-hash guard and complete69file verification",
     "initialIndependentAudit": "passed:69/69 hashes,19 non-doc target f65/worktree/original, all historical doc bodies retained",
-    "finalDocsRefresh": "complete"
+    "finalDocsRefresh": "complete; subsequent diagnostic closure refreshes four documentation files only, retaining the exact f65 production code"
   },
   "subsequentDiagnostic": {
-    "status": "initial source-data eligibility probe prepared; no acceptance exception",
+    "status": "diagnostic executed; initial Pane has no ancestor Document, so proposed anchor prerequisite is absent",
     "productionCandidateRemains": "f65ab043c7e7a0ad4b5497d1a2651eb490198980",
-    "diagnosticHelperLfSha256": "ec2d426691deb0bb84db25592f42b21190adf9a6882f279192317fd05b812c2b",
+    "diagnosticProbeRetainedInProduction": false,
+    "restoredProductionHelperLfSha256": "093f5910619dfbed9b8f8b1f60b5066e19e7b751ffa120a2c5c4fcfe8a9796d7",
+    "restoredProductionBridgeLfSha256": "6d69d0a1898fecbbe09c2bcbe70ad8a4287afe950a93cd1799212349d5913c43",
+    "diagnosticHelperLfSha256": "82a265d4c435fb68b6906c79fd788dba7aa3c29d735fcecf89d5ec9f3ff6b212",
     "explicitPerformanceDiagnosticsOnly": true,
     "retainsStrictFocusIdentity": true,
     "noTextHashesOrRuntimeIdsLogged": true,
     "maxRanges": 16,
     "rawUtf16CharactersStrictlyBelow": 65536,
-    "actualResult": "pending; must not claim diagnostic timing as baseline repair"
+    "source": "c9bc277bb6e642ab49ebda424c3f403c39ffe0bd",
+    "run": 40562621965,
+    "executed": 96,
+    "passed": 94,
+    "firstBrowserCasesPassed": "10/12; first tested helper on each independent runner failed",
+    "probesExecuted": 84,
+    "protectedBeforeProbe": 12,
+    "unsupportedInitialRole": 82,
+    "initialPaneWithoutAncestorDocument": 2,
+    "eligibleInitialAnchors": 0,
+    "summary": "work/alt-d-strict-20261028/ci-c9bc277-initial-anchor/summary.json",
+    "edgeFirstRawSha256": "d43ca102328c8cb5e431000536e6eef39d95160bb350a66155c59e005f227c3f",
+    "chromeFirstRawSha256": "06a48ede65a75c3f4d34c98ebb1b54feb5e3c429623c05bc2cb06aa83fabebed",
+    "actualResult": "No initial A from the validated ancestor chain; no anchor acceptance added. Both identity failures remain and neither exhausted the deadline. Probe subsequently removed, PS and bridge exactly restored to f65. Diagnostic timing is not baseline repair; frozen f65 installer unchanged.",
+    "furtherResearchOnly": {
+      "uiaV2": "https://github.com/Descolada/UIA-v2/blob/main/Lib/UIA.ahk#L831-L854",
+      "chromiumHandler": "https://github.com/chromium/chromium/blob/main/content/browser/renderer_host/legacy_render_widget_host_win.cc#L329-L375",
+      "chromiumActivation": "https://github.com/chromium/chromium/blob/main/ui/accessibility/platform/ax_platform.cc#L186-L215",
+      "finding": "Renderer-child notification differs from earlier top-level initialization attempts, but the public tool also uses readiness polling and defaults to global screen-reader activation. Modern Chromium does not enable web content from the honeypot notification alone. No evidence establishes a single notification as a synchronous fix; no implementation added.",
+      "provesPlatformHasNoSolution": false
+    }
   }
 }
