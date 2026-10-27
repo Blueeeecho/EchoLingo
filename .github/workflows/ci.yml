@@ -106,29 +106,37 @@ jobs:
         if: runner.os == 'Windows'
         shell: powershell
         run: powershell.exe -NoProfile -STA -ExecutionPolicy Bypass -File tests/windows-native-smoke.ps1
-      - name: Windows live transparent region selector desktop smoke
-        if: runner.os == 'Windows'
-        timeout-minutes: 3
-        shell: powershell
-        run: powershell.exe -NoProfile -STA -ExecutionPolicy Bypass -File tests/windows-live-capture-smoke.ps1
       - name: Rust tests
         run: cargo test --manifest-path src-tauri/Cargo.toml
       - name: Rust formatting
         run: cargo fmt --manifest-path src-tauri/Cargo.toml --check
       - name: Build desktop installer
         run: npm run tauri build -- --bundles ${{ runner.os == 'Windows' && 'nsis' || 'dmg' }}
-      - name: Windows application shortcut and OCR integration smoke
+      - name: Windows live transparent region selector desktop smoke
+        id: windows_live_capture
         if: runner.os == 'Windows'
+        continue-on-error: true
+        timeout-minutes: 3
+        shell: powershell
+        run: powershell.exe -NoProfile -STA -ExecutionPolicy Bypass -File tests/windows-live-capture-smoke.ps1
+      - name: Windows application shortcut and OCR integration smoke
+        id: windows_application_core
+        if: runner.os == 'Windows'
+        continue-on-error: true
         timeout-minutes: 5
         shell: powershell
         run: powershell.exe -NoProfile -STA -ExecutionPolicy Bypass -File tests/windows-application-smoke.ps1 -ApplicationPath src-tauri/target/release/echolingo.exe
       - name: Windows popup outside-click and focus integration smoke
+        id: windows_popup_visibility
         if: runner.os == 'Windows'
+        continue-on-error: true
         timeout-minutes: 5
         shell: powershell
         run: powershell.exe -NoProfile -STA -ExecutionPolicy Bypass -File tests/windows-popup-visibility-smoke.ps1 -ApplicationPath src-tauri/target/release/echolingo.exe -IsolatedTestSession
       - name: Windows installed NSIS real offline-model acceptance
+        id: windows_installed_offline
         if: runner.os == 'Windows'
+        continue-on-error: true
         timeout-minutes: 25
         shell: powershell
         run: powershell.exe -NoProfile -STA -ExecutionPolicy Bypass -File scripts/windows-offline-translation-test.ps1
@@ -155,6 +163,22 @@ jobs:
           path: |
             src-tauri/target/release/bundle/nsis/*.exe
             src-tauri/target/release/bundle/dmg/*.dmg
+      # Collect independent desktop results and preserve the candidate even if
+      # one fixture fails; the job still fails unless every acceptance passes.
+      - name: Gate Windows desktop acceptance
+        if: always() && runner.os == 'Windows'
+        shell: powershell
+        run: |
+          $taskOutcomes = @{
+            liveCapture = '${{ steps.windows_live_capture.outcome }}'
+            applicationCore = '${{ steps.windows_application_core.outcome }}'
+            popupVisibility = '${{ steps.windows_popup_visibility.outcome }}'
+            installedOffline = '${{ steps.windows_installed_offline.outcome }}'
+          }
+          $taskOutcomes | ConvertTo-Json -Compress
+          if (@($taskOutcomes.Values | Where-Object { $_ -ne 'success' }).Count -gt 0) {
+            throw 'Windows desktop acceptance incomplete or failed; preview artifacts are not a passing release.'
+          }
 
   frontend-interactions:
     runs-on: ubuntu-latest

@@ -39,6 +39,10 @@ public static class EchoLingoLiveCaptureSmoke {
         }
         protected override bool ShowWithoutActivation { get { return true; } }
         protected override CreateParams CreateParams { get { CreateParams value = base.CreateParams; value.ExStyle |= 0x08000000 | 0x00000080; return value; } }
+        protected override void WndProc(ref Message message) {
+            if (message.Msg == 0x0021) { message.Result = new IntPtr(3); return; } // MA_NOACTIVATE, matching production edges.
+            base.WndProc(ref message);
+        }
     }
     sealed class EscapeFilter : IMessageFilter {
         public int Count;
@@ -52,6 +56,7 @@ public static class EchoLingoLiveCaptureSmoke {
     [DllImport("user32.dll")] static extern bool SetForegroundWindow(IntPtr window);
     [DllImport("user32.dll")] static extern bool EnumWindows(EnumWindow callback, IntPtr parameter);
     [DllImport("user32.dll")] static extern uint GetWindowThreadProcessId(IntPtr window, out uint process);
+    [DllImport("user32.dll", CharSet=CharSet.Unicode)] static extern int GetClassName(IntPtr window, StringBuilder name, int capacity);
     [DllImport("user32.dll")] static extern bool IsWindowVisible(IntPtr window);
     [DllImport("user32.dll")] static extern bool GetWindowRect(IntPtr window, out RECT rectangle);
     [DllImport("user32.dll")] static extern IntPtr GetWindow(IntPtr window, uint command);
@@ -72,22 +77,50 @@ public static class EchoLingoLiveCaptureSmoke {
 
     static void Assert(bool condition, string message) { if (!condition) throw new InvalidOperationException("ASSERTION_FAILED: " + message); }
     static void OnUi(Form form, Action action) { form.Invoke(action); }
-    static void RequireFixtureForeground(Form form) {
-        Assert(GetForegroundWindow() == form.Handle, "Dedicated test window lost foreground; no input will be sent to another app.");
+    sealed class TrialContext {
+        public readonly Form Source;
+        public string Mode = "setup", Stage = "setup";
+        public int HelperProcessId;
+        public Dictionary<string, object> ForegroundFailure;
+        public TrialContext(Form source) { Source = source; }
     }
-    static void Send(Form form, INPUT input) {
-        RequireFixtureForeground(form);
+    static string WindowId(IntPtr window) { return "0x" + window.ToInt64().ToString("X"); }
+    static Dictionary<string, object> ForegroundMetadata(TrialContext context, IntPtr foreground) {
+        uint process = 0; GetWindowThreadProcessId(foreground, out process);
+        int fixtureProcess = Process.GetCurrentProcess().Id;
+        StringBuilder className = new StringBuilder(256);
+        if (foreground != IntPtr.Zero) GetClassName(foreground, className, className.Capacity);
+        return new Dictionary<string, object> {
+            { "mode", context.Mode }, { "stage", context.Stage },
+            { "foregroundHwnd", WindowId(foreground) }, { "foregroundProcessId", process },
+            { "foregroundClass", className.ToString() },
+            { "fixtureHwnd", WindowId(context.Source.Handle) }, { "fixtureProcessId", fixtureProcess },
+            { "helperProcessId", context.HelperProcessId },
+            { "isFixtureWindow", foreground == context.Source.Handle },
+            { "isFixtureProcess", process == fixtureProcess },
+            { "isHelperProcess", context.HelperProcessId != 0 && process == context.HelperProcessId }
+        };
+    }
+    static void RequireFixtureForeground(TrialContext context, string stage) {
+        context.Stage = stage;
+        IntPtr foreground = GetForegroundWindow();
+        if (foreground == context.Source.Handle) return;
+        context.ForegroundFailure = ForegroundMetadata(context, foreground);
+        Assert(false, "Dedicated test window lost foreground at " + context.Mode + "/" + stage + "; no input will be sent to another app.");
+    }
+    static void Send(TrialContext context, string stage, INPUT input) {
+        RequireFixtureForeground(context, stage);
         Assert(SendInput(1, new INPUT[] { input }, Marshal.SizeOf(typeof(INPUT))) == 1, "Windows rejected dedicated fixture input.");
     }
-    static void Move(Form form, Point point) {
+    static void Move(TrialContext context, string stage, Point point) {
         Rectangle desktop = SystemInformation.VirtualScreen;
         INPUT input = new INPUT();
         input.data.mouse.dx = (int)Math.Round((point.X - desktop.Left) * 65535.0 / (desktop.Width - 1));
         input.data.mouse.dy = (int)Math.Round((point.Y - desktop.Top) * 65535.0 / (desktop.Height - 1));
         input.data.mouse.flags = 0x8000 | 0x4000 | 0x0001;
-        Send(form, input);
+        Send(context, stage, input);
     }
-    static void Button(Form form, uint flags) { INPUT input = new INPUT(); input.data.mouse.flags = flags; Send(form, input); }
+    static void Button(TrialContext context, string stage, uint flags) { INPUT input = new INPUT(); input.data.mouse.flags = flags; Send(context, stage, input); }
     static long BorderArea(int processId, out int total, out long largest) {
         int count = 0; long area = 0, maximum = 0;
         EnumWindows(delegate(IntPtr window, IntPtr unused) {
@@ -128,29 +161,35 @@ public static class EchoLingoLiveCaptureSmoke {
         }, IntPtr.Zero);
         return found;
     }
-    static Dictionary<string, object> Trial(Form form, string helper, string mode, Color liveColor) {
+    static Dictionary<string, object> Trial(TrialContext context, string helper, string mode, Color liveColor) {
+        Form form = context.Source;
+        context.Mode = mode; context.Stage = "start-helper"; context.HelperProcessId = 0; context.ForegroundFailure = null;
         ProcessStartInfo start = new ProcessStartInfo("powershell.exe");
         start.Arguments = "-NoProfile -STA -ExecutionPolicy Bypass -File \"" + helper + "\" -Mode capture-image";
         start.UseShellExecute = false; start.CreateNoWindow = true;
         start.RedirectStandardOutput = true; start.RedirectStandardError = true;
         start.StandardOutputEncoding = Encoding.UTF8; start.StandardErrorEncoding = Encoding.UTF8;
         using (Process process = Process.Start(start)) {
+            context.HelperProcessId = process.Id;
             Task<string> output = process.StandardOutput.ReadToEndAsync();
             Task<string> error = process.StandardError.ReadToEndAsync();
             Dictionary<string, object> metrics = new Dictionary<string, object>();
             bool capture = mode == "capture" || mode == "capture-burst" || mode == "topmost-capture";
             Form layer = null; int layerMouseEvents = 0;
             try {
+                context.Stage = "wait-ready-overlays";
                 DateTime deadline = DateTime.UtcNow.AddSeconds(25);
                 // Before dragging only the pointer display has four thin blue
                 // edge HWNDs; inactive displays have no visible border.
                 while (!process.HasExited && ReadyOverlays(process.Id) != 4 && DateTime.UtcNow < deadline) Thread.Sleep(30);
                 Assert(!process.HasExited && ReadyOverlays(process.Id) == 4, "The pointer display's four live thin border windows did not become ready.");
+                context.Stage = "inspect-ready-overlays";
                 int readyCount; long readyLargest;
                 metrics["readyVisibleBorderAreaPixels"] = BorderArea(process.Id, out readyCount, out readyLargest);
                 metrics["readyVisibleBorderWindowCount"] = readyCount; metrics["readyLargestSurfacePixels"] = readyLargest;
-                RequireFixtureForeground(form);
+                RequireFixtureForeground(context, "selector-ready");
                 if (mode == "topmost-capture") {
+                    context.Stage = "create-generated-topmost-layer";
                     OnUi(form, delegate {
                         // A separate generated full-screen source covers the
                         // foreground fixture without activating. Its pixels,
@@ -161,10 +200,11 @@ public static class EchoLingoLiveCaptureSmoke {
                         layer.Show();
                         Assert(SetWindowPos(layer.Handle, new IntPtr(-1), 0, 0, 0, 0, 0x0010 | 0x0001 | 0x0002), "Cannot position the dedicated ordinary topmost source.");
                     });
+                    context.Stage = "wait-borders-above-generated-topmost-layer";
                     DateTime raisedDeadline = DateTime.UtcNow.AddSeconds(3);
                     while (!BordersAboveSource(process.Id, layer.Handle) && DateTime.UtcNow < raisedDeadline) Thread.Sleep(20);
                     Assert(BordersAboveSource(process.Id, layer.Handle), "Capture borders did not passively recover above the ordinary topmost source.");
-                    RequireFixtureForeground(form);
+                    RequireFixtureForeground(context, "generated-topmost-layer-shown");
                     metrics["ordinaryTopmostRaisedAfterPicker"] = true;
                     metrics["generatedTopmostFullScreen"] = true;
                     metrics["visibleCompositeDiffersFromForegroundWindow"] = true;
@@ -172,37 +212,40 @@ public static class EchoLingoLiveCaptureSmoke {
                 // Change the generated content only AFTER the selector exists.
                 // A frozen pre-selection desktop image fails the color check.
                 Point first = Point.Empty, last = Point.Empty;
+                context.Stage = "update-generated-source";
                 OnUi(form, delegate {
                     form.BackColor = mode == "topmost-capture" ? Color.FromArgb(25, 45, 70) : liveColor; form.Refresh();
                     first = form.PointToScreen(new Point(50, 50));
                     last = form.PointToScreen(new Point(260, 160));
                 });
                 Thread.Sleep(150);
-                Move(form, first); Thread.Sleep(80);
+                Move(context, "move-to-selection-origin", first); Thread.Sleep(80);
                 if (mode == "escape-short") {
                     INPUT down = new INPUT(); down.type = 1; down.data.keyboard.vk = 0x1B;
                     INPUT up = down; up.data.keyboard.flags = 2;
-                    RequireFixtureForeground(form);
+                    RequireFixtureForeground(context, "send-short-escape");
                     Assert(SendInput(2, new INPUT[] { down, up }, Marshal.SizeOf(typeof(INPUT))) == 2, "Windows rejected a paired short Escape tap.");
                 } else if (mode == "escape") {
                     INPUT key = new INPUT(); key.type = 1; key.data.keyboard.vk = 0x1B;
-                    Send(form, key); Thread.Sleep(80); key.data.keyboard.flags = 2; Send(form, key);
+                    Send(context, "escape-down", key); Thread.Sleep(80); key.data.keyboard.flags = 2; Send(context, "escape-up", key);
                 } else if (mode == "right") {
-                    Button(form, 0x0008); Thread.Sleep(80); Button(form, 0x0010);
+                    Button(context, "cancel-right-down", 0x0008); Thread.Sleep(80); Button(context, "cancel-right-up", 0x0010);
                 } else {
+                    context.Stage = "measure-before-drag";
                     process.Refresh(); TimeSpan cpuBefore = process.TotalProcessorTime;
                     metrics["helperPrivateBytesBeforeDrag"] = process.PrivateMemorySize64;
                     metrics["helperWorkingSetBytesBeforeDrag"] = process.WorkingSet64;
-                    Button(form, 0x0002); Thread.Sleep(80);
+                    Button(context, "selection-left-down", 0x0002); Thread.Sleep(80);
                     if (mode == "capture-burst") {
                         double longestInput = 0;
                         List<double> borderDelays = new List<double>();
                         for (int step = 1; step <= 90; step++) {
                             Stopwatch inputTime = Stopwatch.StartNew();
                             Point target = new Point(first.X + (last.X - first.X) * step / 90, first.Y + (last.Y - first.Y) * step / 90);
-                            Move(form, target);
+                            Move(context, "burst-move-" + step, target);
                             longestInput = Math.Max(longestInput, inputTime.Elapsed.TotalMilliseconds);
                             if (step % 10 == 0) {
+                                context.Stage = "observe-burst-edge-" + step;
                                 while (!SelectionEdgeAt(process.Id, first, target) && inputTime.ElapsedMilliseconds < 2500) Thread.Sleep(2);
                                 Assert(SelectionEdgeAt(process.Id, first, target), "A sampled drag move did not reach its actual thin edge HWND coordinates.");
                                 borderDelays.Add(inputTime.Elapsed.TotalMilliseconds);
@@ -210,6 +253,7 @@ public static class EchoLingoLiveCaptureSmoke {
                             Thread.Sleep(8);
                         }
                         Stopwatch settled = Stopwatch.StartNew();
+                        context.Stage = "settle-final-burst-edge";
                         while (!SelectionEdgeAt(process.Id, first, last) && settled.ElapsedMilliseconds < 2500) Thread.Sleep(10);
                         Assert(SelectionEdgeAt(process.Id, first, last), "The visual selection border did not reach the actual final drag coordinates.");
                         metrics["burstMoves"] = 90; metrics["longestSendInputCallMilliseconds"] = longestInput;
@@ -220,7 +264,8 @@ public static class EchoLingoLiveCaptureSmoke {
                         metrics["dragToObservedBorderP95Milliseconds"] = borderDelays[(int)Math.Ceiling(borderDelays.Count * 0.95) - 1];
                         // Timings are observations on this Windows test host,
                         // not proof of the owner's Intel/AMD PC performance.
-                    } else { Move(form, last); Thread.Sleep(100); }
+                    } else { Move(context, "move-to-selection-end", last); Thread.Sleep(100); }
+                    context.Stage = "measure-drag";
                     process.Refresh();
                     metrics["helperCpuMillisecondsDuringDrag"] = (process.TotalProcessorTime - cpuBefore).TotalMilliseconds;
                     metrics["helperPrivateBytesDuringDrag"] = process.PrivateMemorySize64;
@@ -229,11 +274,13 @@ public static class EchoLingoLiveCaptureSmoke {
                     int draggingCount; long draggingLargest;
                     metrics["draggingVisibleBorderAreaPixels"] = BorderArea(process.Id, out draggingCount, out draggingLargest);
                     metrics["draggingVisibleBorderWindowCount"] = draggingCount; metrics["draggingLargestSurfacePixels"] = draggingLargest;
-                    Button(form, 0x0004);
+                    Button(context, "selection-left-up", 0x0004);
                 }
+                context.Stage = "wait-helper-exit";
                 Assert(process.WaitForExit(10000), "Capture helper did not finish after the fixture selection/cancellation.");
                 JavaScriptSerializer json = new JavaScriptSerializer(); json.MaxJsonLength = 16 * 1024 * 1024;
                 Dictionary<string, object> reply = json.Deserialize<Dictionary<string, object>>(output.GetAwaiter().GetResult());
+                context.Stage = "verify-helper-response";
                 if (!capture) {
                     Assert(!(bool)reply["ok"] && process.ExitCode != 0 && ((string)reply["error"]).StartsWith("CANCELLED:", StringComparison.Ordinal), "Cancel did not return CANCELLED.");
                 } else {
@@ -249,8 +296,10 @@ public static class EchoLingoLiveCaptureSmoke {
                         metrics["generatedVisiblePixelRgb"] = new int[] { liveColor.R, liveColor.G, liveColor.B };
                     }
                 }
-                RequireFixtureForeground(form);
+                RequireFixtureForeground(context, "capture-complete");
+                context.Stage = "verify-generated-layer-input";
                 if (layer != null) OnUi(form, delegate { Assert(layerMouseEvents == 0, "Selection button input reached the generated topmost layer."); });
+                context.Stage = "verify-no-leftover-borders";
                 Assert(ReadyOverlays(process.Id) == 0, "Capture border windows survived their helper process.");
                 metrics["mode"] = mode; metrics["passed"] = true; metrics["foregroundPreserved"] = true;
                 return metrics;
@@ -270,6 +319,7 @@ public static class EchoLingoLiveCaptureSmoke {
         report["multiMonitorInteractiveTested"] = false; report["mixedDpiInteractiveTested"] = false;
         report["pinnedAppExclusionTested"] = false; report["globalShortcutsTested"] = false;
         using (Form form = new Form()) {
+            TrialContext context = new TrialContext(form);
             form.Text = "EchoLingo generated live-capture fixture";
             form.AutoScaleMode = AutoScaleMode.None;
             form.ClientSize = new Size(400, 250); form.StartPosition = FormStartPosition.CenterScreen;
@@ -290,9 +340,11 @@ public static class EchoLingoLiveCaptureSmoke {
                     try {
                         Assert(SetThreadDpiAwarenessContext(new IntPtr(-4)) != IntPtr.Zero, "Fixture worker DPI context failed.");
                         foreach (string mode in new string[] { "capture", "capture-burst", "topmost-capture", "escape-short", "escape", "right", "capture" }) {
+                            context.Mode = mode; context.Stage = "reset-generated-source";
                             OnUi(form, delegate { form.BackColor = Color.FromArgb(50, 210, 110); form.Refresh(); });
-                            trials.Add(Trial(form, helper, mode, Color.FromArgb(220, 70, 85)));
+                            trials.Add(Trial(context, helper, mode, Color.FromArgb(220, 70, 85)));
                         }
+                        context.Stage = "verify-generated-source-input";
                         OnUi(form, delegate {
                             Assert(sourceMouseEvents == 0, "Selection/cancel button input reached the generated source window.");
                             Assert(escapeEvents.Count == 0, "Escape down/up reached the generated source window.");
@@ -302,10 +354,19 @@ public static class EchoLingoLiveCaptureSmoke {
                         report["liveCaptureAfterSelectionPassed"] = true;
                         report["overlayAbsentInCapture"] = true;
                         report["ok"] = true;
-                    } catch (Exception error) { report["error"] = error.Message; }
+                    } catch (Exception error) {
+                        report["error"] = error.Message;
+                        report["stack"] = error.ToString();
+                        report["failedMode"] = context.Mode; report["failedStage"] = context.Stage;
+                        report["foregroundAtFailure"] = context.ForegroundFailure ?? ForegroundMetadata(context, GetForegroundWindow());
+                    }
                     finally {
-                        try { if (restorePointer && GetForegroundWindow() == form.Handle) Move(form, originalPointer); }
-                        catch (Exception error) { report["ok"] = false; report["pointerRestoreError"] = error.Message; }
+                        try { if (restorePointer && GetForegroundWindow() == form.Handle) Move(context, "restore-original-pointer", originalPointer); }
+                        catch (Exception error) {
+                            report["ok"] = false; report["pointerRestoreError"] = error.Message;
+                            report["pointerRestoreStack"] = error.ToString();
+                            report["pointerRestoreForeground"] = context.ForegroundFailure ?? ForegroundMetadata(context, GetForegroundWindow());
+                        }
                         finally { OnUi(form, delegate { finished = true; form.Close(); }); }
                     }
                 });
