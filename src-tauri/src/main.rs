@@ -2356,6 +2356,10 @@ fn main() {
                 pending_shortcut_settings: AtomicBool::new(false),
             });
             app.manage(window_layout::LayoutState::new(layout_data_dir));
+            // The first registered OCR shortcut must already have its native
+            // input host; startup does not otherwise wait for the frontend.
+            #[cfg(target_os = "windows")]
+            outside_click_watcher(app.handle().clone());
             #[cfg(target_os = "macos")]
             {
                 app.manage(ApplicationPolicyDiagnostics::default());
@@ -2387,6 +2391,7 @@ fn main() {
             if configure_shortcuts_requested(&std::env::args().collect::<Vec<_>>()) {
                 request_shortcut_settings(app.handle());
             }
+            #[cfg(not(target_os = "windows"))]
             outside_click_watcher(app.handle().clone());
             Ok(())
         })

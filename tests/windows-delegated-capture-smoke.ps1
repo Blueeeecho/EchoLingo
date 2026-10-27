@@ -127,11 +127,11 @@ public static class EchoLingoDelegatedCaptureSmoke {
     }
     sealed class Host : IDisposable {
         public Process Process;public int Child;public int Generation;public bool Usable=true;
-        Task<string> error;Task<string> pending;
+        Task<string> error;Task<string> pending;StreamWriter input;public bool FirstCommandBomRemoved;
         public Host(string harness,string helper,string assembly) {
             ProcessStartInfo start=new ProcessStartInfo(harness,"\""+helper+"\" \""+assembly+"\"");
             start.UseShellExecute=false;start.CreateNoWindow=true;start.RedirectStandardInput=true;start.RedirectStandardOutput=true;start.RedirectStandardError=true;start.StandardOutputEncoding=Encoding.UTF8;
-            Process=Process.Start(start);error=Process.StandardError.ReadToEndAsync();
+            Process=Process.Start(start);input=new StreamWriter(Process.StandardInput.BaseStream,new UTF8Encoding(false));input.AutoFlush=true;error=Process.StandardError.ReadToEndAsync();
             try { Dictionary<string,object> ready=Read(5000);Need((string)ready["event"]=="host"&&(bool)ready["productionModulesImported"]&&(bool)ready["outsideClickGateDisarmed"],"Exact production observer did not start."); }
             catch {if(!Process.HasExited){Process.Kill();Process.WaitForExit(3000);}Process.Dispose();throw;}
         }
@@ -139,15 +139,15 @@ public static class EchoLingoDelegatedCaptureSmoke {
             if(pending==null)pending=Process.StandardOutput.ReadLineAsync();
             Need(pending.Wait(milliseconds),"HOST_PROTOCOL_TIMEOUT: Bounded private host response did not arrive.");
             string line=pending.GetAwaiter().GetResult();pending=null;
-            if(line==null){string ownError=error!=null&&error.IsCompleted?error.GetAwaiter().GetResult():"";Need(false,"HOST_PROTOCOL_EOF: "+ownError.Substring(0,Math.Min(ownError.Length,600)));}
+            if(line==null){Usable=false;string ownError=error!=null&&error.IsCompleted?error.GetAwaiter().GetResult():"";Need(false,"HOST_PROTOCOL_EOF: "+ownError.Substring(0,Math.Min(ownError.Length,600)));}
             Need(line.Length<=32*1024*1024,"HOST_PROTOCOL_SIZE");
             return json.Deserialize<Dictionary<string,object>>(line);
         }
         public int Begin() {
             Need(Child==0&&Usable&&!Process.HasExited,"Previous session did not finish.");
-            Process.StandardInput.WriteLine("capture");Process.StandardInput.Flush();Dictionary<string,object> child=Read(5000);
+            Dictionary<string,object> child;try{input.WriteLine("capture");child=Read(5000);}catch{Usable=false;throw;}
             Need((string)child["event"]=="child"&&Convert.ToInt32(child["hostProcessId"])==Process.Id,"Unexpected host child identity.");
-            Generation++;Need(Convert.ToInt32(child["generation"])==Generation,"Host generation did not advance exactly once.");Child=Convert.ToInt32(child["helperProcessId"]);return Child;
+            FirstCommandBomRemoved=(bool)child["firstCommandBomRemoved"];Generation++;Need(Convert.ToInt32(child["generation"])==Generation,"Host generation did not advance exactly once.");Child=Convert.ToInt32(child["helperProcessId"]);return Child;
         }
         public Dictionary<string,object> Finish(Dictionary<string,object> report,int timeout) {
             Dictionary<string,object> reply=Read(timeout);report["helperDiagnostics"]=SafeReply(reply);
@@ -156,10 +156,11 @@ public static class EchoLingoDelegatedCaptureSmoke {
             Need((bool)closed["sessionCloseCalled"]&&!(bool)closed["helperDeadlineKilled"]&&Convert.ToInt64(closed["hostThreadId"])>0&&!Process.HasExited,"Host session did not close normally.");
             Need(reply.ContainsKey("ok")&&Convert.ToInt32(closed["helperExitCode"])==((bool)reply["ok"]?0:1),"Helper response and actual process exit code disagree.");return reply;
         }
+        public void Shutdown(){input.WriteLine("shutdown");}
         public void Dispose() {
             if(Process==null)return;
             try {
-                if(!Process.HasExited&&Child==0){Process.StandardInput.WriteLine("shutdown");Process.StandardInput.Flush();}
+                if(!Process.HasExited&&Child==0){input.WriteLine("shutdown");}
                 if(!Process.WaitForExit(4000))Process.Kill();Process.WaitForExit(3000);
             }finally{Process.Dispose();}
         }
@@ -229,7 +230,7 @@ public static class EchoLingoDelegatedCaptureSmoke {
             source=new Sources();int oldDown=0,oldUp=0,oldClick=0;
             bool preheld=kind=="preheld-source-release-then-first-fresh-pair";
             if(preheld){Send(new INPUT[]{Mouse(2)});source.Partial=true;Thread.Sleep(80);source.Drain();Need(source.Downs==1&&source.Ups==0,"Preheld setup did not deliver exactly one source down.");}
-            int helper=host.Begin();report["helperProcessId"]=helper;report["hostProcessId"]=host.Process.Id;report["generation"]=host.Generation;
+            int helper=host.Begin();report["helperProcessId"]=helper;report["hostProcessId"]=host.Process.Id;report["generation"]=host.Generation;report["firstCommandBomRemoved"]=host.FirstCommandBomRemoved;
             report["sourceAHwnd"]=Id(source.AH);report["sourceBHwnd"]=Id(source.BH);report["sourceUiThreadId"]=source.ThreadId;report["controllerThreadId"]=GetCurrentThreadId();
             report["sourcePhysicalDwmBounds"]=Rect(source.AFrame);report["sourceForegroundBefore"]=Id(GetForegroundWindow());
             if(preheld){
@@ -319,9 +320,9 @@ public static class EchoLingoDelegatedCaptureSmoke {
         List<Dictionary<string,object>> cases=new List<Dictionary<string,object>>();bool ok=true;Dictionary<string,object> stopped=null;
         using(Host host=new Host(harness,helper,assembly)){
             foreach(string kind in new string[]{"first-fresh-pair-immediate-release","topmost-self-raise-immediate-first-pair","foreign-thread-native-capture","cross-peer-held900ms","preheld-source-release-then-first-fresh-pair","escape-drains-owned-release","escape-held-release-after-helper-close","next-capture-after-escape"}){
-                Dictionary<string,object> result=Case(host,kind);cases.Add(result);ok=ok&&(bool)result["ok"];if(!host.Usable||host.Child!=0)break;
+                Dictionary<string,object> result=Case(host,kind);cases.Add(result);ok=ok&&(bool)result["ok"];if(!host.Usable||host.Child!=0||host.Process.HasExited)break;
             }
-            if(host.Child==0&&!host.Process.HasExited){host.Process.StandardInput.WriteLine("shutdown");host.Process.StandardInput.Flush();stopped=host.Read(4000);Need((string)stopped["event"]=="stopped"&&Convert.ToInt32(stopped["completedGenerations"])==cases.Count,"Host stop/generation mismatch.");Need(host.Process.WaitForExit(4000)&&host.Process.ExitCode==0,"Production observer host failed to exit.");}
+            if(host.Child==0&&!host.Process.HasExited){host.Shutdown();stopped=host.Read(4000);Need((string)stopped["event"]=="stopped"&&Convert.ToInt32(stopped["completedGenerations"])==cases.Count,"Host stop/generation mismatch.");Need(host.Process.WaitForExit(4000)&&host.Process.ExitCode==0,"Production observer host failed to exit.");}
             else ok=false;
         }
         return new Dictionary<string,object>{{"ok",ok&&cases.Count==8},{"cases",cases},{"hostShutdown",stopped},{"productionModulesImported",true},{"requestedInputBackend","delegated-exact-production"},{"userContentCaptured",false},{"clipboardAccessed",false},{"scope","Exact production hook pump/session and C# picker with generated same-integrity peers only; no Tauri/engine, physical app, elevated boundary or universal acceptance claim."}};

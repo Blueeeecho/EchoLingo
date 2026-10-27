@@ -148,13 +148,32 @@ mod desktop {
         observer::disarm();
         emit(&format!("{{\"event\":\"host\",\"hostProcessId\":{},\"productionModulesImported\":true,\"outsideClickGateDisarmed\":true}}",std::process::id()))?;
         let mut generation = 0;
+        let mut first_command = true;
+        let mut leading_bom_removed = false;
         for command in io::stdin().lock().lines() {
             let command = command.map_err(|_| "HOST_PIPE_READ")?;
+            // Some .NET Framework pipe writers prefix UTF-8 once. Accept only
+            // that transport preamble, never trim/normalize lifecycle commands.
+            let command = if first_command {
+                first_command = false;
+                if let Some(rest) = command.strip_prefix('\u{feff}') {
+                    leading_bom_removed = true;
+                    rest
+                } else {
+                    &command
+                }
+            } else {
+                &command
+            };
             if command == "shutdown" {
                 break;
             }
             if command != "capture" {
-                return Err("LIFECYCLE_COMMAND_REQUIRED".into());
+                return Err(format!(
+                    "LIFECYCLE_COMMAND_REQUIRED firstCodepoint={} characters={}",
+                    command.chars().next().map(u32::from).unwrap_or(0),
+                    command.chars().count()
+                ));
             }
             generation += 1;
             let mut session = bridge::Session::begin()?;
@@ -186,7 +205,7 @@ mod desktop {
             let error = child.stderr.take().ok_or("HELPER_STDERR")?;
             let output = thread::spawn(move || collect(output));
             let error = thread::spawn(move || collect(error));
-            emit(&format!("{{\"event\":\"child\",\"generation\":{generation},\"helperProcessId\":{},\"hostProcessId\":{}}}",child.id(),std::process::id()))?;
+            emit(&format!("{{\"event\":\"child\",\"generation\":{generation},\"helperProcessId\":{},\"hostProcessId\":{},\"firstCommandBomRemoved\":{leading_bom_removed}}}",child.id(),std::process::id()))?;
             let mut killed = false;
             let status = loop {
                 if let Some(status) = child.try_wait().map_err(|_| "HELPER_WAIT_FAILED")? {

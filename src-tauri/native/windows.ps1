@@ -1475,9 +1475,9 @@ sealed class CaptureInputPump : IDisposable {
             PeekMessage(out message, IntPtr.Zero, 0, 0, 0); // Establish queue before publishing readiness/WM_QUIT.
             if (installMouseHook) {
                 hook = SetWindowsHookEx(14, callback, GetModuleHandle(null), 0);
-                // A verified input plane is always present before blue-ready.
-                // A failed or later silently removed mouse hook can therefore
-                // use normal HWND input, without clicking the source beneath.
+                // Legacy standalone diagnostics retain this managed path.
+                // TOPMOST/HWND hit testing alone does not prove exclusive
+                // ownership; the app uses its native session input bridge.
                 if (hook != IntPtr.Zero) Interlocked.Exchange(ref mouseHookInstalled, 1);
             }
             keyboardHook = SetKeyboardHook(13, keyboardCallback, GetModuleHandle(null), 0);

@@ -8,7 +8,7 @@ try {
     if (-not $IsolatedTestSession -and -not $env:GITHUB_ACTIONS) { throw 'ISOLATION_REQUIRED' }
     if ([Environment]::OSVersion.Platform -ne [PlatformID]::Win32NT -or -not [Environment]::UserInteractive -or [IntPtr]::Size -ne 8) { throw 'WINDOWS_X64_INTERACTIVE_REQUIRED' }
     $ApplicationPath=(Resolve-Path -LiteralPath $ApplicationPath).Path
-    if (-not $NodePath) { $NodePath=(Get-Command node.exe -CommandType Application -ErrorAction Stop).Source }
+    if (-not $NodePath) { $NodePath=(Get-Command node.exe -CommandType Application -ErrorAction Stop | Select-Object -First 1).Source }
     $NodePath=(Resolve-Path -LiteralPath $NodePath).Path
     $FixturePath=(Resolve-Path -LiteralPath (Join-Path $PSScriptRoot 'windows-shortcuts-ui.mjs')).Path
     Add-Type -AssemblyName System.Web.Extensions
