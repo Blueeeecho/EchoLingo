@@ -32,6 +32,8 @@ public static class EchoLingoShortcutsUiaFixture {
     [DllImport("kernel32.dll",SetLastError=true)] static extern bool TerminateJobObject(IntPtr job, uint code);
     [DllImport("kernel32.dll",SetLastError=true)] static extern bool QueryInformationJobObject(IntPtr job, int kind, out JOBACCOUNTING info, uint size, out uint returned);
     [DllImport("kernel32.dll",CharSet=CharSet.Unicode,SetLastError=true)] static extern uint GetFileAttributes(string path);
+    [DllImport("kernel32.dll",SetLastError=true)] static extern uint WaitForSingleObject(IntPtr handle, uint milliseconds);
+    [DllImport("kernel32.dll")] static extern uint GetCurrentThreadId();
     [DllImport("kernel32.dll")] static extern bool CloseHandle(IntPtr handle);
     [StructLayout(LayoutKind.Sequential)] struct MOUSE { public int x,y; public uint data,flags,time; public UIntPtr extra; }
     [StructLayout(LayoutKind.Sequential)] struct KEY { public ushort vk,scan; public uint flags,time; public UIntPtr extra; }
@@ -192,17 +194,71 @@ public static class EchoLingoShortcutsUiaFixture {
             Wait(FieldsVisible,25000,"ACTUAL_SHORTCUT_SETTINGS_NOT_READY"); report["actualSettingsUiTested"]=true;
         }
         void Stop() {
-            Exception failure=null;
-            if(job!=IntPtr.Zero) { IntPtr ownJob=job;job=IntPtr.Zero;try {
-                Need(TerminateJobObject(ownJob,0),"OWN_APP_JOB_STOP_FAILED");Stopwatch stopped=Stopwatch.StartNew();JOBACCOUNTING accounting;uint returned;
-                while(true) {
+            if(job==IntPtr.Zero&&app==null) { main=IntPtr.Zero;return; }
+            Exception failure=null;IntPtr ownJob=job,appHandle=IntPtr.Zero;job=IntPtr.Zero;
+            uint thread=GetCurrentThreadId(),lastWait=UInt32.MaxValue;int polls=0;
+            uint[] modifiers=new uint[]{7,7,1,1},keys=new uint[]{0x78,0x79,0x44,0x53};
+            int[] attempts=new int[4],unregistered=new int[4],lastErrors=new int[]{-1,-1,-1,-1};
+            long[] firstConflicts=new long[]{-1,-1,-1,-1};bool completed=false,allAvailable=false;
+            Dictionary<string,object> stoppedState=new Dictionary<string,object>{{"budgetMilliseconds",5000},{"applicationHandleRequired",app!=null},{"nativeProbeThreadId",thread},{"activeProcesses",null}};
+            Stopwatch stopped=Stopwatch.StartNew();
+            try {
+                if(app!=null) appHandle=app.Handle;
+                Need(ownJob!=IntPtr.Zero,"OWN_APP_JOB_MISSING");
+                Need(TerminateJobObject(ownJob,0),"OWN_APP_JOB_STOP_FAILED");
+                while(stopped.ElapsedMilliseconds<5000) {
+                    polls++;JOBACCOUNTING accounting;uint returned;
                     Need(QueryInformationJobObject(ownJob,1,out accounting,(uint)Marshal.SizeOf(typeof(JOBACCOUNTING)),out returned),"OWN_JOB_ACCOUNTING_FAILED");
-                    if(accounting.active==0) { jobStops.Add(new Dictionary<string,object>{{"activeProcesses",accounting.active},{"elapsedMilliseconds",stopped.ElapsedMilliseconds}});break; }
-                    Need(stopped.ElapsedMilliseconds<5000,"OWN_JOB_PROCESSES_NOT_STOPPED");Thread.Sleep(10);
+                    stoppedState["activeProcesses"]=accounting.active;
+                    lastWait=appHandle==IntPtr.Zero?0:WaitForSingleObject(appHandle,0);
+                    int waitError=lastWait==UInt32.MaxValue?Marshal.GetLastWin32Error():0;
+                    stoppedState["processWaitWin32Error"]=waitError;
+                    if(polls==1) stoppedState["firstProcessWaitResult"]=lastWait;
+                    Need(lastWait==0||lastWait==258,"OWN_PROCESS_WAIT_FAILED");
+                    allAvailable=false;
+                    if(lastWait==0&&accounting.active==0) {
+                        allAvailable=true;
+                        for(int i=0;i<keys.Length;i++) {
+                            Need(stopped.ElapsedMilliseconds<5000,"OWN_STOP_RESOURCE_DEADLINE");
+                            Need(GetCurrentThreadId()==thread,"STOP_PROBE_THREAD_CHANGED");attempts[i]++;
+                            bool registered=RegisterHotKey(IntPtr.Zero,23117,modifiers[i],keys[i]);int error=registered?0:Marshal.GetLastWin32Error();lastErrors[i]=error;
+                            if(registered) {
+                                uint releaseThread=GetCurrentThreadId();
+                                bool released=UnregisterHotKey(IntPtr.Zero,23117);int releaseError=released?0:Marshal.GetLastWin32Error();
+                                stoppedState["probeUnregisterWin32Error"]=releaseError;
+                                Need(released,"STOP_PROBE_RELEASE_FAILED");unregistered[i]++;
+                                Need(releaseThread==thread&&GetCurrentThreadId()==thread,"STOP_PROBE_THREAD_CHANGED");
+                            } else {
+                                Need(error==1409,"STOP_PROBE_UNKNOWN_ERROR");allAvailable=false;
+                                if(firstConflicts[i]<0) firstConflicts[i]=stopped.ElapsedMilliseconds;
+                            }
+                        }
+                        if(allAvailable&&stopped.ElapsedMilliseconds<5000) { completed=true;break; }
+                    }
+                    long remaining=5000-stopped.ElapsedMilliseconds;if(remaining>0) Thread.Sleep((int)Math.Min(10,remaining));
                 }
-            } catch(Exception e) { failure=e; } finally { CloseHandle(ownJob); } }
-            if(app!=null) { try { if(!app.HasExited) { app.Kill(); Need(app.WaitForExit(5000),"OWN_APP_NOT_STOPPED"); } } catch(Exception e) { if(failure==null) failure=e; } finally { app.Dispose();app=null; } }
-            main=IntPtr.Zero; if(failure!=null) throw failure;
+                Need(completed,"OWN_STOP_RESOURCE_DEADLINE");
+            } catch(Exception e) { failure=e; }
+            finally {
+                stoppedState["resourceObservationElapsedMilliseconds"]=stopped.ElapsedMilliseconds;stoppedState["processWaitResult"]=lastWait;
+                stoppedState["processSignaled"]=lastWait==0;stoppedState["polls"]=polls;stoppedState["allCoreKeysAvailable"]=allAvailable;stoppedState["completed"]=completed;
+                stoppedState["coreModifiers"]=modifiers;stoppedState["coreKeys"]=keys;stoppedState["probeAttempts"]=attempts;
+                stoppedState["successfulProbeUnregistrations"]=unregistered;stoppedState["lastProbeErrors"]=lastErrors;stoppedState["firstConflictElapsedMilliseconds"]=firstConflicts;
+                stoppedState["failureCleanupKillUsed"]=false;jobStops.Add(stoppedState);if(ownJob!=IntPtr.Zero) CloseHandle(ownJob);
+                if(app!=null) {
+                    try {
+                        // Only failure cleanup may need this existing owned-app
+                        // fallback. It cannot turn a failed Stop into success.
+                        if(!completed&&WaitForSingleObject(appHandle,0)==258) {
+                            stoppedState["failureCleanupKillUsed"]=true;app.Kill();long remaining=5000-stopped.ElapsedMilliseconds;
+                            if(remaining>0) WaitForSingleObject(appHandle,(uint)remaining);
+                        }
+                    } catch(Exception e) { if(failure==null) failure=e; }
+                    finally { app.Dispose();app=null; }
+                }
+                stoppedState["elapsedMilliseconds"]=stopped.ElapsedMilliseconds;main=IntPtr.Zero;
+            }
+            if(failure!=null) throw failure;
         }
         void Conflict() {
             Stage("real-external-conflict-rollback"); Availability(7,0x77,true,"conflict-baseline");
