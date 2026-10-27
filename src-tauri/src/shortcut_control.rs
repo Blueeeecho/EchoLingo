@@ -1,6 +1,7 @@
 //! Pure shortcut recording and registration policies. The caller serializes
 //! access to a gate and resolves an accepted binding ID to its current action.
-use std::collections::{BTreeSet, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
+use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
 
 pub const RECORDING_LEASE: Duration = Duration::from_secs(15);
@@ -136,6 +137,53 @@ impl ShortcutGate {
     }
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ShortcutRoute {
+    pub action: String,
+    pub combo: String,
+}
+
+pub type ShortcutRouteSnapshot = Arc<BTreeMap<u32, ShortcutRoute>>;
+
+/// Hotkey callbacks must not wait for settings persistence or OS registration.
+/// Build the next map outside this lock; hold it only to clone/replace an Arc.
+#[derive(Default)]
+pub struct ShortcutRoutes(RwLock<ShortcutRouteSnapshot>);
+
+impl ShortcutRoutes {
+    pub fn publish_registered(
+        &self,
+        desired: impl IntoIterator<Item = (u32, ShortcutRoute)>,
+        registered: impl IntoIterator<Item = u32>,
+    ) -> Result<(), String> {
+        let registered: BTreeSet<_> = registered.into_iter().collect();
+        let next: BTreeMap<_, _> = desired
+            .into_iter()
+            .filter(|(id, _)| registered.contains(id))
+            .collect();
+        let next = Arc::new(next);
+        let mut current = self.0.write().map_err(|_| "快捷键路由状态异常")?;
+        // Provider/theme-only saves do not invalidate a pending hotkey.
+        if current.as_ref() != next.as_ref() {
+            *current = next;
+        }
+        Ok(())
+    }
+
+    pub fn snapshot(&self) -> Result<ShortcutRouteSnapshot, String> {
+        self.0
+            .read()
+            .map(|current| Arc::clone(&current))
+            .map_err(|_| "快捷键路由状态异常".into())
+    }
+
+    pub fn is_current(&self, snapshot: &ShortcutRouteSnapshot) -> bool {
+        self.0
+            .read()
+            .is_ok_and(|current| Arc::ptr_eq(&current, snapshot))
+    }
+}
+
 /// A read-only snapshot of the four supported modifier families. No hook,
 /// sequence, text, clipboard, application query, or permission is involved.
 pub fn recording_modifiers_down() -> Option<u8> {
@@ -244,6 +292,104 @@ mod tests {
     use std::cell::{Cell, RefCell};
     use std::collections::VecDeque;
     use std::rc::Rc;
+
+    fn route(action: &str, combo: &str) -> ShortcutRoute {
+        ShortcutRoute {
+            action: action.into(),
+            combo: combo.into(),
+        }
+    }
+
+    #[test]
+    fn route_reads_finish_while_another_thread_holds_settings_for_persistence() {
+        use std::sync::{mpsc, Mutex};
+        let routes = Arc::new(ShortcutRoutes::default());
+        routes
+            .publish_registered([(1, route("selection", "Alt+D"))], [1])
+            .unwrap();
+        let settings = Arc::new(Mutex::new(route("selection", "Alt+D")));
+        let (held_tx, held_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let writer_routes = Arc::clone(&routes);
+        let writer_settings = Arc::clone(&settings);
+        let writer = std::thread::spawn(move || {
+            let mut locked = writer_settings.lock().unwrap();
+            held_tx.send(()).unwrap();
+            release_rx.recv().unwrap();
+            *locked = route("selection", "Ctrl+D");
+            writer_routes
+                .publish_registered([(2, locked.clone())], [2])
+                .unwrap();
+        });
+        held_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        assert!(settings.try_lock().is_err());
+        let reader_routes = Arc::clone(&routes);
+        let (read_tx, read_rx) = mpsc::channel();
+        let reader = std::thread::spawn(move || {
+            let mut gate = ShortcutGate::default();
+            let now = Instant::now();
+            assert_eq!(gate.observe(1, true, now), ShortcutDelivery::Ignored);
+            assert_eq!(gate.observe(1, false, now), ShortcutDelivery::Action);
+            let snapshot = reader_routes.snapshot().unwrap();
+            read_tx.send(snapshot.get(&1).cloned()).unwrap();
+        });
+        // The write is still blocked on release_rx, not on timing or disk speed.
+        let received = read_rx.recv_timeout(Duration::from_secs(2));
+        release_tx.send(()).unwrap();
+        writer.join().unwrap();
+        reader.join().unwrap();
+        assert_eq!(received.unwrap(), Some(route("selection", "Alt+D")));
+        assert_eq!(
+            routes.snapshot().unwrap().get(&2),
+            Some(&route("selection", "Ctrl+D"))
+        );
+        assert!(!routes.snapshot().unwrap().contains_key(&1));
+    }
+
+    #[test]
+    fn route_generation_changes_only_when_action_combo_or_registration_changes() {
+        let routes = ShortcutRoutes::default();
+        routes
+            .publish_registered([(1, route("selection", "Alt+D"))], [1])
+            .unwrap();
+        let accepted = routes.snapshot().unwrap();
+        routes
+            .publish_registered([(1, route("selection", "Alt+D"))], [1])
+            .unwrap();
+        assert!(routes.is_current(&accepted));
+        routes
+            .publish_registered([(1, route("silentOcr", "Alt+D"))], [1])
+            .unwrap();
+        assert!(!routes.is_current(&accepted));
+        assert_eq!(accepted.get(&1), Some(&route("selection", "Alt+D")));
+        let swapped = routes.snapshot().unwrap();
+        assert_eq!(swapped.get(&1), Some(&route("silentOcr", "Alt+D")));
+        routes
+            .publish_registered([(1, route("silentOcr", "Alt+D"))], [])
+            .unwrap();
+        assert!(!routes.is_current(&swapped));
+        assert!(routes.snapshot().unwrap().is_empty());
+    }
+
+    #[test]
+    fn partial_registry_recovery_never_routes_missing_or_unconfigured_ids() {
+        let routes = ShortcutRoutes::default();
+        //1 was restored,2 failed restoration,3 is an orphan staged registration.
+        routes
+            .publish_registered(
+                [
+                    (1, route("selection", "Alt+D")),
+                    (2, route("silentOcr", "Alt+S")),
+                ],
+                [1, 3],
+            )
+            .unwrap();
+        let snapshot = routes.snapshot().unwrap();
+        assert_eq!(snapshot.len(), 1);
+        assert_eq!(snapshot.get(&1), Some(&route("selection", "Alt+D")));
+        assert!(!snapshot.contains_key(&2));
+        assert!(!snapshot.contains_key(&3));
+    }
 
     #[test]
     fn native_recording_bridge_requires_one_fresh_pair_in_the_same_live_lease() {

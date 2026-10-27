@@ -41,6 +41,7 @@ struct AppState {
     pinned: AtomicBool,
     native_busy: AtomicBool,
     shortcut_gate: Mutex<shortcut_control::ShortcutGate>,
+    shortcut_routes: shortcut_control::ShortcutRoutes,
     shortcut_updating: AtomicBool,
     registered_shortcuts: Mutex<Vec<Shortcut>>,
     translation_busy: tokio::sync::Semaphore,
@@ -606,42 +607,34 @@ fn parsed_shortcuts(s: &Shortcuts) -> Result<Vec<(String, Shortcut)>, String> {
 
 fn dispatch_shortcut(app: &tauri::AppHandle, shortcut: &Shortcut, phase: ShortcutState) {
     let state = app.state::<AppState>();
-    let delivery = state
-        .shortcut_gate
-        .lock()
-        .map(|mut gate| {
-            let now = Instant::now();
-            if state.shortcut_updating.load(Ordering::SeqCst) {
-                gate.cancel(now);
-            }
-            // Observe releases even during updates: dropping them leaves a stale
-            // held ID which would swallow the next genuine press after saving.
-            gate.observe(shortcut.id(), phase == ShortcutState::Pressed, now)
-        })
-        .unwrap_or(shortcut_control::ShortcutDelivery::Ignored);
-    if delivery == shortcut_control::ShortcutDelivery::Ignored
-        || state.shortcut_updating.load(Ordering::SeqCst)
+    let delivery = state.shortcut_gate.lock().ok().and_then(|mut gate| {
+        let now = Instant::now();
+        if state.shortcut_updating.load(Ordering::SeqCst) {
+            gate.cancel(now);
+        }
+        // Observe releases even during updates: dropping them leaves a stale
+        // held ID which would swallow the next genuine press after saving.
+        let delivery = gate.observe(shortcut.id(), phase == ShortcutState::Pressed, now);
+        if delivery == shortcut_control::ShortcutDelivery::Ignored {
+            return None;
+        }
+        // Bind the accepted release to this route generation while the
+        // recording gate is still held. A later update cannot turn it
+        // into a different action after cancelling the old press.
+        Some((delivery, state.shortcut_routes.snapshot().ok()?))
+    });
+    let Some((delivery, routes)) = delivery else {
+        return;
+    };
+    // This lookup never takes the settings/registration locks, which may span
+    // disk sync or a synchronous visit to the UI thread. Reject stale maps.
+    if state.shortcut_updating.load(Ordering::SeqCst) || !state.shortcut_routes.is_current(&routes)
     {
         return;
     }
-    // Native registration may synchronously visit the UI thread. Never block
-    // that thread on a Settings save which is waiting for registration there.
-    let binding = state.settings.try_lock().ok().and_then(|settings| {
-        let normalized = shortcut_bindings::normalized(&settings.shortcuts).ok()?;
-        let action = parsed_shortcuts(&normalized)
-            .ok()?
-            .into_iter()
-            .find(|(_, binding)| binding.id() == shortcut.id())
-            .map(|(action, _)| action)?;
-        let combo = normalized
-            .pairs()
-            .into_iter()
-            .find(|(name, _)| *name == action)?
-            .1
-            .to_owned();
-        Some((action, combo))
-    });
-    if let Some((action, combo)) = binding {
+    if let Some(shortcut_control::ShortcutRoute { action, combo }) =
+        routes.get(&shortcut.id()).cloned()
+    {
         match delivery {
             shortcut_control::ShortcutDelivery::Recorded(lease_id) => {
                 if state
@@ -723,7 +716,44 @@ fn install_shortcuts(app: &tauri::AppHandle, s: &Shortcuts) -> Result<(), String
         .map(|(_, binding)| binding.id())
         .collect::<Vec<_>>();
     let mut registry = shortcut_registry(app, &mut registered, &next);
-    shortcut_control::replace_bindings(&mut registry, &old, &ids, || Ok(()))
+    let result = shortcut_control::replace_bindings(&mut registry, &old, &ids, || Ok(()));
+    sync_shortcut_routes(&state, s, registry.registered, result)
+}
+
+fn sync_shortcut_routes(
+    state: &AppState,
+    shortcuts: &Shortcuts,
+    registered: &[Shortcut],
+    result: Result<(), String>,
+) -> Result<(), String> {
+    let sync = (|| {
+        let canonical = shortcut_bindings::normalized(shortcuts)?;
+        let desired = canonical
+            .pairs()
+            .into_iter()
+            .filter(|(_, combo)| !combo.is_empty())
+            .map(|(action, combo)| {
+                let binding: Shortcut = combo.parse().map_err(|_| "快捷键路由无效")?;
+                Ok((
+                    binding.id(),
+                    shortcut_control::ShortcutRoute {
+                        action: action.to_owned(),
+                        combo: combo.to_owned(),
+                    },
+                ))
+            })
+            .collect::<Result<Vec<_>, String>>()?;
+        state
+            .shortcut_routes
+            .publish_registered(desired, registered.iter().map(Shortcut::id))
+    })();
+    match sync {
+        Ok(()) => result,
+        Err(error) => Err(match result {
+            Ok(()) => error,
+            Err(previous) => format!("{previous}；{error}"),
+        }),
+    }
 }
 
 fn cancel_shortcut_recording(app: &tauri::AppHandle) {
@@ -821,6 +851,7 @@ fn save_settings(
             ));
         }
     }
+    result = sync_shortcut_routes(&state, &current.shortcuts, registry.registered, result);
     for account in changed_credential_accounts(&previous, &current) {
         if let Err(error) = state.credentials.invalidate_account(&account) {
             result = Err(match result {
@@ -2243,6 +2274,7 @@ fn main() {
                 pinned: AtomicBool::new(false),
                 native_busy: AtomicBool::new(false),
                 shortcut_gate: Mutex::new(shortcut_control::ShortcutGate::default()),
+                shortcut_routes: shortcut_control::ShortcutRoutes::default(),
                 shortcut_updating: AtomicBool::new(false),
                 registered_shortcuts: Mutex::new(Vec::new()),
                 translation_busy: tokio::sync::Semaphore::new(2),
@@ -2946,6 +2978,7 @@ mod tests {
             pinned: AtomicBool::new(false),
             native_busy: AtomicBool::new(false),
             shortcut_gate: Mutex::new(shortcut_control::ShortcutGate::default()),
+            shortcut_routes: shortcut_control::ShortcutRoutes::default(),
             shortcut_updating: AtomicBool::new(false),
             registered_shortcuts: Mutex::new(Vec::new()),
             translation_busy: tokio::sync::Semaphore::new(2),
