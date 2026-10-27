@@ -121,7 +121,21 @@ public static class EchoLingoShortcutMedium {
             Capability(UpdateProcThreadAttribute(attributes,0,new IntPtr(0x20002),list,new IntPtr(IntPtr.Size*3),IntPtr.Zero,IntPtr.Zero),"Whitelist only three owned standard handles");
             string windows=Environment.GetEnvironmentVariable("SystemRoot");Need(Path.IsPathRooted(windows),"SystemRoot missing.");
             SortedDictionary<string,string> vars=new SortedDictionary<string,string>(StringComparer.OrdinalIgnoreCase);
-            vars["SystemRoot"]=windows;vars["WINDIR"]=windows;vars["TEMP"]=Path.GetTempPath();vars["TMP"]=Path.GetTempPath();vars["PATH"]=Path.Combine(windows,"System32")+";"+windows+";"+Path.Combine(windows,"System32\\Wbem");vars["ECHOLINGO_TEST_EXPECT_MEDIUM"]="1";
+            vars["SystemRoot"]=windows;vars["WINDIR"]=windows;vars["TEMP"]=Path.GetTempPath();vars["TMP"]=Path.GetTempPath();
+            // One standard-Windows environment correction for restricted-child
+            // PowerShell module discovery; never forward the parent environment.
+            string powerShell=Path.Combine(windows,"System32\\WindowsPowerShell\\v1.0");
+            string programFiles=Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles);
+            string programFilesX86=Environment.GetFolderPath(Environment.SpecialFolder.ProgramFilesX86);
+            vars["USERPROFILE"]=Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
+            vars["APPDATA"]=Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData);
+            vars["LOCALAPPDATA"]=Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
+            vars["ProgramFiles"]=programFiles;vars["ProgramW6432"]=programFiles;vars["ProgramFiles(x86)"]=programFilesX86;
+            vars["ProgramData"]=Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData);
+            vars["COMSPEC"]=Path.Combine(windows,"System32\\cmd.exe");vars["PATHEXT"]=".COM;.EXE;.BAT;.CMD;.VBS;.VBE;.JS;.JSE;.WSF;.WSH;.MSC";
+            Need(Path.IsPathRooted(programFiles)&&Path.IsPathRooted(vars["USERPROFILE"])&&Path.IsPathRooted(vars["APPDATA"])&&Path.IsPathRooted(vars["LOCALAPPDATA"]),"Standard Windows known folders unavailable.");
+            vars["PSModulePath"]=Path.Combine(programFiles,"WindowsPowerShell\\Modules")+";"+Path.Combine(powerShell,"Modules");
+            vars["PATH"]=Path.Combine(windows,"System32")+";"+windows+";"+Path.Combine(windows,"System32\\Wbem")+";"+powerShell;vars["ECHOLINGO_TEST_EXPECT_MEDIUM"]="1";
             StringBuilder block=new StringBuilder();foreach(KeyValuePair<string,string> variable in vars)block.Append(variable.Key).Append('=').Append(variable.Value).Append('\0');block.Append('\0');environment=Marshal.StringToHGlobalUni(block.ToString());
             STARTUPEX startup=new STARTUPEX();startup.startup.size=Marshal.SizeOf(typeof(STARTUPEX));startup.startup.desktop="winsta0\\default";startup.startup.flags=0x100;startup.startup.input=nul;startup.startup.output=writeOut;startup.startup.error=writeError;startup.attributes=attributes;
             Capability(CreateProcessAsUser(restricted,node,new StringBuilder(command),IntPtr.Zero,IntPtr.Zero,true,0x08000000|0x00080000|0x00000400|0x4,environment,Path.GetDirectoryName(Path.GetDirectoryName(fixture)),ref startup,out child),"Create suspended own MEDIUM Node");

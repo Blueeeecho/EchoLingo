@@ -5,8 +5,77 @@ mod windows_capture_input;
 #[path = "../src-tauri/src/windows_visibility.rs"]
 mod windows_visibility;
 
+// canonicalize() intentionally returns verbatim Windows paths. Framework
+// Add-Type/Assembly.Location use ordinary DOS/UNC spelling in this fixture.
+// Conversion alone is not trust: desktop::fixture_path rechecks the file and
+// requires ordinary spelling to canonicalize to the identical original path.
+fn ordinary_windows_spelling(value: &str) -> Result<String, &'static str> {
+    let ordinary = if let Some(rest) = value.strip_prefix("\\\\?\\UNC\\") {
+        format!("\\\\{rest}")
+    } else if let Some(rest) = value.strip_prefix("\\\\?\\") {
+        rest.to_owned()
+    } else {
+        value.to_owned()
+    };
+    let bytes = ordinary.as_bytes();
+    let disk =
+        bytes.len() >= 3 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':' && bytes[2] == b'\\';
+    let unc = ordinary.strip_prefix("\\\\").is_some_and(|rest| {
+        let mut parts = rest.split('\\');
+        let server = parts.next().unwrap_or("");
+        let share = parts.next().unwrap_or("");
+        !server.is_empty()
+            && !share.is_empty()
+            && !matches!(server, "." | ".." | "?")
+            && !matches!(share, "." | "..")
+    });
+    if (!disk && !unc)
+        || ordinary.contains('\0')
+        || ordinary.contains('\r')
+        || ordinary.contains('\n')
+        || ordinary.encode_utf16().count() >= 260
+    {
+        return Err("FIXTURE_ORDINARY_ABSOLUTE_PATH_REQUIRED");
+    }
+    Ok(ordinary)
+}
+#[cfg(test)]
+mod path_tests {
+    use super::ordinary_windows_spelling;
+    #[test]
+    fn verbatim_disk_and_unc_use_ordinary_equivalent_spelling() {
+        assert_eq!(
+            ordinary_windows_spelling(r"\\?\D:\generated test\helper.dll").unwrap(),
+            r"D:\generated test\helper.dll"
+        );
+        assert_eq!(
+            ordinary_windows_spelling(r"\\?\UNC\server\share\生成\helper.dll").unwrap(),
+            r"\\server\share\生成\helper.dll"
+        );
+        assert_eq!(
+            ordinary_windows_spelling(r"C:\生成\helper.ps1").unwrap(),
+            r"C:\生成\helper.ps1"
+        );
+    }
+    #[test]
+    fn relative_device_volume_and_unsupported_long_paths_are_rejected() {
+        for bad in [
+            r"relative.dll",
+            r"C:relative.dll",
+            r"\\.\C:\helper.dll",
+            r"\\?\Volume{test}\helper.dll",
+            r"\\server",
+            r"\\?\GLOBALROOT\Device\helper.dll",
+        ] {
+            assert!(ordinary_windows_spelling(bad).is_err());
+        }
+        assert!(ordinary_windows_spelling(&format!(r"C:\{}", "x".repeat(260))).is_err());
+    }
+}
+
 #[cfg(windows)]
 mod desktop {
+    use super::ordinary_windows_spelling;
     use super::windows_capture_input as bridge;
     use super::windows_visibility as observer;
     use std::ffi::c_void;
@@ -127,26 +196,37 @@ mod desktop {
         let valid = result.is_ok() && bytes.len() <= 32 * 1024 * 1024;
         (String::from_utf8(bytes).unwrap_or_default(), valid)
     }
+    fn fixture_path(input: &std::ffi::OsStr) -> Result<PathBuf, String> {
+        let canonical = PathBuf::from(input)
+            .canonicalize()
+            .map_err(|_| "FIXTURE_PATH_CANONICALIZE")?;
+        let spelling =
+            ordinary_windows_spelling(canonical.to_str().ok_or("FIXTURE_PATH_UNICODE")?)?;
+        let ordinary = PathBuf::from(spelling);
+        if !ordinary.is_absolute()
+            || !ordinary.is_file()
+            || ordinary
+                .canonicalize()
+                .map_err(|_| "FIXTURE_PATH_REVERIFY")?
+                != canonical
+        {
+            return Err("FIXTURE_PATH_NOT_EQUIVALENT".into());
+        }
+        Ok(ordinary)
+    }
     pub fn run() -> Result<(), String> {
         let args: Vec<_> = std::env::args_os().collect();
         if args.len() != 3 {
             return Err("USAGE_HELPER_ASSEMBLY_PATHS".into());
         }
-        let helper = PathBuf::from(&args[1])
-            .canonicalize()
-            .map_err(|_| "HELPER_PATH")?;
-        let assembly = PathBuf::from(&args[2])
-            .canonicalize()
-            .map_err(|_| "ASSEMBLY_PATH")?;
-        if !helper.is_file() || !assembly.is_file() {
-            return Err("HELPER_FILE_REQUIRED".into());
-        }
+        let helper = fixture_path(&args[1])?;
+        let assembly = fixture_path(&args[2])?;
         let shell = PathBuf::from(std::env::var_os("SystemRoot").ok_or("WINDOWS_DIRECTORY")?)
             .join("System32/WindowsPowerShell/v1.0/powershell.exe");
         let job = Job::new()?;
         let _receiver = observer::start()?;
         observer::disarm();
-        emit(&format!("{{\"event\":\"host\",\"hostProcessId\":{},\"productionModulesImported\":true,\"outsideClickGateDisarmed\":true}}",std::process::id()))?;
+        emit(&format!("{{\"event\":\"host\",\"hostProcessId\":{},\"productionModulesImported\":true,\"outsideClickGateDisarmed\":true,\"ordinaryHelperAndAssemblyPathsVerified\":true}}",std::process::id()))?;
         let mut generation = 0;
         let mut first_command = true;
         let mut leading_bom_removed = false;

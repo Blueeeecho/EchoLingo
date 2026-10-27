@@ -195,7 +195,7 @@ jobs:
           $output = @(); $fixtureExit = 1
           $global:LASTEXITCODE = 1 # A missing/unlaunchable node must never reuse a null/success exit code.
           try {
-            $output = @(node tests/windows-shortcuts-ui.mjs src-tauri/target/release/echolingo.exe --isolated-test-session 2>&1)
+            $output = @(& powershell.exe -NoProfile -STA -ExecutionPolicy Bypass -File tests/windows-shortcuts-ui-medium.ps1 -ApplicationPath src-tauri/target/release/echolingo.exe -IsolatedTestSession 2>&1)
             $fixtureExit = $LASTEXITCODE
           } finally {
             $output | Out-File "$env:RUNNER_TEMP/echolingo-shortcuts-ui.log" -Encoding utf8

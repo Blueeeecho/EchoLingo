@@ -127,12 +127,12 @@ public static class EchoLingoDelegatedCaptureSmoke {
     }
     sealed class Host : IDisposable {
         public Process Process;public int Child;public int Generation;public bool Usable=true;
-        Task<string> error;Task<string> pending;StreamWriter input;public bool FirstCommandBomRemoved;
+        Task<string> error;Task<string> pending;StreamWriter input;public bool FirstCommandBomRemoved;public bool OrdinaryPathsVerified;
         public Host(string harness,string helper,string assembly) {
             ProcessStartInfo start=new ProcessStartInfo(harness,"\""+helper+"\" \""+assembly+"\"");
             start.UseShellExecute=false;start.CreateNoWindow=true;start.RedirectStandardInput=true;start.RedirectStandardOutput=true;start.RedirectStandardError=true;start.StandardOutputEncoding=Encoding.UTF8;
             Process=Process.Start(start);input=new StreamWriter(Process.StandardInput.BaseStream,new UTF8Encoding(false));input.AutoFlush=true;error=Process.StandardError.ReadToEndAsync();
-            try { Dictionary<string,object> ready=Read(5000);Need((string)ready["event"]=="host"&&(bool)ready["productionModulesImported"]&&(bool)ready["outsideClickGateDisarmed"],"Exact production observer did not start."); }
+            try { Dictionary<string,object> ready=Read(5000);Need((string)ready["event"]=="host"&&(bool)ready["productionModulesImported"]&&(bool)ready["outsideClickGateDisarmed"],"Exact production observer did not start.");OrdinaryPathsVerified=ready.ContainsKey("ordinaryHelperAndAssemblyPathsVerified")&&(bool)ready["ordinaryHelperAndAssemblyPathsVerified"];Need(OrdinaryPathsVerified,"Ordinary helper/DLL path equivalence was not verified."); }
             catch {if(!Process.HasExited){Process.Kill();Process.WaitForExit(3000);}Process.Dispose();throw;}
         }
         public Dictionary<string,object> Read(int milliseconds) {
@@ -230,7 +230,7 @@ public static class EchoLingoDelegatedCaptureSmoke {
             source=new Sources();int oldDown=0,oldUp=0,oldClick=0;
             bool preheld=kind=="preheld-source-release-then-first-fresh-pair";
             if(preheld){Send(new INPUT[]{Mouse(2)});source.Partial=true;Thread.Sleep(80);source.Drain();Need(source.Downs==1&&source.Ups==0,"Preheld setup did not deliver exactly one source down.");}
-            int helper=host.Begin();report["helperProcessId"]=helper;report["hostProcessId"]=host.Process.Id;report["generation"]=host.Generation;report["firstCommandBomRemoved"]=host.FirstCommandBomRemoved;
+            int helper=host.Begin();report["helperProcessId"]=helper;report["hostProcessId"]=host.Process.Id;report["generation"]=host.Generation;report["firstCommandBomRemoved"]=host.FirstCommandBomRemoved;report["ordinaryHelperAndAssemblyPathsVerified"]=host.OrdinaryPathsVerified;
             report["sourceAHwnd"]=Id(source.AH);report["sourceBHwnd"]=Id(source.BH);report["sourceUiThreadId"]=source.ThreadId;report["controllerThreadId"]=GetCurrentThreadId();
             report["sourcePhysicalDwmBounds"]=Rect(source.AFrame);report["sourceForegroundBefore"]=Id(GetForegroundWindow());
             if(preheld){

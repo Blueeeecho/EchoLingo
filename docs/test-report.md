@@ -2,6 +2,14 @@
 
 更新时间：2026-10-25，Asia/Shanghai。本报告分别记录本机执行、CI 和真实桌面边界，未运行不算通过。[本轮原始本机证据](validation/macos-preview-20261025.json)。
 
+## 2026-10-27 原生输入接管候选：代码完成，Windows 运行验收仍被阻塞
+
+最新候选92978a2已实现独立原生输入会话：复用Rust消息泵，每次捕获前刷新一次鼠标钩子；用随机会话编号、实际子进程PID和私有标量消息连接OCR窗口。应用路径停用托管鼠标钩子；保持源应用焦点，保护预持按钮和全部匹配释放，助手退出后继续吞掉已接管的迟到松开。Windows先启动原生消息队列再注册快捷键。独立源代码审查未发现剩余阻断；本机211项Rust通过/1项真实模型专用测试ignored，76项前端单位与完整隔离UI回归通过。Alt+D的设置锁丢弃首次快捷键和启动监听前丢选文两处已修正，仍待新安装版Windows验证。
+
+真实Windows40513309819已编译新原生模块，但首条夹具控制命令协议失败，0项有效捕获。修正夹具UTF-8写入后，40515584043已完成8次助手启动；全部在约0.5秒内以NATIVE_ASSEMBLY退出，未创建选择窗口，故仍是0项有效框选。相同DLL的OCR/加载检查通过；正在核对harness canonicalize产生的Windows长路径前缀与PowerShell/.NET加载及路径归属校验的兼容性。不能据此称原生接管已修复实体Win11/WeGame，也不能把原先托管路径的通过结果算给新路径。
+
+历史0a包快捷键真实UI诊断的中完整性实验40513309471在Node路径选择前失败；修正后40515583842已核验Node为MEDIUM8192，但在启动应用前的PowerShell命令15s超时。仅准备一次标准Windows环境变量修正，不改CDP/总超时、系统安全规则或产品开发者工具；原失败全部保留。没有新的安装包，旧5731bb78包仍有机主确认的穿透/首次取词缺陷。Mac规范应用未安装、签名或变更权限。
+
 ## 2026-10-27 owner-tested input-repair preview still fails on WeGame; Alt+D first attempt unreliable
 
 The owner confirms installing the exact newly supplied input-repair package and fully exiting the old process. Alt+S still clicks through on WeGame. They also report Alt+D often needs two presses to obtain selected text. These are current physical acceptance failures, not a stale-version assumption or something controlled Server passes can override. The delivered5731bb78 installer remains an immutable preview with known remaining defects; do not call either workflow universally fixed.
