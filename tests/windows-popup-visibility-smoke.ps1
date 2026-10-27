@@ -37,6 +37,7 @@ public static class EchoLingoPopupVisibilitySmoke {
     [DllImport("user32.dll")] static extern uint GetWindowThreadProcessId(IntPtr window, out uint process);
     [DllImport("user32.dll")] static extern IntPtr GetForegroundWindow();
     [DllImport("user32.dll")] static extern IntPtr GetAncestor(IntPtr window, uint kind);
+    [DllImport("user32.dll")] static extern IntPtr GetWindow(IntPtr window, uint kind);
     [DllImport("user32.dll")] static extern IntPtr WindowFromPoint(POINT point);
     [DllImport("user32.dll")] static extern bool SetForegroundWindow(IntPtr window);
     [DllImport("user32.dll")] static extern bool IsWindowVisible(IntPtr window);
@@ -139,13 +140,32 @@ public static class EchoLingoPopupVisibilitySmoke {
         uint process; uint thread = GetWindowThreadProcessId(window, out process);
         StringBuilder name = new StringBuilder(256); GetClassName(window, name, name.Capacity);
         IntPtr root = GetAncestor(window, 2);
+        IntPtr owner = GetWindow(window, 4), rootOwner = GetAncestor(window, 3);
         StringBuilder rootName = new StringBuilder(256); GetClassName(root, rootName, rootName.Capacity);
         // Public window identity only, including on an unexpected foreground.
         // Never query titles, UIA contents, process paths or source text.
         return new Dictionary<string, object> {
             { "hwnd", "0x" + window.ToInt64().ToString("X") }, { "processId", process }, { "threadId", thread },
-            { "class", name.ToString() }, { "rootHwnd", "0x" + root.ToInt64().ToString("X") }, { "rootClass", rootName.ToString() }
+            { "class", name.ToString() }, { "rootHwnd", "0x" + root.ToInt64().ToString("X") }, { "rootClass", rootName.ToString() },
+            { "directOwnerHwnd", "0x" + owner.ToInt64().ToString("X") },
+            { "rootOwnerHwnd", "0x" + rootOwner.ToInt64().ToString("X") }, { "nativeVisible", window != IntPtr.Zero && IsWindowVisible(window) }
         };
+    }
+    static Dictionary<string, object> OwnedLifecycleSnapshot(IntPtr main, Form owned, string phase, double elapsed) {
+        Dictionary<string, object> snapshot = new Dictionary<string, object> {
+            { "phase", phase }, { "elapsedMs", elapsed }, { "main", WindowIdentityMetadata(main) },
+            { "foreground", WindowIdentityMetadata(GetForegroundWindow()) },
+            { "ownedHandleCreated", owned.IsHandleCreated }, { "ownedManagedVisible", owned.Visible }
+        };
+        // Do not create a handle just for diagnosis: that would change the
+        // very owner/creation/activation sequence being measured.
+        if (owned.IsHandleCreated) {
+            IntPtr window = owned.Handle;
+            snapshot["owned"] = WindowIdentityMetadata(window);
+            snapshot["directOwnerMatchesMain"] = GetWindow(window, 4) == main;
+            snapshot["rootOwnerMatchesMain"] = GetAncestor(window, 3) == main;
+        }
+        return snapshot;
     }
     static void PrepareSourceClickOnce(Form form, TextBox source, IntPtr main, Dictionary<string, object> report) {
         Require(!IsWindowVisible(main), "Source click preparation requires the real app window to be hidden.");
@@ -480,12 +500,26 @@ public static class EchoLingoPopupVisibilitySmoke {
                             stage = "actual-owned-native-window";
                             using (Form ownedDialog = new Form()) {
                                 int ownedClicks = 0; ownedDialog.MouseDown += delegate { Interlocked.Increment(ref ownedClicks); };
+                                List<Dictionary<string, object>> ownerLifecycle = new List<Dictionary<string, object>>();
+                                report["ownedWindowLifecycle"] = ownerLifecycle; report["ownedWindowLifecycleLimit"] = 16;
+                                Stopwatch ownerClock = Stopwatch.StartNew();
+                                Action<string> observeOwner = delegate(string phase) {
+                                    if (ownerLifecycle.Count < 16) ownerLifecycle.Add(OwnedLifecycleSnapshot(main, ownedDialog, phase, ownerClock.Elapsed.TotalMilliseconds));
+                                    else report["ownedWindowLifecycleTruncated"] = true;
+                                };
+                                ownedDialog.HandleCreated += delegate { observeOwner("handle-created"); };
+                                ownedDialog.VisibleChanged += delegate { observeOwner("visible-changed"); };
+                                ownedDialog.Activated += delegate { observeOwner("activated"); };
+                                ownedDialog.HandleDestroyed += delegate { observeOwner("handle-destroyed"); };
                                 Ui(form, delegate {
                                     ownedDialog.Text = "EchoLingo generated native owned-window fixture";
                                     ownedDialog.StartPosition = FormStartPosition.Manual; ownedDialog.Bounds = new Rectangle(30, 360, 240, 140);
+                                    observeOwner("before-show-with-owner");
                                     ownedDialog.Show(new Owner(main));
+                                    observeOwner("after-show-with-owner");
                                 });
                                 Wait(delegate { return GetForegroundWindow() == ownedDialog.Handle; }, 2000, "Generated owned window did not gain focus.");
+                                Ui(form, delegate { observeOwner("before-owner-assertion"); });
                                 Require(GetAncestor(ownedDialog.Handle, 3) == main, "Generated owned window has no actual app-root ownership; case not tested.");
                                 ClickGeneratedBody(ownedDialog, main, delegate { return Interlocked.CompareExchange(ref ownedClicks, 0, 0); }, report, "actual-owned-native-window"); Thread.Sleep(150);
                                 Require(IsWindowVisible(main), "Clicking an actual owned window dismissed its popup owner.");
