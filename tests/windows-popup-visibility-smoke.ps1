@@ -28,9 +28,10 @@ using System.Windows.Forms;
 
 public static class EchoLingoPopupVisibilitySmoke {
     const string Identifier = "io.github.blueeeecho.echolingo", Marker = ".echolingo-visibility-owned";
-    // Pinned Tao0.37.2 default. Never infer an app window from area: the
-    // global-hotkey0.8.0 helper is also a top-level HWND with default size.
-    const string MainWindowClass = "Window Class";
+    // Pinned tauri-runtime-wry2.12.3 overrides the Tao default with this
+    // class (src/lib.rs:790), confirmed by the actual Windows HWND inventory.
+    // The global-hotkey helper is also a top-level HWND with default size.
+    const string MainWindowClass = "Tauri Window";
     delegate bool Enumerate(IntPtr window, IntPtr unused);
     [DllImport("user32.dll")] static extern bool EnumWindows(Enumerate callback, IntPtr unused);
     [DllImport("user32.dll")] static extern uint GetWindowThreadProcessId(IntPtr window, out uint process);
