@@ -1,14 +1,16 @@
 # EchoLingo status and handoff
 
-Updated: 2026-10-27, Asia/Shanghai. Stage: v0.1.0 preview hardening and acceptance.
+Updated: 2026-10-28, Asia/Shanghai. Stage: v0.1.0 preview hardening and acceptance.
 
-## 2026-10-27 连续快捷键、通用选词与固定窗口：修复候选待 Windows 实测
+## 2026-10-28 连续快捷键与固定窗口：同一新版已交付，真实定向通过
 
-机主现确认 native-input 预览的无感 OCR 框选基本可用；仍报告 Alt+D 跨应用随机空白、固定后重复 OCR/取词报错，以及松手后浮窗出现慢。旧预览不据此视为全部通过。本轮删除 native_busy 静默丢快捷键路径，改为每次新意图取消旧意图、原生输入/剪贴板清理结束后仅最新任务执行；发布与初始 epoch 更新也按意图排序。固定窗口的失败/空结果保留已有内容，成功才替换，普通选词仍可抬起窗口。旧任务的两种剪贴板恢复警告单独可见，不覆盖新任务。
+每次 Alt+D/Alt+S 都立即提交新意图，替代 native_busy 静默丢弃；旧任务先安全清理输入/剪贴板，只执行并发布最新任务。初始 epoch 与结果发布也按意图排序。固定窗口在取消/空结果/错误时保留已有内容，成功才覆盖；普通取词仍抬起窗口，仅固定 OCR 原位更新。旧任务的两种剪贴板恢复警告保持可见，不覆盖新内容。选词增加有限、前台/根窗口/密码核验后的祖先 Document 选区，去掉固定20ms稳定等待；Windows等待实际子进程结束，取消走私有事件，匹配鼠标释放保护保留。
 
-选词查询扩为经过前台/根窗口/密码保护核验的有限祖先 Document 选区；仅查询选择范围，不读取整个文档。复制回退验证新剪贴板版本及已核验源进程，取消后先恢复，去除固定20ms稳定等待。Windows 子进程用实际完成事件等待，取消走私有事件；已吞掉的鼠标配对释放仍必须安全清理。新增 OCR 分阶段耗时和固定窗口排除捕获的数值诊断；尚无实际 Windows WDA/连续固定捕获通过证据，未放松排除保障或隐藏固定窗口。
+候选产品源码4cf37d8。实际 Windows 同一 stage SHA86373b0c…cf03 定向40535341400（仅夹具修正d748559，无重建）通过：固定后2次不同 Alt+D、Alt+S→Alt+S不按Esc、新OCR成功覆盖、OCR中途Alt+D替换，共4/4新场景及7条独立历史。旧helper退出、零overlay/底层点击、源前台保持；固定窗口428次采样无隐藏，最大间隔25.845ms；捕获期间 affinity 实读17成功。松手到完成历史696ms是该测试机单次mock链，不是所有机器保证或瞬时OCR。非重叠ROI未证明遮挡像素排除的物理效果。
 
-本机224项Rust通过/1项真实引擎专用ignored、76前端单元/构建及完整假IPC界面回归通过；准确C#5/net48编译、PS AST、97选词策略断言及独立审阅通过。新增11项生成UIA/剪贴板桌面夹具与实际Tauri固定连续快捷键测试待Windows运行；不等于实体浏览器/WPS验收。尚未生成或交付本轮安装器；未变更Mac安装/签名/隐私/钥匙串或启动已停止VM。
+本机224 Rust/1引擎专用ignored、Windows228/1ignored、76前端及完整假IPC UI通过。原full40529706953仍failure，保留3项准备失败（选词夹具引用、固定夹具布局、旧快捷键UI工具超时）；6ff定向40530892064补11/11真实生成UIA/剪贴板、8/8原生输入；d748定向补上述4/4，未改写原full。真实浏览器正文曾一次成功；另次前置UIA查询2s超时，4场景整体未验收，冷浏览器控件准备与产品同样的2s限制仍需调查。不能宣称全部浏览器/WPS/实体Win11通过。
+
+[新版Windows x64安装器](/Users/wwq/Documents/Codex/2026-10-24/ni-ne/outputs/EchoLingo-installers/windows-preview-20261027-latest-intent/EchoLingo_0.1.0_preview_20261027_latest-intent_x64-setup.exe)已向机主提供：75,306,581B，SHA256eeb16b9163eaea06c57eec22ee7be852057d254260bdb82754dc347d538a7d2e；API ZIP大小/摘要/CRC、唯一包、实际NSIS安装及3B marker身份和对应源码清单独审通过。仍是未签名预览，未发布stable；Mac安装/签名/隐私/钥匙串及停止的本地VM未动。实体应用/浏览器/多屏体验待机主测试。[精确证据](validation/windows-latest-intent-20261027.json)。
 
 ## 2026-10-27 原生输入接管：新预览已交付，等待实体Win11验收
 

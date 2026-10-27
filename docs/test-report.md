@@ -1,14 +1,20 @@
 # 0.1.0 预览版验证报告
 
-更新时间：2026-10-25，Asia/Shanghai。本报告分别记录本机执行、CI 和真实桌面边界，未运行不算通过。[本轮原始本机证据](validation/macos-preview-20261025.json)。
+更新时间：2026-10-28，Asia/Shanghai。本报告分别记录本机执行、CI 和真实桌面边界，未运行不算通过。[本轮原始本机证据](validation/macos-preview-20261025.json)。
 
-## 2026-10-27 latest-intent 候选：本机回归通过，Windows 新场景待运行
+## 2026-10-28 latest-intent：同一程序的固定连续操作通过，浏览器范围部分待验收
 
-- 机主反馈：上一预览OCR框选基本可用；随机选词、固定后新任务和松手后延迟仍未验收。
-- 当前本机：224 Rust passed/1引擎专用ignored；76前端单元、类型/生产构建、完整假IPC UI passed。C#5/net48精确生产源码及新夹具编译、PS AST、97项纯选词策略和独立审查 passed。没有新依赖/模型/运行时。
-- 新增待跑：11项真实生成 UIA provider/延迟剪贴板保护；实际Tauri固定后两次不同Alt+D、Alt+S→Alt+S不按Esc、Alt+S→Alt+D，要求7条不同历史、旧helper退出、零遗留overlay、源窗口焦点及固定持续可见采样。
-- 新数值诊断区分release→cleanup/PNG/reply/OCR及WDA get/set/Win32错误。固定排除捕获是否失败、OCR初始化占比尚待真实Windows数据，不能将纯测试或假IPC当作已修复证明。
-- 本轮安装器尚未构建交付，Mac规范安装、签名、TCC、钥匙串及停止的Win10VM未动。历史失败和旧预览摘要保留在下文。
+| 检查 | 实际结果与边界 |
+|---|---|
+| 本机/构建 |224 Rust passed/1引擎专用ignored，76前端单位/类型/构建/完整假IPC UI passed；Windows228 Rust/1ignored，Mac与前端CI成功 |
+| 原full40529706953 |原9gate保留6success/3failure；实际NSIS离线6模型+取词/空框输入/OCR3链通过。选词夹具引用漏项0/11、固定夹具空间不足0/4、旧shortcutUI启动PowerShell超时0实际case，均未算通过 |
+| native补测40530892064 |产品未变，显式接口引用修正后11/11真实UIA/剪贴板与8/8精确生产输入桥通过 |
+| exact4cf补测40535341400 |生产源diff为空、stageSHA86373b0c…cf03/5,784,064B硬核对；固定2次新选词、AltS→AltS、AltS→AltD无需Esc，4/4及7条不同历史通过，旧helper退出/0overlay/0底层OCR点击/源前台保持 |
+| 固定持续性/延迟 |428采样hidden0，maxgap25.845ms；capture affinity实读17。OCR松手→history696ms，包含识别/界面/mock翻译；不是所有实机或原版对照。非重叠ROI不证明遮挡处像素排除 |
+| 真实浏览器 |40533405895正文首次真实helper成功，次场景setup主窗判定失败；40535344819首场景pre-helper UIA查询2s超时，整体4场景未验收。该冷控件限界可能与产品同样2s上限有关，不能简单说产品无关，也未构成已执行helper失败 |
+| 分发审核 |75,306,581B/eeb16b91…安装器已交付；API ZIP摘要/大小/CRC、唯一EXE、安装后仅3B NSIS marker、对应source2105成员CRC/2104清单文件hash独审通过。无新增依赖/模型/运行时 |
+
+[精确JSON](validation/windows-latest-intent-20261027.json)保留原始失败与补测身份。预览不是stable；实体Win10/11/消费应用、IME/全屏/多屏仍需验收。未安装/签名Mac、改TCC/钥匙串或启动停止的VM。
 
 ## 2026-10-27 原生输入接管：新预览已交付，等待实体Win11验收
 
