@@ -77,6 +77,7 @@ public static class EchoLingoLiveCaptureSmoke {
     [DllImport("user32.dll")] static extern IntPtr ChildWindowFromPointEx(IntPtr parent, Point point, uint flags);
     [DllImport("user32.dll")] static extern IntPtr WindowFromPoint(Point point);
     [DllImport("user32.dll")] static extern IntPtr GetAncestor(IntPtr window, uint flags);
+    [DllImport("user32.dll")] static extern IntPtr GetParent(IntPtr window);
     [DllImport("user32.dll")] static extern bool GetWindowRect(IntPtr window, out RECT rectangle);
     [DllImport("dwmapi.dll")] static extern int DwmGetWindowAttribute(IntPtr window, uint attribute, out RECT rectangle, int size);
     [DllImport("user32.dll")] static extern IntPtr GetWindow(IntPtr window, uint command);
@@ -913,7 +914,12 @@ public static class EchoLingoLiveCaptureSmoke {
                 form.BackColor = Color.FromArgb(50, 210, 110);
                 peer = new Form(); peer.Text = "EchoLingo generated independent peer B";
                 peer.AutoScaleMode = AutoScaleMode.None; peer.FormBorderStyle = FormBorderStyle.None;
-                peer.StartPosition = FormStartPosition.Manual; peer.ShowInTaskbar = false; peer.TopMost = false;
+                // ShowInTaskbar=false gives a WinForms top-level Form a
+                // hidden native taskbar owner even when Form.Owner is null.
+                // These peers deliberately use normal taskbar windows so the
+                // native GW_OWNER/GetParent assertions remain genuinely zero.
+                peer.StartPosition = FormStartPosition.Manual; peer.ShowInTaskbar = true; peer.TopMost = false;
+                peer.Owner = null;
                 peer.Bounds = new Rectangle(form.Left + 280, form.Top, 320, 240);
                 peer.BackColor = Color.FromArgb(210, 120, 40);
                 originButton = new Button(); originButton.Text = "Generated A"; originButton.Bounds = new Rectangle(25, 45, 75, 35);
@@ -931,7 +937,14 @@ public static class EchoLingoLiveCaptureSmoke {
                 peer.Show(); peerHwnd = peer.Handle;
                 form.Activate(); SetForegroundWindow(form.Handle);
                 Assert(GetForegroundWindow() == form.Handle, "Peer source A could not hold actual foreground before helper startup.");
-                Assert(form.Handle != peerHwnd && GetWindow(form.Handle, 4) == IntPtr.Zero && GetWindow(peerHwnd, 4) == IntPtr.Zero,
+                IntPtr aOwner = GetWindow(form.Handle, 4), bOwner = GetWindow(peerHwnd, 4);
+                IntPtr aParent = GetParent(form.Handle), bParent = GetParent(peerHwnd);
+                metrics["preparedSourceAHwnd"] = WindowId(form.Handle); metrics["preparedSourceBHwnd"] = WindowId(peerHwnd);
+                metrics["sourceANativeOwnerHwnd"] = WindowId(aOwner); metrics["sourceBNativeOwnerHwnd"] = WindowId(bOwner);
+                metrics["sourceANativeParentHwnd"] = WindowId(aParent); metrics["sourceBNativeParentHwnd"] = WindowId(bParent);
+                metrics["sourceAManagedOwnerIsNull"] = form.Owner == null; metrics["sourceBManagedOwnerIsNull"] = peer.Owner == null;
+                Assert(form.Handle != peerHwnd && aOwner == IntPtr.Zero && bOwner == IntPtr.Zero && aParent == IntPtr.Zero && bParent == IntPtr.Zero
+                    && form.Owner == null && peer.Owner == null && GetAncestor(form.Handle, 2) == form.Handle && GetAncestor(peerHwnd, 2) == peerHwnd,
                     "The generated A/B windows are not independent ownerless peers.");
                 Assert((GetWindowLongPtr(form.Handle, -20).ToInt64() & 8) == 0 && (GetWindowLongPtr(peerHwnd, -20).ToInt64() & 8) == 0,
                     "The peer fixture accidentally created a topmost window.");
