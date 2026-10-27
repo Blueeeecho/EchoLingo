@@ -2,6 +2,18 @@
 
 Updated: 2026-10-28, Asia/Shanghai. Stage: v0.1.0 preview hardening and acceptance.
 
+<!-- shortcut-reconfiguration-20261028:start -->
+## 2026-10-28 快捷键更改：新版实测通过，其他已知取词边界保留
+
+新产品源码295a0ce/full40572666385的三项CI任务全部成功，Windows原始12/12门禁通过。真实安装/注册CLI20项、实际设置界面6项、自定义键取词/空框输入/左键WinRT OCR三条链、单次Alt+D矩阵16项通过；Windows230Rust/1资源专用ignored、Mac226Rust/1ignored、两平台各79前端单位及完整隔离UI回归通过。设置验证包含当前键录制、保存新键并释放旧键、真实外部冲突回滚、重启保留、禁用后重启和手填恢复默认。UIA使用真实Toggle/Invoke/ValuePattern和Win32键盘，没有CDP或假IPC；自定义键流程是独立新配置目录，使用原有4秒预热及本机mock翻译，不能冒充同一UI保存会话或冷首次验收。
+
+修正Windows依赖将NumpadEqual错误映射为普通E的问题：前后端在五项快捷键注册/保存前拒绝该键，显示明确说明；正常E/Equal和Mac/Linux原路径保留。新WindowsCLI真实验证五个拒绝项与普通E成功，未冒充物理小键盘测试。原设置及API选择保留。旧f65也先完成不可变程序补验0f1ca8b/run40572097066：设置6/6、自定义键3/3通过；此前0case及b0的3/6失败完整保留，不能回写成成功。测试只在原预算内重观察失效状态，按钮/写值/按键不重发，未增加生产固定等待。
+
+[新版Windows x64预览包](/Users/wwq/Documents/Codex/2026-10-24/ni-ne/outputs/EchoLingo-installers/windows-preview-20261028-shortcuts/EchoLingo_0.1.0_preview_20261028_shortcuts_x64-setup.exe)为75,313,434B/SHA256cf42fe57…a1e724；已核对API ZIP大小/完整摘要/CRC、唯一NSIS、stage8490a973…22a4b、完整嵌入DLL/helper及2104份对应源码清单。实际NSIS安装后6次真实离线推理和3条应用链通过；48份运行资源/原始许可证已由安装验收核对。本地仅静态核验，未执行Windows安装器；旧六文件候选保持不变。
+
+这是GitHub-hosted Windows Server桌面验收，不是实体Win10/11、WPS/WeGame/全屏多屏全应用验收。原真实浏览器95/96的首次Edge失败、同PID后台剪贴板发布反例仍未解决，新full未重跑真实浏览器压力矩阵；不得用12门禁覆盖这两个缺陷。UIA重启为保存后终止自有Job，不冒称正常退出测试。未使用真实用户API密钥（mock仅新随机缺失账号），未替换/签名本机Mac、修改权限/钥匙串规则或启动停止的VM，未发布stable。[本轮精确记录](validation/windows-shortcut-reconfiguration-20261028.json)。
+
+<!-- shortcut-reconfiguration-20261028:end -->
 ## 2026-10-28 Alt+D 严格复核：候选已生成，首次取词仍未达标
 
 补充诊断c9bc277/run40562621965：双独立order共94/96，各47/48；两台runner的首个Pane都没有祖先Document，84次探针中0个可用初始只读选区，12项密码在探针前正确拒绝。因此不能用后出现的正文补造首次选区，未采用锚点例外。该探针只用于诊断，不能将其时序当生产修复。另查UIA-v2正文renderer-child初始化与Chromium主源，发现旧工具还依赖准备循环/全局screen-reader开关，现代Chromium亦不再单凭honeypot消息准备完整正文；仅单次通知能否有效尚无实测，不据此继续叠加初始化代码。f65待验收包保持不变。

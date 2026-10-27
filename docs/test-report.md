@@ -1,5 +1,23 @@
 # 0.1.0 预览版验证报告
 
+<!-- shortcut-reconfiguration-20261028:start -->
+## 2026-10-28 快捷键更改补验与新版完整回归
+
+| 验证 | 实际结果与限制 |
+|---|---|
+| 新完整构建 |295a0ce/full40572666385三jobs成功；Windows原始12/12门禁success，不以continue-on-error的conclusion代替raw outcome |
+| 单位/界面 |Windows230Rust/1资源专用ignored、Mac226Rust/1ignored，两平台各79前端单位；28Python预检、完整隔离DOM/假IPC UI及类型/构建通过；不把跨平台相同前端测试相加 |
+| 真实CLI |20/20，含五个动作NumpadEqual→exit3/空协议且配置不变，随后普通CtrlAltShiftE→exit0；冲突/旧启用字段/F12/禁用/坏配置/迁移保留；不等于安装向导或物理小键盘测试 |
+| 实际设置UI |6/6：已注册键录制、保存新键旧键释放、外部F8真实占用回滚且原F9仍可录制、重启保留、清空禁用后重启、手填AltD/S恢复；3次启动/2次真实录制键/7次ValuePattern写，只有状态观察重试，无用户动作重发 |
+| 自定义快捷键 |3/3：CtrlAltShiftF9选词、空框输入Enter、CtrlAltShiftF10左拖→真实WinRT OCR，各单按一次且原文/新请求/3条独立历史匹配；独立于UI保存目录、保留原4秒预热、loopback mock翻译，不冒称同一保存会话或冷首次 |
+| 其余Windows |新stage单AltD矩阵16/16、生成文档/剪贴板11/11、私有budget8/8；原生输入/实时覆盖层/固定连续任务/浮窗/内部守卫门禁通过。私有worker不是实际UIA，生成应用不是浏览器实测，A/B描述性指标不保证实体Win11速度 |
+| 实际NSIS |新75,313,434B/cf42fe57…a1e724实际安装，6次真实离线推理+3条真实安装后应用链通过，无mock翻译；48文件资源/许可证allowlist通过，隔离规则与自有安装已清理 |
+| 包身份 |stage5,825,536B/8490a973…22a4b；安装后7efc8aeb…74c1仅唯一UNK→NSS的3字节变化。两API ZIP大小/完整SHA/CRC、完整DLL100864B/f31abc48…44e42及helper、对应sourceZIP66ce2962…8fd3c的2104份清单逐项通过 |
+| 不可变旧程序补验 |f65 stage3e767c…4539于0f1ca8b/run40572097066真实设置6/6+自定义键3/3通过；原49cc/aac/e4/9cc/90/b0失败及0case/3case事实保留。b0瞬时F9冲突owner仍未知；加强退出条件后观察到真实句柄结束及四键释放，不倒推该owner |
+
+实际Windows环境为hosted Server，实体Win10/11、目标消费应用/IME/多屏/全屏仍未验收。原真实浏览器95/96首次Edge失败及同PID后台剪贴板发布反例没有被此回归关闭。UIA保存/重启与真实自定义键工作流为两个独立夹具，重启用自有Job终止，不能冒称优雅退出。未使用用户密钥、修改本机Mac签名/安装/隐私/钥匙串、启动停止的VM或发布stable。[精确JSON](validation/windows-shortcut-reconfiguration-20261028.json)与[新预览目录](/Users/wwq/Documents/Codex/2026-10-24/ni-ne/outputs/EchoLingo-installers/windows-preview-20261028-shortcuts)提供原始身份和交付摘要。
+
+<!-- shortcut-reconfiguration-20261028:end -->
 ## 2026-10-28 Alt+D 严格冷启动、精确内容和竞态复核
 
 | 执行 | 原始结果及解释 |
