@@ -9,12 +9,12 @@ on:
         description: Full regression or exact-binary desktop diagnostics
         type: choice
         default: full
-        options: [full, windows-popup-diagnostics, windows-application-diagnostics, windows-input-plane-experiment, windows-native-diagnostics, windows-shortcuts-ui-diagnostics, windows-shortcuts-ui-medium-diagnostics, windows-delegated-diagnostics, windows-browser-diagnostics, windows-latest-intent-diagnostics, windows-selection-application-diagnostics, windows-selection-clipboard-diagnostics, windows-selection-notepad-diagnostics, windows-selection-budget-diagnostics]
+        options: [full, windows-popup-diagnostics, windows-application-diagnostics, windows-input-plane-experiment, windows-native-diagnostics, windows-shortcuts-ui-diagnostics, windows-shortcuts-ui-medium-diagnostics, windows-shortcuts-current-diagnostics, windows-delegated-diagnostics, windows-browser-diagnostics, windows-latest-intent-diagnostics, windows-selection-application-diagnostics, windows-selection-clipboard-diagnostics, windows-selection-notepad-diagnostics, windows-selection-budget-diagnostics]
 permissions:
   contents: read
 jobs:
   desktop:
-    if: github.event.inputs.mode != 'windows-popup-diagnostics' && github.event.inputs.mode != 'windows-application-diagnostics' && github.event.inputs.mode != 'windows-input-plane-experiment' && github.event.inputs.mode != 'windows-native-diagnostics' && github.event.inputs.mode != 'windows-shortcuts-ui-diagnostics' && github.event.inputs.mode != 'windows-shortcuts-ui-medium-diagnostics' && github.event.inputs.mode != 'windows-delegated-diagnostics' && github.event.inputs.mode != 'windows-browser-diagnostics' && github.event.inputs.mode != 'windows-latest-intent-diagnostics' && github.event.inputs.mode != 'windows-selection-application-diagnostics' && github.event.inputs.mode != 'windows-selection-clipboard-diagnostics' && github.event.inputs.mode != 'windows-selection-notepad-diagnostics' && github.event.inputs.mode != 'windows-selection-budget-diagnostics'
+    if: github.event.inputs.mode != 'windows-popup-diagnostics' && github.event.inputs.mode != 'windows-application-diagnostics' && github.event.inputs.mode != 'windows-input-plane-experiment' && github.event.inputs.mode != 'windows-native-diagnostics' && github.event.inputs.mode != 'windows-shortcuts-ui-diagnostics' && github.event.inputs.mode != 'windows-shortcuts-ui-medium-diagnostics' && github.event.inputs.mode != 'windows-shortcuts-current-diagnostics' && github.event.inputs.mode != 'windows-delegated-diagnostics' && github.event.inputs.mode != 'windows-browser-diagnostics' && github.event.inputs.mode != 'windows-latest-intent-diagnostics' && github.event.inputs.mode != 'windows-selection-application-diagnostics' && github.event.inputs.mode != 'windows-selection-clipboard-diagnostics' && github.event.inputs.mode != 'windows-selection-notepad-diagnostics' && github.event.inputs.mode != 'windows-selection-budget-diagnostics'
     strategy:
       fail-fast: false
       matrix:
@@ -365,7 +365,7 @@ jobs:
           }
 
   frontend-interactions:
-    if: github.event.inputs.mode != 'windows-popup-diagnostics' && github.event.inputs.mode != 'windows-application-diagnostics' && github.event.inputs.mode != 'windows-input-plane-experiment' && github.event.inputs.mode != 'windows-native-diagnostics' && github.event.inputs.mode != 'windows-shortcuts-ui-diagnostics' && github.event.inputs.mode != 'windows-shortcuts-ui-medium-diagnostics' && github.event.inputs.mode != 'windows-delegated-diagnostics' && github.event.inputs.mode != 'windows-browser-diagnostics' && github.event.inputs.mode != 'windows-latest-intent-diagnostics' && github.event.inputs.mode != 'windows-selection-application-diagnostics' && github.event.inputs.mode != 'windows-selection-clipboard-diagnostics' && github.event.inputs.mode != 'windows-selection-notepad-diagnostics' && github.event.inputs.mode != 'windows-selection-budget-diagnostics'
+    if: github.event.inputs.mode != 'windows-popup-diagnostics' && github.event.inputs.mode != 'windows-application-diagnostics' && github.event.inputs.mode != 'windows-input-plane-experiment' && github.event.inputs.mode != 'windows-native-diagnostics' && github.event.inputs.mode != 'windows-shortcuts-ui-diagnostics' && github.event.inputs.mode != 'windows-shortcuts-ui-medium-diagnostics' && github.event.inputs.mode != 'windows-shortcuts-current-diagnostics' && github.event.inputs.mode != 'windows-delegated-diagnostics' && github.event.inputs.mode != 'windows-browser-diagnostics' && github.event.inputs.mode != 'windows-latest-intent-diagnostics' && github.event.inputs.mode != 'windows-selection-application-diagnostics' && github.event.inputs.mode != 'windows-selection-clipboard-diagnostics' && github.event.inputs.mode != 'windows-selection-notepad-diagnostics' && github.event.inputs.mode != 'windows-selection-budget-diagnostics'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -732,8 +732,8 @@ jobs:
           if (@($outcomes.Values | Where-Object { $_ -ne 'success' }).Count -gt 0) { throw 'Delegated native input checks failed or incomplete; this is not full app acceptance.' }
 
   windows-shortcuts-ui-diagnostics:
-    name: Targeted shortcut UI diagnostics (exact 0a08830 binary)
-    if: github.event_name == 'workflow_dispatch' && (github.event.inputs.mode == 'windows-shortcuts-ui-diagnostics' || github.event.inputs.mode == 'windows-shortcuts-ui-medium-diagnostics')
+    name: Targeted shortcut UI diagnostics (immutable candidate)
+    if: github.event_name == 'workflow_dispatch' && (github.event.inputs.mode == 'windows-shortcuts-ui-diagnostics' || github.event.inputs.mode == 'windows-shortcuts-ui-medium-diagnostics' || github.event.inputs.mode == 'windows-shortcuts-current-diagnostics')
     runs-on: windows-latest
     timeout-minutes: 6
     permissions:
@@ -749,6 +749,16 @@ jobs:
         run: |
           git diff --quiet 0a08830f8286a2d54aa658c8876b013a8b1696b1 HEAD -- src src-tauri resources assets scripts index.html package.json package-lock.json vite.config.ts tsconfig.json tsconfig.node.json .cargo
           if ($LASTEXITCODE -ne 0) { throw 'Application source changed; the 0a08830 binary cannot prove this checkout.' }
+      - name: Require production equivalence for current f65 supplement
+        if: github.event.inputs.mode == 'windows-shortcuts-current-diagnostics'
+        shell: powershell
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          git diff --quiet f65ab043c7e7a0ad4b5497d1a2651eb490198980 HEAD -- src src-tauri resources assets scripts index.html package.json package-lock.json vite.config.ts tsconfig.json tsconfig.node.json .cargo
+          if ($LASTEXITCODE -ne 0) { throw 'Production source differs from f65; rebuild and do not claim same-binary acceptance.' }
+          $actual = gh run view 40556538469 --repo Blueeeecho/EchoLingo --json headSha --jq .headSha
+          if ($LASTEXITCODE -ne 0 -or $actual.Trim() -ne 'f65ab043c7e7a0ad4b5497d1a2651eb490198980') { throw 'Immutable f65 source-run identity mismatch.' }
       - uses: actions/setup-node@v4
         with:
           node-version: '24'
@@ -756,8 +766,8 @@ jobs:
       - run: npm ci
       - uses: actions/download-artifact@v4
         with:
-          artifact-ids: '12734022372'
-          run-id: 40502410316
+          artifact-ids: ${{ github.event.inputs.mode == 'windows-shortcuts-current-diagnostics' && '12758601917' || '12734022372' }}
+          run-id: ${{ github.event.inputs.mode == 'windows-shortcuts-current-diagnostics' && '40556538469' || '40502410316' }}
           github-token: ${{ github.token }}
           path: shortcut-candidate-evidence
           merge-multiple: true
@@ -769,14 +779,17 @@ jobs:
           if ($candidateFiles.Count -ne 1) { throw 'Expected exactly one stage executable in the exact source-run artifact.' }
           $candidatePath = $candidateFiles[0].FullName
           $candidateHash = (Get-FileHash -LiteralPath $candidatePath -Algorithm SHA256).Hash.ToLowerInvariant()
-          if ($candidateFiles[0].Length -ne 5717504 -or $candidateHash -ne '046a33fd4498e7ef2e14a49f694f0a1fa9e6e2af1805d1538358e8bcfce77090') { throw 'Exact stage executable identity mismatch.' }
+          $current = '${{ github.event.inputs.mode }}' -eq 'windows-shortcuts-current-diagnostics'
+          $expectedBytes = if ($current) { 5825536 } else { 5717504 }
+          $expectedHash = if ($current) { '3e767c7046adcf8ef6b137f5811b0966efc8613f671f1f3d575f185b3c074539' } else { '046a33fd4498e7ef2e14a49f694f0a1fa9e6e2af1805d1538358e8bcfce77090' }
+          if ($candidateFiles[0].Length -ne $expectedBytes -or $candidateHash -ne $expectedHash) { throw 'Exact stage executable identity mismatch.' }
           $identity = [ordered]@{
-            scope = 'Historical exact 0a08830 shortcut UI only; never current-checkout or full-run acceptance'
+            scope = if ($current) { 'Exact f65 packaged shortcut UI supplement; original full-run failure retained' } else { 'Historical exact 0a08830 shortcut UI only; never current-checkout or full-run acceptance' }
             diagnosticMode = '${{ github.event.inputs.mode }}'
-            sourceRun = 40502410316
-            sourceArtifactId = 12734022372
-            applicationSource = '0a08830f8286a2d54aa658c8876b013a8b1696b1'
-            sourceArtifactApiDigest = 'sha256:74145ae5b69cb755124cc2e565cc9d287206f435b20b5d830c4c0ffd7c5dd33d'
+            sourceRun = if ($current) { 40556538469 } else { 40502410316 }
+            sourceArtifactId = if ($current) { 12758601917 } else { 12734022372 }
+            applicationSource = if ($current) { 'f65ab043c7e7a0ad4b5497d1a2651eb490198980' } else { '0a08830f8286a2d54aa658c8876b013a8b1696b1' }
+            sourceArtifactApiDigest = if ($current) { 'sha256:94e355b8d0e9d713ad2d0329ed01f22961252ff5e6c8f05397458ff34bef9a5d' } else { 'sha256:74145ae5b69cb755124cc2e565cc9d287206f435b20b5d830c4c0ffd7c5dd33d' }
             stagedBytes = $candidateFiles[0].Length
             stagedSha256 = $candidateHash
             checkoutFixtureSha256 = (Get-FileHash tests/windows-shortcuts-ui.mjs -Algorithm SHA256).Hash.ToLowerInvariant()
@@ -790,7 +803,7 @@ jobs:
         shell: powershell
         env:
           ECHOLINGO_SHORTCUT_UI_CANDIDATE: ${{ steps.candidate.outputs.path }}
-          ECHOLINGO_SHORTCUT_UI_MEDIUM: ${{ github.event.inputs.mode == 'windows-shortcuts-ui-medium-diagnostics' }}
+          ECHOLINGO_SHORTCUT_UI_MEDIUM: ${{ github.event.inputs.mode == 'windows-shortcuts-ui-medium-diagnostics' || github.event.inputs.mode == 'windows-shortcuts-current-diagnostics' }}
         run: |
           $ErrorActionPreference = 'Continue'
           $output = @(); $fixtureExit = 1

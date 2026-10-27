@@ -11,9 +11,23 @@ assert.equal(process.platform, 'win32');
 assert.equal(isolation, '--isolated-test-session');
 const executable = path.resolve(appArgument);
 const ps = path.join(process.env.SystemRoot, 'System32/WindowsPowerShell/v1.0/powershell.exe');
-const shell = (code) => execFileSync(ps, ['-NoProfile', '-Command', code], { encoding: 'utf8', timeout: 15000 }).trim();
-const roaming = shell("[Environment]::GetFolderPath([Environment+SpecialFolder]::ApplicationData)");
-const local = shell("[Environment]::GetFolderPath([Environment+SpecialFolder]::LocalApplicationData)");
+const powerShellOperations = [];
+function shell(operation, code) {
+  const started = Date.now();
+  try {
+    const output = execFileSync(ps, ['-NoProfile', '-Command', code], { encoding: 'utf8', timeout: 15000, windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] });
+    powerShellOperations.push({ operation, elapsedMilliseconds: Date.now() - started, status: 'completed' });
+    return output.trim();
+  } catch (error) {
+    const timedOut = error.code === 'ETIMEDOUT';
+    const record = { operation, elapsedMilliseconds: Date.now() - started, status: timedOut ? 'timed-out' : 'failed', exitCode: Number.isInteger(error.status) ? error.status : null, signal: error.signal ?? null, stdoutCharacters: String(error.stdout ?? '').length, stderrCharacters: String(error.stderr ?? '').length };
+    powerShellOperations.push(record);
+    // Do not let execFileSync's default error serialize the PowerShell source.
+    throw new Error(`PowerShell operation ${operation} ${record.status} (budgetMilliseconds=15000, exitCode=${record.exitCode}, signal=${record.signal}).`);
+  }
+}
+const roaming = shell('known-folder-roaming', "[Environment]::GetFolderPath([Environment+SpecialFolder]::ApplicationData)");
+const local = shell('known-folder-local', "[Environment]::GetFolderPath([Environment+SpecialFolder]::LocalApplicationData)");
 const identifier = 'io.github.blueeeecho.echolingo';
 const roots = [path.join(roaming, identifier), path.join(local, identifier)];
 const token = `shortcut-ui-${process.pid}-${Date.now()}`;
@@ -33,7 +47,7 @@ function requireAppRunning() {
 // command line, environment or user content. Comparison stays inside Win32.
 function applicationToken(pid) {
   assert.ok(Number.isSafeInteger(pid) && pid > 0);
-  return JSON.parse(shell(`Add-Type -TypeDefinition @'
+  return JSON.parse(shell('actual-application-token', `Add-Type -TypeDefinition @'
 using System;using System.Diagnostics;using System.Runtime.InteropServices;using System.Security.Principal;
 public static class EchoLingoUiToken {
 [DllImport("advapi32.dll",SetLastError=true)]static extern bool OpenProcessToken(IntPtr process,uint access,out IntPtr token);
@@ -71,7 +85,9 @@ function actualAvailability(modifiers, key) {
 try {
   // Refuse existing settings or processes; never repoint/overwrite daily data.
   const processName = path.basename(executable, '.exe').replaceAll("'", "''");
-  assert.equal(shell(`@(Get-Process -Name '${processName}' -ErrorAction SilentlyContinue).Count`), '0');
+  // The recorded medium-token failure was Get-Process cmdlet execution before
+  // app launch. Keep the same name guard without depending on cmdlet discovery.
+  assert.equal(shell('existing-process-name-guard', `$ErrorActionPreference='Stop'; $ownedNameProcesses = @([System.Diagnostics.Process]::GetProcessesByName('${processName}')); try { [Console]::Out.WriteLine($ownedNameProcesses.Length) } finally { foreach ($ownedNameProcess in $ownedNameProcesses) { $ownedNameProcess.Dispose() } }`), '0');
   for (const root of roots) {
     await fs.mkdir(root); owned.push(root);
     await fs.writeFile(path.join(root, '.shortcut-ui-owned'), token);
@@ -145,7 +161,7 @@ try {
   diagnostics = {
     stage, elapsedMilliseconds: Date.now() - started,
     app: app ? { pid: app.pid, exitCode: app.exitCode, signalCode: app.signalCode, spawnError: bounded(appSpawnError?.stack, 4000) } : null,
-    lastCdpError, appOutput, actualApplicationToken,
+    lastCdpError, appOutput, actualApplicationToken, powerShellOperations,
   };
   if (Number.isInteger(port)) {
     try {
@@ -163,10 +179,10 @@ try {
   if (app?.pid) {
     try {
       const code = `$children = @(Get-CimInstance Win32_Process -Filter 'ParentProcessId=${app.pid}' | Select-Object -First 16 ProcessId,ParentProcessId,Name); ConvertTo-Json -InputObject $children -Compress`;
-      diagnostics.directChildProcesses = JSON.parse(shell(code));
+      diagnostics.directChildProcesses = JSON.parse(shell('failure-child-process-metadata', code));
       for (const child of diagnostics.directChildProcesses) {
         if (child.Name?.toLowerCase() !== 'msedgewebview2.exe') continue;
-        try { child.fileVersion = bounded(shell(`(Get-Process -Id ${Number(child.ProcessId)} -ErrorAction Stop).MainModule.FileVersionInfo.FileVersion`), 80); }
+        try { child.fileVersion = bounded(shell('failure-webview-version', `(Get-Process -Id ${Number(child.ProcessId)} -ErrorAction Stop).MainModule.FileVersionInfo.FileVersion`), 80); }
         catch (error) { child.versionReadError = bounded(error.message, 300); }
       }
     } catch (probeError) { diagnostics.processMetadataError = bounded(probeError.message, 1000); }
@@ -203,7 +219,7 @@ try {
 }
 const report = {
   ok: !failure && cleanupErrors.length === 0, stage, stages, elapsedMilliseconds: Date.now() - started, cases,
-  actualApplicationToken, webViewBrowserVersion: browser ? bounded(browser.version(), 120) : undefined, actualPackagedWebView: Boolean(browser), actualWindowsSendInput: nativeKeySends > 0, nativeKeySends, fakeIpcUsed: false, externalTranslation: false,
+  actualApplicationToken, powerShellOperations, webViewBrowserVersion: browser ? bounded(browser.version(), 120) : undefined, actualPackagedWebView: Boolean(browser), actualWindowsSendInput: nativeKeySends > 0, nativeKeySends, fakeIpcUsed: false, externalTranslation: false,
   scope: 'Disposable Server desktop and generated keys only; physical Windows11/IME remains unverified.',
 };
 if (failure) { report.error = bounded(failure.message, 4000); report.stack = bounded(failure.stack, 12000); report.diagnostics = diagnostics; }
