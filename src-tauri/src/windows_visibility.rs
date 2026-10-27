@@ -122,6 +122,40 @@ fn external_focus(known: bool, owned: bool, class: Option<&str>) -> bool {
         && class.is_some_and(|class| !matches!(class, "IME" | "MSCTFIME UI" | "CiceroUIWndFrame"))
 }
 
+const MAX_OWNER_LINKS: usize = 16;
+
+fn owned_window(
+    main_window: isize,
+    target: isize,
+    root: isize,
+    root_owner: isize,
+    same_process: bool,
+    mut owner_of: impl FnMut(isize) -> isize,
+) -> bool {
+    if main_window == 0 || target == 0 {
+        return false;
+    }
+    if target == main_window || root == main_window || root_owner == main_window || same_process {
+        return true;
+    }
+    // GA_ROOTOWNER need not expose a cross-process direct owner (observed
+    // with a real WinForms window). Walk the actual GW_OWNER relationship
+    // from the parent root; never allocate, recurse or query window content.
+    let mut current = root;
+    let mut visited = [0isize; MAX_OWNER_LINKS];
+    for at in 0..MAX_OWNER_LINKS {
+        if current == 0 || visited[..at].contains(&current) {
+            return false;
+        }
+        if current == main_window {
+            return true;
+        }
+        visited[at] = current;
+        current = owner_of(current);
+    }
+    current == main_window
+}
+
 #[cfg(target_os = "windows")]
 mod native {
     use super::*;
@@ -184,6 +218,7 @@ mod native {
         fn GetForegroundWindow() -> Handle;
         fn WindowFromPoint(point: Point) -> Handle;
         fn GetAncestor(window: Handle, kind: u32) -> Handle;
+        fn GetWindow(window: Handle, kind: u32) -> Handle;
         fn GetWindowThreadProcessId(window: Handle, process: *mut u32) -> u32;
         fn GetClassNameW(window: Handle, name: *mut u16, maximum: i32) -> i32;
         fn GetWindowRect(window: Handle, rectangle: *mut Rect) -> i32;
@@ -370,14 +405,20 @@ mod native {
         if target.is_null() {
             return false;
         }
-        let root = unsafe { GetAncestor(target, 3) }; // GA_ROOTOWNER
+        let root = unsafe { GetAncestor(target, 2) }; // GA_ROOT: parent chain only
+        let root_owner = unsafe { GetAncestor(target, 3) }; // GA_ROOTOWNER
         let mut process = 0;
         unsafe {
             GetWindowThreadProcessId(target, &mut process);
         }
-        target as isize == main_window
-            || root as isize == main_window
-            || process == std::process::id()
+        owned_window(
+            main_window,
+            target as isize,
+            root as isize,
+            root_owner as isize,
+            process == std::process::id(),
+            |window| unsafe { GetWindow(window as Handle, 4) as isize }, // GW_OWNER
+        )
     }
 
     fn external_window(main_window: isize, target: Handle) -> bool {
@@ -410,6 +451,110 @@ pub use native::*;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn direct_cross_process_owner_survives_self_root_owner_from_actual_fixture() {
+        // Actual1cc Windows metadata: the fixture owns this HWND, GW_OWNER is
+        // EchoLingo, but GA_ROOTOWNER still reports the fixture window itself.
+        let main = 0x10204;
+        let dialog = 0x2026e;
+        let root_owner = dialog;
+        assert!(dialog != main && root_owner != main); // Old classifier rejected it.
+        let mut queries = Vec::new();
+        assert!(owned_window(
+            main,
+            dialog,
+            dialog,
+            root_owner,
+            false,
+            |window| {
+                queries.push(window);
+                if window == dialog {
+                    main
+                } else {
+                    0
+                }
+            }
+        ));
+        assert_eq!(queries, [dialog]);
+    }
+
+    #[test]
+    fn owned_child_uses_parent_root_and_keeps_main_in_middle_of_owner_chain() {
+        let mut queries = Vec::new();
+        assert!(owned_window(100, 7, 20, 900, false, |window| {
+            queries.push(window);
+            match window {
+                20 => 30,
+                30 => 100,
+                100 => 900,
+                _ => 0,
+            }
+        }));
+        assert_eq!(queries, [20, 30]); // Start at GA_ROOT, stop at main.
+        for (target, root, root_owner, same_process) in [
+            (100, 100, 900, false),
+            (7, 100, 900, false),
+            (7, 20, 100, false),
+            (7, 20, 20, true),
+        ] {
+            assert!(owned_window(
+                100,
+                target,
+                root,
+                root_owner,
+                same_process,
+                |_| { panic!("Existing own-window/same-PID fast paths must not traverse") }
+            ));
+        }
+    }
+
+    #[test]
+    fn unrelated_missing_and_cyclic_owners_do_not_match_or_loop() {
+        assert!(!owned_window(0, 7, 20, 20, true, |_| panic!("Null main")));
+        assert!(!owned_window(100, 0, 100, 100, true, |_| panic!(
+            "Null target"
+        )));
+        assert!(!owned_window(100, 7, 0, 0, false, |_| panic!("Null root")));
+        let mut queries = Vec::new();
+        assert!(!owned_window(100, 7, 20, 20, false, |window| {
+            queries.push(window);
+            0
+        }));
+        assert_eq!(queries, [20]);
+        queries.clear();
+        assert!(!owned_window(100, 7, 20, 20, false, |window| {
+            queries.push(window);
+            window
+        }));
+        assert_eq!(queries, [20]);
+        queries.clear();
+        assert!(!owned_window(100, 7, 20, 20, false, |window| {
+            queries.push(window);
+            if window == 20 {
+                30
+            } else {
+                20
+            }
+        }));
+        assert_eq!(queries, [20, 30]);
+    }
+
+    #[test]
+    fn owner_queries_have_a_fixed_limit_and_accept_the_last_permitted_link() {
+        let mut queries = 0;
+        assert!(!owned_window(100, 1, 1, 1, false, |window| {
+            queries += 1;
+            window + 1
+        }));
+        assert_eq!(queries, MAX_OWNER_LINKS);
+        queries = 0;
+        assert!(owned_window(17, 1, 1, 1, false, |window| {
+            queries += 1;
+            window + 1
+        }));
+        assert_eq!(queries, MAX_OWNER_LINKS);
+    }
 
     #[test]
     fn short_click_and_first_click_have_no_sampling_or_initial_discard() {

@@ -520,7 +520,12 @@ public static class EchoLingoPopupVisibilitySmoke {
                                 });
                                 Wait(delegate { return GetForegroundWindow() == ownedDialog.Handle; }, 2000, "Generated owned window did not gain focus.");
                                 Ui(form, delegate { observeOwner("before-owner-assertion"); });
-                                Require(GetAncestor(ownedDialog.Handle, 3) == main, "Generated owned window has no actual app-root ownership; case not tested.");
+                                uint ownedProcess; GetWindowThreadProcessId(ownedDialog.Handle, out ownedProcess);
+                                Require(ownedProcess == Process.GetCurrentProcess().Id && GetAncestor(ownedDialog.Handle, 2) == ownedDialog.Handle && GetWindow(ownedDialog.Handle, 4) == main,
+                                    "Generated owned window has no verified fixture PID/top-level root/direct app owner; case not tested.");
+                                report["generatedDirectOwnershipVerified"] = true;
+                                report["ownedActivationMainVisibleObserved"] = IsWindowVisible(main);
+                                Require(IsWindowVisible(main), "Activating the verified direct-owned window dismissed its popup owner.");
                                 ClickGeneratedBody(ownedDialog, main, delegate { return Interlocked.CompareExchange(ref ownedClicks, 0, 0); }, report, "actual-owned-native-window"); Thread.Sleep(150);
                                 Require(IsWindowVisible(main), "Clicking an actual owned window dismissed its popup owner.");
                                 report["generatedNativeOwnedWindowRetainedPassed"] = true;
