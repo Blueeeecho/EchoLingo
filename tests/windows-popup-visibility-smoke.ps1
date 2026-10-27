@@ -28,6 +28,9 @@ using System.Windows.Forms;
 
 public static class EchoLingoPopupVisibilitySmoke {
     const string Identifier = "io.github.blueeeecho.echolingo", Marker = ".echolingo-visibility-owned";
+    // Pinned Tao0.37.2 default. Never infer an app window from area: the
+    // global-hotkey0.8.0 helper is also a top-level HWND with default size.
+    const string MainWindowClass = "Window Class";
     delegate bool Enumerate(IntPtr window, IntPtr unused);
     [DllImport("user32.dll")] static extern bool EnumWindows(Enumerate callback, IntPtr unused);
     [DllImport("user32.dll")] static extern uint GetWindowThreadProcessId(IntPtr window, out uint process);
@@ -74,27 +77,48 @@ public static class EchoLingoPopupVisibilitySmoke {
         Require(GetForegroundWindow() == form.Handle, "Generated source is not foreground; no input sent elsewhere.");
         Send(new INPUT[] { Key(0x12, false), Key(key, false), Key(key, true), Key(0x12, true) });
     }
-    static IntPtr MainWindow(int process) {
-        IntPtr result = IntPtr.Zero; long largest = 0;
+    static bool MainWindowCandidate(IntPtr window, int process) {
+        uint owner; GetWindowThreadProcessId(window, out owner);
+        if (window == IntPtr.Zero || owner != process || GetAncestor(window, 2) != window) return false;
+        StringBuilder name = new StringBuilder(256); GetClassName(window, name, name.Capacity);
+        return name.ToString() == MainWindowClass;
+    }
+    static List<IntPtr> MainWindowCandidates(int process) {
+        List<IntPtr> candidates = new List<IntPtr>();
         EnumWindows(delegate(IntPtr window, IntPtr unused) {
-            uint owner; RECT bounds; GetWindowThreadProcessId(window, out owner);
-            if (owner == process && GetWindowRect(window, out bounds)) {
-                long area = (long)(bounds.right - bounds.left) * (bounds.bottom - bounds.top);
-                if (bounds.right - bounds.left >= 200 && bounds.bottom - bounds.top >= 100 && area > largest) { result = window; largest = area; }
-            }
+            if (MainWindowCandidate(window, process)) candidates.Add(window);
             return true;
         }, IntPtr.Zero);
-        return result;
+        return candidates;
+    }
+    static IntPtr MainWindow(int process) {
+        List<IntPtr> candidates = MainWindowCandidates(process);
+        return candidates.Count == 1 ? candidates[0] : IntPtr.Zero;
     }
     static void RequireUniqueOwnedMainWindow(Process app, IntPtr main) {
-        int candidates = 0; IntPtr candidate = IntPtr.Zero;
-        EnumWindows(delegate(IntPtr window, IntPtr unused) {
-            uint owner; RECT bounds; GetWindowThreadProcessId(window, out owner);
-            if (owner == app.Id && GetWindowRect(window, out bounds)
-                && bounds.right - bounds.left >= 200 && bounds.bottom - bounds.top >= 100) { candidates++; candidate = window; }
-            return true;
+        List<IntPtr> candidates = MainWindowCandidates(app.Id);
+        Require(candidates.Count == 1 && candidates[0] == main, "Native preparation refused: no unique root HWND of the pinned Tao class belongs to the fixture-started PID.");
+    }
+    static Dictionary<string, object> OwnTopLevelWindowInventory(Process app) {
+        const int maximum = 32; bool truncated = false;
+        List<Dictionary<string, object>> windows = new List<Dictionary<string, object>>();
+        if (app != null) EnumWindows(delegate(IntPtr window, IntPtr unused) {
+            uint owner; uint thread = GetWindowThreadProcessId(window, out owner);
+            if (owner != app.Id) return true;
+            if (windows.Count >= maximum) { truncated = true; return false; }
+            StringBuilder name = new StringBuilder(256); GetClassName(window, name, name.Capacity);
+            Dictionary<string, object> value = new Dictionary<string, object> {
+                { "hwnd", "0x" + window.ToInt64().ToString("X") }, { "processId", owner }, { "threadId", thread },
+                { "class", name.ToString() }, { "visible", IsWindowVisible(window) },
+                { "rootHwnd", "0x" + GetAncestor(window, 2).ToInt64().ToString("X") },
+                { "mainCandidate", MainWindowCandidate(window, app.Id) }
+            };
+            RECT bounds;
+            if (GetWindowRect(window, out bounds)) value["size"] = new int[] { bounds.right - bounds.left, bounds.bottom - bounds.top };
+            else value["boundsUnavailable"] = true;
+            windows.Add(value); return true;
         }, IntPtr.Zero);
-        Require(candidates == 1 && candidate == main, "Native preparation refused: app main HWND is not unique and owned by the fixture-started PID.");
+        return new Dictionary<string, object> { { "maximum", maximum }, { "truncated", truncated }, { "windows", windows } };
     }
     static IntPtr SingleInstanceWindow(int process) {
         IntPtr result = IntPtr.Zero; int count = 0;
@@ -276,7 +300,7 @@ public static class EchoLingoPopupVisibilitySmoke {
                             catch (InvalidOperationException) { throw new InvalidOperationException("New app has no observable GUI message loop."); }
                             report["nativeInputIdleObserved"] = true;
                             stage = "wait-native-window";
-                            Wait(delegate { Require(!app.HasExited, "New app exited before creating its native window."); main = MainWindow(app.Id); return main != IntPtr.Zero; }, 20000, "New app native window not created.");
+                            Wait(delegate { Require(!app.HasExited, "New app exited before creating its native window."); main = MainWindow(app.Id); return main != IntPtr.Zero; }, 20000, "No unique root HWND of the pinned Tao class became available for the started app PID.");
                             Action sourceFocus = delegate { Ui(form, delegate { form.Activate(); source.Focus(); source.SelectAll(); });
                                 Require(SetForegroundWindow(form.Handle), "Generated source foreground was rejected.");
                                 Wait(delegate { return GetForegroundWindow() == form.Handle; }, 2000, "Generated source not foreground."); };
@@ -405,7 +429,8 @@ public static class EchoLingoPopupVisibilitySmoke {
                             report["singleInstanceHandoffPassed"] = true;
                             report["ok"] = true;
                         } catch (Exception error) {
-                            report["failedStage"] = stage; report["failureReadiness"] = ReadinessMetadata(app, main);
+                            report["failedStage"] = stage; report["ownTopLevelWindowsAtFailure"] = OwnTopLevelWindowInventory(app);
+                            report["failureReadiness"] = ReadinessMetadata(app, main);
                             report["failureDetails"] = error.ToString(); failure = error;
                         }
                         finally {

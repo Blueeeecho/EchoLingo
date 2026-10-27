@@ -240,12 +240,20 @@ jobs:
           $candidatePath = $candidateFiles[0].FullName
           $candidateHash = (Get-FileHash -LiteralPath $candidatePath -Algorithm SHA256).Hash.ToLowerInvariant()
           if ($candidateHash -ne '3bc6a04c9e98787e9e2a20bf6235be215609e3e139799d339a388c0907c33142') { throw 'Candidate identity mismatch.' }
+          # Windows checkout can convert LF to CRLF. Preserve the exact file
+          # digest and an explicit LF digest for comparison with Git snapshots.
+          $fixtureText = [IO.File]::ReadAllText((Resolve-Path tests/windows-popup-visibility-smoke.ps1)).Replace("`r`n", "`n")
+          $fixtureDigest = [Security.Cryptography.SHA256]::Create()
+          try {
+            $fixtureLfHash = [BitConverter]::ToString($fixtureDigest.ComputeHash([Text.UTF8Encoding]::new($false).GetBytes($fixtureText))).Replace('-', '').ToLowerInvariant()
+          } finally { $fixtureDigest.Dispose() }
           [ordered]@{
             scope = 'Targeted popup diagnostics only; not a full build or release acceptance'
             sourceRun = 40462630406
             applicationSource = 'c247dd99cfc6e49133541c3173b60118ed157bb5'
             stagedSha256 = $candidateHash
-            fixtureSha256 = (Get-FileHash tests/windows-popup-visibility-smoke.ps1 -Algorithm SHA256).Hash.ToLowerInvariant()
+            checkoutFixtureSha256 = (Get-FileHash tests/windows-popup-visibility-smoke.ps1 -Algorithm SHA256).Hash.ToLowerInvariant()
+            canonicalLfFixtureSha256 = $fixtureLfHash
           } | ConvertTo-Json -Compress
           "path=$candidatePath" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
       - name: Run actual popup interactions against verified candidate
