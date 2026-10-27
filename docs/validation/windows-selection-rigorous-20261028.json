@@ -714,5 +714,16 @@
     "independentAudit": "initial69file sync passed; final docs refreshed with prior-hash guard and complete69file verification",
     "initialIndependentAudit": "passed:69/69 hashes,19 non-doc target f65/worktree/original, all historical doc bodies retained",
     "finalDocsRefresh": "complete"
+  },
+  "subsequentDiagnostic": {
+    "status": "initial source-data eligibility probe prepared; no acceptance exception",
+    "productionCandidateRemains": "f65ab043c7e7a0ad4b5497d1a2651eb490198980",
+    "diagnosticHelperLfSha256": "ec2d426691deb0bb84db25592f42b21190adf9a6882f279192317fd05b812c2b",
+    "explicitPerformanceDiagnosticsOnly": true,
+    "retainsStrictFocusIdentity": true,
+    "noTextHashesOrRuntimeIdsLogged": true,
+    "maxRanges": 16,
+    "rawUtf16CharactersStrictlyBelow": 65536,
+    "actualResult": "pending; must not claim diagnostic timing as baseline repair"
   }
 }

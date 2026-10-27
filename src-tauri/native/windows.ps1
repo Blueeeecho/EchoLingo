@@ -438,7 +438,16 @@ public static class EchoLingoNative {
         public IntPtr Foreground;
         public int[] FocusIdentity;
         public int InitialRoleId;
+        public InitialSelectionAnchor DiagnosticInitialAnchor;
         public readonly HashSet<int> SourceProcesses = new HashSet<int>();
+    }
+    sealed class InitialSelectionAnchor {
+        public readonly int[] DocumentIdentity;
+        public readonly int DocumentProcess;
+        public readonly string[] RawRanges;
+        public InitialSelectionAnchor(int[] identity, int process, string[] ranges) {
+            DocumentIdentity = (int[])identity.Clone(); DocumentProcess = process; RawRanges = (string[])ranges.Clone();
+        }
     }
     sealed class SelectionBudgetExceededException : InvalidOperationException {
         public SelectionBudgetExceededException() : base("SELECTION: The selected-text accessibility budget was exhausted; no further copy input was sent.") { }
@@ -520,6 +529,9 @@ public static class EchoLingoNative {
         public volatile int Stage, Depth;
         public volatile int InitialRoleId, FreshRoleId, InitialIdentityLength, FreshIdentityLength;
         public volatile int IdentityCompared, IdentityEqual, RootWalkReason, ExceptionKind;
+        public volatile int AnchorProbeAttempted, AnchorProbeInitialRoleId, AnchorProbeDocumentDepth;
+        public volatile int AnchorProbeDocumentIdentityAvailable, AnchorProbeRangeCount, AnchorProbeAllReadOnly;
+        public volatile int AnchorProbeNonempty, AnchorProbeEligible, AnchorProbeReason;
         public volatile bool Abandoned;
         public void Mark(int stage, int depth) { Depth = depth; Stage = stage; }
     }
@@ -624,6 +636,17 @@ public static class EchoLingoNative {
                 CapturePerformance.Set(prefix + "IdentityEqual", trace.IdentityEqual);
                 CapturePerformance.Set(prefix + "RootWalkReason", trace.RootWalkReason);
                 CapturePerformance.Set(prefix + "ExceptionKind", outcomeStage < 0 ? trace.ExceptionKind : outcomeExceptionKind);
+                if (trace.AnchorProbeAttempted != 0) {
+                    CapturePerformance.Set(prefix + "AnchorProbeAttempted", trace.AnchorProbeAttempted);
+                    CapturePerformance.Set(prefix + "AnchorProbeInitialRoleId", trace.AnchorProbeInitialRoleId);
+                    CapturePerformance.Set(prefix + "AnchorProbeDocumentDepth", trace.AnchorProbeDocumentDepth);
+                    CapturePerformance.Set(prefix + "AnchorProbeDocumentIdentityAvailable", trace.AnchorProbeDocumentIdentityAvailable);
+                    CapturePerformance.Set(prefix + "AnchorProbeRangeCount", trace.AnchorProbeRangeCount);
+                    CapturePerformance.Set(prefix + "AnchorProbeAllReadOnly", trace.AnchorProbeAllReadOnly);
+                    CapturePerformance.Set(prefix + "AnchorProbeNonempty", trace.AnchorProbeNonempty);
+                    CapturePerformance.Set(prefix + "AnchorProbeEligible", trace.AnchorProbeEligible);
+                    CapturePerformance.Set(prefix + "AnchorProbeReason", trace.AnchorProbeReason);
+                }
                 if (budget != null) {
                     CapturePerformance.Set(prefix + "BudgetLimitMilliseconds", budget.LimitMilliseconds);
                     CapturePerformance.Set(prefix + "BudgetRemainingAtStartMilliseconds", budgetRemainingAtStart);
@@ -735,6 +758,77 @@ public static class EchoLingoNative {
     static AutomationElement CurrentSelectionFocus(SelectionContext context) {
         List<AutomationElement> ancestors; return CurrentSelectionFocus(context, out ancestors);
     }
+    static InitialSelectionAnchor ProbeInitialReadOnlySelection(SelectionContext context, AutomationElement focused, List<AutomationElement> ancestors) {
+        // Diagnostic evidence only. It never permits a changed focus identity,
+        // seeds a later anchor, or searches beyond this already validated chain.
+        if (!CapturePerformance.Enabled || selectionTrace == null) return null;
+        SelectionTrace trace = selectionTrace; trace.AnchorProbeAttempted = 1;
+        trace.AnchorProbeReason = 9; // unavailable; eligible0 is always authoritative
+        try {
+            RequireSelectionQueryActive(); SelectionStage(24, 0);
+            if (focused == null || ancestors == null || ancestors.Count == 0 || !Object.ReferenceEquals(focused, ancestors[0])) return null;
+            ControlType initialRole = focused.Cached.ControlType;
+            if (initialRole == null) return null;
+            trace.AnchorProbeInitialRoleId = initialRole.Id;
+            if (initialRole != ControlType.Pane && initialRole != ControlType.Document) { trace.AnchorProbeReason = 1; return null; }
+            AutomationElement document = null;
+            for (int depth = 0; depth < ancestors.Count; depth++) {
+                ControlType role = ancestors[depth].Cached.ControlType;
+                if (role == null) return null;
+                if (role == ControlType.Edit) { trace.AnchorProbeReason = 3; return null; }
+                if (role == ControlType.Document) { document = ancestors[depth]; trace.AnchorProbeDocumentDepth = depth + 1; break; }
+            }
+            if (document == null) { trace.AnchorProbeReason = 2; return null; }
+            RequireSelectionQueryActive(); SelectionStage(25, trace.AnchorProbeDocumentDepth);
+            int[] identity = document.GetRuntimeId(); RequireSelectionQueryActive();
+            int process = document.Cached.ProcessId;
+            if (identity == null || identity.Length == 0 || process == 0) { trace.AnchorProbeReason = 4; return null; }
+            trace.AnchorProbeDocumentIdentityAvailable = 1;
+            RequireSelectionQueryActive(); SelectionStage(26, trace.AnchorProbeDocumentDepth);
+            object raw; bool available = document.TryGetCurrentPattern(TextPattern.Pattern, out raw); RequireSelectionQueryActive();
+            if (!available) { trace.AnchorProbeReason = 5; return null; }
+            TextPattern pattern = raw as TextPattern; if (pattern == null) return null;
+            RequireSelectionQueryActive(); SelectionStage(27, trace.AnchorProbeDocumentDepth);
+            TextPatternRange[] ranges = pattern.GetSelection(); RequireSelectionQueryActive();
+            trace.AnchorProbeRangeCount = ranges == null ? 0 : Math.Min(ranges.Length, 17); //17 means over the16-range limit
+            if (ranges == null || ranges.Length == 0) { trace.AnchorProbeReason = 6; return null; }
+            if (ranges.Length > 16) { trace.AnchorProbeReason = 8; return null; }
+            foreach (TextPatternRange range in ranges) {
+                if (range == null) return null;
+                RequireSelectionQueryActive(); SelectionStage(28, trace.AnchorProbeDocumentDepth);
+                object readOnly = range.GetAttributeValue(TextPattern.IsReadOnlyAttribute); RequireSelectionQueryActive();
+                if (!(readOnly is bool) || !(bool)readOnly) { trace.AnchorProbeReason = 7; return null; }
+            }
+            trace.AnchorProbeAllReadOnly = 1;
+            string[] parts = new string[ranges.Length]; int total = 0; bool nonempty = false;
+            for (int index = 0; index < ranges.Length; index++) {
+                int remaining = 65536 - total;
+                RequireSelectionQueryActive(); SelectionStage(29, trace.AnchorProbeDocumentDepth);
+                string part = ranges[index].GetText(remaining + 1); RequireSelectionQueryActive();
+                if (part == null) return null;
+                if (part.Length >= remaining) { trace.AnchorProbeReason = 8; return null; }
+                parts[index] = part; total += part.Length;
+                if (!String.IsNullOrWhiteSpace(part)) nonempty = true;
+            }
+            trace.AnchorProbeNonempty = nonempty ? 1 : 0;
+            if (!nonempty) { trace.AnchorProbeReason = 6; return null; }
+            if (GetForegroundWindow() != context.Foreground)
+                throw new OperationCanceledException("CANCELLED: The source window changed during the initial selection diagnostic.");
+            RequireSelectionQueryActive();
+            InitialSelectionAnchor anchor = new InitialSelectionAnchor(identity, process, parts);
+            trace.AnchorProbeReason = 0; trace.AnchorProbeEligible = 1; SelectionStage(30, trace.AnchorProbeDocumentDepth);
+            return anchor;
+        } catch (OperationCanceledException) { throw; }
+        catch (SelectionBudgetExceededException) { throw; }
+        catch (InvalidOperationException error) {
+            if (error.Message.StartsWith("PROTECTED:", StringComparison.Ordinal)
+                || error.Message.StartsWith("NATIVE_CANCEL:", StringComparison.Ordinal)) throw;
+            trace.AnchorProbeReason = 9; return null;
+        } catch (ElementNotAvailableException) { trace.AnchorProbeReason = 9; return null; }
+        catch (COMException) { trace.AnchorProbeReason = 9; return null; }
+        catch (NotSupportedException) { trace.AnchorProbeReason = 9; return null; }
+        catch (ArgumentException) { trace.AnchorProbeReason = 9; return null; }
+    }
     static SelectionContext CaptureSelectionContext() {
         try {
             SelectionContext context = new SelectionContext();
@@ -743,7 +837,9 @@ public static class EchoLingoNative {
             if (nativePid != 0 && nativePid == ExcludedSourceProcessId)
                 throw new InvalidOperationException("NO_SELECTION: EchoLingo is the foreground application.");
             if (nativePid != 0) context.SourceProcesses.Add(unchecked((int)nativePid));
-            AutomationElement focused = CurrentSelectionFocus(context);
+            List<AutomationElement> ancestors;
+            AutomationElement focused = CurrentSelectionFocus(context, out ancestors);
+            if (CapturePerformance.Enabled) context.DiagnosticInitialAnchor = ProbeInitialReadOnlySelection(context, focused, ancestors);
             int process = focused.Cached.ProcessId;
             if (process != 0) context.SourceProcesses.Add(process);
             return context;

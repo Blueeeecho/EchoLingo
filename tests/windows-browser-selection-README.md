@@ -128,3 +128,15 @@ clipboard broker, WPS or physical Windows 10/11. Those require separate tests.
 
 Microsoft UIA threading guidance:
 https://learn.microsoft.com/en-us/windows/win32/winauto/uiauto-threading
+
+## Initial source-data eligibility diagnostic (after f65 candidate)
+
+A subsequent diagnostic-only Q1 probe, enabled solely by PerformanceDiagnostics,
+reads from the first already validated focus ancestor chain. It never accepts a
+changed focus or seeds an anchor later. It checks for the nearest existing
+Document, nonempty raw selected ranges and a strictly Boolean true read-only
+attribute, with at most16 ranges and strictly less than65536 UTF-16 characters.
+Only nine numeric outcomes are reported; text and runtime IDs remain private to
+that invocation. Extra provider calls can change timing, so a passing diagnostic
+run is not evidence that the frozen f65 candidate or normal path was repaired.
+No initial Document/A means no basis for a later anchor exception.
