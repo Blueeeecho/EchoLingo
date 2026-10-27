@@ -9,12 +9,12 @@ on:
         description: Full regression or exact-binary desktop diagnostics
         type: choice
         default: full
-        options: [full, windows-popup-diagnostics, windows-application-diagnostics, windows-input-plane-experiment, windows-native-diagnostics, windows-shortcuts-ui-diagnostics, windows-shortcuts-ui-medium-diagnostics, windows-delegated-diagnostics, windows-browser-diagnostics, windows-latest-intent-diagnostics, windows-selection-application-diagnostics, windows-selection-clipboard-diagnostics]
+        options: [full, windows-popup-diagnostics, windows-application-diagnostics, windows-input-plane-experiment, windows-native-diagnostics, windows-shortcuts-ui-diagnostics, windows-shortcuts-ui-medium-diagnostics, windows-delegated-diagnostics, windows-browser-diagnostics, windows-latest-intent-diagnostics, windows-selection-application-diagnostics, windows-selection-clipboard-diagnostics, windows-selection-notepad-diagnostics]
 permissions:
   contents: read
 jobs:
   desktop:
-    if: github.event.inputs.mode != 'windows-popup-diagnostics' && github.event.inputs.mode != 'windows-application-diagnostics' && github.event.inputs.mode != 'windows-input-plane-experiment' && github.event.inputs.mode != 'windows-native-diagnostics' && github.event.inputs.mode != 'windows-shortcuts-ui-diagnostics' && github.event.inputs.mode != 'windows-shortcuts-ui-medium-diagnostics' && github.event.inputs.mode != 'windows-delegated-diagnostics' && github.event.inputs.mode != 'windows-browser-diagnostics' && github.event.inputs.mode != 'windows-latest-intent-diagnostics' && github.event.inputs.mode != 'windows-selection-application-diagnostics' && github.event.inputs.mode != 'windows-selection-clipboard-diagnostics'
+    if: github.event.inputs.mode != 'windows-popup-diagnostics' && github.event.inputs.mode != 'windows-application-diagnostics' && github.event.inputs.mode != 'windows-input-plane-experiment' && github.event.inputs.mode != 'windows-native-diagnostics' && github.event.inputs.mode != 'windows-shortcuts-ui-diagnostics' && github.event.inputs.mode != 'windows-shortcuts-ui-medium-diagnostics' && github.event.inputs.mode != 'windows-delegated-diagnostics' && github.event.inputs.mode != 'windows-browser-diagnostics' && github.event.inputs.mode != 'windows-latest-intent-diagnostics' && github.event.inputs.mode != 'windows-selection-application-diagnostics' && github.event.inputs.mode != 'windows-selection-clipboard-diagnostics' && github.event.inputs.mode != 'windows-selection-notepad-diagnostics'
     strategy:
       fail-fast: false
       matrix:
@@ -317,7 +317,7 @@ jobs:
           }
 
   frontend-interactions:
-    if: github.event.inputs.mode != 'windows-popup-diagnostics' && github.event.inputs.mode != 'windows-application-diagnostics' && github.event.inputs.mode != 'windows-input-plane-experiment' && github.event.inputs.mode != 'windows-native-diagnostics' && github.event.inputs.mode != 'windows-shortcuts-ui-diagnostics' && github.event.inputs.mode != 'windows-shortcuts-ui-medium-diagnostics' && github.event.inputs.mode != 'windows-delegated-diagnostics' && github.event.inputs.mode != 'windows-browser-diagnostics' && github.event.inputs.mode != 'windows-latest-intent-diagnostics' && github.event.inputs.mode != 'windows-selection-application-diagnostics' && github.event.inputs.mode != 'windows-selection-clipboard-diagnostics'
+    if: github.event.inputs.mode != 'windows-popup-diagnostics' && github.event.inputs.mode != 'windows-application-diagnostics' && github.event.inputs.mode != 'windows-input-plane-experiment' && github.event.inputs.mode != 'windows-native-diagnostics' && github.event.inputs.mode != 'windows-shortcuts-ui-diagnostics' && github.event.inputs.mode != 'windows-shortcuts-ui-medium-diagnostics' && github.event.inputs.mode != 'windows-delegated-diagnostics' && github.event.inputs.mode != 'windows-browser-diagnostics' && github.event.inputs.mode != 'windows-latest-intent-diagnostics' && github.event.inputs.mode != 'windows-selection-application-diagnostics' && github.event.inputs.mode != 'windows-selection-clipboard-diagnostics' && github.event.inputs.mode != 'windows-selection-notepad-diagnostics'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -820,7 +820,7 @@ jobs:
 
   windows-latest-intent-diagnostics:
     name: Registered-shortcut diagnostics (exact 4cf37d8 binary)
-    if: github.event_name == 'workflow_dispatch' && (github.event.inputs.mode == 'windows-latest-intent-diagnostics' || github.event.inputs.mode == 'windows-selection-application-diagnostics')
+    if: github.event_name == 'workflow_dispatch' && (github.event.inputs.mode == 'windows-latest-intent-diagnostics' || github.event.inputs.mode == 'windows-selection-application-diagnostics' || github.event.inputs.mode == 'windows-selection-notepad-diagnostics')
     runs-on: windows-latest
     timeout-minutes: 6
     permissions:
@@ -855,7 +855,9 @@ jobs:
         run: |
           $ErrorActionPreference = 'Continue'
           $global:LASTEXITCODE = 1
-          if ('${{ github.event.inputs.mode }}' -eq 'windows-selection-application-diagnostics') {
+          if ('${{ github.event.inputs.mode }}' -eq 'windows-selection-notepad-diagnostics') {
+            $output = @(& powershell.exe -NoProfile -STA -ExecutionPolicy Bypass -File tests/windows-selection-notepad-smoke.ps1 -ApplicationPath $env:ECHOLINGO_APPLICATION_CANDIDATE -IsolatedTestSession 2>&1)
+          } elseif ('${{ github.event.inputs.mode }}' -eq 'windows-selection-application-diagnostics') {
             $output = @(& powershell.exe -NoProfile -STA -ExecutionPolicy Bypass -File tests/windows-selection-application-smoke.ps1 -ApplicationPath $env:ECHOLINGO_APPLICATION_CANDIDATE -IsolatedTestSession 2>&1)
           } else {
             $output = @(& powershell.exe -NoProfile -STA -ExecutionPolicy Bypass -File tests/windows-application-smoke.ps1 -ApplicationPath $env:ECHOLINGO_APPLICATION_CANDIDATE -LatestIntentTests 2>&1)
