@@ -127,6 +127,39 @@ public static class EchoLingoPopupVisibilitySmoke {
         object pattern; Require(element.TryGetCurrentPattern(InvokePattern.Pattern, out pattern), "Control cannot be invoked: " + name);
         ((InvokePattern)pattern).Invoke();
     }
+    static Dictionary<string, object> ReadinessMetadata(Process app, IntPtr main) {
+        Dictionary<string, object> value = new Dictionary<string, object>();
+        value["mainHwnd"] = "0x" + main.ToInt64().ToString("X");
+        value["nativeVisible"] = main != IntPtr.Zero && IsWindowVisible(main);
+        IntPtr foreground = GetForegroundWindow(); uint foregroundProcess; GetWindowThreadProcessId(foreground, out foregroundProcess);
+        value["foregroundHwnd"] = "0x" + foreground.ToInt64().ToString("X"); value["foregroundProcessId"] = foregroundProcess;
+        value["appExited"] = app == null || app.HasExited;
+        if (main == IntPtr.Zero) return value;
+        RECT bounds; if (GetWindowRect(main, out bounds)) value["nativeSize"] = new int[] { bounds.right - bounds.left, bounds.bottom - bounds.top };
+        try {
+            AutomationElement root = AutomationElement.FromHandle(main);
+            value["uiaRootControlType"] = root.Current.ControlType.ProgrammaticName;
+            value["uiaRootFrameworkId"] = root.Current.FrameworkId;
+            value["uiaRootProcessId"] = root.Current.ProcessId;
+        } catch (Exception error) { value["uiaRootMetadataError"] = error.GetType().Name; }
+        List<Dictionary<string, object>> controls = new List<Dictionary<string, object>>();
+        // Read only static fixture-targeted control metadata. Never inspect
+        // source values, provider fields, clipboard or arbitrary UIA names.
+        foreach (string name in new string[] { "\u8fd4\u56de\u7ffb\u8bd1", "\u9489\u4f4f\u7a97\u53e3", "\u9690\u85cf\u7a97\u53e3" }) {
+            Dictionary<string, object> control = new Dictionary<string, object> { { "name", name } };
+            try {
+                AutomationElement element = Element(main, name); control["found"] = element != null;
+                if (element != null) {
+                    control["controlType"] = element.Current.ControlType.ProgrammaticName;
+                    control["enabled"] = element.Current.IsEnabled; control["offscreen"] = element.Current.IsOffscreen;
+                    object pattern; control["supportsInvoke"] = element.TryGetCurrentPattern(InvokePattern.Pattern, out pattern);
+                }
+            } catch (Exception error) { control["metadataError"] = error.GetType().Name; }
+            controls.Add(control);
+        }
+        value["staticControls"] = controls;
+        return value;
+    }
     static string KnownFolder(string id) {
         Guid folder = new Guid(id); IntPtr value;
         Require(SHGetKnownFolderPath(ref folder, 0, IntPtr.Zero, out value) == 0, "Could not resolve the dedicated test account's data directory.");
@@ -156,7 +189,8 @@ public static class EchoLingoPopupVisibilitySmoke {
         List<string> owned = new List<string>(); Process app = null;
         Dictionary<string, object> report = new Dictionary<string, object> { { "ok", false }, { "actualApplicationTested", false },
             { "windowsInteractiveTested", true }, { "fixtureReadsClipboard", false }, { "credentialsCreated", false },
-            { "physicalWindows10Tested", false }, { "altTabKeySequenceTested", false }, { "screenshotsTested", false } };
+            { "physicalWindows10Tested", false }, { "altTabKeySequenceTested", false }, { "screenshotsTested", false },
+            { "earlyStartupHotkeyTested", false }, { "singleShortcutPerAction", true } };
         try {
             string roaming = Path.Combine(KnownFolder("3EB685DB-65F9-4CF6-A03A-E3EF65729F3D"), Identifier);
             string local = Path.Combine(KnownFolder("F1B32785-6FBA-4FCF-9D55-7B8E7F157091"), Identifier);
@@ -182,6 +216,7 @@ public static class EchoLingoPopupVisibilitySmoke {
                 form.Shown += delegate {
                     Thread worker = new Thread(delegate() {
                         POINT original; bool restorePointer = GetPhysicalCursorPos(out original);
+                        IntPtr main = IntPtr.Zero; string stage = "start-application";
                         try {
                             Require(SetThreadDpiAwarenessContext(new IntPtr(-4)) != IntPtr.Zero, "Physical fixture coordinates unavailable.");
                             string childLocal = Path.Combine(root, "Local"), childTemp = Path.Combine(root, "Temp"); Directory.CreateDirectory(childLocal); Directory.CreateDirectory(childTemp);
@@ -190,17 +225,39 @@ public static class EchoLingoPopupVisibilitySmoke {
                             start.EnvironmentVariables["TEMP"] = childTemp; start.EnvironmentVariables["TMP"] = childTemp;
                             start.EnvironmentVariables["WEBVIEW2_USER_DATA_FOLDER"] = Path.Combine(local, "fixture-webview");
                             app = Process.Start(start); report["actualApplicationTested"] = true; report["applicationProcessId"] = app.Id;
-                            IntPtr main = IntPtr.Zero;
-                            Wait(delegate { main = MainWindow(app.Id); return main != IntPtr.Zero; }, 20000, "New app window not created.");
+                            stage = "wait-native-input-idle";
+                            try { Require(app.WaitForInputIdle(15000), "New app native message loop did not become input-idle."); }
+                            catch (InvalidOperationException) { throw new InvalidOperationException("New app has no observable GUI message loop."); }
+                            report["nativeInputIdleObserved"] = true;
+                            stage = "wait-native-window";
+                            Wait(delegate { Require(!app.HasExited, "New app exited before creating its native window."); main = MainWindow(app.Id); return main != IntPtr.Zero; }, 20000, "New app native window not created.");
                             Action sourceFocus = delegate { Ui(form, delegate { form.Activate(); source.Focus(); source.SelectAll(); });
                                 Require(SetForegroundWindow(form.Handle), "Generated source foreground was rejected.");
                                 Wait(delegate { return GetForegroundWindow() == form.Handle; }, 2000, "Generated source not foreground."); };
                             Action moveApp = delegate { Require(SetWindowPos(main, IntPtr.Zero, Math.Max(300, Screen.PrimaryScreen.Bounds.Right - 720), 20, 0, 0, 0x1 | 0x4 | 0x10), "Could not position own app fixture."); };
-                            // Explicit warm-up, not a retried test hotkey: wait
-                            // for actual WebView controls before dismissal cases.
-                            sourceFocus(); Shortcut(form, 0x41);
-                            Wait(delegate { return IsWindowVisible(main) && Element(main, "\u9489\u4f4f\u7a97\u53e3") != null; }, 20000, "New app WebView did not become ready.");
-                            Invoke(main, "\u9690\u85cf\u7a97\u53e3"); Wait(delegate { return !IsWindowVisible(main); }, 5000, "Warm-up popup did not hide.");
+                            // Explicit setup uses the product's durable
+                            // single-instance -> pending-settings handshake. A
+                            // native HWND alone does not prove that focus-input
+                            // listeners exist. No fixed sleep or repeated test
+                            // shortcut is used to manufacture readiness.
+                            stage = "request-settings-setup-once";
+                            using (Process setup = Process.Start(start)) {
+                                report["setupLaunchProcessId"] = setup.Id;
+                                if (!setup.WaitForExit(10000)) { setup.Kill(); setup.WaitForExit(3000); throw new InvalidOperationException("Explicit settings setup instance did not hand off and exit."); }
+                                report["setupInstanceExited"] = true; report["setupInstanceExitCode"] = setup.ExitCode;
+                                Require(setup.ExitCode == 0, "Explicit settings setup instance failed.");
+                            }
+                            report["readinessSetup"] = "single explicit second launch -> durable pending-settings -> real UIA controls";
+                            stage = "wait-settings-native-visible";
+                            Wait(delegate { Require(!app.HasExited, "New app exited during explicit settings setup."); return IsWindowVisible(main); }, 20000, "Explicit settings setup did not show the native app window.");
+                            report["setupNativeVisibleObserved"] = true;
+                            stage = "wait-settings-accessibility-control";
+                            Wait(delegate { return Element(main, "\u8fd4\u56de\u7ffb\u8bd1") != null; }, 5000, "Settings native window is visible, but its WebView return control is unavailable through UIA.");
+                            report["setupReadiness"] = ReadinessMetadata(app, main);
+                            stage = "finish-explicit-settings-setup";
+                            Invoke(main, "\u8fd4\u56de\u7ffb\u8bd1");
+                            Invoke(main, "\u9690\u85cf\u7a97\u53e3"); Wait(delegate { return !IsWindowVisible(main); }, 5000, "Prepared popup did not hide.");
+                            stage = "passive-selected-text-outside-click";
                             sourceFocus(); Shortcut(form, 0x44);
                             Wait(delegate { return IsWindowVisible(main); }, 12000, "Selected-text popup did not show."); moveApp();
                             Require(GetForegroundWindow() == form.Handle, "Passive selected-text popup stole source foreground.");
@@ -209,13 +266,17 @@ public static class EchoLingoPopupVisibilitySmoke {
                             Wait(delegate { return !IsWindowVisible(main); }, 2000, "Short source click failed to hide unpinned popup.");
                             Wait(delegate { return clicksReachedSource > before; }, 2000, "Outside observer swallowed the source click.");
                             report["passiveOutsideClickPassed"] = true; report["outsideHideObservedMs"] = outside.ElapsedMilliseconds;
+                            stage = "explicit-input-inside-retention";
                             sourceFocus(); Shortcut(form, 0x41);
                             Wait(delegate { return IsWindowVisible(main) && GetForegroundWindow() == main; }, 5000, "Explicit input did not focus the new app."); moveApp();
                             RECT bounds; Require(GetWindowRect(main, out bounds), "Own app bounds unavailable.");
                             Click(bounds.left + 70, bounds.top + 70, form, main, false); Thread.Sleep(150);
                             Require(IsWindowVisible(main), "Inside click hid the popup."); report["insideClickRetainedPassed"] = true;
+                            stage = "actual-toolbar-drag";
                             DragOwnToolbar(main); report["actualToolbarDragRetainedPassed"] = true;
+                            stage = "actual-edge-resize";
                             moveApp(); ResizeOwnEdge(main); report["actualEdgeResizeRetainedPassed"] = true;
+                            stage = "actual-owned-native-window";
                             using (Form ownedDialog = new Form()) {
                                 Ui(form, delegate {
                                     ownedDialog.Text = "EchoLingo generated native owned-window fixture";
@@ -229,8 +290,10 @@ public static class EchoLingoPopupVisibilitySmoke {
                                 report["generatedNativeOwnedWindowRetainedPassed"] = true;
                                 Ui(form, delegate { ownedDialog.Close(); });
                             }
+                            stage = "focus-deactivation";
                             sourceFocus(); Wait(delegate { return !IsWindowVisible(main); }, 2000, "Actual foreground deactivation failed to hide input popup.");
                             report["focusDeactivationPassed"] = true;
+                            stage = "pin-outside-retention";
                             Shortcut(form, 0x41); Wait(delegate { return IsWindowVisible(main); }, 5000, "Pin test input did not show."); moveApp();
                             Invoke(main, "\u9489\u4f4f\u7a97\u53e3"); Wait(delegate { return Element(main, "\u53d6\u6d88\u9489\u4f4f") != null; }, 5000, "Pin state did not update.");
                             sourceFocus(); Click(55, 500, form, main, true); Thread.Sleep(250);
@@ -238,20 +301,27 @@ public static class EchoLingoPopupVisibilitySmoke {
                             Invoke(main, "\u53d6\u6d88\u9489\u4f4f"); Wait(delegate { return Element(main, "\u9489\u4f4f\u7a97\u53e3") != null; }, 5000, "Unpin state did not update.");
                             Click(55, 500, form, main, true); Wait(delegate { return !IsWindowVisible(main); }, 2000, "Unpinned popup did not resume outside dismissal.");
                             report["unpinOutsideHidePassed"] = true;
+                            stage = "management-outside-retention";
                             Shortcut(form, 0x41); Wait(delegate { return IsWindowVisible(main); }, 5000, "Management test input did not show.");
                             Invoke(main, "\u66f4\u591a"); Invoke(main, "\u8bbe\u7f6e");
                             Wait(delegate { return Element(main, "\u8fd4\u56de\u7ffb\u8bd1") != null; }, 5000, "Management did not open.");
                             sourceFocus(); Click(55, 500, form, main, true); Thread.Sleep(250);
                             Require(IsWindowVisible(main), "Management view hid on outside interaction."); report["managementOutsideRetainedPassed"] = true;
                             report["ok"] = true;
-                        } catch (Exception error) { failure = error; }
+                        } catch (Exception error) {
+                            report["failedStage"] = stage; report["failureReadiness"] = ReadinessMetadata(app, main);
+                            report["failureDetails"] = error.ToString(); failure = error;
+                        }
                         finally {
                             IntPtr foreground = GetForegroundWindow();
                             if (foreground == form.Handle || (app != null && foreground == MainWindow(app.Id))) {
                                 INPUT release = new INPUT(); release.type = 0; release.data.mouse.flags = 4;
                                 SendInput(4, new INPUT[] { Key(0x12, true), Key(0x44, true), Key(0x41, true), release }, Marshal.SizeOf(typeof(INPUT)));
                             }
-                            if (app != null) { try { if (!app.HasExited) { app.Kill(); app.WaitForExit(5000); } } catch { } }
+                            if (app != null) {
+                                try { if (!app.HasExited) { app.Kill(); app.WaitForExit(5000); } Require(app.HasExited, "Own app did not stop during cleanup."); report["ownApplicationStopped"] = true; }
+                                catch (Exception error) { report["ok"] = false; report["applicationCleanupError"] = error.Message; }
+                            }
                             if (restorePointer && GetForegroundWindow() == form.Handle) SetCursorPos(original.x, original.y);
                             Ui(form, delegate { done = true; form.Close(); });
                         }
@@ -263,9 +333,11 @@ public static class EchoLingoPopupVisibilitySmoke {
             }
         } catch (Exception error) { report["error"] = error.Message; }
         finally {
+            bool removed = true;
             for (int index = owned.Count - 1; index >= 0; index--) {
-                try { Clean(owned[index], token); } catch (Exception error) { report["ok"] = false; report["cleanupError"] = error.Message; }
+                try { Clean(owned[index], token); } catch (Exception error) { removed = false; report["ok"] = false; report["cleanupError"] = error.Message; }
             }
+            report["ownedDirectoriesRemoved"] = removed;
         }
         return new JavaScriptSerializer().Serialize(report);
     }
