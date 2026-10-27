@@ -341,8 +341,10 @@ mod tests {
         for number in 1..=24 {
             let value = format!("F{number}");
             if cfg!(target_os = "windows") && number == 12 {
-                assert!(normalized(&only(&value)).unwrap_err().contains("F12"));
-                assert!(parsed(&only(&value)).is_err());
+                // Canonicalization must retain the name for installer
+                // conflict reporting; only runtime registration rejects it.
+                assert_eq!(normalized(&only(&value)).unwrap().selection, value);
+                assert!(parsed(&only(&value)).unwrap_err().contains("F12"));
                 continue;
             }
             assert_eq!(normalized(&only(&value)).unwrap().selection, value);
