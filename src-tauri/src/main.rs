@@ -1842,7 +1842,15 @@ fn start_action(app: tauri::AppHandle, action: String) {
             if let Some(exclusion) = exclusion {
                 exclusion.restore()?;
             }
-            finish_native_text(text, worker_request.cancelled()).map(|text| (text, cloud_ocr))
+            #[cfg(target_os = "windows")]
+            let source_changed = expected_source.is_some_and(|source| !source.is_current());
+            #[cfg(not(target_os = "windows"))]
+            let source_changed = false;
+            // A later editor inside the same source window is a different
+            // selection intent. Discard it without raising/focusing a blank
+            // popup; restoration notices retain their global safety path.
+            finish_native_text(text, worker_request.cancelled() || source_changed)
+                .map(|text| (text, cloud_ocr))
         })
         .await
         .map_err(|_| "系统操作异常".to_string())
@@ -1892,9 +1900,10 @@ fn start_action(app: tauri::AppHandle, action: String) {
                     );
                 }
                 Ok(_) if action == "selection" => {
-                    if !keep_popup {
-                        empty_selection_window(&app, presentation.epoch);
-                    }
+                    // Alt+D is also the manual-input shortcut, including when
+                    // the existing translator is pinned. Pin retains the window,
+                    // not the previous source after an explicit new input task.
+                    empty_selection_window(&app, presentation.epoch);
                 }
                 Ok(_) => {
                     if !keep_popup {
@@ -1903,9 +1912,9 @@ fn start_action(app: tauri::AppHandle, action: String) {
                     let _ = app.emit("action-error", "没有识别到文字，请选择更清晰的区域");
                 }
                 Err(error) => {
-                    if keep_popup {
-                        // Retention protects completed content for selection and
-                        // OCR equally. An unsuccessful task never emits blank text.
+                    if keep_popup && action != "selection" {
+                        // Failed/cancelled OCR preserves completed content.
+                        // Unavailable selection still opens the quiet editor.
                         if let Some(message) = visible_action_error(&action, &error) {
                             let _ = app.emit("action-error", if capture { error } else { message });
                         }

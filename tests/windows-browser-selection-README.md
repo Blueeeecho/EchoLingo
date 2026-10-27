@@ -42,6 +42,13 @@ post-helper-audit failure are separate fields. Audit success cannot turn a faile
 first acquisition into a pass. Production still has 2000ms per SelectionQuery,
 not a 2000ms limit for its complete multi-query workflow.
 
+The helper is invoked with explicit performance diagnostics. Only the numeric
+whitelist of up to 16 query durations, last stages/depths and three startup/reply
+phases is retained. Stage numbers are 1 worker entered, 2 focused-element/cache
+query, 3 runtime identity, 4 cached ancestor validation, 5 cached parent query,
+6 TextPattern query, 7 GetSelection, 8 GetText, and 9 completed focus validation.
+No accessibility warm-up or timeout/retry change accompanies these diagnostics.
+
 A failed case keeps the overall result false. Only after generated clipboard
 restoration, foreground and responsive audit are confirmed can the fixture
 continue to the next predeclared distinct case; this is never a retry of the

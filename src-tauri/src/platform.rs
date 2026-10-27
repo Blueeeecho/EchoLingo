@@ -57,6 +57,10 @@ pub struct NativeSourceSnapshot {
     window: isize,
     #[cfg(target_os = "windows")]
     process: u32,
+    #[cfg(target_os = "windows")]
+    thread: u32,
+    #[cfg(target_os = "windows")]
+    focus: isize,
 }
 impl NativeSourceSnapshot {
     pub fn is_current(&self) -> bool {
@@ -76,8 +80,12 @@ pub fn native_source_snapshot() -> Result<NativeSourceSnapshot, String> {
 pub fn native_source_is_current(expected: &NativeSourceSnapshot) -> bool {
     #[cfg(target_os = "windows")]
     {
-        native_process::source_snapshot()
-            .is_ok_and(|now| now.window == expected.window && now.process == expected.process)
+        native_process::source_snapshot().is_ok_and(|now| {
+            now.window == expected.window
+                && now.process == expected.process
+                && now.thread == expected.thread
+                && now.focus == expected.focus
+        })
     }
     #[cfg(not(target_os = "windows"))]
     {
@@ -1007,6 +1015,14 @@ fn run_windows(
     {
         return Err(NATIVE_CANCELLED.into());
     }
+    if source.is_some_and(|expected| !expected.is_current())
+        && result
+            .as_ref()
+            .err()
+            .is_none_or(|error| !error.starts_with("CLIPBOARD_"))
+    {
+        return Err("CANCELLED: The source focus changed during selection capture.".into());
+    }
     result
 }
 
@@ -1168,6 +1184,18 @@ mod native_process {
     use super::NativeSourceSnapshot;
     use std::ffi::c_void;
     use std::os::windows::io::AsRawHandle;
+    #[repr(C)]
+    struct GuiThreadInfo {
+        size: u32,
+        flags: u32,
+        active: *mut c_void,
+        focus: *mut c_void,
+        capture: *mut c_void,
+        menu_owner: *mut c_void,
+        move_size: *mut c_void,
+        caret: *mut c_void,
+        caret_rect: [i32; 4],
+    }
     #[link(name = "kernel32")]
     unsafe extern "system" {
         fn CreateEventW(
@@ -1185,6 +1213,8 @@ mod native_process {
     unsafe extern "system" {
         fn GetForegroundWindow() -> *mut c_void;
         fn GetWindowThreadProcessId(window: *mut c_void, pid: *mut u32) -> u32;
+        fn GetGUIThreadInfo(thread: u32, info: *mut GuiThreadInfo) -> i32;
+        fn GetAncestor(window: *mut c_void, flags: u32) -> *mut c_void;
     }
     #[link(name = "bcrypt")]
     unsafe extern "system" {
@@ -1194,15 +1224,27 @@ mod native_process {
     pub fn source_snapshot() -> Result<NativeSourceSnapshot, String> {
         let window = unsafe { GetForegroundWindow() };
         let mut process = 0;
-        if window.is_null()
-            || unsafe { GetWindowThreadProcessId(window, &mut process) } == 0
-            || process == 0
-        {
+        let thread = unsafe { GetWindowThreadProcessId(window, &mut process) };
+        if window.is_null() || thread == 0 || process == 0 {
             return Err("SELECTION_SOURCE_CHANGED: The source application is unavailable.".into());
+        }
+        // Record native focus at the shortcut, before helper startup. Root
+        // HWND/PID alone cannot distinguish two editors in the same window.
+        // This is bounded Win32 metadata, never a UIA query on the UI thread.
+        let mut info: GuiThreadInfo = unsafe { std::mem::zeroed() };
+        info.size = std::mem::size_of::<GuiThreadInfo>() as u32;
+        if unsafe { GetGUIThreadInfo(thread, &mut info) } == 0
+            || unsafe { GetForegroundWindow() } != window
+            || (!info.focus.is_null()
+                && unsafe { GetAncestor(info.focus, 2) } != unsafe { GetAncestor(window, 2) })
+        {
+            return Err("SELECTION_SOURCE_CHANGED: The source focus is unavailable.".into());
         }
         Ok(NativeSourceSnapshot {
             window: window as isize,
             process,
+            thread,
+            focus: info.focus as isize,
         })
     }
     pub struct CancellationEvent {

@@ -122,6 +122,121 @@ public static class CaptureHealth {
     public static Dictionary<string, long> Snapshot() { return new Dictionary<string, long>(values); }
 }
 
+// A clipboard owner/sequence cannot identify a copy transaction. This ticket
+// only detects a distinct keyboard copy intent; background writes by the same
+// process remain outside that guarantee. No text or general key history is kept.
+public sealed class SelectionCopyTicket {
+    readonly ulong marker;
+    int controls, ownControls, ownPhases, superseded;
+    public SelectionCopyTicket(ulong value) { if (value == 0) throw new ArgumentException("A copy input marker is required."); marker = value; }
+    public void Observe(int key, bool down, bool up, ulong extra) {
+        int control = key == 0x11 ? 1 : key == 0xA2 ? 2 : key == 0xA3 ? 4 : 0;
+        if (extra == marker) {
+            if (control != 0) { if (down) ownControls = 1; if (up) ownControls = 0; }
+            int phase = control != 0 ? (down ? 1 : up ? 8 : 0) : key == 0x43 ? (down ? 2 : up ? 4 : 0) : 0;
+            Interlocked.Exchange(ref ownPhases, ownPhases | phase);
+            return;
+        }
+        if (control != 0) { if (down) controls |= control; if (up) controls &= ~control; }
+        if (down && (controls | ownControls) != 0 && (key == 0x43 || key == 0x2D)) Interlocked.Exchange(ref superseded, 1);
+    }
+    public bool Superseded { get { return Interlocked.CompareExchange(ref superseded, 0, 0) != 0; } }
+    public bool OwnInputObserved { get { return Interlocked.CompareExchange(ref ownPhases, 0, 0) == 15; } }
+}
+
+// Created only immediately before the single clipboard fallback injection.
+// The direct UIA path never starts this thread or installs a hook. The callback
+// forwards every key and only updates bounded scalar ticket state.
+sealed class SelectionCopyObserver : IDisposable {
+    delegate IntPtr KeyboardHook(int code, IntPtr message, IntPtr data);
+    [StructLayout(LayoutKind.Sequential)] struct KeyboardData { public uint key, scan, flags, time; public UIntPtr extra; }
+    [StructLayout(LayoutKind.Sequential)] struct NativeMessage { public IntPtr window; public uint message; public UIntPtr word; public IntPtr parameter; public uint time; public int x, y; public uint privateData; }
+    [DllImport("user32.dll", EntryPoint="SetWindowsHookExW", SetLastError=true)] static extern IntPtr SetHook(int id, KeyboardHook callback, IntPtr module, uint thread);
+    [DllImport("user32.dll", SetLastError=true)] static extern bool UnhookWindowsHookEx(IntPtr hook);
+    [DllImport("user32.dll")] static extern IntPtr CallNextHookEx(IntPtr hook, int code, IntPtr message, IntPtr data);
+    [DllImport("user32.dll")] static extern bool PeekMessage(out NativeMessage message, IntPtr window, uint min, uint max, uint remove);
+    [DllImport("user32.dll", SetLastError=true)] static extern int GetMessage(out NativeMessage message, IntPtr window, uint min, uint max);
+    [DllImport("user32.dll", EntryPoint="PostThreadMessageW", SetLastError=true)] static extern bool PostThreadMessage(uint thread, uint message, UIntPtr word, IntPtr parameter);
+    [DllImport("kernel32.dll")] static extern uint GetCurrentThreadId();
+    [DllImport("kernel32.dll", CharSet=CharSet.Unicode)] static extern IntPtr GetModuleHandle(string module);
+    readonly SelectionCopyTicket ticket;
+    readonly KeyboardHook callback;
+    readonly ManualResetEvent ready;
+    readonly Thread thread;
+    IntPtr hook;
+    volatile uint threadId;
+    volatile bool running, inputIssued;
+    volatile string failure;
+    int stopRequested, disposed;
+    public UIntPtr Marker { get; private set; }
+    public SelectionCopyObserver() {
+        byte[] bytes = new byte[IntPtr.Size];
+        using (System.Security.Cryptography.RandomNumberGenerator random = System.Security.Cryptography.RandomNumberGenerator.Create()) random.GetBytes(bytes);
+        ulong value = IntPtr.Size == 8 ? BitConverter.ToUInt64(bytes, 0) : BitConverter.ToUInt32(bytes, 0);
+        if (value == 0) throw new InvalidOperationException("SELECTION: Windows could not initialize copy observation; no copy input was sent.");
+        Marker = IntPtr.Size == 8 ? new UIntPtr(value) : new UIntPtr((uint)value);
+        ticket = new SelectionCopyTicket(value); callback = OnKeyboard;
+        ready = new ManualResetEvent(false);
+        thread = new Thread(Run);
+        try { thread.IsBackground = true; thread.Name = "EchoLingo copy input"; thread.SetApartmentState(ApartmentState.MTA); thread.Start(); if (!ready.WaitOne(1000)) throw new InvalidOperationException("SELECTION: Copy observation did not start in time; no copy input was sent."); RequireCurrent(); }
+        catch { Dispose(); throw; }
+    }
+    void Run() {
+        try {
+            threadId = GetCurrentThreadId(); NativeMessage message;
+            PeekMessage(out message, IntPtr.Zero, 0, 0, 0);
+            hook = SetHook(13, callback, GetModuleHandle(null), 0);
+            if (hook == IntPtr.Zero) { failure = "install"; return; }
+            running = true; ready.Set();
+            while (Interlocked.CompareExchange(ref stopRequested, 0, 0) == 0) {
+                int result = GetMessage(out message, IntPtr.Zero, 0, 0);
+                if (result == 0) break;
+                if (result < 0) { failure = "message"; break; }
+            }
+        } catch { failure = "listener"; }
+        finally {
+            if (hook != IntPtr.Zero && !UnhookWindowsHookEx(hook)) failure = "unhook";
+            hook = IntPtr.Zero; running = false; ready.Set(); GC.KeepAlive(callback);
+        }
+    }
+    IntPtr OnKeyboard(int code, IntPtr message, IntPtr data) {
+        if (code == 0) {
+            try {
+                int kind = message.ToInt32(); bool down = kind == 0x100 || kind == 0x104, up = kind == 0x101 || kind == 0x105;
+                if (down || up) { KeyboardData key = (KeyboardData)Marshal.PtrToStructure(data, typeof(KeyboardData)); ticket.Observe((int)key.key, down, up, key.extra.ToUInt64()); }
+            } catch { failure = "callback"; }
+        }
+        return CallNextHookEx(hook, code, message, data);
+    }
+    public void Issued() { RequireCurrent(); inputIssued = true; }
+    public void RequireCurrent() {
+        if (ticket.Superseded) throw new InvalidOperationException("CANCELLED: A new copy shortcut superseded selection capture; the newer clipboard was preserved.");
+        if (failure != null || !running) throw new InvalidOperationException(inputIssued
+            ? "CLIPBOARD_RESTORE_SKIPPED: Copy input observation was lost; current clipboard contents were preserved."
+            : "SELECTION: Copy observation is unavailable; no copy input was sent.");
+    }
+    public void AwaitOwnInput(Func<long> elapsedMilliseconds) {
+        while (!ticket.OwnInputObserved) {
+            RequireCurrent();
+            if (elapsedMilliseconds() >= 1200) throw new InvalidOperationException("CLIPBOARD_RESTORE_SKIPPED: Windows did not confirm the copy input; current clipboard contents were preserved.");
+            Thread.Sleep(1); // Await actual input acknowledgement, not a settling delay.
+        }
+        RequireCurrent();
+    }
+    public void Finish() {
+        RequireCurrent(); Dispose();
+        if (ticket.Superseded) throw new InvalidOperationException("CANCELLED: A new copy shortcut superseded selection capture; the newer clipboard was preserved.");
+        if (failure != null) throw new InvalidOperationException("SELECTION: Windows could not finish copy observation.");
+    }
+    public void Dispose() {
+        if (Interlocked.Exchange(ref disposed, 1) != 0) return;
+        Interlocked.Exchange(ref stopRequested, 1);
+        if (threadId != 0 && running && !PostThreadMessage(threadId, 0x12, UIntPtr.Zero, IntPtr.Zero)) failure = "stop";
+        if (thread.IsAlive && !thread.Join(1000)) { failure = "join"; return; }
+        ready.Dispose(); GC.KeepAlive(callback);
+    }
+}
+
 public static class SelectionCopyPolicy {
     public const string InputBlocked = "SELECTION: Windows blocked copy input. Elevated or protected apps may not allow selection capture; try screenshot OCR.";
     public static T RequireFocus<T>(T focused) where T : class {
@@ -214,11 +329,13 @@ public static class SelectionCopyPolicy {
     // restore an unrelated clipboard generation. No key input is retried here.
     public static string CompleteCopy(uint initial, uint inserted, Func<uint> sequence, Func<string> readText,
                                       Action<uint> restore, Func<long> elapsedMilliseconds, Action wait,
-                                      Action<string> trace = null, Action requireContextAfterRestore = null, Action requireCopyOwner = null) {
+                                      Action<string> trace = null, Action requireContextAfterRestore = null, Action requireCopyOwner = null,
+                                      Action requireCopyTicket = null) {
         bool inputFailed = inserted != 4;
         if (inserted < 2) throw new InvalidOperationException(InputBlocked);
         Completion completion = new Completion(initial);
         while (true) {
+            if (requireCopyTicket != null) requireCopyTicket();
             uint before = sequence();
             string text;
             try { text = before == initial ? null : readText(); }
@@ -231,6 +348,7 @@ public static class SelectionCopyPolicy {
                 }
                 throw new InvalidOperationException("CLIPBOARD_RESTORE_SKIPPED: Copied text could not be read safely. The original clipboard was not restored over this uncertain update; current contents were preserved.");
             }
+            if (requireCopyTicket != null) requireCopyTicket();
             uint after = sequence();
             if (before == after && after != initial && !String.IsNullOrWhiteSpace(text) && requireCopyOwner != null) {
                 requireCopyOwner();
@@ -250,12 +368,14 @@ public static class SelectionCopyPolicy {
                 case Observation.Completed:
                     RequireCurrentSequence(completion.CompletedSequence, sequence());
                     if (requireCopyOwner != null) requireCopyOwner();
+                    if (requireCopyTicket != null) requireCopyTicket();
                     restore(completion.CompletedSequence);
                     if (inputFailed) throw new InvalidOperationException(InputBlocked);
                     // A completed copy still owns its necessary restoration.
                     // Only then reject a source-window/focus change, without
                     // returning that obsolete result to the translation view.
                     if (requireContextAfterRestore != null) requireContextAfterRestore();
+                    if (requireCopyTicket != null) requireCopyTicket();
                     return completion.CompletedText;
                 case Observation.UnchangedTimeout:
                     throw new InvalidOperationException(inputFailed ? InputBlocked : "NO_SELECTION: No text was copied. Try screenshot OCR for nonselectable text or apps running as administrator.");
@@ -319,49 +439,148 @@ public static class EchoLingoNative {
         public int[] FocusIdentity;
         public readonly HashSet<int> SourceProcesses = new HashSet<int>();
     }
+    // One windowless MTA owns all UIA calls for this helper invocation. Never
+    // move live AutomationElements between apartments or abort a provider call.
+    sealed class SelectionAutomationWorker {
+        readonly object gate = new object();
+        readonly AutoResetEvent wake = new AutoResetEvent(false);
+        readonly Thread thread;
+        Action pending;
+        bool unusable;
+        public SelectionAutomationWorker() {
+            thread = new Thread(Run); thread.IsBackground = true;
+            thread.SetApartmentState(ApartmentState.MTA); thread.Start();
+        }
+        void Run() {
+            while (true) {
+                wake.WaitOne(); Action action;
+                lock (gate) { if (unusable) return; action = pending; pending = null; }
+                if (action != null) action();
+                lock (gate) { if (unusable) return; }
+            }
+        }
+        public Task<T> Enqueue<T>(Func<T> query) {
+            TaskCompletionSource<T> result = new TaskCompletionSource<T>();
+            lock (gate) {
+                if (unusable || pending != null)
+                    throw new InvalidOperationException("SELECTION: The accessibility query worker is unavailable; no copy input was sent.");
+                pending = delegate { try { result.SetResult(query()); } catch (Exception error) { result.SetException(error); } };
+                wake.Set();
+            }
+            return result.Task;
+        }
+        public void Abandon() { lock (gate) { unusable = true; wake.Set(); } }
+    }
+    sealed class SelectionTrace {
+        public volatile int Stage, Depth;
+        public volatile bool Abandoned;
+        public void Mark(int stage, int depth) { Depth = depth; Stage = stage; }
+    }
+    static readonly object selectionWorkerGate = new object();
+    static SelectionAutomationWorker selectionWorker;
+    static int selectionQueryCount;
+    [ThreadStatic] static SelectionTrace selectionTrace;
+    static void SelectionStage(int stage, int depth) { if (selectionTrace != null) selectionTrace.Mark(stage, depth); }
+    static void RequireSelectionQueryActive() {
+        NativeCancellation.ThrowIfRequested();
+        if (selectionTrace != null && selectionTrace.Abandoned)
+            throw new OperationCanceledException("CANCELLED: The accessibility query expired.");
+    }
     static T SelectionQuery<T>(Func<T> query) {
         NativeCancellation.ThrowIfRequested();
-        Task<T> task = Task.Factory.StartNew(query, CancellationToken.None, TaskCreationOptions.DenyChildAttach, TaskScheduler.Default);
-        Stopwatch elapsed = Stopwatch.StartNew();
-        while (!task.IsCompleted) {
-            NativeCancellation.ThrowIfRequested();
-            if (elapsed.ElapsedMilliseconds >= 2000)
-                throw new InvalidOperationException("SELECTION: The source accessibility provider did not answer in time; no copy input was sent.");
-            Thread.Sleep(5); // Condition polling, never a fixed preparation delay.
+        SelectionAutomationWorker worker;
+        lock (selectionWorkerGate) {
+            if (selectionWorker == null) selectionWorker = new SelectionAutomationWorker();
+            worker = selectionWorker;
         }
-        NativeCancellation.ThrowIfRequested();
-        if (task.IsFaulted) throw task.Exception.InnerException;
-        return task.Result;
+        SelectionTrace trace = new SelectionTrace();
+        int index = ++selectionQueryCount;
+        Stopwatch elapsed = Stopwatch.StartNew();
+        Task<T> task = worker.Enqueue(delegate {
+            selectionTrace = trace; SelectionStage(1, 0);
+            try { return query(); } finally { selectionTrace = null; }
+        });
+        try {
+            while (!task.IsCompleted) {
+                NativeCancellation.ThrowIfRequested();
+                if (elapsed.ElapsedMilliseconds >= 2000)
+                    throw new InvalidOperationException("SELECTION: The source accessibility provider did not answer in time; no copy input was sent.");
+                Thread.Sleep(5); // Condition polling, never a fixed preparation delay.
+            }
+            NativeCancellation.ThrowIfRequested();
+            if (task.IsFaulted) throw task.Exception.InnerException;
+            return task.Result;
+        } catch { trace.Abandoned = true; worker.Abandon(); throw; }
+        finally {
+            // Numeric diagnostics are opt-in. Only this calling thread writes
+            // CapturePerformance, even when a timed-out provider is still busy.
+            if (CapturePerformance.Enabled && index <= 16) {
+                string prefix = "selectionQuery" + index;
+                CapturePerformance.Set(prefix + "Milliseconds", elapsed.Elapsed.TotalMilliseconds);
+                CapturePerformance.Set(prefix + "Stage", trace.Stage);
+                CapturePerformance.Set(prefix + "Depth", trace.Depth);
+            }
+        }
     }
     static bool SameIdentity(int[] expected, int[] current) {
         if (expected == null || current == null || expected.Length == 0 || expected.Length != current.Length) return false;
         for (int i = 0; i < expected.Length; i++) if (expected[i] != current[i]) return false;
         return true;
     }
-    static bool FocusBelongsToWindow(AutomationElement focused, IntPtr foreground) {
+    static CacheRequest SelectionCache() {
+        CacheRequest cache = new CacheRequest();
+        cache.TreeScope = TreeScope.Element;
+        cache.TreeFilter = Automation.RawViewCondition;
+        cache.AutomationElementMode = AutomationElementMode.Full;
+        cache.Add(AutomationElement.ProcessIdProperty);
+        cache.Add(AutomationElement.NativeWindowHandleProperty);
+        cache.Add(AutomationElement.ControlTypeProperty);
+        cache.Add(AutomationElement.IsPasswordProperty);
+        return cache;
+    }
+    static bool FocusBelongsToWindow(AutomationElement focused, IntPtr foreground, CacheRequest cache, out List<AutomationElement> ancestors) {
+        ancestors = new List<AutomationElement>();
         IntPtr root = GetAncestor(foreground, 2); // GA_ROOT, not process identity.
         if (root == IntPtr.Zero) return false;
         AutomationElement current = focused;
         for (int depth = 0; current != null && depth < 64; depth++) {
-            int handle = current.Current.NativeWindowHandle;
-            if (handle != 0 && GetAncestor(new IntPtr(handle), 2) == root) return true;
-            current = TreeWalker.RawViewWalker.GetParent(current);
+            RequireSelectionQueryActive(); SelectionStage(4, depth);
+            AutomationElement.AutomationElementInformation info = current.Cached;
+            if (info.IsPassword) throw new InvalidOperationException("PROTECTED: Selected text is inside a password control.");
+            int handle = info.NativeWindowHandle;
+            if (handle != 0 && GetAncestor(new IntPtr(handle), 2) != root) return false;
+            ancestors.Add(current);
+            if (handle != 0 && new IntPtr(handle) == root) return true;
+            SelectionStage(5, depth);
+            current = TreeWalker.RawViewWalker.GetParent(current, cache);
         }
         return false;
     }
-    static AutomationElement CurrentSelectionFocus(SelectionContext context) {
+    static AutomationElement CurrentSelectionFocus(SelectionContext context, out List<AutomationElement> ancestors) {
         try {
             if (context.Foreground == IntPtr.Zero || GetForegroundWindow() != context.Foreground)
                 throw new InvalidOperationException("SELECTION: Foreground application changed; select text and retry.");
-            AutomationElement focused = SelectionCopyPolicy.RequireFocus(AutomationElement.FocusedElement);
-            if (!SameIdentity(context.FocusIdentity, focused.GetRuntimeId()) || !FocusBelongsToWindow(focused, context.Foreground))
+            CacheRequest cache = SelectionCache(); AutomationElement focused;
+            SelectionStage(2, 0);
+            using (cache.Activate()) focused = SelectionCopyPolicy.RequireFocus(AutomationElement.FocusedElement);
+            RequireSelectionQueryActive(); SelectionStage(3, 0); int[] identity = focused.GetRuntimeId();
+            if ((context.FocusIdentity != null && !SameIdentity(context.FocusIdentity, identity)) || !FocusBelongsToWindow(focused, context.Foreground, cache, out ancestors))
                 throw new InvalidOperationException("SELECTION: The focused control changed or is outside the source window; select text and retry.");
+            if (context.FocusIdentity == null) {
+                if (identity == null || identity.Length == 0)
+                    throw new InvalidOperationException("SELECTION: The source focus identity is unavailable; select text and retry.");
+                context.FocusIdentity = identity;
+            }
             if (GetForegroundWindow() != context.Foreground)
                 throw new InvalidOperationException("SELECTION: Foreground application changed; select text and retry.");
+            SelectionStage(9, ancestors.Count);
             return focused;
         } catch (ElementNotAvailableException) {
             throw new InvalidOperationException("SELECTION: The source control is no longer available; select text and retry.");
         }
+    }
+    static AutomationElement CurrentSelectionFocus(SelectionContext context) {
+        List<AutomationElement> ancestors; return CurrentSelectionFocus(context, out ancestors);
     }
     static SelectionContext CaptureSelectionContext() {
         try {
@@ -371,10 +590,9 @@ public static class EchoLingoNative {
             if (nativePid != 0 && nativePid == ExcludedSourceProcessId)
                 throw new InvalidOperationException("NO_SELECTION: EchoLingo is the foreground application.");
             if (nativePid != 0) context.SourceProcesses.Add(unchecked((int)nativePid));
-            AutomationElement focused = SelectionCopyPolicy.RequireFocus(AutomationElement.FocusedElement);
-            context.FocusIdentity = focused.GetRuntimeId();
-            if (focused.Current.ProcessId != 0) context.SourceProcesses.Add(focused.Current.ProcessId);
-            CurrentSelectionFocus(context);
+            AutomationElement focused = CurrentSelectionFocus(context);
+            int process = focused.Cached.ProcessId;
+            if (process != 0) context.SourceProcesses.Add(process);
             return context;
         } catch (ElementNotAvailableException) {
             throw new InvalidOperationException("SELECTION: The source control is no longer available; select text and retry.");
@@ -389,43 +607,32 @@ public static class EchoLingoNative {
     }
     static string AutomationSelection(SelectionContext context) {
         try {
-            AutomationElement focused = CurrentSelectionFocus(context);
-            string focusedRole = focused.Current.ControlType.ProgrammaticName;
+            List<AutomationElement> ancestors;
+            AutomationElement focused = CurrentSelectionFocus(context, out ancestors);
+            string focusedRole = focused.Cached.ControlType.ProgrammaticName;
             bool focusedEmpty = false, document = false;
-            IntPtr root = GetAncestor(context.Foreground, 2);
             // Validate the complete bounded ancestor chain before reading any
             // selected text. A provider below a protected ancestor must never
             // disclose its range just because its own IsPassword is false.
-            List<AutomationElement> ancestors = new List<AutomationElement>();
-            AutomationElement element = focused;
-            bool sourceRootReached = false;
-            for (int depth = 0; element != null && depth < 64; depth++) {
-                if (element.Current.IsPassword) throw new InvalidOperationException("PROTECTED: Selected text is inside a password control.");
-                int handle = element.Current.NativeWindowHandle;
-                if (handle != 0 && GetAncestor(new IntPtr(handle), 2) != root)
-                    throw new InvalidOperationException("SELECTION: Text provider is outside the source window; select text and retry.");
-                ancestors.Add(element);
-                if (handle != 0 && new IntPtr(handle) == root) { sourceRootReached = true; break; }
-                element = TreeWalker.RawViewWalker.GetParent(element);
-            }
-            if (!sourceRootReached) throw new InvalidOperationException("SELECTION: The text provider ancestry is incomplete; select text and retry.");
             for (int depth = 0; depth < ancestors.Count; depth++) {
-                element = ancestors[depth];
-                string role = element.Current.ControlType.ProgrammaticName;
+                RequireSelectionQueryActive(); SelectionStage(6, depth);
+                AutomationElement element = ancestors[depth];
+                string role = element.Cached.ControlType.ProgrammaticName;
                 if (depth == 0 || role == "ControlType.Document" || role == "ControlType.Edit") {
                     object raw; bool available = element.TryGetCurrentPattern(TextPattern.Pattern, out raw);
                     TextPattern pattern = raw as TextPattern;
                     if (available && pattern == null) throw new InvalidOperationException("SELECTION: The source returned an invalid text provider; select text and retry.");
                     if (role == "ControlType.Document") {
                         document = true;
-                        if (element.Current.ProcessId != 0) context.SourceProcesses.Add(element.Current.ProcessId);
+                        if (element.Cached.ProcessId != 0) context.SourceProcesses.Add(element.Cached.ProcessId);
                     }
                     if (available) {
                         // An empty Edit is authoritative. A document or its
                         // focused descendant can expose a different caret than
                         // the document selection; only walk this ancestor path.
                         string selected = SelectionCopyPolicy.ReadAutomation(false, true, true,
-                            delegate { return pattern.GetSelection(); }, delegate(TextPatternRange range) { return range.GetText(-1); }, role != "ControlType.Edit");
+                            delegate { RequireSelectionQueryActive(); SelectionStage(7, depth); return pattern.GetSelection(); },
+                            delegate(TextPatternRange range) { RequireSelectionQueryActive(); SelectionStage(8, depth); return range.GetText(-1); }, role != "ControlType.Edit");
                         if (!String.IsNullOrWhiteSpace(selected)) return selected;
                         if (depth == 0) focusedEmpty = true;
                     }
@@ -480,8 +687,12 @@ public static class EchoLingoNative {
         return saved;
     }
     static INPUT Key(ushort code, bool up) {
+        return Key(code, up, UIntPtr.Zero);
+    }
+    static INPUT Key(ushort code, bool up, UIntPtr marker) {
         INPUT input = new INPUT(); input.type = 1;
         input.data.keyboard.vk = code; input.data.keyboard.flags = up ? 2u : 0u;
+        input.data.keyboard.extra = marker;
         return input;
     }
     public static string SelectedText() {
@@ -521,38 +732,52 @@ public static class EchoLingoNative {
                         throw new InvalidOperationException("SELECTION: Foreground application or shortcut modifiers changed before copy; retry.");
                     SelectionCopyPolicy.RequireCurrentSequence(initial, GetClipboardSequenceNumber());
                 }, delegate {
+                    using (SelectionCopyObserver observer = new SelectionCopyObserver()) {
                     NativeCancellation.ThrowIfRequested();
-                    INPUT[] keys = new INPUT[] { Key(0x11, false), Key(0x43, false), Key(0x43, true), Key(0x11, true) };
+                    RequireSelectionContext(context);
+                    observer.RequireCurrent();
+                    if (ModifiersDown()) throw new InvalidOperationException("SELECTION: Shortcut modifiers changed before copy; retry.");
+                    SelectionCopyPolicy.RequireCurrentSequence(initial, GetClipboardSequenceNumber());
+                    INPUT[] keys = new INPUT[] { Key(0x11, false, observer.Marker), Key(0x43, false, observer.Marker), Key(0x43, true, observer.Marker), Key(0x11, true, observer.Marker) };
+                    Stopwatch clock = Stopwatch.StartNew();
+                    observer.Issued();
                     uint inserted = SendInput((uint)keys.Length, keys, Marshal.SizeOf(typeof(INPUT)));
                     if (inserted != keys.Length) {
                         // Ensure our Ctrl-down cannot leave a modifier stuck.
-                        INPUT[] release = new INPUT[] { Key(0x43, true), Key(0x11, true) };
+                        INPUT[] release = new INPUT[] { Key(0x43, true, observer.Marker), Key(0x11, true, observer.Marker) };
                         SendInput((uint)release.Length, release, Marshal.SizeOf(typeof(INPUT)));
                     }
-                    Stopwatch clock = Stopwatch.StartNew();
-                    return SelectionCopyPolicy.CompleteCopy(initial, inserted, GetClipboardSequenceNumber,
+                    if (inserted >= 2) observer.AwaitOwnInput(delegate { return clock.ElapsedMilliseconds; });
+                    string result = SelectionCopyPolicy.CompleteCopy(initial, inserted, GetClipboardSequenceNumber,
                         delegate { return Clipboard.ContainsText() ? Clipboard.GetText(TextDataFormat.UnicodeText) : null; },
                         delegate(uint copied) {
                             // Recheck immediately before the restoration write as well
                             // as before invoking this callback; a newer copy wins.
                             SelectionCopyPolicy.RequireCurrentSequence(copied, GetClipboardSequenceNumber());
+                            observer.RequireCurrent();
                             try {
                                 if (saved.GetFormats(false).Length == 0) {
                                     if (!OpenClipboard(IntPtr.Zero)) throw new InvalidOperationException("Clipboard is busy.");
                                     try {
                                         SelectionCopyPolicy.RequireCurrentSequence(copied, GetClipboardSequenceNumber());
+                                        observer.RequireCurrent();
                                         if (!EmptyClipboard()) throw new InvalidOperationException("Cannot restore an empty clipboard.");
                                     } finally { CloseClipboard(); }
                                 }
-                                else Clipboard.SetDataObject(saved, true, 0, 0);
+                                else { observer.RequireCurrent(); Clipboard.SetDataObject(saved, true, 0, 0); }
                             } catch (Exception error) {
+                                if (error.Message.StartsWith("CANCELLED:", StringComparison.Ordinal)
+                                    || error.Message.StartsWith("CLIPBOARD_RESTORE_SKIPPED:", StringComparison.Ordinal)) throw;
                                 throw new InvalidOperationException("CLIPBOARD_RESTORE_FAILED: Could not restore original clipboard formats. " + error.Message);
                             }
                         }, delegate { return clock.ElapsedMilliseconds; }, delegate { Thread.Sleep(5); },
                         Environment.GetEnvironmentVariable("ECHOLINGO_SELECTION_TRACE") == "1"
                             ? (Action<string>)delegate(string message) { Console.Error.WriteLine(message); } : null,
                         delegate { NativeCancellation.ThrowIfRequested(); RequireSelectionContext(context); },
-                        delegate { RequireCopiedSourceOwner(context); });
+                        delegate { RequireCopiedSourceOwner(context); }, observer.RequireCurrent);
+                    observer.Finish();
+                    return result;
+                    }
             });
         } finally { foreach (IDisposable resource in resources) resource.Dispose(); }
     }

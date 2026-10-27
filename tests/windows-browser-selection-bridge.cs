@@ -93,6 +93,18 @@ public static class WindowsBrowserSelectionBridge {
         DataObject data=new DataObject();data.SetData(DataFormats.UnicodeText,false,"Generated browser clipboard original 24680");data.SetData(DataFormats.Html,false,"<p>Generated browser rich original 24680</p>");data.SetData(DataFormats.Rtf,false,"{\\rtf1 Generated browser rich original 24680}");Clipboard.SetDataObject(data,true,0,0);ownedClipboard=GetClipboardSequenceNumber();seeded=true;return data;
     }
     static bool Restored(DataObject expected){IDataObject actual=Clipboard.GetDataObject();if(actual==null)return false;foreach(string format in expected.GetFormats(false))if(!Object.Equals(expected.GetData(format,false),actual.GetData(format,false)))return false;return true;}
+    static Dictionary<string,object> QueryDiagnostics(Dictionary<string,object> reply){
+        Dictionary<string,object> numeric=new Dictionary<string,object>();object raw;
+        if(reply.TryGetValue("capturePerformance",out raw)){
+            Dictionary<string,object> performance=raw as Dictionary<string,object>;
+            if(performance!=null)for(int i=1;i<=16;i++)foreach(string suffix in new string[]{"Milliseconds","Stage","Depth"}){string key="selectionQuery"+i+suffix;object value;if(performance.TryGetValue(key,out value)){double number=Convert.ToDouble(value);Need(!Double.IsNaN(number)&&!Double.IsInfinity(number)&&number>=0&&number<=10000000,"SELECTION_DIAGNOSTIC_BOUND");numeric[key]=number;}}
+        }
+        if(reply.TryGetValue("helperPerformance",out raw)){
+            Dictionary<string,object> phases=raw as Dictionary<string,object>;
+            if(phases!=null)foreach(string key in new string[]{"assembliesLoadedMilliseconds","nativeTypesReadyMilliseconds","replyMilliseconds"}){object value;if(phases.TryGetValue(key,out value)){double number=Convert.ToDouble(value);Need(!Double.IsNaN(number)&&!Double.IsInfinity(number)&&number>=0&&number<=10000000,"HELPER_DIAGNOSTIC_BOUND");numeric[key]=number;}}
+        }
+        return numeric;
+    }
     static Dictionary<string,object> RunCase(Dictionary<string,object> command){
         int pid=Convert.ToInt32(command["browserPid"]);string expected=Convert.ToString(command["expected"]),outcome=Convert.ToString(command["outcome"]),requiredRole=Convert.ToString(command["requiredRole"]);Need(expected.Length<=512,"GENERATED_EXPECTATION_TOO_LARGE");
         Need(outcome=="selection"||outcome=="empty"||outcome=="protected","GENERATED_OUTCOME_INVALID");
@@ -105,7 +117,7 @@ public static class WindowsBrowserSelectionBridge {
         Stage="clipboard-seed";DataObject seed=Seed();uint initial=ownedClipboard;string cancelName="Local\\EchoLingo-cancel-"+Guid.NewGuid().ToString("N");
         using(EventWaitHandle cancel=new EventWaitHandle(false,EventResetMode.ManualReset,cancelName)){
             ProcessStartInfo start=new ProcessStartInfo(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.System),"WindowsPowerShell/v1.0/powershell.exe"));
-            start.Arguments="-NoLogo -NoProfile -STA -ExecutionPolicy Bypass -File \""+Helper+"\" -Mode selected-text -NativeAssemblyPath \""+Assembly+"\" -NativeCancellationEvent \""+cancelName+"\"";
+            start.Arguments="-NoLogo -NoProfile -STA -ExecutionPolicy Bypass -File \""+Helper+"\" -Mode selected-text -NativeAssemblyPath \""+Assembly+"\" -NativeCancellationEvent \""+cancelName+"\" -PerformanceDiagnostics";
             start.UseShellExecute=false;start.CreateNoWindow=true;start.RedirectStandardOutput=true;start.RedirectStandardError=true;start.StandardOutputEncoding=new UTF8Encoding(false);
             HashSet<int> observedOwners=new HashSet<int>();HashSet<uint> observedGenerations=new HashSet<uint>();Stopwatch clock=Stopwatch.StartNew();Dictionary<string,object> reply;
             Stage="native-helper";using(Process helper=Process.Start(start)){
@@ -118,6 +130,7 @@ public static class WindowsBrowserSelectionBridge {
                     }
                     Need(Task.WaitAll(new Task[]{stdout,stderr},2000),"BROWSER_HELPER_PIPE_TIMEOUT");Need(stdout.Result.Length<262144&&stderr.Result.Length<65536,"BROWSER_HELPER_OUTPUT_BOUND");
                     reply=Json.Deserialize<Dictionary<string,object>>(stdout.Result.Trim('\ufeff',' ','\r','\n'));
+                    metadata["selectionQueryDiagnostics"]=QueryDiagnostics(reply);
                     Need(reply.ContainsKey("nativeBackend")&&Convert.ToString(reply["nativeBackend"])=="precompiled-framework-dll","BROWSER_HELPER_EXACT_DLL_NOT_USED");
                     metadata["nativeBackend"]=reply["nativeBackend"];metadata["helperActualExitCode"]=helper.ExitCode;bool nativeOk=Convert.ToBoolean(reply["ok"]);Need(helper.ExitCode==(nativeOk?0:1),"BROWSER_HELPER_EXIT_MISMATCH");metadata["nativeHelperReportedOk"]=nativeOk;
                     string error=reply.ContainsKey("error")?Convert.ToString(reply["error"]):"",text=reply.ContainsKey("text")?Convert.ToString(reply["text"]):"";int split=error.IndexOf(':');

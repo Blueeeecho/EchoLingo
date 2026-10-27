@@ -1640,6 +1640,26 @@ try {
     assert.equal(await page.evaluate(() => window.__qa.showPopupAttempts.at(-1).reuseVisiblePopup), kind === 'ocr');
     assert.equal(await pin.getAttribute('aria-pressed'), 'true');
   }
+  // A fresh empty Alt+D is a manual-input task even while pinned. The
+  // backend must deliver this event; this UI test verifies its ACK/focus path.
+  const emptyPinned = await page.evaluate(() => window.__qa.nativePinnedCaptureStart());
+  const emptyPinnedId = ++pinnedDeliveryId;
+  const beforeEmptyPinned = await page.evaluate(() => window.__qa.translationRequests.length);
+  await page.evaluate(({ task, id }) => {
+    const payload = { text: '', mode: 'input', focusInput: true, presentationEpoch: task.epoch, deliveryId: id };
+    window.__qa.pendingSource = structuredClone(payload); window.__qa.emit('source-text', payload);
+  }, { task: emptyPinned, id: emptyPinnedId });
+  await page.waitForFunction((id) => window.__qa.sourceAcks.includes(id) && document.activeElement.id === 'source-text', emptyPinnedId);
+  assert.equal(await page.locator('#source-text').inputValue(), '');
+  assert.equal(await pin.getAttribute('aria-pressed'), 'true');
+  assert.equal(await page.evaluate(() => window.__qa.translationRequests.length), beforeEmptyPinned);
+  assert.equal(await page.evaluate(() => window.__qa.showPopupAttempts.at(-1).focusInput), true);
+  assert.equal(await page.evaluate(() => window.__qa.showPopupAttempts.at(-1).reuseVisiblePopup), false);
+  await page.keyboard.type('QA pinned immediate keyboard input');
+  assert.equal(await page.locator('#source-text').inputValue(), 'QA pinned immediate keyboard input');
+  await page.keyboard.press('Enter');
+  await page.waitForFunction((count) => window.__qa.translationRequests.length === count + 1, beforeEmptyPinned);
+  await page.getByText('Isolated test translation fixture', { exact: true }).waitFor();
   const supersededPinned = await page.evaluate(() => window.__qa.nativePinnedCaptureStart());
   const latestPinned = await page.evaluate(() => window.__qa.nativePinnedCaptureStart());
   const latestPinnedId = ++pinnedDeliveryId;

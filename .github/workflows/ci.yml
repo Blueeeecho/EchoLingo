@@ -258,6 +258,32 @@ jobs:
         timeout-minutes: 5
         shell: powershell
         run: powershell.exe -NoProfile -STA -ExecutionPolicy Bypass -File tests/windows-popup-visibility-smoke.ps1 -ApplicationPath src-tauri/target/release/echolingo.exe -IsolatedTestSession
+      - name: Windows rigorous single-press selection application matrix
+        id: windows_selection_rigorous
+        if: runner.os == 'Windows'
+        continue-on-error: true
+        timeout-minutes: 5
+        shell: powershell
+        run: |
+          $candidate = (Resolve-Path src-tauri/target/release/echolingo.exe).Path
+          $hash = (Get-FileHash -LiteralPath $candidate -Algorithm SHA256).Hash.ToLowerInvariant()
+          $bytes = (Get-Item -LiteralPath $candidate).Length
+          $output = @(& powershell.exe -NoProfile -STA -ExecutionPolicy Bypass -File tests/windows-selection-application-smoke.ps1 -ApplicationPath $candidate -ExpectedApplicationSha256 $hash -ExpectedApplicationBytes $bytes -IsolatedTestSession 2>&1)
+          $fixtureExit = $LASTEXITCODE
+          $output | Out-File "$env:RUNNER_TEMP/echolingo-selection-rigorous.log" -Encoding utf8
+          $output | Write-Output
+          exit $fixtureExit
+      - name: Windows exact query-worker and copy-ticket regressions
+        id: windows_selection_internals
+        if: runner.os == 'Windows'
+        continue-on-error: true
+        timeout-minutes: 2
+        shell: powershell
+        run: |
+          & powershell.exe -NoProfile -STA -ExecutionPolicy Bypass -File tests/windows-selection-query-smoke.ps1 -NativeAssemblyPath '${{ steps.windows_native_candidate.outputs.path }}' -IsolatedTestSession
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & powershell.exe -NoProfile -STA -ExecutionPolicy Bypass -File tests/windows-selection-copy-ticket-smoke.ps1
+          exit $LASTEXITCODE
       - name: Windows installed NSIS real offline-model acceptance
         id: windows_installed_offline
         if: runner.os == 'Windows'
@@ -279,6 +305,7 @@ jobs:
             ${{ runner.temp }}/echolingo-helper-performance.log
             ${{ runner.temp }}/echolingo-selection-document.log
             ${{ runner.temp }}/echolingo-application-latest-intent.log
+            ${{ runner.temp }}/echolingo-selection-rigorous.log
             ${{ runner.temp }}/EchoLingo-offline-engine-source.zip
             resources/offline-translation/manifest.json
             src-tauri/target/release/echolingo.exe
@@ -310,6 +337,8 @@ jobs:
             helperPerformance = '${{ steps.windows_helper_performance.outcome }}'
             delegatedCapture = '${{ steps.windows_delegated_capture.outcome }}'
             selectionDocument = '${{ steps.windows_selection_document.outcome }}'
+            rigorousSelection = '${{ steps.windows_selection_rigorous.outcome }}'
+            selectionInternals = '${{ steps.windows_selection_internals.outcome }}'
           }
           $taskOutcomes | ConvertTo-Json -Compress
           if (@($taskOutcomes.Values | Where-Object { $_ -ne 'success' }).Count -gt 0) {
