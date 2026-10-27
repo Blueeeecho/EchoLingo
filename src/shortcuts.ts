@@ -24,7 +24,8 @@ const modifier = (token: string, mac: boolean): string | undefined => {
   if (['CMDORCTRL', 'COMMANDORCONTROL', 'COMMANDORCTRL', 'CMDORCONTROL'].includes(token)) return mac ? 'Super' : 'Ctrl';
   return undefined;
 };
-export function normalizeShortcut(value: string, mac = false): string {
+const isWindows = () => typeof navigator !== 'undefined' && /Win/i.test(navigator.platform);
+export function normalizeShortcut(value: string, mac = false, windows = isWindows()): string {
   if (value.length > 80 || /[\r\n\0]/.test(value)) throw new Error('快捷键过长或包含无效字符。');
   const text = value.trim();
   if (!text) return '';
@@ -45,15 +46,17 @@ export function normalizeShortcut(value: string, mac = false): string {
     if (!key) throw new Error(`不支持按键“${part.trim()}”；可使用字母、数字、F1–F24 或 Enter、Space 等键名。`);
   }
   if (!key) throw new Error('请再按一个普通按键，不能只设置 Ctrl、Alt 等修饰键。');
+  // The pinned Windows backend maps NumpadEqual to the ordinary E key.
+  if (windows && !mac && key === 'NumpadEqual') throw new Error('Windows 暂不支持小键盘等号键，请选择其他按键。');
   if (![...mods].some((item) => item !== 'Shift') && !/^F\d+$/.test(key)) {
     throw new Error('请搭配 Ctrl、Alt 或 Win/Command；F1–F24 可以单独使用。');
   }
   return [...['Ctrl', 'Alt', 'Shift', 'Super'].filter((item) => mods.has(item)), key].join('+');
 }
-export function normalizeShortcuts(values: Record<ShortcutAction, string>, mac = false): Record<ShortcutAction, string> {
+export function normalizeShortcuts(values: Record<ShortcutAction, string>, mac = false, windows = isWindows()): Record<ShortcutAction, string> {
   const result = {} as Record<ShortcutAction, string>; const seen = new Set<string>();
   for (const action of ['selection', 'silentOcr', 'capture', 'ocr', 'input'] as const) {
-    const key = normalizeShortcut(values[action], mac);
+    const key = normalizeShortcut(values[action], mac, windows);
     if (key && seen.has(key)) throw new Error('不同操作不能使用相同的快捷键。');
     if (key) seen.add(key);
     result[action] = key;
@@ -65,7 +68,7 @@ export function displayShortcut(value: string, mac = false): string {
   catch { return value; }
 }
 export type RecordedKey = { kind: 'wait' | 'cancel' } | { kind: 'key'; value: string } | { kind: 'error'; message: string };
-export function recordedShortcut(event: Pick<KeyboardEvent, 'key' | 'code' | 'ctrlKey' | 'altKey' | 'shiftKey' | 'metaKey' | 'repeat' | 'isComposing' | 'keyCode'> & { getModifierState?: (key: string) => boolean }, mac = false): RecordedKey {
+export function recordedShortcut(event: Pick<KeyboardEvent, 'key' | 'code' | 'ctrlKey' | 'altKey' | 'shiftKey' | 'metaKey' | 'repeat' | 'isComposing' | 'keyCode'> & { getModifierState?: (key: string) => boolean }, mac = false, windows = isWindows()): RecordedKey {
   if (event.isComposing || event.keyCode === 229 || ['Process', 'Dead', 'Unidentified'].includes(event.key)) return { kind: 'error', message: '请先结束输入法组合，再录制快捷键。' };
   if (event.repeat) return { kind: 'wait' };
   if (event.key === 'Escape' && !event.ctrlKey && !event.altKey && !event.shiftKey && !event.metaKey) return { kind: 'cancel' };
@@ -73,6 +76,6 @@ export function recordedShortcut(event: Pick<KeyboardEvent, 'key' | 'code' | 'ct
   if (event.getModifierState?.('AltGraph')) return { kind: 'error', message: '请使用 Ctrl、Alt 或 Win/Command，不使用 AltGr 录制。' };
   const mods = [event.ctrlKey ? 'Ctrl' : '', event.altKey ? 'Alt' : '', event.shiftKey ? 'Shift' : '', event.metaKey ? 'Super' : ''].filter(Boolean);
   const key = /^(?:Key[A-Z]|Digit[0-9]|Numpad[A-Za-z0-9]+)$/.test(event.code) ? event.code : event.key === ' ' ? 'Space' : event.key;
-  try { return { kind: 'key', value: normalizeShortcut([...mods, key].join('+'), mac) }; }
+  try { return { kind: 'key', value: normalizeShortcut([...mods, key].join('+'), mac, windows) }; }
   catch (error) { return { kind: 'error', message: error instanceof Error ? error.message : '该组合无法录制，请直接填写。' }; }
 }

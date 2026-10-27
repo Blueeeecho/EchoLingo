@@ -76,6 +76,17 @@ public static class EchoLingoShortcutOwner {
     $held = $false
     Set-Bindings '' ''
     Probe 0 "selection=`nsilentOcr=`n" 'explicitly-disabled-core-shortcuts'
+    # Real early CLI validation only: not Settings UI recording or physical
+    # key acceptance. The pinned Windows mapping must not turn keypad = into E.
+    foreach ($action in @('selection', 'silentOcr', 'capture', 'ocr', 'input')) {
+        Set-Bindings '' ''
+        $unsupported = [IO.File]::ReadAllText($settings) | ConvertFrom-Json
+        $unsupported.shortcuts.PSObject.Properties[$action].Value = 'Ctrl+Alt+Shift+NumpadEqual'
+        [IO.File]::WriteAllText($settings, ($unsupported | ConvertTo-Json -Depth 4 -Compress), [Text.UTF8Encoding]::new($false))
+        Probe 3 '' "windows-numpad-equal-$action-rejected-before-registration"
+    }
+    Set-Bindings 'Ctrl+Alt+Shift+E' ''
+    Probe 0 "selection=Ctrl+Alt+Shift+E`nsilentOcr=`n" 'ordinary-e-supported-after-keypad-equal-rejection'
     Set-Bindings 'F12' ''
     Probe 2 "selection=F12`n" 'windows-reserved-key'
     Set-Bindings '' ''
@@ -98,7 +109,7 @@ public static class EchoLingoShortcutOwner {
     Probe 3 '' 'invalid-settings-unknown-not-conflict'
     [IO.File]::WriteAllText($settings, (' ' * (2MB + 1)))
     Probe 3 '' 'oversized-settings-bounded-unknown'
-    [Console]::Out.WriteLine((@{ok=$true; cases=$cases.ToArray(); actualWindowsRegistration=$true; webviewStarted=$false; credentialsAccessed=$false; scope='Isolated account real RegisterHotKey probe. Not physical keyboard, installer dialog, consumer app or Windows11 acceptance.'} | ConvertTo-Json -Depth 7 -Compress))
+    [Console]::Out.WriteLine((@{ok=$true; cases=$cases.ToArray(); actualWindowsRegistration=$true; webviewStarted=$false; credentialsAccessed=$false; scope='Isolated account real CLI/RegisterHotKey probe. Not Settings UI recording, physical keyboard, installer dialog, consumer app or Windows11 acceptance.'} | ConvertTo-Json -Depth 7 -Compress))
 } catch {
     [Console]::Out.WriteLine((@{ok=$false; error=$_.Exception.Message; cases=$cases.ToArray()} | ConvertTo-Json -Depth 7 -Compress))
     exit 1

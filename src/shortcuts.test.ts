@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { displayShortcut, normalizeShortcut, normalizeShortcuts, recordedShortcut } from './shortcuts';
 const keys = { selection: 'Alt+D', silentOcr: 'Alt+S', capture: '', ocr: 'Alt+Shift+S', input: 'Alt+A' };
 const event = (values: Partial<KeyboardEvent> = {}): Parameters<typeof recordedShortcut>[0] => ({ key: 't', code: 'KeyT', ctrlKey: true, altKey: false, shiftKey: false, metaKey: false, repeat: false, isComposing: false, keyCode: 84, ...values });
@@ -20,6 +20,37 @@ describe('shortcut configuration', () => {
   it('finds aliases and advanced-binding conflicts while allowing multiple empty bindings', () => {
     expect(() => normalizeShortcuts({ ...keys, selection: 'Win+T', capture: 'meta+t' })).toThrow('相同');
     expect(normalizeShortcuts({ ...keys, selection: '', capture: '' }).selection).toBe('');
+  });
+  it('rejects Windows NumpadEqual in typed and recorded input without changing macOS or other platforms', () => {
+    const message = 'Windows 暂不支持小键盘等号键，请选择其他按键。';
+    expect(() => normalizeShortcut('control+numpadequal', false, true)).toThrow(message);
+    for (const action of ['selection', 'silentOcr', 'capture', 'ocr', 'input'] as const) {
+      expect(() => normalizeShortcuts({ ...keys, [action]: 'Ctrl+NumpadEqual' }, false, true)).toThrow(message);
+    }
+    const keypad = event({ key: '=', code: 'NumpadEqual' });
+    expect(recordedShortcut(keypad, false, true)).toEqual({ kind: 'error', message });
+    expect(normalizeShortcut('Ctrl+NumpadEqual', true, false)).toBe('Ctrl+NumpadEqual');
+    expect(recordedShortcut(keypad, true, false)).toEqual({ kind: 'key', value: 'Ctrl+NumpadEqual' });
+    expect(normalizeShortcut('Ctrl+NumpadEqual', false, false)).toBe('Ctrl+NumpadEqual');
+  });
+  it('keeps ordinary E, equals and function keys available on Windows', () => {
+    for (const value of ['Ctrl+E', 'Ctrl+Equal', 'Ctrl+Numpad1', 'Alt+D', 'Alt+S']) {
+      expect(normalizeShortcut(value, false, true)).toBe(value);
+    }
+    for (let n = 1; n <= 24; n++) expect(normalizeShortcut(`F${n}`, false, true)).toBe(`F${n}`);
+    // Windows F12 reservation is still checked by the backend before registration.
+    expect(recordedShortcut(event({ key: 'e', code: 'KeyE' }), false, true)).toEqual({ kind: 'key', value: 'Ctrl+E' });
+  });
+  it('applies the Windows restriction through the default browser platform path only', () => {
+    try {
+      vi.stubGlobal('navigator', { platform: 'Win32' });
+      expect(() => normalizeShortcuts({ ...keys, silentOcr: 'Ctrl+NumpadEqual' })).toThrow('Windows 暂不支持');
+      expect(recordedShortcut(event({ key: '=', code: 'NumpadEqual' })).kind).toBe('error');
+      vi.stubGlobal('navigator', { platform: 'MacIntel' });
+      expect(normalizeShortcut('Ctrl+NumpadEqual', true)).toBe('Ctrl+NumpadEqual');
+      vi.stubGlobal('navigator', { platform: 'Linux x86_64' });
+      expect(normalizeShortcut('Ctrl+NumpadEqual')).toBe('Ctrl+NumpadEqual');
+    } finally { vi.unstubAllGlobals(); }
   });
   it('never commits repeats, IME confirmations or modifier-only events', () => {
     expect(recordedShortcut(event())).toEqual({ kind: 'key', value: 'Ctrl+T' });

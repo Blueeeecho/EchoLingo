@@ -170,7 +170,18 @@ fn normalize_one(value: &str, mac: bool) -> Result<String, String> {
 }
 
 fn prepare(shortcuts: &Shortcuts) -> Result<(Shortcuts, Vec<(String, Shortcut)>), String> {
-    let mac = cfg!(target_os = "macos");
+    prepare_for_platform(
+        shortcuts,
+        cfg!(target_os = "macos"),
+        cfg!(target_os = "windows"),
+    )
+}
+
+fn prepare_for_platform(
+    shortcuts: &Shortcuts,
+    mac: bool,
+    windows: bool,
+) -> Result<(Shortcuts, Vec<(String, Shortcut)>), String> {
     let canonical = Shortcuts {
         selection: normalize_one(&shortcuts.selection, mac)?,
         capture: normalize_one(&shortcuts.capture, mac)?,
@@ -187,6 +198,11 @@ fn prepare(shortcuts: &Shortcuts) -> Result<(Shortcuts, Vec<(String, Shortcut)>)
         // A frontend key-name whitelist cannot guarantee support in the real
         // pinned native parser. Its accepted ID also owns conflict detection.
         let binding: Shortcut = value.parse().map_err(|_| format!("快捷键无效：{value}"))?;
+        // global-hotkey0.8.0 maps NumpadEqual to VK_E on Windows. Reject it
+        // before either validation or registration can accept the wrong key.
+        if windows && !mac && binding.key == tauri_plugin_global_shortcut::Code::NumpadEqual {
+            return Err("Windows 暂不支持小键盘等号键，请选择其他按键。".into());
+        }
         if !ids.insert(binding.id()) {
             return Err("不同操作不能使用相同的快捷键".into());
         }
@@ -239,6 +255,59 @@ mod tests {
             }
         }
         assert!(parsed(&only("Ctrl+Alt+F11")).is_ok());
+    }
+
+    #[test]
+    fn windows_rejects_numpad_equal_in_every_action_but_preserves_other_platforms() {
+        let expected = "Windows 暂不支持小键盘等号键，请选择其他按键。";
+        for action in 0..5 {
+            let mut values = only("");
+            let field = match action {
+                0 => &mut values.selection,
+                1 => &mut values.capture,
+                2 => &mut values.ocr,
+                3 => &mut values.silent_ocr,
+                _ => &mut values.input,
+            };
+            *field = "control+numpadequal".into();
+            assert_eq!(
+                prepare_for_platform(&values, false, true).unwrap_err(),
+                expected
+            );
+            for mac in [true, false] {
+                let (_, bindings) = prepare_for_platform(&values, mac, false).unwrap();
+                assert_eq!(bindings.len(), 1);
+                assert_eq!(
+                    bindings[0].1.key,
+                    tauri_plugin_global_shortcut::Code::NumpadEqual
+                );
+            }
+        }
+        if cfg!(target_os = "windows") {
+            assert_eq!(normalized(&only("Ctrl+NumpadEqual")).unwrap_err(), expected);
+            assert_eq!(parsed(&only("Ctrl+NumpadEqual")).unwrap_err(), expected);
+        } else {
+            assert_eq!(
+                normalized(&only("Ctrl+NumpadEqual")).unwrap().selection,
+                "Ctrl+NumpadEqual"
+            );
+        }
+    }
+
+    #[test]
+    fn windows_numpad_rejection_keeps_letters_equals_and_function_keys() {
+        for value in ["Ctrl+E", "Ctrl+Equal", "Ctrl+Numpad1", "Alt+D", "Alt+S"] {
+            let (canonical, bindings) = prepare_for_platform(&only(value), false, true).unwrap();
+            assert_eq!(canonical.selection, value);
+            assert_eq!(bindings.len(), 1);
+        }
+        for number in 1..=24 {
+            let value = format!("F{number}");
+            let (canonical, bindings) = prepare_for_platform(&only(&value), false, true).unwrap();
+            assert_eq!(canonical.selection, value);
+            assert_eq!(bindings.len(), 1);
+        }
+        // Runtime parsed() keeps its separate Windows F12 reservation above.
     }
 
     #[test]
@@ -433,8 +502,12 @@ mod tests {
     #[test]
     fn canonical_named_keys_are_validated_by_the_pinned_real_parser() {
         for name in NAMED_KEYS {
-            let value = normalized(&only(&format!("Ctrl+{name}"))).unwrap();
-            assert_eq!(value.selection, format!("Ctrl+{name}"));
+            let value = normalized(&only(&format!("Ctrl+{name}")));
+            if cfg!(target_os = "windows") && *name == "NumpadEqual" {
+                assert!(value.unwrap_err().contains("Windows 暂不支持"));
+            } else {
+                assert_eq!(value.unwrap().selection, format!("Ctrl+{name}"));
+            }
         }
         for (alias, canonical) in [
             ("/", "Slash"),
