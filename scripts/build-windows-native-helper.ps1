@@ -31,7 +31,13 @@ try {
     if (-not [IO.File]::Exists($destination) -or ([IO.FileInfo]$destination).Length -eq 0) {
         throw 'NATIVE_BUILD_OUTPUT: The compiler produced no native DLL.'
     }
-    [Console]::Out.WriteLine((@{ ok = $true; backend = 'precompiled-framework-dll'; bytes = ([IO.FileInfo]$destination).Length; sha256 = (Get-FileHash -LiteralPath $destination -Algorithm SHA256).Hash.ToLowerInvariant() } | ConvertTo-Json -Compress))
+    # Cargo can inherit a PowerShell Core module path when invoking the
+    # Framework host. Hash the generated DLL with .NET directly rather than
+    # depending on Get-FileHash module discovery in that child environment.
+    $sha256 = [Security.Cryptography.SHA256]::Create()
+    try { $digest = [BitConverter]::ToString($sha256.ComputeHash([IO.File]::ReadAllBytes($destination))).Replace('-', '').ToLowerInvariant() }
+    finally { $sha256.Dispose() }
+    [Console]::Out.WriteLine((@{ ok = $true; backend = 'precompiled-framework-dll'; bytes = ([IO.FileInfo]$destination).Length; sha256 = $digest } | ConvertTo-Json -Compress))
 } catch {
     [Console]::Error.WriteLine($_.Exception.Message)
     exit 1
