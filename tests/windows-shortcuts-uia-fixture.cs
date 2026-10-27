@@ -46,19 +46,27 @@ public static class EchoLingoShortcutsUiaFixture {
     sealed class UiWorker : IDisposable {
         readonly AutoResetEvent wake = new AutoResetEvent(false);
         readonly object gate = new object(); readonly Thread thread; readonly Action active; readonly Func<int> remaining;
-        Action pending; int abandoned, closed;
+        readonly List<object> failures=new List<object>();
+        Action pending; int abandoned, closed,exceptionCount; string operation="none";
         public UiWorker(Action check,Func<int> budget) {
             active=check; remaining=budget; thread=new Thread(delegate() { while (true) { wake.WaitOne(); Action next; lock(gate) { next=pending; pending=null; } if(next!=null) next(); if(Volatile.Read(ref closed)!=0) return; } });
             thread.IsBackground=true; thread.SetApartmentState(ApartmentState.MTA); thread.Start();
         }
         public void Check() { active(); Need(Volatile.Read(ref abandoned)==0,"UIA_WORKER_ABANDONED"); }
+        public void Rpc(string name) { Check();operation=name; }
+        public int ExceptionCount { get { return Volatile.Read(ref exceptionCount); } }
+        public object[] Failures { get { lock(gate) return failures.ToArray(); } }
+        void Failure(Exception error) {
+            Interlocked.Increment(ref exceptionCount);string stack=error.StackTrace??"";if(stack.Length>4096)stack=stack.Substring(0,4096);
+            lock(gate) if(failures.Count<16) failures.Add(new Dictionary<string,object>{{"operation",operation},{"exceptionType",error.GetType().Name},{"hresult",error.HResult},{"stack",stack}});
+        }
         public T Call<T>(Func<T> action) {
             Check(); T result=default(T); Exception failure=null;
             ManualResetEvent done=new ManualResetEvent(false);
-            lock(gate) { Need(pending==null,"UIA_WORKER_BUSY"); pending=delegate { try { Check(); result=action(); Check(); } catch(Exception e) { failure=e; } finally { done.Set(); } }; }
+            lock(gate) { Need(pending==null,"UIA_WORKER_BUSY"); pending=delegate { try { operation="task-entry";Check();result=action();Check(); } catch(Exception e) { Failure(e);failure=e; } finally { done.Set(); } }; }
             wake.Set();
             int wait=Math.Min(UiaCallMilliseconds,Math.Max(1,remaining()));
-            if(!done.WaitOne(wait)) { Interlocked.Exchange(ref abandoned,1); throw new InvalidOperationException(wait<UiaCallMilliseconds?"FIXTURE_DEADLINE_180000MS":"UIA_CALL_DEADLINE_5000MS"); }
+            if(!done.WaitOne(wait)) { Interlocked.Exchange(ref abandoned,1); throw new InvalidOperationException(wait<UiaCallMilliseconds?"UIA_REMAINING_BUDGET_DEADLINE":"UIA_CALL_DEADLINE_5000MS"); }
             done.Dispose(); if(failure!=null) throw failure; return result;
         }
         public void Dispose() { Interlocked.Exchange(ref abandoned,1); Interlocked.Exchange(ref closed,1); wake.Set(); Need(thread.Join(2000),"UIA_WORKER_NOT_STOPPED"); wake.Dispose(); }
@@ -69,11 +77,20 @@ public static class EchoLingoShortcutsUiaFixture {
         readonly List<object> buttonPatterns=new List<object>(),jobStops=new List<object>();
         readonly List<string> cleanupErrors=new List<string>(); readonly JavaScriptSerializer json=new JavaScriptSerializer();
         readonly Dictionary<string,object> report=new Dictionary<string,object>();
-        UiWorker ui; Process app; IntPtr job,main; string settingsPath,local,stage="claim-generated-data"; int keySends,valueWrites,launches;
+        UiWorker ui; Process app; IntPtr job,main; string settingsPath,local,stage="claim-generated-data"; int keySends,valueWrites,launches,staleReadObservations;
+        long observationDeadline=Int64.MaxValue;
         public Fixture(string path) { executable=path; }
         void Active() { Need(watch.ElapsedMilliseconds<TotalMilliseconds,"FIXTURE_DEADLINE_180000MS"); }
         void Wait(Func<bool> condition, int milliseconds, string error) {
-            Stopwatch t=Stopwatch.StartNew(); do { Active(); if(condition()) return; Thread.Sleep(20); } while(t.ElapsedMilliseconds<milliseconds);
+            long end=Math.Min(Interlocked.Read(ref observationDeadline),watch.ElapsedMilliseconds+milliseconds);
+            long previous=Interlocked.Exchange(ref observationDeadline,end);
+            try {
+                while(watch.ElapsedMilliseconds<end) {
+                    Active();try { if(condition()) return; } catch(ElementNotAvailableException) { staleReadObservations++; }
+                    long remaining=Math.Min(end-watch.ElapsedMilliseconds,TotalMilliseconds-watch.ElapsedMilliseconds);
+                    if(remaining>0) Thread.Sleep((int)Math.Min(20,remaining));
+                }
+            } finally { Interlocked.Exchange(ref observationDeadline,previous); }
             throw new InvalidOperationException(error);
         }
         void Stage(string name) { Active(); stage=name; report["stage"]=stage; }
@@ -116,27 +133,27 @@ public static class EchoLingoShortcutsUiaFixture {
         }
         void OwnMain() { Active(); Need(main!=IntPtr.Zero&&Main()==main,"OWN_MAIN_IDENTITY_CHANGED"); }
         AutomationElement Find(string name, ControlType type) {
-            ui.Check(); OwnMain(); AutomationElement root=AutomationElement.FromHandle(main); ui.Check();
-            AutomationElementCollection all=root.FindAll(TreeScope.Descendants,new AndCondition(new PropertyCondition(AutomationElement.NameProperty,name),new PropertyCondition(AutomationElement.ControlTypeProperty,type))); ui.Check();
+            ui.Check();OwnMain();ui.Rpc("own-root-from-handle");AutomationElement root=AutomationElement.FromHandle(main);ui.Check();
+            ui.Rpc("find-named-control");AutomationElementCollection all=root.FindAll(TreeScope.Descendants,new AndCondition(new PropertyCondition(AutomationElement.NameProperty,name),new PropertyCondition(AutomationElement.ControlTypeProperty,type)));ui.Check();
             Need(all.Count<=16,"UIA_TARGET_NOT_BOUNDED"); AutomationElement result=null;
-            for(int i=0;i<all.Count;i++) { bool offscreen=all[i].Current.IsOffscreen; ui.Check(); if(!offscreen) { Need(result==null,"UIA_TARGET_NOT_UNIQUE"); result=all[i]; } }
+            for(int i=0;i<all.Count;i++) { ui.Rpc("read-control-offscreen");bool offscreen=all[i].Current.IsOffscreen;ui.Check();if(!offscreen) { Need(result==null,"UIA_TARGET_NOT_UNIQUE"); result=all[i]; } }
             return result;
         }
-        string Field(string name) { return ui.Call(delegate { AutomationElement e=Find(name,ControlType.Edit); Need(e!=null,"SHORTCUT_FIELD_NOT_VISIBLE"); object p; Need(e.TryGetCurrentPattern(ValuePattern.Pattern,out p),"SHORTCUT_VALUE_PATTERN_MISSING"); ui.Check(); string v=((ValuePattern)p).Current.Value; ui.Check(); return v; }); }
+        string Field(string name) { return ui.Call(delegate { AutomationElement e=Find(name,ControlType.Edit);Need(e!=null,"SHORTCUT_FIELD_NOT_VISIBLE");object p;ui.Rpc("query-value-pattern");Need(e.TryGetCurrentPattern(ValuePattern.Pattern,out p),"SHORTCUT_VALUE_PATTERN_MISSING");ui.Check();ui.Rpc("read-shortcut-value");string v=((ValuePattern)p).Current.Value;ui.Check();return v; }); }
         bool FieldsVisible() { return ui.Call(delegate { return Find(Selection,ControlType.Edit)!=null&&Find(Ocr,ControlType.Edit)!=null; }); }
-        void Fill(string name,string value) { ui.Call(delegate { AutomationElement e=Find(name,ControlType.Edit); Need(e!=null,"SHORTCUT_FIELD_NOT_VISIBLE"); object p; Need(e.TryGetCurrentPattern(ValuePattern.Pattern,out p),"SHORTCUT_VALUE_PATTERN_MISSING"); ui.Check(); Need(!((ValuePattern)p).Current.IsReadOnly,"SHORTCUT_FIELD_READONLY"); ui.Check(); ((ValuePattern)p).SetValue(value); ui.Check(); return true; }); valueWrites++; Need(Field(name)==value,"SHORTCUT_VALUE_WRITE_NOT_APPLIED"); }
+        void Fill(string name,string value) { ui.Call(delegate { AutomationElement e=Find(name,ControlType.Edit);Need(e!=null,"SHORTCUT_FIELD_NOT_VISIBLE");object p;ui.Rpc("query-value-pattern");Need(e.TryGetCurrentPattern(ValuePattern.Pattern,out p),"SHORTCUT_VALUE_PATTERN_MISSING");ui.Check();ui.Rpc("read-shortcut-readonly");Need(!((ValuePattern)p).Current.IsReadOnly,"SHORTCUT_FIELD_READONLY");ui.Check();ui.Rpc("set-shortcut-value");((ValuePattern)p).SetValue(value);ui.Check();return true; });valueWrites++;Wait(delegate { return FieldsVisible()&&Field(name)==value; },5000,"SHORTCUT_VALUE_WRITE_NOT_APPLIED"); }
         void Invoke(string name) { ui.Call(delegate {
             AutomationElement e=Find(name,ControlType.Button);Need(e!=null,"SHORTCUT_BUTTON_NOT_VISIBLE");object invocation,toggle;
-            bool supportsInvoke=e.TryGetCurrentPattern(InvokePattern.Pattern,out invocation);ui.Check();
-            bool supportsToggle=e.TryGetCurrentPattern(TogglePattern.Pattern,out toggle);ui.Check();
+            ui.Rpc("query-invoke-pattern");bool supportsInvoke=e.TryGetCurrentPattern(InvokePattern.Pattern,out invocation);ui.Check();
+            ui.Rpc("query-toggle-pattern");bool supportsToggle=e.TryGetCurrentPattern(TogglePattern.Pattern,out toggle);ui.Check();
             buttonPatterns.Add(new Dictionary<string,object>{{"target",name==Record?1:2},{"supportsInvoke",supportsInvoke?1:0},{"supportsToggle",supportsToggle?1:0}});
-            if(supportsInvoke) ((InvokePattern)invocation).Invoke();
-            else if(name==Record&&supportsToggle) ((TogglePattern)toggle).Toggle();
+            if(supportsInvoke) { ui.Rpc("invoke-shortcut-button");((InvokePattern)invocation).Invoke(); }
+            else if(name==Record&&supportsToggle) { ui.Rpc("toggle-record-button");((TogglePattern)toggle).Toggle(); }
             else throw new InvalidOperationException("SHORTCUT_ACTION_PATTERN_MISSING");
             ui.Check();return true;
         }); }
         bool Status(string prefix) {
-            return ui.Call(delegate { ui.Check(); OwnMain(); AutomationElement root=AutomationElement.FromHandle(main); ui.Check(); AutomationElementCollection text=root.FindAll(TreeScope.Descendants,new PropertyCondition(AutomationElement.ControlTypeProperty,ControlType.Text)); ui.Check(); Need(text.Count<=512,"UIA_STATIC_TEXT_NOT_BOUNDED"); for(int i=0;i<text.Count;i++) { string value=text[i].Current.Name; ui.Check(); if(value.StartsWith(prefix,StringComparison.Ordinal)) { bool visible=!text[i].Current.IsOffscreen; ui.Check(); if(visible) return true; } } return false; });
+            return ui.Call(delegate { ui.Check();OwnMain();ui.Rpc("status-root-from-handle");AutomationElement root=AutomationElement.FromHandle(main);ui.Check();ui.Rpc("find-status-text");AutomationElementCollection text=root.FindAll(TreeScope.Descendants,new PropertyCondition(AutomationElement.ControlTypeProperty,ControlType.Text));ui.Check();Need(text.Count<=512,"UIA_STATIC_TEXT_NOT_BOUNDED");for(int i=0;i<text.Count;i++) { ui.Rpc("read-static-status-name");string value=text[i].Current.Name;ui.Check();if(value.StartsWith(prefix,StringComparison.Ordinal)) { ui.Rpc("read-status-offscreen");bool visible=!text[i].Current.IsOffscreen;ui.Check();if(visible) return true; } }return false; });
         }
         void Availability(uint modifiers,uint key,bool available,string phase) {
             Active(); bool registered=RegisterHotKey(IntPtr.Zero,23117,modifiers,key); int error=registered?0:Marshal.GetLastWin32Error();
@@ -151,7 +168,7 @@ public static class EchoLingoShortcutsUiaFixture {
         void RecordKey(uint modifiers,ushort key,string expected) {
             OwnMain(); SetForegroundWindow(main); Wait(delegate { return GetAncestor(GetForegroundWindow(),2)==main; },2000,"OWN_APP_NOT_FOREGROUND");
             Invoke(Record); Wait(delegate { return Status("请按快捷键并松开所有按键"); },5000,"RECORDING_LEASE_NOT_READY");
-            Wait(delegate { return ui.Call(delegate { AutomationElement e=Find(Selection,ControlType.Edit); Need(e!=null,"RECORD_FIELD_MISSING"); bool focused=e.Current.HasKeyboardFocus; ui.Check(); return focused; }); },5000,"RECORD_FIELD_NOT_FOCUSED");
+            Wait(delegate { return ui.Call(delegate { AutomationElement e=Find(Selection,ControlType.Edit);Need(e!=null,"RECORD_FIELD_MISSING");ui.Rpc("read-recording-field-focus");bool focused=e.Current.HasKeyboardFocus;ui.Check();return focused; }); },5000,"RECORD_FIELD_NOT_FOCUSED");
             foreach(int vk in new int[]{0x10,0x11,0x12,0x5B,0x5C}) Need((GetAsyncKeyState(vk)&0x8000)==0,"PREHELD_MODIFIER_NO_INPUT");
             List<INPUT> down=new List<INPUT>(),up=new List<INPUT>();
             if((modifiers&2)!=0)down.Add(Key(0x11,false));if((modifiers&1)!=0)down.Add(Key(0x12,false));if((modifiers&4)!=0)down.Add(Key(0x10,false));down.Add(Key(key,false));
@@ -159,7 +176,7 @@ public static class EchoLingoShortcutsUiaFixture {
             try { Send(down.ToArray()); Thread.Sleep(40); }
             finally { Need(SendInput((uint)up.Count,up.ToArray(),Marshal.SizeOf(typeof(INPUT)))==up.Count,"OWN_GENERATED_KEY_RELEASE_FAILED"); }
             keySends++; Wait(delegate { return Status("已录入，点击"); },5000,"REGISTERED_KEY_NOT_RECORDED");
-            Need(Field(Selection)==expected&&FieldsVisible(),"RECORDING_EXECUTED_ACTION_OR_CHANGED_VIEW");
+            Wait(delegate { return FieldsVisible()&&Field(Selection)==expected; },5000,"RECORDING_EXECUTED_ACTION_OR_CHANGED_VIEW");
             Need(!File.Exists(Path.Combine(Path.GetDirectoryName(settingsPath),"history.json")),"RECORDING_CREATED_HISTORY");
         }
         byte[] Settings() { CheckRoot(Path.GetDirectoryName(settingsPath)); Need(File.Exists(settingsPath)&&(File.GetAttributes(settingsPath)&FileAttributes.ReparsePoint)==0,"SETTINGS_CHANGED_OR_MISSING"); Need(new FileInfo(settingsPath).Length<=1048576,"SETTINGS_OVERSIZE"); return File.ReadAllBytes(settingsPath); }
@@ -215,7 +232,7 @@ public static class EchoLingoShortcutsUiaFixture {
                 string roaming=Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),Identifier);local=Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),Identifier);
                 Claim(roaming);Claim(local);settingsPath=Path.Combine(roaming,"settings.json");
                 File.WriteAllText(settingsPath,"{\"shortcutDefaultsVersion\":1,\"shortcuts\":{\"selection\":\"Alt+D\",\"silentOcr\":\"Alt+S\",\"capture\":\"\",\"ocr\":\"\",\"input\":\"\"},\"providers\":[],\"ocrProviders\":[],\"sourceLanguage\":\"auto\",\"targetLanguage\":\"auto\",\"languageDirectionVersion\":1,\"saveHistory\":false}",new UTF8Encoding(false));
-                ui=new UiWorker(Active,delegate { return (int)Math.Max(0,TotalMilliseconds-watch.ElapsedMilliseconds); }); Defaults(true,"before-app");Custom(true,"before-app");
+                ui=new UiWorker(delegate { Active();Need(watch.ElapsedMilliseconds<Interlocked.Read(ref observationDeadline),"UIA_OBSERVATION_DEADLINE"); },delegate { return (int)Math.Max(0,Math.Min(TotalMilliseconds-watch.ElapsedMilliseconds,Interlocked.Read(ref observationDeadline)-watch.ElapsedMilliseconds)); });Defaults(true,"before-app");Custom(true,"before-app");
                 Start();long t=watch.ElapsedMilliseconds;Stage("record-registered-default");Defaults(false,"default-started");RecordKey(1,0x44,"Alt+D");Passed("Registered Alt+D records through a real lease without leaving settings",t);
                 t=watch.ElapsedMilliseconds;Stage("save-custom-bindings");SavePair("Ctrl+Alt+Shift+F9","Ctrl+Alt+Shift+F10");Custom(false,"custom-saved");Defaults(true,"old-released");Passed("Real UI save owns both previously available custom keys and releases old keys",t);
                 t=watch.ElapsedMilliseconds;Conflict();Passed("External F8 owner rejects save; exact prior file and F9 recording survive",t);
@@ -233,6 +250,7 @@ public static class EchoLingoShortcutsUiaFixture {
                 report["stage"]=stage;report["elapsedMilliseconds"]=watch.ElapsedMilliseconds;report["cases"]=cases;report["casesExecuted"]=cases.Count;report["casesExpected"]=6;report["nativeRegistrationProbes"]=probes;
                 report["nativeKeySends"]=keySends;report["actualWindowsSendInput"]=keySends>0;report["valuePatternWrites"]=valueWrites;report["applicationLaunches"]=launches;report["cleanupErrors"]=cleanupErrors;report["ownedDataRemoved"]=cleanupErrors.Count==0;
                 report["buttonPatternMetadata"]=buttonPatterns;report["ownedJobStops"]=jobStops;
+                report["staleReadObservations"]=staleReadObservations;report["uiaExceptionCount"]=ui==null?0:ui.ExceptionCount;report["uiaExceptionMetadata"]=ui==null?new object[0]:ui.Failures;
             }
             return report;
         }
