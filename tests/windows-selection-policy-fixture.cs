@@ -29,7 +29,9 @@ public static class WindowsSelectionPolicyFixture {
         public bool ReplaceBeforeRestore;
         public bool FailRestore;
         public bool FailRead;
-        public bool LoseContextWhileReading;
+        public bool BusyFirstRead, ForeignOwner;
+        public int OwnerChecks;
+        public bool LoseContextWhileReading, CancelAfterCopy;
         public int PostContextChecks;
         public readonly List<string> Order = new List<string>();
         public string Clipboard = "original-rich-fixture";
@@ -37,7 +39,7 @@ public static class WindowsSelectionPolicyFixture {
         public string Run(uint inserted) {
             return SelectionCopyPolicy.CompleteCopy(10, inserted,
                 delegate { SequenceReadCount++; return CurrentSequence; },
-                delegate { ReadCount++; Order.Add("read"); if (FailRead) throw new InvalidOperationException("synthetic clipboard busy"); Clipboard = Frames[Math.Min(Index, Frames.Count - 1)].Text; return Clipboard; },
+                delegate { ReadCount++; Order.Add("read"); if (FailRead) throw new InvalidOperationException("synthetic read failure"); if(BusyFirstRead&&ReadCount==1)throw new System.Runtime.InteropServices.ExternalException("synthetic publication lock",unchecked((int)0x800401D0)); Clipboard = Frames[Math.Min(Index, Frames.Count - 1)].Text; return Clipboard; },
                 delegate(uint expected) {
                     if (ReplaceBeforeRestore) SelectionCopyPolicy.RequireCurrentSequence(expected, expected + 1);
                     if (FailRestore) throw new InvalidOperationException("CLIPBOARD_RESTORE_FAILED: synthetic failure");
@@ -48,9 +50,10 @@ public static class WindowsSelectionPolicyFixture {
                 delegate { if (++Index >= Frames.Count) throw new Exception("Unbounded copy wait"); }, null,
                 delegate {
                     PostContextChecks++; Order.Add("post-context");
+                    if (CancelAfterCopy) throw new OperationCanceledException("CANCELLED: synthetic newer task");
                     if (LoseContextWhileReading && ReadCount > 0)
                         throw new InvalidOperationException("SELECTION: synthetic source context changed while copy waited");
-                });
+                }, delegate {OwnerChecks++;if(ForeignOwner)throw new InvalidOperationException("CLIPBOARD_CHANGED: synthetic non-source owner");});
         }
     }
     static CopyFixture Stable() {
@@ -158,7 +161,7 @@ public static class WindowsSelectionPolicyFixture {
             Assert(copyCalls == 1, "A context change during UIA revalidation blocks input");
 
             CopyFixture normal = Stable();
-            Assert(normal.Run(4) == "synthetic selected text 中文" && normal.Index == 4, "Clear then delayed stable text waits and succeeds");
+            Assert(normal.Run(4) == "synthetic selected text 中文" && normal.Index == 2, "Clear then first coherent source-owned Unicode publication completes without a fixed stability sleep");
             Assert(normal.RestoreCount == 1 && normal.Clipboard == "original-rich-fixture", "Completed copy restores original data once");
             Assert(normal.PostContextChecks == 1 && normal.Order.IndexOf("restore") < normal.Order.IndexOf("post-context"), "Source context is checked after restoration before a normal result returns");
             foreach (string changed in new string[] { "foreground", "focused control" }) {
@@ -169,6 +172,11 @@ public static class WindowsSelectionPolicyFixture {
                 Assert(supersededSource.PostContextChecks == 1
                     && supersededSource.Order.IndexOf("restore") < supersededSource.Order.IndexOf("post-context"), "Changed " + changed + " cannot return old text and cannot skip necessary restoration");
             }
+            CopyFixture cancelled = Stable(); cancelled.CancelAfterCopy = true;
+            bool cancellationReported = false;
+            try { cancelled.Run(4); } catch (OperationCanceledException) { cancellationReported = true; }
+            Assert(cancellationReported && cancelled.RestoreCount == 1 && cancelled.Clipboard == "original-rich-fixture", "A superseded task restores its already-issued copy before reporting cancellation");
+            Assert(cancelled.Order.IndexOf("restore") < cancelled.Order.IndexOf("post-context"), "Cancellation cannot skip required clipboard restoration");
             foreach (uint partial in new uint[] { 2, 3 }) {
                 CopyFixture fixture = Stable();
                 Error(delegate { fixture.Run(partial); }, "SELECTION:");
@@ -184,13 +192,15 @@ public static class WindowsSelectionPolicyFixture {
             Error(delegate { clearOnly.Run(4); }, "CLIPBOARD_RESTORE_SKIPPED:");
             Assert(clearOnly.RestoreCount == 0, "An incomplete clear cannot be restored over a later publish");
             CopyFixture late = new CopyFixture();
-            late.Frames.Add(new Frame(1195, 12, "late text")); late.Frames.Add(new Frame(1200, 12, "late text"));
+            late.Frames.Add(new Frame(1200, 12, "late text"));
             Error(delegate { late.Run(4); }, "CLIPBOARD_RESTORE_SKIPPED:");
-            Assert(late.RestoreCount == 0, "Deadline does not bypass 20ms stability");
-            CopyFixture newer = new CopyFixture();
-            newer.Frames.Add(new Frame(0, 12, "copy candidate")); newer.Frames.Add(new Frame(10, 13, "new user copy"));
-            Error(delegate { newer.Run(4); }, "CLIPBOARD_CHANGED:");
-            Assert(newer.RestoreCount == 0 && newer.Clipboard == "new user copy", "A newer generation after a candidate wins");
+            Assert(late.RestoreCount == 0, "A first Unicode publication at the deadline does not extend the bounded observation");
+            CopyFixture foreign = Stable(); foreign.ForeignOwner=true;
+            Error(delegate {foreign.Run(4);}, "CLIPBOARD_CHANGED:");
+            Assert(foreign.RestoreCount==0&&foreign.OwnerChecks==1,"First coherent text from a non-source clipboard owner is never returned or overwritten");
+            CopyFixture busy = new CopyFixture();busy.BusyFirstRead=true;
+            busy.Frames.Add(new Frame(0,12,"selected after lock"));busy.Frames.Add(new Frame(5,12,"selected after lock"));
+            Assert(busy.Run(4)=="selected after lock"&&busy.ReadCount==2&&busy.RestoreCount==1,"Known temporary clipboard-open failure is condition-retried then restored once");
             CopyFixture restoreRace = Stable(); restoreRace.ReplaceBeforeRestore = true;
             Error(delegate { restoreRace.Run(4); }, "CLIPBOARD_CHANGED:");
             Assert(restoreRace.RestoreCount == 0, "Final restoration callback rechecks clipboard generation");
@@ -206,7 +216,7 @@ public static class WindowsSelectionPolicyFixture {
             SelectionCopyPolicy.Completion torn = new SelectionCopyPolicy.Completion(10);
             Assert(torn.Observe(11, "discarded torn text", 12, 0) == SelectionCopyPolicy.Observation.Waiting, "First materialization race is discarded and reread");
             Assert(!torn.CandidateSequence.HasValue, "A torn first read cannot establish clipboard ownership");
-            Assert(torn.Observe(12, "coherent text", 12, 5) == SelectionCopyPolicy.Observation.Waiting, "Only a coherent snapshot establishes the first candidate");
+            Assert(torn.Observe(12, "coherent text", 12, 5) == SelectionCopyPolicy.Observation.Completed, "The first coherent snapshot can complete once ownership is checked by the caller");
             Assert(torn.Observe(12, "newer text", 13, 10) == SelectionCopyPolicy.Observation.Superseded, "A torn read after a candidate still preserves the newer generation");
             SelectionCopyPolicy.Completion expiredTorn = new SelectionCopyPolicy.Completion(10);
             Assert(expiredTorn.Observe(11, "late torn text", 12, 1200) == SelectionCopyPolicy.Observation.UnfinishedTimeout, "An initial materialization race cannot extend the deadline");
@@ -218,15 +228,14 @@ public static class WindowsSelectionPolicyFixture {
                 delegate(uint expected) { SelectionCopyPolicy.RequireCurrentSequence(expected, renderSequence); renderRestores++; },
                 delegate { return renderStep * 10; }, delegate { if (++renderStep > 4) throw new Exception("Unbounded materialization retry"); },
                 delegate(string trace) { metadataTrace.Add(trace); });
-            Assert(rendered == "coherent text" && renderRestores == 1 && renderStep == 3, "First read render race is reread, stabilized, then restored exactly once");
+            Assert(rendered == "coherent text" && renderRestores == 1 && renderStep == 1, "First read render race is reread coherently and restored exactly once without stability delay");
             Assert(metadataTrace[0].Contains("before=11 after=12 candidateBefore=none candidateAfter=none")
                 && metadataTrace[0].Contains("observation=Waiting"), "Numeric trace proves the torn first snapshot was discarded");
             Assert(metadataTrace.TrueForAll(delegate(string trace) { return !trace.Contains("discarded torn text") && !trace.Contains("coherent text"); }), "Diagnostic trace contains no copied content");
-            SelectionCopyPolicy.Completion changedText = new SelectionCopyPolicy.Completion(10);
-            Assert(changedText.Observe(11, "part", 11, 0) == SelectionCopyPolicy.Observation.Waiting, "First candidate waits");
-            Assert(changedText.Observe(11, "whole", 11, 10) == SelectionCopyPolicy.Observation.Waiting, "Same-generation materialization resets stability");
-            Assert(changedText.Observe(11, "whole", 11, 29) == SelectionCopyPolicy.Observation.Waiting, "Changed candidate cannot complete early");
-            Assert(changedText.Observe(11, "whole", 11, 30) == SelectionCopyPolicy.Observation.Completed, "Changed candidate completes after stable interval");
+            Assert(SelectionCopyPolicy.ReadAutomation(false,true,true,delegate{return new string[0];},delegate(string x){return x;},true)==null,"Document-scoped empty provider may seek a verified parent selection or single-copy fallback");
+            Error(delegate {SelectionCopyPolicy.ReadAutomation(false,true,true,delegate{return new string[]{(string)null};},delegate(string x){return x;},true);},"SELECTION:");
+            Error(delegate {SelectionCopyPolicy.ReadAutomation(false,true,true,delegate{return new string[]{"range"};},delegate(string x){throw new InvalidOperationException("SELECTION: stale range");},true);},"SELECTION:");
+            Assert(normal.OwnerChecks==2,"Owner validated after coherent read and again immediately before restore");
             Console.WriteLine("{\"ok\":true,\"selectionPolicyFixturePassed\":true,\"assertions\":" + assertions + ",\"windowsInteractiveTested\":false,\"clipboardAccessed\":false,\"inputSent\":false,\"screenCaptured\":false}");
             return 0;
         } catch (Exception error) { Console.Error.WriteLine(error); return 1; }

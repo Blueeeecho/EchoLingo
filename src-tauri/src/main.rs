@@ -4,6 +4,7 @@ mod language_detection;
 #[cfg(target_os = "macos")]
 mod macos_startup;
 mod model;
+mod native_tasks;
 mod ocr;
 mod ocr_native;
 mod offline_translation;
@@ -29,7 +30,7 @@ use std::{
     path::{Path, PathBuf},
     sync::{
         atomic::{AtomicBool, Ordering},
-        Mutex,
+        Arc, Mutex,
     },
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
@@ -42,7 +43,7 @@ struct AppState {
     credential_reads: Mutex<()>,
     history: Mutex<Vec<HistoryEntry>>,
     pinned: AtomicBool,
-    native_busy: AtomicBool,
+    native_tasks: native_tasks::Controller,
     shortcut_gate: Mutex<shortcut_control::ShortcutGate>,
     shortcut_routes: shortcut_control::ShortcutRoutes,
     shortcut_updating: AtomicBool,
@@ -474,25 +475,30 @@ async fn load_ocr_key_async(
     app: tauri::AppHandle,
     provider: ocr::OcrProvider,
     explicit_retry: bool,
+    cancelled: Option<Arc<AtomicBool>>,
 ) -> Result<String, String> {
     tauri::async_runtime::spawn_blocking(move || {
         let state = app.state::<AppState>();
+        let still_current = || {
+            Ok(!cancelled
+                .as_ref()
+                .is_some_and(|flag| flag.load(Ordering::Acquire)))
+        };
+        if !still_current()? {
+            return Err(translation_requests::CANCELLED.into());
+        }
         let key = ocr_credential_key(&provider)?;
         if let Some(cached) = state.credentials.peek(&key)? {
             if !explicit_retry || matches!(&cached, Ok(secret) if !secret.is_empty()) {
                 return cached;
             }
         }
-        serialized_credential_read(
-            &state.credential_reads,
-            || Ok(true),
-            || {
-                if explicit_retry {
-                    retry_unavailable_credential(&state.credentials, &key)?;
-                }
-                load_ocr_key(&state.credentials, &provider)
-            },
-        )
+        serialized_credential_read(&state.credential_reads, still_current, || {
+            if explicit_retry {
+                retry_unavailable_credential(&state.credentials, &key)?;
+            }
+            load_ocr_key(&state.credentials, &provider)
+        })
     })
     .await
     .map_err(|_| "OCR 凭据读取任务未完成，请在设置中重试".to_string())?
@@ -553,7 +559,7 @@ async fn test_ocr_provider(
         .cloned()
         .ok_or("OCR 服务不存在")?;
     let start = std::time::Instant::now();
-    let key = load_ocr_key_async(app, p.clone(), true).await;
+    let key = load_ocr_key_async(app, p.clone(), true, None).await;
     let text = ocr::recognize(
         &state.client,
         &p,
@@ -992,6 +998,7 @@ fn announce_presentation(app: &tauri::AppHandle, presentation: translation_reque
     let _ = app.emit("translation-presentation", presentation);
 }
 fn cancel_active_translation(app: &tauri::AppHandle) -> Option<translation_requests::Presentation> {
+    app.state::<AppState>().native_tasks.cancel();
     let presentation = app
         .state::<AppState>()
         .translation_requests
@@ -1277,6 +1284,7 @@ fn prepare_input_presentation(
 }
 
 fn show(app: &tauri::AppHandle) -> Result<translation_requests::Presentation, String> {
+    app.state::<AppState>().native_tasks.cancel();
     let presentation = prepare_input_presentation(&app.state::<AppState>().translation_requests)?;
     announce_presentation(app, presentation);
     let handle = app.clone();
@@ -1616,6 +1624,29 @@ fn visible_action_error(action: &str, error: &str) -> Option<String> {
             .to_owned(),
     )
 }
+fn clipboard_restoration_notice(error: &str) -> Option<String> {
+    if error.starts_with("CLIPBOARD_RESTORE_FAILED:")
+        || error.starts_with("CLIPBOARD_RESTORE_SKIPPED:")
+    {
+        visible_action_error("selection", error)
+    } else {
+        None
+    }
+}
+fn finish_native_text<T>(result: Result<T, String>, cancelled: bool) -> Result<T, String> {
+    // Restoration is a global safety notice even when a newer task owns the
+    // popup. Never convert that warning into an old source presentation.
+    if cancelled
+        && !result
+            .as_ref()
+            .err()
+            .is_some_and(|error| clipboard_restoration_notice(error).is_some())
+    {
+        Err(translation_requests::CANCELLED.into())
+    } else {
+        result
+    }
+}
 struct ActionFailurePresentation {
     source: serde_json::Value,
     error: Option<String>,
@@ -1670,9 +1701,13 @@ fn start_action(app: tauri::AppHandle, action: String) {
         return;
     }
     let state = app.state::<AppState>();
-    if state.native_busy.swap(true, Ordering::SeqCst) {
-        return;
-    }
+    let request = match state.native_tasks.begin() {
+        Ok(request) => request,
+        Err(error) => {
+            let _ = app.emit("action-error", error);
+            return;
+        }
+    };
     let capture = is_capture_action(&action);
     let window = app.get_webview_window("main");
     let keep_popup = state
@@ -1688,135 +1723,281 @@ fn start_action(app: tauri::AppHandle, action: String) {
                 state.pinned.load(Ordering::SeqCst),
             )
         });
-    // A pinned window must remain on screen, but must never enter an OCR image.
-    // macOS excludes this process's windows in its capture implementation.
+    // Capture source identity at the user's request, before waiting for the old
+    // picker to finish its owned release drain. Never read a later source app.
     #[cfg(target_os = "windows")]
-    let capture_exclusion = if capture && keep_popup {
-        match platform::CaptureWindowExclusion::acquire(window.as_ref().unwrap()) {
-            Ok(exclusion) => Some(exclusion),
-            Err(error) => {
-                state.native_busy.store(false, Ordering::SeqCst);
+    let source_snapshot = if action == "selection" {
+        platform::native_source_snapshot().map(Some)
+    } else {
+        Ok(None)
+    };
+    let presentation = match begin_native_request_presentation(
+        &state.native_tasks,
+        &request,
+        &state.translation_requests,
+        keep_popup,
+        |presentation| announce_presentation(&app, presentation),
+    ) {
+        Some(Ok(presentation)) => presentation,
+        Some(Err(error)) => {
+            state.native_tasks.publish(&request, || {
                 let _ = app.emit("action-error", error);
+            });
+            return;
+        }
+        None => return,
+    };
+    tauri::async_runtime::spawn(async move {
+        if capture && !keep_popup {
+            // Native window work stays on the UI thread, outside the short
+            // controller publication lock. Await its acknowledgement before
+            // any helper can capture an unhidden own window.
+            if let Err(error) = hide_native_capture_window(&app, &request, presentation).await {
+                publish_native_result(&app, &request, presentation, keep_popup, || {
+                    if let Some(message) = visible_action_error(&action, &error) {
+                        let _ = app.emit("action-error", message);
+                    }
+                });
                 return;
             }
         }
-    } else {
-        None
-    };
-    let Ok(presentation) =
-        begin_native_action_presentation(&state.translation_requests, keep_popup)
-    else {
-        state.native_busy.store(false, Ordering::SeqCst);
-        return;
-    };
-    announce_presentation(&app, presentation);
-    let cloud_ocr = if capture {
-        let settings = state.settings.lock().unwrap();
-        let provider = settings
-            .active_ocr_provider_id
-            .as_ref()
-            .and_then(|id| settings.ocr_providers.iter().find(|p| &p.id == id))
-            .cloned();
-        if !keep_popup {
-            if let Some(w) = &window {
-                let _ = platform::hide_webview_window(w);
-            }
-        }
-        provider
-    } else {
-        None
-    };
-    tauri::async_runtime::spawn(async move {
         #[cfg(target_os = "macos")]
         if capture {
             if let Err(error) = verify_capture_application_policy(&app).await {
-                app.state::<AppState>()
-                    .native_busy
-                    .store(false, Ordering::SeqCst);
-                if native_action_result_is_current(&app, presentation, keep_popup) {
+                publish_native_result(&app, &request, presentation, keep_popup, || {
                     let _ = app.emit("action-error", error);
-                }
+                });
                 return;
             }
         }
-        let action2 = action.clone();
-        let use_cloud = cloud_ocr.is_some();
+        let worker_app = app.clone();
+        let worker_request = request.clone();
+        let worker_action = action.clone();
         let result = tauri::async_runtime::spawn_blocking(move || {
+            let state = worker_app.state::<AppState>();
+            // Only one actual native child owns input/exclusion at a time. A
+            // superseded waiter is rejected before launching or reading text.
+            let _physical = state.native_tasks.enter(&worker_request)?;
+            if !native_request_is_current(&worker_app, &worker_request, presentation, keep_popup) {
+                return Err(translation_requests::CANCELLED.to_owned());
+            }
+            #[cfg(target_os = "windows")]
+            let expected_source = source_snapshot?;
+            #[cfg(target_os = "windows")]
+            if let Some(source) = &expected_source {
+                if !source.is_current() {
+                    return Err("CANCELLED: 原选词窗口已改变，请重新选词".into());
+                }
+            }
+            let cloud_ocr = if capture {
+                let settings = locked(&state.settings)?;
+                settings
+                    .active_ocr_provider_id
+                    .as_ref()
+                    .and_then(|id| {
+                        settings
+                            .ocr_providers
+                            .iter()
+                            .find(|provider| &provider.id == id)
+                    })
+                    .cloned()
+            } else {
+                None
+            };
+            if !native_request_is_current(&worker_app, &worker_request, presentation, keep_popup) {
+                return Err(translation_requests::CANCELLED.into());
+            }
+            // Acquire after the physical permit so an old guard's restore can
+            // never reset a newer capture's exclusion. Keep it until cleanup.
+            #[cfg(target_os = "windows")]
+            let exclusion = if capture && keep_popup {
+                Some(platform::CaptureWindowExclusion::acquire(
+                    window.as_ref().ok_or("窗口不存在")?,
+                )?)
+            } else {
+                None
+            };
             #[cfg(not(target_os = "windows"))]
             std::thread::sleep(Duration::from_millis(180));
-            let result = match action2.as_str() {
-                "selection" => platform::selected_text(),
+            if worker_request.cancelled() {
+                return Err(translation_requests::CANCELLED.into());
+            }
+            #[cfg(target_os = "windows")]
+            if let Some(source) = &expected_source {
+                if !source.is_current() {
+                    return Err("CANCELLED: 原选词窗口已改变，请重新选词".into());
+                }
+            }
+            let cancel = worker_request.cancellation();
+            let text = match worker_action.as_str() {
+                "selection" => platform::selected_text_cancelable(cancel),
                 "clipboard" => platform::clipboard_text(),
-                "capture" | "ocr" | "silentOcr" if use_cloud => platform::capture_image(),
-                "capture" | "ocr" | "silentOcr" => platform::capture_ocr(),
+                "capture" | "ocr" | "silentOcr" if cloud_ocr.is_some() => {
+                    platform::capture_image_cancelable(cancel)
+                }
+                "capture" | "ocr" | "silentOcr" => platform::capture_ocr_cancelable(cancel),
                 _ => Err("未知操作".into()),
             };
             #[cfg(target_os = "windows")]
-            if let Some(exclusion) = capture_exclusion {
-                // Restore immediately after capture, before credentials/network OCR.
+            if let Some(exclusion) = exclusion {
                 exclusion.restore()?;
             }
-            result
+            finish_native_text(text, worker_request.cancelled()).map(|text| (text, cloud_ocr))
         })
         .await
         .map_err(|_| "系统操作异常".to_string())
-        .and_then(|r| r);
-        if !native_action_result_is_current(&app, presentation, keep_popup && capture) {
-            app.state::<AppState>()
-                .native_busy
-                .store(false, Ordering::SeqCst);
+        .and_then(|result| result);
+        if let Err(error) = &result {
+            if let Some(message) = clipboard_restoration_notice(error) {
+                // No source, epoch, activation or visibility mutation: an old
+                // copy's failed restore must remain visible during a new task.
+                let _ = app.emit("action-error", message);
+                return;
+            }
+        }
+        if !native_request_is_current(&app, &request, presentation, keep_popup) {
             return;
         }
-        let result = if let (Some(provider), Ok(image)) = (&cloud_ocr, &result) {
-            let state = app.state::<AppState>();
-            let key = load_ocr_key_async(app.clone(), provider.clone(), false).await;
-            ocr::recognize(&state.client, provider, key, image).await
-        } else {
-            result
+        let result = match result {
+            Ok((text, Some(provider))) => {
+                let key = load_ocr_key_async(
+                    app.clone(),
+                    provider.clone(),
+                    false,
+                    Some(request.cancellation()),
+                )
+                .await;
+                if !native_request_is_current(&app, &request, presentation, keep_popup) {
+                    return;
+                }
+                let state = app.state::<AppState>();
+                native_ocr_result(
+                    request.cancellation(),
+                    ocr::recognize(&state.client, &provider, key, &text),
+                )
+                .await
+            }
+            Ok((text, None)) => Ok(text),
+            Err(error) => Err(error),
         };
-        if !native_action_result_is_current(&app, presentation, keep_popup && capture) {
-            app.state::<AppState>()
-                .native_busy
-                .store(false, Ordering::SeqCst);
+        if !native_request_is_current(&app, &request, presentation, keep_popup) {
             return;
         }
-        match result {
-            Ok(text) if !text.trim().is_empty() => {
-                let mode = captured_text_mode(&action);
-                let mut payload = serde_json::json!({"text":text,"mode":mode,"presentationEpoch":presentation.epoch,"updateVisiblePopup":keep_popup && capture});
-                if capture {
-                    payload["captureOrigin"] = serde_json::json!("ocr");
+        publish_native_result(&app, &request, presentation, keep_popup, || {
+            match result {
+                Ok(text) if !text.trim().is_empty() => {
+                    emit_source_text(
+                        &app,
+                        captured_source_payload(&action, text, presentation.epoch, keep_popup),
+                    );
                 }
-                emit_source_text(&app, payload);
-            }
-            Ok(_) if action == "selection" => empty_selection_window(&app, presentation.epoch),
-            Ok(_) => {
-                if !keep_popup {
-                    emit_source_text(&app, empty_input_payload(presentation.epoch));
-                }
-                let _ = app.emit("action-error", "没有识别到文字，请选择更清晰的区域");
-            }
-            Err(e) => {
-                if keep_popup && capture {
-                    // Cancellation, empty OCR and failures keep the completed
-                    // source/result. Only a successful capture replaces them.
-                    if !e.starts_with("CANCELLED") {
-                        let _ = app.emit("action-error", e);
-                    }
-                } else if let Some(failure) =
-                    action_failure_presentation(&action, &e, presentation.epoch)
-                {
-                    emit_source_text(&app, failure.source);
-                    if let Some(message) = failure.error {
-                        let _ = app.emit("action-error", message);
+                Ok(_) if action == "selection" => {
+                    if !keep_popup {
+                        empty_selection_window(&app, presentation.epoch);
                     }
                 }
+                Ok(_) => {
+                    if !keep_popup {
+                        emit_source_text(&app, empty_input_payload(presentation.epoch));
+                    }
+                    let _ = app.emit("action-error", "没有识别到文字，请选择更清晰的区域");
+                }
+                Err(error) => {
+                    if keep_popup {
+                        // Retention protects completed content for selection and
+                        // OCR equally. An unsuccessful task never emits blank text.
+                        if let Some(message) = visible_action_error(&action, &error) {
+                            let _ = app.emit("action-error", if capture { error } else { message });
+                        }
+                    } else if let Some(failure) =
+                        action_failure_presentation(&action, &error, presentation.epoch)
+                    {
+                        emit_source_text(&app, failure.source);
+                        if let Some(message) = failure.error {
+                            let _ = app.emit("action-error", message);
+                        }
+                    }
+                }
             }
-        }
-        app.state::<AppState>()
-            .native_busy
-            .store(false, Ordering::SeqCst);
+        });
     });
+}
+async fn hide_native_capture_window(
+    app: &tauri::AppHandle,
+    request: &native_tasks::Request,
+    presentation: translation_requests::Presentation,
+) -> Result<(), String> {
+    let (send, receive) = tokio::sync::oneshot::channel();
+    let handle = app.clone();
+    let request = request.clone();
+    app.run_on_main_thread(move || {
+        let result = if !native_request_is_current(&handle, &request, presentation, false) {
+            Err(translation_requests::CANCELLED.to_owned())
+        } else if let Some(window) = handle.get_webview_window("main") {
+            platform::hide_webview_window(&window)
+        } else {
+            Err("窗口不存在".into())
+        };
+        let _ = send.send(result);
+    })
+    .map_err(|_| "WINDOW_THREAD: 无法准备截图窗口".to_string())?;
+    receive
+        .await
+        .map_err(|_| "WINDOW_THREAD: 截图窗口准备被中断".to_string())?
+}
+async fn wait_native_cancellation(cancelled: Arc<AtomicBool>) {
+    while !cancelled.load(Ordering::Acquire) {
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+}
+async fn native_ocr_result<T>(
+    cancelled: Arc<AtomicBool>,
+    future: impl std::future::Future<Output = Result<T, String>>,
+) -> Result<T, String> {
+    tokio::select! {
+        biased;
+        _ = wait_native_cancellation(cancelled) => Err(translation_requests::CANCELLED.into()),
+        result = future => result,
+    }
+}
+fn native_request_is_current(
+    app: &tauri::AppHandle,
+    request: &native_tasks::Request,
+    presentation: translation_requests::Presentation,
+    retained: bool,
+) -> bool {
+    app.state::<AppState>().native_tasks.is_current(request)
+        && native_action_result_is_current(app, presentation, retained)
+}
+// The controller lock orders short event publication against a new begin.
+// Do not call native_request_is_current here: publish already owns that lock.
+fn publish_native_result<R>(
+    app: &tauri::AppHandle,
+    request: &native_tasks::Request,
+    presentation: translation_requests::Presentation,
+    retained: bool,
+    publication: impl FnOnce() -> R,
+) -> Option<R> {
+    app.state::<AppState>()
+        .native_tasks
+        .publish(request, || {
+            native_action_result_is_current(app, presentation, retained).then(publication)
+        })
+        .flatten()
+}
+fn captured_source_payload(
+    action: &str,
+    text: String,
+    epoch: u64,
+    retained: bool,
+) -> serde_json::Value {
+    let capture = is_capture_action(action);
+    let mut payload = serde_json::json!({"text":text,"mode":captured_text_mode(action),"presentationEpoch":epoch,
+        "updateVisiblePopup":retained,"reuseVisiblePopup":retained && capture});
+    if capture {
+        payload["captureOrigin"] = serde_json::json!("ocr");
+    }
+    payload
 }
 fn is_capture_action(action: &str) -> bool {
     matches!(action, "capture" | "ocr" | "silentOcr")
@@ -1863,6 +2044,21 @@ fn begin_native_action_presentation(
     } else {
         requests.suspend()
     }
+}
+fn begin_native_request_presentation(
+    controller: &native_tasks::Controller,
+    request: &native_tasks::Request,
+    requests: &translation_requests::TranslationRequests,
+    keep_popup: bool,
+    announce: impl FnOnce(translation_requests::Presentation),
+) -> Option<Result<translation_requests::Presentation, String>> {
+    // A stale begin may not invalidate the newer task's presentation. The
+    // epoch and its event are published together against concurrent begin().
+    controller.publish(request, || {
+        let presentation = begin_native_action_presentation(requests, keep_popup)?;
+        announce(presentation);
+        Ok(presentation)
+    })
 }
 fn captured_text_mode(action: &str) -> &'static str {
     // Owner's “无感 OCR” means capture → source text → automatic translation.
@@ -2337,7 +2533,7 @@ fn main() {
                 credential_reads: Mutex::new(()),
                 history: Mutex::new(history),
                 pinned: AtomicBool::new(false),
-                native_busy: AtomicBool::new(false),
+                native_tasks: native_tasks::Controller::default(),
                 shortcut_gate: Mutex::new(shortcut_control::ShortcutGate::default()),
                 shortcut_routes: shortcut_control::ShortcutRoutes::default(),
                 shortcut_updating: AtomicBool::new(false),
@@ -2880,6 +3076,78 @@ mod tests {
     }
 
     #[test]
+    fn native_initial_publication_cannot_advance_a_newer_requests_epoch() {
+        let controller = native_tasks::Controller::default();
+        let requests = translation_requests::TranslationRequests::default();
+        requests.resume(None).unwrap();
+        let old = controller.begin().unwrap();
+        let latest = controller.begin().unwrap();
+        let announced = Mutex::new(Vec::new());
+        let current = begin_native_request_presentation(
+            &controller,
+            &latest,
+            &requests,
+            true,
+            |presentation| announced.lock().unwrap().push(presentation),
+        )
+        .unwrap()
+        .unwrap();
+        // Reproduce an earlier callback resuming after the newer request has
+        // already published. It may neither suspend nor announce another epoch.
+        assert!(begin_native_request_presentation(
+            &controller,
+            &old,
+            &requests,
+            false,
+            |_| panic!("stale initial presentation was announced"),
+        )
+        .is_none());
+        assert_eq!(requests.presentation().unwrap(), current);
+        assert_eq!(*announced.lock().unwrap(), vec![current]);
+        assert!(controller.is_current(&latest));
+    }
+    #[test]
+    fn native_cancel_preserves_only_clipboard_restoration_safety_notices() {
+        for error in [
+            "CLIPBOARD_RESTORE_FAILED: Generated original formats unavailable",
+            "CLIPBOARD_RESTORE_SKIPPED: Generated copy completion uncertain",
+        ] {
+            let result = finish_native_text::<String>(Err(error.into()), true);
+            assert_eq!(result.unwrap_err(), error);
+            let notice = clipboard_restoration_notice(error).unwrap();
+            assert!(
+                !notice.contains("Generated"),
+                "do not expose native details"
+            );
+        }
+        for error in [
+            "CLIPBOARD_CHANGED: A newer user copy was preserved",
+            "CLIPBOARD_UNAVAILABLE: Generated fixture",
+            "CLIPBOARD_RESTORE_FAILED_SUFFIX: Not a restoration failure",
+            "NATIVE_CANCEL_SIGNAL: Generated fixture",
+            "CANCELLED: Generated fixture",
+            "HTTP 503",
+        ] {
+            assert!(clipboard_restoration_notice(error).is_none());
+            assert_eq!(
+                finish_native_text::<String>(Err(error.into()), true).unwrap_err(),
+                translation_requests::CANCELLED
+            );
+            assert_eq!(
+                finish_native_text::<String>(Err(error.into()), false).unwrap_err(),
+                error
+            );
+        }
+        assert_eq!(
+            finish_native_text(Ok("old source"), true).unwrap_err(),
+            translation_requests::CANCELLED
+        );
+        assert_eq!(
+            finish_native_text(Ok("new source"), false).unwrap(),
+            "new source"
+        );
+    }
+    #[test]
     fn pin_retention_applies_only_to_an_already_visible_translation_popup() {
         let requests = translation_requests::TranslationRequests::default();
         let hidden = requests.presentation().unwrap();
@@ -2907,6 +3175,79 @@ mod tests {
         for action in ["selection", "clipboard", "input"] {
             assert!(!is_capture_action(action));
         }
+    }
+
+    #[test]
+    fn retained_native_sources_replace_success_without_turning_pin_into_content_lock() {
+        for action in [
+            "silentOcr",
+            "selection",
+            "silentOcr",
+            "selection",
+            "clipboard",
+        ] {
+            let payload = captured_source_payload(action, format!("generated {action}"), 8, true);
+            assert_eq!(payload["text"], format!("generated {action}"));
+            assert_eq!(payload["updateVisiblePopup"], true);
+            assert_eq!(payload["reuseVisiblePopup"], is_capture_action(action));
+            assert_eq!(payload["presentationEpoch"], 8);
+            if is_capture_action(action) {
+                assert_eq!(payload["captureOrigin"], "ocr");
+            } else {
+                assert!(payload.get("captureOrigin").is_none());
+            }
+            let unpinned = captured_source_payload(action, "new generated source".into(), 9, false);
+            assert_eq!(unpinned["updateVisiblePopup"], false);
+            assert_eq!(unpinned["reuseVisiblePopup"], false);
+        }
+    }
+    #[tokio::test]
+    async fn superseded_cloud_ocr_is_dropped_and_cannot_start_a_cancelled_request() {
+        use std::sync::atomic::AtomicUsize;
+        struct Cleanup(Arc<AtomicBool>);
+        impl Drop for Cleanup {
+            fn drop(&mut self) {
+                self.0.store(true, Ordering::SeqCst);
+            }
+        }
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let dropped = Arc::new(AtomicBool::new(false));
+        let started = Arc::new(AtomicUsize::new(0));
+        let (ready, entered) = tokio::sync::oneshot::channel();
+        let worker = {
+            let cancel = cancelled.clone();
+            let dropped = dropped.clone();
+            let started = started.clone();
+            tokio::spawn(async move {
+                native_ocr_result(cancel, async move {
+                    let _cleanup = Cleanup(dropped);
+                    started.fetch_add(1, Ordering::SeqCst);
+                    let _ = ready.send(());
+                    std::future::pending::<Result<(), String>>().await
+                })
+                .await
+            })
+        };
+        entered.await.unwrap();
+        cancelled.store(true, Ordering::SeqCst);
+        let result = tokio::time::timeout(Duration::from_secs(1), worker)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(result.unwrap_err(), translation_requests::CANCELLED);
+        assert!(dropped.load(Ordering::SeqCst));
+        assert_eq!(started.load(Ordering::SeqCst), 1);
+        let result = native_ocr_result(cancelled, async {
+            started.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        })
+        .await;
+        assert_eq!(result.unwrap_err(), translation_requests::CANCELLED);
+        assert_eq!(
+            started.load(Ordering::SeqCst),
+            1,
+            "cancelled work must not poll/send another request"
+        );
     }
 
     #[test]
@@ -3049,7 +3390,7 @@ mod tests {
             credential_reads: Mutex::new(()),
             history: Mutex::new(vec![]),
             pinned: AtomicBool::new(false),
-            native_busy: AtomicBool::new(false),
+            native_tasks: native_tasks::Controller::default(),
             shortcut_gate: Mutex::new(shortcut_control::ShortcutGate::default()),
             shortcut_routes: shortcut_control::ShortcutRoutes::default(),
             shortcut_updating: AtomicBool::new(false),

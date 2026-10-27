@@ -15,7 +15,9 @@ param(
     [string]$InputBackend = 'hybrid',
     # Explicit packaged native session. No source/window content is transferred.
     [uint32]$CaptureHostThreadId = 0,
-    [long]$CaptureHostToken = 0
+    [long]$CaptureHostToken = 0,
+    [string]$NativeCancellationEvent = '',
+    [uint32]$ExcludedSourceProcessId = 0
 )
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
@@ -27,7 +29,14 @@ $script:HelperPhases = @{}
 
 function Write-Result($Value) {
     $Value['nativeBackend'] = $script:NativeBackend
-    if ('CaptureHealth' -as [type]) { $Value['captureHealth'] = [CaptureHealth]::Snapshot() }
+    if ('CaptureHealth' -as [type]) {
+        [CaptureHealth]::Mark('replyAtMilliseconds')
+        [CaptureHealth]::Duration('releaseToReplyMilliseconds','releaseAtMilliseconds')
+        if ($script:HelperPhases.ContainsKey('ocrRecognizedMilliseconds')) {
+            [CaptureHealth]::Set('ocrDurationMilliseconds',[long]($script:HelperPhases['ocrRecognizedMilliseconds']-$script:HelperPhases['ocrStartMilliseconds']))
+        }
+        $Value['captureHealth'] = [CaptureHealth]::Snapshot()
+    }
     if ($PerformanceDiagnostics) {
         $script:HelperPhases['replyMilliseconds'] = $script:HelperWatch.Elapsed.TotalMilliseconds
         $Value['helperPerformance'] = $script:HelperPhases
@@ -76,6 +85,7 @@ using System.IO;
 using System.Runtime.InteropServices;
 using System.Text;
 using System.Threading;
+using System.Threading.Tasks;
 using System.Windows.Automation;
 using System.Windows.Automation.Text;
 using System.Windows.Forms;
@@ -104,6 +114,9 @@ public static class CapturePerformance {
 
 public static class CaptureHealth {
     static readonly Dictionary<string, long> values = new Dictionary<string, long>();
+    static readonly Stopwatch clock=Stopwatch.StartNew();
+    public static void Mark(string name){if(!values.ContainsKey(name))values[name]=clock.ElapsedMilliseconds;}
+    public static void Duration(string name,string start){long began;if(values.TryGetValue(start,out began))values[name]=Math.Max(0,clock.ElapsedMilliseconds-began);}
     public static void Set(string name, long value) { values[name] = value; }
     public static void Increment(string name) { long value;values.TryGetValue(name,out value);values[name]=value+1; }
     public static Dictionary<string, long> Snapshot() { return new Dictionary<string, long>(values); }
@@ -128,7 +141,7 @@ public static class SelectionCopyPolicy {
         return null;
     }
     public static string ReadAutomation<T>(bool password, bool fallbackAllowed, bool hasTextPattern,
-                                           Func<T[]> getSelection, Func<T, string> read) where T : class {
+                                           Func<T[]> getSelection, Func<T, string> read, bool emptyIsUnavailable = false) where T : class {
         if (password) throw new InvalidOperationException("PROTECTED: Selected text is inside a password control.");
         if (!hasTextPattern) return UnavailableSelection(fallbackAllowed);
         T[] ranges;
@@ -137,10 +150,10 @@ public static class SelectionCopyPolicy {
         // Do not catch range-reading failures here: a stale/invalid provider
         // must not be converted into permission to send keyboard input.
         catch (InvalidOperationException) { return UnavailableSelection(fallbackAllowed); }
-        string text = AutomationText(ranges, read);
+        string text = AutomationText(ranges, read, emptyIsUnavailable);
         return text ?? UnavailableSelection(fallbackAllowed);
     }
-    public static string AutomationText<T>(T[] ranges, Func<T, string> read) where T : class {
+    public static string AutomationText<T>(T[] ranges, Func<T, string> read, bool emptyIsUnavailable = false) where T : class {
         // The whole array may legitimately be null when no caret is exposed.
         if (ranges == null) return null;
         StringBuilder text = new StringBuilder();
@@ -150,6 +163,7 @@ public static class SelectionCopyPolicy {
             if (!String.IsNullOrEmpty(part)) { if (text.Length > 0) text.AppendLine(); text.Append(part); }
         }
         if (!String.IsNullOrWhiteSpace(text.ToString())) return text.ToString();
+        if (emptyIsUnavailable) return null;
         throw new InvalidOperationException("NO_SELECTION: No text is selected in the source application.");
     }
 
@@ -157,8 +171,6 @@ public static class SelectionCopyPolicy {
     public sealed class Completion {
         readonly uint initial;
         uint? candidate;
-        string candidateText;
-        long stableSince;
         public uint CompletedSequence { get; private set; }
         public string CompletedText { get; private set; }
         public uint? CandidateSequence { get { return candidate; } }
@@ -174,13 +186,9 @@ public static class SelectionCopyPolicy {
             if (after == initial) return expired ? Observation.UnchangedTimeout : Observation.Waiting;
             if (expired) return Observation.UnfinishedTimeout;
             if (!String.IsNullOrWhiteSpace(text)) {
-                if (!candidate.HasValue || candidateText != text) {
-                    candidate = after; candidateText = text; stableSince = elapsedMilliseconds;
-                }
-                if (elapsedMilliseconds - stableSince >= 20) {
-                    CompletedSequence = after; CompletedText = text;
-                    return Observation.Completed;
-                }
+                candidate = after;
+                CompletedSequence = after; CompletedText = text;
+                return Observation.Completed;
             } else if (candidate.HasValue) return Observation.Superseded;
             return Observation.Waiting;
         }
@@ -206,7 +214,7 @@ public static class SelectionCopyPolicy {
     // restore an unrelated clipboard generation. No key input is retried here.
     public static string CompleteCopy(uint initial, uint inserted, Func<uint> sequence, Func<string> readText,
                                       Action<uint> restore, Func<long> elapsedMilliseconds, Action wait,
-                                      Action<string> trace = null, Action requireContextAfterRestore = null) {
+                                      Action<string> trace = null, Action requireContextAfterRestore = null, Action requireCopyOwner = null) {
         bool inputFailed = inserted != 4;
         if (inserted < 2) throw new InvalidOperationException(InputBlocked);
         Completion completion = new Completion(initial);
@@ -214,10 +222,20 @@ public static class SelectionCopyPolicy {
             uint before = sequence();
             string text;
             try { text = before == initial ? null : readText(); }
-            catch (Exception) {
+            catch (Exception error) {
+                // A clipboard owner may still hold its publication lock.
+                // Retry only the documented temporary-open HRESULT, within the
+                // original deadline, without resending input or restoring data.
+                if (error is System.Runtime.InteropServices.ExternalException && unchecked((uint)error.HResult) == 0x800401D0u && elapsedMilliseconds() < 1200) {
+                    wait(); continue;
+                }
                 throw new InvalidOperationException("CLIPBOARD_RESTORE_SKIPPED: Copied text could not be read safely. The original clipboard was not restored over this uncertain update; current contents were preserved.");
             }
             uint after = sequence();
+            if (before == after && after != initial && !String.IsNullOrWhiteSpace(text) && requireCopyOwner != null) {
+                requireCopyOwner();
+                after = sequence(); // Owner observation cannot admit a torn generation.
+            }
             long elapsed = elapsedMilliseconds();
             uint? candidateBefore = completion.CandidateSequence;
             Observation observation = completion.Observe(before, text, after, elapsed);
@@ -231,6 +249,7 @@ public static class SelectionCopyPolicy {
                 case Observation.Waiting: wait(); break;
                 case Observation.Completed:
                     RequireCurrentSequence(completion.CompletedSequence, sequence());
+                    if (requireCopyOwner != null) requireCopyOwner();
                     restore(completion.CompletedSequence);
                     if (inputFailed) throw new InvalidOperationException(InputBlocked);
                     // A completed copy still owns its necessary restoration.
@@ -250,10 +269,16 @@ public static class SelectionCopyPolicy {
 }
 
 public static class EchoLingoNative {
+    public static uint ExcludedSourceProcessId { get; set; }
     [DllImport("user32.dll")] static extern IntPtr GetForegroundWindow();
     [DllImport("user32.dll")] static extern IntPtr GetAncestor(IntPtr window, uint flags);
     [DllImport("user32.dll")] static extern short GetAsyncKeyState(int key);
     [DllImport("user32.dll")] static extern uint GetClipboardSequenceNumber();
+    [DllImport("user32.dll")] static extern IntPtr GetClipboardOwner();
+    [DllImport("user32.dll", SetLastError=true)] static extern bool OpenClipboard(IntPtr owner);
+    [DllImport("user32.dll", SetLastError=true)] static extern bool EmptyClipboard();
+    [DllImport("user32.dll")] static extern bool CloseClipboard();
+    [DllImport("user32.dll")] static extern uint GetWindowThreadProcessId(IntPtr window, out uint process);
     [DllImport("user32.dll")] static extern uint SendInput(uint count, INPUT[] input, int size);
     [DllImport("user32.dll")] static extern bool SetProcessDpiAwarenessContext(IntPtr context);
     [DllImport("user32.dll")] static extern IntPtr SetThreadDpiAwarenessContext(IntPtr context);
@@ -292,6 +317,21 @@ public static class EchoLingoNative {
     sealed class SelectionContext {
         public IntPtr Foreground;
         public int[] FocusIdentity;
+        public readonly HashSet<int> SourceProcesses = new HashSet<int>();
+    }
+    static T SelectionQuery<T>(Func<T> query) {
+        NativeCancellation.ThrowIfRequested();
+        Task<T> task = Task.Factory.StartNew(query, CancellationToken.None, TaskCreationOptions.DenyChildAttach, TaskScheduler.Default);
+        Stopwatch elapsed = Stopwatch.StartNew();
+        while (!task.IsCompleted) {
+            NativeCancellation.ThrowIfRequested();
+            if (elapsed.ElapsedMilliseconds >= 2000)
+                throw new InvalidOperationException("SELECTION: The source accessibility provider did not answer in time; no copy input was sent.");
+            Thread.Sleep(5); // Condition polling, never a fixed preparation delay.
+        }
+        NativeCancellation.ThrowIfRequested();
+        if (task.IsFaulted) throw task.Exception.InnerException;
+        return task.Result;
     }
     static bool SameIdentity(int[] expected, int[] current) {
         if (expected == null || current == null || expected.Length == 0 || expected.Length != current.Length) return false;
@@ -327,33 +367,89 @@ public static class EchoLingoNative {
         try {
             SelectionContext context = new SelectionContext();
             context.Foreground = GetForegroundWindow();
+            uint nativePid; GetWindowThreadProcessId(context.Foreground, out nativePid);
+            if (nativePid != 0 && nativePid == ExcludedSourceProcessId)
+                throw new InvalidOperationException("NO_SELECTION: EchoLingo is the foreground application.");
+            if (nativePid != 0) context.SourceProcesses.Add(unchecked((int)nativePid));
             AutomationElement focused = SelectionCopyPolicy.RequireFocus(AutomationElement.FocusedElement);
             context.FocusIdentity = focused.GetRuntimeId();
+            if (focused.Current.ProcessId != 0) context.SourceProcesses.Add(focused.Current.ProcessId);
             CurrentSelectionFocus(context);
             return context;
         } catch (ElementNotAvailableException) {
             throw new InvalidOperationException("SELECTION: The source control is no longer available; select text and retry.");
         }
     }
-    static void RequireSelectionContext(SelectionContext context) { CurrentSelectionFocus(context); }
+    static void RequireSelectionContext(SelectionContext context) {
+        SelectionQuery(delegate { CurrentSelectionFocus(context); return true; });
+    }
+    static bool DocumentCopyAllowed(string role) {
+        return SelectionCopyPolicy.CopyFallbackAllowed(role) || role == "ControlType.Hyperlink"
+            || role == "ControlType.Group" || role == "ControlType.ListItem";
+    }
     static string AutomationSelection(SelectionContext context) {
         try {
             AutomationElement focused = CurrentSelectionFocus(context);
-            bool password = focused.Current.IsPassword;
-            bool fallbackAllowed = SelectionCopyPolicy.CopyFallbackAllowed(focused.Current.ControlType.ProgrammaticName);
-            object pattern;
-            bool hasTextPattern = focused.TryGetCurrentPattern(TextPattern.Pattern, out pattern);
-            TextPattern textPattern = pattern as TextPattern;
-            if (hasTextPattern && textPattern == null)
-                throw new InvalidOperationException("SELECTION: The source returned an invalid text provider; select text and retry.");
-            return SelectionCopyPolicy.ReadAutomation(password, fallbackAllowed, hasTextPattern,
-                delegate { return textPattern.GetSelection(); }, delegate(TextPatternRange range) { return range.GetText(-1); });
+            string focusedRole = focused.Current.ControlType.ProgrammaticName;
+            bool focusedEmpty = false, document = false;
+            IntPtr root = GetAncestor(context.Foreground, 2);
+            // Validate the complete bounded ancestor chain before reading any
+            // selected text. A provider below a protected ancestor must never
+            // disclose its range just because its own IsPassword is false.
+            List<AutomationElement> ancestors = new List<AutomationElement>();
+            AutomationElement element = focused;
+            bool sourceRootReached = false;
+            for (int depth = 0; element != null && depth < 64; depth++) {
+                if (element.Current.IsPassword) throw new InvalidOperationException("PROTECTED: Selected text is inside a password control.");
+                int handle = element.Current.NativeWindowHandle;
+                if (handle != 0 && GetAncestor(new IntPtr(handle), 2) != root)
+                    throw new InvalidOperationException("SELECTION: Text provider is outside the source window; select text and retry.");
+                ancestors.Add(element);
+                if (handle != 0 && new IntPtr(handle) == root) { sourceRootReached = true; break; }
+                element = TreeWalker.RawViewWalker.GetParent(element);
+            }
+            if (!sourceRootReached) throw new InvalidOperationException("SELECTION: The text provider ancestry is incomplete; select text and retry.");
+            for (int depth = 0; depth < ancestors.Count; depth++) {
+                element = ancestors[depth];
+                string role = element.Current.ControlType.ProgrammaticName;
+                if (depth == 0 || role == "ControlType.Document" || role == "ControlType.Edit") {
+                    object raw; bool available = element.TryGetCurrentPattern(TextPattern.Pattern, out raw);
+                    TextPattern pattern = raw as TextPattern;
+                    if (available && pattern == null) throw new InvalidOperationException("SELECTION: The source returned an invalid text provider; select text and retry.");
+                    if (role == "ControlType.Document") {
+                        document = true;
+                        if (element.Current.ProcessId != 0) context.SourceProcesses.Add(element.Current.ProcessId);
+                    }
+                    if (available) {
+                        // An empty Edit is authoritative. A document or its
+                        // focused descendant can expose a different caret than
+                        // the document selection; only walk this ancestor path.
+                        string selected = SelectionCopyPolicy.ReadAutomation(false, true, true,
+                            delegate { return pattern.GetSelection(); }, delegate(TextPatternRange range) { return range.GetText(-1); }, role != "ControlType.Edit");
+                        if (!String.IsNullOrWhiteSpace(selected)) return selected;
+                        if (depth == 0) focusedEmpty = true;
+                    }
+                    if (role == "ControlType.Edit") {
+                        if (!SelectionCopyPolicy.CopyFallbackAllowed(focusedRole))
+                            throw new InvalidOperationException("NO_SELECTION: The focused editable control does not provide a selection.");
+                        return null; // Unsupported editable provider, not an empty valid range.
+                    }
+                }
+            }
+            if (document && DocumentCopyAllowed(focusedRole)) return null;
+            if (!focusedEmpty && SelectionCopyPolicy.CopyFallbackAllowed(focusedRole)) return null;
+            throw new InvalidOperationException("NO_SELECTION: No text is selected in the source application.");
         } catch (InvalidOperationException error) {
             if (error.Message.StartsWith("PROTECTED:") || error.Message.StartsWith("NO_SELECTION:") || error.Message.StartsWith("SELECTION:")) throw;
             throw new InvalidOperationException("SELECTION: The source selection query failed; select text and retry.");
         } catch (ElementNotAvailableException) {
             throw new InvalidOperationException("SELECTION: The source control is no longer available; select text and retry.");
         }
+    }
+    static void RequireCopiedSourceOwner(SelectionContext context) {
+        IntPtr owner = GetClipboardOwner(); uint process;
+        if (owner == IntPtr.Zero || GetWindowThreadProcessId(owner, out process) == 0 || !context.SourceProcesses.Contains(unchecked((int)process)))
+            throw new InvalidOperationException("CLIPBOARD_CHANGED: The new clipboard data does not belong to the verified source; current contents were preserved.");
     }
     static object CloneClipboardValue(object value) {
         if (value == null) throw new InvalidOperationException("Clipboard format could not be materialized.");
@@ -389,12 +485,14 @@ public static class EchoLingoNative {
         return input;
     }
     public static string SelectedText() {
-        SelectionContext context = CaptureSelectionContext();
-        string direct = AutomationSelection(context);
+        NativeCancellation.ThrowIfRequested();
+        SelectionContext context = SelectionQuery(CaptureSelectionContext);
+        string direct = SelectionQuery(delegate { return AutomationSelection(context); });
         RequireSelectionContext(context);
         if (!String.IsNullOrWhiteSpace(direct)) return direct;
         DateTime deadline = DateTime.UtcNow.AddMilliseconds(1500);
         while (ModifiersDown()) {
+            NativeCancellation.ThrowIfRequested();
             if (DateTime.UtcNow >= deadline) throw new InvalidOperationException("SELECTION: Release the shortcut keys and retry.");
             Thread.Sleep(20);
         }
@@ -403,21 +501,27 @@ public static class EchoLingoNative {
         DataObject saved;
         uint initial = GetClipboardSequenceNumber();
         try {
+            NativeCancellation.ThrowIfRequested();
             saved = SnapshotClipboard(resources);
             if (GetClipboardSequenceNumber() != initial) throw new InvalidOperationException("Clipboard changed while its formats were being preserved. Retry.");
+        }
+        catch (OperationCanceledException) {
+            foreach (IDisposable resource in resources) resource.Dispose(); throw;
         }
         catch (Exception error) {
             foreach (IDisposable resource in resources) resource.Dispose();
             throw new InvalidOperationException("CLIPBOARD: Cannot preserve all clipboard formats. Selection capture was stopped before changing the clipboard. " + error.Message);
         }
         try {
-            return SelectionCopyPolicy.RevalidateAndCopy(delegate { return AutomationSelection(context); },
+            return SelectionCopyPolicy.RevalidateAndCopy(delegate { return SelectionQuery(delegate { return AutomationSelection(context); }); },
                 delegate {
+                    NativeCancellation.ThrowIfRequested();
                     RequireSelectionContext(context);
                     if (ModifiersDown())
                         throw new InvalidOperationException("SELECTION: Foreground application or shortcut modifiers changed before copy; retry.");
                     SelectionCopyPolicy.RequireCurrentSequence(initial, GetClipboardSequenceNumber());
                 }, delegate {
+                    NativeCancellation.ThrowIfRequested();
                     INPUT[] keys = new INPUT[] { Key(0x11, false), Key(0x43, false), Key(0x43, true), Key(0x11, true) };
                     uint inserted = SendInput((uint)keys.Length, keys, Marshal.SizeOf(typeof(INPUT)));
                     if (inserted != keys.Length) {
@@ -433,15 +537,22 @@ public static class EchoLingoNative {
                             // as before invoking this callback; a newer copy wins.
                             SelectionCopyPolicy.RequireCurrentSequence(copied, GetClipboardSequenceNumber());
                             try {
-                                if (saved.GetFormats(false).Length == 0) Clipboard.Clear();
-                                else Clipboard.SetDataObject(saved, true, 5, 40);
+                                if (saved.GetFormats(false).Length == 0) {
+                                    if (!OpenClipboard(IntPtr.Zero)) throw new InvalidOperationException("Clipboard is busy.");
+                                    try {
+                                        SelectionCopyPolicy.RequireCurrentSequence(copied, GetClipboardSequenceNumber());
+                                        if (!EmptyClipboard()) throw new InvalidOperationException("Cannot restore an empty clipboard.");
+                                    } finally { CloseClipboard(); }
+                                }
+                                else Clipboard.SetDataObject(saved, true, 0, 0);
                             } catch (Exception error) {
                                 throw new InvalidOperationException("CLIPBOARD_RESTORE_FAILED: Could not restore original clipboard formats. " + error.Message);
                             }
                         }, delegate { return clock.ElapsedMilliseconds; }, delegate { Thread.Sleep(5); },
                         Environment.GetEnvironmentVariable("ECHOLINGO_SELECTION_TRACE") == "1"
                             ? (Action<string>)delegate(string message) { Console.Error.WriteLine(message); } : null,
-                        delegate { RequireSelectionContext(context); });
+                        delegate { NativeCancellation.ThrowIfRequested(); RequireSelectionContext(context); },
+                        delegate { RequireCopiedSourceOwner(context); });
             });
         } finally { foreach (IDisposable resource in resources) resource.Dispose(); }
     }
@@ -472,6 +583,7 @@ public static class EchoLingoNative {
     public static void CaptureRegion(string path) { CaptureRegion(path, true); }
     public static void CaptureRegion(string path, bool mouseHook) { CaptureRegion(path, mouseHook, 0, 0); }
     public static void CaptureRegion(string path, bool mouseHook, uint hostThread, long hostToken) {
+        NativeCancellation.ThrowIfRequested();
         ConfigureDpi();
         try {
             if (GetAwarenessFromDpiAwarenessContext(GetThreadDpiAwarenessContext()) != 2)
@@ -491,7 +603,7 @@ public static class EchoLingoNative {
                 CapturePerformance.Mark("pixelsCapturedMilliseconds");
                 picker.ValidateCaptureEnvironment();
                 crop.Save(path, ImageFormat.Png);
-                CapturePerformance.Mark("pngSavedMilliseconds");
+                CapturePerformance.Mark("pngSavedMilliseconds");CaptureHealth.Duration("releaseToPngMilliseconds","releaseAtMilliseconds");
             }
         }
     }
@@ -1346,6 +1458,27 @@ sealed class CaptureInputPlanes : IDisposable {
     }
 }
 
+// One read-only handle for this fresh helper lifetime. The parent owns the
+// manual-reset event; no ACL/policy changes, inherited handles or stored token.
+public static class NativeCancellation {
+    [DllImport("kernel32.dll",CharSet=CharSet.Unicode,SetLastError=true)] static extern IntPtr OpenEvent(uint access,bool inherit,string name);
+    [DllImport("kernel32.dll")] static extern uint WaitForSingleObject(IntPtr handle,uint milliseconds);
+    static IntPtr cancellation;
+    public static void Configure(string name){
+        if(String.IsNullOrEmpty(name))return;
+        if(name.Length>128||!System.Text.RegularExpressions.Regex.IsMatch(name,@"\ALocal\\EchoLingo-cancel-[0-9a-fA-F-]+\z"))throw new InvalidOperationException("NATIVE_CANCEL: Invalid task cancellation session.");
+        cancellation=OpenEvent(0x100000,false,name);
+        if(cancellation==IntPtr.Zero)throw new InvalidOperationException("NATIVE_CANCEL: Task cancellation session is unavailable.");
+    }
+    public static bool Requested {get{
+        if(cancellation==IntPtr.Zero)return false;
+        uint result=WaitForSingleObject(cancellation,0);
+        if(result==0)return true;if(result==258)return false;
+        throw new InvalidOperationException("NATIVE_CANCEL: Windows could not inspect task cancellation.");
+    }}
+    public static void ThrowIfRequested(){if(Requested)throw new OperationCanceledException("CANCELLED: Native task was superseded.");}
+}
+
 // The production Rust hook consumes legacy input before it reaches any source
 // HWND. This own message-only mailbox transfers scalar physical coordinates;
 // no focus/activation, shared pointers, clipboard or content crosses this bridge.
@@ -1362,7 +1495,7 @@ sealed class CaptureDelegatedInput : NativeWindow, IDisposable {
     readonly CaptureMoveMailbox moves;
     readonly Stopwatch clock=Stopwatch.StartNew();
     long lastControl=-250, lastAck, lastPing=-250;
-    bool ready, armed, finishing, stopAck, disposed;
+    bool ready, armed, finishing, stopAck, disposed, stopSent, stopAttempted;
     public bool Armed { get { return armed&&!finishing&&failure==null; } }
     string failure;
     public string Failure { get { return failure; } }
@@ -1380,6 +1513,9 @@ sealed class CaptureDelegatedInput : NativeWindow, IDisposable {
         if(finished)finishing=true;
         if(!ready&&now>3000){Fail();return;}
         if(ready&&now-lastAck>1250){Fail();return;}
+        // A completed release sends STOP immediately; its acknowledgement is
+        // the condition, not a50ms control-throttle or a fixed cleanup pause.
+        if(finishing&&ready&&!stopAck&&!stopSent){stopSent=true;lastControl=now;Send(StopMessage);return;}
         if(now-lastControl<50)return;lastControl=now;
         if(!ready){Send(Ready);return;}
         if(finishing){if(!stopAck)Send(StopMessage);return;}
@@ -1402,15 +1538,15 @@ sealed class CaptureDelegatedInput : NativeWindow, IDisposable {
                 long packed=message.LParam.ToInt64();Point pointer=new Point(unchecked((int)(packed>>32)),unchecked((int)packed));
                 int kind=message.Msg==LeftDown?0x0201:message.Msg==LeftUp?0x0202:message.Msg==RightDown?0x0204:0x0205;
                 CaptureHealth.Increment(kind==0x0201||kind==0x0204?"nativeHostDowns":"nativeHostUps");
-                moves.Publish(pointer,false);lock(gate)input.Mouse(kind,pointer,state);
+                moves.Publish(pointer,false);lock(gate){input.Mouse(kind,pointer,state);if(kind==0x0202&&state.Finished)CaptureHealth.Mark("releaseAtMilliseconds");}
             }
             return;
         }
         base.WndProc(ref message);
     }
     public bool Stop() {
-        if(disposed)return stopAck&&failure==null;
-        finishing=true;Stopwatch wait=Stopwatch.StartNew();
+        if(disposed||stopAttempted)return stopAck&&failure==null;
+        stopAttempted=true;finishing=true;Stopwatch wait=Stopwatch.StartNew();
         do{Pulse(true);Application.DoEvents();if(stopAck)break;Thread.Sleep(5);}while(wait.ElapsedMilliseconds<600);
         if(!stopAck)Fail();return stopAck&&failure==null;
     }
@@ -1679,6 +1815,7 @@ sealed class RegionPicker : ApplicationContext {
             catch (InvalidOperationException error) { failure = error.Message; }
         }
         bool left = Down(0x01), right = Down(0x02);
+        if(NativeCancellation.Requested){lock(selectionGate)state.Cancel();}
         lock (selectionGate) {
             if (!input.Armed) input.ResyncReleasedButtons(left, right);
             if (input.EscapeCancelled || failure != null) state.Cancel();
@@ -1720,7 +1857,7 @@ sealed class RegionPicker : ApplicationContext {
         // Recheck only phase under its short lock; native queries stay outside.
         lock (selectionGate) if (state.Dragging || state.Finished) { hovered = Rectangle.Empty; hoverPolicy.Clear(); }
         if (finished) {
-            if (!stopping) { stopping = true; CapturePerformance.Mark("selectionFinishedMilliseconds"); foreach (CaptureOverlay overlay in overlays) overlay.Hide(); }
+            if (!stopping) { stopping = true; CaptureHealth.Mark("releaseAtMilliseconds");CapturePerformance.Mark("selectionFinishedMilliseconds"); foreach (CaptureOverlay overlay in overlays) overlay.Hide(); }
             // Keep a short bounded drain for matching mouse/Escape releases.
             if (mayStop) {
                 if (releaseExceeded && failure == null)
@@ -1786,7 +1923,7 @@ sealed class RegionPicker : ApplicationContext {
         if (moves != null) { CapturePerformance.Set("movesPublished", moves.Moves); CapturePerformance.Set("moveWakesPosted", moves.Posts); CapturePerformance.Set("movePostFailures", moves.Failures); }
         if (moves != null) { CaptureHealth.Set("hookMouseMoves", moves.Moves); CaptureHealth.Set("moveWakesPosted", moves.Posts); CaptureHealth.Set("movePostFailures", moves.Failures); }
         if (wake != null) wake.Dispose();
-        CapturePerformance.Mark("overlaysDisposedMilliseconds");
+        CapturePerformance.Mark("overlaysDisposedMilliseconds");CaptureHealth.Duration("releaseToCleanupMilliseconds","releaseAtMilliseconds");
     }
     protected override void Dispose(bool disposing) {
         if (disposing) {
@@ -1806,6 +1943,9 @@ sealed class RegionPicker : ApplicationContext {
     ) | Select-Object -Unique
     Add-Type -TypeDefinition $source -ReferencedAssemblies $references
     }
+    [NativeCancellation]::Configure($NativeCancellationEvent)
+    [EchoLingoNative]::ExcludedSourceProcessId = $ExcludedSourceProcessId
+    [NativeCancellation]::ThrowIfRequested()
     $script:HelperPhases['nativeTypesReadyMilliseconds'] = $script:HelperWatch.Elapsed.TotalMilliseconds
     if ($PerformanceDiagnostics) { [CapturePerformance]::Enable() }
     [EchoLingoNative]::ConfigureDpi()
@@ -1831,11 +1971,21 @@ sealed class RegionPicker : ApplicationContext {
     function Await-WinRt($Operation, [Type]$ResultType) {
         $method = $script:AsTask.MakeGenericMethod($ResultType)
         $task = $method.Invoke($null, @($Operation))
-        $remaining = [int][Math]::Max(1, ($script:OcrDeadline - [DateTime]::UtcNow).TotalMilliseconds)
-        if (-not $task.Wait($remaining)) {
-            try { $Operation.Cancel() } catch { }
-            throw 'OCR_TIMEOUT: Local OCR exceeded 30 seconds.'
+        while (-not $task.IsCompleted) {
+            if ([NativeCancellation]::Requested) {
+                try { $Operation.Cancel() } catch { }
+                [NativeCancellation]::ThrowIfRequested()
+            }
+            $remaining = [int][Math]::Max(0.0, ($script:OcrDeadline - [DateTime]::UtcNow).TotalMilliseconds)
+            if ($remaining -le 0) {
+                try { $Operation.Cancel() } catch { }
+                throw 'OCR_TIMEOUT: Local OCR exceeded 30 seconds.'
+            }
+            # A task completion wakes immediately.30ms only bounds cancellation
+            # checks; this is not a delay applied after OCR has completed.
+            $null = $task.Wait([Math]::Min(30, $remaining))
         }
+        [NativeCancellation]::ThrowIfRequested()
         return $task.GetAwaiter().GetResult()
     }
     function Test-OcrBounds($Line) {
@@ -1996,6 +2146,7 @@ sealed class RegionPicker : ApplicationContext {
         if ((Join-OcrLayoutLines $invalid) -cne 'unmodified  spaces') { throw 'SELF_TEST: Invalid geometry changed original recognizer text.' }
     }
     function Get-OcrText([string]$Path) {
+        [NativeCancellation]::ThrowIfRequested()
         $script:HelperPhases['ocrStartMilliseconds'] = $script:HelperWatch.Elapsed.TotalMilliseconds
         Initialize-Ocr
         $script:OcrDeadline = [DateTime]::UtcNow.AddSeconds(30)

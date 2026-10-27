@@ -368,7 +368,7 @@ async function receiveCapturedText(payload: SourceTextEvent): Promise<void> {
   const intent = focusIntentRevision;
   let presentedEpoch = presentationEpoch;
   try {
-    const presentation = await panelLayout.presentPopup(presentationEpoch, Boolean(payload.focusInput), Boolean(payload.updateVisiblePopup));
+    const presentation = await panelLayout.presentPopup(presentationEpoch, Boolean(payload.focusInput), Boolean(payload.reuseVisiblePopup ?? payload.updateVisiblePopup));
     if (presentation) { applyTranslationPresentation(presentation); presentedEpoch = presentation.epoch; }
     else if (desktop) return;
   } catch (error) {

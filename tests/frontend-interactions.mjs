@@ -1621,6 +1621,74 @@ try {
   assert.equal(await page.evaluate(() => window.__qa.showPopupAttempts.at(-1).reuseVisiblePopup), false);
   assert.equal(await page.evaluate(() => window.__qa.showPopupAttempts.at(-1).focusInput), false);
   assert.equal(await pin.getAttribute('aria-pressed'), 'true');
+  // Exercise the production delivery IDs/ACK path as well as legacy synthetic
+  // events: every fresh pinned task may replace a completed result, while
+  // edits/navigation and a newer task still invalidate the previous request.
+  let pinnedDeliveryId = 1000;
+  for (const kind of ['ocr', 'selection', 'ocr', 'selection']) {
+    const task = await page.evaluate(() => window.__qa.nativePinnedCaptureStart());
+    const count = await page.evaluate(() => window.__qa.translationRequests.length);
+    const id = ++pinnedDeliveryId;
+    await page.evaluate(({ kind, task, id }) => {
+      const payload = { text: `QA identified pinned ${kind} ${id}`, mode: 'translate', presentationEpoch: task.epoch,
+        deliveryId: id, updateVisiblePopup: true, reuseVisiblePopup: kind === 'ocr', ...(kind === 'ocr' ? { captureOrigin: 'ocr' } : {}) };
+      window.__qa.pendingSource = structuredClone(payload); window.__qa.emit('source-text', payload);
+    }, { kind, task, id });
+    await page.waitForFunction(({ count, id }) => window.__qa.translationRequests.length === count + 1 && window.__qa.sourceAcks.includes(id), { count, id });
+    await page.getByText('Isolated test translation fixture', { exact: true }).waitFor();
+    assert.equal(await page.locator('#source-text').inputValue(), `QA identified pinned ${kind} ${id}`);
+    assert.equal(await page.evaluate(() => window.__qa.showPopupAttempts.at(-1).reuseVisiblePopup), kind === 'ocr');
+    assert.equal(await pin.getAttribute('aria-pressed'), 'true');
+  }
+  const supersededPinned = await page.evaluate(() => window.__qa.nativePinnedCaptureStart());
+  const latestPinned = await page.evaluate(() => window.__qa.nativePinnedCaptureStart());
+  const latestPinnedId = ++pinnedDeliveryId;
+  const beforeLatestPinned = await page.evaluate(() => window.__qa.translationRequests.length);
+  await page.evaluate(({ old, current, id }) => {
+    window.__qa.emit('source-text', { text: 'QA stale native OCR completion', mode: 'translate', presentationEpoch: old.epoch, deliveryId: id,
+      updateVisiblePopup: true, reuseVisiblePopup: true, captureOrigin: 'ocr' });
+    window.__qa.emit('source-text', { text: 'QA latest AltD replaces pending OCR', mode: 'translate', presentationEpoch: current.epoch, deliveryId: id + 1,
+      updateVisiblePopup: true, reuseVisiblePopup: false });
+  }, { old: supersededPinned, current: latestPinned, id: latestPinnedId });
+  pinnedDeliveryId++;
+  await page.waitForFunction((count) => window.__qa.translationRequests.length === count + 1, beforeLatestPinned);
+  await page.getByText('Isolated test translation fixture', { exact: true }).waitFor();
+  assert.equal(await page.locator('#source-text').inputValue(), 'QA latest AltD replaces pending OCR');
+  assert.equal(await page.evaluate(() => window.__qa.showPopupAttempts.at(-1).reuseVisiblePopup), false);
+  const beforeRestoreNotice = await page.evaluate(() => ({
+    source: document.querySelector('#source-text').value, results: document.querySelector('#results').textContent,
+    requests: window.__qa.translationRequests.length, shows: window.__qa.showPopupAttempts.length,
+    hides: window.__qa.nativeHideTransitions, epoch: window.__qa.presentation.epoch,
+  }));
+  await page.evaluate(() => window.__qa.emit('action-error', '原剪贴板恢复失败，当前剪贴板可能仍是刚才复制的选中文字。'));
+  await page.locator('#toast').getByText('原剪贴板恢复失败，当前剪贴板可能仍是刚才复制的选中文字。').waitFor();
+  assert.deepEqual(await page.evaluate(() => ({
+    source: document.querySelector('#source-text').value, results: document.querySelector('#results').textContent,
+    requests: window.__qa.translationRequests.length, shows: window.__qa.showPopupAttempts.length,
+    hides: window.__qa.nativeHideTransitions, epoch: window.__qa.presentation.epoch,
+  })), beforeRestoreNotice);
+  for (const invalidation of ['edit', 'pin-toggle', 'management']) {
+    const task = await page.evaluate(() => window.__qa.nativePinnedCaptureStart());
+    const baseline = await page.evaluate(() => ({ requests: window.__qa.translationRequests.length, shows: window.__qa.showPopupAttempts.length }));
+    if (invalidation === 'edit') await page.locator('#source-text').fill('QA edit during retained selection wins');
+    if (invalidation === 'management') await goView('history');
+    if (invalidation === 'pin-toggle') { await pin.click(); await pin.click(); }
+    const text = await page.locator('#source-text').inputValue();
+    const id = ++pinnedDeliveryId;
+    await page.evaluate(({ task, id }) => window.__qa.emit('source-text', { text: 'QA retained selection completion', mode: 'translate',
+      deliveryId: id, presentationEpoch: task.epoch, updateVisiblePopup: true, reuseVisiblePopup: false }), { task, id });
+    await page.waitForFunction((id) => window.__qa.sourceAcks.includes(id), id);
+    if (invalidation === 'pin-toggle') {
+      await page.waitForFunction((count) => window.__qa.translationRequests.length === count + 1, baseline.requests);
+      await page.getByText('Isolated test translation fixture', { exact: true }).waitFor();
+      assert.equal(await page.locator('#source-text').inputValue(), 'QA retained selection completion');
+    } else {
+      assert.equal(await page.locator('#source-text').inputValue(), text);
+      assert.equal(await page.evaluate(() => window.__qa.translationRequests.length), baseline.requests);
+      assert.equal(await page.evaluate(() => window.__qa.showPopupAttempts.length), baseline.shows);
+    }
+    if (invalidation === 'management') await goView('translate');
+  }
   // A pinned capture result is an update to the existing translation view,
   // never an instruction to navigate away from later management actions.
   for (const managementView of ['settings', 'history']) {

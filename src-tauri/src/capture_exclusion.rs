@@ -9,6 +9,33 @@
 //! https://learn.microsoft.com/windows/win32/api/winuser/nf-winuser-getwindowdisplayaffinity
 //! https://learn.microsoft.com/windows/win32/devnotes/rtlgetversion
 
+#[cfg(target_os = "windows")]
+fn exclusion_trace() -> &'static std::sync::Mutex<serde_json::Value> {
+    static TRACE: std::sync::OnceLock<std::sync::Mutex<serde_json::Value>> =
+        std::sync::OnceLock::new();
+    TRACE.get_or_init(|| std::sync::Mutex::new(serde_json::json!({"attempted":false})))
+}
+#[cfg(target_os = "windows")]
+pub fn last_diagnostics() -> serde_json::Value {
+    exclusion_trace()
+        .lock()
+        .map(|v| v.clone())
+        .unwrap_or(serde_json::Value::Null)
+}
+#[cfg(target_os = "windows")]
+fn trace_operation(value: serde_json::Value) {
+    if let Ok(mut trace) = exclusion_trace().lock() {
+        if let Some(items) = trace
+            .get_mut("operations")
+            .and_then(serde_json::Value::as_array_mut)
+        {
+            if items.len() < 12 {
+                items.push(value);
+            }
+        }
+    }
+}
+
 const EXCLUDE_FROM_CAPTURE: u32 = 0x11;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -125,6 +152,9 @@ impl CaptureWindowExclusion {
     /// these synchronous User32 calls from our capture worker; no UI-thread
     /// dispatcher acknowledgment is mistaken for an operating-system result.
     pub fn acquire(window: &tauri::WebviewWindow) -> Result<Self, String> {
+        if let Ok(mut trace) = exclusion_trace().lock() {
+            *trace = serde_json::json!({"attempted":true,"operations":[]});
+        }
         let hwnd = window
             .hwnd()
             .map_err(|_| ExclusionError::Unavailable.message())?
@@ -167,10 +197,35 @@ mod win32 {
         fn GetWindowDisplayAffinity(hwnd: Hwnd, affinity: *mut u32) -> i32;
         fn GetWindowThreadProcessId(hwnd: Hwnd, process_id: *mut u32) -> u32;
         fn GetAncestor(hwnd: Hwnd, flags: u32) -> Hwnd;
+        #[cfg(target_pointer_width = "64")]
+        fn GetWindowLongPtrW(hwnd: Hwnd, index: i32) -> isize;
+        #[cfg(target_pointer_width = "32")]
+        fn GetWindowLongW(hwnd: Hwnd, index: i32) -> i32;
     }
     #[link(name = "kernel32")]
     unsafe extern "system" {
         fn GetCurrentProcessId() -> u32;
+        fn GetLastError() -> u32;
+        fn SetLastError(error: u32);
+    }
+    #[link(name = "dwmapi")]
+    unsafe extern "system" {
+        fn DwmIsCompositionEnabled(enabled: *mut i32) -> i32;
+    }
+    fn style(hwnd: Hwnd, index: i32) -> (u32, u32) {
+        unsafe {
+            SetLastError(0);
+        }
+        #[cfg(target_pointer_width = "64")]
+        let value = unsafe { GetWindowLongPtrW(hwnd, index) } as u32;
+        #[cfg(target_pointer_width = "32")]
+        let value = unsafe { GetWindowLongW(hwnd, index) } as u32;
+        let error = if value == 0 {
+            unsafe { GetLastError() }
+        } else {
+            0
+        };
+        (value, error)
     }
     #[link(name = "ntdll")]
     unsafe extern "system" {
@@ -191,7 +246,11 @@ mod win32 {
             };
             // SAFETY: The initialized output buffer matches the Windows ABI;
             // RtlGetVersion avoids manifest-dependent version virtualization.
-            (unsafe { RtlGetVersion(&mut version) } >= 0).then_some((version.major, version.build))
+            let status = unsafe { RtlGetVersion(&mut version) };
+            super::trace_operation(
+                serde_json::json!({"operation":"version","status":status,"major":version.major,"build":version.build}),
+            );
+            (status >= 0).then_some((version.major, version.build))
         }
 
         fn owns_top_level_window(&self, hwnd: isize) -> bool {
@@ -199,31 +258,57 @@ mod win32 {
             let mut owner = 0;
             // SAFETY: User32 validates HWND values, and owner is writable. The
             // GA_ROOT result must be the same window, not an ancestor HWND.
-            unsafe {
-                !hwnd.is_null()
-                    && GetAncestor(hwnd, 2) == hwnd
-                    && GetWindowThreadProcessId(hwnd, &mut owner) != 0
-                    && owner == GetCurrentProcessId()
-            }
+            let root = unsafe { GetAncestor(hwnd, 2) };
+            let thread = unsafe { GetWindowThreadProcessId(hwnd, &mut owner) };
+            let owned = !hwnd.is_null()
+                && root == hwnd
+                && thread != 0
+                && owner == unsafe { GetCurrentProcessId() };
+            let (style, style_error) = style(hwnd, -16);
+            let (extended, extended_error) = self::style(hwnd, -20);
+            let mut composed = 0;
+            let dwm_status = unsafe { DwmIsCompositionEnabled(&mut composed) };
+            super::trace_operation(
+                serde_json::json!({"operation":"windowMetadata","ownedTopLevel":owned,"style":style,"styleError":style_error,"extendedStyle":extended,"extendedStyleError":extended_error,"layered":extended&0x80000!=0,"dwmStatus":dwm_status,"dwmComposing":composed!=0}),
+            );
+            owned
         }
 
         fn get(&self, hwnd: isize) -> Result<u32, ()> {
             let mut affinity = 0;
             // SAFETY: The affinity output is valid and HWND is checked above.
-            if unsafe { GetWindowDisplayAffinity(hwnd as Hwnd, &mut affinity) } == 0 {
-                Err(())
+            let success = unsafe { GetWindowDisplayAffinity(hwnd as Hwnd, &mut affinity) } != 0;
+            let error = if success {
+                0
             } else {
+                unsafe { GetLastError() }
+            };
+            super::trace_operation(
+                serde_json::json!({"operation":"getAffinity","success":success,"error":error,"value":if success{Some(affinity)}else{None}}),
+            );
+            if success {
                 Ok(affinity)
+            } else {
+                Err(())
             }
         }
 
         fn set(&self, hwnd: isize, affinity: u32) -> Result<(), ()> {
             // SAFETY: Only our validated top-level HWND is changed, with a
             // documented value or the exact value previously read from Windows.
-            if unsafe { SetWindowDisplayAffinity(hwnd as Hwnd, affinity) } == 0 {
-                Err(())
+            let success = unsafe { SetWindowDisplayAffinity(hwnd as Hwnd, affinity) } != 0;
+            let error = if success {
+                0
             } else {
+                unsafe { GetLastError() }
+            };
+            super::trace_operation(
+                serde_json::json!({"operation":"setAffinity","success":success,"error":error,"value":affinity}),
+            );
+            if success {
                 Ok(())
+            } else {
+                Err(())
             }
         }
     }

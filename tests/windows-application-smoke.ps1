@@ -2,7 +2,7 @@
 # desktop. Never run this against a user's installed app or existing app data.
 # It creates generated source content, a loopback mock and empty owned app dirs.
 [CmdletBinding()]
-param([string]$ApplicationPath = '', [switch]$OfflineTranslation, [switch]$InstalledPackage)
+param([string]$ApplicationPath = '', [switch]$OfflineTranslation, [switch]$InstalledPackage, [switch]$LatestIntentTests)
 $ErrorActionPreference = 'Stop'
 [Console]::OutputEncoding = [Text.UTF8Encoding]::new($false)
 try {
@@ -17,11 +17,15 @@ try {
     if ([string]::IsNullOrWhiteSpace($ApplicationPath)) {
         $ApplicationPath = Join-Path $PSScriptRoot '..\src-tauri\target\release\echolingo.exe'
     }
+    if ($LatestIntentTests -and $OfflineTranslation) { throw 'LATEST_INTENT_MOCK_ONLY: Existing three offline-model flows are unchanged.' }
     $ApplicationPath = (Resolve-Path -LiteralPath $ApplicationPath).Path
     Add-Type -AssemblyName System.Windows.Forms
     Add-Type -AssemblyName System.Drawing
     Add-Type -AssemblyName System.Web.Extensions
     Add-Type -AssemblyName System.Management
+    Add-Type -AssemblyName UIAutomationClient
+    Add-Type -AssemblyName UIAutomationTypes
+    Add-Type -AssemblyName WindowsBase
     $source = @'
 using System;
 using System.Collections;
@@ -37,6 +41,7 @@ using System.Text;
 using System.Threading;
 using System.Web.Script.Serialization;
 using System.Windows.Forms;
+using System.Windows.Automation;
 
 public static class EchoLingoApplicationSmoke {
     const string Identifier = "io.github.blueeeecho.echolingo";
@@ -45,6 +50,11 @@ public static class EchoLingoApplicationSmoke {
     static string Selected { get { return Offline ? "Hello world. This is a translation test." : "EchoLingo application selection 97531"; } }
     static string Typed { get { return Offline ? "\u4f60\u597d\uff0c\u4e16\u754c\u3002\u8fd9\u662f\u4e00\u6b21\u7ffb\u8bd1\u6d4b\u8bd5\u3002" : "EchoLingo typed input 86420"; } }
     static string OcrText { get { return Offline ? "Hello world 2468" : "EchoLingo OCR 2468"; } }
+    const string PinnedSelectionOne = "EchoLingo pinned selection alpha 13579";
+    const string PinnedSelectionTwo = "EchoLingo pinned selection bravo 86421";
+    const string PinnedOcr = "EchoLingo pinned OCR 3579";
+    const string AbandonedOcr = "EchoLingo abandoned OCR 7788";
+    const string SwitchedSelection = "EchoLingo switched selection 11223";
     const string MarkerName = ".echolingo-ci-owned";
     delegate bool EnumWindow(IntPtr window, IntPtr parameter);
     [DllImport("shell32.dll")] static extern int SHGetKnownFolderPath(ref Guid folder, uint flags, IntPtr token, out IntPtr path);
@@ -54,6 +64,7 @@ public static class EchoLingoApplicationSmoke {
     [DllImport("user32.dll")] static extern bool SetForegroundWindow(IntPtr window);
     [DllImport("user32.dll")] static extern bool EnumWindows(EnumWindow callback, IntPtr parameter);
     [DllImport("user32.dll")] static extern uint GetWindowThreadProcessId(IntPtr window, out uint process);
+    [DllImport("user32.dll", SetLastError=true)] static extern bool GetWindowDisplayAffinity(IntPtr window, out uint affinity);
     [DllImport("user32.dll")] static extern bool IsWindowVisible(IntPtr window);
     [DllImport("user32.dll", CharSet=CharSet.Unicode)] static extern int GetClassName(IntPtr window, StringBuilder name, int capacity);
     [DllImport("user32.dll")] static extern IntPtr GetDesktopWindow();
@@ -320,6 +331,104 @@ public static class EchoLingoApplicationSmoke {
         }
         throw new InvalidOperationException("TIMEOUT: " + failure);
     }
+    static IntPtr MainWindow(int process) {
+        List<IntPtr> candidates=new List<IntPtr>();
+        EnumWindows(delegate(IntPtr window,IntPtr unused){
+            uint owner;GetWindowThreadProcessId(window,out owner);StringBuilder name=new StringBuilder(256);GetClassName(window,name,name.Capacity);
+            if(owner==process&&GetAncestor(window,2)==window&&name.ToString()=="Tauri Window")candidates.Add(window);return true;
+        },IntPtr.Zero);return candidates.Count==1?candidates[0]:IntPtr.Zero;
+    }
+    static AutomationElement Element(IntPtr window,string name) {
+        return AutomationElement.FromHandle(window).FindFirst(TreeScope.Descendants,new PropertyCondition(AutomationElement.NameProperty,name));
+    }
+    static void InvokeControl(Process app,IntPtr main,string name) {
+        AutomationElement element=null;
+        WaitFor(delegate{return (element=Element(main,name))!=null;},5,"Actual popup accessibility control missing: "+name,app);
+        object pattern;
+        if(element.TryGetCurrentPattern(InvokePattern.Pattern,out pattern))((InvokePattern)pattern).Invoke();
+        else if(element.TryGetCurrentPattern(TogglePattern.Pattern,out pattern))((TogglePattern)pattern).Toggle();
+        else if(element.TryGetCurrentPattern(ExpandCollapsePattern.Pattern,out pattern))((ExpandCollapsePattern)pattern).Expand();
+        else throw new InvalidOperationException("Actual popup control has no supported action pattern: "+name);
+    }
+    static bool SourceMatches(IntPtr main,string expected,bool foldCase=false) {
+        AutomationElement element=AutomationElement.FromHandle(main).FindFirst(TreeScope.Descendants,new AndCondition(
+            new PropertyCondition(AutomationElement.ControlTypeProperty,ControlType.Edit),
+            new OrCondition(new PropertyCondition(AutomationElement.AutomationIdProperty,"source-text"),new PropertyCondition(AutomationElement.NameProperty,"\u539f\u6587"))));
+        object pattern;return element!=null&&!element.Current.IsOffscreen&&element.TryGetCurrentPattern(ValuePattern.Pattern,out pattern)&&String.Equals(((ValuePattern)pattern).Current.Value,expected,foldCase?StringComparison.OrdinalIgnoreCase:StringComparison.Ordinal);
+    }
+    static Dictionary<string,object> MainMetadata(Process app) {
+        IntPtr main=MainWindow(app.Id);uint affinity;bool affinityOk=GetWindowDisplayAffinity(main,out affinity);int affinityError=affinityOk?0:Marshal.GetLastWin32Error();RECT r;bool rectOk=GetWindowRect(main,out r);
+        return new Dictionary<string,object>{{"mainHwnd",WindowId(main)},{"mainProcessId",app.Id},{"visible",main!=IntPtr.Zero&&IsWindowVisible(main)},
+            {"style",GetWindowLongPtr(main,-16).ToInt64()},{"extendedStyle",GetWindowLongPtr(main,-20).ToInt64()},
+            {"displayAffinityQuerySucceeded",affinityOk},{"displayAffinity",affinityOk?(object)affinity:null},{"displayAffinityWin32Error",affinityError},
+            {"physicalBounds",rectOk?(object)new int[]{r.left,r.top,r.right-r.left,r.bottom-r.top}:null}};
+    }
+    sealed class PinnedVisibilityWatch : IDisposable {
+        readonly IntPtr window;readonly Thread thread;volatile bool stop;int samples,hidden;long maximumGapTicks;
+        public PinnedVisibilityWatch(IntPtr main){window=main;thread=new Thread(delegate(){long last=Stopwatch.GetTimestamp();while(!stop){long now=Stopwatch.GetTimestamp();maximumGapTicks=Math.Max(maximumGapTicks,now-last);last=now;Interlocked.Increment(ref samples);if(!IsWindowVisible(window))Interlocked.Increment(ref hidden);Thread.Sleep(10);}});thread.IsBackground=true;thread.Start();}
+        public void Check(){Assert(IsWindowVisible(window)&&Interlocked.CompareExchange(ref hidden,0,0)==0,"Pinned actual popup became hidden during a latest-intent workflow.");}
+        public Dictionary<string,object> Snapshot(){return new Dictionary<string,object>{{"samples",samples},{"hiddenSamples",hidden},{"maximumSampleGapMilliseconds",maximumGapTicks*1000.0/Stopwatch.Frequency},{"pollMilliseconds",10}};}
+        public void Dispose(){if(stop)return;stop=true;Assert(thread.Join(2000),"Pinned visibility observer did not stop.");}
+    }
+    static void PlaceGeneratedSource(Form form,TextBox source,IntPtr main,string text) {
+        RECT raw;Assert(GetWindowRect(main,out raw),"Cannot measure own popup for generated-source placement.");Rectangle popup=Rectangle.FromLTRB(raw.left,raw.top,raw.right,raw.bottom);popup.Inflate(12,12);
+        OnUi(form,delegate{
+            bool placed=false;Size size=form.Size;
+            foreach(Screen screen in Screen.AllScreens){Rectangle area=screen.WorkingArea;
+                Point[] candidates={new Point(area.Left+8,area.Top+8),new Point(area.Right-size.Width-8,area.Top+8),new Point(area.Left+8,area.Bottom-size.Height-8),new Point(area.Right-size.Width-8,area.Bottom-size.Height-8),
+                    new Point(popup.Left-size.Width-4,popup.Top),new Point(popup.Right+4,popup.Top),new Point(popup.Left,popup.Top-size.Height-4),new Point(popup.Left,popup.Bottom+4)};
+                foreach(Point point in candidates){Rectangle bounds=new Rectangle(point,size);if(area.Contains(bounds)&&!bounds.IntersectsWith(popup)){form.Location=point;placed=true;break;}}if(placed)break;
+            }
+            Assert(placed,"No non-overlapping generated-source placement; the actual popup was not moved or hidden.");
+            form.Activate();SetForegroundWindow(form.Handle);source.Focus();if(text!=null){source.Text="Prefix "+text+" suffix";source.Select(7,text.Length);}else source.Select(0,0);
+        });RequireForeground(form);
+        RECT moved;Assert(GetWindowRect(form.Handle,out moved)&&!Rectangle.FromLTRB(moved.left,moved.top,moved.right,moved.bottom).IntersectsWith(popup),"Generated form still overlaps the pinned popup.");
+    }
+    static void MoveGenerated(Form form,Point point) {
+        RequireForeground(form);Rectangle desktop=SystemInformation.VirtualScreen;INPUT input=new INPUT();input.data.mouse.dx=(int)Math.Round((point.X-desktop.Left)*65535.0/(desktop.Width-1));input.data.mouse.dy=(int)Math.Round((point.Y-desktop.Top)*65535.0/(desktop.Height-1));input.data.mouse.flags=0x8000|0x4000|1;Send(new INPUT[]{input});
+    }
+    static Dictionary<string,object> StartPinnedPicker(Form form,Panel image,Process app,IntPtr main,PinnedVisibilityWatch visibility,uint rejectedPid) {
+        Point first=Point.Empty,last=Point.Empty;Rectangle display=Rectangle.Empty;OnUi(form,delegate{first=image.PointToScreen(new Point(2,2));last=image.PointToScreen(new Point(image.Width-2,image.Height-2));display=Screen.FromPoint(first).Bounds;});
+        RECT raw;Assert(DwmGetWindowAttribute(form.Handle,9,out raw,Marshal.SizeOf(typeof(RECT)))==0,"Cannot measure generated picker source.");Rectangle frame=Rectangle.FromLTRB(raw.left,raw.top,raw.right,raw.bottom);
+        MoveGenerated(form,first);Dictionary<string,object> probe=new Dictionary<string,object>();Stopwatch time=Stopwatch.StartNew();Shortcut(form,0x53);
+        WaitFor(delegate{visibility.Check();return AppOcrReady(form,app.Id,form.Handle,frame,first,display,probe)&&Convert.ToUInt32(probe["helperProcessId"])!=rejectedPid;},25,"Pinned latest Alt+S did not create a new exact ready helper.",app);
+        visibility.Check();probe["hotkeyToReadyMilliseconds"]=time.Elapsed.TotalMilliseconds;probe["rejectedPreviousHelperPid"]=rejectedPid;probe["first"]=new int[]{first.X,first.Y};probe["last"]=new int[]{last.X,last.Y};probe["pinnedMainMetadata"]=MainMetadata(app);return probe;
+    }
+    static bool ProcessExited(uint pid){try{using(Process process=Process.GetProcessById((int)pid))return process.HasExited;}catch(ArgumentException){return true;}}
+    static void LatestIntents(Form form,TextBox source,Panel image,Process app,MockServer server,string history,string providerId,List<string> passed,Dictionary<string,object> report,Action<string> paint,Func<int> sourceEvents) {
+        Assert(server!=null&&!Offline,"Latest-intent extra flows require the generated loopback mock.");IntPtr main=MainWindow(app.Id);Assert(main!=IntPtr.Zero&&IsWindowVisible(main),"Latest-intent test has no unique visible actual Tauri popup.");
+        report["uiAutomationSelectorsUsed"]=true;List<Dictionary<string,object>> cases=new List<Dictionary<string,object>>();report["latestIntentCases"]=cases;report["latestIntentRequiredCaseCount"]=4;report["latestIntentUsesEscape"]=false;report["latestIntentExpectedHistoryCount"]=7;
+        InvokeControl(app,main,"\u9489\u4f4f\u7a97\u53e3");WaitFor(delegate{return Element(main,"\u53d6\u6d88\u9489\u4f4f")!=null&&IsWindowVisible(main);},5,"Actual popup pin did not engage.",app);
+        using(PinnedVisibilityWatch visibility=new PinnedVisibilityWatch(main)){
+            try{
+                foreach(string selected in new string[]{PinnedSelectionOne,PinnedSelectionTwo}){
+                    string kind=MockServer.Kind(selected);Dictionary<string,object> test=new Dictionary<string,object>{{"kind",kind},{"ok",false}};cases.Add(test);
+                    PlaceGeneratedSource(form,source,main,selected);visibility.Check();Stopwatch time=Stopwatch.StartNew();Shortcut(form,0x44);
+                    WaitFor(delegate{visibility.Check();if(server.Error!=null)throw new InvalidOperationException(server.Error);return HasHistory(history,selected,kind,providerId)&&SourceMatches(main,selected);},45,"One Alt+D did not replace the pinned source and commit distinct history.",app);
+                    test["hotkeyToHistoryMilliseconds"]=time.Elapsed.TotalMilliseconds;RequireForeground(form);test["ok"]=true;
+                }
+                Assert(server.Count==5,"Pinned selections caused duplicate or missing translations.");passed.Add("Pinned actual popup accepted two distinct one-press Alt+D selections and durable histories");
+                PlaceGeneratedSource(form,source,main,null);paint(PinnedOcr);
+                Dictionary<string,object> first=StartPinnedPicker(form,image,app,main,visibility,0);uint oldPid=Convert.ToUInt32(first["helperProcessId"]);
+                Dictionary<string,object> restarted=new Dictionary<string,object>{{"kind","pinned-ocr-restart"},{"ok",false},{"firstReadiness",first}};cases.Add(restarted);
+                // No Escape and no mouse release: the next Alt+S is a new task.
+                Dictionary<string,object> second=StartPinnedPicker(form,image,app,main,visibility,oldPid);restarted["secondReadiness"]=second;
+                Assert(Convert.ToUInt32(second["helperProcessId"])!=oldPid,"Repeated Alt+S reused the old picker process.");WaitFor(delegate{visibility.Check();return ProcessExited(oldPid);},5,"Superseded picker did not exit.",app);
+                int[] begin=(int[])second["first"],end=(int[])second["last"];Point a=new Point(begin[0],begin[1]),b=new Point(end[0],end[1]);
+                MoveGenerated(form,a);INPUT down=new INPUT();down.data.mouse.flags=2;Send(new INPUT[]{down});MoveGenerated(form,b);RequireForeground(form);INPUT up=new INPUT();up.data.mouse.flags=4;Stopwatch release=Stopwatch.StartNew();Send(new INPUT[]{up});
+                WaitFor(delegate{visibility.Check();if(server.Error!=null)throw new InvalidOperationException(server.Error);return HasHistory(history,PinnedOcr,"pinned-ocr",providerId)&&SourceMatches(main,PinnedOcr,true);},50,"Repeated pinned Alt+S did not OCR/replace/translate the generated image.",app);
+                restarted["releaseToHistoryMilliseconds"]=release.Elapsed.TotalMilliseconds;visibility.Check();RequireForeground(form);Assert(AppOverlays(app.Id)==0&&sourceEvents()==0,"Pinned OCR left an overlay or delivered input to generated content.");Assert(server.Count==6,"Repeated OCR caused duplicate or stale translations.");restarted["ok"]=true;passed.Add("Pinned Alt+S then Alt+S without Esc created a new helper and completed one fresh OCR/history while visible");
+                PlaceGeneratedSource(form,source,main,SwitchedSelection);paint(AbandonedOcr);
+                Dictionary<string,object> abandoned=StartPinnedPicker(form,image,app,main,visibility,0);uint abandonedPid=Convert.ToUInt32(abandoned["helperProcessId"]);
+                Dictionary<string,object> switched=new Dictionary<string,object>{{"kind","ocr-to-selection"},{"ok",false},{"cancelledReadiness",abandoned}};cases.Add(switched);
+                Stopwatch switchTime=Stopwatch.StartNew();Shortcut(form,0x44);
+                WaitFor(delegate{visibility.Check();if(server.Error!=null)throw new InvalidOperationException(server.Error);return HasHistory(history,SwitchedSelection,"switched-selection",providerId)&&SourceMatches(main,SwitchedSelection)&&ProcessExited(abandonedPid)&&AppOverlays(app.Id)==0;},45,"Alt+D did not replace/cancel the ready OCR task and commit one new selection.",app);
+                switched["hotkeyToHistoryMilliseconds"]=switchTime.Elapsed.TotalMilliseconds;visibility.Check();RequireForeground(form);Assert(server.Count==7,"OCR-to-selection caused a stale or duplicate translation.");
+                Assert(new JavaScriptSerializer().Deserialize<object[]>(File.ReadAllText(history)).Length==7,"Latest-intent fixture did not commit exactly seven distinct generated histories.");Assert(Element(main,"\u53d6\u6d88\u9489\u4f4f")!=null,"Popup pin state was lost.");switched["ok"]=true;passed.Add("Pinned ready Alt+S -> one Alt+D cancelled the picker with no Esc, fresh source/history and zero remaining overlays");
+                report["latestIntentTestsPassed"]=true;
+            }finally{visibility.Dispose();report["pinnedVisibilityObservation"]=visibility.Snapshot();report["latestIntentExecutedCaseCount"]=cases.Count;report["latestIntentPassedCaseCount"]=cases.FindAll(delegate(Dictionary<string,object> value){return Convert.ToBoolean(value["ok"]);}).Count;}
+        }
+    }
     sealed class MockServer : IDisposable {
         readonly TcpListener listener; readonly Thread thread; readonly object gate = new object();
         readonly JavaScriptSerializer json = new JavaScriptSerializer();
@@ -332,6 +441,11 @@ public static class EchoLingoApplicationSmoke {
         public string Url { get { return "http://127.0.0.1:" + ((IPEndPoint)listener.LocalEndpoint).Port; } }
         public int Count { get { lock (gate) return Requests.Count; } }
         public static string Kind(string text) {
+            if (text == PinnedSelectionOne) return "pinned-selection-one";
+            if (text == PinnedSelectionTwo) return "pinned-selection-two";
+            if (String.Equals(text.Trim(),PinnedOcr,StringComparison.OrdinalIgnoreCase)) return "pinned-ocr";
+            if (String.Equals(text.Trim(),AbandonedOcr,StringComparison.OrdinalIgnoreCase)) return "abandoned-ocr";
+            if (text == SwitchedSelection) return "switched-selection";
             if (text == Selected) return "selection";
             if (text == Typed) return "typed";
             if (String.Equals(text.Trim(), OcrText, StringComparison.OrdinalIgnoreCase)) return "ocr";
@@ -387,7 +501,7 @@ public static class EchoLingoApplicationSmoke {
             object[] entries = json.Deserialize<object[]>(File.ReadAllText(path));
             foreach (object raw in entries) {
                 Dictionary<string, object> entry = raw as Dictionary<string, object>;
-                if (entry == null || !String.Equals((string)entry["text"], source, kind == "ocr" ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal)) continue;
+                if (entry == null || !String.Equals((string)entry["text"], source, (kind == "ocr" || kind == "pinned-ocr") ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal)) continue;
                 foreach (object value in (IEnumerable)entry["results"]) {
                     Dictionary<string, object> result = (Dictionary<string, object>)value;
                     if ((string)result["providerId"] != providerId || result.ContainsKey("error")) continue;
@@ -410,11 +524,12 @@ public static class EchoLingoApplicationSmoke {
         using (Process command = Process.Start(stop)) { command.StandardOutput.ReadToEnd(); command.StandardError.ReadToEnd(); Assert(command.WaitForExit(10000), "Own process-tree cleanup timed out."); }
         Assert(app.WaitForExit(5000), "Own application did not exit during cleanup.");
     }
-    public static Dictionary<string, object> Run(string executable, bool offline, bool installed) {
+    public static Dictionary<string, object> Run(string executable, bool offline, bool installed, bool latest) {
+        Assert(!latest||!offline,"Latest-intent extra tests are mock-only.");
         Offline = offline; ActualTranslations.Clear();
         Dictionary<string, object> report = new Dictionary<string, object>(); List<string> passed = new List<string>();
         report["ok"] = false; report["passed"] = passed; report["actualApplicationTested"] = false;
-        report["singleHotkeyPerAction"] = true; report["uiAutomationSelectorsUsed"] = false;
+        report["latestIntentTestsRequested"]=latest; report["singleHotkeyPerAction"] = true; report["uiAutomationSelectorsUsed"] = false;
         report["credentialsCreated"] = false; report["credentialAccessScope"] = offline ? "None: bundled offline provider" : "One random absent provider account; no existing credential or key supplied";
         report["translationBackend"] = offline ? "real-bundled-offline-model" : "loopback-mock";
         report["multiMonitorTested"] = false; report["fullscreenTested"] = false; report["installedPackageTested"] = installed;
@@ -448,7 +563,8 @@ public static class EchoLingoApplicationSmoke {
                     form.FormBorderStyle = FormBorderStyle.FixedDialog; form.MaximizeBox = false;
                     source.Multiline = true; source.SetBounds(20, 20, 680, 80); source.Text = "Prefix " + Selected + " suffix";
                     image.SetBounds(20, 170, 680, 150); image.BackColor = Color.White;
-                    image.Paint += delegate(object sender, PaintEventArgs args) { using (Font font = new Font("Segoe UI", 30, FontStyle.Regular)) args.Graphics.DrawString(OcrText, font, Brushes.Black, 12, 40); };
+                    string paintedOcrText=OcrText;
+                    image.Paint += delegate(object sender, PaintEventArgs args) { using (Font font = new Font("Segoe UI", 30, FontStyle.Regular)) args.Graphics.DrawString(paintedOcrText, font, Brushes.Black, 12, 40); };
                     int sourceMouseEvents = 0; image.MouseDown += delegate { sourceMouseEvents++; }; image.MouseUp += delegate { sourceMouseEvents++; };
                     form.Controls.Add(source); form.Controls.Add(image); bool finished = false;
                     form.FormClosing += delegate(object sender, FormClosingEventArgs args) { if (!finished) args.Cancel = true; };
@@ -510,12 +626,14 @@ public static class EchoLingoApplicationSmoke {
                                 OnUi(form, delegate { Assert(sourceMouseEvents == 0, "OCR drag reached generated source control."); });
                                 Assert(AppOverlays(app.Id) == 0, "Actual OCR left selection overlays behind.");
                                 passed.Add("Actual Alt+S -> production transparent overlays -> left-drag -> WinRT OCR -> frontend source/automatic " + (offline ? "real offline model" : "mock") + " translation -> history; foreground preserved");
+                                if(latest) LatestIntents(form,source,image,app,server,history,providerId,passed,report,
+                                    delegate(string text){OnUi(form,delegate{paintedOcrText=text;image.Refresh();});},delegate{int events=0;OnUi(form,delegate{events=sourceMouseEvents;});return events;});
                                 report["mockRequests"] = server == null ? new List<Dictionary<string, object>>() : server.Requests;
                                 if (offline) {
                                     Assert(ActualTranslations.Count == 3 && new JavaScriptSerializer().Deserialize<object[]>(File.ReadAllText(history)).Length == 3, "Offline flows did not produce exactly three successful synthetic histories.");
                                 }
                                 report["actualOfflineTranslations"] = ActualTranslations; report["ok"] = true;
-                            } catch (Exception error) { report["error"] = error.Message; }
+                            } catch (Exception error) { report["error"] = error.Message;if(app!=null&&!app.HasExited){try{report["ownMainFailureMetadata"]=MainMetadata(app);}catch(Exception diagnostic){report["mainMetadataErrorType"]=diagnostic.GetType().Name;}} }
                             finally {
                                 if (!(bool)report["ok"]) ReleaseOwnInput(form, app);
                                 try { KillOwnTree(app); report["ownApplicationTreeStopped"] = true; } catch (Exception error) { report["ok"] = false; report["cleanupError"] = error.Message; }
@@ -545,9 +663,10 @@ public static class EchoLingoApplicationSmoke {
 }
 '@
     $references = @([Windows.Forms.Form].Assembly.Location, [Drawing.Bitmap].Assembly.Location,
-        [Web.Script.Serialization.JavaScriptSerializer].Assembly.Location, [Management.ManagementObject].Assembly.Location) | Select-Object -Unique
+        [Web.Script.Serialization.JavaScriptSerializer].Assembly.Location, [Management.ManagementObject].Assembly.Location, [Windows.Automation.AutomationElement].Assembly.Location,
+        [Windows.Automation.ControlType].Assembly.Location, [Windows.DependencyObject].Assembly.Location) | Select-Object -Unique
     Add-Type -TypeDefinition $source -ReferencedAssemblies $references
-    $result = [EchoLingoApplicationSmoke]::Run($ApplicationPath, [bool]$OfflineTranslation, [bool]$InstalledPackage)
+    $result = [EchoLingoApplicationSmoke]::Run($ApplicationPath, [bool]$OfflineTranslation, [bool]$InstalledPackage, [bool]$LatestIntentTests)
     $result['powerShellVersion'] = $PSVersionTable.PSVersion.ToString()
     $result['applicationSha256'] = (Get-FileHash -Algorithm SHA256 -LiteralPath $ApplicationPath).Hash.ToLowerInvariant()
     [Console]::Out.WriteLine(($result | ConvertTo-Json -Depth 12 -Compress))

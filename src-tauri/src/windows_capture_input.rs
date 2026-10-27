@@ -112,6 +112,7 @@ struct Shared {
     move_pending: AtomicBool,
     failed: AtomicBool,
     writer: Mutex<()>,
+    available: AtomicIsize,
 }
 impl Default for Shared {
     fn default() -> Self {
@@ -130,12 +131,53 @@ impl Default for Shared {
             move_pending: AtomicBool::new(false),
             failed: AtomicBool::new(false),
             writer: Mutex::new(()),
+            available: AtomicIsize::new(0),
         }
     }
 }
 static SHARED: OnceLock<Shared> = OnceLock::new();
 pub fn initialize() {
-    let _ = shared();
+    let s = shared();
+    #[cfg(windows)]
+    if s.available.load(Ordering::SeqCst) == 0 {
+        let event = unsafe { native::CreateEventW(std::ptr::null(), 1, 1, std::ptr::null()) };
+        if !event.is_null()
+            && s.available
+                .compare_exchange(0, event as isize, Ordering::SeqCst, Ordering::SeqCst)
+                .is_err()
+        {
+            unsafe {
+                native::CloseHandle(event);
+            }
+        }
+    }
+    #[cfg(not(windows))]
+    let _ = s;
+}
+#[cfg(windows)]
+pub fn wait_available(cancelled: impl Fn() -> bool) -> Result<(), String> {
+    let s = shared();
+    loop {
+        if cancelled() {
+            return Err("CANCELLED: Native task was superseded.".into());
+        }
+        if s.token.load(Ordering::SeqCst) == 0 {
+            return Ok(());
+        }
+        let event = s.available.load(Ordering::SeqCst);
+        if event == 0 || s.thread.load(Ordering::SeqCst) == 0 {
+            return Err("CAPTURE_INPUT_HOST: The native input listener is unavailable.".into());
+        }
+        let result = unsafe { native::WaitForSingleObject(event as _, 30) };
+        if result == 0 && s.token.load(Ordering::SeqCst) != 0 {
+            std::thread::yield_now();
+        }
+        if result != 0 && result != 258 {
+            return Err(
+                "CAPTURE_INPUT_HOST: Windows could not await the previous input release.".into(),
+            );
+        }
+    }
 }
 pub fn replacement_is_valid(old_unhooked: bool, error: Option<i32>) -> bool {
     old_unhooked || error == Some(1404)
@@ -155,6 +197,14 @@ fn finish_generation(s: &Shared) {
     s.target.store(0, Ordering::SeqCst);
     s.child.store(0, Ordering::SeqCst);
     s.flags.store(0, Ordering::SeqCst);
+    #[cfg(windows)]
+    if s.available.load(Ordering::SeqCst) != 0 {
+        unsafe {
+            native::SetEvent(s.available.load(Ordering::SeqCst) as _);
+        }
+    }
+    // Publish idle last: a new session cannot reset the event before this
+    // generation has finished signaling its release condition.
     s.token.store(0, Ordering::SeqCst);
 }
 #[cfg(windows)]
@@ -171,6 +221,19 @@ mod native {
         pub fn PostThreadMessageW(thread: u32, message: u32, word: usize, parameter: isize) -> i32;
         pub fn GetWindowThreadProcessId(window: *mut c_void, process: *mut u32) -> u32;
         pub fn GetAsyncKeyState(key: i32) -> i16;
+    }
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        pub fn CreateEventW(
+            attributes: *const c_void,
+            manual: i32,
+            initial: i32,
+            name: *const u16,
+        ) -> *mut c_void;
+        pub fn SetEvent(event: *mut c_void) -> i32;
+        pub fn ResetEvent(event: *mut c_void) -> i32;
+        pub fn CloseHandle(handle: *mut c_void) -> i32;
+        pub fn WaitForSingleObject(event: *mut c_void, milliseconds: u32) -> u32;
     }
     #[link(name = "bcrypt")]
     unsafe extern "system" {
@@ -430,6 +493,10 @@ impl Session {
         token &= i64::MAX as u64;
         if token == 0 {
             return Err("CAPTURE_INPUT_HOST: Windows returned an invalid input session.".into());
+        }
+        let event = s.available.load(Ordering::SeqCst);
+        if event == 0 || unsafe { native::ResetEvent(event as _) } == 0 {
+            return Err("CAPTURE_INPUT_HOST: Windows could not prepare input availability.".into());
         }
         s.child.store(0, Ordering::SeqCst);
         s.target.store(0, Ordering::SeqCst);

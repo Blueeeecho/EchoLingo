@@ -10,6 +10,82 @@ mod capture_exclusion;
 #[cfg(target_os = "windows")]
 pub use capture_exclusion::CaptureWindowExclusion;
 
+const NATIVE_CANCELLED: &str = "CANCELLED: Native task was superseded.";
+type NativeCancel = std::sync::Arc<std::sync::atomic::AtomicBool>;
+fn cancelled(cancel: Option<&NativeCancel>) -> bool {
+    cancel.is_some_and(|c| c.load(std::sync::atomic::Ordering::SeqCst))
+}
+
+pub fn selected_text_cancelable(cancel: NativeCancel) -> Result<String, String> {
+    cancellable_text("selected-text", cancel)
+}
+pub fn capture_ocr_cancelable(cancel: NativeCancel) -> Result<String, String> {
+    cancellable_text("capture-ocr", cancel)
+}
+pub fn capture_image_cancelable(cancel: NativeCancel) -> Result<String, String> {
+    image_response(run_cancelable("capture-image", cancel)?)
+}
+fn cancellable_text(mode: &str, cancel: NativeCancel) -> Result<String, String> {
+    run_cancelable(mode, cancel)?
+        .get("text")
+        .and_then(Value::as_str)
+        .map(str::to_owned)
+        .ok_or_else(|| "NATIVE_PROTOCOL: Native helper returned no text field.".into())
+}
+fn run_cancelable(mode: &str, cancel: NativeCancel) -> Result<Value, String> {
+    if cancelled(Some(&cancel)) {
+        return Err(NATIVE_CANCELLED.into());
+    }
+    #[cfg(target_os = "windows")]
+    {
+        run_windows(mode, None, Some(cancel))
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let result = run(mode, None);
+        if cancelled(Some(&cancel)) {
+            Err(NATIVE_CANCELLED.into())
+        } else {
+            result
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+pub struct NativeSourceSnapshot {
+    #[cfg(target_os = "windows")]
+    window: isize,
+    #[cfg(target_os = "windows")]
+    process: u32,
+}
+impl NativeSourceSnapshot {
+    pub fn is_current(&self) -> bool {
+        native_source_is_current(self)
+    }
+}
+pub fn native_source_snapshot() -> Result<NativeSourceSnapshot, String> {
+    #[cfg(target_os = "windows")]
+    {
+        native_process::source_snapshot()
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        Ok(NativeSourceSnapshot {})
+    }
+}
+pub fn native_source_is_current(expected: &NativeSourceSnapshot) -> bool {
+    #[cfg(target_os = "windows")]
+    {
+        native_process::source_snapshot()
+            .is_ok_and(|now| now.window == expected.window && now.process == expected.process)
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = expected;
+        true
+    }
+}
+
 pub fn selected_text() -> Result<String, String> {
     run_text("selected-text", None)
 }
@@ -21,7 +97,9 @@ pub fn capture_ocr() -> Result<String, String> {
 /// Capture only. The caller chooses whether to submit this PNG to a configured
 /// third-party OCR API; the native helper performs no upload or network request.
 pub fn capture_image() -> Result<String, String> {
-    let result = run("capture-image", None)?;
+    image_response(run("capture-image", None)?)
+}
+fn image_response(result: Value) -> Result<String, String> {
     result
         .get("imageBase64")
         .and_then(Value::as_str)
@@ -407,6 +485,7 @@ pub fn diagnostics() -> Value {
     #[cfg(target_os = "windows")]
     {
         let mut value = value;
+        value["captureExclusion"] = capture_exclusion::last_diagnostics();
         value["lastCaptureHealth"] = windows_capture_health()
             .lock()
             .map(|v| v.clone())
@@ -451,6 +530,10 @@ fn bounded_capture_health(value: &Value) -> Value {
         "inputPlaneVisibleCount",
         "inputPlaneRemainingAfterCleanup",
         "inputPlaneFallbackUsed",
+        "releaseToPngMilliseconds",
+        "releaseToCleanupMilliseconds",
+        "releaseToReplyMilliseconds",
+        "ocrDurationMilliseconds",
         "nativeHostReady",
         "nativeHostArmed",
         "nativeHostDowns",
@@ -701,8 +784,25 @@ fn parse_response(bytes: &[u8], successful: bool) -> Result<Value, String> {
         .to_owned())
 }
 
+#[cfg(any(target_os = "windows", test))]
+fn native_forced_stop_error(mode: &str, reason: &str) -> String {
+    if mode == "selected-text" {
+        format!("CLIPBOARD_RESTORE_SKIPPED: Selection helper was forcibly stopped before its cleanup could be confirmed. Current clipboard contents were preserved; restoration is uncertain. {reason}")
+    } else {
+        reason.to_owned()
+    }
+}
+
 #[cfg(target_os = "windows")]
 fn run(mode: &str, input: Option<&str>) -> Result<Value, String> {
+    run_windows(mode, input, None)
+}
+#[cfg(target_os = "windows")]
+fn run_windows(
+    mode: &str,
+    input: Option<&str>,
+    cancel: Option<NativeCancel>,
+) -> Result<Value, String> {
     use std::io::{Read, Write};
     use std::process::Stdio;
     use std::time::{Duration, Instant};
@@ -714,7 +814,26 @@ fn run(mode: &str, input: Option<&str>) -> Result<Value, String> {
         }
     }
 
+    if cancelled(cancel.as_ref()) {
+        return Err(NATIVE_CANCELLED.into());
+    }
+    let source = if mode == "selected-text" {
+        Some(native_source_snapshot()?)
+    } else {
+        None
+    };
+    if capture || mode == "selected-text" {
+        crate::windows_capture_input::wait_available(|| cancelled(cancel.as_ref()))?;
+    }
     let mut command = native_command(mode)?;
+    let mut cancellation = if cancel.is_some() {
+        Some(native_process::CancellationEvent::new()?)
+    } else {
+        None
+    };
+    if let Some(event) = &cancellation {
+        command.args(["-NativeCancellationEvent", event.name()]);
+    }
     let mut capture_session = if capture {
         Some(crate::windows_capture_input::Session::begin()?)
     } else {
@@ -736,6 +855,16 @@ fn run(mode: &str, input: Option<&str>) -> Result<Value, String> {
         })
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
+    if cancelled(cancel.as_ref()) {
+        return Err(NATIVE_CANCELLED.into());
+    }
+    if source.is_some_and(|expected| !expected.is_current()) {
+        return Err(
+            "CANCELLED: The source application changed while the previous native task was ending."
+                .into(),
+        );
+    }
+    let helper_started = Instant::now();
     let mut child = command
         .spawn()
         .map_err(|error| format!("NATIVE_START: Could not start the system helper: {error}"))?;
@@ -770,17 +899,36 @@ fn run(mode: &str, input: Option<&str>) -> Result<Value, String> {
         60
     };
     let deadline = Instant::now() + Duration::from_secs(limit);
+    let mut cancellation_requested = false;
+    let mut cancellation_signalled = false;
+    let mut cancellation_signal_failed = false;
     let status = loop {
-        match child.try_wait() {
+        if !cancellation_requested && cancelled(cancel.as_ref()) {
+            cancellation_requested = true;
+            if let Some(event) = &mut cancellation {
+                cancellation_signalled = event.signal();
+                cancellation_signal_failed = !cancellation_signalled;
+            }
+            if cancellation_signal_failed && capture {
+                if let Ok(mut health) = windows_capture_health().lock() {
+                    health["cancellationSignalFailed"] = json!(1);
+                }
+            }
+        }
+        let wait_result = native_process::wait_child(&child, 30);
+        match wait_result.and_then(|_| child.try_wait()) {
             Ok(Some(status)) => break status,
-            Ok(None) if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(30)),
+            Ok(None) if Instant::now() < deadline => {}
             Ok(None) => {
                 if let Some(session) = &mut capture_session {
                     session.close();
                 }
                 let _ = child.kill();
                 let _ = child.wait();
-                return Err("NATIVE_TIMEOUT: The system helper stopped responding. Retry; if this persists, check system permissions and OCR language installation.".into());
+                return Err(native_forced_stop_error(
+                    mode,
+                    "NATIVE_TIMEOUT: The system helper stopped responding.",
+                ));
             }
             Err(error) => {
                 if let Some(session) = &mut capture_session {
@@ -788,8 +936,9 @@ fn run(mode: &str, input: Option<&str>) -> Result<Value, String> {
                 }
                 let _ = child.kill();
                 let _ = child.wait();
-                return Err(format!(
-                    "NATIVE_WAIT: Could not wait for the system helper: {error}"
+                return Err(native_forced_stop_error(
+                    mode,
+                    &format!("NATIVE_WAIT: Could not wait for the system helper: {error}"),
                 ));
             }
         }
@@ -827,12 +976,38 @@ fn run(mode: &str, input: Option<&str>) -> Result<Value, String> {
         if let Ok(reply) = serde_json::from_slice::<Value>(&output) {
             let mut safe = bounded_capture_health(&reply["captureHealth"]);
             safe["helperResponseReceived"] = json!(1);
+            safe["helperElapsedMilliseconds"] = json!(helper_started
+                .elapsed()
+                .as_millis()
+                .min(u128::from(u64::MAX))
+                as u64);
+            safe["cancellationRequested"] = json!(u64::from(cancellation_requested));
+            safe["cancellationSignalled"] = json!(u64::from(cancellation_signalled));
+            safe["cancellationSignalFailed"] = json!(u64::from(cancellation_signal_failed));
             if let Ok(mut health) = windows_capture_health().lock() {
                 *health = safe;
             }
         }
     }
-    parse_response(&output, status.success())
+    let result = parse_response(&output, status.success());
+    // Clipboard restoration errors remain visible even when a task was replaced.
+    if cancellation_signal_failed
+        && result
+            .as_ref()
+            .err()
+            .is_none_or(|error| !error.starts_with("CLIPBOARD_"))
+    {
+        return Err("NATIVE_CANCEL_SIGNAL: Windows could not signal task cancellation; the previous helper was allowed to clean up safely.".into());
+    }
+    if cancelled(cancel.as_ref())
+        && result
+            .as_ref()
+            .err()
+            .is_none_or(|error| !error.starts_with("CLIPBOARD_"))
+    {
+        return Err(NATIVE_CANCELLED.into());
+    }
+    result
 }
 
 #[cfg(not(any(target_os = "macos", target_os = "windows")))]
@@ -981,8 +1156,113 @@ fn native_command(mode: &str) -> Result<std::process::Command, String> {
         .arg(assembly);
     // No command shell, interpolation, user-supplied code, execution-policy change
     // to the machine, or visible console window. Copy text travels through stdin.
+    if mode == "selected-text" {
+        command.args(["-ExcludedSourceProcessId", &std::process::id().to_string()]);
+    }
     command.creation_flags(0x08000000); // CREATE_NO_WINDOW
     Ok(command)
+}
+
+#[cfg(target_os = "windows")]
+mod native_process {
+    use super::NativeSourceSnapshot;
+    use std::ffi::c_void;
+    use std::os::windows::io::AsRawHandle;
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        fn CreateEventW(
+            attributes: *const c_void,
+            manual: i32,
+            initial: i32,
+            name: *const u16,
+        ) -> *mut c_void;
+        fn SetEvent(event: *mut c_void) -> i32;
+        fn CloseHandle(handle: *mut c_void) -> i32;
+        fn WaitForSingleObject(handle: *mut c_void, milliseconds: u32) -> u32;
+        fn GetLastError() -> u32;
+    }
+    #[link(name = "user32")]
+    unsafe extern "system" {
+        fn GetForegroundWindow() -> *mut c_void;
+        fn GetWindowThreadProcessId(window: *mut c_void, pid: *mut u32) -> u32;
+    }
+    #[link(name = "bcrypt")]
+    unsafe extern "system" {
+        fn BCryptGenRandom(algorithm: *mut c_void, buffer: *mut u8, length: u32, flags: u32)
+            -> i32;
+    }
+    pub fn source_snapshot() -> Result<NativeSourceSnapshot, String> {
+        let window = unsafe { GetForegroundWindow() };
+        let mut process = 0;
+        if window.is_null()
+            || unsafe { GetWindowThreadProcessId(window, &mut process) } == 0
+            || process == 0
+        {
+            return Err("SELECTION_SOURCE_CHANGED: The source application is unavailable.".into());
+        }
+        Ok(NativeSourceSnapshot {
+            window: window as isize,
+            process,
+        })
+    }
+    pub struct CancellationEvent {
+        handle: *mut c_void,
+        name: String,
+        signalled: bool,
+    }
+    impl CancellationEvent {
+        pub fn new() -> Result<Self, String> {
+            let mut bytes = [0u8; 16];
+            if unsafe { BCryptGenRandom(std::ptr::null_mut(), bytes.as_mut_ptr(), 16, 2) } < 0 {
+                return Err("NATIVE_CANCEL: Windows could not prepare task cancellation.".into());
+            }
+            let suffix: String = bytes.iter().map(|b| format!("{b:02x}")).collect();
+            let name = format!("Local\\EchoLingo-cancel-{}-{suffix}", std::process::id());
+            let wide: Vec<u16> = name.encode_utf16().chain(Some(0)).collect();
+            let handle = unsafe { CreateEventW(std::ptr::null(), 1, 0, wide.as_ptr()) };
+            let error = unsafe { GetLastError() };
+            if handle.is_null() {
+                return Err("NATIVE_CANCEL: Windows could not create task cancellation.".into());
+            }
+            if error == 183 {
+                unsafe {
+                    CloseHandle(handle);
+                };
+                return Err(
+                    "NATIVE_CANCEL: Windows returned an existing cancellation session.".into(),
+                );
+            }
+            Ok(Self {
+                handle,
+                name,
+                signalled: false,
+            })
+        }
+        pub fn name(&self) -> &str {
+            &self.name
+        }
+        pub fn signal(&mut self) -> bool {
+            if !self.signalled {
+                self.signalled = unsafe { SetEvent(self.handle) } != 0;
+            }
+            self.signalled
+        }
+    }
+    impl Drop for CancellationEvent {
+        fn drop(&mut self) {
+            unsafe {
+                CloseHandle(self.handle);
+            }
+        }
+    }
+    pub fn wait_child(child: &std::process::Child, milliseconds: u32) -> std::io::Result<()> {
+        // This worker owns no HWND and waits on actual process completion;
+        // completion wakes immediately, with only cancellation polling bounded.
+        match unsafe { WaitForSingleObject(child.as_raw_handle(), milliseconds) } {
+            0 | 258 => Ok(()),
+            _ => Err(std::io::Error::last_os_error()),
+        }
+    }
 }
 
 #[cfg(target_os = "windows")]
@@ -1045,6 +1325,37 @@ fn materialize(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn forced_selection_stop_never_claims_clipboard_cleanup_or_hides_its_warning() {
+        assert!(
+            super::native_forced_stop_error("selected-text", "NATIVE_WAIT")
+                .starts_with("CLIPBOARD_RESTORE_SKIPPED:")
+        );
+        assert_eq!(
+            super::native_forced_stop_error("capture-ocr", "NATIVE_WAIT"),
+            "NATIVE_WAIT"
+        );
+    }
+    #[test]
+    fn superseded_requests_return_before_any_native_helper_or_image_is_started() {
+        use std::sync::{atomic::AtomicBool, Arc};
+        for result in [
+            super::selected_text_cancelable(Arc::new(AtomicBool::new(true))),
+            super::capture_ocr_cancelable(Arc::new(AtomicBool::new(true))),
+            super::capture_image_cancelable(Arc::new(AtomicBool::new(true))),
+        ] {
+            assert_eq!(result.unwrap_err(), super::NATIVE_CANCELLED);
+        }
+    }
+    #[test]
+    fn capture_image_validation_is_shared_by_ordinary_and_cancelable_paths() {
+        assert_eq!(
+            super::image_response(serde_json::json!({"imageBase64":"fixture-only"})).unwrap(),
+            "fixture-only"
+        );
+        assert!(super::image_response(serde_json::json!({"imageBase64":""})).is_err());
+        assert!(super::image_response(serde_json::json!({"text":"not-an-image"})).is_err());
+    }
     #[test]
     fn native_assembly_cache_rechecks_mutation_after_initial_success_without_repair() {
         let directory = std::env::temp_dir().join(format!(
