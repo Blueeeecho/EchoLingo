@@ -1512,8 +1512,11 @@ sealed class RegionPicker : ApplicationContext {
         for ($i = 1; $i -lt $OcrLines.Count; $i++) {
             $a = $OcrLines[$i - 1]; $b = $OcrLines[$i]
             if ((Test-OcrBounds $a) -and (Test-OcrBounds $b)) {
-                $overlap = [Math]::Max(0, [Math]::Min(($a.X + $a.Width), ($b.X + $b.Width)) - [Math]::Max($a.X, $b.X))
-                $sameColumn = $overlap -gt (0.1 * [Math]::Min($a.Width, $b.Width))
+                # Windows PowerShell5.1 can select Math.Max(Int32,Int32) when
+                # its first argument is integer0, rounding fractional layout
+                # widths to0. Pin every geometry operand to Double.
+                $overlap = [Math]::Max([double]0.0, [Math]::Min(([double]$a.X + [double]$a.Width), ([double]$b.X + [double]$b.Width)) - [Math]::Max([double]$a.X, [double]$b.X))
+                $sameColumn = $overlap -gt (0.1 * [Math]::Min([double]$a.Width, [double]$b.Width))
                 if (-not $sameColumn -and $b.Y -lt ($a.Y - 0.9 * $median)) { $group++ }
                 $pitch = [double]$b.Y - [double]$a.Y
                 if ($sameColumn -and $pitch -gt 0 -and -not (Test-OcrStructuralLine ([string]$a.Text)) -and -not (Test-OcrStructuralLine ([string]$b.Text))) {
@@ -1541,7 +1544,7 @@ sealed class RegionPicker : ApplicationContext {
                 if (-not $structured -and (Test-OcrBounds $previous) -and (Test-OcrBounds $current)) {
                     $referenceHeight = [Math]::Max($median, [Math]::Min([double]$previous.Height, [double]$current.Height))
                     $verticalGap = [double]$current.Y - ([double]$previous.Y + [double]$previous.Height)
-                    $overlap = [Math]::Max(0, [Math]::Min(([double]$previous.X + [double]$previous.Width), ([double]$current.X + [double]$current.Width)) - [Math]::Max([double]$previous.X, [double]$current.X))
+                    $overlap = [Math]::Max([double]0.0, [Math]::Min(([double]$previous.X + [double]$previous.Width), ([double]$current.X + [double]$current.Width)) - [Math]::Max([double]$previous.X, [double]$current.X))
                     $columnReset = ($overlap -le (0.1 * [Math]::Min([double]$previous.Width, [double]$current.Width))) -and
                         ([double]$current.Y -lt ([double]$previous.Y - 0.9 * $referenceHeight))
                     $pitch = [double]$current.Y - [double]$previous.Y
@@ -1602,9 +1605,17 @@ sealed class RegionPicker : ApplicationContext {
             [pscustomobject]@{ Text = $_.Text; X = ($_.X / 1000.0); Y = ($_.Y / 1000.0); Width = ($_.Width / 1000.0); Height = ($_.Height / 1000.0) }
         })
         $flat = ($lines | ForEach-Object { $_.Text }) -join "`n"
-        if ((Join-OcrLayoutLines $lines) -cne $expected -or (Join-OcrLayoutLines $scaled) -cne $expected -or
-            (Join-OcrLayoutLines $lines $false) -cne $flat) {
-            throw 'SELF_TEST: Paragraph geometry, scaling, rotation fallback, or original line order was not preserved.'
+        if ((Join-OcrLayoutLines $lines) -cne $expected) { throw 'SELF_TEST: OCR paragraph geometry fixture failed: pixel-layout-and-column-order.' }
+        if ((Join-OcrLayoutLines $scaled) -cne $expected) { throw 'SELF_TEST: OCR paragraph geometry fixture failed: fractional-scale-layout.' }
+        if ((Join-OcrLayoutLines $lines $false) -cne $flat) { throw 'SELF_TEST: OCR paragraph geometry fixture failed: rotated-plain-order-fallback.' }
+        $subpixel = @(
+            [pscustomobject]@{ Text = 'fraction first'; X = 0.11; Y = 0.1; Width = 0.15; Height = 0.01 }
+            [pscustomobject]@{ Text = 'fraction second'; X = 0.12; Y = 0.114; Width = 0.14; Height = 0.01 }
+            [pscustomobject]@{ Text = 'fraction paragraph'; X = 0.12; Y = 0.138; Width = 0.14; Height = 0.01 }
+            [pscustomobject]@{ Text = 'fraction continued'; X = 0.12; Y = 0.152; Width = 0.14; Height = 0.01 }
+        )
+        if ((Join-OcrLayoutLines $subpixel) -cne "fraction first`nfraction second`n`nfraction paragraph`nfraction continued") {
+            throw 'SELF_TEST: OCR paragraph geometry fixture failed: fractional-overlap-and-baseline.'
         }
         $structured = @(
             [pscustomobject]@{ Text = '- first item'; X = 0; Y = 0; Width = 100; Height = 10 }
