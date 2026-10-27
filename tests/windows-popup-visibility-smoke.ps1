@@ -37,6 +37,7 @@ public static class EchoLingoPopupVisibilitySmoke {
     [DllImport("user32.dll")] static extern uint GetWindowThreadProcessId(IntPtr window, out uint process);
     [DllImport("user32.dll")] static extern IntPtr GetForegroundWindow();
     [DllImport("user32.dll")] static extern IntPtr GetAncestor(IntPtr window, uint kind);
+    [DllImport("user32.dll")] static extern IntPtr WindowFromPoint(POINT point);
     [DllImport("user32.dll")] static extern bool SetForegroundWindow(IntPtr window);
     [DllImport("user32.dll")] static extern bool IsWindowVisible(IntPtr window);
     [DllImport("user32.dll")] static extern bool ShowWindowAsync(IntPtr window, int command);
@@ -134,6 +135,52 @@ public static class EchoLingoPopupVisibilitySmoke {
         Require(count == 1, "Dedicated app PID has no unique single-instance target HWND.");
         return result;
     }
+    static Dictionary<string, object> WindowIdentityMetadata(IntPtr window) {
+        uint process; uint thread = GetWindowThreadProcessId(window, out process);
+        StringBuilder name = new StringBuilder(256); GetClassName(window, name, name.Capacity);
+        IntPtr root = GetAncestor(window, 2);
+        StringBuilder rootName = new StringBuilder(256); GetClassName(root, rootName, rootName.Capacity);
+        // Public window identity only, including on an unexpected foreground.
+        // Never query titles, UIA contents, process paths or source text.
+        return new Dictionary<string, object> {
+            { "hwnd", "0x" + window.ToInt64().ToString("X") }, { "processId", process }, { "threadId", thread },
+            { "class", name.ToString() }, { "rootHwnd", "0x" + root.ToInt64().ToString("X") }, { "rootClass", rootName.ToString() }
+        };
+    }
+    static void PrepareSourceClickOnce(Form form, TextBox source, IntPtr main, Dictionary<string, object> report) {
+        Require(!IsWindowVisible(main), "Source click preparation requires the real app window to be hidden.");
+        Dictionary<string, object> preparation = new Dictionary<string, object> {
+            { "isPopupAcceptance", false }, { "clickPairsSent", 0 }, { "foregroundBefore", WindowIdentityMetadata(GetForegroundWindow()) }
+        };
+        report["initialSourceClickPreparation"] = preparation;
+        POINT point = new POINT(); IntPtr sourceHandle = IntPtr.Zero, formHandle = IntPtr.Zero;
+        Ui(form, delegate {
+            form.WindowState = FormWindowState.Normal;
+            // HWND_TOP for this ordinary generated form only. No TOPMOST,
+            // activation request or product-window mutation in preparation.
+            Require(SetWindowPos(form.Handle, IntPtr.Zero, 0, 0, 0, 0, 0x1 | 0x2 | 0x10), "Could not raise the ordinary generated source window for its one setup click.");
+            sourceHandle = source.Handle; formHandle = form.Handle;
+            Point center = source.PointToScreen(new Point(source.ClientSize.Width / 2, source.ClientSize.Height / 2));
+            point.x = center.X; point.y = center.Y;
+        });
+        Require(SetCursorPos(point.x, point.y), "Could not position the one generated source setup click.");
+        IntPtr target = WindowFromPoint(point); uint owner; GetWindowThreadProcessId(target, out owner);
+        preparation["target"] = WindowIdentityMetadata(target);
+        Require(target == sourceHandle && owner == Process.GetCurrentProcess().Id && GetAncestor(target, 2) == formHandle,
+            "The one setup click does not hit the exact generated source editor/PID/root; no input sent.");
+        Require(!IsWindowVisible(main), "App became visible before source preparation; no click sent.");
+        INPUT down = new INPUT(); down.type = 0; down.data.mouse.flags = 2;
+        INPUT up = down; up.data.mouse.flags = 4;
+        Send(new INPUT[] { down, up }); preparation["clickPairsSent"] = 1;
+        Wait(delegate {
+            bool ready = false;
+            Ui(form, delegate { ready = GetForegroundWindow() == formHandle && form.ContainsFocus && source.Focused; });
+            preparation["foregroundAfter"] = WindowIdentityMetadata(GetForegroundWindow());
+            preparation["actualSourceReady"] = ready;
+            return ready;
+        }, 3000, "One generated source setup click did not establish actual foreground/editor focus; no shortcut sent.");
+        Require(!IsWindowVisible(main), "Product became visible during source-only preparation; popup case not tested.");
+    }
     static Dictionary<string, object> NativeWindowMetadata(Process app, IntPtr window) {
         uint owner; uint thread = GetWindowThreadProcessId(window, out owner);
         bool own = app != null && owner == app.Id && window != IntPtr.Zero;
@@ -205,6 +252,7 @@ public static class EchoLingoPopupVisibilitySmoke {
         value["nativeVisible"] = main != IntPtr.Zero && IsWindowVisible(main);
         IntPtr foreground = GetForegroundWindow(); uint foregroundProcess; GetWindowThreadProcessId(foreground, out foregroundProcess);
         value["foregroundHwnd"] = "0x" + foreground.ToInt64().ToString("X"); value["foregroundProcessId"] = foregroundProcess;
+        value["foregroundWindow"] = WindowIdentityMetadata(foreground);
         value["appExited"] = app == null || app.HasExited;
         Dictionary<string, object> native = NativeWindowMetadata(app, main); value["nativeProbe"] = native;
         if (!native.ContainsKey("wmNullResponded") || !(bool)native["wmNullResponded"]) { value["uiaSkipped"] = "Own native HWND unavailable or WM_NULL did not respond within 200ms."; return value; }
@@ -329,6 +377,7 @@ public static class EchoLingoPopupVisibilitySmoke {
                                         GetWindowThreadProcessId(foreground, out owner);
                                         focus["foregroundHwnd"] = "0x" + foreground.ToInt64().ToString("X");
                                         focus["foregroundProcessId"] = owner;
+                                        focus["foregroundWindow"] = WindowIdentityMetadata(foreground);
                                         focus["sourceContainsFocus"] = form.ContainsFocus;
                                         focus["sourceControlFocused"] = source.Focused;
                                         ready = foreground == form.Handle && form.ContainsFocus && source.Focused;
@@ -360,6 +409,13 @@ public static class EchoLingoPopupVisibilitySmoke {
                             report["setupReadiness"] = ReadinessMetadata(app, main);
                             stage = "finish-native-preparation-by-real-close";
                             Invoke(main, "\u9690\u85cf\u7a97\u53e3"); Wait(delegate { return !IsWindowVisible(main); }, 5000, "Real close IPC did not hide the prepared popup.");
+                            // A real user clicks/selects the source before Alt+D.
+                            // This one source-only setup click occurs while the
+                            // product is already hidden, so it cannot satisfy
+                            // any outside-hide, pin or management assertion.
+                            // Later sourceFocus calls never fall back to clicks.
+                            stage = "initial-source-click-preparation-once";
+                            PrepareSourceClickOnce(form, source, main, report);
                             stage = "passive-selected-text-outside-click";
                             sourceFocus(); Shortcut(form, 0x44);
                             Wait(delegate { return IsWindowVisible(main); }, 12000, "Selected-text popup did not show."); moveApp();
