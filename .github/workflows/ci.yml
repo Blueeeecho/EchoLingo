@@ -803,7 +803,7 @@ jobs:
         shell: powershell
         env:
           ECHOLINGO_SHORTCUT_UI_CANDIDATE: ${{ steps.candidate.outputs.path }}
-          ECHOLINGO_SHORTCUT_UI_MEDIUM: ${{ github.event.inputs.mode == 'windows-shortcuts-ui-medium-diagnostics' || github.event.inputs.mode == 'windows-shortcuts-current-diagnostics' }}
+          ECHOLINGO_SHORTCUT_UI_MEDIUM: ${{ github.event.inputs.mode == 'windows-shortcuts-ui-medium-diagnostics' }}
         run: |
           $ErrorActionPreference = 'Continue'
           $output = @(); $fixtureExit = 1
