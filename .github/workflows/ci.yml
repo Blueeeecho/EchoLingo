@@ -4,10 +4,17 @@ on:
     branches: [main]
   pull_request:
   workflow_dispatch:
+    inputs:
+      mode:
+        description: Full regression or targeted popup diagnostics using the exact af7 candidate
+        type: choice
+        default: full
+        options: [full, windows-popup-diagnostics]
 permissions:
   contents: read
 jobs:
   desktop:
+    if: github.event.inputs.mode != 'windows-popup-diagnostics'
     strategy:
       fail-fast: false
       matrix:
@@ -181,6 +188,7 @@ jobs:
           }
 
   frontend-interactions:
+    if: github.event.inputs.mode != 'windows-popup-diagnostics'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -200,3 +208,69 @@ jobs:
           npm run dev > "$RUNNER_TEMP/echolingo-vite.log" 2>&1 &
           curl --retry 20 --retry-connrefused --retry-delay 1 -s http://127.0.0.1:1420/ > /dev/null
           npm run test:ui
+
+  windows-popup-diagnostics:
+    name: Targeted popup diagnostics (reused af7 binary)
+    if: github.event_name == 'workflow_dispatch' && github.event.inputs.mode == 'windows-popup-diagnostics'
+    runs-on: windows-latest
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Require unchanged application source
+        shell: powershell
+        run: |
+          git diff --quiet af7eee0bd4f3ab196356689f80cbb720ae9d57b3 HEAD -- src src-tauri index.html package.json package-lock.json resources
+          if ($LASTEXITCODE -ne 0) { throw 'Application changed; use the full build instead of the reused binary.' }
+      - uses: actions/download-artifact@v4
+        with:
+          name: EchoLingo-Windows-offline-evidence
+          run-id: 40462630406
+          github-token: ${{ github.token }}
+          path: popup-candidate-evidence
+      - name: Verify exact previously built application
+        id: candidate
+        shell: powershell
+        run: |
+          $candidateFiles = @(Get-ChildItem popup-candidate-evidence -Recurse -File -Filter echolingo.exe)
+          if ($candidateFiles.Count -ne 1) { throw 'Expected exactly one staged candidate executable.' }
+          $candidatePath = $candidateFiles[0].FullName
+          $candidateHash = (Get-FileHash -LiteralPath $candidatePath -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($candidateHash -ne '3bc6a04c9e98787e9e2a20bf6235be215609e3e139799d339a388c0907c33142') { throw 'Candidate identity mismatch.' }
+          [ordered]@{
+            scope = 'Targeted popup diagnostics only; not a full build or release acceptance'
+            sourceRun = 40462630406
+            applicationSource = 'c247dd99cfc6e49133541c3173b60118ed157bb5'
+            stagedSha256 = $candidateHash
+            fixtureSha256 = (Get-FileHash tests/windows-popup-visibility-smoke.ps1 -Algorithm SHA256).Hash.ToLowerInvariant()
+          } | ConvertTo-Json -Compress
+          "path=$candidatePath" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+      - name: Run actual popup interactions against verified candidate
+        id: popup
+        continue-on-error: true
+        timeout-minutes: 5
+        shell: powershell
+        env:
+          ECHOLINGO_POPUP_CANDIDATE: ${{ steps.candidate.outputs.path }}
+        run: |
+          $fixtureOutput = @(& powershell.exe -NoProfile -STA -ExecutionPolicy Bypass -File tests/windows-popup-visibility-smoke.ps1 -ApplicationPath $env:ECHOLINGO_POPUP_CANDIDATE -IsolatedTestSession 2>&1)
+          $fixtureExit = $LASTEXITCODE
+          $fixtureOutput | Out-File -FilePath "$env:RUNNER_TEMP/echolingo-popup-diagnostics.log" -Encoding utf8
+          $fixtureOutput | Write-Output
+          exit $fixtureExit
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: EchoLingo-Windows-popup-diagnostics
+          if-no-files-found: warn
+          path: ${{ runner.temp }}/echolingo-popup-diagnostics.log
+      - name: Gate targeted popup diagnostics
+        if: always()
+        shell: powershell
+        run: |
+          $popupOutcome = '${{ steps.popup.outcome }}'
+          [ordered]@{ scope = 'targeted-popup-only'; popupVisibility = $popupOutcome } | ConvertTo-Json -Compress
+          if ($popupOutcome -ne 'success') { throw 'Targeted popup diagnostics incomplete or failed.' }

@@ -35,6 +35,10 @@ public static class EchoLingoPopupVisibilitySmoke {
     [DllImport("user32.dll")] static extern IntPtr GetAncestor(IntPtr window, uint kind);
     [DllImport("user32.dll")] static extern bool SetForegroundWindow(IntPtr window);
     [DllImport("user32.dll")] static extern bool IsWindowVisible(IntPtr window);
+    [DllImport("user32.dll")] static extern bool ShowWindowAsync(IntPtr window, int command);
+    [DllImport("user32.dll", CharSet=CharSet.Unicode)] static extern int GetClassName(IntPtr window, StringBuilder name, int capacity);
+    [DllImport("user32.dll", SetLastError=true)] static extern IntPtr SendMessageTimeout(IntPtr window, uint message, UIntPtr wparam, IntPtr lparam, uint flags, uint timeout, out UIntPtr result);
+    [DllImport("kernel32.dll")] static extern void SetLastError(uint error);
     [DllImport("user32.dll")] static extern bool GetWindowRect(IntPtr window, out RECT rectangle);
     [DllImport("user32.dll")] static extern bool SetWindowPos(IntPtr window, IntPtr after, int x, int y, int width, int height, uint flags);
     [DllImport("user32.dll")] static extern bool SetCursorPos(int x, int y);
@@ -81,6 +85,47 @@ public static class EchoLingoPopupVisibilitySmoke {
             return true;
         }, IntPtr.Zero);
         return result;
+    }
+    static void RequireUniqueOwnedMainWindow(Process app, IntPtr main) {
+        int candidates = 0; IntPtr candidate = IntPtr.Zero;
+        EnumWindows(delegate(IntPtr window, IntPtr unused) {
+            uint owner; RECT bounds; GetWindowThreadProcessId(window, out owner);
+            if (owner == app.Id && GetWindowRect(window, out bounds)
+                && bounds.right - bounds.left >= 200 && bounds.bottom - bounds.top >= 100) { candidates++; candidate = window; }
+            return true;
+        }, IntPtr.Zero);
+        Require(candidates == 1 && candidate == main, "Native preparation refused: app main HWND is not unique and owned by the fixture-started PID.");
+    }
+    static IntPtr SingleInstanceWindow(int process) {
+        IntPtr result = IntPtr.Zero; int count = 0;
+        EnumWindows(delegate(IntPtr window, IntPtr unused) {
+            uint owner; GetWindowThreadProcessId(window, out owner);
+            if (owner == process) {
+                StringBuilder name = new StringBuilder(256); GetClassName(window, name, name.Capacity);
+                if (name.ToString() == Identifier + "-sic") { result = window; count++; }
+            }
+            return true;
+        }, IntPtr.Zero);
+        Require(count == 1, "Dedicated app PID has no unique single-instance target HWND.");
+        return result;
+    }
+    static Dictionary<string, object> NativeWindowMetadata(Process app, IntPtr window) {
+        uint owner; uint thread = GetWindowThreadProcessId(window, out owner);
+        bool own = app != null && owner == app.Id && window != IntPtr.Zero;
+        Dictionary<string, object> value = new Dictionary<string, object> {
+            { "hwnd", "0x" + window.ToInt64().ToString("X") }, { "processId", owner }, { "threadId", thread },
+            { "ownedByStartedApp", own }, { "visible", window != IntPtr.Zero && IsWindowVisible(window) }
+        };
+        if (!own) return value; // Never probe a foreign/expired/reused HWND.
+        StringBuilder name = new StringBuilder(256); GetClassName(window, name, name.Capacity); value["class"] = name.ToString();
+        UIntPtr result; SetLastError(0); Stopwatch ping = Stopwatch.StartNew();
+        // WM_NULL only, exact own HWND, bounded 200ms. This observes sent-
+        // message responsiveness, not frontend/IPC/callback completion.
+        IntPtr sent = SendMessageTimeout(window, 0, UIntPtr.Zero, IntPtr.Zero, 0x0001 | 0x0002 | 0x0020, 200, out result);
+        int error = Marshal.GetLastWin32Error();
+        value["wmNullResponded"] = sent != IntPtr.Zero; value["wmNullElapsedMs"] = ping.Elapsed.TotalMilliseconds;
+        value["wmNullLastError"] = error; value["wmNullMessageResult"] = result.ToUInt64(); value["wmNullTimeoutMs"] = 200;
+        return value;
     }
     static void Click(int x, int y, Form source, IntPtr app, bool requireSource) {
         IntPtr foreground = GetForegroundWindow();
@@ -134,7 +179,8 @@ public static class EchoLingoPopupVisibilitySmoke {
         IntPtr foreground = GetForegroundWindow(); uint foregroundProcess; GetWindowThreadProcessId(foreground, out foregroundProcess);
         value["foregroundHwnd"] = "0x" + foreground.ToInt64().ToString("X"); value["foregroundProcessId"] = foregroundProcess;
         value["appExited"] = app == null || app.HasExited;
-        if (main == IntPtr.Zero) return value;
+        Dictionary<string, object> native = NativeWindowMetadata(app, main); value["nativeProbe"] = native;
+        if (!native.ContainsKey("wmNullResponded") || !(bool)native["wmNullResponded"]) { value["uiaSkipped"] = "Own native HWND unavailable or WM_NULL did not respond within 200ms."; return value; }
         RECT bounds; if (GetWindowRect(main, out bounds)) value["nativeSize"] = new int[] { bounds.right - bounds.left, bounds.bottom - bounds.top };
         try {
             AutomationElement root = AutomationElement.FromHandle(main);
@@ -235,28 +281,28 @@ public static class EchoLingoPopupVisibilitySmoke {
                                 Require(SetForegroundWindow(form.Handle), "Generated source foreground was rejected.");
                                 Wait(delegate { return GetForegroundWindow() == form.Handle; }, 2000, "Generated source not foreground."); };
                             Action moveApp = delegate { Require(SetWindowPos(main, IntPtr.Zero, Math.Max(300, Screen.PrimaryScreen.Bounds.Right - 720), 20, 0, 0, 0x1 | 0x4 | 0x10), "Could not position own app fixture."); };
-                            // Explicit setup uses the product's durable
-                            // single-instance -> pending-settings handshake. A
-                            // native HWND alone does not prove that focus-input
-                            // listeners exist. No fixed sleep or repeated test
-                            // shortcut is used to manufacture readiness.
-                            stage = "request-settings-setup-once";
-                            using (Process setup = Process.Start(start)) {
-                                report["setupLaunchProcessId"] = setup.Id;
-                                if (!setup.WaitForExit(10000)) { setup.Kill(); setup.WaitForExit(3000); throw new InvalidOperationException("Explicit settings setup instance did not hand off and exit."); }
-                                report["setupInstanceExited"] = true; report["setupInstanceExitCode"] = setup.ExitCode;
-                                Require(setup.ExitCode == 0, "Explicit settings setup instance failed.");
-                            }
-                            report["readinessSetup"] = "single explicit second launch -> durable pending-settings -> real UIA controls";
-                            stage = "wait-settings-native-visible";
-                            Wait(delegate { Require(!app.HasExited, "New app exited during explicit settings setup."); return IsWindowVisible(main); }, 20000, "Explicit settings setup did not show the native app window.");
+                            // Native-only fixture preparation. This one owned-
+                            // HWND show is explicitly NOT shortcut/presentation
+                            // acceptance. All behavior cases below use the real
+                            // single hotkey or real UI controls after close.
+                            stage = "native-owned-window-preparation-once";
+                            RequireUniqueOwnedMainWindow(app, main);
+                            report["silentStartupObserved"] = !IsWindowVisible(main);
+                            Require(!IsWindowVisible(main), "Fresh dedicated app did not start silently.");
+                            Stopwatch preparation = Stopwatch.StartNew();
+                            Require(ShowWindowAsync(main, 4), "One native SW_SHOWNOACTIVATE preparation request was rejected.");
+                            report["nativePreparationIsShortcutAcceptance"] = false;
+                            report["nativePreparationShowRequests"] = 1;
+                            report["readinessSetup"] = "One ShowWindowAsync(SW_SHOWNOACTIVATE) of unique own main HWND; real UIA ready; real close IPC";
+                            stage = "wait-preparation-native-visible";
+                            Wait(delegate { Require(!app.HasExited, "New app exited during native preparation."); return IsWindowVisible(main); }, 5000, "Native preparation was queued, but the app window did not become visible.");
                             report["setupNativeVisibleObserved"] = true;
-                            stage = "wait-settings-accessibility-control";
-                            Wait(delegate { return Element(main, "\u8fd4\u56de\u7ffb\u8bd1") != null; }, 5000, "Settings native window is visible, but its WebView return control is unavailable through UIA.");
+                            stage = "wait-preparation-accessibility-controls";
+                            Wait(delegate { return Element(main, "\u9489\u4f4f\u7a97\u53e3") != null && Element(main, "\u9690\u85cf\u7a97\u53e3") != null; }, 15000, "Prepared native window is visible, but its real WebView pin/close controls did not become ready.");
+                            report["nativePreparationObservedMs"] = preparation.Elapsed.TotalMilliseconds;
                             report["setupReadiness"] = ReadinessMetadata(app, main);
-                            stage = "finish-explicit-settings-setup";
-                            Invoke(main, "\u8fd4\u56de\u7ffb\u8bd1");
-                            Invoke(main, "\u9690\u85cf\u7a97\u53e3"); Wait(delegate { return !IsWindowVisible(main); }, 5000, "Prepared popup did not hide.");
+                            stage = "finish-native-preparation-by-real-close";
+                            Invoke(main, "\u9690\u85cf\u7a97\u53e3"); Wait(delegate { return !IsWindowVisible(main); }, 5000, "Real close IPC did not hide the prepared popup.");
                             stage = "passive-selected-text-outside-click";
                             sourceFocus(); Shortcut(form, 0x44);
                             Wait(delegate { return IsWindowVisible(main); }, 12000, "Selected-text popup did not show."); moveApp();
@@ -307,6 +353,56 @@ public static class EchoLingoPopupVisibilitySmoke {
                             Wait(delegate { return Element(main, "\u8fd4\u56de\u7ffb\u8bd1") != null; }, 5000, "Management did not open.");
                             sourceFocus(); Click(55, 500, form, main, true); Thread.Sleep(250);
                             Require(IsWindowVisible(main), "Management view hid on outside interaction."); report["managementOutsideRetainedPassed"] = true;
+                            report["corePopupCasesPassed"] = true;
+                            // Keep independent launch/handoff acceptance last:
+                            // a failure here must preserve all core case results.
+                            stage = "single-instance-hide-management-by-real-close";
+                            Invoke(main, "\u9690\u85cf\u7ba1\u7406\u7a97\u53e3");
+                            Wait(delegate { return !IsWindowVisible(main); }, 5000, "Real management close did not prepare a hidden single-instance target.");
+                            IntPtr singleTarget = SingleInstanceWindow(app.Id);
+                            report["singleInstancePrimaryBefore"] = NativeWindowMetadata(app, main);
+                            report["singleInstanceTargetBefore"] = NativeWindowMetadata(app, singleTarget);
+                            stage = "single-instance-handoff-and-secondary-exit";
+                            List<Dictionary<string, object>> observations = new List<Dictionary<string, object>>();
+                            report["singleInstanceObservations"] = observations;
+                            Stopwatch handoff = Stopwatch.StartNew();
+                            using (Process second = Process.Start(start)) {
+                                report["singleInstanceSecondaryProcessId"] = second.Id;
+                                report["singleInstanceLaunchRequests"] = 1;
+                                report["singleInstanceDeadlineMs"] = 15000;
+                                report["singleInstanceLibraryForwardTimeoutMs"] = 10000;
+                                long nextObservation = 0;
+                                while (!second.HasExited && handoff.ElapsedMilliseconds < 15000) {
+                                    if (handoff.ElapsedMilliseconds >= nextObservation && observations.Count < 6) {
+                                        observations.Add(new Dictionary<string, object> {
+                                            { "elapsedMs", handoff.Elapsed.TotalMilliseconds },
+                                            { "primaryMain", NativeWindowMetadata(app, main) },
+                                            { "primarySingleInstanceTarget", NativeWindowMetadata(app, singleTarget) }
+                                        });
+                                        nextObservation += 2500;
+                                    }
+                                    second.WaitForExit(50);
+                                }
+                                report["singleInstanceSecondaryExitObservedMs"] = handoff.Elapsed.TotalMilliseconds;
+                                report["singleInstanceSecondaryExited"] = second.HasExited;
+                                if (!second.HasExited) {
+                                    report["singleInstanceReadinessBeforeAbort"] = ReadinessMetadata(app, main);
+                                    second.Kill(); second.WaitForExit(3000); report["singleInstanceSecondaryStoppedAfterFailure"] = second.HasExited;
+                                    throw new InvalidOperationException("Single-instance secondary did not exit within the bounded 15s diagnostic deadline (library forward timeout is 10s).");
+                                }
+                                report["singleInstanceSecondaryExitCode"] = second.ExitCode;
+                                Require(second.ExitCode == 0, "Single-instance secondary failed.");
+                            }
+                            // Exit0 also occurs on library forward timeout. Only
+                            // the actual primary Settings view proves handoff.
+                            stage = "single-instance-primary-settings-native-visible";
+                            Wait(delegate { Require(!app.HasExited, "Primary exited after single-instance launch."); return IsWindowVisible(main); }, 5000, "Secondary exited, but the primary settings native window did not show.");
+                            report["singleInstancePrimaryNativeVisible"] = true;
+                            stage = "single-instance-primary-settings-accessibility";
+                            Wait(delegate { return Element(main, "\u8fd4\u56de\u7ffb\u8bd1") != null; }, 5000, "Primary native window is visible after second launch, but the real Settings return control is unavailable.");
+                            report["singleInstanceSettingsReadiness"] = ReadinessMetadata(app, main);
+                            report["singleInstanceSettingsObservedMs"] = handoff.Elapsed.TotalMilliseconds;
+                            report["singleInstanceHandoffPassed"] = true;
                             report["ok"] = true;
                         } catch (Exception error) {
                             report["failedStage"] = stage; report["failureReadiness"] = ReadinessMetadata(app, main);
