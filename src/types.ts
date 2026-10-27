@@ -65,4 +65,4 @@ export interface HistoryEntry {
   favorite: boolean;
 }
 export type PermissionKind = 'accessibility' | 'screenCapture';
-export interface SourceTextEvent { text: string; mode: 'translate' | 'ocr' | 'input'; captureOrigin?: 'ocr'; permissionRequired?: PermissionKind; focusInput?: boolean; updateVisiblePopup?: boolean }
+export interface SourceTextEvent { text: string; mode: 'translate' | 'ocr' | 'input'; captureOrigin?: 'ocr'; permissionRequired?: PermissionKind; focusInput?: boolean; updateVisiblePopup?: boolean; presentationEpoch?: number; deliveryId?: number }

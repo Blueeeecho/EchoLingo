@@ -11,11 +11,14 @@ mod platform;
 mod shortcut_bindings;
 mod shortcut_control;
 mod shortcut_probe;
+mod source_delivery;
 #[cfg(test)]
 mod storage_tests;
 mod translation;
 mod translation_requests;
 mod window_layout;
+#[cfg(target_os = "windows")]
+mod windows_capture_input;
 #[cfg(any(target_os = "windows", test))]
 mod windows_visibility;
 
@@ -52,6 +55,7 @@ struct AppState {
     startup_warnings: Mutex<Vec<String>>,
     outside_thread: Mutex<Option<std::thread::Thread>>,
     pending_settings: Mutex<Option<u64>>,
+    source_deliveries: Mutex<source_delivery::SourceDeliveries<serde_json::Value>>,
     pending_shortcut_settings: AtomicBool,
 }
 
@@ -980,6 +984,9 @@ fn cancel_translation(state: State<AppState>, request_id: u64) -> Result<(), Str
     Ok(())
 }
 fn announce_presentation(app: &tauri::AppHandle, presentation: translation_requests::Presentation) {
+    if let Ok(mut deliveries) = app.state::<AppState>().source_deliveries.lock() {
+        deliveries.advance(presentation.epoch);
+    }
     #[cfg(target_os = "windows")]
     windows_visibility::disarm();
     let _ = app.emit("translation-presentation", presentation);
@@ -1517,7 +1524,65 @@ fn empty_input_payload(presentation_epoch: u64) -> serde_json::Value {
     serde_json::json!({"text":"","mode":"input","presentationEpoch":presentation_epoch})
 }
 fn empty_selection_window(app: &tauri::AppHandle, presentation_epoch: u64) {
-    let _ = app.emit("source-text", empty_selection_payload(presentation_epoch));
+    emit_source_text(app, empty_selection_payload(presentation_epoch));
+}
+
+fn source_delivery_event(
+    delivery: source_delivery::Delivery<serde_json::Value>,
+) -> serde_json::Value {
+    let mut payload = delivery.payload;
+    payload["deliveryId"] = serde_json::json!(delivery.id);
+    payload["presentationEpoch"] = serde_json::json!(delivery.epoch);
+    payload
+}
+
+fn emit_source_text(app: &tauri::AppHandle, payload: serde_json::Value) {
+    let result = (|| {
+        let epoch = payload["presentationEpoch"]
+            .as_u64()
+            .ok_or("捕获交付缺少展示编号")?;
+        let state = app.state::<AppState>();
+        if state.translation_requests.presentation()?.epoch != epoch {
+            return Err(translation_requests::CANCELLED.to_owned());
+        }
+        let delivery = locked(&state.source_deliveries)?.publish(epoch, payload)?;
+        Ok(source_delivery_event(delivery))
+    })();
+    match result {
+        Ok(payload) => {
+            let _ = app.emit("source-text", payload);
+        }
+        Err(error) if error.starts_with("CANCELLED:") => {}
+        Err(error) => {
+            let _ = app.emit("action-error", error);
+        }
+    }
+}
+
+#[tauri::command]
+fn get_pending_source(
+    window: tauri::WebviewWindow,
+    state: State<AppState>,
+) -> Result<Option<serde_json::Value>, String> {
+    if window.label() != "main" {
+        return Err("捕获结果只能交付主窗口".into());
+    }
+    let epoch = state.translation_requests.presentation()?.epoch;
+    Ok(locked(&state.source_deliveries)?
+        .peek(epoch)
+        .map(source_delivery_event))
+}
+
+#[tauri::command]
+fn ack_source_delivery(
+    window: tauri::WebviewWindow,
+    state: State<AppState>,
+    delivery_id: u64,
+) -> Result<bool, String> {
+    if window.label() != "main" {
+        return Err("捕获结果只能由主窗口确认".into());
+    }
+    Ok(locked(&state.source_deliveries)?.acknowledge(delivery_id))
 }
 fn empty_selection_payload(presentation_epoch: u64) -> serde_json::Value {
     let mut payload = empty_input_payload(presentation_epoch);
@@ -1722,12 +1787,12 @@ fn start_action(app: tauri::AppHandle, action: String) {
                 if capture {
                     payload["captureOrigin"] = serde_json::json!("ocr");
                 }
-                let _ = app.emit("source-text", payload);
+                emit_source_text(&app, payload);
             }
             Ok(_) if action == "selection" => empty_selection_window(&app, presentation.epoch),
             Ok(_) => {
                 if !keep_popup {
-                    let _ = app.emit("source-text", empty_input_payload(presentation.epoch));
+                    emit_source_text(&app, empty_input_payload(presentation.epoch));
                 }
                 let _ = app.emit("action-error", "没有识别到文字，请选择更清晰的区域");
             }
@@ -1741,7 +1806,7 @@ fn start_action(app: tauri::AppHandle, action: String) {
                 } else if let Some(failure) =
                     action_failure_presentation(&action, &e, presentation.epoch)
                 {
-                    let _ = app.emit("source-text", failure.source);
+                    emit_source_text(&app, failure.source);
                     if let Some(message) = failure.error {
                         let _ = app.emit("action-error", message);
                     }
@@ -2287,6 +2352,7 @@ fn main() {
                 startup_warnings: Mutex::new(warnings),
                 outside_thread: Mutex::new(None),
                 pending_settings: Mutex::new(None),
+                source_deliveries: Mutex::new(source_delivery::SourceDeliveries::default()),
                 pending_shortcut_settings: AtomicBool::new(false),
             });
             app.manage(window_layout::LayoutState::new(layout_data_dir));
@@ -2348,6 +2414,8 @@ fn main() {
             show_popup,
             show_management,
             get_pending_settings,
+            get_pending_source,
+            ack_source_delivery,
             get_settings,
             save_settings,
             set_shortcut_recording,
@@ -2991,6 +3059,7 @@ mod tests {
             startup_warnings: Mutex::new(vec![]),
             outside_thread: Mutex::new(None),
             pending_settings: Mutex::new(None),
+            source_deliveries: Mutex::new(source_delivery::SourceDeliveries::default()),
             pending_shortcut_settings: AtomicBool::new(false),
         };
         let result = vec![TranslationResult {

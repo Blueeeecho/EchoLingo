@@ -4,6 +4,7 @@ import { installPanelLayout } from './panel-layout';
 import type { TranslationPresentation } from './panel-layout';
 import { normalizeCapturedText, normalizeOcrCapturedText } from './text-normalization';
 import { createShortcutEditor, type NativeRecordedShortcut } from './shortcut-editor';
+import { SourceDeliveryInbox, type SourceDeliveryIdentity } from './source-delivery';
 import { credentialScope } from './credential-scope';
 import { credentialMayExist, credentialStateOf, credentialStatusLabel } from './credential-state';
 import { inferProviderPreset, PROVIDER_PRESETS, qwenBaseUrl, qwenSettingsFromUrl } from './provider-presets';
@@ -37,6 +38,10 @@ let generation = 0;
 // User/capture intent only; a native presentation may cancel an old translation
 // without invalidating its own delayed, backend-verified input-focus event.
 let focusIntentRevision = 0;
+const startupSourceIntentRevision = focusIntentRevision;
+type NativeSourceDelivery = SourceTextEvent & SourceDeliveryIdentity;
+const sourceDeliveryInbox = new SourceDeliveryInbox<NativeSourceDelivery>();
+let sourceDeliveryIntent: { epoch: number; intentRevision: number } | null = null;
 let translating = false;
 let activeTranslationId: number | null = null;
 let translationPresentation: TranslationPresentation = { epoch: 0, presented: false };
@@ -70,7 +75,7 @@ let progressEpoch: number | null = null;
 let resultSource = '';
 let pendingTranslate = false;
 let originalCapture: SourceTextEvent | null = null;
-let queuedCapture: SourceTextEvent | null = null;
+let queuedCapture: { payload: SourceTextEvent; intentRevision: number } | null = null;
 interface InputFocusRequest { epoch: number; generation: number; intentRevision: number }
 let queuedInputFocus: InputFocusRequest | null = null;
 type NativeSettingsRequest = { presentationEpoch: number; section?: 'shortcuts' };
@@ -251,12 +256,13 @@ function stopPendingTranslation(preserveFocusIntent = false): void {
   invalidateResults(preserveFocusIntent);
   status('翻译已取消');
 }
-function applyTranslationPresentation(presentation: TranslationPresentation): void {
+function applyTranslationPresentation(presentation: TranslationPresentation, sourceIntent = settingsReady ? focusIntentRevision : startupSourceIntentRevision): void {
   // Native events and IPC responses may arrive out of order. Only newer
   // presentation epochs may invalidate an in-progress UI generation.
   if (presentation.epoch < translationPresentation.epoch) return;
   const changed = presentation.epoch > translationPresentation.epoch;
   translationPresentation = presentation;
+  if (changed || sourceDeliveryIntent === null) sourceDeliveryIntent = { epoch: presentation.epoch, intentRevision: sourceIntent };
   if (changed) {
     // This cancellation is part of accepting the native presentation itself,
     // not a newer user edit/navigation that invalidates its input-focus intent.
@@ -268,6 +274,7 @@ function applyTranslationPresentation(presentation: TranslationPresentation): vo
     // after cancelling the previous request so later edits/manual work win.
     visiblePopupUpdateBaseline = presentation.presented ? { epoch: presentation.epoch, generation } : null;
   }
+  if (settingsReady && sourceDeliveryInbox.peek()) queueMicrotask(() => run(flushSourceDeliveries));
 }
 function beginTranslation(presentationEpoch: number): Promise<number> {
   // IPC handlers can run concurrently. Preserve ticket allocation order when
@@ -288,7 +295,50 @@ function clearOriginalCapture(): void {
   originalCapture = null;
   $('#restore-original-breaks').hidden = true;
 }
-async function receiveCapturedText(payload: SourceTextEvent & { presentationEpoch?: number }): Promise<void> {
+async function acknowledgeSource(id: number): Promise<void> {
+  await invoke('ack_source_delivery', { deliveryId: id });
+}
+async function flushSourceDeliveries(): Promise<void> {
+  let item = sourceDeliveryInbox.peek();
+  if (!settingsReady || !item) return;
+  let current: TranslationPresentation | undefined;
+  // A live result can outrun its presentation notification. Validate the real
+  // backend epoch before adopting that boundary; never infer it from the text.
+  if (item.intentRevision === focusIntentRevision && item.payload.presentationEpoch > translationPresentation.epoch) {
+    const id = item.payload.deliveryId;
+    current = await invoke<TranslationPresentation>('get_translation_presentation');
+    if (!sourceDeliveryInbox.isLatest(id)) return;
+    if (item.intentRevision !== focusIntentRevision || current.epoch !== item.payload.presentationEpoch) {
+      sourceDeliveryInbox.discard(id);
+      await acknowledgeSource(id);
+      return;
+    }
+    applyTranslationPresentation(current, item.intentRevision);
+  }
+  const accepted = sourceDeliveryInbox.take(translationPresentation.epoch, focusIntentRevision, settingsReady);
+  if (!accepted) return;
+  const { payload, intentRevision } = accepted;
+  try {
+    if (!accepted.apply || !sourceDeliveryInbox.isLatest(payload.deliveryId)
+      || sourceDeliveryIntent?.epoch !== payload.presentationEpoch || sourceDeliveryIntent?.intentRevision !== intentRevision) return;
+    current ??= await invoke<TranslationPresentation>('get_translation_presentation');
+    if (current.epoch !== payload.presentationEpoch || translationPresentation.epoch !== payload.presentationEpoch
+      || intentRevision !== focusIntentRevision || !sourceDeliveryInbox.isLatest(payload.deliveryId)) return;
+    await receiveCapturedText(payload);
+  } finally {
+    // A delayed ACK can only clear this ID, never a newer task's pending text.
+    await acknowledgeSource(payload.deliveryId);
+  }
+}
+async function receiveNativeSource(payload: SourceTextEvent, replay = false): Promise<void> {
+  // Browser previews and older synthetic fixtures have no transport identity.
+  if (payload.deliveryId === undefined) { await receiveCapturedText(payload); return; }
+  const intent = !settingsReady || replay ? startupSourceIntentRevision
+    : sourceDeliveryIntent !== null && sourceDeliveryIntent.epoch === payload.presentationEpoch ? sourceDeliveryIntent.intentRevision : focusIntentRevision;
+  sourceDeliveryInbox.offer(payload as NativeSourceDelivery, intent);
+  await flushSourceDeliveries();
+}
+async function receiveCapturedText(payload: SourceTextEvent): Promise<void> {
   const presentationEpoch = payload.presentationEpoch ?? translationPresentation.epoch;
   if (presentationEpoch < translationPresentation.epoch) return;
   if (payload.updateVisiblePopup && (currentView !== 'translate' || !translationPresentation.presented
@@ -296,7 +346,7 @@ async function receiveCapturedText(payload: SourceTextEvent & { presentationEpoc
     || visiblePopupUpdateBaseline.generation !== generation)) return;
   // Preserve an unfinished credentials editor rather than displaying it over a
   // captured translation or silently discarding its fields. Latest capture wins.
-  if (allModals.some((modal) => !modal.hidden)) { queuedCapture = payload; queuedInputFocus = null; return; }
+  if (allModals.some((modal) => !modal.hidden)) { queuedCapture = { payload, intentRevision: focusIntentRevision }; queuedInputFocus = null; return; }
   pendingTranslate = false; clearToast();
   setView('translate');
   const normalized = payload.mode === 'input' ? payload.text
@@ -837,8 +887,11 @@ function closeModal(modal: HTMLElement): void {
   if (previous?.isConnected && previous.getClientRects().length > 0) previous.focus({ preventScroll: true });
   else fallback?.focus({ preventScroll: true });
   if (!anotherModal && queuedCapture) {
-    const payload = queuedCapture; queuedCapture = null;
-    queueMicrotask(() => run(() => receiveCapturedText(payload)));
+    const capture = queuedCapture; queuedCapture = null;
+    queueMicrotask(() => {
+      if (capture.intentRevision === focusIntentRevision
+        && (capture.payload.deliveryId === undefined || sourceDeliveryInbox.isLatest(capture.payload.deliveryId))) run(() => receiveCapturedText(capture.payload));
+    });
   } else if (!anotherModal && queuedInputFocus) {
     const request = queuedInputFocus; queuedInputFocus = null;
     queueMicrotask(() => requestInputFocus(request));
@@ -1251,7 +1304,7 @@ async function initialize(): Promise<void> {
   status('正在加载设置…');
   try {
     // Listen before loading settings so an incoming native selection is not lost during startup.
-    cleanupListeners.push(await listen<SourceTextEvent & { presentationEpoch?: number }>('source-text', (event) => run(() => receiveCapturedText(event.payload))));
+    cleanupListeners.push(await listen<SourceTextEvent>('source-text', (event) => run(() => receiveNativeSource(event.payload))));
     cleanupListeners.push(await listen<unknown>('focus-input', (event) => run(() => receiveInputFocus(event.payload))));
     cleanupListeners.push(await listen<NativeSettingsRequest>('open-settings', (event) => run(() => openSettingsFromNative(event.payload))));
     cleanupListeners.push(await listen<TranslationPresentation>('translation-presentation', (event) => applyTranslationPresentation(event.payload)));
@@ -1259,7 +1312,7 @@ async function initialize(): Promise<void> {
     cleanupListeners.push(await listen<string>('action-error', (event) => handleActionError(event.payload)));
     cleanupListeners.push(await listen<string>('shortcut-error', (event) => toast(event.payload, 'error', 8000)));
     cleanupListeners.push(await listen<NativeRecordedShortcut>('shortcut-recorded', (event) => shortcutEditor.receiveNative(event.payload)));
-    applyTranslationPresentation(await invoke<TranslationPresentation>('get_translation_presentation'));
+    applyTranslationPresentation(await invoke<TranslationPresentation>('get_translation_presentation'), startupSourceIntentRevision);
     const startupSettings = await invoke<NativeSettingsRequest | null>('get_pending_settings');
     if (startupSettings) pendingSettingsOpen = !pendingSettingsOpen || startupSettings.presentationEpoch > pendingSettingsOpen.presentationEpoch ? startupSettings : pendingSettingsOpen;
     settings = await invoke<Settings>('get_settings');
@@ -1268,6 +1321,9 @@ async function initialize(): Promise<void> {
     if (!translating) emptyResults();
     await loadHistory(); status('准备就绪');
     if (pendingSettingsOpen) { const request = pendingSettingsOpen; pendingSettingsOpen = null; await openSettingsFromNative(request); }
+    const pendingSource = await invoke<SourceTextEvent | null>('get_pending_source');
+    if (pendingSource) await receiveNativeSource(pendingSource, true);
+    await flushSourceDeliveries();
     if (pendingTranslate) run(translate);
     const diagnostic = await invoke<{ warnings?: unknown }>('diagnostics', document.documentElement.dataset.platform === 'windows' ? { includeNative: false } : {}).catch(() => null);
     if (Array.isArray(diagnostic?.warnings) && diagnostic.warnings.length > 0) toast(diagnostic.warnings.filter((warning): warning is string => typeof warning === 'string').join('\n'), 'error', 10_000);

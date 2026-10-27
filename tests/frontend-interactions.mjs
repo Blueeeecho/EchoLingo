@@ -19,6 +19,7 @@ try {
       saveHistory: true, theme: 'light', maxHistory: 20, autoHideSeconds: 0, ocrProviders: [], activeOcrProviderId: null,
     };
     const callbacks = new Map(), listeners = new Map(), ocrKeys = new Map(), translationKeys = new Map(); let callbackId = 0;
+    window.__TAURI_EVENT_PLUGIN_INTERNALS__ = { unregisterListener: (event) => listeners.delete(event) };
     const scope = (provider) => ['system', 'offline'].includes(provider.kind) ? `${provider.id}:${provider.kind}` : `${provider.id}:${provider.kind}:${new URL(provider.baseUrl).origin}`;
     translationKeys.set(scope(state.providers[0]), 'qa-original-translation-key');
     const fixture = window.__qa = { permissionState: { platform: 'macos', supported: true, identity: 'application-process', runningBundledApp: true, bundleIdentifier: 'io.github.qa.echolingo', processId: 1, accessibilityGranted: false, screenCaptureGranted: false }, permissionReads: 0, permissionRequests: [], permissionSettings: [], holdTranslation: false, releaseTranslation: () => {}, translationError: null, settings: state, saveCalls: 0, keyCalls: 0, ocrKeyCalls: 0, ocrTestCalls: 0, ocrDeleteCalls: 0, credentialWrites: [], settingsWrites: [], hideCalls: 0, layoutCalls: [], showCalls: [], translationRequests: [], dragCalls: 0, holdSave: false, failSave: false, releaseSave: () => {}, emit: (name, payload) => listeners.get(name)?.({ event: name, payload, id: 1 }) };
@@ -31,6 +32,14 @@ try {
     Object.assign(fixture, { pinned: false, nativeVisible: true, popupReveals: 0, nativeHideTransitions: 0 });
     Object.assign(fixture, { holdPopupAck: false, popupAckWaits: 0, releasePopupAck: () => {}, sourceFocusCalls: 0 });
     Object.assign(fixture, { holdPresentationRead: false, presentationReadWaits: 0, releasePresentationRead: () => {} });
+    const sourceBoot = new URL(location.href).searchParams.get('sourceDeliveryFixture');
+    Object.assign(fixture, { pendingSource: null, sourceAcks: [], sourceAckResults: [], pendingSourceReads: 0, bootSettingsWaits: 0, releaseBootSettings: () => {}, oldSourceAckWaits: 0, newSourceAckWaits: 0, releaseOldSourceAck: () => {}, releaseNewSourceAck: () => {} });
+    if (sourceBoot) {
+      fixture.presentation = { epoch: sourceBoot === 'management' || sourceBoot === 'newtask' ? 2 : 1, presented: false };
+      fixture.pendingSource = { deliveryId: sourceBoot === 'newtask' ? 2 : 1, presentationEpoch: fixture.presentation.epoch,
+        text: sourceBoot === 'empty' ? '' : sourceBoot === 'newtask' ? 'Latest generated startup source' : 'Generated startup source', mode: sourceBoot === 'empty' ? 'input' : 'translate', focusInput: sourceBoot === 'empty' };
+      if (sourceBoot === 'management') { fixture.pendingSource = null; fixture.pendingSettings = { presentationEpoch: 2 }; }
+    }
     fixture.emitInputFocus = (presentation = fixture.nativeInputShow()) => fixture.emit('focus-input', structuredClone(presentation));
     const elementFocus = HTMLElement.prototype.focus;
     HTMLElement.prototype.focus = function (...args) {
@@ -85,8 +94,14 @@ try {
     window.__TAURI_INTERNALS__ = {
       transformCallback: (callback) => { const id = ++callbackId; callbacks.set(id, callback); return id; },
       invoke: async (command, args = {}) => {
-        if (command === 'plugin:event|listen') { listeners.set(args.event, callbacks.get(args.handler)); return 1; }
-        if (command === 'get_settings') { fixture.settingsReads++; for (const provider of fixture.settings.providers) decorateCredential(provider, translationKeys); for (const provider of fixture.settings.ocrProviders) decorateCredential(provider, ocrKeys); return structuredClone(fixture.settings); }
+        if (command === 'plugin:event|listen') {
+          listeners.set(args.event, callbacks.get(args.handler));
+          if (args.event === 'source-text' && ['dual', 'management', 'newtask'].includes(sourceBoot)) fixture.emit('source-text',
+            sourceBoot === 'dual' ? structuredClone(fixture.pendingSource) : { deliveryId: 1, presentationEpoch: 1, text: 'Old generated startup source', mode: 'translate' });
+          return 1;
+        }
+        if (command === 'plugin:event|unlisten') { listeners.delete(args.event); return; }
+        if (command === 'get_settings') { fixture.settingsReads++; if (sourceBoot === 'edit' && fixture.settingsReads === 1) { fixture.bootSettingsWaits++; await new Promise(resolve => { fixture.releaseBootSettings = resolve; }); } for (const provider of fixture.settings.providers) decorateCredential(provider, translationKeys); for (const provider of fixture.settings.ocrProviders) decorateCredential(provider, ocrKeys); return structuredClone(fixture.settings); }
         if (command === 'get_history') return structuredClone(fixture.history ?? []);
         if (command === 'toggle_favorite') { const entry = fixture.history?.find(item => item.id === args.id); if (entry) entry.favorite = !entry.favorite; return; }
         if (command === 'copy_text') { fixture.copies.push(args.text); return; }
@@ -96,6 +111,17 @@ try {
           return presentation;
         }
         if (command === 'get_pending_settings') return fixture.pendingSettings ?? null;
+        if (command === 'get_pending_source') { fixture.pendingSourceReads++; return structuredClone(fixture.pendingSource); }
+        if (command === 'ack_source_delivery') {
+          fixture.sourceAcks.push(args.deliveryId);
+          if (sourceBoot === 'delayed-ack') {
+            if (args.deliveryId === 1) { fixture.oldSourceAckWaits++; await new Promise(resolve => { fixture.releaseOldSourceAck = resolve; }); }
+            if (args.deliveryId === 2) { fixture.newSourceAckWaits++; await new Promise(resolve => { fixture.releaseNewSourceAck = resolve; }); }
+          }
+          const cleared = fixture.pendingSource?.deliveryId === args.deliveryId;
+          if (cleared) fixture.pendingSource = null;
+          fixture.sourceAckResults.push({ deliveryId: args.deliveryId, cleared }); return cleared;
+        }
         if (command === 'get_system_translation_status') { fixture.systemStatusCalls.push(structuredClone(args)); return structuredClone(fixture.systemStatus); }
         if (command === 'prepare_system_translation') { fixture.systemPrepareCalls.push(structuredClone(args)); fixture.systemStatus = { ...fixture.systemStatus, ready: true, requiresSetup: false, status: 'installed', message: 'QA 本机语言包已就绪' }; return structuredClone(fixture.systemStatus); }
         if (command === 'permission_status') { fixture.permissionReads++; return structuredClone(fixture.permissionState); }
@@ -173,6 +199,56 @@ try {
       },
     };
   });
+  const sourceFixtureUrl = (mode) => {
+    const url = new URL(process.env.ECHOLINGO_TEST_URL ?? 'http://127.0.0.1:1420/');
+    url.searchParams.set('sourceDeliveryFixture', mode); return url.href;
+  };
+  for (const mode of ['before-listener', 'dual', 'newtask']) {
+    await page.goto(sourceFixtureUrl(mode));
+    await page.waitForFunction(() => window.__qa.translationRequests.length === 1 && window.__qa.sourceAcks.length > 0);
+    assert.equal(await page.locator('#source-text').inputValue(), mode === 'newtask' ? 'Latest generated startup source' : 'Generated startup source');
+    await page.waitForTimeout(60);
+    assert.equal(await page.evaluate(() => window.__qa.translationRequests.length), 1);
+    assert.equal(await page.evaluate(() => window.__qa.pendingSource), null);
+  }
+  // The startup-pull ACK is still in flight when a newer live delivery arrives.
+  // Hold the new ACK too, so the old completion must visibly preserve ID2.
+  await page.goto(sourceFixtureUrl('delayed-ack'));
+  await page.waitForFunction(() => window.__qa.oldSourceAckWaits === 1 && window.__qa.translationRequests.length === 1);
+  await page.evaluate(() => {
+    const fixture = window.__qa;
+    fixture.presentation = { epoch: fixture.presentation.epoch + 1, presented: false };
+    fixture.pendingSource = { deliveryId: 2, presentationEpoch: fixture.presentation.epoch, text: 'New live source during old ACK', mode: 'translate' };
+    fixture.emit('translation-presentation', structuredClone(fixture.presentation));
+    fixture.emit('source-text', structuredClone(fixture.pendingSource));
+  });
+  await page.waitForFunction(() => window.__qa.newSourceAckWaits === 1 && window.__qa.translationRequests.length === 2);
+  await page.evaluate(() => window.__qa.releaseOldSourceAck());
+  await page.waitForFunction(() => window.__qa.sourceAckResults.some(item => item.deliveryId === 1));
+  assert.deepEqual(await page.evaluate(() => window.__qa.sourceAckResults.find(item => item.deliveryId === 1)), { deliveryId: 1, cleared: false });
+  assert.equal(await page.evaluate(() => window.__qa.pendingSource.deliveryId), 2);
+  assert.equal(await page.locator('#source-text').inputValue(), 'New live source during old ACK');
+  assert.deepEqual(await page.evaluate(() => window.__qa.sourceAcks), [1, 2]);
+  await page.evaluate(() => window.__qa.releaseNewSourceAck());
+  await page.waitForFunction(() => window.__qa.pendingSource === null);
+  assert.equal(await page.evaluate(() => window.__qa.translationRequests.length), 2);
+  assert.equal(await page.locator('#source-text').inputValue(), 'New live source during old ACK');
+  await page.goto(sourceFixtureUrl('empty'));
+  await page.waitForFunction(() => document.activeElement.id === 'source-text' && window.__qa.sourceAcks.length === 1);
+  assert.equal(await page.locator('#source-text').inputValue(), '');
+  assert.equal(await page.evaluate(() => window.__qa.translationRequests.length), 0);
+  await page.goto(sourceFixtureUrl('edit'));
+  await page.waitForFunction(() => window.__qa.bootSettingsWaits === 1);
+  await page.locator('#source-text').fill('Generated user edit while settings load');
+  await page.evaluate(() => window.__qa.releaseBootSettings());
+  await page.waitForFunction(() => window.__qa.sourceAcks.length === 1);
+  assert.equal(await page.locator('#source-text').inputValue(), 'Generated user edit while settings load');
+  assert.equal(await page.evaluate(() => window.__qa.translationRequests.length), 0);
+  await page.goto(sourceFixtureUrl('management'));
+  await page.waitForFunction(() => document.body.dataset.view === 'settings' && window.__qa.sourceAcks.length === 1);
+  assert.equal(await page.locator('#source-text').inputValue(), '');
+  assert.equal(await page.evaluate(() => window.__qa.translationRequests.length), 0);
+  console.log('PASS: capture before listener replays once after readiness; event plus pull translates once; old startup payloads cannot overwrite edits, management, or a newer task; empty Alt+D retains first-input focus. Fake IPC only.');
   await page.goto(process.env.ECHOLINGO_TEST_URL ?? 'http://127.0.0.1:1420/');
   await page.waitForFunction(() => document.querySelector('#footer-status')?.textContent === '准备就绪');
   const goView = async (view) => {
