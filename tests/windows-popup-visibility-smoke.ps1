@@ -305,9 +305,38 @@ public static class EchoLingoPopupVisibilitySmoke {
                             report["nativeInputIdleObserved"] = true;
                             stage = "wait-native-window";
                             Wait(delegate { Require(!app.HasExited, "New app exited before creating its native window."); main = MainWindow(app.Id); return main != IntPtr.Zero; }, 20000, "No unique root HWND of the pinned Tao class became available for the started app PID.");
-                            Action sourceFocus = delegate { Ui(form, delegate { form.Activate(); source.Focus(); source.SelectAll(); });
-                                Require(SetForegroundWindow(form.Handle), "Generated source foreground was rejected.");
-                                Wait(delegate { return GetForegroundWindow() == form.Handle; }, 2000, "Generated source not foreground."); };
+                            Action sourceFocus = delegate {
+                                Dictionary<string, object> focus = new Dictionary<string, object>();
+                                report["lastSourceFocusPreparation"] = focus;
+                                // Keep activation and focus on the actual source
+                                // UI thread, as in the native/application/live
+                                // fixtures. A worker's second foreground call
+                                // is not the readiness condition. Do not retry
+                                // activation or send a shortcut if denied.
+                                Ui(form, delegate {
+                                    form.WindowState = FormWindowState.Normal;
+                                    form.Activate();
+                                    focus["setForegroundReturned"] = SetForegroundWindow(form.Handle);
+                                    source.Focus(); source.SelectAll();
+                                    uint owner; uint thread = GetWindowThreadProcessId(form.Handle, out owner);
+                                    focus["sourceHwnd"] = "0x" + form.Handle.ToInt64().ToString("X");
+                                    focus["sourceProcessId"] = owner; focus["sourceUiThreadId"] = thread;
+                                });
+                                Wait(delegate {
+                                    bool ready = false;
+                                    Ui(form, delegate {
+                                        IntPtr foreground = GetForegroundWindow(); uint owner;
+                                        GetWindowThreadProcessId(foreground, out owner);
+                                        focus["foregroundHwnd"] = "0x" + foreground.ToInt64().ToString("X");
+                                        focus["foregroundProcessId"] = owner;
+                                        focus["sourceContainsFocus"] = form.ContainsFocus;
+                                        focus["sourceControlFocused"] = source.Focused;
+                                        ready = foreground == form.Handle && form.ContainsFocus && source.Focused;
+                                        focus["actualSourceReady"] = ready;
+                                    });
+                                    return ready;
+                                }, 3000, "Generated source did not become foreground with its editor focused; no shortcut was sent.");
+                            };
                             Action moveApp = delegate { Require(SetWindowPos(main, IntPtr.Zero, Math.Max(300, Screen.PrimaryScreen.Bounds.Right - 720), 20, 0, 0, 0x1 | 0x4 | 0x10), "Could not position own app fixture."); };
                             // Native-only fixture preparation. This one owned-
                             // HWND show is explicitly NOT shortcut/presentation
