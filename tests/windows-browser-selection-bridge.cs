@@ -97,7 +97,7 @@ public static class WindowsBrowserSelectionBridge {
         Dictionary<string,object> numeric=new Dictionary<string,object>();object raw;
         if(reply.TryGetValue("capturePerformance",out raw)){
             Dictionary<string,object> performance=raw as Dictionary<string,object>;
-            if(performance!=null)for(int i=1;i<=16;i++)foreach(string suffix in new string[]{"Milliseconds","Stage","Depth"}){string key="selectionQuery"+i+suffix;object value;if(performance.TryGetValue(key,out value)){double number=Convert.ToDouble(value);Need(!Double.IsNaN(number)&&!Double.IsInfinity(number)&&number>=0&&number<=10000000,"SELECTION_DIAGNOSTIC_BOUND");numeric[key]=number;}}
+            if(performance!=null)for(int i=1;i<=16;i++)foreach(string suffix in new string[]{"Milliseconds","Stage","Depth","InitialRoleId","FreshRoleId","InitialIdentityLength","FreshIdentityLength","IdentityCompared","IdentityEqual","RootWalkReason","ExceptionKind"}){string key="selectionQuery"+i+suffix;object value;if(performance.TryGetValue(key,out value)){double number=Convert.ToDouble(value);Need(!Double.IsNaN(number)&&!Double.IsInfinity(number)&&number>=0&&number<=10000000,"SELECTION_DIAGNOSTIC_BOUND");numeric[key]=number;}}
         }
         if(reply.TryGetValue("helperPerformance",out raw)){
             Dictionary<string,object> phases=raw as Dictionary<string,object>;

@@ -437,6 +437,7 @@ public static class EchoLingoNative {
     sealed class SelectionContext {
         public IntPtr Foreground;
         public int[] FocusIdentity;
+        public int InitialRoleId;
         public readonly HashSet<int> SourceProcesses = new HashSet<int>();
     }
     // One windowless MTA owns all UIA calls for this helper invocation. Never
@@ -473,6 +474,8 @@ public static class EchoLingoNative {
     }
     sealed class SelectionTrace {
         public volatile int Stage, Depth;
+        public volatile int InitialRoleId, FreshRoleId, InitialIdentityLength, FreshIdentityLength;
+        public volatile int IdentityCompared, IdentityEqual, RootWalkReason, ExceptionKind;
         public volatile bool Abandoned;
         public void Mark(int stage, int depth) { Depth = depth; Stage = stage; }
     }
@@ -481,6 +484,12 @@ public static class EchoLingoNative {
     static int selectionQueryCount;
     [ThreadStatic] static SelectionTrace selectionTrace;
     static void SelectionStage(int stage, int depth) { if (selectionTrace != null) selectionTrace.Mark(stage, depth); }
+    static void SelectionException(Exception error) {
+        if (selectionTrace == null || selectionTrace.ExceptionKind != 0) return;
+        selectionTrace.ExceptionKind = error is ElementNotAvailableException ? 1
+            : error is OperationCanceledException ? 2 : error is ArgumentException ? 3
+            : error is COMException ? 4 : error is InvalidOperationException ? 5 : 6;
+    }
     static void RequireSelectionQueryActive() {
         NativeCancellation.ThrowIfRequested();
         if (selectionTrace != null && selectionTrace.Abandoned)
@@ -498,7 +507,8 @@ public static class EchoLingoNative {
         Stopwatch elapsed = Stopwatch.StartNew();
         Task<T> task = worker.Enqueue(delegate {
             selectionTrace = trace; SelectionStage(1, 0);
-            try { return query(); } finally { selectionTrace = null; }
+            try { return query(); } catch (Exception error) { SelectionException(error); throw; }
+            finally { selectionTrace = null; }
         });
         try {
             while (!task.IsCompleted) {
@@ -519,6 +529,14 @@ public static class EchoLingoNative {
                 CapturePerformance.Set(prefix + "Milliseconds", elapsed.Elapsed.TotalMilliseconds);
                 CapturePerformance.Set(prefix + "Stage", trace.Stage);
                 CapturePerformance.Set(prefix + "Depth", trace.Depth);
+                CapturePerformance.Set(prefix + "InitialRoleId", trace.InitialRoleId);
+                CapturePerformance.Set(prefix + "FreshRoleId", trace.FreshRoleId);
+                CapturePerformance.Set(prefix + "InitialIdentityLength", trace.InitialIdentityLength);
+                CapturePerformance.Set(prefix + "FreshIdentityLength", trace.FreshIdentityLength);
+                CapturePerformance.Set(prefix + "IdentityCompared", trace.IdentityCompared);
+                CapturePerformance.Set(prefix + "IdentityEqual", trace.IdentityEqual);
+                CapturePerformance.Set(prefix + "RootWalkReason", trace.RootWalkReason);
+                CapturePerformance.Set(prefix + "ExceptionKind", trace.ExceptionKind);
             }
         }
     }
@@ -541,41 +559,67 @@ public static class EchoLingoNative {
     static bool FocusBelongsToWindow(AutomationElement focused, IntPtr foreground, CacheRequest cache, out List<AutomationElement> ancestors) {
         ancestors = new List<AutomationElement>();
         IntPtr root = GetAncestor(foreground, 2); // GA_ROOT, not process identity.
-        if (root == IntPtr.Zero) return false;
+        if (root == IntPtr.Zero) { if (selectionTrace != null) selectionTrace.RootWalkReason = 2; SelectionStage(12, 0); return false; }
         AutomationElement current = focused;
         for (int depth = 0; current != null && depth < 64; depth++) {
             RequireSelectionQueryActive(); SelectionStage(4, depth);
             AutomationElement.AutomationElementInformation info = current.Cached;
-            if (info.IsPassword) throw new InvalidOperationException("PROTECTED: Selected text is inside a password control.");
+            if (info.IsPassword) { if (selectionTrace != null) selectionTrace.RootWalkReason = 6; SelectionStage(16, depth); throw new InvalidOperationException("PROTECTED: Selected text is inside a password control."); }
             int handle = info.NativeWindowHandle;
-            if (handle != 0 && GetAncestor(new IntPtr(handle), 2) != root) return false;
+            if (handle != 0 && GetAncestor(new IntPtr(handle), 2) != root) { if (selectionTrace != null) selectionTrace.RootWalkReason = 3; SelectionStage(13, depth); return false; }
             ancestors.Add(current);
-            if (handle != 0 && new IntPtr(handle) == root) return true;
+            if (handle != 0 && new IntPtr(handle) == root) { if (selectionTrace != null) selectionTrace.RootWalkReason = 1; return true; }
             SelectionStage(5, depth);
             current = TreeWalker.RawViewWalker.GetParent(current, cache);
         }
-        return false;
+        if (selectionTrace != null) selectionTrace.RootWalkReason = current == null ? 5 : 4;
+        SelectionStage(current == null ? 15 : 14, ancestors.Count); return false;
     }
     static AutomationElement CurrentSelectionFocus(SelectionContext context, out List<AutomationElement> ancestors) {
         try {
-            if (context.Foreground == IntPtr.Zero || GetForegroundWindow() != context.Foreground)
+            if (context.Foreground == IntPtr.Zero || GetForegroundWindow() != context.Foreground) {
+                SelectionStage(18, 0);
                 throw new InvalidOperationException("SELECTION: Foreground application changed; select text and retry.");
+            }
             CacheRequest cache = SelectionCache(); AutomationElement focused;
             SelectionStage(2, 0);
             using (cache.Activate()) focused = SelectionCopyPolicy.RequireFocus(AutomationElement.FocusedElement);
-            RequireSelectionQueryActive(); SelectionStage(3, 0); int[] identity = focused.GetRuntimeId();
-            if ((context.FocusIdentity != null && !SameIdentity(context.FocusIdentity, identity)) || !FocusBelongsToWindow(focused, context.Foreground, cache, out ancestors))
+            RequireSelectionQueryActive(); int roleId = 0;
+            // Cached role reads add no provider RPC. Diagnostic unavailability
+            // must not become a new acquisition failure or weaken a guard.
+            if (CapturePerformance.Enabled) { SelectionStage(20, 0); try { ControlType role = focused.Cached.ControlType; if (role != null) roleId = role.Id; } catch { } }
+            if (selectionTrace != null) { selectionTrace.InitialRoleId = context.FocusIdentity == null ? roleId : context.InitialRoleId; selectionTrace.FreshRoleId = roleId; }
+            SelectionStage(3, 0); int[] identity = focused.GetRuntimeId(); SelectionStage(10, 0);
+            bool identityCompared = context.FocusIdentity != null;
+            bool identityEqual = identityCompared && SameIdentity(context.FocusIdentity, identity);
+            if (selectionTrace != null) {
+                selectionTrace.InitialIdentityLength = context.FocusIdentity == null ? (identity == null ? 0 : identity.Length) : context.FocusIdentity.Length;
+                selectionTrace.FreshIdentityLength = identity == null ? 0 : identity.Length;
+                selectionTrace.IdentityCompared = identityCompared ? 1 : 0;
+                selectionTrace.IdentityEqual = identityEqual ? 1 : 0;
+            }
+            if (identityCompared && !identityEqual) {
+                SelectionStage(11, 0);
+                throw new InvalidOperationException("SELECTION: The focused control changed or is outside the source window; select text and retry.");
+            }
+            if (!FocusBelongsToWindow(focused, context.Foreground, cache, out ancestors))
                 throw new InvalidOperationException("SELECTION: The focused control changed or is outside the source window; select text and retry.");
             if (context.FocusIdentity == null) {
-                if (identity == null || identity.Length == 0)
+                if (identity == null || identity.Length == 0) {
+                    SelectionStage(17, 0);
                     throw new InvalidOperationException("SELECTION: The source focus identity is unavailable; select text and retry.");
+                }
                 context.FocusIdentity = identity;
+                context.InitialRoleId = roleId;
             }
-            if (GetForegroundWindow() != context.Foreground)
+            if (GetForegroundWindow() != context.Foreground) {
+                SelectionStage(19, ancestors.Count);
                 throw new InvalidOperationException("SELECTION: Foreground application changed; select text and retry.");
+            }
             SelectionStage(9, ancestors.Count);
             return focused;
-        } catch (ElementNotAvailableException) {
+        } catch (ElementNotAvailableException error) {
+            SelectionException(error);
             throw new InvalidOperationException("SELECTION: The source control is no longer available; select text and retry.");
         }
     }
@@ -594,7 +638,8 @@ public static class EchoLingoNative {
             int process = focused.Cached.ProcessId;
             if (process != 0) context.SourceProcesses.Add(process);
             return context;
-        } catch (ElementNotAvailableException) {
+        } catch (ElementNotAvailableException error) {
+            SelectionException(error);
             throw new InvalidOperationException("SELECTION: The source control is no longer available; select text and retry.");
         }
     }
@@ -649,7 +694,8 @@ public static class EchoLingoNative {
         } catch (InvalidOperationException error) {
             if (error.Message.StartsWith("PROTECTED:") || error.Message.StartsWith("NO_SELECTION:") || error.Message.StartsWith("SELECTION:")) throw;
             throw new InvalidOperationException("SELECTION: The source selection query failed; select text and retry.");
-        } catch (ElementNotAvailableException) {
+        } catch (ElementNotAvailableException error) {
+            SelectionException(error);
             throw new InvalidOperationException("SELECTION: The source control is no longer available; select text and retry.");
         }
     }

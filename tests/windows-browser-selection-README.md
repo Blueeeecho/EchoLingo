@@ -46,7 +46,17 @@ The helper is invoked with explicit performance diagnostics. Only the numeric
 whitelist of up to 16 query durations, last stages/depths and three startup/reply
 phases is retained. Stage numbers are 1 worker entered, 2 focused-element/cache
 query, 3 runtime identity, 4 cached ancestor validation, 5 cached parent query,
-6 TextPattern query, 7 GetSelection, 8 GetText, and 9 completed focus validation.
+6 TextPattern query, 7 GetSelection, 8 GetText, 9 completed focus validation,
+10 GetRuntimeId returned, 11 identity mismatch, 12 missing native root,
+13 ancestor belongs to another root, 14 ancestry limit, 15 ancestry ended,
+16 protected ancestor, 17 missing runtime identity, 18/19 foreground changed
+before/after validation, and 20 diagnostic cached-role read. Initial/fresh
+ControlType IDs and identity lengths, plus identity-compared/equal flags,
+distinguish provider failures from a confirmed mismatch without retaining IDs.
+Root-walk reason is 0 not reached, 1 complete, 2 no root, 3 other root, 4 depth
+limit, 5 ended, 6 password. Exception kind is 0 none observed, 1 unavailable
+element, 2 cancellation, 3 argument, 4 COM, 5 invalid operation, 6 other. These
+are numeric enums, never exception messages, runtime IDs, names or content.
 No accessibility warm-up or timeout/retry change accompanies these diagnostics.
 
 A failed case keeps the overall result false. Only after generated clipboard
