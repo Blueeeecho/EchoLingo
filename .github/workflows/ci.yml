@@ -9,12 +9,12 @@ on:
         description: Full regression or exact-binary desktop diagnostics
         type: choice
         default: full
-        options: [full, windows-popup-diagnostics, windows-application-diagnostics, windows-input-plane-experiment, windows-native-diagnostics, windows-shortcuts-ui-diagnostics, windows-shortcuts-ui-medium-diagnostics, windows-delegated-diagnostics, windows-browser-diagnostics]
+        options: [full, windows-popup-diagnostics, windows-application-diagnostics, windows-input-plane-experiment, windows-native-diagnostics, windows-shortcuts-ui-diagnostics, windows-shortcuts-ui-medium-diagnostics, windows-delegated-diagnostics, windows-browser-diagnostics, windows-latest-intent-diagnostics]
 permissions:
   contents: read
 jobs:
   desktop:
-    if: github.event.inputs.mode != 'windows-popup-diagnostics' && github.event.inputs.mode != 'windows-application-diagnostics' && github.event.inputs.mode != 'windows-input-plane-experiment' && github.event.inputs.mode != 'windows-native-diagnostics' && github.event.inputs.mode != 'windows-shortcuts-ui-diagnostics' && github.event.inputs.mode != 'windows-shortcuts-ui-medium-diagnostics' && github.event.inputs.mode != 'windows-delegated-diagnostics' && github.event.inputs.mode != 'windows-browser-diagnostics'
+    if: github.event.inputs.mode != 'windows-popup-diagnostics' && github.event.inputs.mode != 'windows-application-diagnostics' && github.event.inputs.mode != 'windows-input-plane-experiment' && github.event.inputs.mode != 'windows-native-diagnostics' && github.event.inputs.mode != 'windows-shortcuts-ui-diagnostics' && github.event.inputs.mode != 'windows-shortcuts-ui-medium-diagnostics' && github.event.inputs.mode != 'windows-delegated-diagnostics' && github.event.inputs.mode != 'windows-browser-diagnostics' && github.event.inputs.mode != 'windows-latest-intent-diagnostics'
     strategy:
       fail-fast: false
       matrix:
@@ -317,7 +317,7 @@ jobs:
           }
 
   frontend-interactions:
-    if: github.event.inputs.mode != 'windows-popup-diagnostics' && github.event.inputs.mode != 'windows-application-diagnostics' && github.event.inputs.mode != 'windows-input-plane-experiment' && github.event.inputs.mode != 'windows-native-diagnostics' && github.event.inputs.mode != 'windows-shortcuts-ui-diagnostics' && github.event.inputs.mode != 'windows-shortcuts-ui-medium-diagnostics' && github.event.inputs.mode != 'windows-delegated-diagnostics' && github.event.inputs.mode != 'windows-browser-diagnostics'
+    if: github.event.inputs.mode != 'windows-popup-diagnostics' && github.event.inputs.mode != 'windows-application-diagnostics' && github.event.inputs.mode != 'windows-input-plane-experiment' && github.event.inputs.mode != 'windows-native-diagnostics' && github.event.inputs.mode != 'windows-shortcuts-ui-diagnostics' && github.event.inputs.mode != 'windows-shortcuts-ui-medium-diagnostics' && github.event.inputs.mode != 'windows-delegated-diagnostics' && github.event.inputs.mode != 'windows-browser-diagnostics' && github.event.inputs.mode != 'windows-latest-intent-diagnostics'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -817,3 +817,59 @@ jobs:
           $outcome = '${{ steps.browser.outcome }}'
           [ordered]@{ scope = 'Fresh generated-page installed Chromium native selection; no Tauri/WPS/all-app acceptance'; browser = $outcome } | ConvertTo-Json -Compress
           if ($outcome -ne 'success') { throw 'Actual browser selection failed or was inconclusive.' }
+
+  windows-latest-intent-diagnostics:
+    name: Pinned latest-intent diagnostics (exact 4cf37d8 binary)
+    if: github.event_name == 'workflow_dispatch' && github.event.inputs.mode == 'windows-latest-intent-diagnostics'
+    runs-on: windows-latest
+    timeout-minutes: 6
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - uses: actions/checkout@v4
+      - name: Verify production source is unchanged and retrieve exact built candidate
+        shell: powershell
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          git fetch --no-tags --depth=1 origin 4cf37d8fb506ee28387f433f86832e91b281468d
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          git diff --exit-code 4cf37d8fb506ee28387f433f86832e91b281468d HEAD -- src src-tauri package.json package-lock.json assets resources scripts
+          if ($LASTEXITCODE -ne 0) { throw 'Production source changed; this exact-binary supplement is invalid.' }
+          $destination = "$env:RUNNER_TEMP/echolingo-4cf37d8-latest-intent"
+          gh run download 40529706953 --repo Blueeeecho/EchoLingo --name EchoLingo-Windows-offline-evidence --dir $destination
+          if ($LASTEXITCODE -ne 0) { throw 'The exact full-run evidence artifact could not be retrieved.' }
+          $candidates = @(Get-ChildItem -LiteralPath $destination -Recurse -File -Filter echolingo.exe)
+          if ($candidates.Count -ne 1) { throw 'Expected exactly one staged application.' }
+          $candidate = $candidates[0].FullName
+          $hash = (Get-FileHash -LiteralPath $candidate -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($hash -ne '86373b0c771b6644b66b6dc0f8a8c50295b6b7da50a8b1227953d11e78b1cf03' -or $candidates[0].Length -ne 5784064) { throw 'Actual application identity differs from the full-run candidate.' }
+          "ECHOLINGO_APPLICATION_CANDIDATE=$candidate" | Out-File $env:GITHUB_ENV -Encoding utf8 -Append
+          [ordered]@{ applicationSourceUnchanged = $true; reusedRun = 40529706953; applicationSha256 = $hash; applicationBytes = $candidates[0].Length; rebuilt = $false } | ConvertTo-Json -Compress
+      - name: Actual pinned selections and OCR replacement without Escape
+        id: latest
+        continue-on-error: true
+        timeout-minutes: 5
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Continue'
+          $global:LASTEXITCODE = 1
+          $output = @(& powershell.exe -NoProfile -STA -ExecutionPolicy Bypass -File tests/windows-application-smoke.ps1 -ApplicationPath $env:ECHOLINGO_APPLICATION_CANDIDATE -LatestIntentTests 2>&1)
+          $fixtureExit = $LASTEXITCODE
+          $output | Out-File "$env:RUNNER_TEMP/echolingo-application-latest-intent.log" -Encoding utf8
+          $output | Write-Output
+          exit $fixtureExit
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: EchoLingo-Windows-latest-intent
+          if-no-files-found: warn
+          path: ${{ runner.temp }}/echolingo-application-latest-intent.log
+      - name: Gate exact-binary latest-intent outcome
+        if: always()
+        shell: powershell
+        run: |
+          $outcome = '${{ steps.latest.outcome }}'
+          [ordered]@{ scope = 'Exact 4cf37d8 built-app pinned latest-intent supplement; original full gate remains unchanged'; latestIntent = $outcome } | ConvertTo-Json -Compress
+          if ($outcome -ne 'success') { throw 'Exact-binary latest-intent workflows failed or were incomplete.' }

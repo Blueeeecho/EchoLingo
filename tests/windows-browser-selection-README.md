@@ -11,7 +11,13 @@ The fixture uses the runner's installed Edge, or installed Chrome if Edge is
 absent. It downloads no browser. It creates a new marked temporary profile,
 launches its own browser process and connects only to that profile's
 `DevToolsActivePort`. CDP independently verifies the browser root PID and exact
-fresh-profile command line before any page operation. It does not discover or
+fresh-profile command line before any page operation. The first native case
+binds its unique verified browser root HWND; subsequent cases require that same
+HWND/PID/thread/class/owner/root/style-kind identity to remain visible. They do
+not select a new window from a later set of Chromium tooltip/transient windows.
+Numeric owned-window inventory is retained on success and failure; the earlier
+second-case BROWSER_ROOT_NOT_UNIQUE log did not record candidate counts, so its
+zero-versus-multiple cause remains unknown. It does not discover or
 connect to existing browser profiles or debugging sessions.
 
 Four generated local-page cases invoke the real native `selected-text` helper

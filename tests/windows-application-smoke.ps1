@@ -370,19 +370,37 @@ public static class EchoLingoApplicationSmoke {
         public Dictionary<string,object> Snapshot(){return new Dictionary<string,object>{{"samples",samples},{"hiddenSamples",hidden},{"maximumSampleGapMilliseconds",maximumGapTicks*1000.0/Stopwatch.Frequency},{"pollMilliseconds",10}};}
         public void Dispose(){if(stop)return;stop=true;Assert(thread.Join(2000),"Pinned visibility observer did not stop.");}
     }
-    static void PlaceGeneratedSource(Form form,TextBox source,IntPtr main,string text) {
-        RECT raw;Assert(GetWindowRect(main,out raw),"Cannot measure own popup for generated-source placement.");Rectangle popup=Rectangle.FromLTRB(raw.left,raw.top,raw.right,raw.bottom);popup.Inflate(12,12);
+    static Dictionary<string,object> PlaceGeneratedSource(Form form,TextBox source,Panel image,IntPtr main,string text) {
+        RECT raw;Assert(GetWindowRect(main,out raw),"Cannot measure own popup for generated-source placement.");Rectangle actualPopup=Rectangle.FromLTRB(raw.left,raw.top,raw.right,raw.bottom),popup=actualPopup;popup.Inflate(12,12);
+        Dictionary<string,object> layout=new Dictionary<string,object>();
         OnUi(form,delegate{
-            bool placed=false;Size size=form.Size;
-            foreach(Screen screen in Screen.AllScreens){Rectangle area=screen.WorkingArea;
-                Point[] candidates={new Point(area.Left+8,area.Top+8),new Point(area.Right-size.Width-8,area.Top+8),new Point(area.Left+8,area.Bottom-size.Height-8),new Point(area.Right-size.Width-8,area.Bottom-size.Height-8),
-                    new Point(popup.Left-size.Width-4,popup.Top),new Point(popup.Right+4,popup.Top),new Point(popup.Left,popup.Top-size.Height-4),new Point(popup.Left,popup.Bottom+4)};
-                foreach(Point point in candidates){Rectangle bounds=new Rectangle(point,size);if(area.Contains(bounds)&&!bounds.IntersectsWith(popup)){form.Location=point;placed=true;break;}}if(placed)break;
+            bool placed=false;Size frame=new Size(form.Width-form.ClientSize.Width,form.Height-form.ClientSize.Height);SizeF required;
+            using(Font font=new Font("Segoe UI",24,FontStyle.Regular))using(Graphics graphics=form.CreateGraphics()){
+                SizeF pinned=graphics.MeasureString(PinnedOcr,font),abandoned=graphics.MeasureString(AbandonedOcr,font);required=new SizeF(Math.Max(pinned.Width,abandoned.Width),Math.Max(pinned.Height,abandoned.Height));
             }
-            Assert(placed,"No non-overlapping generated-source placement; the actual popup was not moved or hidden.");
+            Size minimumClient=new Size(Math.Max(490,(int)Math.Ceiling(required.Width)+56),Math.Max(168,(int)Math.Ceiling(required.Height)+128));
+            foreach(Screen screen in Screen.AllScreens){Rectangle area=screen.WorkingArea;Rectangle inset=Rectangle.Inflate(area,-8,-8);
+                Rectangle[] regions={
+                    Rectangle.Intersect(inset,Rectangle.FromLTRB(inset.Left,inset.Top,inset.Right,Math.Max(inset.Top,popup.Top))),
+                    Rectangle.Intersect(inset,Rectangle.FromLTRB(inset.Left,Math.Min(inset.Bottom,popup.Bottom),inset.Right,inset.Bottom)),
+                    Rectangle.Intersect(inset,Rectangle.FromLTRB(inset.Left,inset.Top,Math.Max(inset.Left,popup.Left),inset.Bottom)),
+                    Rectangle.Intersect(inset,Rectangle.FromLTRB(Math.Min(inset.Right,popup.Right),inset.Top,inset.Right,inset.Bottom))};
+                foreach(Rectangle region in regions){
+                    Size client=new Size(Math.Min(720,region.Width-frame.Width),Math.Min(430,region.Height-frame.Height));
+                    if(client.Width<minimumClient.Width||client.Height<minimumClient.Height)continue;
+                    form.ClientSize=client;form.Location=region.Location;
+                    source.SetBounds(12,8,client.Width-24,44);image.SetBounds(12,64,client.Width-24,client.Height-76);
+                    // DrawString uses(12,40); require the entire generated line
+                    // inside the two-pixel-inset capture, without clipping.
+                    Assert(required.Width+24<=image.Width-4&&required.Height+44<=image.Height-4,"Adaptive generated OCR image would clip its known text.");
+                    Assert(region.Contains(form.Bounds)&&area.Contains(form.Bounds)&&!form.Bounds.IntersectsWith(popup),"Adaptive generated form escaped its verified free rectangle.");
+                    layout["sourceBounds"]=RectValue(form.Bounds);layout["sourceClientSize"]=new int[]{client.Width,client.Height};layout["imageClientBounds"]=RectValue(image.Bounds);layout["workingArea"]=RectValue(area);layout["freeRegion"]=RectValue(region);layout["pinnedPopupBounds"]=RectValue(actualPopup);layout["ocrFontPoints"]=24;layout["measuredMaximumOcrTextSize"]=new double[]{required.Width,required.Height};layout["popupMovedOrHidden"]=false;placed=true;break;
+                }if(placed)break;
+            }
+            Assert(placed,"No non-overlapping generated-source placement after safe adaptive layout; actual popup was not moved or hidden.");
             form.Activate();SetForegroundWindow(form.Handle);source.Focus();if(text!=null){source.Text="Prefix "+text+" suffix";source.Select(7,text.Length);}else source.Select(0,0);
         });RequireForeground(form);
-        RECT moved;Assert(GetWindowRect(form.Handle,out moved)&&!Rectangle.FromLTRB(moved.left,moved.top,moved.right,moved.bottom).IntersectsWith(popup),"Generated form still overlaps the pinned popup.");
+        RECT moved;Assert(GetWindowRect(form.Handle,out moved)&&!Rectangle.FromLTRB(moved.left,moved.top,moved.right,moved.bottom).IntersectsWith(popup),"Generated form still overlaps the pinned popup.");layout["nonOverlapVerified"]=true;return layout;
     }
     static void MoveGenerated(Form form,Point point) {
         RequireForeground(form);Rectangle desktop=SystemInformation.VirtualScreen;INPUT input=new INPUT();input.data.mouse.dx=(int)Math.Round((point.X-desktop.Left)*65535.0/(desktop.Width-1));input.data.mouse.dy=(int)Math.Round((point.Y-desktop.Top)*65535.0/(desktop.Height-1));input.data.mouse.flags=0x8000|0x4000|1;Send(new INPUT[]{input});
@@ -397,18 +415,18 @@ public static class EchoLingoApplicationSmoke {
     static bool ProcessExited(uint pid){try{using(Process process=Process.GetProcessById((int)pid))return process.HasExited;}catch(ArgumentException){return true;}}
     static void LatestIntents(Form form,TextBox source,Panel image,Process app,MockServer server,string history,string providerId,List<string> passed,Dictionary<string,object> report,Action<string> paint,Func<int> sourceEvents) {
         Assert(server!=null&&!Offline,"Latest-intent extra flows require the generated loopback mock.");IntPtr main=MainWindow(app.Id);Assert(main!=IntPtr.Zero&&IsWindowVisible(main),"Latest-intent test has no unique visible actual Tauri popup.");
-        report["uiAutomationSelectorsUsed"]=true;List<Dictionary<string,object>> cases=new List<Dictionary<string,object>>();report["latestIntentCases"]=cases;report["latestIntentRequiredCaseCount"]=4;report["latestIntentUsesEscape"]=false;report["latestIntentExpectedHistoryCount"]=7;
+        report["uiAutomationSelectorsUsed"]=true;List<Dictionary<string,object>> cases=new List<Dictionary<string,object>>();report["latestIntentCases"]=cases;report["latestIntentRequiredCaseCount"]=4;report["latestIntentUsesEscape"]=false;report["latestIntentExpectedHistoryCount"]=7;List<Dictionary<string,object>> layouts=new List<Dictionary<string,object>>();report["generatedSourceLayouts"]=layouts;paint(OcrText);
         InvokeControl(app,main,"\u9489\u4f4f\u7a97\u53e3");WaitFor(delegate{return Element(main,"\u53d6\u6d88\u9489\u4f4f")!=null&&IsWindowVisible(main);},5,"Actual popup pin did not engage.",app);
         using(PinnedVisibilityWatch visibility=new PinnedVisibilityWatch(main)){
             try{
                 foreach(string selected in new string[]{PinnedSelectionOne,PinnedSelectionTwo}){
                     string kind=MockServer.Kind(selected);Dictionary<string,object> test=new Dictionary<string,object>{{"kind",kind},{"ok",false}};cases.Add(test);
-                    PlaceGeneratedSource(form,source,main,selected);visibility.Check();Stopwatch time=Stopwatch.StartNew();Shortcut(form,0x44);
+                    layouts.Add(PlaceGeneratedSource(form,source,image,main,selected));visibility.Check();Stopwatch time=Stopwatch.StartNew();Shortcut(form,0x44);
                     WaitFor(delegate{visibility.Check();if(server.Error!=null)throw new InvalidOperationException(server.Error);return HasHistory(history,selected,kind,providerId)&&SourceMatches(main,selected);},45,"One Alt+D did not replace the pinned source and commit distinct history.",app);
                     test["hotkeyToHistoryMilliseconds"]=time.Elapsed.TotalMilliseconds;RequireForeground(form);test["ok"]=true;
                 }
                 Assert(server.Count==5,"Pinned selections caused duplicate or missing translations.");passed.Add("Pinned actual popup accepted two distinct one-press Alt+D selections and durable histories");
-                PlaceGeneratedSource(form,source,main,null);paint(PinnedOcr);
+                layouts.Add(PlaceGeneratedSource(form,source,image,main,null));paint(PinnedOcr);
                 Dictionary<string,object> first=StartPinnedPicker(form,image,app,main,visibility,0);uint oldPid=Convert.ToUInt32(first["helperProcessId"]);
                 Dictionary<string,object> restarted=new Dictionary<string,object>{{"kind","pinned-ocr-restart"},{"ok",false},{"firstReadiness",first}};cases.Add(restarted);
                 // No Escape and no mouse release: the next Alt+S is a new task.
@@ -418,7 +436,7 @@ public static class EchoLingoApplicationSmoke {
                 MoveGenerated(form,a);INPUT down=new INPUT();down.data.mouse.flags=2;Send(new INPUT[]{down});MoveGenerated(form,b);RequireForeground(form);INPUT up=new INPUT();up.data.mouse.flags=4;Stopwatch release=Stopwatch.StartNew();Send(new INPUT[]{up});
                 WaitFor(delegate{visibility.Check();if(server.Error!=null)throw new InvalidOperationException(server.Error);return HasHistory(history,PinnedOcr,"pinned-ocr",providerId)&&SourceMatches(main,PinnedOcr,true);},50,"Repeated pinned Alt+S did not OCR/replace/translate the generated image.",app);
                 restarted["releaseToHistoryMilliseconds"]=release.Elapsed.TotalMilliseconds;visibility.Check();RequireForeground(form);Assert(AppOverlays(app.Id)==0&&sourceEvents()==0,"Pinned OCR left an overlay or delivered input to generated content.");Assert(server.Count==6,"Repeated OCR caused duplicate or stale translations.");restarted["ok"]=true;passed.Add("Pinned Alt+S then Alt+S without Esc created a new helper and completed one fresh OCR/history while visible");
-                PlaceGeneratedSource(form,source,main,SwitchedSelection);paint(AbandonedOcr);
+                layouts.Add(PlaceGeneratedSource(form,source,image,main,SwitchedSelection));paint(AbandonedOcr);
                 Dictionary<string,object> abandoned=StartPinnedPicker(form,image,app,main,visibility,0);uint abandonedPid=Convert.ToUInt32(abandoned["helperProcessId"]);
                 Dictionary<string,object> switched=new Dictionary<string,object>{{"kind","ocr-to-selection"},{"ok",false},{"cancelledReadiness",abandoned}};cases.Add(switched);
                 Stopwatch switchTime=Stopwatch.StartNew();Shortcut(form,0x44);
@@ -563,8 +581,8 @@ public static class EchoLingoApplicationSmoke {
                     form.FormBorderStyle = FormBorderStyle.FixedDialog; form.MaximizeBox = false;
                     source.Multiline = true; source.SetBounds(20, 20, 680, 80); source.Text = "Prefix " + Selected + " suffix";
                     image.SetBounds(20, 170, 680, 150); image.BackColor = Color.White;
-                    string paintedOcrText=OcrText;
-                    image.Paint += delegate(object sender, PaintEventArgs args) { using (Font font = new Font("Segoe UI", 30, FontStyle.Regular)) args.Graphics.DrawString(paintedOcrText, font, Brushes.Black, 12, 40); };
+                    string paintedOcrText=OcrText;float paintedOcrFontPoints=30;
+                    image.Paint += delegate(object sender, PaintEventArgs args) { using (Font font = new Font("Segoe UI", paintedOcrFontPoints, FontStyle.Regular)) args.Graphics.DrawString(paintedOcrText, font, Brushes.Black, 12, 40); };
                     int sourceMouseEvents = 0; image.MouseDown += delegate { sourceMouseEvents++; }; image.MouseUp += delegate { sourceMouseEvents++; };
                     form.Controls.Add(source); form.Controls.Add(image); bool finished = false;
                     form.FormClosing += delegate(object sender, FormClosingEventArgs args) { if (!finished) args.Cancel = true; };
@@ -627,7 +645,7 @@ public static class EchoLingoApplicationSmoke {
                                 Assert(AppOverlays(app.Id) == 0, "Actual OCR left selection overlays behind.");
                                 passed.Add("Actual Alt+S -> production transparent overlays -> left-drag -> WinRT OCR -> frontend source/automatic " + (offline ? "real offline model" : "mock") + " translation -> history; foreground preserved");
                                 if(latest) LatestIntents(form,source,image,app,server,history,providerId,passed,report,
-                                    delegate(string text){OnUi(form,delegate{paintedOcrText=text;image.Refresh();});},delegate{int events=0;OnUi(form,delegate{events=sourceMouseEvents;});return events;});
+                                    delegate(string text){OnUi(form,delegate{paintedOcrText=text;paintedOcrFontPoints=24;image.Refresh();});},delegate{int events=0;OnUi(form,delegate{events=sourceMouseEvents;});return events;});
                                 report["mockRequests"] = server == null ? new List<Dictionary<string, object>>() : server.Requests;
                                 if (offline) {
                                     Assert(ActualTranslations.Count == 3 && new JavaScriptSerializer().Deserialize<object[]>(File.ReadAllText(history)).Length == 3, "Offline flows did not produce exactly three successful synthetic histories.");
