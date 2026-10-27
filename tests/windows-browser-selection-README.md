@@ -1,4 +1,4 @@
-# Real Chromium selected-text fixture
+# Real Chromium native selection matrix
 
 Run only on an unlocked, ephemeral GitHub-hosted Windows desktop after `npm ci`
 and after building the exact native .NET Framework DLL from the helper source:
@@ -7,45 +7,70 @@ and after building the exact native .NET Framework DLL from the helper source:
 node tests/windows-browser-selection-smoke.mjs --helper src-tauri/native/windows.ps1 --native-assembly C:\owned-build\EchoLingo.Native.dll
 ```
 
-The fixture uses the runner's installed Edge, or installed Chrome if Edge is
-absent. It downloads no browser. It creates a new marked temporary profile,
-launches its own browser process and connects only to that profile's
-`DevToolsActivePort`. CDP independently verifies the browser root PID and exact
-fresh-profile command line before any page operation. The first native case
-binds its unique verified browser root HWND; subsequent cases require that same
-HWND/PID/thread/class/owner/root/style-kind identity to remain visible. They do
-not select a new window from a later set of Chromium tooltip/transient windows.
-Numeric owned-window inventory is retained on success and failure; the earlier
-second-case BROWSER_ROOT_NOT_UNIQUE log did not record candidate counts, so its
-zero-versus-multiple cause remains unknown. It does not discover or
-connect to existing browser profiles or debugging sessions.
+Both installed Edge and installed Chrome are tested when found in standard
+Program Files locations. An unavailable browser is explicitly listed; it is not
+counted as accepted. No browser is downloaded. Each browser gets three rounds,
+each with a freshly launched browser, new marked profile and new bridge process.
+This is a fresh-process/profile test, not an OS cold-boot benchmark.
 
-Four generated local-page cases invoke the real native `selected-text` helper
-once each: body document selection, link focus with a separate document
-selection, explicitly empty textarea, and selected textarea. UIA metadata
-records actual focused/ancestor PIDs and control types. The helper must preserve
-browser foreground and generated Unicode/HTML/RTF clipboard formats. DOM copy
-events must be at most one; empty textarea must never copy. Clipboard owner
-sampling reads only sequence numbers and owner PIDs; it can miss brief ownership
-and does not establish an unobserved copy path. If UIA provides text directly,
-`nativeClipboardCopyExercised` is false. No application-specific provider branch
-or fake helper response is used.
+Each round has eight predeclared cases: English body text selected with actual
+`page.mouse` down/drag/up, Chinese body punctuation, selected document text while
+a link is focused, selected textarea, English and Chinese contenteditable,
+explicitly empty textarea, and selected generated password input. Case text is
+distinct per browser/round. The mouse case derives start/end coordinates from
+first/last generated text-character rectangles and requires exact DOM selection;
+a failed drag is never repaired with programmatic selection. Other cases use DOM
+selection to create the required focus topology and say so in their result.
 
-The page contains only generated fixture text and inline styling/script. Page
-requests outside its exact loopback origin are aborted; browser background
-networking, sync, updates and extensions are disabled and external DNS resolution
-is blocked. This is not a packet-level audit of the browser/OS. No external page,
-API, user account, existing clipboard content or existing profile is read.
-An initially nonempty clipboard stops setup without reading its data.
+The first acquisition occurs before any fixture UIA call and without
+`--force-renderer-accessibility` or an accessibility warm-up. CDP verifies the
+spawned root PID and exact fresh-profile command line, then Win32 verifies the
+same owned executable, unique initial root HWND and actual foreground. Subsequent
+cases require that same HWND/PID/thread/class/owner/root/style-kind/visible
+identity; they never choose a different Chromium popup. The production helper's
+own UIA identity, password and selection checks remain intact.
 
-Failure/inconclusive always exits nonzero. Missing installed browser, unavailable
-foreground/UIA setup or a missing owned debugging endpoint is not acceptance.
-Each result says whether setup failed, whether the real browser was reached, and
-how many cases executed/passed. Host C# compilation, PS AST and Node syntax checks
-are not Windows runtime results. This fixture tests native acquisition against a
-fresh Chromium page, not Tauri hotkey dispatch, an installed app, all websites,
-all clipboard brokers, physical Windows 10/11 or performance guarantees.
+Every case invokes the exact production `selected-text` helper once. Its actual
+exit, error prefix, explicit production UIA-deadline error, expected-result match,
+clipboard and foreground outcome are retained. A separate UIA audit runs only
+**after** the helper; it still has a 2000ms total deadline. It batches properties
+with CacheRequest and makes one parent traversal call per level, records MTA
+worker entry/FocusedElement/cache/runtime-ID stages and parent depth/start/end
+measurements, and verifies source-root/password identity. The owning STA pumps
+its generated OLE clipboard window during bounded waits. Acquisition failure and
+post-helper-audit failure are separate fields. Audit success cannot turn a failed
+first acquisition into a pass. Production still has 2000ms per SelectionQuery,
+not a 2000ms limit for its complete multi-query workflow.
 
-Cleanup requests helper cancellation before bounded hard cleanup of its own
-synthetic-data process, closes/kills only fixture-started process trees, and
-removes only its marked profile root. Existing browser processes are untouched.
+A failed case keeps the overall result false. Only after generated clipboard
+restoration, foreground and responsive audit are confirmed can the fixture
+continue to the next predeclared distinct case; this is never a retry of the
+failed helper. Unsafe cleanup, identity failure or unresponsive audit stops that
+round, leaves remaining cases unexecuted, and still exits nonzero. Exact selected
+text and zero copy events for empty/password controls are required. Positive
+cases permit at most one DOM copy event. Unicode/HTML/RTF generated clipboard
+formats must survive. An initially nonempty clipboard stops setup without
+reading its data. Owner sampling reads only sequence numbers/PIDs, can miss brief
+ownership, and is not proof of a clipboard fallback when direct UIA suffices.
+
+All content is generated in an owned loopback page. Page requests outside that
+origin are aborted; background networking/sync/updates/extensions are disabled
+and external DNS resolution is blocked. This is not a packet-level browser/OS
+network audit. Existing profiles, browser sessions, user text, credentials and
+APIs are not read. Only owned process trees/profile roots are cleaned up.
+
+Previous evidence is retained separately: run40533405895 passed one body case,
+then failed root enumeration before its second helper; candidate counts were
+not recorded, so zero versus multiple roots remains unknown. Run40535344819 had
+a bound foreground root but timed out in the old pre-helper UIA metadata probe;
+zero helpers ran. That probe both added RPC work and pre-warmed successful
+subsequent helper calls. Its cause is unresolved and may be relevant to the
+production two-second UIA budget; it is not dismissed as unrelated.
+
+C#5/net48 compile, PS AST and Node syntax are host checks, not Windows acceptance.
+This matrix tests direct native acquisition against installed Chromium. It does
+not exercise Alt+D registration/Tauri delivery, installation, every website,
+clipboard broker, WPS or physical Windows 10/11. Those require separate tests.
+
+Microsoft UIA threading guidance:
+https://learn.microsoft.com/en-us/windows/win32/winauto/uiauto-threading
