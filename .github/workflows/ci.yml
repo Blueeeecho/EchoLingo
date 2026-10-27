@@ -489,7 +489,7 @@ jobs:
     name: Windows native helper diagnostics (fresh Framework DLL)
     if: github.event_name == 'workflow_dispatch' && github.event.inputs.mode == 'windows-native-diagnostics'
     runs-on: windows-latest
-    timeout-minutes: 8
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
       - name: Compile exact native helper without the app or offline engine
@@ -542,6 +542,30 @@ jobs:
             if ($backendExit -ne 0) { $fixtureExit = $backendExit }
           }
           exit $fixtureExit
+      - name: Independent active-window and native-capture experiment
+        id: active
+        continue-on-error: true
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Continue'
+          $global:LASTEXITCODE = 1
+          $output = @(& powershell.exe -NoProfile -STA -ExecutionPolicy Bypass -File tests/windows-active-capture-experiment.ps1 -IsolatedTestSession 2>&1)
+          $fixtureExit = $LASTEXITCODE
+          $output | Out-File "$env:RUNNER_TEMP/echolingo-native-active-experiment.log" -Encoding utf8
+          $output | Write-Output
+          exit $fixtureExit
+      - name: Same-user medium-helper and high-source input boundary
+        id: integrity
+        continue-on-error: true
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Continue'
+          $global:LASTEXITCODE = 1
+          $output = @(& powershell.exe -NoProfile -STA -ExecutionPolicy Bypass -File tests/windows-integrity-boundary-smoke.ps1 -NativeAssemblyPath "$env:RUNNER_TEMP/echolingo-native-diagnostics.dll" -IsolatedTestSession 2>&1)
+          $fixtureExit = $LASTEXITCODE
+          $output | Out-File "$env:RUNNER_TEMP/echolingo-native-integrity-boundary.log" -Encoding utf8
+          $output | Write-Output
+          exit $fixtureExit
       - uses: actions/upload-artifact@v4
         if: always()
         with:
@@ -551,11 +575,13 @@ jobs:
             ${{ runner.temp }}/echolingo-native-ocr-diagnostics.log
             ${{ runner.temp }}/echolingo-native-live-*.log
             ${{ runner.temp }}/echolingo-native-ownership-*.log
+            ${{ runner.temp }}/echolingo-native-active-experiment.log
+            ${{ runner.temp }}/echolingo-native-integrity-boundary.log
       - name: Gate raw native outcomes
         if: always()
         shell: powershell
         run: |
-          $outcomes = @{ ocr = '${{ steps.ocr.outcome }}'; assembly = '${{ steps.assembly.outcome }}'; live = '${{ steps.live.outcome }}'; ownership = '${{ steps.ownership.outcome }}' }
+          $outcomes = @{ ocr = '${{ steps.ocr.outcome }}'; assembly = '${{ steps.assembly.outcome }}'; live = '${{ steps.live.outcome }}'; ownership = '${{ steps.ownership.outcome }}'; activeExperiment = '${{ steps.active.outcome }}'; integrityBoundary = '${{ steps.integrity.outcome }}' }
           $outcomes | ConvertTo-Json -Compress
           if (@($outcomes.Values | Where-Object { $_ -ne 'success' }).Count -gt 0) { throw 'Fresh native Windows checks failed or incomplete; this is not app acceptance.' }
 
