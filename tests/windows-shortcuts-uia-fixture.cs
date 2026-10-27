@@ -30,6 +30,8 @@ public static class EchoLingoShortcutsUiaFixture {
     [DllImport("kernel32.dll",SetLastError=true)] static extern bool SetInformationJobObject(IntPtr job, int kind, ref JOBINFO info, uint size);
     [DllImport("kernel32.dll",SetLastError=true)] static extern bool AssignProcessToJobObject(IntPtr job, IntPtr process);
     [DllImport("kernel32.dll",SetLastError=true)] static extern bool TerminateJobObject(IntPtr job, uint code);
+    [DllImport("kernel32.dll",SetLastError=true)] static extern bool QueryInformationJobObject(IntPtr job, int kind, out JOBACCOUNTING info, uint size, out uint returned);
+    [DllImport("kernel32.dll",CharSet=CharSet.Unicode,SetLastError=true)] static extern uint GetFileAttributes(string path);
     [DllImport("kernel32.dll")] static extern bool CloseHandle(IntPtr handle);
     [StructLayout(LayoutKind.Sequential)] struct MOUSE { public int x,y; public uint data,flags,time; public UIntPtr extra; }
     [StructLayout(LayoutKind.Sequential)] struct KEY { public ushort vk,scan; public uint flags,time; public UIntPtr extra; }
@@ -38,6 +40,7 @@ public static class EchoLingoShortcutsUiaFixture {
     [StructLayout(LayoutKind.Sequential)] struct JOBLIMIT { public long processTime,jobTime; public uint flags; public UIntPtr minimum,maximum; public uint active; public UIntPtr affinity; public uint priority,scheduling; }
     [StructLayout(LayoutKind.Sequential)] struct IOCOUNTERS { public ulong a,b,c,d,e,f; }
     [StructLayout(LayoutKind.Sequential)] struct JOBINFO { public JOBLIMIT basic; public IOCOUNTERS io; public UIntPtr processMemory,jobMemory,peakProcess,peakJob; }
+    [StructLayout(LayoutKind.Sequential)] struct JOBACCOUNTING { public long totalUser,totalKernel,periodUser,periodKernel; public uint faults,total,active,terminated; }
 
     static void Need(bool value, string error) { if (!value) throw new InvalidOperationException(error); }
     sealed class UiWorker : IDisposable {
@@ -63,6 +66,7 @@ public static class EchoLingoShortcutsUiaFixture {
     sealed class Fixture {
         readonly string executable, token=Guid.NewGuid().ToString("N"); readonly Stopwatch watch=Stopwatch.StartNew();
         readonly List<string> owned=new List<string>(); readonly List<object> cases=new List<object>(), probes=new List<object>();
+        readonly List<object> buttonPatterns=new List<object>(),jobStops=new List<object>();
         readonly List<string> cleanupErrors=new List<string>(); readonly JavaScriptSerializer json=new JavaScriptSerializer();
         readonly Dictionary<string,object> report=new Dictionary<string,object>();
         UiWorker ui; Process app; IntPtr job,main; string settingsPath,local,stage="claim-generated-data"; int keySends,valueWrites,launches;
@@ -80,7 +84,29 @@ public static class EchoLingoShortcutsUiaFixture {
         }
         void RejectLinks(string root) {
             Need((File.GetAttributes(root)&FileAttributes.ReparsePoint)==0,"OWNED_TREE_LINK");
-            foreach(string path in Directory.GetFileSystemEntries(root)) { Need((File.GetAttributes(path)&FileAttributes.ReparsePoint)==0,"OWNED_TREE_LINK"); if(Directory.Exists(path)) RejectLinks(path); }
+            foreach(string path in Directory.GetFileSystemEntries(root)) {
+                try { Need((File.GetAttributes(path)&FileAttributes.ReparsePoint)==0,"OWNED_TREE_LINK"); if(Directory.Exists(path)) RejectLinks(path); }
+                catch(FileNotFoundException) { if(!Missing(path)) throw; }
+                catch(DirectoryNotFoundException) { if(!Missing(path)) throw; }
+            }
+        }
+        bool Missing(string path) { uint attributes=GetFileAttributes(path); int error=Marshal.GetLastWin32Error();return attributes==UInt32.MaxValue&&(error==2||error==3); }
+        void Clean(string root) {
+            CheckRoot(root); bool destructiveStarted=false;Stopwatch cleanup=Stopwatch.StartNew();
+            while(true) {
+                if(Missing(root)) return;
+                // After a partial recursive delete the marker itself may be
+                // gone. Ownership was verified before that first delete;
+                // keep checking root/reparse identity and any surviving marker.
+                Need((File.GetAttributes(root)&FileAttributes.ReparsePoint)==0,"OWNED_DIRECTORY_CHANGED");
+                string marker=Path.Combine(root,Marker);
+                if(!Missing(marker)) Need(File.ReadAllText(marker)==token,"OWNED_MARKER_CHANGED");
+                else Need(destructiveStarted,"OWNED_MARKER_CHANGED");
+                try { RejectLinks(root);destructiveStarted=true;Directory.Delete(root,true);return; }
+                catch(IOException) { if(Missing(root)) return;if(cleanup.ElapsedMilliseconds>=5000) throw; }
+                catch(UnauthorizedAccessException) { if(cleanup.ElapsedMilliseconds>=5000) throw; }
+                Thread.Sleep(50);
+            }
         }
         void Claim(string root) { Need(CreateDirectory(root,IntPtr.Zero),"EXISTING_DATA_OR_CREATE_FAILURE"); owned.Add(root); File.WriteAllText(Path.Combine(root,Marker),token,new UTF8Encoding(false)); }
         IntPtr Main() {
@@ -99,7 +125,16 @@ public static class EchoLingoShortcutsUiaFixture {
         string Field(string name) { return ui.Call(delegate { AutomationElement e=Find(name,ControlType.Edit); Need(e!=null,"SHORTCUT_FIELD_NOT_VISIBLE"); object p; Need(e.TryGetCurrentPattern(ValuePattern.Pattern,out p),"SHORTCUT_VALUE_PATTERN_MISSING"); ui.Check(); string v=((ValuePattern)p).Current.Value; ui.Check(); return v; }); }
         bool FieldsVisible() { return ui.Call(delegate { return Find(Selection,ControlType.Edit)!=null&&Find(Ocr,ControlType.Edit)!=null; }); }
         void Fill(string name,string value) { ui.Call(delegate { AutomationElement e=Find(name,ControlType.Edit); Need(e!=null,"SHORTCUT_FIELD_NOT_VISIBLE"); object p; Need(e.TryGetCurrentPattern(ValuePattern.Pattern,out p),"SHORTCUT_VALUE_PATTERN_MISSING"); ui.Check(); Need(!((ValuePattern)p).Current.IsReadOnly,"SHORTCUT_FIELD_READONLY"); ui.Check(); ((ValuePattern)p).SetValue(value); ui.Check(); return true; }); valueWrites++; Need(Field(name)==value,"SHORTCUT_VALUE_WRITE_NOT_APPLIED"); }
-        void Invoke(string name) { ui.Call(delegate { AutomationElement e=Find(name,ControlType.Button); Need(e!=null,"SHORTCUT_BUTTON_NOT_VISIBLE"); object p; Need(e.TryGetCurrentPattern(InvokePattern.Pattern,out p),"SHORTCUT_INVOKE_PATTERN_MISSING"); ui.Check(); ((InvokePattern)p).Invoke(); ui.Check(); return true; }); }
+        void Invoke(string name) { ui.Call(delegate {
+            AutomationElement e=Find(name,ControlType.Button);Need(e!=null,"SHORTCUT_BUTTON_NOT_VISIBLE");object invocation,toggle;
+            bool supportsInvoke=e.TryGetCurrentPattern(InvokePattern.Pattern,out invocation);ui.Check();
+            bool supportsToggle=e.TryGetCurrentPattern(TogglePattern.Pattern,out toggle);ui.Check();
+            buttonPatterns.Add(new Dictionary<string,object>{{"target",name==Record?1:2},{"supportsInvoke",supportsInvoke?1:0},{"supportsToggle",supportsToggle?1:0}});
+            if(supportsInvoke) ((InvokePattern)invocation).Invoke();
+            else if(name==Record&&supportsToggle) ((TogglePattern)toggle).Toggle();
+            else throw new InvalidOperationException("SHORTCUT_ACTION_PATTERN_MISSING");
+            ui.Check();return true;
+        }); }
         bool Status(string prefix) {
             return ui.Call(delegate { ui.Check(); OwnMain(); AutomationElement root=AutomationElement.FromHandle(main); ui.Check(); AutomationElementCollection text=root.FindAll(TreeScope.Descendants,new PropertyCondition(AutomationElement.ControlTypeProperty,ControlType.Text)); ui.Check(); Need(text.Count<=512,"UIA_STATIC_TEXT_NOT_BOUNDED"); for(int i=0;i<text.Count;i++) { string value=text[i].Current.Name; ui.Check(); if(value.StartsWith(prefix,StringComparison.Ordinal)) { bool visible=!text[i].Current.IsOffscreen; ui.Check(); if(visible) return true; } } return false; });
         }
@@ -141,7 +176,14 @@ public static class EchoLingoShortcutsUiaFixture {
         }
         void Stop() {
             Exception failure=null;
-            if(job!=IntPtr.Zero) { IntPtr ownJob=job;job=IntPtr.Zero;try { Need(TerminateJobObject(ownJob,0),"OWN_APP_JOB_STOP_FAILED"); } catch(Exception e) { failure=e; } finally { CloseHandle(ownJob); } }
+            if(job!=IntPtr.Zero) { IntPtr ownJob=job;job=IntPtr.Zero;try {
+                Need(TerminateJobObject(ownJob,0),"OWN_APP_JOB_STOP_FAILED");Stopwatch stopped=Stopwatch.StartNew();JOBACCOUNTING accounting;uint returned;
+                while(true) {
+                    Need(QueryInformationJobObject(ownJob,1,out accounting,(uint)Marshal.SizeOf(typeof(JOBACCOUNTING)),out returned),"OWN_JOB_ACCOUNTING_FAILED");
+                    if(accounting.active==0) { jobStops.Add(new Dictionary<string,object>{{"activeProcesses",accounting.active},{"elapsedMilliseconds",stopped.ElapsedMilliseconds}});break; }
+                    Need(stopped.ElapsedMilliseconds<5000,"OWN_JOB_PROCESSES_NOT_STOPPED");Thread.Sleep(10);
+                }
+            } catch(Exception e) { failure=e; } finally { CloseHandle(ownJob); } }
             if(app!=null) { try { if(!app.HasExited) { app.Kill(); Need(app.WaitForExit(5000),"OWN_APP_NOT_STOPPED"); } } catch(Exception e) { if(failure==null) failure=e; } finally { app.Dispose();app=null; } }
             main=IntPtr.Zero; if(failure!=null) throw failure;
         }
@@ -165,6 +207,7 @@ public static class EchoLingoShortcutsUiaFixture {
             report["ok"]=false;report["actualSettingsUiTested"]=false;report["fakeIpcUsed"]=false;report["cdpUsed"]=false;report["userContentRead"]=false;
             report["credentialsCreated"]=false;report["clipboardReadOrChanged"]=false;report["actualNewShortcutTranslationWorkflowTested"]=false;
             report["restartMethod"]="owned-job-termination; settings are saved through the real UI before termination, not graceful app quit";
+            report["jobAssignedAfterStart"]=true;report["completeDescendantEnumeration"]=false;
             report["scope"]="Generated ephemeral Windows Server settings UIA/SendInput/RegisterHotKey only; not physical Windows11 or translation/OCR workflow acceptance.";
             report["overallDeadlineMilliseconds"]=TotalMilliseconds;report["uiaCallDeadlineMilliseconds"]=UiaCallMilliseconds;
             try {
@@ -185,10 +228,11 @@ public static class EchoLingoShortcutsUiaFixture {
                 try { Stop(); } catch(Exception e) { cleanupErrors.Add(e.Message); }
                 if(ui!=null) try { ui.Dispose(); } catch(Exception e) { cleanupErrors.Add(e.Message); }
                 if((bool)report["ok"]) try { Custom(true,"final-process-release");Defaults(true,"final-process-release"); } catch(Exception e) { cleanupErrors.Add(e.Message); }
-                for(int i=owned.Count-1;i>=0;i--) try { CheckRoot(owned[i]);RejectLinks(owned[i]);Stopwatch cleanup=Stopwatch.StartNew();while(true) { try { Directory.Delete(owned[i],true);break; } catch(IOException) { if(cleanup.ElapsedMilliseconds>=5000) throw; } catch(UnauthorizedAccessException) { if(cleanup.ElapsedMilliseconds>=5000) throw; }Thread.Sleep(50); } } catch(Exception e) { cleanupErrors.Add(e.Message); }
+                for(int i=owned.Count-1;i>=0;i--) try { Clean(owned[i]); } catch(Exception e) { cleanupErrors.Add(e.Message); }
                 if(cleanupErrors.Count!=0) report["ok"]=false;
                 report["stage"]=stage;report["elapsedMilliseconds"]=watch.ElapsedMilliseconds;report["cases"]=cases;report["casesExecuted"]=cases.Count;report["casesExpected"]=6;report["nativeRegistrationProbes"]=probes;
                 report["nativeKeySends"]=keySends;report["actualWindowsSendInput"]=keySends>0;report["valuePatternWrites"]=valueWrites;report["applicationLaunches"]=launches;report["cleanupErrors"]=cleanupErrors;report["ownedDataRemoved"]=cleanupErrors.Count==0;
+                report["buttonPatternMetadata"]=buttonPatterns;report["ownedJobStops"]=jobStops;
             }
             return report;
         }
