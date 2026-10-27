@@ -6,15 +6,15 @@ on:
   workflow_dispatch:
     inputs:
       mode:
-        description: Full regression or targeted popup diagnostics using the exact c133 candidate
+        description: Full regression or exact-binary desktop diagnostics
         type: choice
         default: full
-        options: [full, windows-popup-diagnostics]
+        options: [full, windows-popup-diagnostics, windows-application-diagnostics]
 permissions:
   contents: read
 jobs:
   desktop:
-    if: github.event.inputs.mode != 'windows-popup-diagnostics'
+    if: github.event.inputs.mode != 'windows-popup-diagnostics' && github.event.inputs.mode != 'windows-application-diagnostics'
     strategy:
       fail-fast: false
       matrix:
@@ -188,7 +188,7 @@ jobs:
           }
 
   frontend-interactions:
-    if: github.event.inputs.mode != 'windows-popup-diagnostics'
+    if: github.event.inputs.mode != 'windows-popup-diagnostics' && github.event.inputs.mode != 'windows-application-diagnostics'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -282,3 +282,75 @@ jobs:
           $popupOutcome = '${{ steps.popup.outcome }}'
           [ordered]@{ scope = 'targeted-popup-only'; popupVisibility = $popupOutcome } | ConvertTo-Json -Compress
           if ($popupOutcome -ne 'success') { throw 'Targeted popup diagnostics incomplete or failed.' }
+
+  windows-application-diagnostics:
+    name: Targeted application diagnostics (reused ab4405c binary)
+    if: github.event_name == 'workflow_dispatch' && github.event.inputs.mode == 'windows-application-diagnostics'
+    runs-on: windows-latest
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Require unchanged hover candidate application source
+        shell: powershell
+        run: |
+          git diff --quiet ab4405cc15e2ca204459b2fd40389924aa994695 HEAD -- src src-tauri index.html package.json package-lock.json resources
+          if ($LASTEXITCODE -ne 0) { throw 'Application changed; use the full build instead of the reused binary.' }
+      - uses: actions/download-artifact@v4
+        with:
+          name: EchoLingo-Windows-offline-evidence
+          run-id: 40481264703
+          github-token: ${{ github.token }}
+          path: application-candidate-evidence
+      - name: Verify exact previously built hover application
+        id: candidate
+        shell: powershell
+        run: |
+          $candidateFiles = @(Get-ChildItem application-candidate-evidence -Recurse -File -Filter echolingo.exe)
+          if ($candidateFiles.Count -ne 1) { throw 'Expected exactly one staged candidate executable.' }
+          $candidatePath = $candidateFiles[0].FullName
+          $candidateHash = (Get-FileHash -LiteralPath $candidatePath -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($candidateHash -ne '199d3f29c2d44fb64fa4960a6b62d61ade4bff5cec685828a6602be19c070007') { throw 'Candidate identity mismatch.' }
+          $fixtureText = [IO.File]::ReadAllText((Resolve-Path tests/windows-application-smoke.ps1)).Replace("`r`n", "`n")
+          $fixtureDigest = [Security.Cryptography.SHA256]::Create()
+          try {
+            $fixtureLfHash = [BitConverter]::ToString($fixtureDigest.ComputeHash([Text.UTF8Encoding]::new($false).GetBytes($fixtureText))).Replace('-', '').ToLowerInvariant()
+          } finally { $fixtureDigest.Dispose() }
+          [ordered]@{
+            scope = 'Targeted actual application workflows only; no rebuild or full-run success claim'
+            sourceRun = 40481264703
+            applicationSource = 'ab4405cc15e2ca204459b2fd40389924aa994695'
+            stagedSha256 = $candidateHash
+            checkoutFixtureSha256 = (Get-FileHash tests/windows-application-smoke.ps1 -Algorithm SHA256).Hash.ToLowerInvariant()
+            canonicalLfFixtureSha256 = $fixtureLfHash
+          } | ConvertTo-Json -Compress
+          "path=$candidatePath" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+      - name: Run actual selection input and OCR workflows against verified candidate
+        id: application
+        continue-on-error: true
+        timeout-minutes: 5
+        shell: powershell
+        env:
+          ECHOLINGO_APPLICATION_CANDIDATE: ${{ steps.candidate.outputs.path }}
+        run: |
+          $fixtureOutput = @(& powershell.exe -NoProfile -STA -ExecutionPolicy Bypass -File tests/windows-application-smoke.ps1 -ApplicationPath $env:ECHOLINGO_APPLICATION_CANDIDATE 2>&1)
+          $fixtureExit = $LASTEXITCODE
+          $fixtureOutput | Out-File -FilePath "$env:RUNNER_TEMP/echolingo-application-diagnostics.log" -Encoding utf8
+          $fixtureOutput | Write-Output
+          exit $fixtureExit
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: EchoLingo-Windows-application-diagnostics
+          if-no-files-found: warn
+          path: ${{ runner.temp }}/echolingo-application-diagnostics.log
+      - name: Gate targeted application diagnostics
+        if: always()
+        shell: powershell
+        run: |
+          $applicationOutcome = '${{ steps.application.outcome }}'
+          [ordered]@{ scope = 'targeted-application-only'; applicationCore = $applicationOutcome } | ConvertTo-Json -Compress
+          if ($applicationOutcome -ne 'success') { throw 'Targeted application diagnostics incomplete or failed.' }

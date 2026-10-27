@@ -55,7 +55,10 @@ public static class EchoLingoApplicationSmoke {
     [DllImport("user32.dll")] static extern bool EnumWindows(EnumWindow callback, IntPtr parameter);
     [DllImport("user32.dll")] static extern uint GetWindowThreadProcessId(IntPtr window, out uint process);
     [DllImport("user32.dll")] static extern bool IsWindowVisible(IntPtr window);
+    [DllImport("user32.dll")] static extern IntPtr WindowFromPoint(Point point);
+    [DllImport("user32.dll")] static extern IntPtr GetAncestor(IntPtr window, uint flags);
     [DllImport("user32.dll")] static extern bool GetWindowRect(IntPtr window, out RECT rectangle);
+    [DllImport("dwmapi.dll")] static extern int DwmGetWindowAttribute(IntPtr window, uint attribute, out RECT rectangle, int size);
     [DllImport("user32.dll", EntryPoint="GetWindowLongPtrW")] static extern IntPtr GetWindowLongPtr(IntPtr window, int index);
     [DllImport("user32.dll")] static extern uint SendInput(uint count, INPUT[] input, int size);
     [DllImport("user32.dll")] static extern bool SetProcessDpiAwarenessContext(IntPtr context);
@@ -141,26 +144,91 @@ public static class EchoLingoApplicationSmoke {
         }, IntPtr.Zero);
         return result;
     }
-    static int AppOverlays(int appId) {
-        int count = 0;
-        Dictionary<uint, bool> helperOwners = new Dictionary<uint, bool>();
+    sealed class AppEdge {
+        public IntPtr Handle;
+        public uint ProcessId;
+        public int ParentProcessId;
+        public Rectangle Bounds;
+    }
+    static List<AppEdge> AppOverlayWindows(int appId) {
+        List<AppEdge> result = new List<AppEdge>();
+        Dictionary<uint, int> helperParents = new Dictionary<uint, int>();
         EnumWindows(delegate(IntPtr window, IntPtr unused) {
             if (!IsWindowVisible(window)) return true;
             long style = GetWindowLongPtr(window, -20).ToInt64();
             long required = 0x08000000L | 0x00080000L | 0x00000020L | 8;
             if ((style & required) != required) return true;
             uint owner; GetWindowThreadProcessId(window, out owner);
-            bool isHelper;
-            if (!helperOwners.TryGetValue(owner, out isHelper)) { isHelper = ParentPid((int)owner) == appId; helperOwners.Add(owner, isHelper); }
-            if (isHelper) {
+            int parent;
+            if (!helperParents.TryGetValue(owner, out parent)) { parent = ParentPid((int)owner); helperParents.Add(owner, parent); }
+            if (parent == appId) {
                 RECT rectangle; Assert(GetWindowRect(window, out rectangle), "Cannot inspect the actual app's capture border geometry.");
                 int width = rectangle.right - rectangle.left, height = rectangle.bottom - rectangle.top;
                 Assert(width > 0 && height > 0 && Math.Min(width, height) <= 2, "Actual OCR still created a full-screen overlay surface instead of thin edges.");
-                count++;
+                result.Add(new AppEdge { Handle = window, ProcessId = owner, ParentProcessId = parent,
+                    Bounds = Rectangle.FromLTRB(rectangle.left, rectangle.top, rectangle.right, rectangle.bottom) });
             }
             return true;
         }, IntPtr.Zero);
-        return count;
+        return result;
+    }
+    static int AppOverlays(int appId) { return AppOverlayWindows(appId).Count; }
+    static int[] RectValue(Rectangle value) { return new int[] { value.Left, value.Top, value.Width, value.Height }; }
+    static string WindowId(IntPtr value) { return "0x" + value.ToInt64().ToString("X"); }
+    static List<Rectangle> ExpectedPerimeter(Rectangle frame, Rectangle display) {
+        List<Rectangle> result = new List<Rectangle>();
+        if (frame.Width <= 0 || frame.Height <= 0) return result;
+        int horizontal = Math.Min(2, frame.Height), vertical = Math.Min(2, frame.Width);
+        foreach (Rectangle edge in new Rectangle[] {
+            new Rectangle(frame.Left, frame.Top, frame.Width, horizontal),
+            new Rectangle(frame.Left, frame.Bottom - horizontal, frame.Width, horizontal),
+            new Rectangle(frame.Left, frame.Top + horizontal, vertical, Math.Max(0, frame.Height - horizontal * 2)),
+            new Rectangle(frame.Right - vertical, frame.Top + horizontal, vertical, Math.Max(0, frame.Height - horizontal * 2))
+        }) {
+            Rectangle clipped = Rectangle.Intersect(edge, display);
+            if (clipped.Width > 0 && clipped.Height > 0) result.Add(clipped);
+        }
+        return result;
+    }
+    static bool AppOcrReady(Form form, int appId, IntPtr expectedSource, Rectangle expectedFrame,
+        Point expectedPointer, Rectangle display, Dictionary<string, object> probe) {
+        RequireForeground(form);
+        Point pointer; bool pointerKnown = GetPhysicalCursorPos(out pointer);
+        IntPtr hit = pointerKnown ? WindowFromPoint(pointer) : IntPtr.Zero;
+        IntPtr target = hit == IntPtr.Zero ? IntPtr.Zero : GetAncestor(hit, 2); uint targetPid;
+        GetWindowThreadProcessId(target, out targetPid);
+        RECT measured; int frameResult = DwmGetWindowAttribute(form.Handle, 9, out measured, Marshal.SizeOf(typeof(RECT)));
+        Rectangle frame = frameResult == 0 ? Rectangle.FromLTRB(measured.left, measured.top, measured.right, measured.bottom) : Rectangle.Empty;
+        bool validSource = pointerKnown && pointer == expectedPointer && target == expectedSource && form.Handle == expectedSource
+            && targetPid == Process.GetCurrentProcess().Id && GetAncestor(target, 2) == target
+            && IsWindowVisible(target) && frame == expectedFrame && frame.Width > 0 && frame.Height > 0 && frame.Contains(pointer);
+        List<Rectangle> screen = ExpectedPerimeter(display, display), hover = ExpectedPerimeter(expectedFrame, display);
+        List<Rectangle> remaining = new List<Rectangle>(screen); remaining.AddRange(hover);
+        List<AppEdge> actual = AppOverlayWindows(appId);
+        List<Dictionary<string, object>> windows = new List<Dictionary<string, object>>();
+        uint helper = 0; bool oneHelper = actual.Count > 0, exactGeometry = actual.Count == remaining.Count;
+        foreach (AppEdge edge in actual) {
+            if (helper == 0) helper = edge.ProcessId; else if (helper != edge.ProcessId) oneHelper = false;
+            int index = remaining.IndexOf(edge.Bounds);
+            if (index < 0) exactGeometry = false; else remaining.RemoveAt(index);
+            windows.Add(new Dictionary<string, object> { { "hwnd", WindowId(edge.Handle) },
+                { "helperProcessId", edge.ProcessId }, { "helperParentProcessId", edge.ParentProcessId }, { "physicalBounds", RectValue(edge.Bounds) } });
+        }
+        bool ready = validSource && screen.Count == 4 && hover.Count == 4 && oneHelper && exactGeometry && remaining.Count == 0;
+        probe["pointerPhysicalXY"] = pointerKnown ? (object)new int[] { pointer.X, pointer.Y } : null;
+        probe["expectedPointerPhysicalXY"] = new int[] { expectedPointer.X, expectedPointer.Y };
+        probe["pointerHitHwnd"] = WindowId(hit); probe["pointerRootHwnd"] = WindowId(target);
+        probe["pointerRootProcessId"] = targetPid; probe["expectedSourceHwnd"] = WindowId(expectedSource);
+        probe["expectedSourceProcessId"] = Process.GetCurrentProcess().Id; probe["sourceTargetVerified"] = validSource;
+        probe["sourceDwmFrameHRESULT"] = frameResult; probe["expectedHoverPhysicalBounds"] = RectValue(expectedFrame);
+        probe["actualSourceDwmPhysicalBounds"] = RectValue(frame); probe["sourceDwmFrameStable"] = frame == expectedFrame;
+        probe["expectedScreenPhysicalBounds"] = RectValue(display);
+        probe["expectedScreenEdgeCount"] = 4; probe["expectedHoverEdgeCount"] = 4;
+        probe["actualVisibleEdgeCount"] = actual.Count; probe["oneDirectApplicationChildHelper"] = oneHelper;
+        probe["helperProcessId"] = helper; probe["physicalEdgeMultisetMatches"] = screen.Count == 4 && hover.Count == 4 && exactGeometry && remaining.Count == 0;
+        probe["observedEdges"] = windows; probe["ready"] = ready;
+        RequireForeground(form);
+        return ready;
     }
     static void WaitFor(Func<bool> condition, int seconds, string failure, Process app) {
         DateTime deadline = DateTime.UtcNow.AddSeconds(seconds);
@@ -333,12 +401,27 @@ public static class EchoLingoApplicationSmoke {
                                 Assert(server == null || server.Count == 2, "Empty selection or typed submission sent duplicate/unexpected requests.");
                                 passed.Add("Actual empty Alt+D -> focused blank source -> first Unicode SendInput text + Enter -> " + (offline ? "real offline zh-en model" : "second mock") + "/history");
                                 OnUi(form, delegate { form.Activate(); SetForegroundWindow(form.Handle); source.Focus(); source.Select(0, 0); }); Thread.Sleep(150);
-                                Shortcut(form, 0x53);
-                                WaitFor(delegate { return AppOverlays(app.Id) == 4; }, 25, "Actual Alt+S did not create the pointer display's four production thin border windows.", app);
                                 Point first = Point.Empty, last = Point.Empty;
-                                OnUi(form, delegate { first = image.PointToScreen(new Point(2, 2)); last = image.PointToScreen(new Point(image.Width - 2, image.Height - 2)); });
+                                Rectangle pointerDisplay = Rectangle.Empty;
+                                OnUi(form, delegate { first = image.PointToScreen(new Point(2, 2)); last = image.PointToScreen(new Point(image.Width - 2, image.Height - 2)); pointerDisplay = Screen.FromPoint(first).Bounds; });
+                                IntPtr ocrSource = form.Handle; RECT sourceDwm;
+                                Assert(DwmGetWindowAttribute(ocrSource, 9, out sourceDwm, Marshal.SizeOf(typeof(RECT))) == 0,
+                                    "Cannot independently measure the generated OCR source DWM frame.");
+                                Rectangle ocrSourceFrame = Rectangle.FromLTRB(sourceDwm.left, sourceDwm.top, sourceDwm.right, sourceDwm.bottom);
                                 RequireForeground(form); Rectangle desktop = SystemInformation.VirtualScreen;
                                 Action<Point> move = delegate(Point point) { RequireForeground(form); INPUT input = new INPUT(); input.data.mouse.dx = (int)Math.Round((point.X - desktop.Left) * 65535.0 / (desktop.Width - 1)); input.data.mouse.dy = (int)Math.Round((point.Y - desktop.Top) * 65535.0 / (desktop.Height - 1)); input.data.mouse.flags = 0x8000 | 0x4000 | 1; Send(new INPUT[] { input }); };
+                                // Put the pointer over generated content before
+                                // the one real hotkey, then require its actual
+                                // source HWND and screen+hover physical frames.
+                                // Four arbitrary borders or eight wrong ones
+                                // cannot satisfy the readiness condition.
+                                move(first);
+                                Dictionary<string, object> ocrReady = new Dictionary<string, object>(); report["ocrOverlayReadiness"] = ocrReady;
+                                Shortcut(form, 0x53);
+                                Stopwatch readyElapsed = Stopwatch.StartNew();
+                                WaitFor(delegate { return AppOcrReady(form, app.Id, ocrSource, ocrSourceFrame, first, pointerDisplay, ocrReady); }, 25,
+                                    "Actual Alt+S did not create exact screen and generated-source hover thin edge perimeters.", app);
+                                ocrReady["observedAfterHotkeyMilliseconds"] = readyElapsed.Elapsed.TotalMilliseconds;
                                 move(first); Thread.Sleep(100); INPUT down = new INPUT(); down.data.mouse.flags = 2; Send(new INPUT[] { down }); Thread.Sleep(100); move(last); Thread.Sleep(100);
                                 RequireForeground(form); INPUT up = new INPUT(); up.data.mouse.flags = 4; Send(new INPUT[] { up });
                                 WaitFor(delegate { if (server != null && server.Error != null) throw new InvalidOperationException(server.Error); return HasHistory(history, OcrText, "ocr", providerId); }, 50, "Actual Alt+S left-drag OCR did not fill/translate exact generated text.", app);
