@@ -9,12 +9,12 @@ on:
         description: Full regression or exact-binary desktop diagnostics
         type: choice
         default: full
-        options: [full, windows-popup-diagnostics, windows-application-diagnostics, windows-input-plane-experiment, windows-native-diagnostics]
+        options: [full, windows-popup-diagnostics, windows-application-diagnostics, windows-input-plane-experiment, windows-native-diagnostics, windows-shortcuts-ui-diagnostics]
 permissions:
   contents: read
 jobs:
   desktop:
-    if: github.event.inputs.mode != 'windows-popup-diagnostics' && github.event.inputs.mode != 'windows-application-diagnostics' && github.event.inputs.mode != 'windows-input-plane-experiment' && github.event.inputs.mode != 'windows-native-diagnostics'
+    if: github.event.inputs.mode != 'windows-popup-diagnostics' && github.event.inputs.mode != 'windows-application-diagnostics' && github.event.inputs.mode != 'windows-input-plane-experiment' && github.event.inputs.mode != 'windows-native-diagnostics' && github.event.inputs.mode != 'windows-shortcuts-ui-diagnostics'
     strategy:
       fail-fast: false
       matrix:
@@ -171,10 +171,19 @@ jobs:
         timeout-minutes: 4
         shell: powershell
         run: |
-          $output = @(node tests/windows-shortcuts-ui.mjs src-tauri/target/release/echolingo.exe --isolated-test-session 2>&1)
-          $fixtureExit = $LASTEXITCODE
-          $output | Out-File "$env:RUNNER_TEMP/echolingo-shortcuts-ui.log" -Encoding utf8
-          $output | Write-Output
+          # Windows PowerShell's default Stop preference aborts on native
+          # stderr before the captured output can be saved. Keep the actual
+          # Node exit code and preserve every diagnostic line in finally.
+          $ErrorActionPreference = 'Continue'
+          $output = @(); $fixtureExit = 1
+          $global:LASTEXITCODE = 1 # A missing/unlaunchable node must never reuse a null/success exit code.
+          try {
+            $output = @(node tests/windows-shortcuts-ui.mjs src-tauri/target/release/echolingo.exe --isolated-test-session 2>&1)
+            $fixtureExit = $LASTEXITCODE
+          } finally {
+            $output | Out-File "$env:RUNNER_TEMP/echolingo-shortcuts-ui.log" -Encoding utf8
+            $output | Write-Output
+          }
           exit $fixtureExit
       - name: Windows live transparent region selector desktop smoke
         id: windows_live_capture
@@ -269,7 +278,7 @@ jobs:
           }
 
   frontend-interactions:
-    if: github.event.inputs.mode != 'windows-popup-diagnostics' && github.event.inputs.mode != 'windows-application-diagnostics' && github.event.inputs.mode != 'windows-input-plane-experiment' && github.event.inputs.mode != 'windows-native-diagnostics'
+    if: github.event.inputs.mode != 'windows-popup-diagnostics' && github.event.inputs.mode != 'windows-application-diagnostics' && github.event.inputs.mode != 'windows-input-plane-experiment' && github.event.inputs.mode != 'windows-native-diagnostics' && github.event.inputs.mode != 'windows-shortcuts-ui-diagnostics'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -532,3 +541,88 @@ jobs:
           $outcomes = @{ ocr = '${{ steps.ocr.outcome }}'; assembly = '${{ steps.assembly.outcome }}'; live = '${{ steps.live.outcome }}' }
           $outcomes | ConvertTo-Json -Compress
           if (@($outcomes.Values | Where-Object { $_ -ne 'success' }).Count -gt 0) { throw 'Fresh native Windows checks failed or incomplete; this is not app acceptance.' }
+
+  windows-shortcuts-ui-diagnostics:
+    name: Targeted shortcut UI diagnostics (exact 0a08830 binary)
+    if: github.event_name == 'workflow_dispatch' && github.event.inputs.mode == 'windows-shortcuts-ui-diagnostics'
+    runs-on: windows-latest
+    timeout-minutes: 6
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Require unchanged exact packaged application source
+        shell: powershell
+        run: |
+          git diff --quiet 0a08830f8286a2d54aa658c8876b013a8b1696b1 HEAD -- src src-tauri resources assets scripts index.html package.json package-lock.json vite.config.ts tsconfig.json tsconfig.node.json .cargo
+          if ($LASTEXITCODE -ne 0) { throw 'Application source changed; the 0a08830 binary cannot prove this checkout.' }
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+      - run: npm ci
+      - uses: actions/download-artifact@v4
+        with:
+          artifact-ids: '12734022372'
+          run-id: 40502410316
+          github-token: ${{ github.token }}
+          path: shortcut-candidate-evidence
+          merge-multiple: true
+      - name: Verify exact previously built stage executable
+        id: candidate
+        shell: powershell
+        run: |
+          $candidateFiles = @(Get-ChildItem shortcut-candidate-evidence -Recurse -File -Filter echolingo.exe)
+          if ($candidateFiles.Count -ne 1) { throw 'Expected exactly one stage executable in the exact source-run artifact.' }
+          $candidatePath = $candidateFiles[0].FullName
+          $candidateHash = (Get-FileHash -LiteralPath $candidatePath -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($candidateFiles[0].Length -ne 5717504 -or $candidateHash -ne '046a33fd4498e7ef2e14a49f694f0a1fa9e6e2af1805d1538358e8bcfce77090') { throw 'Exact stage executable identity mismatch.' }
+          $identity = [ordered]@{
+            scope = 'Targeted actual shortcut UI only; no rebuild or full-run success claim'
+            sourceRun = 40502410316
+            sourceArtifactId = 12734022372
+            applicationSource = '0a08830f8286a2d54aa658c8876b013a8b1696b1'
+            sourceArtifactApiDigest = 'sha256:74145ae5b69cb755124cc2e565cc9d287206f435b20b5d830c4c0ffd7c5dd33d'
+            stagedBytes = $candidateFiles[0].Length
+            stagedSha256 = $candidateHash
+            checkoutFixtureSha256 = (Get-FileHash tests/windows-shortcuts-ui.mjs -Algorithm SHA256).Hash.ToLowerInvariant()
+          }
+          $identity | ConvertTo-Json -Compress | Tee-Object -FilePath "$env:RUNNER_TEMP/echolingo-shortcuts-ui-identity.json"
+          "path=$candidatePath" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+      - name: Run original actual shortcut UI interactions with bounded diagnostics
+        id: shortcuts_ui
+        continue-on-error: true
+        timeout-minutes: 4
+        shell: powershell
+        env:
+          ECHOLINGO_SHORTCUT_UI_CANDIDATE: ${{ steps.candidate.outputs.path }}
+        run: |
+          $ErrorActionPreference = 'Continue'
+          $output = @(); $fixtureExit = 1
+          $global:LASTEXITCODE = 1 # A missing/unlaunchable node must never reuse a null/success exit code.
+          try {
+            $output = @(node tests/windows-shortcuts-ui.mjs $env:ECHOLINGO_SHORTCUT_UI_CANDIDATE --isolated-test-session 2>&1)
+            $fixtureExit = $LASTEXITCODE
+          } finally {
+            $output | Out-File "$env:RUNNER_TEMP/echolingo-shortcuts-ui.log" -Encoding utf8
+            $output | Write-Output
+          }
+          exit $fixtureExit
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: EchoLingo-Windows-shortcuts-ui-diagnostics
+          if-no-files-found: warn
+          path: |
+            ${{ runner.temp }}/echolingo-shortcuts-ui.log
+            ${{ runner.temp }}/echolingo-shortcuts-ui-identity.json
+      - name: Gate targeted shortcut UI raw outcome
+        if: always()
+        shell: powershell
+        run: |
+          $outcome = '${{ steps.shortcuts_ui.outcome }}'
+          [ordered]@{ scope = 'targeted-shortcut-ui-only'; shortcutUi = $outcome } | ConvertTo-Json -Compress
+          if ($outcome -ne 'success') { throw 'Targeted actual shortcut UI diagnostics incomplete or failed.' }
