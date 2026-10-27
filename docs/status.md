@@ -2,19 +2,19 @@
 
 Updated: 2026-10-28, Asia/Shanghai. Stage: v0.1.0 preview hardening and acceptance.
 
-## 2026-10-28 Alt+D 严格复核：真实反例已定位，最终候选尚未交付
+## 2026-10-28 Alt+D 严格复核：候选已生成，首次取词仍未达标
 
 本轮要求一次快捷键、原文逐字匹配、新请求与历史、源应用不被编辑、富文本剪贴板和前台保持；禁止用重按成功覆盖首次失败，禁止为浏览器夹具预先查询UIA或强制开启AX。实际环境是GitHub-hosted Windows Server桌面，不是实体Windows10/11或WPS。
 
 生产修复包括：触发时保存原生焦点/线程并在结果返回复核；固定空选区Alt+D进入空白输入并立即接受键盘；UIA使用一次调用内专用无窗MTA及新鲜缓存，完整祖先密码/根窗口和已绑定身份核验保留；复制回退用随机输入票据识别新的Ctrl+C/Ctrl+Insert，旧任务取消且不覆盖新复制。普通取消仍先完成已发复制的必要恢复。未新增固定settle、循环重试或后台剪贴板轮询。
 
-新候选不是全绿：4385的cache-first焦点获取导致6/6冷首次失败；改为普通FocusedElement再更新同一元素缓存后，48次真实Edge/Chrome调用47通过。实测第一次系统调用在2.186秒才返回，因此810改为整轮取词共用最多5秒、调用完成立即返回，所有RPC共用剩余预算。810仍47/48：第一轮原生UIA先返回Pane、下次返回Group，被严格身份守卫拒绝，不能称浏览器已全部修好。8e来源根窗口初始化对照40553539117仍47/48、冷5/6，同样Pane→Group，无超时；该29行无效对照已撤回。93b进一步MSAA获焦窗口接口对照40555594514反而42/48、冷0/6：6次实际focus都是顶层root，接口均成功返回但Pane→Group仍被拒绝；该初始化亦精确撤回，不作为修复。最后增加两台独立环境分别Edge-first/Chrome-first的96项和新stage完整回归，首次取词当前仍未验收。
+新候选不是全绿：4385的cache-first焦点获取导致6/6冷首次失败；改为普通FocusedElement再更新同一元素缓存后，48次真实Edge/Chrome调用47通过。实测第一次系统调用在2.186秒才返回，因此810改为原生取词共用最多5秒、调用完成立即返回，所有RPC共用剩余预算。810仍47/48：第一轮原生UIA先返回Pane、下次返回Group，被严格身份守卫拒绝，不能称浏览器已全部修好。8e来源根窗口初始化对照40553539117仍47/48、冷5/6，同样Pane→Group，无超时；该29行无效对照已撤回。93b进一步MSAA获焦窗口接口对照40555594514反而42/48、冷0/6：6次实际focus都是顶层root，接口均成功返回但Pane→Group仍被拒绝；该初始化亦精确撤回，不作为修复。最终f65双独立环境40556538688共95/96：Chrome-first48/48、冷6/6；Edge-first47/48、冷5/6，首例约1.084秒首次query后发生Pane→Group，不是超时。首次Edge取词仍未达标；新stage完整回归40556538469现已结束：11门禁10success/1failure，原failure保留。新的实际单Alt+D矩阵16/16通过，6真实模型和3实际NSIS安装后离线链通过；快捷键设置录制夹具准备超时，0实际case，仍未验收该界面。
 
 实际已构建4385程序（stage SHA6684d75f…bd6，5,809,152B）经过仅夹具修正的6300补测，16/16单次注册Alt+D场景通过，包括7次真实鼠标拖选、固定后新内容覆盖、空选区直接输入、手动编辑取消旧请求、同窗口焦点切换取消、管理页不被晚到结果替换。其严格身份与源码由不可变run/哈希绑定，无重建；它不证明后续810原生代码的整体验收。原full40544606324保持failure：11门禁9success，快捷键UI准备失败和当时严格夹具失败；Windows228Rust/1ignored、NSIS实际安装、6离线模型和3安装后真实链通过。
 
 剪贴板810实际3项2通过：基线和实际第二Ctrl+C安全取消通过，同PID后台发布仍会错认来源并恢复覆盖，原红保留。标准clipboard owner/sequence不是复制事务ID，输入票据无法证明任意后台发布的因果来源。默认暂沿用现有兼容回退；未凭未回复选项切换策略。native焦点HWND亦不等于每个DOM选区身份。
 
-本机224Rust/1引擎专用ignored、76前端单位/类型/构建及完整假IPC UI通过；C#5/net48及PS AST通过。预算专用夹具40553539766已在Windows执行8/8及42断言通过；这是私有worker/模拟复制策略检查，不是真实UIA提供者或剪贴板验收。Notepad两次0次Alt+D，仍未验收。未安装或签名Mac、修改TCC/钥匙串/凭据、重启停止的VM；未将本轮候选作为新版安装器交付。[严格证据](validation/windows-selection-rigorous-20261028.json)。
+本机224Rust/1引擎专用ignored、76前端单位/类型/构建及完整假IPC UI通过；C#5/net48及PS AST通过。预算专用夹具40553539766已在Windows执行8/8及42断言通过；这是私有worker/模拟复制策略检查，不是真实UIA提供者或剪贴板验收。Notepad两次0次Alt+D，仍未验收。未安装或签名Mac、修改TCC/钥匙串/凭据、重启停止的VM；已生成并核验[Windows x64待验收候选](/Users/wwq/Documents/Codex/2026-10-24/ni-ne/outputs/EchoLingo-installers/windows-candidate-20261028-selection-rigorous/EchoLingo_0.1.0_preview_20261028_selection-candidate_x64-setup.exe)：75,281,557B/SHAa22b586b…ce4c9，API ZIP大小/摘要/CRC、唯一NSIS、完整内嵌DLL及对应源码均已核对。它不是全通过修复版，未自动替换或发布stable。[严格证据](validation/windows-selection-rigorous-20261028.json)。
 
 ## 2026-10-28 连续快捷键与固定窗口：同一新版已交付，真实定向通过
 
