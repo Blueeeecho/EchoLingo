@@ -28,6 +28,14 @@ try {
     Object.assign(fixture, { credentialStates: {}, credentialReadCalls: 0, translationTestCalls: 0, settingsReads: 0 });
     Object.assign(fixture, { resizeRequests: [], nativeResizeRequests: [], holdResize: false, releaseResize: () => {} });
     Object.assign(fixture, { pinned: false, nativeVisible: true, popupReveals: 0, nativeHideTransitions: 0 });
+    Object.assign(fixture, { holdPopupAck: false, popupAckWaits: 0, releasePopupAck: () => {}, sourceFocusCalls: 0 });
+    Object.assign(fixture, { holdPresentationRead: false, presentationReadWaits: 0, releasePresentationRead: () => {} });
+    fixture.emitInputFocus = (presentation = fixture.nativeInputShow()) => fixture.emit('focus-input', structuredClone(presentation));
+    const elementFocus = HTMLElement.prototype.focus;
+    HTMLElement.prototype.focus = function (...args) {
+      if (this.id === 'source-text') fixture.sourceFocusCalls++;
+      return elementFocus.apply(this, args);
+    };
     const decorateCredential = (provider, keys) => {
       const cached = fixture.credentialStates[scope(provider)];
       if (cached) provider.credentialState = cached; else delete provider.credentialState;
@@ -52,12 +60,17 @@ try {
       if (announce) announcePresentation();
       return structuredClone(fixture.presentation);
     };
-    fixture.nativeShow = () => {
+    fixture.nativeShow = (announce = true) => {
       if (!fixture.nativeVisible) fixture.popupReveals++;
       fixture.nativeVisible = true;
       if (!fixture.presentation.presented) fixture.presentation = { epoch: fixture.presentation.epoch + 1, presented: true };
-      announcePresentation();
+      if (announce) announcePresentation();
       return structuredClone(fixture.presentation);
+    };
+    fixture.nativeInputShow = (announce = true) => {
+      fixture.presentation = { ...fixture.presentation, epoch: fixture.presentation.epoch + 1 };
+      if (activeTranslationId !== null) cancelTranslation(activeTranslationId);
+      return fixture.nativeShow(announce);
     };
     // Models the backend's pinned-visible-popup decision, not screen capture.
     // Invalidate old translation work while keeping the presentation visible.
@@ -76,7 +89,11 @@ try {
         if (command === 'get_history') return structuredClone(fixture.history ?? []);
         if (command === 'toggle_favorite') { const entry = fixture.history?.find(item => item.id === args.id); if (entry) entry.favorite = !entry.favorite; return; }
         if (command === 'copy_text') { fixture.copies.push(args.text); return; }
-        if (command === 'get_translation_presentation') return structuredClone(fixture.presentation);
+        if (command === 'get_translation_presentation') {
+          const presentation = structuredClone(fixture.presentation);
+          if (fixture.holdPresentationRead) { fixture.presentationReadWaits++; await new Promise((resolve) => { fixture.releasePresentationRead = resolve; }); }
+          return presentation;
+        }
         if (command === 'get_pending_settings') return fixture.pendingSettings ?? null;
         if (command === 'get_system_translation_status') { fixture.systemStatusCalls.push(structuredClone(args)); return structuredClone(fixture.systemStatus); }
         if (command === 'prepare_system_translation') { fixture.systemPrepareCalls.push(structuredClone(args)); fixture.systemStatus = { ...fixture.systemStatus, ready: true, requiresSetup: false, status: 'installed', message: 'QA 本机语言包已就绪' }; return structuredClone(fixture.systemStatus); }
@@ -120,7 +137,10 @@ try {
           fixture.showPopupAttempts.push(structuredClone(args));
           if (args.presentationEpoch !== fixture.presentation.epoch) throw new Error('CANCELLED: stale popup presentation');
           fixture.permissionAtShow.push({ visible: !document.querySelector('#permission-guidance').hidden, title: document.querySelector('#permission-guidance-title').textContent, layout: structuredClone(fixture.layoutCalls.at(-1)) });
-          fixture.showCalls.push(structuredClone(fixture.layoutCalls.at(-1))); return fixture.nativeShow();
+          fixture.showCalls.push(structuredClone(fixture.layoutCalls.at(-1)));
+          const presentation = fixture.nativeShow();
+          if (fixture.holdPopupAck) { fixture.popupAckWaits++; await new Promise((resolve) => { fixture.releasePopupAck = resolve; }); }
+          return presentation;
         }
         if (command === 'set_pinned') { fixture.pinned = args.pinned; (fixture.pinRequests ??= []).push(args.pinned); return; }
         if (command === 'begin_translation') {
@@ -207,6 +227,195 @@ try {
   await page.evaluate(() => window.__qa.emit('source-text', { text: '', mode: 'input' }));
   await page.waitForFunction(() => document.activeElement.id !== 'source-text');
   assert.equal(await page.locator('.source-actions').isVisible(), false);
+  // A native popup may have been accepted before its IPC acknowledgment reaches
+  // this WebView. A newer selection epoch, edit or management view must stop
+  // that old blank-input continuation from focusing the source afterward.
+  for (const superseding of ['selection-epoch', 'edit', 'view', 'view-roundtrip']) {
+    const before = await page.evaluate(() => {
+      const fixture = window.__qa;
+      document.activeElement?.blur();
+      fixture.holdPopupAck = true;
+      const before = { waits: fixture.popupAckWaits, focuses: fixture.sourceFocusCalls, requests: fixture.translationRequests.length };
+      fixture.emit('source-text', { text: '', mode: 'input', focusInput: true, presentationEpoch: fixture.presentation.epoch });
+      return before;
+    });
+    await page.waitForFunction((waits) => window.__qa.popupAckWaits > waits, before.waits);
+    if (superseding === 'selection-epoch') await page.evaluate(() => { window.__qa.nativeHide(); window.__qa.nativeShow(); });
+    else if (superseding === 'edit') await page.evaluate(() => {
+      const source = document.querySelector('#source-text');
+      source.value = 'QA edit before delayed popup acknowledgment';
+      source.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+    else {
+      await goView('settings');
+      if (superseding === 'view-roundtrip') await goView('translate');
+    }
+    await page.evaluate(() => { window.__qa.holdPopupAck = false; window.__qa.releasePopupAck(); });
+    // Drain the promise continuation, independently of future layout frames.
+    await page.evaluate(() => new Promise((resolve) => setTimeout(resolve, 0)));
+    assert.equal(await page.evaluate(() => window.__qa.sourceFocusCalls), before.focuses, `old popup acknowledgment focused after ${superseding}`);
+    assert.equal(await page.evaluate(() => window.__qa.translationRequests.length), before.requests);
+    if (superseding === 'edit') assert.equal(await page.locator('#source-text').inputValue(), 'QA edit before delayed popup acknowledgment');
+    await goView('translate');
+  }
+  // Hold only frames scheduled by this explicit focus request, then let a newer
+  // capture/edit/view overtake it before executing those exact callbacks.
+  for (const superseding of ['selection-epoch', 'edit', 'view', 'view-roundtrip']) {
+    const before = await page.evaluate(async () => {
+      const fixture = window.__qa;
+      document.activeElement?.blur();
+      const frames = [], scheduleFrame = window.requestAnimationFrame;
+      window.requestAnimationFrame = (callback) => { frames.push(callback); return 0; };
+      try {
+        fixture.emitInputFocus();
+        await new Promise((resolve) => setTimeout(resolve, 0));
+      } finally { window.requestAnimationFrame = scheduleFrame; }
+      fixture.releaseInputFocusFrames = () => { for (const callback of frames) callback(performance.now()); };
+      return { focuses: fixture.sourceFocusCalls, frames: frames.length };
+    });
+    assert.ok(before.frames > 0);
+    if (superseding === 'selection-epoch') await page.evaluate(() => { window.__qa.nativeHide(); window.__qa.nativeShow(); });
+    else if (superseding === 'edit') await page.evaluate(() => {
+      const source = document.querySelector('#source-text');
+      source.value = 'QA edit before delayed input frame';
+      source.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+    else {
+      await goView('settings');
+      if (superseding === 'view-roundtrip') await goView('translate');
+    }
+    await page.evaluate(() => window.__qa.releaseInputFocusFrames());
+    assert.equal(await page.evaluate(() => window.__qa.sourceFocusCalls), before.focuses, `old input frame focused after ${superseding}`);
+    if (superseding === 'edit') assert.equal(await page.locator('#source-text').inputValue(), 'QA edit before delayed input frame');
+    await goView('translate');
+  }
+  await page.evaluate(() => window.__qa.emitInputFocus());
+  await page.waitForFunction(() => document.activeElement.id === 'source-text');
+  // The native presentation arrives first, but its entire focus event can be
+  // delayed past a user edit or navigation that keeps the native epoch equal.
+  for (const superseding of ['edit', 'view', 'view-roundtrip']) {
+    const before = await page.evaluate(() => {
+      const fixture = window.__qa;
+      document.activeElement?.blur();
+      const presentation = fixture.nativeInputShow();
+      return { presentation, focuses: fixture.sourceFocusCalls };
+    });
+    if (superseding === 'edit') await page.evaluate(() => {
+      const source = document.querySelector('#source-text');
+      source.value = 'QA edit before same-epoch whole input event';
+      source.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+    else {
+      await goView('settings');
+      if (superseding === 'view-roundtrip') await goView('translate');
+    }
+    const expectedView = await page.locator('body').getAttribute('data-view');
+    assert.equal(await page.evaluate(() => window.__qa.presentation.epoch), before.presentation.epoch);
+    await page.evaluate((presentation) => {
+      // Replaying its presentation must not refresh an already observed epoch's
+      // baseline and thereby legitimize the delayed complete focus event.
+      window.__qa.emit('translation-presentation', presentation);
+      window.__qa.emitInputFocus(presentation);
+    }, before.presentation);
+    await page.evaluate(() => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+    assert.equal(await page.evaluate(() => window.__qa.sourceFocusCalls), before.focuses, `same-epoch whole input event refocused after ${superseding}`);
+    assert.equal(await page.locator('body').getAttribute('data-view'), expectedView);
+    // A new explicit input action, even while visible or in management, gets a
+    // fresh native epoch and is allowed to return to the editor and focus it.
+    await page.evaluate(() => window.__qa.emitInputFocus());
+    await page.waitForFunction((before) => window.__qa.presentation.epoch > before.presentation.epoch
+      && window.__qa.sourceFocusCalls === before.focuses + 1 && document.activeElement.id === 'source-text', before);
+    assert.equal(await page.locator('body').getAttribute('data-view'), 'translate');
+  }
+  // A delayed complete focus event must retain its native identity, including
+  // when the newer backend selection has not yet reached the WebView.
+  for (const announceSelection of [true, false]) {
+    const before = await page.evaluate((announce) => {
+      const fixture = window.__qa;
+      document.activeElement?.blur();
+      const payload = structuredClone(fixture.presentation), focuses = fixture.sourceFocusCalls;
+      fixture.nativeHide(announce);
+      fixture.emitInputFocus(payload);
+      return focuses;
+    }, announceSelection);
+    await page.evaluate(() => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+    assert.equal(await page.evaluate(() => window.__qa.sourceFocusCalls), before, `old complete input event focused; selection announced=${announceSelection}`);
+    await page.evaluate(() => window.__qa.nativeShow());
+  }
+  const beforeInvalidFocus = await page.evaluate(() => {
+    const fixture = window.__qa;
+    document.activeElement?.blur();
+    const epoch = fixture.presentation.epoch, focuses = fixture.sourceFocusCalls;
+    for (const payload of [undefined, null, {}, { epoch, presented: false }, { epoch: -1, presented: true },
+      { epoch: 0.5, presented: true }, { epoch: String(epoch), presented: true }, { epoch: epoch + 100, presented: true }]) {
+      fixture.emit('focus-input', payload);
+    }
+    return { epoch, focuses };
+  });
+  await page.evaluate(() => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+  assert.equal(await page.evaluate(() => window.__qa.sourceFocusCalls), beforeInvalidFocus.focuses);
+  assert.equal(await page.evaluate(() => window.__qa.presentation.epoch), beforeInvalidFocus.epoch);
+
+  // A valid native hidden→visible Alt+A may deliver focus before or after its
+  // presentation announcement. Verify its backend state before accepting it.
+  for (const focusFirst of [true, false]) {
+    const requests = await page.evaluate(() => { window.__qa.holdTranslation = true; return window.__qa.translationRequests.length; });
+    await page.locator('#source-text').fill('QA old translation before native input');
+    await page.locator('#source-text').press('Enter');
+    await page.waitForFunction((count) => window.__qa.translationRequests.length > count, requests);
+    const before = await page.evaluate((first) => {
+      const fixture = window.__qa;
+      document.activeElement?.blur();
+      fixture.nativeHide(!first);
+      const presentation = fixture.nativeInputShow(!first);
+      const before = { focuses: fixture.sourceFocusCalls, shows: fixture.showPopupAttempts.length, presentation };
+      fixture.emitInputFocus(presentation);
+      return before;
+    }, focusFirst);
+    await page.waitForFunction((focuses) => window.__qa.sourceFocusCalls === focuses + 1
+      && document.activeElement.id === 'source-text', before.focuses);
+    if (focusFirst) await page.evaluate((presentation) => window.__qa.emit('translation-presentation', presentation), before.presentation);
+    assert.equal(await page.evaluate(() => window.__qa.showPopupAttempts.length), before.shows);
+    await page.evaluate(() => { window.__qa.holdTranslation = false; });
+  }
+  // Even an accepted backend read can be delayed. User work while it is in
+  // flight must prevent its eventual response from granting a fresh focus.
+  for (const superseding of ['selection-epoch', 'edit', 'view', 'submit']) {
+    const before = await page.evaluate(() => {
+      const fixture = window.__qa;
+      document.activeElement?.blur();
+      fixture.holdPresentationRead = true;
+      const source = document.querySelector('#source-text');
+      source.value = 'QA source before delayed focus validation';
+      source.dispatchEvent(new Event('input', { bubbles: true }));
+      const before = { waits: fixture.presentationReadWaits, focuses: fixture.sourceFocusCalls };
+      fixture.emitInputFocus();
+      return before;
+    });
+    await page.waitForFunction((waits) => window.__qa.presentationReadWaits > waits, before.waits);
+    if (superseding === 'selection-epoch') await page.evaluate(() => { window.__qa.nativeHide(); window.__qa.nativeShow(); });
+    else if (superseding === 'edit') await page.evaluate(() => {
+      const source = document.querySelector('#source-text');
+      source.value = 'QA edit before delayed focus validation';
+      source.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+    else if (superseding === 'submit') await page.locator('#translate-button').click();
+    else await goView('settings');
+    await page.evaluate(() => { window.__qa.holdPresentationRead = false; window.__qa.releasePresentationRead(); });
+    await page.evaluate(() => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+    assert.equal(await page.evaluate(() => window.__qa.sourceFocusCalls), before.focuses, `delayed focus validation focused after ${superseding}`);
+    await goView('translate');
+  }
+  const hiddenInput = await page.evaluate(() => {
+    const fixture = window.__qa, hidden = fixture.nativeHide();
+    const before = { epoch: hidden.epoch, focuses: fixture.sourceFocusCalls };
+    fixture.emit('source-text', { text: '', mode: 'input', focusInput: true, presentationEpoch: hidden.epoch });
+    return before;
+  });
+  await page.waitForFunction((before) => window.__qa.sourceFocusCalls === before.focuses + 1
+    && window.__qa.presentation.epoch > before.epoch && document.activeElement.id === 'source-text', hiddenInput);
+  await page.evaluate(() => window.__qa.emit('source-text', { text: '', mode: 'input' }));
+  await page.waitForFunction(() => document.activeElement.id !== 'source-text');
   // Padding belongs to the button's hit area, and must never start a drag.
   const pinDragCalls = await page.evaluate(() => window.__qa.dragCalls);
   await pin.click({ position: { x: 3, y: 3 } });
@@ -403,7 +612,7 @@ try {
   assert.equal(await page.locator('#permission-guidance').isHidden(), true);
   await emitPermissionCapture();
   await page.locator('#permission-guidance').waitFor({ state: 'visible' });
-  await page.evaluate(() => window.__qa.emit('focus-input'));
+  await page.evaluate(() => window.__qa.emitInputFocus());
   assert.equal(await page.locator('#permission-guidance').isHidden(), true);
   const beforeStalePermission = await page.evaluate(() => {
     const epoch = window.__qa.presentation.epoch;
@@ -789,12 +998,45 @@ try {
   await page.waitForFunction(() => window.__qa.layoutCalls.at(-1)?.presentation === 'management');
   await page.getByRole('button', { name: '编辑', exact: true }).click();
   await page.locator('#provider-name').fill('QA Alt+A unfinished editor');
-  await page.evaluate(() => window.__qa.emit('focus-input'));
+  await page.evaluate(() => window.__qa.emitInputFocus());
   assert.equal(await page.locator('body').getAttribute('data-view'), 'settings');
   assert.equal(await page.locator('#provider-name').inputValue(), 'QA Alt+A unfinished editor');
   assert.equal(await page.evaluate(() => window.__qa.layoutCalls.at(-1).presentation), 'management');
   await page.locator('#cancel-provider-dialog').click();
   await page.waitForFunction(() => document.body.dataset.view === 'translate' && document.activeElement.id === 'source-text');
+
+  // An Alt+A queued in an editor retains its original epoch. Closing that
+  // editor after a newer selection starts must not reissue the old focus.
+  await goView('settings');
+  await page.getByRole('button', { name: '编辑', exact: true }).click();
+  const beforeQueuedFocus = await page.evaluate(async () => {
+    const fixture = window.__qa;
+    fixture.emitInputFocus();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    fixture.nativeHide(); fixture.nativeShow();
+    return fixture.sourceFocusCalls;
+  });
+  await page.locator('#cancel-provider-dialog').click();
+  await page.evaluate(() => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+  assert.equal(await page.locator('body').getAttribute('data-view'), 'settings');
+  assert.equal(await page.evaluate(() => window.__qa.sourceFocusCalls), beforeQueuedFocus);
+  await goView('translate');
+
+  await goView('settings');
+  await page.getByRole('button', { name: '编辑', exact: true }).click();
+  await page.evaluate(async () => { window.__qa.emitInputFocus(); await new Promise((resolve) => setTimeout(resolve, 0)); });
+  const beforeQueuedRoundtrip = await page.evaluate(() => {
+    const focuses = window.__qa.sourceFocusCalls;
+    // Close queues a microtask; navigate away and back before that continuation.
+    document.querySelector('#cancel-provider-dialog').click();
+    document.querySelector('button[data-view="translate"]').click();
+    document.querySelector('button[data-view="settings"]').click();
+    return focuses;
+  });
+  await page.evaluate(() => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+  assert.equal(await page.locator('body').getAttribute('data-view'), 'settings');
+  assert.equal(await page.evaluate(() => window.__qa.sourceFocusCalls), beforeQueuedRoundtrip);
+  await goView('translate');
 
   // Tray, Cmd+, and reopen use an explicit Settings event. Configuration is
   // prepared in management geometry before the native focused presentation.
@@ -1169,7 +1411,7 @@ try {
     const capture = await page.evaluate(() => window.__qa.nativePinnedCaptureStart());
     if (action === 'edit') await page.locator('#source-text').fill('QA manual edit wins over pending OCR');
     else {
-      await page.evaluate(() => window.__qa.emit('focus-input', null));
+      await page.evaluate(() => window.__qa.emitInputFocus());
       await page.waitForFunction(() => document.activeElement.id === 'source-text');
       await page.keyboard.press('ControlOrMeta+End'); await page.keyboard.type(' with Alt+A typing');
     }
@@ -1403,6 +1645,8 @@ try {
   assert.equal(await page.evaluate(() => window.__qa.ocrTestCalls), credentialBaseline.ocrTests + 1);
   assert.equal(await page.evaluate(() => window.__qa.translationRequests.length), credentialBaseline.translations);
   assert.deepEqual(errors, []);
+  console.log('PASS: native input focus events require exact backend-verified presentation metadata; an observed epoch keeps its original intent baseline across duplicate announcements, edits and navigation; fresh explicit input works while visible or in management; stale complete events, missing/malformed/future payloads and delayed verification cannot rebind focus; hidden Alt+A works with either presentation-event order. Fake IPC only.');
+  console.log('PASS: accepted popup acknowledgments, explicit input animation frames and modal queues cannot revive focus after a newer selection epoch, edit or management-view roundtrip; current empty-selection typing and current input focus remain available. Isolated DOM/IPC only, not a native WPS root-cause claim.');
   console.log('PASS: repeated pinned capture epochs keep completed source/result DOM visible through cancel/no-text/OCR/permission errors; successful OCR replaces source and auto-translates without a modeled hide/reveal; pin remains active; stale source/presentation/progress cannot overwrite; in-flight partial results are cancelled and removed. Fake IPC only, no real capture or native visibility pass.');
   console.log('PASS: marked visible-popup OCR updates cannot navigate away from settings/history, overwrite newer edits or Alt+A typing, or cancel a newer manual translation; accepted marked capture still auto-translates; ordinary unmarked source workflows remain covered.');
   console.log('PASS: show_popup IPC explicitly requests reuseVisiblePopup=false for ordinary blank/input/selection, including an already visible pinned popup; only marked pinned OCR sends true. Payload dispatch only; no native physical raise/z-order acceptance is claimed.');

@@ -13,6 +13,18 @@
   --border: #30313e; --accent: #aa96f0; --accent-hover: #b7a5fb; --accent-soft: #342d4d;
   --teal: #7abdb4; --danger: #e1909b; --shadow: 0 6px 24px #00000012; --ring: #ad98ef;
 }
+:root[data-platform="windows"] {
+  font-family: "Microsoft YaHei UI", "Microsoft YaHei", "Segoe UI", sans-serif;
+  text-rendering: auto;
+}
+/* Use the installed Windows Chinese reading font in both text panels. */
+:root[data-platform="windows"] body[data-view="translate"] #source-text,
+:root[data-platform="windows"] body[data-view="translate"] .result-text {
+  font-family: "SimSun", "宋体", "NSimSun", "Microsoft YaHei", serif;
+  font-size: 16px;
+  font-weight: 400;
+  line-height: 1.75;
+}
 * { box-sizing: border-box; }
 body { margin: 0; min-width: 480px; }
 button, input, select, textarea { font: inherit; }

@@ -33,15 +33,20 @@ let history: HistoryEntry[] = [];
 let favoritesOnly = false;
 let pinned = false;
 let generation = 0;
+// User/capture intent only; a native presentation may cancel an old translation
+// without invalidating its own delayed, backend-verified input-focus event.
+let focusIntentRevision = 0;
 let translating = false;
 let activeTranslationId: number | null = null;
 let translationPresentation: TranslationPresentation = { epoch: 0, presented: false };
+let presentationFocusIntent: { epoch: number; intentRevision: number } | null = null;
 let visiblePopupUpdateBaseline: { epoch: number; generation: number } | null = null;
 let translationStartQueue: Promise<void> = Promise.resolve();
 let sourceComposing = false;
 let permissionBusy = false;
 let permissionGuidanceKind: PermissionKind | null = null;
 const macDesktop = desktop && /Mac/.test(navigator.platform);
+document.documentElement.dataset.platform = /Win/.test(navigator.platform) ? 'windows' : /Mac/.test(navigator.platform) ? 'macos' : 'other';
 let editingProviderId: string | null = null;
 let providerSaving = false;
 let providerScopeAtOpen: string | null = null;
@@ -65,7 +70,8 @@ let resultSource = '';
 let pendingTranslate = false;
 let originalCapture: SourceTextEvent | null = null;
 let queuedCapture: SourceTextEvent | null = null;
-let queuedInputFocus = false;
+interface InputFocusRequest { epoch: number; generation: number; intentRevision: number }
+let queuedInputFocus: InputFocusRequest | null = null;
 let pendingSettingsOpen: { presentationEpoch: number } | null = null;
 let latestSettingsOpenEpoch = -1;
 let confirmResolve: ((value: boolean) => void) | null = null;
@@ -143,6 +149,7 @@ function reportError(error: unknown): void { toast(userFacingError(error), 'erro
 function run(work: () => Promise<unknown>): void { void work().catch(reportError); }
 function setView(view: string): void {
   if (!['translate', 'history', 'settings'].includes(view)) return;
+  if (view !== currentView) focusIntentRevision += 1;
   closeMoreMenu();
   currentView = view; document.body.dataset.view = view;
   $('#management-title').textContent = view === 'history' ? '历史与收藏' : '设置';
@@ -222,9 +229,10 @@ function emptyResults(): void {
   $('#translation-state').textContent = '';
   notifyLayout();
 }
-function invalidateResults(): void {
+function invalidateResults(preserveFocusIntent = false): void {
   cancelActiveTranslation();
   generation += 1;
+  if (!preserveFocusIntent) focusIntentRevision += 1;
   setLoading(false);
   currentResults = [];
   resultSource = '';
@@ -235,9 +243,9 @@ function cancelActiveTranslation(): void {
   activeTranslationId = null;
   if (desktop && requestId !== null) void invoke('cancel_translation', { requestId }).catch(reportError);
 }
-function stopPendingTranslation(): void {
+function stopPendingTranslation(preserveFocusIntent = false): void {
   if (!translating) return;
-  invalidateResults();
+  invalidateResults(preserveFocusIntent);
   status('翻译已取消');
 }
 function applyTranslationPresentation(presentation: TranslationPresentation): void {
@@ -247,7 +255,12 @@ function applyTranslationPresentation(presentation: TranslationPresentation): vo
   const changed = presentation.epoch > translationPresentation.epoch;
   translationPresentation = presentation;
   if (changed) {
-    stopPendingTranslation();
+    // This cancellation is part of accepting the native presentation itself,
+    // not a newer user edit/navigation that invalidates its input-focus intent.
+    stopPendingTranslation(true);
+    // Bind only when this epoch is first observed. A delayed duplicate state or
+    // complete focus event must not rebind after the user edits or navigates.
+    presentationFocusIntent = presentation.presented ? { epoch: presentation.epoch, intentRevision: focusIntentRevision } : null;
     // A capture may finish while its pinned popup remains usable. Snapshot
     // after cancelling the previous request so later edits/manual work win.
     visiblePopupUpdateBaseline = presentation.presented ? { epoch: presentation.epoch, generation } : null;
@@ -280,7 +293,7 @@ async function receiveCapturedText(payload: SourceTextEvent & { presentationEpoc
     || visiblePopupUpdateBaseline.generation !== generation)) return;
   // Preserve an unfinished credentials editor rather than displaying it over a
   // captured translation or silently discarding its fields. Latest capture wins.
-  if (allModals.some((modal) => !modal.hidden)) { queuedCapture = payload; queuedInputFocus = false; return; }
+  if (allModals.some((modal) => !modal.hidden)) { queuedCapture = payload; queuedInputFocus = null; return; }
   pendingTranslate = false; clearToast();
   setView('translate');
   const normalized = payload.mode === 'input' ? payload.text : normalizeCapturedText(payload.text);
@@ -298,24 +311,57 @@ async function receiveCapturedText(payload: SourceTextEvent & { presentationEpoc
     restore.hidden = false;
   }
   const token = generation;
+  const intent = focusIntentRevision;
+  let presentedEpoch = presentationEpoch;
   try {
     const presentation = await panelLayout.presentPopup(presentationEpoch, Boolean(payload.focusInput), Boolean(payload.updateVisiblePopup));
-    if (presentation) applyTranslationPresentation(presentation);
+    if (presentation) { applyTranslationPresentation(presentation); presentedEpoch = presentation.epoch; }
     else if (desktop) return;
   } catch (error) {
     if (errorMessage(error).startsWith('CANCELLED:')) return;
     throw error;
   }
-  if (token !== generation || currentView !== 'translate') return;
+  // A valid native show acknowledgment can arrive after a newer selection has
+  // already advanced the epoch. Resume may itself advance the requested epoch,
+  // so compare against the accepted response, not the original capture epoch.
+  if (token !== generation || intent !== focusIntentRevision || currentView !== 'translate' || allModals.some((modal) => !modal.hidden)
+    || (desktop && (!translationPresentation.presented || translationPresentation.epoch !== presentedEpoch))) return;
   if (payload.mode === 'translate') { if (settingsReady) run(translate); else pendingTranslate = true; }
   else if (payload.mode === 'ocr') status('文字识别完成');
   // Empty Alt+D is now an explicit input action. Nonempty selection/OCR stays
   // passive; only the epoch-bound input payload may activate and focus.
   if (payload.focusInput) source.focus({ preventScroll: true });
 }
-function requestInputFocus(): void {
-  if (allModals.some((modal) => !modal.hidden)) { queuedInputFocus = true; queuedCapture = null; return; }
-  clearPermissionGuidance(); setView('translate'); requestAnimationFrame(() => source.focus());
+function requestInputFocus(request: InputFocusRequest = { epoch: translationPresentation.epoch, generation, intentRevision: focusIntentRevision }): void {
+  if (request.epoch !== translationPresentation.epoch || request.generation !== generation || request.intentRevision !== focusIntentRevision) return;
+  if (allModals.some((modal) => !modal.hidden)) { queuedInputFocus = request; queuedCapture = null; return; }
+  clearPermissionGuidance(); setView('translate');
+  // This request may legitimately navigate from management to the editor.
+  // Bind its frame after that navigation; queued requests retain their origin.
+  const intent = focusIntentRevision;
+  requestAnimationFrame(() => {
+    if (currentView !== 'translate' || intent !== focusIntentRevision || request.epoch !== translationPresentation.epoch || request.generation !== generation
+      || allModals.some((modal) => !modal.hidden) || (desktop && !translationPresentation.presented)) return;
+    source.focus();
+  });
+}
+async function receiveInputFocus(payload: unknown): Promise<void> {
+  if (!payload || typeof payload !== 'object') return;
+  const candidate = payload as Partial<TranslationPresentation>;
+  const epoch = candidate.epoch;
+  if (!Number.isSafeInteger(epoch) || typeof epoch !== 'number' || epoch < 0
+    || candidate.presented !== true || epoch < translationPresentation.epoch) return;
+  if (epoch === translationPresentation.epoch && (presentationFocusIntent?.epoch !== epoch
+    || presentationFocusIntent.intentRevision !== focusIntentRevision)) return;
+  const intent = focusIntentRevision;
+  // The complete event can arrive late, or before its presentation event. A
+  // backend read prevents rebinding old/malformed/future events to local state.
+  const current = await invoke<TranslationPresentation>('get_translation_presentation');
+  if (current.epoch !== epoch || current.presented !== true || intent !== focusIntentRevision
+    || epoch < translationPresentation.epoch) return;
+  applyTranslationPresentation(current);
+  if (presentationFocusIntent?.epoch !== epoch || presentationFocusIntent.intentRevision !== focusIntentRevision) return;
+  requestInputFocus({ epoch: current.epoch, generation, intentRevision: presentationFocusIntent.intentRevision });
 }
 async function openSettingsFromNative(payload: { presentationEpoch: number }): Promise<void> {
   if (!settingsReady) {
@@ -421,6 +467,7 @@ async function translate(): Promise<void> {
   if (text.length > MAX_TEXT_LENGTH) throw new Error('每次最多翻译 20,000 字符。');
   if (!requireDesktop()) return;
   if (!settings.providers.some((provider) => provider.enabled)) { setView('settings'); toast('请先添加并启用一个翻译服务。'); return; }
+  focusIntentRevision += 1;
   const token = ++generation;
   const presentationEpoch = translationPresentation.epoch;
   const from = sourceLanguage.value, to = targetLanguage.value;
@@ -448,7 +495,7 @@ async function translate(): Promise<void> {
     status(results.some((result) => !result.error) ? '翻译完成' : '服务返回错误');
   } catch (error) {
     if (token !== generation) return;
-    if (errorMessage(error).startsWith('CANCELLED:')) { invalidateResults(); status('翻译已取消'); return; }
+    if (errorMessage(error).startsWith('CANCELLED:')) { invalidateResults(true); status('翻译已取消'); return; }
     resultsContainer.replaceChildren();
     const card = node('article', 'result-card');
     card.append(node('p', 'result-error', userFacingError(error)));
@@ -778,7 +825,8 @@ function closeModal(modal: HTMLElement): void {
     const payload = queuedCapture; queuedCapture = null;
     queueMicrotask(() => run(() => receiveCapturedText(payload)));
   } else if (!anotherModal && queuedInputFocus) {
-    queuedInputFocus = false; queueMicrotask(requestInputFocus);
+    const request = queuedInputFocus; queuedInputFocus = null;
+    queueMicrotask(() => requestInputFocus(request));
   }
 }
 function setProviderSaving(value: boolean): void {
@@ -1196,7 +1244,7 @@ async function initialize(): Promise<void> {
   try {
     // Listen before loading settings so an incoming native selection is not lost during startup.
     cleanupListeners.push(await listen<SourceTextEvent & { presentationEpoch?: number }>('source-text', (event) => run(() => receiveCapturedText(event.payload))));
-    cleanupListeners.push(await listen('focus-input', requestInputFocus));
+    cleanupListeners.push(await listen<unknown>('focus-input', (event) => run(() => receiveInputFocus(event.payload))));
     cleanupListeners.push(await listen<{ presentationEpoch: number }>('open-settings', (event) => run(() => openSettingsFromNative(event.payload))));
     cleanupListeners.push(await listen<TranslationPresentation>('translation-presentation', (event) => applyTranslationPresentation(event.payload)));
     cleanupListeners.push(await listen<TranslationProgress>('translation-progress', (event) => receiveTranslationProgress(event.payload)));

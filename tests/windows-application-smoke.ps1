@@ -143,13 +143,21 @@ public static class EchoLingoApplicationSmoke {
     }
     static int AppOverlays(int appId) {
         int count = 0;
+        Dictionary<uint, bool> helperOwners = new Dictionary<uint, bool>();
         EnumWindows(delegate(IntPtr window, IntPtr unused) {
             if (!IsWindowVisible(window)) return true;
             long style = GetWindowLongPtr(window, -20).ToInt64();
             long required = 0x08000000L | 0x00080000L | 0x00000020L | 8;
             if ((style & required) != required) return true;
             uint owner; GetWindowThreadProcessId(window, out owner);
-            if (ParentPid((int)owner) == appId) count++;
+            bool isHelper;
+            if (!helperOwners.TryGetValue(owner, out isHelper)) { isHelper = ParentPid((int)owner) == appId; helperOwners.Add(owner, isHelper); }
+            if (isHelper) {
+                RECT rectangle; Assert(GetWindowRect(window, out rectangle), "Cannot inspect the actual app's capture border geometry.");
+                int width = rectangle.right - rectangle.left, height = rectangle.bottom - rectangle.top;
+                Assert(width > 0 && height > 0 && Math.Min(width, height) <= 2, "Actual OCR still created a full-screen overlay surface instead of thin edges.");
+                count++;
+            }
             return true;
         }, IntPtr.Zero);
         return count;
@@ -326,7 +334,7 @@ public static class EchoLingoApplicationSmoke {
                                 passed.Add("Actual empty Alt+D -> focused blank source -> first Unicode SendInput text + Enter -> " + (offline ? "real offline zh-en model" : "second mock") + "/history");
                                 OnUi(form, delegate { form.Activate(); SetForegroundWindow(form.Handle); source.Focus(); source.Select(0, 0); }); Thread.Sleep(150);
                                 Shortcut(form, 0x53);
-                                WaitFor(delegate { return AppOverlays(app.Id) == Screen.AllScreens.Length; }, 25, "Actual Alt+S did not create production transparent helper overlays.", app);
+                                WaitFor(delegate { return AppOverlays(app.Id) == 4; }, 25, "Actual Alt+S did not create the pointer display's four production thin border windows.", app);
                                 Point first = Point.Empty, last = Point.Empty;
                                 OnUi(form, delegate { first = image.PointToScreen(new Point(2, 2)); last = image.PointToScreen(new Point(image.Width - 2, image.Height - 2)); });
                                 RequireForeground(form); Rectangle desktop = SystemInformation.VirtualScreen;

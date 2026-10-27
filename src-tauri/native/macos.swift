@@ -36,19 +36,152 @@ func requireAccessibility() throws {
     }
 }
 
-func focusedElement(applicationPID: pid_t? = nil) -> AXUIElement? {
-    let pid = applicationPID ?? NSWorkspace.shared.frontmostApplication?.processIdentifier
-    let roots = pid.map { [AXUIElementCreateApplication($0), AXUIElementCreateSystemWide()] }
-        ?? [AXUIElementCreateSystemWide()]
-    for root in roots {
+// Keep only the latest explicit selection attempt in memory. Diagnostics never
+// query a selection, clipboard or window title and never write this trace out.
+final class SelectionTrace {
+    private static let lock = NSLock()
+    private static var latest: [String: Any] = ["state": "unread", "schemaVersion": 1]
+    static let maximumEvents = 32
+    private static let allowedFields: Set<String> = [
+        "axApplicationStatus", "axPIDStatus", "axPID", "workspacePID", "workspaceOnMainThread",
+        "foregroundSource", "foregroundPID", "bundleIdentifier", "foregroundMismatch", "root",
+        "focusStatus", "focusPIDStatus", "focusOwner", "expectedPID", "ownerMatches", "valueTypeValid",
+        "role", "roleStatus", "subrole", "subroleStatus", "selectedTextStatus", "selectedTextEmpty",
+        "rangeStatus", "rangeState", "rangeLength", "rangeTextStatus", "pluralStatus", "pluralState", "rangeCount", "positiveRangeCount",
+        "decision", "documentContainer", "opaqueDocument", "copyIssued"
+    ]
+    private let start = ProcessInfo.processInfo.systemUptime
+    private let publish: Bool
+    private var events = [[String: Any]]()
+    private var phase = "started"
+    private var truncated = false
+    private var copyIssued = false
+    init(publish: Bool = true) {
+        self.publish = publish
+        record("started")
+    }
+    func record(_ phase: String, _ fields: [String: Any] = [:]) {
+        self.phase = String(phase.prefix(64))
+        if fields["copyIssued"] as? Bool == true { copyIssued = true }
+        var event: [String: Any] = ["phase": self.phase, "mainThread": Thread.isMainThread,
+                                    "elapsedMs": elapsedMilliseconds()]
+        for (key, value) in fields where Self.allowedFields.contains(key) {
+            if let value = value as? String { event[key] = String(value.prefix(256)) }
+            else if value is NSNumber || value is NSNull { event[key] = value }
+        }
+        if events.count < Self.maximumEvents { events.append(event) } else { truncated = true }
+        store(state: "running", errorCategory: nil)
+    }
+    func finish(errorCategory: String? = nil) {
+        store(state: errorCategory == nil ? "completed" : "failed", errorCategory: errorCategory)
+    }
+    private func elapsedMilliseconds() -> Double {
+        (ProcessInfo.processInfo.systemUptime - start) * 1000
+    }
+    func snapshot(state: String = "running", errorCategory: String? = nil) -> [String: Any] {
+        let categories: Set<String> = ["PERMISSION", "SELECTION", "NO_SELECTION", "CLIPBOARD",
+            "CLIPBOARD_CHANGED", "CLIPBOARD_RESTORE_FAILED", "CLIPBOARD_RESTORE_SKIPPED"]
+        let category = errorCategory.map { categories.contains($0) ? $0 : "NATIVE" }
+        return ["schemaVersion": 1, "state": state, "phase": phase,
+                "errorCategory": category as Any? ?? NSNull(), "copyIssued": copyIssued,
+                "elapsedMs": elapsedMilliseconds(), "events": events, "eventsTruncated": truncated]
+    }
+    private func store(state: String, errorCategory: String?) {
+        guard publish else { return }
+        let value = snapshot(state: state, errorCategory: errorCategory)
+        Self.lock.lock(); Self.latest = value; Self.lock.unlock()
+    }
+    static func lastSnapshot() -> [String: Any] {
+        lock.lock(); defer { lock.unlock() }
+        return latest
+    }
+}
+
+struct SelectionApplicationSnapshot {
+    let pid: pid_t?
+    let bundleIdentifier: String?
+}
+
+func selectionForegroundSource(axStatus: AXError, axPIDStatus: AXError?, axPID: pid_t?, workspacePID: pid_t?) -> (pid_t?, String) {
+    if axStatus == .success, axPIDStatus == .success, let axPID, axPID > 0 {
+        return (axPID, "axFocusedApplication")
+    }
+    // A transient missing/invalid AX target must not resurrect a cached app.
+    // Workspace fallback is restricted to an explicitly unsupported API.
+    if [.attributeUnsupported, .notImplemented].contains(axStatus), let workspacePID, workspacePID > 0 {
+        return (workspacePID, "workspaceUnsupportedFallback")
+    }
+    return (nil, "unavailable")
+}
+
+func selectionApplicationSnapshot(trace: SelectionTrace? = nil, phase: String = "foreground") -> SelectionApplicationSnapshot {
+    var value: CFTypeRef?
+    let status = AXUIElementCopyAttributeValue(AXUIElementCreateSystemWide(), kAXFocusedApplicationAttribute as CFString, &value)
+    var axPID: pid_t?
+    var pidStatus: AXError?
+    if status == .success, let value, CFGetTypeID(value) == AXUIElementGetTypeID() {
+        var pid: pid_t = 0
+        pidStatus = AXUIElementGetPid(value as! AXUIElement, &pid)
+        if pidStatus == .success { axPID = pid }
+    }
+    // NSWorkspace is a main-thread comparison/fallback, not the authority when
+    // AX has a current application. AX queries stay on the capture worker.
+    let metadata = onMainThread { () -> (pid_t?, String, pid_t?, String?, Bool) in
+        let workspacePID = NSWorkspace.shared.frontmostApplication?.processIdentifier
+        let (pid, source) = selectionForegroundSource(axStatus: status, axPIDStatus: pidStatus,
+                                                    axPID: axPID, workspacePID: workspacePID)
+        let bundle = pid.flatMap { NSRunningApplication(processIdentifier: $0)?.bundleIdentifier }
+        return (pid, source, workspacePID, bundle, Thread.isMainThread)
+    }
+    trace?.record(phase, ["axApplicationStatus": status.rawValue, "axPIDStatus": pidStatus?.rawValue as Any? ?? NSNull(),
+        "axPID": axPID as Any? ?? NSNull(), "workspacePID": metadata.2 as Any? ?? NSNull(),
+        "workspaceOnMainThread": metadata.4, "foregroundSource": metadata.1,
+        "foregroundPID": metadata.0 as Any? ?? NSNull(), "bundleIdentifier": metadata.3 as Any? ?? NSNull(),
+        "foregroundMismatch": axPID != nil && metadata.2 != nil && axPID != metadata.2])
+    return SelectionApplicationSnapshot(pid: metadata.0, bundleIdentifier: metadata.3)
+}
+
+func selectionFocusOwnerMatches(_ expectedPID: pid_t?, _ owner: pid_t, _ status: AXError) -> Bool {
+    guard let expectedPID, expectedPID > 0 else { return false }
+    return status == .success && owner == expectedPID
+}
+
+func focusedElement(applicationPID: pid_t? = nil, trace: SelectionTrace? = nil, phase: String = "focus") -> AXUIElement? {
+    let pid = applicationPID ?? selectionApplicationSnapshot(trace: trace).pid
+    guard let pid, pid > 0 else { return nil }
+    let system = AXUIElementCreateSystemWide()
+    func query(_ root: AXUIElement, _ name: String) -> AXUIElement? {
         var value: CFTypeRef?
-        guard AXUIElementCopyAttributeValue(root, kAXFocusedUIElementAttribute as CFString, &value) == .success,
-              let value = value, CFGetTypeID(value) == AXUIElementGetTypeID() else { continue }
+        let status = AXUIElementCopyAttributeValue(root, kAXFocusedUIElementAttribute as CFString, &value)
+        let valid = value.map { CFGetTypeID($0) == AXUIElementGetTypeID() } ?? false
+        guard status == .success, let value, valid else {
+            trace?.record(phase, ["root": name, "focusStatus": status.rawValue, "valueTypeValid": valid])
+            return nil
+        }
         let element = value as! AXUIElement
         var owner: pid_t = 0
-        guard AXUIElementGetPid(element, &owner) == .success,
-              pid == nil || owner == pid else { continue }
-        return element
+        let ownerStatus = AXUIElementGetPid(element, &owner)
+        let matches = selectionFocusOwnerMatches(pid, owner, ownerStatus)
+        trace?.record(phase, ["root": name, "focusStatus": status.rawValue, "focusPIDStatus": ownerStatus.rawValue,
+            "focusOwner": owner, "expectedPID": pid, "ownerMatches": matches])
+        return matches ? element : nil
+    }
+    if let element = query(AXUIElementCreateApplication(pid), "application") { return element }
+    if let element = query(system, "systemWide") { return element }
+    // Some applications expose focus only through the system's focused app.
+    // Validate that application before querying it; never follow a new owner.
+    var application: CFTypeRef?
+    let status = AXUIElementCopyAttributeValue(system, kAXFocusedApplicationAttribute as CFString, &application)
+    var owner: pid_t = 0
+    if status == .success, let application, CFGetTypeID(application) == AXUIElementGetTypeID() {
+        let root = application as! AXUIElement
+        let ownerStatus = AXUIElementGetPid(root, &owner)
+        let matches = selectionFocusOwnerMatches(pid, owner, ownerStatus)
+        trace?.record(phase, ["root": "systemFocusedApplication", "axApplicationStatus": status.rawValue,
+            "focusPIDStatus": ownerStatus.rawValue, "focusOwner": owner, "expectedPID": pid, "ownerMatches": matches])
+        if matches { return query(root, "systemFocusedApplication") }
+    } else {
+        trace?.record(phase, ["root": "systemFocusedApplication", "axApplicationStatus": status.rawValue])
     }
     return nil
 }
@@ -65,15 +198,19 @@ enum SelectionDecision: Equatable {
 // Known WPS document wrappers are an explicit exception: their zero ranges can
 // be placeholders, just like their empty AXSelectedText. Do not extend that
 // exception to ordinary editable text controls or other applications.
-func selectionDecision(selectedText: String?, selectedRange: CFRange?, rangeText: String?, opaqueDocument: Bool = false) -> SelectionDecision {
+func selectionDecision(selectedText: String?, selectedRange: CFRange?, rangeText: String?, opaqueDocument: Bool = false,
+                       documentContainer: Bool = false) -> SelectionDecision {
     if let text = selectedText, !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
         return .text(text)
     }
     if let range = selectedRange {
-        guard range.location >= 0, range.length >= 0 else { return .empty }
+        guard validSelectionRange(range) else { return .empty }
         if range.length == 0 { return opaqueDocument ? .copy : .empty }
         if let text = rangeText {
-            return text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? .empty : .text(text)
+            if text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                return opaqueDocument || documentContainer ? .copy : .empty
+            }
+            return .text(text)
         }
         return .copy
     }
@@ -81,33 +218,129 @@ func selectionDecision(selectedText: String?, selectedRange: CFRange?, rangeText
     // advertise an empty AXSelectedText without implementing text ranges.
     // That is unavailable information, unlike an editor's confirmed empty
     // range. Do not apply this exception to editable text controls.
-    return selectedText == nil || (selectedRange == nil && opaqueDocument) ? .copy : .empty
+    return selectedText == nil || opaqueDocument || documentContainer ? .copy : .empty
 }
 
 func opaqueSelectionContainer(_ role: String?, bundleIdentifier: String?) -> Bool {
     // Keep this compatibility exception scoped to WPS; a generic editor may
     // implement copy-current-line while reporting no selection information.
     guard bundleIdentifier == "com.kingsoft.wpsoffice.mac" else { return false }
-    return ["AXWindow", "AXGroup", "AXScrollArea", "AXLayoutArea", "AXDocument", "AXWebArea"].contains(role ?? "")
+    // WPS also exposes its document canvas as AXSplitGroup with no selected
+    // text and a placeholder zero range even while the document has a selection.
+    return ["AXWindow", "AXGroup", "AXSplitGroup", "AXScrollArea", "AXLayoutArea", "AXDocument", "AXWebArea"].contains(role ?? "")
 }
 
 func unavailableSelectionRange(_ status: AXError) -> Bool {
     [.attributeUnsupported, .noValue, .notImplemented].contains(status)
 }
 
-func selectionRangesDecision(_ ranges: [CFRange], texts: [String?], opaqueDocument: Bool = false) -> SelectionDecision? {
+func readonlySelectionContainer(_ role: String?) -> Bool {
+    // The focused document itself is not an ordinary editable input control.
+    // Do not infer this from AXWindow/AXGroup or from an arbitrary app name.
+    role == "AXWebArea" || role == "AXDocument"
+}
+
+enum SelectionQuery<Value> {
+    case value(Value)
+    case unavailable
+    case invalid
+
+    var state: String {
+        switch self { case .value: return "valid"; case .unavailable: return "unavailable"; case .invalid: return "invalid" }
+    }
+    var value: Value? {
+        if case .value(let value) = self { return value }
+        return nil
+    }
+}
+
+struct SelectionRangeValue {
+    let value: AXValue
+    let range: CFRange
+}
+
+func validSelectionRange(_ range: CFRange) -> Bool {
+    range.location >= 0 && range.length >= 0 && !range.location.addingReportingOverflow(range.length).overflow
+}
+
+func selectionTextQuery(status: AXError, value: CFTypeRef?) -> SelectionQuery<String> {
+    guard status == .success else { return unavailableSelectionRange(status) ? .unavailable : .invalid }
+    guard let text = value as? String else { return .invalid }
+    return .value(text)
+}
+
+func selectionRangeQuery(status: AXError, value: CFTypeRef?) -> SelectionQuery<SelectionRangeValue> {
+    guard status == .success else { return unavailableSelectionRange(status) ? .unavailable : .invalid }
+    guard let value, CFGetTypeID(value) == AXValueGetTypeID() else { return .invalid }
+    let axValue = value as! AXValue
+    var range = CFRange(location: -1, length: -1)
+    guard AXValueGetType(axValue) == .cfRange, AXValueGetValue(axValue, .cfRange, &range),
+          validSelectionRange(range) else { return .invalid }
+    return .value(SelectionRangeValue(value: axValue, range: range))
+}
+
+func selectionRangesQuery(status: AXError, value: CFTypeRef?) -> SelectionQuery<[SelectionRangeValue]> {
+    guard status == .success else { return unavailableSelectionRange(status) ? .unavailable : .invalid }
+    guard let value, CFGetTypeID(value) == CFArrayGetTypeID(), let values = value as? [Any],
+          values.count <= 64 else { return .invalid }
+    var ranges = [SelectionRangeValue]()
+    for value in values {
+        guard case .value(let range) = selectionRangeQuery(status: .success, value: value as CFTypeRef) else { return .invalid }
+        ranges.append(range)
+    }
+    return .value(ranges)
+}
+
+func requireUsableSelectionQuery<Value>(_ query: SelectionQuery<Value>) throws {
+    if case .invalid = query {
+        throw NativeError("SELECTION: The application returned invalid selection metadata or an accessibility query failed. Select text and retry.")
+    }
+}
+
+func requireSelectionCopyTarget(role: String?, subrole: String?) throws {
+    try requireUnprotectedSelection(subrole)
+    // Reject focus on UI chrome, not text controls inside a dialog. Unknown
+    // custom document roles retain the guarded compatibility fallback.
+    let nonTextRoles = ["AXSheet", "AXButton", "AXPopUpButton", "AXMenuButton", "AXMenu", "AXMenuItem", "AXMenuBar", "AXMenuBarItem"]
+    if nonTextRoles.contains(role ?? "") || (role == "AXWindow" && ["AXDialog", "AXSystemDialog"].contains(subrole ?? "")) {
+        throw NativeError("NO_SELECTION: The focused control is not a text selection source.")
+    }
+}
+
+func selectionFocusClassification(role: SelectionQuery<String>, subrole: SelectionQuery<String>,
+                                  copyFallback: Bool) throws -> (role: String?, subrole: String?) {
+    try requireUsableSelectionQuery(role)
+    try requireUsableSelectionQuery(subrole)
+    if copyFallback { try requireSelectionCopyTarget(role: role.value, subrole: subrole.value) }
+    else { try requireUnprotectedSelection(subrole.value) }
+    return (role.value, subrole.value)
+}
+
+func selectionRangesDecision(_ ranges: [CFRange], texts: [String?], opaqueDocument: Bool = false,
+                             documentContainer: Bool = false) -> SelectionDecision? {
     guard ranges.count <= 64, ranges.count == texts.count,
-          ranges.allSatisfy({ $0.location >= 0 && $0.length >= 0 }) else { return nil }
+          ranges.allSatisfy(validSelectionRange) else { return nil }
     let positive = ranges.indices.filter { ranges[$0].length > 0 }
     guard !positive.isEmpty else { return opaqueDocument ? .copy : .empty }
     guard positive.allSatisfy({ texts[$0] != nil }) else { return .copy }
     let text = positive.compactMap { texts[$0] }.joined(separator: "\n")
-    return text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? .empty : .text(text)
+    if text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+        return opaqueDocument || documentContainer ? .copy : .empty
+    }
+    return .text(text)
 }
 
 func requireSelectionForeground(_ original: pid_t?, _ current: pid_t?) throws {
     guard let original = original, original > 0, original == current else {
         throw NativeError("SELECTION: The foreground application changed. Select text in the source application and retry.")
+    }
+}
+
+func recheckSelectionApplication(_ expected: SelectionApplicationSnapshot, trace: SelectionTrace, phase: String) throws {
+    let current = selectionApplicationSnapshot(trace: trace, phase: phase)
+    try requireSelectionForeground(expected.pid, current.pid)
+    if let bundle = expected.bundleIdentifier, current.bundleIdentifier != bundle {
+        throw NativeError("SELECTION: The source application identity changed. Select text and retry.")
     }
 }
 
@@ -117,79 +350,101 @@ func requireUnprotectedSelection(_ subrole: String?) throws {
     }
 }
 
-func accessibilitySelection(element: AXUIElement?) throws -> String? {
-    guard let element = element else { return nil }
-    var subrole: CFTypeRef?
-    if AXUIElementCopyAttributeValue(element, kAXSubroleAttribute as CFString, &subrole) == .success {
-        try requireUnprotectedSelection(subrole as? String)
+func accessibilitySelection(element: AXUIElement?, bundleIdentifier: String? = nil,
+                            trace: SelectionTrace? = nil, phase: String = "ax-selection") throws -> String? {
+    guard let element = element else {
+        trace?.record(phase, ["decision": "focusUnavailable"])
+        return nil
     }
+    var subrole: CFTypeRef?
+    let subroleStatus = AXUIElementCopyAttributeValue(element, kAXSubroleAttribute as CFString, &subrole)
+    trace?.record(phase, ["subroleStatus": subroleStatus.rawValue, "subrole": subrole as? String as Any? ?? NSNull()])
     var role: CFTypeRef?
-    AXUIElementCopyAttributeValue(element, kAXRoleAttribute as CFString, &role)
+    let roleStatus = AXUIElementCopyAttributeValue(element, kAXRoleAttribute as CFString, &role)
+    trace?.record(phase, ["roleStatus": roleStatus.rawValue, "role": role as? String as Any? ?? NSNull()])
+    let classification = try selectionFocusClassification(role: selectionTextQuery(status: roleStatus, value: role),
+        subrole: selectionTextQuery(status: subroleStatus, value: subrole), copyFallback: false)
     var owner: pid_t = 0
-    let bundleIdentifier = AXUIElementGetPid(element, &owner) == .success
-        ? NSRunningApplication(processIdentifier: owner)?.bundleIdentifier : nil
-    let opaqueDocument = opaqueSelectionContainer(role as? String, bundleIdentifier: bundleIdentifier)
+    let ownerStatus = AXUIElementGetPid(element, &owner)
+    let bundleIdentifier = bundleIdentifier ?? (ownerStatus == .success
+        ? onMainThread { NSRunningApplication(processIdentifier: owner)?.bundleIdentifier } : nil)
+    let opaqueDocument = opaqueSelectionContainer(classification.role, bundleIdentifier: bundleIdentifier)
+    let documentContainer = readonlySelectionContainer(classification.role)
+    trace?.record(phase, ["roleStatus": roleStatus.rawValue, "role": role as? String as Any? ?? NSNull(),
+        "focusPIDStatus": ownerStatus.rawValue, "focusOwner": owner, "opaqueDocument": opaqueDocument,
+        "documentContainer": documentContainer])
     var selected: CFTypeRef?
-    let selectedText = AXUIElementCopyAttributeValue(element, kAXSelectedTextAttribute as CFString, &selected) == .success
-        ? selected as? String : nil
-    if let text = selectedText, !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { return text }
-    var selectedRange: CFRange?
+    let textStatus = AXUIElementCopyAttributeValue(element, kAXSelectedTextAttribute as CFString, &selected)
+    let textQuery = selectionTextQuery(status: textStatus, value: selected)
+    let selectedText = textQuery.value
+    trace?.record(phase, ["selectedTextStatus": textStatus.rawValue,
+        "selectedTextEmpty": selectedText.map { $0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty } as Any? ?? NSNull()])
+    if let text = selectedText, !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+        trace?.record(phase, ["decision": "text"])
+        return text
+    }
     var rangeValue: CFTypeRef?
     var rangeText: String?
     let rangeStatus = AXUIElementCopyAttributeValue(element, kAXSelectedTextRangeAttribute as CFString, &rangeValue)
-    if selectedText?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty != false,
-       rangeStatus == .success,
-       let value = rangeValue, CFGetTypeID(value) == AXValueGetTypeID() {
-        let axValue = value as! AXValue
-        var range = CFRange(location: 0, length: 0)
-        if AXValueGetType(axValue) == .cfRange, AXValueGetValue(axValue, .cfRange, &range),
-           range.location >= 0, range.length >= 0 {
-            selectedRange = range
-            if range.length > 0 {
-                var extracted: CFTypeRef?
-                if AXUIElementCopyParameterizedAttributeValue(element, kAXStringForRangeParameterizedAttribute as CFString,
-                                                              axValue, &extracted) == .success {
-                    rangeText = extracted as? String
-                }
-            }
-        }
+    let rangeQuery = selectionRangeQuery(status: rangeStatus, value: rangeValue)
+    trace?.record(phase, ["rangeStatus": rangeStatus.rawValue, "rangeState": rangeQuery.state])
+    try requireUsableSelectionQuery(rangeQuery)
+    let selectedRange = rangeQuery.value?.range
+    if let value = rangeQuery.value, value.range.length > 0 {
+        var extracted: CFTypeRef?
+        let status = AXUIElementCopyParameterizedAttributeValue(element, kAXStringForRangeParameterizedAttribute as CFString,
+                                                               value.value, &extracted)
+        let query = selectionTextQuery(status: status, value: extracted)
+        trace?.record(phase, ["rangeTextStatus": status.rawValue])
+        try requireUsableSelectionQuery(query)
+        rangeText = query.value
     }
     var decision: SelectionDecision?
     // Some document implementations publish only the plural range API. Use
     // public ranges rather than reading the document's AXValue or contents.
     var pluralUnavailable = true
-    if (selectedRange == nil || (opaqueDocument && selectedRange?.length == 0))
-        && selectedText?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty != false {
+    if selectedRange == nil || (opaqueDocument && selectedRange?.length == 0) {
         var values: CFTypeRef?
         let status = AXUIElementCopyAttributeValue(element, kAXSelectedTextRangesAttribute as CFString, &values)
-        pluralUnavailable = unavailableSelectionRange(status)
-        if status == .success,
-           let values = values as? [Any], values.count <= 64 {
-            var ranges = [CFRange](), texts = [String?]()
-            for raw in values {
-                let rawValue = raw as CFTypeRef
-                guard CFGetTypeID(rawValue) == AXValueGetTypeID() else { break }
-                let value = rawValue as! AXValue
-                var range = CFRange(location: -1, length: -1)
-                guard AXValueGetType(value) == .cfRange, AXValueGetValue(value, .cfRange, &range) else { break }
-                ranges.append(range)
+        let query = selectionRangesQuery(status: status, value: values)
+        pluralUnavailable = query.state == "unavailable"
+        trace?.record(phase, ["pluralStatus": status.rawValue, "pluralState": query.state])
+        try requireUsableSelectionQuery(query)
+        if let values = query.value {
+            var texts = [String?]()
+            for value in values {
+                guard value.range.length > 0 else { texts.append(nil); continue }
                 var extracted: CFTypeRef?
-                let status = range.length > 0
-                    ? AXUIElementCopyParameterizedAttributeValue(element, kAXStringForRangeParameterizedAttribute as CFString, value, &extracted)
-                    : .noValue
-                texts.append(status == .success ? extracted as? String : nil)
+                let status = AXUIElementCopyParameterizedAttributeValue(element, kAXStringForRangeParameterizedAttribute as CFString,
+                                                                       value.value, &extracted)
+                let textQuery = selectionTextQuery(status: status, value: extracted)
+                trace?.record(phase, ["rangeTextStatus": status.rawValue])
+                try requireUsableSelectionQuery(textQuery)
+                texts.append(textQuery.value)
             }
-            if ranges.count == values.count {
-                decision = selectionRangesDecision(ranges, texts: texts, opaqueDocument: opaqueDocument)
-            }
+            let ranges = values.map(\.range)
+            decision = selectionRangesDecision(ranges, texts: texts, opaqueDocument: opaqueDocument,
+                                               documentContainer: documentContainer)
+            trace?.record(phase, ["rangeCount": ranges.count, "positiveRangeCount": ranges.filter { $0.length > 0 }.count])
         }
     }
     let rangesUnavailable = unavailableSelectionRange(rangeStatus) && pluralUnavailable
-    switch decision ?? selectionDecision(selectedText: selectedText, selectedRange: selectedRange, rangeText: rangeText,
-                                          opaqueDocument: opaqueDocument && (rangesUnavailable || selectedRange != nil)) {
+    let resolved = decision ?? selectionDecision(selectedText: selectedText, selectedRange: selectedRange, rangeText: rangeText,
+        opaqueDocument: opaqueDocument && (rangesUnavailable || selectedRange != nil),
+        documentContainer: documentContainer && (rangesUnavailable || selectedRange != nil))
+    let decisionName: String
+    switch resolved { case .text: decisionName = "text"; case .empty: decisionName = "empty"; case .copy: decisionName = "copy" }
+    trace?.record(phase, ["rangeStatus": rangeStatus.rawValue, "rangeLength": selectedRange?.length as Any? ?? NSNull(),
+                         "decision": decisionName])
+    switch resolved {
     case .text(let text): return text
-    case .empty: throw NativeError("NO_SELECTION: No text is selected in the source application.")
-    case .copy: return nil
+    case .empty:
+        try requireUsableSelectionQuery(textQuery)
+        throw NativeError("NO_SELECTION: No text is selected in the source application.")
+    case .copy:
+        try requireUsableSelectionQuery(textQuery)
+        try requireSelectionCopyTarget(role: classification.role, subrole: classification.subrole)
+        return nil
     }
 }
 
@@ -287,15 +542,21 @@ struct SelectionCopyCompletion {
     }
 }
 
-func requireSelectionFocus(_ expected: AXUIElement?, applicationPID: pid_t?) throws -> AXUIElement {
+func requireSelectionFocus(_ expected: AXUIElement?, applicationPID: pid_t?, trace: SelectionTrace? = nil,
+                           phase: String = "focus-recheck") throws -> AXUIElement {
     guard let expected,
-          let current = focusedElement(applicationPID: applicationPID), CFEqual(expected, current) else {
+          let current = focusedElement(applicationPID: applicationPID, trace: trace, phase: phase), CFEqual(expected, current) else {
+        trace?.record(phase, ["decision": "focusChangedOrUnavailable"])
         throw NativeError("SELECTION: The focused control changed or is unavailable. Select text and retry.")
     }
     var subrole: CFTypeRef?
-    if AXUIElementCopyAttributeValue(current, kAXSubroleAttribute as CFString, &subrole) == .success {
-        try requireUnprotectedSelection(subrole as? String)
-    }
+    let subroleStatus = AXUIElementCopyAttributeValue(current, kAXSubroleAttribute as CFString, &subrole)
+    var role: CFTypeRef?
+    let roleStatus = AXUIElementCopyAttributeValue(current, kAXRoleAttribute as CFString, &role)
+    trace?.record(phase, ["roleStatus": roleStatus.rawValue, "role": role as? String as Any? ?? NSNull(),
+                         "subroleStatus": subroleStatus.rawValue, "subrole": subrole as? String as Any? ?? NSNull()])
+    _ = try selectionFocusClassification(role: selectionTextQuery(status: roleStatus, value: role),
+        subrole: selectionTextQuery(status: subroleStatus, value: subrole), copyFallback: true)
     return current
 }
 
@@ -328,30 +589,51 @@ func copiedSelection(_ pasteboard: NSPasteboard, initialCount: Int) throws -> (c
 }
 
 func selection() throws -> String {
+    let trace = SelectionTrace()
+    do {
+        let text = try captureSelectedText(trace: trace)
+        trace.finish()
+        return text
+    } catch let error as NativeError {
+        trace.finish(errorCategory: error.message.split(separator: ":", maxSplits: 1).first.map(String.init) ?? "NATIVE")
+        throw error
+    } catch {
+        trace.finish(errorCategory: "NATIVE")
+        throw error
+    }
+}
+
+func captureSelectedText(trace: SelectionTrace) throws -> String {
+    trace.record("accessibility-preflight")
     try requireAccessibility()
-    let foregroundPID = NSWorkspace.shared.frontmostApplication?.processIdentifier
-    try requireSelectionForeground(foregroundPID, NSWorkspace.shared.frontmostApplication?.processIdentifier)
-    let originalFocus = focusedElement(applicationPID: foregroundPID)
-    if let text = try accessibilitySelection(element: originalFocus) {
-        try requireSelectionForeground(foregroundPID, NSWorkspace.shared.frontmostApplication?.processIdentifier)
+    let source = selectionApplicationSnapshot(trace: trace, phase: "foreground-initial")
+    let foregroundPID = source.pid
+    try requireSelectionForeground(foregroundPID, foregroundPID)
+    let originalFocus = focusedElement(applicationPID: foregroundPID, trace: trace, phase: "focus-initial")
+    if let text = try accessibilitySelection(element: originalFocus, bundleIdentifier: source.bundleIdentifier,
+                                            trace: trace, phase: "ax-selection-initial") {
+        try recheckSelectionApplication(source, trace: trace, phase: "foreground-after-ax")
         return text
     }
     // The shortcut's modifiers must be released before a clean Cmd+C event.
     let modifiers: CGEventFlags = [.maskCommand, .maskControl, .maskAlternate, .maskShift]
     let deadline = ProcessInfo.processInfo.systemUptime + 1.5
+    trace.record("modifier-release")
     while !CGEventSource.flagsState(.combinedSessionState).intersection(modifiers).isEmpty {
         guard ProcessInfo.processInfo.systemUptime < deadline else { throw NativeError("SELECTION: Release the shortcut keys and retry.") }
         Thread.sleep(forTimeInterval: 0.02)
     }
-    try requireSelectionForeground(foregroundPID, NSWorkspace.shared.frontmostApplication?.processIdentifier)
-    let currentFocus = try requireSelectionFocus(originalFocus, applicationPID: foregroundPID)
+    try recheckSelectionApplication(source, trace: trace, phase: "foreground-before-copy")
+    let currentFocus = try requireSelectionFocus(originalFocus, applicationPID: foregroundPID, trace: trace)
     // The selection may have been cleared while the hotkey was released.
     // Recheck before touching the clipboard or sending the copy command.
-    if let text = try accessibilitySelection(element: currentFocus) {
-        try requireSelectionForeground(foregroundPID, NSWorkspace.shared.frontmostApplication?.processIdentifier)
+    if let text = try accessibilitySelection(element: currentFocus, bundleIdentifier: source.bundleIdentifier,
+                                            trace: trace, phase: "ax-selection-recheck") {
+        try recheckSelectionApplication(source, trace: trace, phase: "foreground-after-ax-recheck")
         return text
     }
     let pasteboard = NSPasteboard.general
+    trace.record("clipboard-snapshot")
     let initialCount = pasteboard.changeCount
     let saved = try SavedPasteboard(pasteboard)
     guard pasteboard.changeCount == initialCount else {
@@ -363,29 +645,35 @@ func selection() throws -> String {
     }
     down.flags = .maskCommand
     up.flags = .maskCommand
-    try requireSelectionForeground(foregroundPID, NSWorkspace.shared.frontmostApplication?.processIdentifier)
-    _ = try requireSelectionFocus(originalFocus, applicationPID: foregroundPID)
+    try recheckSelectionApplication(source, trace: trace, phase: "foreground-before-copy-event")
+    _ = try requireSelectionFocus(originalFocus, applicationPID: foregroundPID, trace: trace, phase: "focus-before-copy-event")
     try requireSelectionModifiersReleased()
     guard pasteboard.changeCount == initialCount else {
         throw NativeError("CLIPBOARD_CHANGED: The clipboard changed before selection capture; its newer contents were preserved. Retry.")
     }
-    try requireSelectionForeground(foregroundPID, NSWorkspace.shared.frontmostApplication?.processIdentifier)
+    try recheckSelectionApplication(source, trace: trace, phase: "foreground-at-copy-event")
     down.post(tap: .cghidEventTap)
     up.post(tap: .cghidEventTap)
+    trace.record("copy-wait", ["copyIssued": true])
     let copied = try copiedSelection(pasteboard, initialCount: initialCount)
     // Restore even if focus changed while the already-posted copy completed.
     // A newer clipboard generation always wins over our saved representation.
     var contextError: Error?
     do {
-        try requireSelectionForeground(foregroundPID, NSWorkspace.shared.frontmostApplication?.processIdentifier)
-        _ = try requireSelectionFocus(originalFocus, applicationPID: foregroundPID)
+        try recheckSelectionApplication(source, trace: trace, phase: "foreground-after-copy")
+        _ = try requireSelectionFocus(originalFocus, applicationPID: foregroundPID, trace: trace, phase: "focus-after-copy")
     } catch { contextError = error }
+    trace.record("clipboard-restore")
     try saved.restore(pasteboard, ifUnchangedSince: copied.changeCount)
-    if let contextError { throw contextError }
+    if let contextError {
+        trace.record("context-rejected-after-restore")
+        throw contextError
+    }
     let text = copied.text
     guard let text = text, !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
         throw NativeError("NO_SELECTION: The selection did not contain plain text. Try screenshot OCR.")
     }
+    trace.record("copy-completed", ["decision": "text"])
     return text
 }
 
@@ -507,7 +795,7 @@ func selectionPolicySelfTest() throws {
             throw NativeError("SELF_TEST: Selection range recovery or empty-selection copy protection failed.")
         }
     }
-    for role in ["AXWindow", "AXGroup", "AXScrollArea", "AXLayoutArea", "AXDocument", "AXWebArea", "AXTextArea", "AXTextField", "AXSearchField", "AXComboBox", "AXButton", ""] {
+    for role in ["AXWindow", "AXGroup", "AXSplitGroup", "AXScrollArea", "AXLayoutArea", "AXDocument", "AXWebArea", "AXTextArea", "AXTextField", "AXSearchField", "AXComboBox", "AXButton", ""] {
         let opaque = opaqueSelectionContainer(role, bundleIdentifier: "com.kingsoft.wpsoffice.mac")
         guard selectionDecision(selectedText: "", selectedRange: nil, rangeText: nil, opaqueDocument: opaque)
                 == (opaque ? .copy : .empty),
@@ -536,7 +824,7 @@ func selectionPolicySelfTest() throws {
           selectionRangesDecision([zero], texts: [nil]) == .empty,
           selectionRangesDecision([zero], texts: [nil], opaqueDocument: true) == .copy,
           selectionRangesDecision([positive], texts: [unicode], opaqueDocument: true) == .text(unicode),
-          selectionRangesDecision([positive], texts: [" \n"], opaqueDocument: true) == .empty,
+          selectionRangesDecision([positive], texts: [" \n"], opaqueDocument: true) == .copy,
           selectionRangesDecision([positive], texts: [" \n"]) == .empty,
           selectionRangesDecision([], texts: []) == .empty,
           selectionRangesDecision([], texts: [], opaqueDocument: true) == .copy,
@@ -571,7 +859,262 @@ func selectionPolicySelfTest() throws {
             throw NativeError("SELF_TEST: Protected selection policy failed.")
         }
     }
+    try wpsSplitGroupSelectionPolicySelfTest()
+    try selectionMetadataPolicySelfTest()
+    try selectionClassificationPolicySelfTest()
+    try selectionQueryPolicySelfTest()
     try selectionCopyPolicySelfTest()
+}
+
+func wpsSplitGroupSelectionPolicySelfTest() throws {
+    // The retained real WPS attempt had AXSelectedText=noValue (-25212), a
+    // successful singular range of length zero, and a matching focus owner.
+    // This fixture tests only that metadata policy, not interactive WPS copy.
+    let zero = CFRange(location: 0, length: 0)
+    let opaque = opaqueSelectionContainer("AXSplitGroup", bundleIdentifier: "com.kingsoft.wpsoffice.mac")
+    guard AXError.noValue.rawValue == -25212, opaque,
+          !readonlySelectionContainer("AXSplitGroup"),
+          selectionDecision(selectedText: nil, selectedRange: zero, rangeText: nil,
+                            opaqueDocument: opaque) == .copy,
+          selectionRangesDecision([zero], texts: [nil], opaqueDocument: opaque) == .copy,
+          selectionRangesDecision([], texts: [], opaqueDocument: opaque) == .copy else {
+        throw NativeError("SELF_TEST: WPS split-group placeholder selection did not retain copy recovery.")
+    }
+    for (role, bundle) in [("AXSplitGroup", "fixture.generic-editor"), ("AXSplitGroup", nil),
+                           ("AXTextArea", "com.kingsoft.wpsoffice.mac"),
+                           ("AXTextField", "com.kingsoft.wpsoffice.mac")] as [(String, String?)] {
+        let ordinary = opaqueSelectionContainer(role, bundleIdentifier: bundle)
+        guard !ordinary,
+              selectionDecision(selectedText: nil, selectedRange: zero, rangeText: nil,
+                                opaqueDocument: ordinary) == .empty,
+              selectionDecision(selectedText: "", selectedRange: zero, rangeText: nil,
+                                opaqueDocument: ordinary) == .empty,
+              selectionRangesDecision([zero], texts: [nil], opaqueDocument: ordinary) == .empty else {
+            throw NativeError("SELF_TEST: WPS split-group recovery leaked into ordinary empty input controls.")
+        }
+    }
+    do {
+        // The runtime must reject secure subroles before evaluating the role.
+        try requireUnprotectedSelection(kAXSecureTextFieldSubrole as String)
+        throw NativeError("SELF_TEST: WPS split-group recovery bypassed protected-field rejection.")
+    } catch let error as NativeError where error.message.hasPrefix("NO_SELECTION:") { }
+}
+
+func selectionMetadataPolicySelfTest() throws {
+    func axRange(_ location: Int, _ length: Int) throws -> AXValue {
+        var range = CFRange(location: location, length: length)
+        guard let value = AXValueCreate(.cfRange, &range) else {
+            throw NativeError("SELF_TEST: Could not create the native range metadata fixture.")
+        }
+        return value
+    }
+    func rejected<Value>(_ query: SelectionQuery<Value>) throws -> Bool {
+        do { try requireUsableSelectionQuery(query); return false }
+        catch let error as NativeError where error.message.hasPrefix("SELECTION:") { return true }
+    }
+    let zero = try axRange(0, 0), positive = try axRange(3, 7)
+    let negativeLocation = try axRange(-1, 1), negativeLength = try axRange(0, -1)
+    let overflowing = try axRange(Int.max, 1)
+    var point = CGPoint(x: 1, y: 2)
+    guard let wrongAXType = AXValueCreate(.cgPoint, &point) else {
+        throw NativeError("SELF_TEST: Could not create a wrong-type native metadata fixture.")
+    }
+    for value in [nil, "not an AXValue" as CFString, NSNumber(value: 7), wrongAXType,
+                  negativeLocation, negativeLength, overflowing] as [CFTypeRef?] {
+        guard try rejected(selectionRangeQuery(status: .success, value: value)) else {
+            throw NativeError("SELF_TEST: Invalid singular native range metadata authorized copy fallback.")
+        }
+    }
+    for value in [nil, "not an array" as CFString, [zero, "bad element"] as NSArray,
+                  [positive, negativeLocation] as NSArray, [negativeLength] as NSArray,
+                  [overflowing] as NSArray, Array(repeating: zero, count: 65) as NSArray] as [CFTypeRef?] {
+        guard try rejected(selectionRangesQuery(status: .success, value: value)) else {
+            throw NativeError("SELF_TEST: Invalid plural native range metadata authorized copy fallback.")
+        }
+    }
+    for status in [AXError.cannotComplete, .apiDisabled, .invalidUIElement, .failure, .illegalArgument] {
+        guard try rejected(selectionRangeQuery(status: status, value: zero)),
+              try rejected(selectionRangesQuery(status: status, value: [zero] as NSArray)),
+              try rejected(selectionTextQuery(status: status, value: nil)) else {
+            throw NativeError("SELF_TEST: A failed native selection query was mistaken for an unavailable API.")
+        }
+    }
+    for status in [AXError.attributeUnsupported, .noValue, .notImplemented] {
+        guard selectionRangeQuery(status: status, value: nil).state == "unavailable",
+              selectionRangesQuery(status: status, value: nil).state == "unavailable",
+              selectionTextQuery(status: status, value: nil).state == "unavailable" else {
+            throw NativeError("SELF_TEST: An explicitly unavailable native selection API lost compatibility recovery.")
+        }
+    }
+    guard let parsedZero = selectionRangeQuery(status: .success, value: zero).value,
+          let parsedPositive = selectionRangeQuery(status: .success, value: positive).value,
+          let parsedPlural = selectionRangesQuery(status: .success, value: [zero, positive] as NSArray).value,
+          parsedPlural.count == 2,
+          selectionRangesQuery(status: .success, value: [] as NSArray).value?.isEmpty == true,
+          selectionRangesQuery(status: .success, value: Array(repeating: zero, count: 64) as NSArray).value?.count == 64,
+          try rejected(selectionTextQuery(status: .success, value: nil)),
+          try rejected(selectionTextQuery(status: .success, value: NSNumber(value: 1))),
+          selectionTextQuery(status: .success, value: "selected fixture" as CFString).value == "selected fixture" else {
+        throw NativeError("SELF_TEST: Native selection metadata parsing lost valid values or accepted invalid text.")
+    }
+    let opaque = opaqueSelectionContainer("AXSplitGroup", bundleIdentifier: "com.kingsoft.wpsoffice.mac")
+    let unavailableText = selectionTextQuery(status: .noValue, value: nil)
+    try requireUsableSelectionQuery(unavailableText)
+    try requireSelectionCopyTarget(role: "AXSplitGroup", subrole: nil)
+    guard selectionDecision(selectedText: unavailableText.value, selectedRange: parsedZero.range, rangeText: nil,
+                            opaqueDocument: opaque) == .copy,
+          selectionRangesDecision([parsedZero.range], texts: [nil], opaqueDocument: opaque) == .copy,
+          selectionDecision(selectedText: nil, selectedRange: parsedZero.range, rangeText: nil) == .empty,
+          selectionDecision(selectedText: nil, selectedRange: parsedPositive.range, rangeText: "selected fixture") == .text("selected fixture"),
+          selectionRangesDecision(parsedPlural.map(\.range), texts: [nil, "selected fixture"]) == .text("selected fixture") else {
+        throw NativeError("SELF_TEST: Parsed metadata lost WPS recovery, positive text or ordinary zero-range protection.")
+    }
+    for (role, subrole) in [("AXWindow", "AXDialog"), ("AXWindow", "AXSystemDialog"), ("AXSheet", nil),
+                           ("AXButton", nil), ("AXPopUpButton", nil), ("AXMenuButton", nil), ("AXMenu", nil),
+                           ("AXMenuItem", nil), ("AXMenuBar", nil), ("AXMenuBarItem", nil),
+                           ("AXTextArea", kAXSecureTextFieldSubrole as String),
+                           ("AXSplitGroup", kAXSecureTextFieldSubrole as String)] as [(String, String?)] {
+        do {
+            try requireSelectionCopyTarget(role: role, subrole: subrole)
+            throw NativeError("SELF_TEST: A non-text or protected focus target authorized blind copy.")
+        } catch let error as NativeError where error.message.hasPrefix("NO_SELECTION:") { }
+    }
+    for (role, subrole) in [("AXWindow", nil), ("AXWindow", "AXStandardWindow"), ("AXSplitGroup", nil),
+                           ("AXTextField", nil), ("AXTextArea", nil), ("fixtureCustomDocument", nil)] as [(String, String?)] {
+        try requireSelectionCopyTarget(role: role, subrole: subrole)
+    }
+}
+
+func selectionClassificationPolicySelfTest() throws {
+    func accepted(role: SelectionQuery<String>, subrole: SelectionQuery<String>, copyFallback: Bool) throws -> Bool {
+        do {
+            _ = try selectionFocusClassification(role: role, subrole: subrole, copyFallback: copyFallback)
+            return true
+        } catch let error as NativeError where error.message.hasPrefix("SELECTION:") || error.message.hasPrefix("NO_SELECTION:") {
+            return false
+        }
+    }
+    let window = selectionTextQuery(status: .success, value: "AXWindow" as CFString)
+    let split = selectionTextQuery(status: .success, value: "AXSplitGroup" as CFString)
+    let absent = selectionTextQuery(status: .noValue, value: nil)
+    let secure = selectionTextQuery(status: .success, value: kAXSecureTextFieldSubrole as CFString)
+    for copyFallback in [false, true] {
+        for status in [AXError.cannotComplete, .apiDisabled, .invalidUIElement, .failure, .illegalArgument] {
+            let failed = selectionTextQuery(status: status, value: nil)
+            guard try !accepted(role: failed, subrole: absent, copyFallback: copyFallback),
+                  try !accepted(role: split, subrole: failed, copyFallback: copyFallback) else {
+                throw NativeError("SELF_TEST: A role or subrole query failure bypassed selection classification.")
+            }
+        }
+        for value in [nil, NSNumber(value: 1), [] as NSArray] as [CFTypeRef?] {
+            let malformed = selectionTextQuery(status: .success, value: value)
+            guard try !accepted(role: malformed, subrole: absent, copyFallback: copyFallback),
+                  try !accepted(role: split, subrole: malformed, copyFallback: copyFallback) else {
+                throw NativeError("SELF_TEST: A successful role query with invalid type bypassed selection classification.")
+            }
+        }
+        for status in [AXError.attributeUnsupported, .noValue, .notImplemented] {
+            let unavailable = selectionTextQuery(status: status, value: nil)
+            guard try accepted(role: split, subrole: unavailable, copyFallback: copyFallback),
+                  try accepted(role: unavailable, subrole: unavailable, copyFallback: copyFallback) else {
+                throw NativeError("SELF_TEST: Explicitly unavailable classification blocked a compatible custom document.")
+            }
+        }
+        guard try !accepted(role: split, subrole: secure, copyFallback: copyFallback),
+              try accepted(role: selectionTextQuery(status: .success, value: "AXTextField" as CFString),
+                           subrole: absent, copyFallback: copyFallback) else {
+            throw NativeError("SELF_TEST: Classification lost protected-field rejection or ordinary text input support.")
+        }
+    }
+    for subrole in ["AXDialog", "AXSystemDialog"] {
+        let dialog = selectionTextQuery(status: .success, value: subrole as CFString)
+        guard try accepted(role: window, subrole: dialog, copyFallback: false),
+              try !accepted(role: window, subrole: dialog, copyFallback: true) else {
+            throw NativeError("SELF_TEST: Copy recheck accepted a dialog wrapper or blocked direct readable text.")
+        }
+    }
+    guard try accepted(role: window, subrole: absent, copyFallback: true),
+          try accepted(role: split, subrole: absent, copyFallback: true),
+          try !accepted(role: selectionTextQuery(status: .success, value: "AXButton" as CFString),
+                        subrole: absent, copyFallback: true) else {
+        throw NativeError("SELF_TEST: Copy reclassification lost WPS document support or accepted changed UI chrome.")
+    }
+}
+
+func selectionQueryPolicySelfTest() throws {
+    // Exercise current AX vs stale Workspace choices without querying any app.
+    let foregroundCases: [(AXError, AXError?, pid_t?, pid_t?, pid_t?, String)] = [
+        (.success, .success, 42, 7, 42, "axFocusedApplication"),
+        (.success, .success, 42, nil, 42, "axFocusedApplication"),
+        (.attributeUnsupported, nil, nil, 7, 7, "workspaceUnsupportedFallback"),
+        (.notImplemented, nil, nil, 7, 7, "workspaceUnsupportedFallback"),
+        (.noValue, nil, nil, 7, nil, "unavailable"),
+        (.cannotComplete, nil, nil, 7, nil, "unavailable"),
+        (.apiDisabled, nil, nil, 7, nil, "unavailable"),
+        (.success, .invalidUIElement, nil, 7, nil, "unavailable"),
+        (.success, .success, 0, 7, nil, "unavailable"),
+        (.success, nil, nil, 7, nil, "unavailable"),
+        (.attributeUnsupported, nil, nil, 0, nil, "unavailable")
+    ]
+    for (status, ownerStatus, pid, workspace, expectedPID, expectedSource) in foregroundCases {
+        let actual = selectionForegroundSource(axStatus: status, axPIDStatus: ownerStatus, axPID: pid, workspacePID: workspace)
+        guard actual.0 == expectedPID, actual.1 == expectedSource else {
+            throw NativeError("SELF_TEST: Selection foreground used stale or invalid application metadata.")
+        }
+    }
+    guard selectionFocusOwnerMatches(42, 42, .success),
+          !selectionFocusOwnerMatches(42, 7, .success),
+          !selectionFocusOwnerMatches(nil, 42, .success),
+          !selectionFocusOwnerMatches(0, 0, .success),
+          !selectionFocusOwnerMatches(42, 42, .invalidUIElement) else {
+        throw NativeError("SELF_TEST: Selection focus fallback accepted a foreign or unverified owner.")
+    }
+    do {
+        _ = try requireSelectionFocus(nil, applicationPID: 42)
+        throw NativeError("SELF_TEST: Unavailable focus allowed an unguarded copy.")
+    } catch let error as NativeError where error.message.hasPrefix("SELECTION:") { }
+    let zero = CFRange(location: 2, length: 0), positive = CFRange(location: 2, length: 3)
+    for role in ["AXWebArea", "AXDocument", "AXTextField", "AXTextArea", "AXSearchField", "AXGroup", "AXWindow", ""] {
+        let document = readonlySelectionContainer(role)
+        guard document == ["AXWebArea", "AXDocument"].contains(role),
+              selectionDecision(selectedText: "", selectedRange: nil, rangeText: nil,
+                                documentContainer: document) == (document ? .copy : .empty),
+              selectionDecision(selectedText: "", selectedRange: positive, rangeText: "",
+                                documentContainer: document) == (document ? .copy : .empty),
+              selectionDecision(selectedText: "", selectedRange: zero, rangeText: nil,
+                                documentContainer: document) == .empty,
+              selectionRangesDecision([positive], texts: [""], documentContainer: document) == (document ? .copy : .empty),
+              selectionRangesDecision([zero], texts: [nil], documentContainer: document) == .empty,
+              selectionDecision(selectedText: "", selectedRange: CFRange(location: -1, length: 3), rangeText: "",
+                                documentContainer: document) == .empty else {
+            throw NativeError("SELF_TEST: Readonly selection recovery weakened ordinary input empty-range protection.")
+        }
+    }
+    guard selectionDecision(selectedText: "", selectedRange: positive, rangeText: "", opaqueDocument: true) == .copy,
+          selectionDecision(selectedText: "", selectedRange: nil, rangeText: nil,
+              documentContainer: readonlySelectionContainer("AXWebArea") && unavailableSelectionRange(.cannotComplete)) == .empty else {
+        throw NativeError("SELF_TEST: Selection document recovery confused a query error with unsupported ranges.")
+    }
+    let before = try JSONSerialization.data(withJSONObject: SelectionTrace.lastSnapshot(), options: [.sortedKeys])
+    let trace = SelectionTrace(publish: false)
+    trace.record("fixture", ["role": String(repeating: "a", count: 500), "copyIssued": true,
+        "text": "private-selection-sentinel", "clipboard": "private-clipboard-sentinel", "title": "private-title-sentinel"])
+    for _ in 0..<64 { trace.record("bounded-fixture") }
+    let snapshot = trace.snapshot(state: "failed", errorCategory: "private-error-sentinel")
+    let encoded = try JSONSerialization.data(withJSONObject: snapshot, options: [.sortedKeys])
+    let serialized = String(decoding: encoded, as: UTF8.self)
+    let events = snapshot["events"] as? [[String: Any]] ?? []
+    let after = try JSONSerialization.data(withJSONObject: SelectionTrace.lastSnapshot(), options: [.sortedKeys])
+    let diagnosticResponse = nativeResponse(mode: "--selection-diagnostics")
+    let modeSnapshot = diagnosticResponse["diagnostics"] as? [String: Any] ?? [:]
+    let modeEncoded = try JSONSerialization.data(withJSONObject: modeSnapshot, options: [.sortedKeys])
+    guard events.count == SelectionTrace.maximumEvents, snapshot["eventsTruncated"] as? Bool == true,
+          snapshot["copyIssued"] as? Bool == true, snapshot["errorCategory"] as? String == "NATIVE",
+          (events[1]["role"] as? String)?.count == 256,
+          !serialized.contains("private-"), before == after,
+          diagnosticResponse["ok"] as? Bool == true, modeEncoded == before else {
+        throw NativeError("SELF_TEST: Selection diagnostics leaked content, grew unbounded or changed the runtime trace.")
+    }
 }
 
 func selectionCopyPolicySelfTest() throws {
@@ -1612,6 +2155,7 @@ func diagnostics() -> [String: Any] {
             "screenCaptureGranted": CGPreflightScreenCaptureAccess(),
             "ocrLanguages": languages, "ocrEngine": "Apple Vision",
             "selection": "Accessibility selected text, then Cmd+C with clipboard restoration",
+            "lastSelectionCapture": SelectionTrace.lastSnapshot(),
             "screens": displayDiagnostics()]
 }
 
@@ -1680,7 +2224,11 @@ func selfTest(input: Data = Data()) throws -> [String: Any] {
             "ocrFixtureTimingScope": "Generated 1100x160 image; Vision recognize only; excludes capture, image drawing and application startup",
             "pngBase64RoundtripPassed": true, "paragraphGeometryFixturePassed": true,
             "selectionPolicyFixturePassed": true, "captureSelectionFixturePassed": true, "captureSelectionDeadlineFixturePassed": true, "systemTranslationPolicyFixturePassed": true, "selectionForegroundFixturePassed": true,
-            "opaqueOfficeSelectionPolicyFixturePassed": true, "pluralSelectionRangesFixturePassed": true,
+            "opaqueOfficeSelectionPolicyFixturePassed": true, "wpsSplitGroupPolicyFixturePassed": true,
+            "selectionMetadataPolicyFixturePassed": true,
+            "selectionClassificationPolicyFixturePassed": true,
+            "pluralSelectionRangesFixturePassed": true,
+            "selectionQueryPolicyFixturePassed": true, "selectionTracePrivacyFixturePassed": true,
             "selectionCopyCompletionFixturePassed": true,
             "wpsInteractiveSelectionTested": false,
             "protectedSelectionFixturePassed": true,
@@ -1694,11 +2242,16 @@ func nativeResponse(mode: String, input: Data = Data()) -> [String: Any] {
     do {
         switch mode {
         case "--selected-text": return ["ok": true, "text": try selection()]
+        case "--selection-diagnostics": return ["ok": true, "diagnostics": SelectionTrace.lastSnapshot()]
         case "--selection-policy-self-test":
             try selectionPolicySelfTest()
             let privatePasteboardTested = Thread.isMainThread
             if privatePasteboardTested { try privatePasteboardSelfTest() }
             return ["ok": true, "diagnostics": ["selectionPolicyFixturePassed": true,
+                    "wpsSplitGroupPolicyFixturePassed": true,
+                    "selectionMetadataPolicyFixturePassed": true,
+                    "selectionClassificationPolicyFixturePassed": true,
+                    "selectionQueryPolicyFixturePassed": true, "selectionTracePrivacyFixturePassed": true,
                     "selectionCopyCompletionFixturePassed": true,
                     "privatePasteboardFixturePassed": privatePasteboardTested,
                     "generalClipboardTouched": false, "permissionRequested": false,

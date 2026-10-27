@@ -161,6 +161,20 @@ pub fn pointer_state() -> Result<(bool, f64, f64), String> {
 
 /// Restore popup stacking/space behavior without showing, ordering, activating,
 /// focusing or moving the window. macOS callers must use the app main thread.
+#[cfg(target_os = "windows")]
+pub fn popup_has_native_foreground(window: &tauri::WebviewWindow) -> bool {
+    window.hwnd().ok().is_some_and(|native| {
+        !native.0.is_null() && crate::windows_visibility::foreground_is_owned(native.0 as isize)
+    })
+}
+
+#[cfg(target_os = "windows")]
+pub fn popup_foreground_is_external(window: &tauri::WebviewWindow) -> bool {
+    window.hwnd().ok().is_some_and(|native| {
+        !native.0.is_null() && crate::windows_visibility::foreground_is_external(native.0 as isize)
+    })
+}
+
 #[cfg(target_os = "macos")]
 pub fn ensure_popup_behavior(window: &tauri::WebviewWindow) -> Result<(), String> {
     use std::ffi::c_void;
@@ -330,6 +344,17 @@ pub fn diagnostics() -> Value {
             json!({ "platform": std::env::consts::OS, "available": false, "error": error })
         }
     }
+}
+
+/// Read the bounded metadata of the last selected-text attempt in this process.
+/// This does not capture text, query other applications or request permissions.
+#[cfg(target_os = "macos")]
+pub fn selection_diagnostics() -> Result<Value, String> {
+    run("selection-diagnostics", None)?
+        .get("diagnostics")
+        .filter(|value| value.is_object())
+        .cloned()
+        .ok_or_else(|| "NATIVE_PROTOCOL: Missing selection diagnostics.".into())
 }
 
 /// A read-only preflight. This never requests a permission or opens Settings.

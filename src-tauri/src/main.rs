@@ -13,6 +13,8 @@ mod storage_tests;
 mod translation;
 mod translation_requests;
 mod window_layout;
+#[cfg(any(target_os = "windows", test))]
+mod windows_visibility;
 
 use model::*;
 use serde::{Deserialize, Serialize};
@@ -141,6 +143,42 @@ fn pending_settings_event(
 }
 
 const PERMISSION_DIAGNOSTICS_FLAG: &str = "--permission-diagnostics";
+#[cfg(any(target_os = "macos", test))]
+const SELECTION_DIAGNOSTICS_FLAG: &str = "--selection-diagnostics";
+
+#[cfg(any(target_os = "macos", test))]
+fn selection_diagnostics_requested(args: &[String]) -> bool {
+    args.iter()
+        .skip(1)
+        .any(|argument| argument == SELECTION_DIAGNOSTICS_FLAG)
+}
+
+#[cfg(any(target_os = "macos", test))]
+fn selection_diagnostic_payload(diagnostics: serde_json::Value) -> serde_json::Value {
+    serde_json::json!({
+        "diagnostic": "last-selection-attempt",
+        "recordedAtUnixMs": now(),
+        "appVersion": env!("CARGO_PKG_VERSION"),
+        "processId": std::process::id(),
+        "executablePath": std::env::current_exe().ok().map(|path| path.display().to_string()),
+        "diagnostics": diagnostics,
+    })
+}
+
+// An explicit support read, not hotkey logging: only Swift's bounded metadata
+// is copied to this fixed destination; never source text or clipboard contents.
+#[cfg(target_os = "macos")]
+fn write_selection_diagnostics(app: &tauri::AppHandle) -> Result<(), String> {
+    static WRITE: Mutex<()> = Mutex::new(());
+    let _write = locked(&WRITE)?;
+    let diagnostics = platform::selection_diagnostics()?;
+    write_json(
+        &app.state::<AppState>()
+            .data_dir
+            .join("selection-diagnostics.json"),
+        &selection_diagnostic_payload(diagnostics),
+    )
+}
 
 fn permission_diagnostics_requested(args: &[String]) -> bool {
     args.iter()
@@ -174,6 +212,11 @@ fn write_permission_diagnostics(app: &tauri::AppHandle) -> Result<(), String> {
 }
 
 fn explicit_launch(app: &tauri::AppHandle, args: &[String]) {
+    #[cfg(target_os = "macos")]
+    if selection_diagnostics_requested(args) {
+        let _ = write_selection_diagnostics(app);
+        return;
+    }
     if permission_diagnostics_requested(args) {
         let _ = write_permission_diagnostics(app);
     } else {
@@ -715,6 +758,8 @@ fn cancel_translation(state: State<AppState>, request_id: u64) -> Result<(), Str
     Ok(())
 }
 fn announce_presentation(app: &tauri::AppHandle, presentation: translation_requests::Presentation) {
+    #[cfg(target_os = "windows")]
+    windows_visibility::disarm();
     let _ = app.emit("translation-presentation", presentation);
 }
 fn cancel_active_translation(app: &tauri::AppHandle) -> Option<translation_requests::Presentation> {
@@ -993,13 +1038,20 @@ fn delete_history(
     Ok(())
 }
 
-fn show(app: &tauri::AppHandle) {
-    let Ok(presentation) = app.state::<AppState>().translation_requests.resume(None) else {
-        return;
-    };
+fn prepare_input_presentation(
+    requests: &translation_requests::TranslationRequests,
+) -> Result<translation_requests::Presentation, String> {
+    // Explicit input actions need a new identity even if already visible. A
+    // delayed focus event from an earlier action must not reuse this epoch.
+    let prepared = requests.invalidate()?;
+    requests.resume(Some(prepared.epoch))
+}
+
+fn show(app: &tauri::AppHandle) -> Result<translation_requests::Presentation, String> {
+    let presentation = prepare_input_presentation(&app.state::<AppState>().translation_requests)?;
     announce_presentation(app, presentation);
     let handle = app.clone();
-    let _ = app.run_on_main_thread(move || {
+    app.run_on_main_thread(move || {
         if handle
             .state::<AppState>()
             .translation_requests
@@ -1018,12 +1070,27 @@ fn show(app: &tauri::AppHandle) {
                 let _ = handle.emit("action-error", error);
                 return;
             }
-            let _ = window.show();
-            let _ = window.unminimize();
-            let _ = window.set_focus();
+            if window.show().is_err() || window.unminimize().is_err() || window.set_focus().is_err()
+            {
+                let _ = handle.emit("action-error", "无法显示输入窗口");
+                return;
+            }
+            // Only a still-current native input presentation grants DOM focus.
+            // The frontend verifies this exact epoch again after IPC delivery.
+            if handle
+                .state::<AppState>()
+                .translation_requests
+                .presentation()
+                .ok()
+                == Some(presentation)
+            {
+                let _ = handle.emit("focus-input", presentation);
+            }
             wake_outside_watcher(&handle);
         }
-    });
+    })
+    .map_err(|_| "无法显示输入窗口")?;
+    Ok(presentation)
 }
 
 // Only explicit tray/menu/reopen actions reach this path. The frontend prepares
@@ -1111,6 +1178,29 @@ fn show_management(
     Ok(presentation)
 }
 fn wake_outside_watcher(app: &tauri::AppHandle) {
+    #[cfg(target_os = "windows")]
+    {
+        let state = app.state::<AppState>();
+        if let (Ok(presentation), Some(window)) = (
+            state.translation_requests.presentation(),
+            app.get_webview_window("main"),
+        ) {
+            if presentation.presented
+                && window.is_visible().unwrap_or(false)
+                && app.state::<window_layout::LayoutState>().is_popup()
+                && !state.pinned.load(Ordering::SeqCst)
+            {
+                windows_visibility::arm(
+                    presentation.epoch,
+                    platform::popup_has_native_foreground(&window),
+                    window.hwnd().map(|native| native.0 as isize).unwrap_or(0),
+                );
+                return;
+            }
+        }
+        windows_visibility::disarm();
+    }
+    #[cfg(not(target_os = "windows"))]
     if let Ok(thread) = app.state::<AppState>().outside_thread.lock() {
         if let Some(thread) = thread.as_ref() {
             thread.unpark();
@@ -1267,8 +1357,9 @@ fn show_popup(
 }
 fn start_action(app: tauri::AppHandle, action: String) {
     if action == "input" {
-        show(&app);
-        let _ = app.emit("focus-input", ());
+        if let Err(error) = show(&app) {
+            let _ = app.emit("action-error", error);
+        }
         return;
     }
     let state = app.state::<AppState>();
@@ -1470,6 +1561,69 @@ fn captured_text_mode(action: &str) -> &'static str {
         "translate"
     }
 }
+#[cfg(target_os = "windows")]
+fn outside_click_watcher(app: tauri::AppHandle) {
+    let clicks = match windows_visibility::start() {
+        Ok(clicks) => clicks,
+        Err(error) => {
+            if let Ok(mut warnings) = app.state::<AppState>().startup_warnings.lock() {
+                warnings.push(error);
+            }
+            return;
+        }
+    };
+    std::thread::Builder::new()
+        .name("popup-outside-clicks".into())
+        .spawn(move || {
+            while let Ok(click) = clicks.recv() {
+                if !windows_visibility::current(click.token) {
+                    continue;
+                }
+                let handle = app.clone();
+                let _ = app.run_on_main_thread(move || {
+                    if !windows_visibility::current(click.token) {
+                        return;
+                    }
+                    let Some(window) = handle.get_webview_window("main") else {
+                        return;
+                    };
+                    let state = handle.state::<AppState>();
+                    let Ok(current) = state.translation_requests.presentation() else {
+                        return;
+                    };
+                    if !should_hide_observed_popup(
+                        translation_requests::Presentation {
+                            epoch: click.token.epoch,
+                            presented: true,
+                        },
+                        current,
+                        handle.state::<window_layout::LayoutState>().is_popup(),
+                        window.is_visible().unwrap_or(false),
+                        state.pinned.load(Ordering::SeqCst),
+                    ) {
+                        return;
+                    }
+                    if let (Ok(position), Ok(size)) = (window.outer_position(), window.outer_size())
+                    {
+                        if windows_visibility::outside_bounds(
+                            click,
+                            position.x,
+                            position.y,
+                            size.width,
+                            size.height,
+                        ) {
+                            cancel_active_translation(&handle);
+                            let _ = window.hide();
+                        }
+                    }
+                });
+            }
+        })
+        .ok();
+}
+
+// Preserve the established macOS pointer/counter path unchanged.
+#[cfg(not(target_os = "windows"))]
 fn outside_click_watcher(app: tauri::AppHandle) {
     let owner = app.clone();
     let handle = std::thread::spawn(move || {
@@ -1555,6 +1709,72 @@ fn should_hide_observed_popup(
     pinned: bool,
 ) -> bool {
     observed == current && popup_layout && visible && !pinned
+}
+
+#[cfg(target_os = "windows")]
+fn windows_popup_focus_changed(app: &tauri::AppHandle, focused: bool) {
+    let Some(token) = windows_visibility::token() else {
+        return;
+    };
+    let Some(window) = app.get_webview_window("main") else {
+        return;
+    };
+    let state = app.state::<AppState>();
+    let Ok(current) = state.translation_requests.presentation() else {
+        return;
+    };
+    if !should_hide_observed_popup(
+        translation_requests::Presentation {
+            epoch: token.epoch,
+            presented: true,
+        },
+        current,
+        app.state::<window_layout::LayoutState>().is_popup(),
+        window.is_visible().unwrap_or(false),
+        state.pinned.load(Ordering::SeqCst),
+    ) {
+        return;
+    }
+    if focused {
+        if platform::popup_has_native_foreground(&window) {
+            windows_visibility::mark_focused(token);
+        }
+    } else if windows_visibility::may_dismiss_blur(
+        token,
+        platform::popup_foreground_is_external(&window),
+    ) {
+        cancel_active_translation(app);
+        let _ = window.hide();
+    }
+}
+
+// Keep the IPC name and the existing layout implementation. Only Windows mode
+// transitions invalidate queued dismissal observations; fitting never shows or
+// focuses a window. macOS continues to call the same layout function directly.
+#[tauri::command(rename = "fit_window")]
+fn fit_window_with_visibility(
+    window: tauri::WebviewWindow,
+    state: State<window_layout::LayoutState>,
+    presentation: String,
+    content_height: f64,
+    content_width: Option<f64>,
+) -> Result<(), String> {
+    #[cfg(target_os = "windows")]
+    let mode_changed = matches!(presentation.as_str(), "popup" | "management")
+        && state.is_popup() != (presentation == "popup");
+    #[cfg(target_os = "windows")]
+    if mode_changed {
+        windows_visibility::disarm();
+    }
+    #[cfg(target_os = "windows")]
+    let app = window.app_handle().clone();
+    let result =
+        window_layout::fit_window(window, state, presentation, content_height, content_width);
+    #[cfg(target_os = "windows")]
+    if mode_changed {
+        wake_outside_watcher(&app);
+    }
+    result
 }
 #[tauri::command]
 fn run_action(app: tauri::AppHandle, action: String) -> Result<(), String> {
@@ -1835,10 +2055,18 @@ fn main() {
             if permission_diagnostics_requested(&std::env::args().collect::<Vec<_>>()) {
                 let _ = write_permission_diagnostics(app.handle());
             }
+            #[cfg(target_os = "macos")]
+            if selection_diagnostics_requested(&std::env::args().collect::<Vec<_>>()) {
+                let _ = write_selection_diagnostics(app.handle());
+            }
             outside_click_watcher(app.handle().clone());
             Ok(())
         })
         .on_window_event(|window, event| match event {
+            #[cfg(target_os = "windows")]
+            tauri::WindowEvent::Focused(focused) if window.label() == "main" => {
+                windows_popup_focus_changed(window.app_handle(), *focused);
+            }
             tauri::WindowEvent::CloseRequested { api, .. } => {
                 api.prevent_close();
                 cancel_active_translation(window.app_handle());
@@ -1847,7 +2075,7 @@ fn main() {
             _ => {}
         })
         .invoke_handler(tauri::generate_handler![
-            window_layout::fit_window,
+            fit_window_with_visibility,
             window_layout::start_window_drag,
             window_layout::start_window_resize,
             window_layout::resize_popup_width,
@@ -1888,6 +2116,8 @@ fn main() {
     macos_startup::configure(&mut app);
     app.run(|app, event| {
         if matches!(&event, tauri::RunEvent::Exit) {
+            #[cfg(target_os = "windows")]
+            windows_visibility::stop();
             let _ = app.state::<window_layout::LayoutState>().flush();
         }
         #[cfg(target_os = "macos")]
@@ -1903,6 +2133,24 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn explicit_input_always_advances_visible_epoch_and_invalidates_old_requests() {
+        let requests = translation_requests::TranslationRequests::default();
+        let visible = requests.resume(None).unwrap();
+        let first = prepare_input_presentation(&requests).unwrap();
+        assert!(first.presented && first.epoch > visible.epoch);
+        let old_request = requests.begin(first.epoch).unwrap();
+        assert!(requests.is_current(old_request).unwrap());
+        let second = prepare_input_presentation(&requests).unwrap();
+        assert!(second.presented && second.epoch > first.epoch);
+        assert!(!requests.is_current(old_request).unwrap());
+        assert!(requests.begin(first.epoch).is_err());
+        assert!(requests.finish(old_request, || Ok(())).is_err());
+        let hidden = requests.suspend().unwrap();
+        let reopened = prepare_input_presentation(&requests).unwrap();
+        assert!(reopened.presented && reopened.epoch > hidden.epoch);
+    }
+
     #[test]
     fn ocr_hotkey_fills_translation_while_recognition_only_stays_explicit() {
         assert_eq!(captured_text_mode("silentOcr"), "translate");
@@ -2103,6 +2351,52 @@ mod tests {
         );
         next.providers.retain(|p| p.id != account);
         assert_eq!(changed_credential_accounts(&old, &next), vec![account]);
+    }
+
+    #[test]
+    fn selection_support_dump_requires_exact_opt_in_and_has_no_capture_payload() {
+        let args = |items: &[&str]| {
+            items
+                .iter()
+                .map(|item| item.to_string())
+                .collect::<Vec<_>>()
+        };
+        assert!(selection_diagnostics_requested(&args(&[
+            "EchoLingo",
+            "--selection-diagnostics"
+        ])));
+        for items in [
+            vec!["EchoLingo"],
+            vec!["--selection-diagnostics"],
+            vec!["EchoLingo", "--selection-diagnostics=/tmp/elsewhere"],
+            vec!["EchoLingo", "selection-diagnostics"],
+        ] {
+            assert!(!selection_diagnostics_requested(&args(&items)));
+        }
+        let metadata = serde_json::json!({"available": false});
+        let payload = selection_diagnostic_payload(metadata.clone());
+        assert_eq!(payload["diagnostics"], metadata);
+        assert_eq!(payload["diagnostic"], "last-selection-attempt");
+        assert_eq!(payload["processId"], std::process::id());
+        let fields: std::collections::BTreeSet<_> = payload
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect();
+        assert_eq!(
+            fields,
+            [
+                "diagnostic",
+                "recordedAtUnixMs",
+                "appVersion",
+                "processId",
+                "executablePath",
+                "diagnostics"
+            ]
+            .into_iter()
+            .collect()
+        );
     }
 
     #[test]

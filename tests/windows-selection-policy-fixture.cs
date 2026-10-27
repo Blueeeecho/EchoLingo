@@ -19,26 +19,38 @@ public static class WindowsSelectionPolicyFixture {
         public string Text;
         public Frame(long time, uint sequence, string text) { Time = time; Sequence = sequence; Text = text; }
     }
+    // The host fixture cannot load Windows UIAutomationTypes. This represents
+    // a provider disappearance, which is not a documented unsupported-selection
+    // InvalidOperationException. The real adapter catches ElementNotAvailable.
+    sealed class UnavailableElementFixtureException : Exception { }
     sealed class CopyFixture {
         public readonly List<Frame> Frames = new List<Frame>();
         public int Index, RestoreCount, ReadCount, SequenceReadCount;
         public bool ReplaceBeforeRestore;
         public bool FailRestore;
         public bool FailRead;
+        public bool LoseContextWhileReading;
+        public int PostContextChecks;
+        public readonly List<string> Order = new List<string>();
         public string Clipboard = "original-rich-fixture";
         public uint CurrentSequence { get { return Frames[Math.Min(Index, Frames.Count - 1)].Sequence; } }
         public string Run(uint inserted) {
             return SelectionCopyPolicy.CompleteCopy(10, inserted,
                 delegate { SequenceReadCount++; return CurrentSequence; },
-                delegate { ReadCount++; if (FailRead) throw new InvalidOperationException("synthetic clipboard busy"); Clipboard = Frames[Math.Min(Index, Frames.Count - 1)].Text; return Clipboard; },
+                delegate { ReadCount++; Order.Add("read"); if (FailRead) throw new InvalidOperationException("synthetic clipboard busy"); Clipboard = Frames[Math.Min(Index, Frames.Count - 1)].Text; return Clipboard; },
                 delegate(uint expected) {
                     if (ReplaceBeforeRestore) SelectionCopyPolicy.RequireCurrentSequence(expected, expected + 1);
                     if (FailRestore) throw new InvalidOperationException("CLIPBOARD_RESTORE_FAILED: synthetic failure");
                     SelectionCopyPolicy.RequireCurrentSequence(expected, CurrentSequence);
-                    RestoreCount++; Clipboard = "original-rich-fixture";
+                    RestoreCount++; Order.Add("restore"); Clipboard = "original-rich-fixture";
                 },
                 delegate { return Frames[Math.Min(Index, Frames.Count - 1)].Time; },
-                delegate { if (++Index >= Frames.Count) throw new Exception("Unbounded copy wait"); });
+                delegate { if (++Index >= Frames.Count) throw new Exception("Unbounded copy wait"); }, null,
+                delegate {
+                    PostContextChecks++; Order.Add("post-context");
+                    if (LoseContextWhileReading && ReadCount > 0)
+                        throw new InvalidOperationException("SELECTION: synthetic source context changed while copy waited");
+                });
         }
     }
     static CopyFixture Stable() {
@@ -57,7 +69,79 @@ public static class WindowsSelectionPolicyFixture {
             Error(delegate { SelectionCopyPolicy.AutomationText(new string[0], delegate(string text) { return text; }); }, "NO_SELECTION:");
             Error(delegate { SelectionCopyPolicy.AutomationText(new string[] { "", "  " }, delegate(string text) { return text; }); }, "NO_SELECTION:");
             Assert(SelectionCopyPolicy.AutomationText(new string[] { "first", "second" }, delegate(string text) { return text; }) == "first" + Environment.NewLine + "second", "Nonempty disjoint ranges preserved");
-            Assert(SelectionCopyPolicy.AutomationText(new string[] { null }, delegate(string text) { throw new Exception("must not read a null range"); }) == null, "Malformed null range is unavailable without dereference");
+            Error(delegate { SelectionCopyPolicy.AutomationText(new string[] { null }, delegate(string text) { throw new Exception("must not read a null range"); }); }, "SELECTION:");
+
+            int unavailableCopies = 0, rangeReads = 0;
+            Func<string> unavailableCopy = delegate { unavailableCopies++; return "synthetic fallback selection"; };
+            Action currentContext = delegate { };
+            Func<string[], string> currentRanges = delegate(string[] ranges) {
+                return SelectionCopyPolicy.ReadAutomation(false, true, true, delegate { return ranges; },
+                    delegate(string range) { rangeReads++; return range; });
+            };
+            Error(delegate {
+                SelectionCopyPolicy.RevalidateAndCopy(delegate {
+                    SelectionCopyPolicy.RequireFocus<string>(null);
+                    return currentRanges(null);
+                }, currentContext, unavailableCopy);
+            }, "SELECTION:");
+            Assert(unavailableCopies == 0 && rangeReads == 0, "Missing focus stops before querying text or sending copy");
+            Error(delegate { SelectionCopyPolicy.RevalidateAndCopy(delegate { return currentRanges(new string[] { null }); }, currentContext, unavailableCopy); }, "SELECTION:");
+            Assert(unavailableCopies == 0 && rangeReads == 0, "Malformed range element never becomes unsupported-provider fallback");
+            bool providerFailed = false;
+            try {
+                SelectionCopyPolicy.RevalidateAndCopy(delegate {
+                    return SelectionCopyPolicy.ReadAutomation<string>(false, true, true,
+                        delegate { throw new UnavailableElementFixtureException(); }, delegate(string range) { return range; });
+                }, currentContext, unavailableCopy);
+            } catch (UnavailableElementFixtureException) { providerFailed = true; }
+            Assert(providerFailed && unavailableCopies == 0, "A disappeared provider propagates failure before copy instead of becoming unsupported");
+            Error(delegate {
+                SelectionCopyPolicy.RevalidateAndCopy(delegate {
+                    return SelectionCopyPolicy.ReadAutomation<string>(false, true, true,
+                        delegate { return new string[] { "range" }; }, delegate(string range) { throw new InvalidOperationException("SELECTION: stale range read"); });
+                }, currentContext, unavailableCopy);
+            }, "SELECTION:");
+            Assert(unavailableCopies == 0, "Invalid range read is not caught as GetSelection unsupported");
+            foreach (string allowed in new string[] { "ControlType.Edit", "ControlType.Document", "ControlType.Text", "ControlType.Custom", "ControlType.Pane" }) {
+                bool fallback = SelectionCopyPolicy.CopyFallbackAllowed(allowed);
+                int beforeCopy = unavailableCopies;
+                Assert(SelectionCopyPolicy.RevalidateAndCopy(delegate {
+                    return SelectionCopyPolicy.ReadAutomation<string>(false, fallback, true, delegate { return null; }, delegate(string range) { return range; });
+                }, currentContext, unavailableCopy) == "synthetic fallback selection" && unavailableCopies == beforeCopy + 1,
+                    "GetSelection whole-array null retains one copy for a verified text/document/custom focus: " + allowed);
+                Assert(SelectionCopyPolicy.RevalidateAndCopy(delegate {
+                    return SelectionCopyPolicy.ReadAutomation<string>(false, fallback, true,
+                        delegate { throw new InvalidOperationException("selection unsupported"); }, delegate(string range) { return range; });
+                }, currentContext, unavailableCopy) == "synthetic fallback selection" && unavailableCopies == beforeCopy + 2,
+                    "Documented GetSelection unsupported exception retains one copy: " + allowed);
+            }
+            foreach (string blockedRole in new string[] { "ControlType.Window", "ControlType.Button", "ControlType.Menu", "ControlType.MenuItem", "ControlType.ToolBar", "ControlType.TitleBar", "", null }) {
+                bool fallback = SelectionCopyPolicy.CopyFallbackAllowed(blockedRole);
+                int beforeCopy = unavailableCopies;
+                Error(delegate {
+                    SelectionCopyPolicy.RevalidateAndCopy(delegate {
+                        return SelectionCopyPolicy.ReadAutomation<string>(false, fallback, false,
+                            delegate { throw new Exception("No TextPattern must not query selection"); }, delegate(string range) { return range; });
+                    }, currentContext, unavailableCopy);
+                }, "NO_SELECTION:");
+                Assert(unavailableCopies == beforeCopy, "Known non-text/unknown focus never receives blind copy: " + blockedRole);
+            }
+            foreach (bool password in new bool[] { false, true }) {
+                int beforeCopy = unavailableCopies;
+                Error(delegate {
+                    SelectionCopyPolicy.RevalidateAndCopy(delegate {
+                        return SelectionCopyPolicy.ReadAutomation<string>(password, true, true,
+                            delegate { return new string[] { "" }; }, delegate(string range) { return range; });
+                    }, currentContext, unavailableCopy);
+                }, password ? "PROTECTED:" : "NO_SELECTION:");
+                Assert(unavailableCopies == beforeCopy, "Known empty and password controls stop without copy");
+            }
+            int unsupportedQueries = 0, beforeUnsupported = unavailableCopies;
+            Assert(SelectionCopyPolicy.RevalidateAndCopy(delegate {
+                return SelectionCopyPolicy.ReadAutomation<string>(false, SelectionCopyPolicy.CopyFallbackAllowed("ControlType.Custom"), false,
+                    delegate { unsupportedQueries++; return null; }, delegate(string range) { return range; });
+            }, currentContext, unavailableCopy) == "synthetic fallback selection" && unsupportedQueries == 0 && unavailableCopies == beforeUnsupported + 1,
+                "A valid custom control without TextPattern keeps exactly one fallback without querying that absent pattern");
 
             int copyCalls = 0, contextChecks = 0;
             Func<string> copy = delegate { copyCalls++; return "fallback"; };
@@ -76,6 +160,15 @@ public static class WindowsSelectionPolicyFixture {
             CopyFixture normal = Stable();
             Assert(normal.Run(4) == "synthetic selected text 中文" && normal.Index == 4, "Clear then delayed stable text waits and succeeds");
             Assert(normal.RestoreCount == 1 && normal.Clipboard == "original-rich-fixture", "Completed copy restores original data once");
+            Assert(normal.PostContextChecks == 1 && normal.Order.IndexOf("restore") < normal.Order.IndexOf("post-context"), "Source context is checked after restoration before a normal result returns");
+            foreach (string changed in new string[] { "foreground", "focused control" }) {
+                CopyFixture supersededSource = Stable(); supersededSource.LoseContextWhileReading = true;
+                Error(delegate { supersededSource.Run(4); }, "SELECTION:");
+                Assert(supersededSource.ReadCount > 0 && supersededSource.RestoreCount == 1
+                    && supersededSource.Clipboard == "original-rich-fixture", "Copy already issued still restores before rejecting changed " + changed);
+                Assert(supersededSource.PostContextChecks == 1
+                    && supersededSource.Order.IndexOf("restore") < supersededSource.Order.IndexOf("post-context"), "Changed " + changed + " cannot return old text and cannot skip necessary restoration");
+            }
             foreach (uint partial in new uint[] { 2, 3 }) {
                 CopyFixture fixture = Stable();
                 Error(delegate { fixture.Run(partial); }, "SELECTION:");

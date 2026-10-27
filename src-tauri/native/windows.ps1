@@ -39,11 +39,41 @@ using System.Windows.Forms;
 // empty selection. A clipboard clear alone is not a completed copy operation.
 public static class SelectionCopyPolicy {
     public const string InputBlocked = "SELECTION: Windows blocked copy input. Elevated or protected apps may not allow selection capture; try screenshot OCR.";
+    public static T RequireFocus<T>(T focused) where T : class {
+        if (focused == null) throw new InvalidOperationException("SELECTION: The focused control is unavailable; select text and retry.");
+        return focused;
+    }
+    public static bool CopyFallbackAllowed(string controlType) {
+        // Known non-text windows, dialogs, buttons and menus must not receive a
+        // blind copy. Pane/Custom retain the dedicated unsupported-provider
+        // path, after native focus identity and top-level context validation.
+        return controlType == "ControlType.Edit" || controlType == "ControlType.Document"
+            || controlType == "ControlType.Text" || controlType == "ControlType.Custom"
+            || controlType == "ControlType.Pane";
+    }
+    static string UnavailableSelection(bool fallbackAllowed) {
+        if (!fallbackAllowed) throw new InvalidOperationException("NO_SELECTION: The focused control does not provide a text selection.");
+        return null;
+    }
+    public static string ReadAutomation<T>(bool password, bool fallbackAllowed, bool hasTextPattern,
+                                           Func<T[]> getSelection, Func<T, string> read) where T : class {
+        if (password) throw new InvalidOperationException("PROTECTED: Selected text is inside a password control.");
+        if (!hasTextPattern) return UnavailableSelection(fallbackAllowed);
+        T[] ranges;
+        try { ranges = getSelection(); }
+        // GetSelection documents this exception for unsupported selection.
+        // Do not catch range-reading failures here: a stale/invalid provider
+        // must not be converted into permission to send keyboard input.
+        catch (InvalidOperationException) { return UnavailableSelection(fallbackAllowed); }
+        string text = AutomationText(ranges, read);
+        return text ?? UnavailableSelection(fallbackAllowed);
+    }
     public static string AutomationText<T>(T[] ranges, Func<T, string> read) where T : class {
+        // The whole array may legitimately be null when no caret is exposed.
         if (ranges == null) return null;
         StringBuilder text = new StringBuilder();
         foreach (T range in ranges) {
-            if (range == null) return null;
+            if (range == null) throw new InvalidOperationException("SELECTION: The source returned an invalid text range; select text and retry.");
             string part = read(range);
             if (!String.IsNullOrEmpty(part)) { if (text.Length > 0) text.AppendLine(); text.Append(part); }
         }
@@ -104,7 +134,7 @@ public static class SelectionCopyPolicy {
     // restore an unrelated clipboard generation. No key input is retried here.
     public static string CompleteCopy(uint initial, uint inserted, Func<uint> sequence, Func<string> readText,
                                       Action<uint> restore, Func<long> elapsedMilliseconds, Action wait,
-                                      Action<string> trace = null) {
+                                      Action<string> trace = null, Action requireContextAfterRestore = null) {
         bool inputFailed = inserted != 4;
         if (inserted < 2) throw new InvalidOperationException(InputBlocked);
         Completion completion = new Completion(initial);
@@ -131,6 +161,10 @@ public static class SelectionCopyPolicy {
                     RequireCurrentSequence(completion.CompletedSequence, sequence());
                     restore(completion.CompletedSequence);
                     if (inputFailed) throw new InvalidOperationException(InputBlocked);
+                    // A completed copy still owns its necessary restoration.
+                    // Only then reject a source-window/focus change, without
+                    // returning that obsolete result to the translation view.
+                    if (requireContextAfterRestore != null) requireContextAfterRestore();
                     return completion.CompletedText;
                 case Observation.UnchangedTimeout:
                     throw new InvalidOperationException(inputFailed ? InputBlocked : "NO_SELECTION: No text was copied. Try screenshot OCR for nonselectable text or apps running as administrator.");
@@ -145,6 +179,7 @@ public static class SelectionCopyPolicy {
 
 public static class EchoLingoNative {
     [DllImport("user32.dll")] static extern IntPtr GetForegroundWindow();
+    [DllImport("user32.dll")] static extern IntPtr GetAncestor(IntPtr window, uint flags);
     [DllImport("user32.dll")] static extern short GetAsyncKeyState(int key);
     [DllImport("user32.dll")] static extern uint GetClipboardSequenceNumber();
     [DllImport("user32.dll")] static extern uint SendInput(uint count, INPUT[] input, int size);
@@ -182,21 +217,71 @@ public static class EchoLingoNative {
             if ((GetAsyncKeyState(key) & 0x8000) != 0) return true;
         return false;
     }
-    static string AutomationSelection() {
+    sealed class SelectionContext {
+        public IntPtr Foreground;
+        public int[] FocusIdentity;
+    }
+    static bool SameIdentity(int[] expected, int[] current) {
+        if (expected == null || current == null || expected.Length == 0 || expected.Length != current.Length) return false;
+        for (int i = 0; i < expected.Length; i++) if (expected[i] != current[i]) return false;
+        return true;
+    }
+    static bool FocusBelongsToWindow(AutomationElement focused, IntPtr foreground) {
+        IntPtr root = GetAncestor(foreground, 2); // GA_ROOT, not process identity.
+        if (root == IntPtr.Zero) return false;
+        AutomationElement current = focused;
+        for (int depth = 0; current != null && depth < 64; depth++) {
+            int handle = current.Current.NativeWindowHandle;
+            if (handle != 0 && GetAncestor(new IntPtr(handle), 2) == root) return true;
+            current = TreeWalker.RawViewWalker.GetParent(current);
+        }
+        return false;
+    }
+    static AutomationElement CurrentSelectionFocus(SelectionContext context) {
         try {
-            AutomationElement focused = AutomationElement.FocusedElement;
-            if (focused == null) return null;
-            // Password controls must never be copied by the fallback.
-            if (focused.Current.IsPassword) throw new InvalidOperationException("PROTECTED: Selected text is inside a password control.");
+            if (context.Foreground == IntPtr.Zero || GetForegroundWindow() != context.Foreground)
+                throw new InvalidOperationException("SELECTION: Foreground application changed; select text and retry.");
+            AutomationElement focused = SelectionCopyPolicy.RequireFocus(AutomationElement.FocusedElement);
+            if (!SameIdentity(context.FocusIdentity, focused.GetRuntimeId()) || !FocusBelongsToWindow(focused, context.Foreground))
+                throw new InvalidOperationException("SELECTION: The focused control changed or is outside the source window; select text and retry.");
+            if (GetForegroundWindow() != context.Foreground)
+                throw new InvalidOperationException("SELECTION: Foreground application changed; select text and retry.");
+            return focused;
+        } catch (ElementNotAvailableException) {
+            throw new InvalidOperationException("SELECTION: The source control is no longer available; select text and retry.");
+        }
+    }
+    static SelectionContext CaptureSelectionContext() {
+        try {
+            SelectionContext context = new SelectionContext();
+            context.Foreground = GetForegroundWindow();
+            AutomationElement focused = SelectionCopyPolicy.RequireFocus(AutomationElement.FocusedElement);
+            context.FocusIdentity = focused.GetRuntimeId();
+            CurrentSelectionFocus(context);
+            return context;
+        } catch (ElementNotAvailableException) {
+            throw new InvalidOperationException("SELECTION: The source control is no longer available; select text and retry.");
+        }
+    }
+    static void RequireSelectionContext(SelectionContext context) { CurrentSelectionFocus(context); }
+    static string AutomationSelection(SelectionContext context) {
+        try {
+            AutomationElement focused = CurrentSelectionFocus(context);
+            bool password = focused.Current.IsPassword;
+            bool fallbackAllowed = SelectionCopyPolicy.CopyFallbackAllowed(focused.Current.ControlType.ProgrammaticName);
             object pattern;
-            if (focused.TryGetCurrentPattern(TextPattern.Pattern, out pattern)) {
-                TextPatternRange[] ranges = ((TextPattern)pattern).GetSelection();
-                return SelectionCopyPolicy.AutomationText(ranges, delegate(TextPatternRange range) { return range.GetText(-1); });
-            }
+            bool hasTextPattern = focused.TryGetCurrentPattern(TextPattern.Pattern, out pattern);
+            TextPattern textPattern = pattern as TextPattern;
+            if (hasTextPattern && textPattern == null)
+                throw new InvalidOperationException("SELECTION: The source returned an invalid text provider; select text and retry.");
+            return SelectionCopyPolicy.ReadAutomation(password, fallbackAllowed, hasTextPattern,
+                delegate { return textPattern.GetSelection(); }, delegate(TextPatternRange range) { return range.GetText(-1); });
         } catch (InvalidOperationException error) {
-            if (error.Message.StartsWith("PROTECTED:") || error.Message.StartsWith("NO_SELECTION:")) throw;
-        } catch (ElementNotAvailableException) { }
-        return null;
+            if (error.Message.StartsWith("PROTECTED:") || error.Message.StartsWith("NO_SELECTION:") || error.Message.StartsWith("SELECTION:")) throw;
+            throw new InvalidOperationException("SELECTION: The source selection query failed; select text and retry.");
+        } catch (ElementNotAvailableException) {
+            throw new InvalidOperationException("SELECTION: The source control is no longer available; select text and retry.");
+        }
     }
     static object CloneClipboardValue(object value) {
         if (value == null) throw new InvalidOperationException("Clipboard format could not be materialized.");
@@ -232,16 +317,16 @@ public static class EchoLingoNative {
         return input;
     }
     public static string SelectedText() {
-        IntPtr foreground = GetForegroundWindow();
-        string direct = AutomationSelection();
-        if (GetForegroundWindow() != foreground) throw new InvalidOperationException("SELECTION: Foreground application changed; select text in the source application and retry.");
+        SelectionContext context = CaptureSelectionContext();
+        string direct = AutomationSelection(context);
+        RequireSelectionContext(context);
         if (!String.IsNullOrWhiteSpace(direct)) return direct;
         DateTime deadline = DateTime.UtcNow.AddMilliseconds(1500);
         while (ModifiersDown()) {
             if (DateTime.UtcNow >= deadline) throw new InvalidOperationException("SELECTION: Release the shortcut keys and retry.");
             Thread.Sleep(20);
         }
-        if (GetForegroundWindow() != foreground) throw new InvalidOperationException("SELECTION: Foreground application changed; select text in the source application and retry.");
+        RequireSelectionContext(context);
         List<IDisposable> resources = new List<IDisposable>();
         DataObject saved;
         uint initial = GetClipboardSequenceNumber();
@@ -254,9 +339,10 @@ public static class EchoLingoNative {
             throw new InvalidOperationException("CLIPBOARD: Cannot preserve all clipboard formats. Selection capture was stopped before changing the clipboard. " + error.Message);
         }
         try {
-            return SelectionCopyPolicy.RevalidateAndCopy(AutomationSelection,
+            return SelectionCopyPolicy.RevalidateAndCopy(delegate { return AutomationSelection(context); },
                 delegate {
-                    if (GetForegroundWindow() != foreground || ModifiersDown())
+                    RequireSelectionContext(context);
+                    if (ModifiersDown())
                         throw new InvalidOperationException("SELECTION: Foreground application or shortcut modifiers changed before copy; retry.");
                     SelectionCopyPolicy.RequireCurrentSequence(initial, GetClipboardSequenceNumber());
                 }, delegate {
@@ -282,7 +368,8 @@ public static class EchoLingoNative {
                             }
                         }, delegate { return clock.ElapsedMilliseconds; }, delegate { Thread.Sleep(5); },
                         Environment.GetEnvironmentVariable("ECHOLINGO_SELECTION_TRACE") == "1"
-                            ? (Action<string>)delegate(string message) { Console.Error.WriteLine(message); } : null);
+                            ? (Action<string>)delegate(string message) { Console.Error.WriteLine(message); } : null,
+                        delegate { RequireSelectionContext(context); });
             });
         } finally { foreach (IDisposable resource in resources) resource.Dispose(); }
     }
@@ -424,7 +511,8 @@ public sealed class CaptureSelectionState {
         Assert(cancel.Cancelled && !cancel.Dragging, "Escape/right cancellation must end dragging.");
         int inputAssertions = CaptureInputPolicy.SelfTest();
         int topologyAssertions = CaptureTopologyPolicy.SelfTest();
-        return new Dictionary<string, object> { { "captureStateFixturePassed", true }, { "fixtureAssertions", 11 + inputAssertions + topologyAssertions }, { "inputPolicyAssertions", inputAssertions }, { "topologyPolicyAssertions", topologyAssertions }, { "releaseGraceMilliseconds", 500 }, { "screenCaptured", false }, { "clipboardChanged", false }, { "interactiveCaptureTested", false } };
+        int outlineAssertions = CaptureOutlinePolicy.SelfTest();
+        return new Dictionary<string, object> { { "captureStateFixturePassed", true }, { "fixtureAssertions", 11 + inputAssertions + topologyAssertions + outlineAssertions }, { "inputPolicyAssertions", inputAssertions }, { "topologyPolicyAssertions", topologyAssertions }, { "outlinePolicyAssertions", outlineAssertions }, { "releaseGraceMilliseconds", 500 }, { "screenCaptured", false }, { "clipboardChanged", false }, { "interactiveCaptureTested", false } };
     }
 }
 
@@ -573,23 +661,67 @@ sealed class CaptureDpiProbe : Form {
     protected override bool ShowWithoutActivation { get { return true; } }
 }
 
-sealed class CaptureOverlay : Form {
-    readonly CaptureSelectionState state;
-    readonly int index;
+// Four narrow rectangles, never a display-sized surface. The same physical-
+// pixel clipping policy feeds actual edge HWNDs and the host-only fixtures.
+public static class CaptureOutlinePolicy {
+    public const int Thickness = 2;
+    public static Rectangle[] Edges(Rectangle outline, Rectangle display) {
+        Rectangle[] result = new Rectangle[4];
+        if (outline.Width <= 0 || outline.Height <= 0) return result;
+        int horizontal = Math.Min(Thickness, outline.Height), vertical = Math.Min(Thickness, outline.Width);
+        Rectangle[] edges = new Rectangle[] {
+            new Rectangle(outline.Left, outline.Top, outline.Width, horizontal),
+            new Rectangle(outline.Left, outline.Bottom - horizontal, outline.Width, horizontal),
+            new Rectangle(outline.Left, outline.Top + horizontal, vertical, Math.Max(0, outline.Height - horizontal * 2)),
+            new Rectangle(outline.Right - vertical, outline.Top + horizontal, vertical, Math.Max(0, outline.Height - horizontal * 2))
+        };
+        for (int i = 0; i < edges.Length; i++) {
+            Rectangle clipped = Rectangle.Intersect(edges[i], display);
+            if (clipped.Width > 0 && clipped.Height > 0) result[i] = clipped;
+        }
+        return result;
+    }
+    static long Area(Rectangle[] edges) { long result = 0; foreach (Rectangle edge in edges) result += (long)edge.Width * edge.Height; return result; }
+    static void Assert(bool value, string message) { if (!value) throw new InvalidOperationException("SELF_TEST: " + message); }
+    public static int SelfTest() {
+        Rectangle display = new Rectangle(-3840, -300, 3840, 2160);
+        Rectangle[] border = Edges(display, display);
+        Assert(border.Length == 4 && Area(border) == 2L * Thickness * (display.Width + display.Height - 2 * Thickness), "A display border must contain only its four thin edges.");
+        Assert(Area(border) < (long)display.Width * display.Height / 100, "A 4K border must occupy less than one percent of a display, with no full-screen surface.");
+        foreach (Rectangle edge in border) Assert(display.Contains(edge) && Math.Min(edge.Width, edge.Height) <= Thickness, "Negative display origins must retain small physical edge rectangles.");
+        Rectangle selection = new Rectangle(-120, -150, 300, 400);
+        Rectangle left = new Rectangle(-1920, -1080, 1920, 1080), right = new Rectangle(0, 0, 1920, 1080);
+        Rectangle[] leftEdges = Edges(selection, left), rightEdges = Edges(selection, right);
+        foreach (Rectangle edge in leftEdges) if (!edge.IsEmpty) Assert(left.Contains(edge), "Cross-display selection edges must be clipped to their own negative-origin display.");
+        foreach (Rectangle edge in rightEdges) if (!edge.IsEmpty) Assert(right.Contains(edge), "Cross-display selection edges must be clipped to their own positive-origin display.");
+        Assert(leftEdges[0].Width == 120 && rightEdges[1].Width == 180, "Cross-display outer edges must retain global coordinates without adding an edge along the screen seam.");
+        Assert(Area(Edges(selection, new Rectangle(500, 500, 800, 600))) == 0, "A display outside the selected rectangle must have no visible edges.");
+        Assert(Area(Edges(Rectangle.Empty, display)) == 0, "No selection must create no selection surface.");
+        Rectangle[] tiny = Edges(new Rectangle(10, 10, 1, 1), new Rectangle(0, 0, 800, 600));
+        foreach (Rectangle edge in tiny) Assert(edge.Width >= 0 && edge.Height >= 0, "A tiny gesture must never create negative-sized windows.");
+        return 17;
+    }
+}
+
+// A color-keyed, click-through HWND only as wide as the blue edge. Unlike a
+// full-screen DoubleBuffered Form, it cannot allocate/repaint a 4K frame for
+// each drag update. No activation, dimming, frozen screenshot or source pixels.
+sealed class CaptureEdgeWindow : Form {
+    [DllImport("user32.dll", SetLastError=true)] static extern bool SetWindowPos(IntPtr window, IntPtr after, int x, int y, int width, int height, uint flags);
     readonly uint expectedDpi;
     readonly Action invalidated;
     static readonly Color ClearKey = Color.FromArgb(255, 0, 255);
-    public CaptureOverlay(Rectangle screen, int screenIndex, uint dpi, CaptureSelectionState selection, Action onInvalidated) {
-        state = selection; index = screenIndex; expectedDpi = dpi; invalidated = onInvalidated;
+    public CaptureEdgeWindow(Rectangle screen, uint dpi, Action onInvalidated) {
+        expectedDpi = dpi; invalidated = onInvalidated;
         AutoScaleMode = AutoScaleMode.None;
         FormBorderStyle = FormBorderStyle.None;
         StartPosition = FormStartPosition.Manual;
-        Bounds = screen;
+        Bounds = new Rectangle(screen.Left, screen.Top, 1, 1);
         TopMost = true;
         ShowInTaskbar = false;
-        BackColor = ClearKey;
+        BackColor = Color.FromArgb(45, 145, 255);
         TransparencyKey = ClearKey;
-        DoubleBuffered = true;
+        DoubleBuffered = false;
     }
     protected override bool ShowWithoutActivation { get { return true; } }
     protected override CreateParams CreateParams {
@@ -604,42 +736,160 @@ sealed class CaptureOverlay : Form {
         if (message.Msg == 0x007E || (message.Msg == 0x02E0 && (uint)(message.WParam.ToInt64() & 0xFFFF) != expectedDpi)) invalidated();
         base.WndProc(ref message);
     }
-    protected override void OnPaint(PaintEventArgs e) {
-        e.Graphics.Clear(ClearKey);
-        using (Pen blue = new Pen(Color.FromArgb(45, 145, 255), 2)) {
-            if (!state.Finished && state.Highlighted == index && Width > 2 && Height > 2)
-                e.Graphics.DrawRectangle(blue, 1, 1, Width - 2, Height - 2);
-            if (!state.Finished && state.Selected.Width > 0 && state.Selected.Height > 0) {
-                Rectangle local = state.Selected;
-                local.Offset(-Left, -Top);
-                e.Graphics.DrawRectangle(blue, local);
-            }
-        }
-        base.OnPaint(e);
+    public void Present(Rectangle edge, bool raise) {
+        if (edge.Width <= 0 || edge.Height <= 0) { if (Visible) Hide(); return; }
+        bool changed = Bounds != edge, showing = !Visible;
+        if (changed) Bounds = edge;
+        if (showing) Show();
+        // HWND_TOPMOST is a group, not permanent precedence over other topmost
+        // windows. Refresh its order passively, at most once per 250ms when idle.
+        if ((changed || showing || raise) && !SetWindowPos(Handle, new IntPtr(-1), 0, 0, 0, 0, 0x0010 | 0x0200 | 0x0001 | 0x0002))
+            throw new InvalidOperationException("CAPTURE_OVERLAY: Windows could not display the selection border above ordinary windows.");
     }
 }
 
-// Transparent color-keyed pixels deliberately do not receive mouse input.
-// Short-lived mouse/Escape hooks consume only selection/cancel gestures;
-// movement, scrolling and other keys keep their normal behavior. They run on
-// this message-pumping helper thread, never injects code into source apps, and
-// store no source-window title, pixels, other key events or clipboard content.
+sealed class CaptureOverlay : IDisposable {
+    readonly Rectangle screen;
+    readonly int index;
+    readonly CaptureEdgeWindow[] edges = new CaptureEdgeWindow[8];
+    public CaptureOverlay(Rectangle display, int screenIndex, uint dpi, Action onInvalidated, Action<IntPtr> register) {
+        screen = display; index = screenIndex;
+        try {
+            for (int i = 0; i < edges.Length; i++) {
+                edges[i] = new CaptureEdgeWindow(screen, dpi, onInvalidated);
+                register(edges[i].Handle);
+            }
+        } catch { Dispose(); throw; }
+    }
+    public void Present(int highlighted, Rectangle selected, bool raise) {
+        Rectangle[] border = CaptureOutlinePolicy.Edges(highlighted == index ? screen : Rectangle.Empty, screen);
+        Rectangle outline = selected;
+        if (outline.Width > 0 && outline.Height > 0) outline.Inflate(1, 1);
+        Rectangle[] selection = CaptureOutlinePolicy.Edges(outline, screen);
+        for (int i = 0; i < 4; i++) { edges[i].Present(border[i], raise); edges[i + 4].Present(selection[i], raise); }
+    }
+    public void Hide() { foreach (CaptureEdgeWindow edge in edges) if (edge != null) edge.Hide(); }
+    public void Dispose() { foreach (CaptureEdgeWindow edge in edges) if (edge != null) { edge.Close(); edge.Dispose(); } }
+}
+
+// Low-level input hooks are synchronous on their installation thread. Keep
+// them on a dedicated native message pump, completely separate from drawing,
+// window positioning, monitor enumeration, OCR, file I/O and PowerShell work.
+// Movement/wheel and all non-Escape keys immediately pass through. The UI
+// samples physical pointer motion; hooks retain only selection button/Esc state.
 // https://learn.microsoft.com/windows/win32/winmsg/lowlevelmouseproc
-sealed class RegionPicker : ApplicationContext {
+sealed class CaptureInputPump : IDisposable {
     delegate IntPtr MouseHook(int code, IntPtr message, IntPtr data);
     delegate IntPtr KeyboardHook(int code, IntPtr message, IntPtr data);
-    [StructLayout(LayoutKind.Sequential)] struct MouseData { public Point point; public uint mouseData, flags, time; public UIntPtr extra; }
+    [StructLayout(LayoutKind.Sequential)] struct NativeMessage { public IntPtr window; public uint message; public UIntPtr wParam; public IntPtr lParam; public uint time; public Point point; public uint privateData; }
     [DllImport("user32.dll", SetLastError=true)] static extern IntPtr SetWindowsHookEx(int id, MouseHook callback, IntPtr module, uint thread);
     [DllImport("user32.dll", EntryPoint="SetWindowsHookExW", SetLastError=true)] static extern IntPtr SetKeyboardHook(int id, KeyboardHook callback, IntPtr module, uint thread);
     [DllImport("user32.dll", SetLastError=true)] static extern bool UnhookWindowsHookEx(IntPtr hook);
     [DllImport("user32.dll")] static extern IntPtr CallNextHookEx(IntPtr hook, int code, IntPtr message, IntPtr data);
+    [DllImport("user32.dll")] static extern short GetAsyncKeyState(int key);
+    [DllImport("user32.dll")] static extern bool PeekMessage(out NativeMessage message, IntPtr window, uint min, uint max, uint remove);
+    [DllImport("user32.dll", SetLastError=true)] static extern int GetMessage(out NativeMessage message, IntPtr window, uint min, uint max);
+    [DllImport("user32.dll")] static extern bool TranslateMessage(ref NativeMessage message);
+    [DllImport("user32.dll")] static extern IntPtr DispatchMessage(ref NativeMessage message);
+    [DllImport("user32.dll", SetLastError=true)] static extern bool PostThreadMessage(uint thread, uint message, UIntPtr wParam, IntPtr lParam);
+    [DllImport("kernel32.dll")] static extern uint GetCurrentThreadId();
+    [DllImport("kernel32.dll", CharSet=CharSet.Unicode)] static extern IntPtr GetModuleHandle(string module);
+    readonly object gate;
+    readonly CaptureSelectionState state;
+    readonly CaptureInputPolicy input;
+    readonly MouseHook callback;
+    readonly KeyboardHook keyboardCallback;
+    readonly ManualResetEvent ready = new ManualResetEvent(false);
+    Thread thread;
+    IntPtr hook, keyboardHook;
+    volatile uint threadId;
+    volatile bool running;
+    volatile string failure;
+    int stopRequested;
+    public bool Running { get { return running; } }
+    public string Failure { get { return failure; } }
+    public CaptureInputPump(object selectionGate, CaptureSelectionState selection, CaptureInputPolicy policy) {
+        gate = selectionGate; state = selection; input = policy;
+        callback = OnMouse; keyboardCallback = OnKeyboard;
+    }
+    static bool Down(int key) { return (GetAsyncKeyState(key) & 0x8000) != 0; }
+    void Fail(string message) { failure = message; lock (gate) state.Cancel(); }
+    public void Start() {
+        thread = new Thread(Run); thread.IsBackground = true; thread.Name = "EchoLingo capture input";
+        thread.SetApartmentState(ApartmentState.STA); thread.Start();
+        if (!ready.WaitOne(3000)) { Stop(); throw new InvalidOperationException("CAPTURE_INPUT: Windows did not start the capture input listener in time."); }
+        if (failure != null || !running) throw new InvalidOperationException(failure ?? "CAPTURE_INPUT: The capture input listener stopped before selection.");
+    }
+    void Run() {
+        try {
+            threadId = GetCurrentThreadId();
+            NativeMessage message;
+            PeekMessage(out message, IntPtr.Zero, 0, 0, 0); // Establish queue before publishing readiness/WM_QUIT.
+            hook = SetWindowsHookEx(14, callback, GetModuleHandle(null), 0);
+            if (hook == IntPtr.Zero) { Fail("CAPTURE_INPUT: Windows could not start region selection."); return; }
+            keyboardHook = SetKeyboardHook(13, keyboardCallback, GetModuleHandle(null), 0);
+            if (keyboardHook == IntPtr.Zero) { Fail("CAPTURE_INPUT: Windows could not install Escape cancellation."); return; }
+            lock (gate) {
+                input.ResyncReleasedButtons(Down(0x01), Down(0x02)); input.ResyncEscape(Down(0x1B));
+                if (input.EscapeCancelled) state.Cancel();
+            }
+            running = true; ready.Set();
+            while (Interlocked.CompareExchange(ref stopRequested, 0, 0) == 0) {
+                int result = GetMessage(out message, IntPtr.Zero, 0, 0);
+                if (result == 0) break;
+                if (result < 0) { Fail("CAPTURE_INPUT: Windows could not continue listening for selection input."); break; }
+                TranslateMessage(ref message); DispatchMessage(ref message);
+            }
+        } catch { Fail("CAPTURE_INPUT: The capture input listener failed; no screenshot was taken."); }
+        finally {
+            if (keyboardHook != IntPtr.Zero && !UnhookWindowsHookEx(keyboardHook)) Fail("CAPTURE_INPUT: Windows could not stop Escape cancellation; no screenshot was taken.");
+            keyboardHook = IntPtr.Zero;
+            if (hook != IntPtr.Zero && !UnhookWindowsHookEx(hook)) Fail("CAPTURE_INPUT: Windows could not stop region selection; no screenshot was taken.");
+            hook = IntPtr.Zero; running = false; ready.Set();
+        }
+    }
+    IntPtr OnKeyboard(int code, IntPtr message, IntPtr data) {
+        if (code != 0) return CallNextHookEx(keyboardHook, code, message, data);
+        int kind = message.ToInt32();
+        bool down = kind == 0x0100 || kind == 0x0104, up = kind == 0x0101 || kind == 0x0105;
+        if ((!down && !up) || Marshal.ReadInt32(data) != 0x1B) return CallNextHookEx(keyboardHook, code, message, data);
+        bool consumed;
+        lock (gate) { consumed = input.Escape(down, up); if (input.EscapeCancelled) state.Cancel(); }
+        return consumed ? new IntPtr(1) : CallNextHookEx(keyboardHook, code, message, data);
+    }
+    IntPtr OnMouse(int code, IntPtr message, IntPtr data) {
+        if (code != 0) return CallNextHookEx(hook, code, message, data);
+        int kind = message.ToInt32();
+        if (kind != 0x0201 && kind != 0x0202 && kind != 0x0204 && kind != 0x0205)
+            return CallNextHookEx(hook, code, message, data);
+        try {
+            Point pointer = new Point(Marshal.ReadInt32(data, 0), Marshal.ReadInt32(data, 4));
+            lock (gate) if (input.Mouse(kind, pointer, state)) return new IntPtr(1);
+        } catch { Fail("CAPTURE_INPUT: Region selection could not process pointer input."); return new IntPtr(1); }
+        return CallNextHookEx(hook, code, message, data);
+    }
+    public bool Stop() {
+        Interlocked.Exchange(ref stopRequested, 1);
+        if (thread == null) return true;
+        uint owner = threadId;
+        if (owner != 0 && thread.IsAlive) PostThreadMessage(owner, 0x0012, UIntPtr.Zero, IntPtr.Zero);
+        return thread.Join(2000);
+    }
+    public void Dispose() { if (Stop()) ready.Dispose(); }
+}
+
+sealed class RegionPicker : ApplicationContext {
     [DllImport("user32.dll")] static extern short GetAsyncKeyState(int key);
     [DllImport("user32.dll")] static extern bool GetPhysicalCursorPos(out Point point);
     [DllImport("user32.dll")] static extern bool IsWindow(IntPtr window);
     [DllImport("user32.dll")] static extern uint GetDpiForWindow(IntPtr window);
     [DllImport("user32.dll")] static extern IntPtr GetThreadDpiAwarenessContext();
     [DllImport("user32.dll")] static extern int GetAwarenessFromDpiAwarenessContext(IntPtr context);
-    [DllImport("kernel32.dll", CharSet=CharSet.Unicode)] static extern IntPtr GetModuleHandle(string module);
+    [DllImport("user32.dll", SetLastError=true)] static extern IntPtr OpenInputDesktop(uint flags, bool inherit, uint access);
+    [DllImport("user32.dll")] static extern bool CloseDesktop(IntPtr desktop);
+    [DllImport("user32.dll")] static extern IntPtr GetThreadDesktop(uint thread);
+    [DllImport("kernel32.dll")] static extern uint GetCurrentThreadId();
+    [DllImport("user32.dll", CharSet=CharSet.Unicode, SetLastError=true)] static extern bool GetUserObjectInformation(IntPtr handle, int index, StringBuilder information, int length, out int needed);
     readonly List<CaptureOverlay> overlays = new List<CaptureOverlay>();
     readonly List<IntPtr> handles = new List<IntPtr>();
     readonly System.Windows.Forms.Timer timer = new System.Windows.Forms.Timer();
@@ -647,12 +897,12 @@ sealed class RegionPicker : ApplicationContext {
     readonly CaptureSelectionState state;
     readonly CaptureInputPolicy input = new CaptureInputPolicy();
     readonly CaptureTopologyPolicy topology;
-    readonly MouseHook callback;
-    readonly KeyboardHook keyboardCallback;
-    IntPtr hook, keyboardHook;
+    readonly object selectionGate = new object();
+    CaptureInputPump inputPump;
     bool stopping, cleaned, observing;
     int renderedHighlight = -2;
     Rectangle renderedSelection;
+    long lastRaise = -250;
     string failure;
     public RegionPicker() {
         Point pointer;
@@ -662,10 +912,11 @@ sealed class RegionPicker : ApplicationContext {
         Rectangle[] rectangles = new Rectangle[displays.Length];
         for (int i = 0; i < displays.Length; i++) rectangles[i] = displays[i].Bounds;
         state = new CaptureSelectionState(rectangles, pointer);
-        callback = OnMouse; keyboardCallback = OnKeyboard;
         Microsoft.Win32.SystemEvents.DisplaySettingsChanged += DisplaysChanged;
         observing = true;
-        for (int i = 0; i < rectangles.Length; i++) overlays.Add(new CaptureOverlay(rectangles[i], i, displays[i].Dpi, state, InvalidateEnvironment));
+        try {
+            for (int i = 0; i < rectangles.Length; i++) overlays.Add(new CaptureOverlay(rectangles[i], i, displays[i].Dpi, InvalidateEnvironment, handles.Add));
+        } catch { Dispose(); throw; }
         timer.Interval = 16;
         timer.Tick += Tick;
     }
@@ -681,25 +932,30 @@ sealed class RegionPicker : ApplicationContext {
         return new CaptureTopologyPolicy(displays, GetAwarenessFromDpiAwarenessContext(GetThreadDpiAwarenessContext()));
     }
     void InvalidateEnvironment() { topology.Invalidate(); }
+    static string DesktopName(IntPtr desktop) {
+        StringBuilder name = new StringBuilder(256); int needed;
+        if (desktop == IntPtr.Zero || !GetUserObjectInformation(desktop, 2, name, name.Capacity * 2, out needed)) return null;
+        return name.ToString();
+    }
+    static void ValidateInputDesktop() {
+        // Read-only validation; never switch desktops, elevate or alter security.
+        IntPtr active = OpenInputDesktop(0, false, 0x0001);
+        try {
+            string activeName = DesktopName(active), currentName = DesktopName(GetThreadDesktop(GetCurrentThreadId()));
+            if (activeName == null || currentName == null || !String.Equals(activeName, currentName, StringComparison.Ordinal))
+                throw new InvalidOperationException("CAPTURE_DESKTOP_UNAVAILABLE: Return to the unlocked Windows desktop; protected system dialogs cannot be selected.");
+        } finally { if (active != IntPtr.Zero) CloseDesktop(active); }
+    }
     public void ValidateCaptureEnvironment() {
+        ValidateInputDesktop();
         bool valid = !topology.Invalid && topology.Matches(ReadTopology());
         if (!valid || topology.Invalid)
             throw new InvalidOperationException("CAPTURE_DISPLAY_CHANGED: Display geometry or DPI changed; select the region again.");
     }
     public Rectangle SelectRegion() {
         try {
-            hook = SetWindowsHookEx(14, callback, GetModuleHandle(null), 0);
-            if (hook == IntPtr.Zero) throw new InvalidOperationException("CAPTURE_INPUT: Windows could not start region selection.");
-            keyboardHook = SetKeyboardHook(13, keyboardCallback, GetModuleHandle(null), 0);
-            if (keyboardHook == IntPtr.Zero) throw new InvalidOperationException("CAPTURE_INPUT: Windows could not install Escape cancellation.");
-            // Sample after installation so a release in the startup gap cannot
-            // leave the session waiting forever. Already swallowed downs are
-            // retained by policy; pre-hook downs keep their source-app releases.
-            input.ResyncReleasedButtons(Down(0x01), Down(0x02));
-            input.ResyncEscape(Down(0x1B));
-            if (input.EscapeCancelled) state.Cancel();
+            inputPump = new CaptureInputPump(selectionGate, state, input); inputPump.Start();
             ValidateCaptureEnvironment();
-            foreach (CaptureOverlay overlay in overlays) { overlay.Show(); handles.Add(overlay.Handle); }
             lifetime.Start(); timer.Start();
             Application.Run(this);
         } finally { Cleanup(); }
@@ -709,57 +965,43 @@ sealed class RegionPicker : ApplicationContext {
         foreach (IntPtr handle in handles) if (IsWindow(handle)) throw new InvalidOperationException("CAPTURE: A selection overlay could not be removed.");
         return state.Selected;
     }
-    IntPtr OnKeyboard(int code, IntPtr message, IntPtr data) {
-        if (code != 0) return CallNextHookEx(keyboardHook, code, message, data);
-        int kind = message.ToInt32();
-        bool down = kind == 0x0100 || kind == 0x0104;
-        bool up = kind == 0x0101 || kind == 0x0105;
-        if ((!down && !up) || Marshal.ReadInt32(data) != 0x1B)
-            return CallNextHookEx(keyboardHook, code, message, data);
-        // Read only the Escape discriminator. No other key details are stored,
-        // decoded or passed into the session's input policy.
-        bool consumed = input.Escape(down, up);
-        if (input.EscapeCancelled) state.Cancel();
-        return consumed ? new IntPtr(1) : CallNextHookEx(keyboardHook, code, message, data);
-    }
-    IntPtr OnMouse(int code, IntPtr message, IntPtr data) {
-        if (code != 0) return CallNextHookEx(hook, code, message, data);
-        int kind = message.ToInt32();
-        bool button = kind == 0x0201 || kind == 0x0202 || kind == 0x0204 || kind == 0x0205;
-        try {
-            Point pointer = ((MouseData)Marshal.PtrToStructure(data, typeof(MouseData))).point;
-            if (input.Mouse(kind, pointer, state)) return new IntPtr(1);
-        } catch {
-            failure = "CAPTURE_INPUT: Region selection could not process pointer input.";
-            state.Cancel();
-            if (button) return new IntPtr(1);
-        }
-        return CallNextHookEx(hook, code, message, data);
-    }
     void Tick(object sender, EventArgs args) {
-        if (!input.Armed) input.ResyncReleasedButtons(Down(0x01), Down(0x02));
-        if (input.EscapeCancelled) state.Cancel();
-        if (topology.Invalid) {
-            failure = "CAPTURE_DISPLAY_CHANGED: Display geometry or DPI changed; select the region again.";
-            state.Cancel();
+        long elapsed = lifetime.ElapsedMilliseconds;
+        bool raise = elapsed - lastRaise >= 250, finished, mayStop, releaseExceeded;
+        int highlighted; Rectangle selected; Point pointer;
+        if (!GetPhysicalCursorPos(out pointer)) failure = "CAPTURE: Windows could not read the capture pointer.";
+        if (inputPump != null && (inputPump.Failure != null || !inputPump.Running)) failure = inputPump.Failure ?? "CAPTURE_INPUT: The selection input listener stopped; no screenshot was taken.";
+        if (topology.Invalid) failure = "CAPTURE_DISPLAY_CHANGED: Display geometry or DPI changed; select the region again.";
+        if (raise) {
+            try { ValidateInputDesktop(); }
+            catch (InvalidOperationException error) { failure = error.Message; }
         }
-        state.Expire(lifetime.ElapsedMilliseconds);
-        if (!state.Finished) {
-            Point pointer;
-            if (!GetPhysicalCursorPos(out pointer)) { failure = "CAPTURE: Windows could not read the capture pointer."; state.Cancel(); }
-            else state.Move(pointer);
+        bool left = Down(0x01), right = Down(0x02);
+        lock (selectionGate) {
+            if (!input.Armed) input.ResyncReleasedButtons(left, right);
+            if (input.EscapeCancelled || failure != null) state.Cancel();
+            state.Expire(elapsed);
+            if (!state.Finished) state.Move(pointer);
+            finished = state.Finished; highlighted = state.Highlighted; selected = state.Selected;
+            mayStop = input.MayStop(finished, elapsed); releaseExceeded = input.ReleaseGraceExceeded;
         }
-        if (state.Finished) {
+        if (finished) {
             if (!stopping) { stopping = true; foreach (CaptureOverlay overlay in overlays) overlay.Hide(); }
             // Keep a short bounded drain for matching mouse/Escape releases.
-            if (input.MayStop(true, lifetime.ElapsedMilliseconds)) {
-                if (input.ReleaseGraceExceeded)
+            if (mayStop) {
+                if (releaseExceeded)
                     failure = "CAPTURE_INPUT_RELEASE: Selection stopped while a button or Escape was still held. Release it before retrying; no screenshot was taken.";
                 ExitThread();
             }
-        } else if (renderedHighlight != state.Highlighted || renderedSelection != state.Selected) {
-            renderedHighlight = state.Highlighted; renderedSelection = state.Selected;
-            foreach (CaptureOverlay overlay in overlays) overlay.Invalidate();
+        } else if (raise || renderedHighlight != highlighted || renderedSelection != selected) {
+            renderedHighlight = highlighted; renderedSelection = selected;
+            try { foreach (CaptureOverlay overlay in overlays) overlay.Present(highlighted, selected, raise); }
+            catch (Exception error) {
+                failure = error is InvalidOperationException && error.Message.StartsWith("CAPTURE_", StringComparison.Ordinal)
+                    ? error.Message : "CAPTURE_OVERLAY: Windows could not update the selection border; no screenshot was taken.";
+                lock (selectionGate) state.Cancel();
+            }
+            if (raise) lastRaise = elapsed;
         }
     }
     void DisplaysChanged(object sender, EventArgs args) {
@@ -771,15 +1013,12 @@ sealed class RegionPicker : ApplicationContext {
         if (cleaned) return;
         cleaned = true;
         timer.Stop();
-        if (hook != IntPtr.Zero) {
-            if (!UnhookWindowsHookEx(hook)) failure = "CAPTURE_INPUT: Windows could not stop region selection; no screenshot was taken.";
-            hook = IntPtr.Zero;
+        if (inputPump != null) {
+            if (!inputPump.Stop()) failure = "CAPTURE_INPUT: Windows could not stop the selection input listener; no screenshot was taken.";
+            else if (inputPump.Failure != null) failure = inputPump.Failure;
+            inputPump.Dispose(); inputPump = null;
         }
-        if (keyboardHook != IntPtr.Zero) {
-            if (!UnhookWindowsHookEx(keyboardHook)) failure = "CAPTURE_INPUT: Windows could not stop Escape cancellation; no screenshot was taken.";
-            keyboardHook = IntPtr.Zero;
-        }
-        foreach (CaptureOverlay overlay in overlays) { overlay.Hide(); overlay.Close(); overlay.Dispose(); }
+        foreach (CaptureOverlay overlay in overlays) overlay.Dispose();
     }
     protected override void Dispose(bool disposing) {
         if (disposing) {

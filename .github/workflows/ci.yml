@@ -122,6 +122,11 @@ jobs:
         timeout-minutes: 5
         shell: powershell
         run: powershell.exe -NoProfile -STA -ExecutionPolicy Bypass -File tests/windows-application-smoke.ps1 -ApplicationPath src-tauri/target/release/echolingo.exe
+      - name: Windows popup outside-click and focus integration smoke
+        if: runner.os == 'Windows'
+        timeout-minutes: 5
+        shell: powershell
+        run: powershell.exe -NoProfile -STA -ExecutionPolicy Bypass -File tests/windows-popup-visibility-smoke.ps1 -ApplicationPath src-tauri/target/release/echolingo.exe -IsolatedTestSession
       - name: Windows installed NSIS real offline-model acceptance
         if: runner.os == 'Windows'
         timeout-minutes: 25
