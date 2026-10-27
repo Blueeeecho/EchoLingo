@@ -66,7 +66,10 @@ async function prepare(page,test,tag){
       if(test.method==='actual-mouse-drag'){
         const text=target.firstChild,first=document.createRange(),last=document.createRange();first.setStart(text,0);first.setEnd(text,1);last.setStart(text,text.length-1);last.setEnd(text,text.length);const a=first.getBoundingClientRect(),b=last.getBoundingClientRect();return {mouse:{x1:a.left+.5,y1:a.top+a.height/2,x2:b.right-.5,y2:b.top+b.height/2},hasFocus:document.hasFocus()};
       }
-      window.getSelection().addRange(range);
+      // Focusing an editable host can create a collapsed caret range. Replace
+      // that setup range explicitly; Chromium only supports one DOM range.
+      // This is the declared programmatic setup, never a mouse-selection fix.
+      window.getSelection().removeAllRanges();window.getSelection().addRange(range);
     }
     return {hasFocus:document.hasFocus()};
   },{test,tag});

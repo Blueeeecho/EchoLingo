@@ -79,14 +79,14 @@ public static class WindowsSelectionNotepadFixture {
     static void StopNotepad(){if(Notepad==null||Notepad.HasExited)return;Notepad.Kill();Need(Notepad.WaitForExit(5000),"OWN_NOTEPAD_REMAINED");}
     sealed class Mock:IDisposable {
         public const string Result="GENERATED_NOTEPAD_TRANSLATION_68241";
-        readonly TcpListener listener=new TcpListener(IPAddress.Loopback,0);readonly Thread thread;volatile bool stop;public volatile string Error;int count;
+        readonly TcpListener listener=new TcpListener(IPAddress.Loopback,0);readonly Thread thread;volatile bool stop;public volatile string Error,CleanupError;int count;
         public Mock(){listener.Start();thread=new Thread(Loop);thread.IsBackground=true;thread.Start();}
         public string Url {get{return "http://127.0.0.1:"+((IPEndPoint)listener.LocalEndpoint).Port;}}
         public int Count {get{return Interlocked.CompareExchange(ref count,0,0);}}
         void Loop(){while(!stop){try{using(TcpClient client=listener.AcceptTcpClient()){
             client.ReceiveTimeout=5000;client.SendTimeout=5000;NetworkStream stream=client.GetStream();List<byte> headers=new List<byte>();bool complete=false;while(headers.Count<16384){int b=stream.ReadByte();Need(b>=0,"MOCK_TRUNCATED_HEADERS");headers.Add((byte)b);int n=headers.Count;if(n>=4&&headers[n-4]==13&&headers[n-3]==10&&headers[n-2]==13&&headers[n-1]==10){complete=true;break;}}Need(complete,"MOCK_HEADER_BOUND");string head=Encoding.ASCII.GetString(headers.ToArray());Need(head.StartsWith("POST /translate HTTP/1.1\r\n",StringComparison.Ordinal),"MOCK_ROUTE");int length=-1;foreach(string line in head.Split(new string[]{"\r\n"},StringSplitOptions.None)){Need(!line.StartsWith("Authorization:",StringComparison.OrdinalIgnoreCase),"MOCK_CREDENTIAL_FORBIDDEN");if(line.StartsWith("Content-Length:",StringComparison.OrdinalIgnoreCase))length=Int32.Parse(line.Substring(15).Trim());}Need(length>=0&&length<=65536,"MOCK_BODY_BOUND");byte[] bytes=new byte[length];int offset=0;while(offset<length){int n=stream.Read(bytes,offset,length-offset);Need(n>0,"MOCK_TRUNCATED_BODY");offset+=n;}Dictionary<string,object> body=new JavaScriptSerializer().Deserialize<Dictionary<string,object>>(Encoding.UTF8.GetString(bytes));Need((string)body["q"]==Expected&&(string)body["target"]=="zh","NON_GENERATED_REQUEST_REJECTED");Need(!body.ContainsKey("api_key")||String.IsNullOrEmpty(body["api_key"] as string),"MOCK_KEY_FORBIDDEN");Interlocked.Increment(ref count);byte[] reply=Encoding.UTF8.GetBytes("{\"translatedText\":\""+Result+"\"}");byte[] prefix=Encoding.ASCII.GetBytes("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nConnection: close\r\nContent-Length: "+reply.Length+"\r\n\r\n");stream.Write(prefix,0,prefix.Length);stream.Write(reply,0,reply.Length);stream.Flush();
         }}catch(Exception e){if(!stop)Error="MOCK_FAILURE:"+e.GetType().Name+":"+e.Message;}}}
-        public void Dispose(){stop=true;listener.Stop();Need(thread.Join(6000),"MOCK_THREAD_NOT_STOPPED");}
+        public void Dispose(){stop=true;try{listener.Stop();if(!thread.Join(6000))CleanupError="MOCK_THREAD_NOT_STOPPED";}catch(Exception e){CleanupError="MOCK_STOP:"+e.GetType().Name;}/* Preserve an in-flight primary exception. */}
     }
     public static Dictionary<string,object> Run(string executable){
         Report=new Dictionary<string,object>{{"ok",false},{"inconclusive",false},{"requiredCases",1},{"executedCases",0},{"passedCases",0},{"actualApplicationTested",false},{"actualNotepadTested",false},{"actualHotkeysSent",0},{"sameActionRetries",0},{"sourceProcessIndependent",false},{"fakeIpcUsed",false},{"directHelperInvoked",false},{"translationBackend","loopback-mock"},{"userContentRead",false},{"browserTested",false},{"physicalWindows11Tested",false},{"credentialsCreated",false},{"selectionMethod","actual-SendInput-Ctrl+A"},{"notepadScope","Classic System32 Notepad only; Store/launcher PID transfer is inconclusive"}};
@@ -110,6 +110,7 @@ public static class WindowsSelectionNotepadFixture {
             }
         } catch(Unavailable e){Report["inconclusive"]=true;Report["error"]=e.Message;}catch(Exception e){Report["error"]=e.Message;Report["errorType"]=e.GetType().Name;}
         finally {
+            if(Server!=null&&Server.CleanupError!=null){Report["ok"]=false;Report["mockCleanupError"]=Server.CleanupError;}
             // Release only keys emitted by this fixture, while one of its two
             // known windows still owns the foreground. Never touch another app.
             IntPtr foreground=GetForegroundWindow();if(foreground==Source||(Main!=IntPtr.Zero&&foreground==Main))SendInput(4,new INPUT[]{Key(0x12,true),Key(0x44,true),Key(0x11,true),Key(0x41,true)},Marshal.SizeOf(typeof(INPUT)));
