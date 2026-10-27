@@ -149,13 +149,39 @@
       "baseline": "passed",
       "newActualCtrlC": "CANCELLED; independent copy preserved",
       "samePidBackgroundPublication": "failure; wrongsource and own restoration overwrite"
+    },
+    "browser8eRootContrast": {
+      "run": 40553539117,
+      "source": "8e0184767396ad961f716736b615a2093c01b3ff",
+      "required": 48,
+      "executed": 48,
+      "passed": 47,
+      "coldFirstPassed": 5,
+      "coldFirstRequired": 6,
+      "setupFailures": 0,
+      "preHelperUiaCalls": 0,
+      "clipboardAndForegroundPreserved": true,
+      "rawLogSha256": "a058ca656e7a933c78ac14e3e06f9ca368105dcfb87da25780bfcb40731c9d52",
+      "finding": "source-root UIA FromHandle+sameElementCache did not fix initialPane toGroup mismatch; ineffective prototype reverted",
+      "firstQueryMilliseconds": 2524.881,
+      "firstHelperMilliseconds": 3348.511,
+      "secondQueryMilliseconds": 10.919
     }
   },
   "budgetFixture": {
-    "pureHostCasesPassed": 5,
-    "assertions": 26,
-    "windowsPrivateWorkerCases": 3,
-    "windowsStatus": "not run"
+    "run": 40553539766,
+    "source": "8e0184767396ad961f716736b615a2093c01b3ff",
+    "required": 8,
+    "executed": 8,
+    "passed": 8,
+    "assertions": 42,
+    "scopedQueryMilliseconds": 2213.9305,
+    "cumulativeQueryMilliseconds": 709.6711,
+    "unscopedQueryMilliseconds": 2005.795,
+    "actualUIAProviderTested": false,
+    "clipboardAccessed": false,
+    "inputSent": false,
+    "hooksInstalled": false
   },
   "diagnosticTimeline": [
     {
@@ -186,5 +212,13 @@
       "passed": 47,
       "finding": "whole selected-text monotonic5000ms budget; first Pane thenGroup identity mismatch retained"
     }
-  ]
+  ],
+  "pendingContrast": {
+    "kind": "native-focus HWND MSAA interface only",
+    "status": "hostchecks and independent review passed; actual cold browser pending",
+    "psSha256": "629e0b40bf031d7af6d6adfa177651b624f5a3ded8e5182d44103e9f4c76e255",
+    "readsMsaaPropertiesFocusSelectionOrChildren": false,
+    "relaxesIdentityGuard": false,
+    "resetsBudget": false
+  }
 }

@@ -399,6 +399,8 @@ public static class EchoLingoNative {
     [DllImport("user32.dll", SetLastError=true)] static extern bool EmptyClipboard();
     [DllImport("user32.dll")] static extern bool CloseClipboard();
     [DllImport("user32.dll")] static extern uint GetWindowThreadProcessId(IntPtr window, out uint process);
+    [DllImport("user32.dll", SetLastError=true)] static extern bool GetGUIThreadInfo(uint thread, ref SelectionGuiInfo info);
+    [DllImport("oleacc.dll", PreserveSig=true)] static extern int AccessibleObjectFromWindow(IntPtr window, uint objectId, ref Guid iid, out IntPtr accessible);
     [DllImport("user32.dll")] static extern uint SendInput(uint count, INPUT[] input, int size);
     [DllImport("user32.dll")] static extern bool SetProcessDpiAwarenessContext(IntPtr context);
     [DllImport("user32.dll")] static extern IntPtr SetThreadDpiAwarenessContext(IntPtr context);
@@ -418,6 +420,11 @@ public static class EchoLingoNative {
     [StructLayout(LayoutKind.Sequential)] struct MOUSEINPUT { public int dx, dy; public uint mouseData, flags, time; public UIntPtr extra; }
     [StructLayout(LayoutKind.Sequential)] struct KEYBDINPUT { public ushort vk, scan; public uint flags, time; public UIntPtr extra; }
     [StructLayout(LayoutKind.Sequential)] struct HARDWAREINPUT { public uint message; public ushort low, high; }
+    [StructLayout(LayoutKind.Sequential)] struct SelectionGuiInfo {
+        public uint size, flags;
+        public IntPtr active, focus, capture, menuOwner, moveSize, caret;
+        public int caretLeft, caretTop, caretRight, caretBottom;
+    }
 
     public static void ConfigureDpi() {
         try { SetProcessDpiAwarenessContext(new IntPtr(-4)); }
@@ -520,6 +527,8 @@ public static class EchoLingoNative {
         public volatile int Stage, Depth;
         public volatile int InitialRoleId, FreshRoleId, InitialIdentityLength, FreshIdentityLength;
         public volatile int IdentityCompared, IdentityEqual, RootWalkReason, ExceptionKind;
+        public volatile int MsaaAttempted, MsaaFocusIsRoot, MsaaHResult, MsaaObjectReturned;
+        public volatile bool MsaaCompleted;
         public volatile bool Abandoned;
         public void Mark(int stage, int depth) { Depth = depth; Stage = stage; }
     }
@@ -624,6 +633,10 @@ public static class EchoLingoNative {
                 CapturePerformance.Set(prefix + "IdentityEqual", trace.IdentityEqual);
                 CapturePerformance.Set(prefix + "RootWalkReason", trace.RootWalkReason);
                 CapturePerformance.Set(prefix + "ExceptionKind", outcomeStage < 0 ? trace.ExceptionKind : outcomeExceptionKind);
+                CapturePerformance.Set(prefix + "MsaaAttempted", trace.MsaaAttempted);
+                CapturePerformance.Set(prefix + "MsaaFocusIsRoot", trace.MsaaFocusIsRoot);
+                if (trace.MsaaCompleted) CapturePerformance.Set(prefix + "MsaaHResult", trace.MsaaHResult);
+                CapturePerformance.Set(prefix + "MsaaObjectReturned", trace.MsaaObjectReturned);
                 if (budget != null) {
                     CapturePerformance.Set(prefix + "BudgetLimitMilliseconds", budget.LimitMilliseconds);
                     CapturePerformance.Set(prefix + "BudgetRemainingAtStartMilliseconds", budgetRemainingAtStart);
@@ -735,43 +748,53 @@ public static class EchoLingoNative {
     static AutomationElement CurrentSelectionFocus(SelectionContext context) {
         List<AutomationElement> ancestors; return CurrentSelectionFocus(context, out ancestors);
     }
-    static void ValidateSelectionSourceRoot(SelectionContext context) {
-        // Validate only the captured source's native root before asking for its
-        // focus. This uses the same query worker/budget and reads no selection,
-        // descendant, or preliminary FocusedElement identity.
+    static void InitializeSelectionClient(SelectionContext context, uint thread, uint process) {
+        // One optional native focused-client interface request on this same MTA
+        // and budget. It does not inspect focus, selection, properties, or children
+        // through MSAA, and never changes the UIA identity binding below.
         RequireSelectionQueryActive();
         IntPtr root = GetAncestor(context.Foreground, 2);
-        uint process; uint thread = GetWindowThreadProcessId(root, out process);
-        if (context.Foreground == IntPtr.Zero || root == IntPtr.Zero || process == 0 || thread == 0
-            || GetForegroundWindow() != context.Foreground)
-            throw new InvalidOperationException("SELECTION: The source window is no longer available; select text and retry.");
+        if (context.Foreground == IntPtr.Zero || root == IntPtr.Zero || thread == 0 || process == 0) return;
+        Action requireSource = delegate {
+            uint currentProcess; uint currentThread = GetWindowThreadProcessId(context.Foreground, out currentProcess);
+            if (GetForegroundWindow() != context.Foreground || GetAncestor(context.Foreground, 2) != root
+                || currentThread != thread || currentProcess != process)
+                throw new OperationCanceledException("CANCELLED: The source window changed during selection initialization.");
+        };
+        requireSource();
+        SelectionGuiInfo before = new SelectionGuiInfo(); before.size = (uint)Marshal.SizeOf(typeof(SelectionGuiInfo));
         SelectionStage(24, 0);
-        AutomationElement source = AutomationElement.FromHandle(root);
-        SelectionStage(25, 0); RequireSelectionQueryActive();
-        if (source == null)
-            throw new InvalidOperationException("SELECTION: The source window accessibility root is unavailable; select text and retry.");
-        SelectionStage(26, 0);
-        source = source.GetUpdatedCache(SelectionCache());
-        SelectionStage(27, 0); RequireSelectionQueryActive();
-        AutomationElement.AutomationElementInformation info = source.Cached;
-        if (info.IsPassword)
-            throw new InvalidOperationException("PROTECTED: Selected text is inside a password control.");
-        uint currentProcess; uint currentThread = GetWindowThreadProcessId(root, out currentProcess);
-        if (new IntPtr(info.NativeWindowHandle) != root || unchecked((uint)info.ProcessId) != process
-            || info.ControlType == null || GetForegroundWindow() != context.Foreground
-            || GetAncestor(context.Foreground, 2) != root || currentProcess != process || currentThread != thread)
-            throw new InvalidOperationException("SELECTION: The source window accessibility root changed; select text and retry.");
-        SelectionStage(28, 0);
+        if (!GetGUIThreadInfo(thread, ref before)) return; // Optional initialization; retain the original UIA path.
+        uint focusProcess; uint focusThread = GetWindowThreadProcessId(before.focus, out focusProcess);
+        requireSource();
+        if (before.focus == IntPtr.Zero || focusThread == 0 || focusProcess != process || GetAncestor(before.focus, 2) != root) return;
+        RequireSelectionQueryActive();
+        if (selectionTrace != null) { selectionTrace.MsaaAttempted = 1; selectionTrace.MsaaFocusIsRoot = before.focus == root ? 1 : 0; }
+        Guid iid = new Guid("618736E0-3C3D-11CF-810C-00AA00389B71"); IntPtr accessible = IntPtr.Zero;
+        SelectionStage(25, 0);
+        try {
+            int result = AccessibleObjectFromWindow(before.focus, 0xFFFFFFFCu, ref iid, out accessible); // OBJID_CLIENT
+            if (selectionTrace != null) { selectionTrace.MsaaHResult = result; selectionTrace.MsaaObjectReturned = accessible != IntPtr.Zero ? 1 : 0; selectionTrace.MsaaCompleted = true; }
+        } finally { if (accessible != IntPtr.Zero) Marshal.Release(accessible); }
+        SelectionStage(26, 0); RequireSelectionQueryActive(); requireSource();
+        SelectionGuiInfo after = new SelectionGuiInfo(); after.size = before.size;
+        if (!GetGUIThreadInfo(thread, ref after))
+            throw new InvalidOperationException("SELECTION: The source focus could not be verified after client initialization.");
+        uint afterProcess; uint afterThread = GetWindowThreadProcessId(after.focus, out afterProcess);
+        if (after.focus != before.focus || afterThread != focusThread || afterProcess != process || GetAncestor(after.focus, 2) != root)
+            throw new OperationCanceledException("CANCELLED: The source focus changed during selection initialization.");
+        requireSource(); RequireSelectionQueryActive(); SelectionStage(27, 0);
+        // Unsupported MSAA, including a null interface, does not reject a UIA-only source.
     }
     static SelectionContext CaptureSelectionContext() {
         try {
             SelectionContext context = new SelectionContext();
             context.Foreground = GetForegroundWindow();
-            uint nativePid; GetWindowThreadProcessId(context.Foreground, out nativePid);
+            uint nativePid; uint nativeThread = GetWindowThreadProcessId(context.Foreground, out nativePid);
             if (nativePid != 0 && nativePid == ExcludedSourceProcessId)
                 throw new InvalidOperationException("NO_SELECTION: EchoLingo is the foreground application.");
             if (nativePid != 0) context.SourceProcesses.Add(unchecked((int)nativePid));
-            ValidateSelectionSourceRoot(context);
+            InitializeSelectionClient(context, nativeThread, nativePid);
             AutomationElement focused = CurrentSelectionFocus(context);
             int process = focused.Cached.ProcessId;
             if (process != 0) context.SourceProcesses.Add(process);

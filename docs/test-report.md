@@ -17,8 +17,9 @@
 | 浏览器cac/40546585120 |改普通FocusedElement→同元素GetUpdatedCache，48实际/47通过，冷5/6；首例2秒截止，其他35正例和12空/password负例通过，所有FG/富clipboard保持 |
 | c74诊断/40548339120 |保留2秒失败后，受控诊断只观察已废弃同一worker：调用2185.9692ms返回，未启动新RPC/未复用结果。不把迟到返回当完整选文成功 |
 | 浏览器810/40550008786 |共享5秒预算，48实际/47通过，冷5/6，0setup失败。首次query1约2297ms成功返回Pane，query2约17ms返回Group，严格身份拒绝；没有超时，不能靠延时宣称修复。剩余预算单调递减，FG/clipboard全保持 |
+| 来源根初始化8e/40553539117 |48/47、冷5/6、0setup失败；新增两次root UIA调用未解决Pane→Group，所有前台/富剪贴板/0copy仍成立。29行无效对照撤回，原红保留 |
 | 剪贴板810/40550008709 |3执行/2通过：基线、实际第二Ctrl+C取消且不覆盖通过；背景同PID发布仍错文+helper恢复覆盖，原始failure保留 |
-| 预算夹具 |5纯逻辑项26断言本机通过；3真实Windows私有worker项尚未执行，不记8/8 |
+| 预算8e/40553539766 |8/8、42断言通过；共享预算允许2213.93ms调用，累计709.67ms截止后不启动新query/迟到RPC，独立标量保留2005.80ms截止。复制在截止后仍先恢复、恢复失败优先、新复制不恢复。全为精确私有worker与模拟策略，不是真实UIA提供者/clipboard/input |
 
 当前没有新版安装器交付。标准clipboard API不能给任意后台发布提供本次Ctrl+C事务身份；现有兼容回退保留此边界。native HWND焦点不覆盖每个DOM变更。实体Win10/11、WPS、IME/多屏/提权窗口未验收；本轮Windows为GitHub-hosted Server桌面。未修改Mac安装、签名、TCC、钥匙串或用户凭据。[精确证据](validation/windows-selection-rigorous-20261028.json)。
 
