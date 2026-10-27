@@ -210,6 +210,46 @@ public static class EchoLingoPopupVisibilitySmoke {
         // shorter than a polling interval. The click must reach the source.
         Send(new INPUT[] { down, up });
     }
+    static Dictionary<string, object> ClickGeneratedBody(Form target, IntPtr app, Func<int> clickCount, Dictionary<string, object> report, string label) {
+        Dictionary<string, object> click = new Dictionary<string, object> { { "case", label }, { "clickPairsSent", 0 }, { "productHiddenObservedAfterClick", false } };
+        if (!report.ContainsKey("generatedClientClicks")) report["generatedClientClicks"] = new List<Dictionary<string, object>>();
+        ((List<Dictionary<string, object>>)report["generatedClientClicks"]).Add(click);
+        POINT point = new POINT(); IntPtr expected = IntPtr.Zero;
+        Ui(target, delegate {
+            Require(target.ClientSize.Width > 48 && target.ClientSize.Height > 48, "Generated client is too small for its empty-body click.");
+            // Actual client coordinates, not the form's requested outer Bounds:
+            // WinForms placement, borders and display scaling may differ.
+            Point body = target.PointToScreen(new Point(24, target.ClientSize.Height - 24));
+            point.x = body.X; point.y = body.Y; expected = target.Handle;
+        });
+        Require(IsWindowVisible(app), "Popup was already hidden before the generated outside click; outside behavior not tested.");
+        IntPtr foreground = GetForegroundWindow();
+        Require(foreground == expected || foreground == app, "Neither generated target nor the app is foreground before the outside click; no input sent.");
+        RECT bounds; Require(GetWindowRect(app, out bounds), "Product bounds unavailable before generated outside click.");
+        Require(point.x < bounds.left || point.x >= bounds.right || point.y < bounds.top || point.y >= bounds.bottom,
+            "Generated client point is not outside the actual product bounds; no input sent.");
+        Require(SetCursorPos(point.x, point.y), "Could not position the generated client click.");
+        IntPtr hit = WindowFromPoint(point); uint owner; GetWindowThreadProcessId(hit, out owner);
+        click["screenPoint"] = new int[] { point.x, point.y }; click["expectedTarget"] = WindowIdentityMetadata(expected);
+        click["actualTarget"] = WindowIdentityMetadata(hit);
+        Require(hit == expected && owner == Process.GetCurrentProcess().Id && GetAncestor(hit, 2) == expected,
+            "Generated client click missed its exact Form HWND/PID/root; no input sent.");
+        int before = clickCount(); click["targetMouseDownCountBefore"] = before;
+        click["targetMouseDownCountAfter"] = before;
+        INPUT down = new INPUT(); down.type = 0; down.data.mouse.flags = 2;
+        INPUT up = down; up.data.mouse.flags = 4;
+        Stopwatch watch = Stopwatch.StartNew();
+        Send(new INPUT[] { down, up }); click["clickPairsSent"] = 1;
+        Wait(delegate {
+            int after = clickCount(); click["targetMouseDownCountAfter"] = after;
+            if (!IsWindowVisible(app) && !(bool)click["productHiddenObservedAfterClick"]) {
+                click["productHiddenObservedAfterClick"] = true; click["hiddenObservedMs"] = watch.Elapsed.TotalMilliseconds;
+            }
+            return after > before;
+        }, 2000, "The exact generated target did not observe its mouse-down; input delivery is unproven (see hit-test/count/visibility metadata).");
+        click["targetMouseDownDelivered"] = true;
+        return click;
+    }
     static void DragOwnToolbar(IntPtr app) {
         Require(GetForegroundWindow() == app, "Own input popup is not foreground; toolbar drag aborted.");
         RECT before; Require(GetWindowRect(app, out before), "Own toolbar bounds unavailable.");
@@ -330,9 +370,10 @@ public static class EchoLingoPopupVisibilitySmoke {
             SetProcessDpiAwarenessContext(new IntPtr(-4));
             Require(Screen.PrimaryScreen.Bounds.Width >= 1024 && Screen.PrimaryScreen.Bounds.Height >= 600, "Generated desktop fixture needs at least 1024x600; no product failure inferred.");
             using (Form form = new Form()) using (TextBox source = new TextBox()) {
-                form.Text = "EchoLingo generated visibility source"; form.Bounds = new Rectangle(30, 120, 720, 420);
+                form.Text = "EchoLingo generated visibility source"; form.StartPosition = FormStartPosition.Manual; form.Bounds = new Rectangle(30, 120, 720, 420);
                 source.Multiline = true; source.SetBounds(20, 20, 660, 100); source.Text = "EchoLingo popup visibility generated source 2468";
                 form.Controls.Add(source); int clicksReachedSource = 0; form.MouseDown += delegate { Interlocked.Increment(ref clicksReachedSource); };
+                Func<int> sourceClickCount = delegate { return Interlocked.CompareExchange(ref clicksReachedSource, 0, 0); };
                 bool done = false; Exception failure = null;
                 form.FormClosing += delegate(object sender, FormClosingEventArgs args) { if (!done) args.Cancel = true; };
                 form.Shown += delegate {
@@ -420,10 +461,11 @@ public static class EchoLingoPopupVisibilitySmoke {
                             sourceFocus(); Shortcut(form, 0x44);
                             Wait(delegate { return IsWindowVisible(main); }, 12000, "Selected-text popup did not show."); moveApp();
                             Require(GetForegroundWindow() == form.Handle, "Passive selected-text popup stole source foreground.");
-                            int before = clicksReachedSource; Stopwatch outside = Stopwatch.StartNew();
-                            Click(55, 500, form, main, true);
+                            Stopwatch outside = Stopwatch.StartNew();
+                            Dictionary<string, object> passiveClick = ClickGeneratedBody(form, main, sourceClickCount, report, "passive-selected-text-outside-click");
                             Wait(delegate { return !IsWindowVisible(main); }, 2000, "Short source click failed to hide unpinned popup.");
-                            Wait(delegate { return clicksReachedSource > before; }, 2000, "Outside observer swallowed the source click.");
+                            passiveClick["productHiddenObservedAfterClick"] = true;
+                            report["passiveOutsideHideObserved"] = true; report["passiveSourceClickDelivered"] = true;
                             report["passiveOutsideClickPassed"] = true; report["outsideHideObservedMs"] = outside.ElapsedMilliseconds;
                             stage = "explicit-input-inside-retention";
                             sourceFocus(); Shortcut(form, 0x41);
@@ -437,6 +479,7 @@ public static class EchoLingoPopupVisibilitySmoke {
                             moveApp(); ResizeOwnEdge(main); report["actualEdgeResizeRetainedPassed"] = true;
                             stage = "actual-owned-native-window";
                             using (Form ownedDialog = new Form()) {
+                                int ownedClicks = 0; ownedDialog.MouseDown += delegate { Interlocked.Increment(ref ownedClicks); };
                                 Ui(form, delegate {
                                     ownedDialog.Text = "EchoLingo generated native owned-window fixture";
                                     ownedDialog.StartPosition = FormStartPosition.Manual; ownedDialog.Bounds = new Rectangle(30, 360, 240, 140);
@@ -444,7 +487,7 @@ public static class EchoLingoPopupVisibilitySmoke {
                                 });
                                 Wait(delegate { return GetForegroundWindow() == ownedDialog.Handle; }, 2000, "Generated owned window did not gain focus.");
                                 Require(GetAncestor(ownedDialog.Handle, 3) == main, "Generated owned window has no actual app-root ownership; case not tested.");
-                                Click(60, 450, ownedDialog, main, true); Thread.Sleep(150);
+                                ClickGeneratedBody(ownedDialog, main, delegate { return Interlocked.CompareExchange(ref ownedClicks, 0, 0); }, report, "actual-owned-native-window"); Thread.Sleep(150);
                                 Require(IsWindowVisible(main), "Clicking an actual owned window dismissed its popup owner.");
                                 report["generatedNativeOwnedWindowRetainedPassed"] = true;
                                 Ui(form, delegate { ownedDialog.Close(); });
@@ -455,16 +498,16 @@ public static class EchoLingoPopupVisibilitySmoke {
                             stage = "pin-outside-retention";
                             Shortcut(form, 0x41); Wait(delegate { return IsWindowVisible(main); }, 5000, "Pin test input did not show."); moveApp();
                             Invoke(main, "\u9489\u4f4f\u7a97\u53e3"); Wait(delegate { return Element(main, "\u53d6\u6d88\u9489\u4f4f") != null; }, 5000, "Pin state did not update.");
-                            sourceFocus(); Click(55, 500, form, main, true); Thread.Sleep(250);
+                            sourceFocus(); ClickGeneratedBody(form, main, sourceClickCount, report, "pin-outside-retention"); Thread.Sleep(250);
                             Require(IsWindowVisible(main), "Pinned popup hid on outside click/focus loss."); report["pinnedOutsideRetainedPassed"] = true;
                             Invoke(main, "\u53d6\u6d88\u9489\u4f4f"); Wait(delegate { return Element(main, "\u9489\u4f4f\u7a97\u53e3") != null; }, 5000, "Unpin state did not update.");
-                            Click(55, 500, form, main, true); Wait(delegate { return !IsWindowVisible(main); }, 2000, "Unpinned popup did not resume outside dismissal.");
+                            ClickGeneratedBody(form, main, sourceClickCount, report, "unpin-outside-hide"); Wait(delegate { return !IsWindowVisible(main); }, 2000, "Unpinned popup did not resume outside dismissal.");
                             report["unpinOutsideHidePassed"] = true;
                             stage = "management-outside-retention";
                             Shortcut(form, 0x41); Wait(delegate { return IsWindowVisible(main); }, 5000, "Management test input did not show.");
                             Invoke(main, "\u66f4\u591a"); Invoke(main, "\u8bbe\u7f6e");
                             Wait(delegate { return Element(main, "\u8fd4\u56de\u7ffb\u8bd1") != null; }, 5000, "Management did not open.");
-                            sourceFocus(); Click(55, 500, form, main, true); Thread.Sleep(250);
+                            sourceFocus(); ClickGeneratedBody(form, main, sourceClickCount, report, "management-outside-retention"); Thread.Sleep(250);
                             Require(IsWindowVisible(main), "Management view hid on outside interaction."); report["managementOutsideRetainedPassed"] = true;
                             report["corePopupCasesPassed"] = true;
                             // Keep independent launch/handoff acceptance last:
