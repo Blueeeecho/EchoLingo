@@ -9,12 +9,12 @@ on:
         description: Full regression or exact-binary desktop diagnostics
         type: choice
         default: full
-        options: [full, windows-popup-diagnostics, windows-application-diagnostics, windows-input-plane-experiment, windows-native-diagnostics, windows-shortcuts-ui-diagnostics, windows-shortcuts-ui-medium-diagnostics, windows-shortcuts-current-diagnostics, windows-delegated-diagnostics, windows-browser-diagnostics, windows-latest-intent-diagnostics, windows-selection-application-diagnostics, windows-selection-clipboard-diagnostics, windows-selection-notepad-diagnostics, windows-selection-budget-diagnostics]
+        options: [full, windows-popup-diagnostics, windows-application-diagnostics, windows-input-plane-experiment, windows-native-diagnostics, windows-shortcuts-ui-diagnostics, windows-shortcuts-ui-medium-diagnostics, windows-shortcuts-current-diagnostics, windows-shortcuts-workflows-diagnostics, windows-delegated-diagnostics, windows-browser-diagnostics, windows-latest-intent-diagnostics, windows-selection-application-diagnostics, windows-selection-clipboard-diagnostics, windows-selection-notepad-diagnostics, windows-selection-budget-diagnostics]
 permissions:
   contents: read
 jobs:
   desktop:
-    if: github.event.inputs.mode != 'windows-popup-diagnostics' && github.event.inputs.mode != 'windows-application-diagnostics' && github.event.inputs.mode != 'windows-input-plane-experiment' && github.event.inputs.mode != 'windows-native-diagnostics' && github.event.inputs.mode != 'windows-shortcuts-ui-diagnostics' && github.event.inputs.mode != 'windows-shortcuts-ui-medium-diagnostics' && github.event.inputs.mode != 'windows-shortcuts-current-diagnostics' && github.event.inputs.mode != 'windows-delegated-diagnostics' && github.event.inputs.mode != 'windows-browser-diagnostics' && github.event.inputs.mode != 'windows-latest-intent-diagnostics' && github.event.inputs.mode != 'windows-selection-application-diagnostics' && github.event.inputs.mode != 'windows-selection-clipboard-diagnostics' && github.event.inputs.mode != 'windows-selection-notepad-diagnostics' && github.event.inputs.mode != 'windows-selection-budget-diagnostics'
+    if: github.event.inputs.mode != 'windows-popup-diagnostics' && github.event.inputs.mode != 'windows-application-diagnostics' && github.event.inputs.mode != 'windows-input-plane-experiment' && github.event.inputs.mode != 'windows-native-diagnostics' && github.event.inputs.mode != 'windows-shortcuts-ui-diagnostics' && github.event.inputs.mode != 'windows-shortcuts-ui-medium-diagnostics' && github.event.inputs.mode != 'windows-shortcuts-current-diagnostics' && github.event.inputs.mode != 'windows-shortcuts-workflows-diagnostics' && github.event.inputs.mode != 'windows-delegated-diagnostics' && github.event.inputs.mode != 'windows-browser-diagnostics' && github.event.inputs.mode != 'windows-latest-intent-diagnostics' && github.event.inputs.mode != 'windows-selection-application-diagnostics' && github.event.inputs.mode != 'windows-selection-clipboard-diagnostics' && github.event.inputs.mode != 'windows-selection-notepad-diagnostics' && github.event.inputs.mode != 'windows-selection-budget-diagnostics'
     strategy:
       fail-fast: false
       matrix:
@@ -383,7 +383,7 @@ jobs:
           }
 
   frontend-interactions:
-    if: github.event.inputs.mode != 'windows-popup-diagnostics' && github.event.inputs.mode != 'windows-application-diagnostics' && github.event.inputs.mode != 'windows-input-plane-experiment' && github.event.inputs.mode != 'windows-native-diagnostics' && github.event.inputs.mode != 'windows-shortcuts-ui-diagnostics' && github.event.inputs.mode != 'windows-shortcuts-ui-medium-diagnostics' && github.event.inputs.mode != 'windows-shortcuts-current-diagnostics' && github.event.inputs.mode != 'windows-delegated-diagnostics' && github.event.inputs.mode != 'windows-browser-diagnostics' && github.event.inputs.mode != 'windows-latest-intent-diagnostics' && github.event.inputs.mode != 'windows-selection-application-diagnostics' && github.event.inputs.mode != 'windows-selection-clipboard-diagnostics' && github.event.inputs.mode != 'windows-selection-notepad-diagnostics' && github.event.inputs.mode != 'windows-selection-budget-diagnostics'
+    if: github.event.inputs.mode != 'windows-popup-diagnostics' && github.event.inputs.mode != 'windows-application-diagnostics' && github.event.inputs.mode != 'windows-input-plane-experiment' && github.event.inputs.mode != 'windows-native-diagnostics' && github.event.inputs.mode != 'windows-shortcuts-ui-diagnostics' && github.event.inputs.mode != 'windows-shortcuts-ui-medium-diagnostics' && github.event.inputs.mode != 'windows-shortcuts-current-diagnostics' && github.event.inputs.mode != 'windows-shortcuts-workflows-diagnostics' && github.event.inputs.mode != 'windows-delegated-diagnostics' && github.event.inputs.mode != 'windows-browser-diagnostics' && github.event.inputs.mode != 'windows-latest-intent-diagnostics' && github.event.inputs.mode != 'windows-selection-application-diagnostics' && github.event.inputs.mode != 'windows-selection-clipboard-diagnostics' && github.event.inputs.mode != 'windows-selection-notepad-diagnostics' && github.event.inputs.mode != 'windows-selection-budget-diagnostics'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -751,7 +751,7 @@ jobs:
 
   windows-shortcuts-ui-diagnostics:
     name: Targeted shortcut UI diagnostics (immutable candidate)
-    if: github.event_name == 'workflow_dispatch' && (github.event.inputs.mode == 'windows-shortcuts-ui-diagnostics' || github.event.inputs.mode == 'windows-shortcuts-ui-medium-diagnostics' || github.event.inputs.mode == 'windows-shortcuts-current-diagnostics')
+    if: github.event_name == 'workflow_dispatch' && (github.event.inputs.mode == 'windows-shortcuts-ui-diagnostics' || github.event.inputs.mode == 'windows-shortcuts-ui-medium-diagnostics' || github.event.inputs.mode == 'windows-shortcuts-current-diagnostics' || github.event.inputs.mode == 'windows-shortcuts-workflows-diagnostics')
     runs-on: windows-latest
     timeout-minutes: 6
     permissions:
@@ -768,7 +768,7 @@ jobs:
           git diff --quiet 0a08830f8286a2d54aa658c8876b013a8b1696b1 HEAD -- src src-tauri resources assets scripts index.html package.json package-lock.json vite.config.ts tsconfig.json tsconfig.node.json .cargo
           if ($LASTEXITCODE -ne 0) { throw 'Application source changed; the 0a08830 binary cannot prove this checkout.' }
       - name: Require production equivalence for current f65 supplement
-        if: github.event.inputs.mode == 'windows-shortcuts-current-diagnostics'
+        if: github.event.inputs.mode == 'windows-shortcuts-current-diagnostics' || github.event.inputs.mode == 'windows-shortcuts-workflows-diagnostics'
         shell: powershell
         env:
           GH_TOKEN: ${{ github.token }}
@@ -784,8 +784,8 @@ jobs:
       - run: npm ci
       - uses: actions/download-artifact@v4
         with:
-          artifact-ids: ${{ github.event.inputs.mode == 'windows-shortcuts-current-diagnostics' && '12758601917' || '12734022372' }}
-          run-id: ${{ github.event.inputs.mode == 'windows-shortcuts-current-diagnostics' && '40556538469' || '40502410316' }}
+          artifact-ids: ${{ (github.event.inputs.mode == 'windows-shortcuts-current-diagnostics' || github.event.inputs.mode == 'windows-shortcuts-workflows-diagnostics') && '12758601917' || '12734022372' }}
+          run-id: ${{ (github.event.inputs.mode == 'windows-shortcuts-current-diagnostics' || github.event.inputs.mode == 'windows-shortcuts-workflows-diagnostics') && '40556538469' || '40502410316' }}
           github-token: ${{ github.token }}
           path: shortcut-candidate-evidence
           merge-multiple: true
@@ -797,7 +797,7 @@ jobs:
           if ($candidateFiles.Count -ne 1) { throw 'Expected exactly one stage executable in the exact source-run artifact.' }
           $candidatePath = $candidateFiles[0].FullName
           $candidateHash = (Get-FileHash -LiteralPath $candidatePath -Algorithm SHA256).Hash.ToLowerInvariant()
-          $current = '${{ github.event.inputs.mode }}' -eq 'windows-shortcuts-current-diagnostics'
+          $current = '${{ github.event.inputs.mode }}' -eq 'windows-shortcuts-current-diagnostics' -or '${{ github.event.inputs.mode }}' -eq 'windows-shortcuts-workflows-diagnostics'
           $expectedBytes = if ($current) { 5825536 } else { 5717504 }
           $expectedHash = if ($current) { '3e767c7046adcf8ef6b137f5811b0966efc8613f671f1f3d575f185b3c074539' } else { '046a33fd4498e7ef2e14a49f694f0a1fa9e6e2af1805d1538358e8bcfce77090' }
           if ($candidateFiles[0].Length -ne $expectedBytes -or $candidateHash -ne $expectedHash) { throw 'Exact stage executable identity mismatch.' }
@@ -818,6 +818,7 @@ jobs:
           "path=$candidatePath" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
       - name: Run original actual shortcut UI interactions with bounded diagnostics
         id: shortcuts_ui
+        if: github.event.inputs.mode != 'windows-shortcuts-workflows-diagnostics'
         continue-on-error: true
         timeout-minutes: 4
         shell: powershell
@@ -843,7 +844,7 @@ jobs:
           }
           exit $fixtureExit
       - name: Loaded custom bindings execute selected-text and native OCR
-        if: github.event.inputs.mode == 'windows-shortcuts-current-diagnostics'
+        if: github.event.inputs.mode == 'windows-shortcuts-current-diagnostics' || github.event.inputs.mode == 'windows-shortcuts-workflows-diagnostics'
         id: custom
         continue-on-error: true
         timeout-minutes: 3
@@ -873,7 +874,9 @@ jobs:
           [ordered]@{ scope = 'targeted-shortcut-ui-only'; shortcutUi = $outcome } | ConvertTo-Json -Compress
           $custom = '${{ steps.custom.outcome }}'
           [ordered]@{ scope = 'Configured custom-key real workflows; separate from UI save/restart checks'; customShortcutWorkflows = $custom } | ConvertTo-Json -Compress
-          if ($outcome -ne 'success' -or ('${{ github.event.inputs.mode }}' -eq 'windows-shortcuts-current-diagnostics' -and $custom -ne 'success')) { throw 'Targeted actual shortcut UI or configured workflows incomplete or failed.' }
+          $workflowOnly = '${{ github.event.inputs.mode }}' -eq 'windows-shortcuts-workflows-diagnostics'
+          $customRequired = $workflowOnly -or '${{ github.event.inputs.mode }}' -eq 'windows-shortcuts-current-diagnostics'
+          if ((-not $workflowOnly -and $outcome -ne 'success') -or ($customRequired -and $custom -ne 'success')) { throw 'Required actual shortcut UI or configured workflows incomplete or failed.' }
 
   windows-browser-diagnostics:
     name: Actual installed browser selected-text diagnostics (${{ matrix.browser_order }})
