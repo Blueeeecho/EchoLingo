@@ -583,7 +583,8 @@ public static class EchoLingoNative {
             }
             CacheRequest cache = SelectionCache(); AutomationElement focused;
             SelectionStage(2, 0);
-            using (cache.Activate()) focused = SelectionCopyPolicy.RequireFocus(AutomationElement.FocusedElement);
+            focused = SelectionCopyPolicy.RequireFocus(AutomationElement.FocusedElement);
+            focused = focused.GetUpdatedCache(cache);
             RequireSelectionQueryActive(); int roleId = 0;
             // Cached role reads add no provider RPC. Diagnostic unavailability
             // must not become a new acquisition failure or weaken a guard.
