@@ -337,9 +337,14 @@ mod tests {
     }
 
     #[test]
-    fn all_function_keys_from_f1_to_f24_can_be_used_without_other_modifiers() {
+    fn available_function_keys_can_be_used_without_other_modifiers() {
         for number in 1..=24 {
             let value = format!("F{number}");
+            if cfg!(target_os = "windows") && number == 12 {
+                assert!(normalized(&only(&value)).unwrap_err().contains("F12"));
+                assert!(parsed(&only(&value)).is_err());
+                continue;
+            }
             assert_eq!(normalized(&only(&value)).unwrap().selection, value);
             assert_eq!(parsed(&only(&value)).unwrap().len(), 1);
         }
