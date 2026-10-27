@@ -9,12 +9,12 @@ on:
         description: Full regression or exact-binary desktop diagnostics
         type: choice
         default: full
-        options: [full, windows-popup-diagnostics, windows-application-diagnostics, windows-input-plane-experiment, windows-native-diagnostics, windows-shortcuts-ui-diagnostics, windows-shortcuts-ui-medium-diagnostics, windows-delegated-diagnostics, windows-browser-diagnostics, windows-latest-intent-diagnostics, windows-selection-application-diagnostics, windows-selection-clipboard-diagnostics, windows-selection-notepad-diagnostics]
+        options: [full, windows-popup-diagnostics, windows-application-diagnostics, windows-input-plane-experiment, windows-native-diagnostics, windows-shortcuts-ui-diagnostics, windows-shortcuts-ui-medium-diagnostics, windows-delegated-diagnostics, windows-browser-diagnostics, windows-latest-intent-diagnostics, windows-selection-application-diagnostics, windows-selection-clipboard-diagnostics, windows-selection-notepad-diagnostics, windows-selection-budget-diagnostics]
 permissions:
   contents: read
 jobs:
   desktop:
-    if: github.event.inputs.mode != 'windows-popup-diagnostics' && github.event.inputs.mode != 'windows-application-diagnostics' && github.event.inputs.mode != 'windows-input-plane-experiment' && github.event.inputs.mode != 'windows-native-diagnostics' && github.event.inputs.mode != 'windows-shortcuts-ui-diagnostics' && github.event.inputs.mode != 'windows-shortcuts-ui-medium-diagnostics' && github.event.inputs.mode != 'windows-delegated-diagnostics' && github.event.inputs.mode != 'windows-browser-diagnostics' && github.event.inputs.mode != 'windows-latest-intent-diagnostics' && github.event.inputs.mode != 'windows-selection-application-diagnostics' && github.event.inputs.mode != 'windows-selection-clipboard-diagnostics' && github.event.inputs.mode != 'windows-selection-notepad-diagnostics'
+    if: github.event.inputs.mode != 'windows-popup-diagnostics' && github.event.inputs.mode != 'windows-application-diagnostics' && github.event.inputs.mode != 'windows-input-plane-experiment' && github.event.inputs.mode != 'windows-native-diagnostics' && github.event.inputs.mode != 'windows-shortcuts-ui-diagnostics' && github.event.inputs.mode != 'windows-shortcuts-ui-medium-diagnostics' && github.event.inputs.mode != 'windows-delegated-diagnostics' && github.event.inputs.mode != 'windows-browser-diagnostics' && github.event.inputs.mode != 'windows-latest-intent-diagnostics' && github.event.inputs.mode != 'windows-selection-application-diagnostics' && github.event.inputs.mode != 'windows-selection-clipboard-diagnostics' && github.event.inputs.mode != 'windows-selection-notepad-diagnostics' && github.event.inputs.mode != 'windows-selection-budget-diagnostics'
     strategy:
       fail-fast: false
       matrix:
@@ -273,17 +273,33 @@ jobs:
           $output | Out-File "$env:RUNNER_TEMP/echolingo-selection-rigorous.log" -Encoding utf8
           $output | Write-Output
           exit $fixtureExit
-      - name: Windows exact query-worker and copy-ticket regressions
+      - name: Windows exact query-worker, copy-ticket and shared-budget regressions
         id: windows_selection_internals
         if: runner.os == 'Windows'
         continue-on-error: true
         timeout-minutes: 2
         shell: powershell
         run: |
-          & powershell.exe -NoProfile -STA -ExecutionPolicy Bypass -File tests/windows-selection-query-smoke.ps1 -NativeAssemblyPath '${{ steps.windows_native_candidate.outputs.path }}' -IsolatedTestSession
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          & powershell.exe -NoProfile -STA -ExecutionPolicy Bypass -File tests/windows-selection-copy-ticket-smoke.ps1
-          exit $LASTEXITCODE
+          $ErrorActionPreference = 'Continue'
+          # Every fixture gets a fresh process; a deliberately poisoned worker
+          # must never carry over into another independent regression.
+          $global:LASTEXITCODE = 1
+          $budgetOutput = @(& powershell.exe -NoProfile -STA -ExecutionPolicy Bypass -File tests/windows-selection-budget-smoke.ps1 -NativeAssemblyPath '${{ steps.windows_native_candidate.outputs.path }}' 2>&1)
+          $budgetExit = $LASTEXITCODE
+          $budgetOutput | Out-File "$env:RUNNER_TEMP/echolingo-selection-budget.log" -Encoding utf8
+          $budgetOutput | Write-Output
+          $global:LASTEXITCODE = 1
+          $queryOutput = @(& powershell.exe -NoProfile -STA -ExecutionPolicy Bypass -File tests/windows-selection-query-smoke.ps1 -NativeAssemblyPath '${{ steps.windows_native_candidate.outputs.path }}' -IsolatedTestSession 2>&1)
+          $queryExit = $LASTEXITCODE
+          $queryOutput | Out-File "$env:RUNNER_TEMP/echolingo-selection-query.log" -Encoding utf8
+          $queryOutput | Write-Output
+          $global:LASTEXITCODE = 1
+          $ticketOutput = @(& powershell.exe -NoProfile -STA -ExecutionPolicy Bypass -File tests/windows-selection-copy-ticket-smoke.ps1 2>&1)
+          $ticketExit = $LASTEXITCODE
+          $ticketOutput | Out-File "$env:RUNNER_TEMP/echolingo-selection-copy-ticket.log" -Encoding utf8
+          $ticketOutput | Write-Output
+          [ordered]@{ selectionBudgetExit = $budgetExit; selectionQueryExit = $queryExit; copyTicketExit = $ticketExit; expectedBudgetCases = 8 } | ConvertTo-Json -Compress
+          if ($budgetExit -ne 0 -or $queryExit -ne 0 -or $ticketExit -ne 0) { throw 'Windows selection internal regressions failed or were incomplete.' }
       - name: Windows installed NSIS real offline-model acceptance
         id: windows_installed_offline
         if: runner.os == 'Windows'
@@ -306,6 +322,9 @@ jobs:
             ${{ runner.temp }}/echolingo-selection-document.log
             ${{ runner.temp }}/echolingo-application-latest-intent.log
             ${{ runner.temp }}/echolingo-selection-rigorous.log
+            ${{ runner.temp }}/echolingo-selection-budget.log
+            ${{ runner.temp }}/echolingo-selection-query.log
+            ${{ runner.temp }}/echolingo-selection-copy-ticket.log
             ${{ runner.temp }}/EchoLingo-offline-engine-source.zip
             resources/offline-translation/manifest.json
             src-tauri/target/release/echolingo.exe
@@ -346,7 +365,7 @@ jobs:
           }
 
   frontend-interactions:
-    if: github.event.inputs.mode != 'windows-popup-diagnostics' && github.event.inputs.mode != 'windows-application-diagnostics' && github.event.inputs.mode != 'windows-input-plane-experiment' && github.event.inputs.mode != 'windows-native-diagnostics' && github.event.inputs.mode != 'windows-shortcuts-ui-diagnostics' && github.event.inputs.mode != 'windows-shortcuts-ui-medium-diagnostics' && github.event.inputs.mode != 'windows-delegated-diagnostics' && github.event.inputs.mode != 'windows-browser-diagnostics' && github.event.inputs.mode != 'windows-latest-intent-diagnostics' && github.event.inputs.mode != 'windows-selection-application-diagnostics' && github.event.inputs.mode != 'windows-selection-clipboard-diagnostics' && github.event.inputs.mode != 'windows-selection-notepad-diagnostics'
+    if: github.event.inputs.mode != 'windows-popup-diagnostics' && github.event.inputs.mode != 'windows-application-diagnostics' && github.event.inputs.mode != 'windows-input-plane-experiment' && github.event.inputs.mode != 'windows-native-diagnostics' && github.event.inputs.mode != 'windows-shortcuts-ui-diagnostics' && github.event.inputs.mode != 'windows-shortcuts-ui-medium-diagnostics' && github.event.inputs.mode != 'windows-delegated-diagnostics' && github.event.inputs.mode != 'windows-browser-diagnostics' && github.event.inputs.mode != 'windows-latest-intent-diagnostics' && github.event.inputs.mode != 'windows-selection-application-diagnostics' && github.event.inputs.mode != 'windows-selection-clipboard-diagnostics' && github.event.inputs.mode != 'windows-selection-notepad-diagnostics' && github.event.inputs.mode != 'windows-selection-budget-diagnostics'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -950,3 +969,40 @@ jobs:
           $outcome = '${{ steps.race.outcome }}'
           [ordered]@{ scope = 'Actual production helper against generated same-source clipboard publications'; race = $outcome } | ConvertTo-Json -Compress
           if ($outcome -ne 'success') { throw 'Clipboard race behavior failed or was inconclusive.' }
+
+  windows-selection-budget-diagnostics:
+    name: Windows selection budget internals (exact native DLL)
+    if: github.event_name == 'workflow_dispatch' && github.event.inputs.mode == 'windows-selection-budget-diagnostics'
+    runs-on: windows-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - name: Compile exact production native helper
+        shell: powershell
+        run: powershell.exe -NoProfile -STA -ExecutionPolicy Bypass -File scripts/build-windows-native-helper.ps1 -HelperPath src-tauri/native/windows.ps1 -OutputPath "$env:RUNNER_TEMP/echolingo-selection-budget-native.dll"
+      - name: Shared budget and owned-copy cleanup regressions in a fresh process
+        id: budget
+        continue-on-error: true
+        timeout-minutes: 2
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Continue'
+          $global:LASTEXITCODE = 1
+          $output = @(& powershell.exe -NoProfile -STA -ExecutionPolicy Bypass -File tests/windows-selection-budget-smoke.ps1 -NativeAssemblyPath "$env:RUNNER_TEMP/echolingo-selection-budget-native.dll" 2>&1)
+          $fixtureExit = $LASTEXITCODE
+          $output | Out-File "$env:RUNNER_TEMP/echolingo-selection-budget.log" -Encoding utf8
+          $output | Write-Output
+          exit $fixtureExit
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: EchoLingo-Windows-selection-budget
+          if-no-files-found: warn
+          path: ${{ runner.temp }}/echolingo-selection-budget.log
+      - name: Gate raw selection-budget outcome
+        if: always()
+        shell: powershell
+        run: |
+          $outcome = '${{ steps.budget.outcome }}'
+          [ordered]@{ scope = 'Exact private budget/query and synthetic copy-policy regression; no actual UIA provider, clipboard or application acceptance'; budget = $outcome } | ConvertTo-Json -Compress
+          if ($outcome -ne 'success') { throw 'Selection-budget internals failed or were incomplete.' }

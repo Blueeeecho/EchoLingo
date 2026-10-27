@@ -1,10 +1,10 @@
 {
   "updated": "2026-10-28 Asia/Shanghai",
-  "candidate": "4385e3448d2c56df4575a0a991b0f6a271bfd708",
-  "status": "Candidate4385 runtime FAILED: cold first browser 6/6 fail; copy2/3 with known background publication red; full build pending",
+  "candidate": "810563be38f660f5042754a3ee611416c0328250",
+  "status": "Not accepted: browser47/48, cold5/6; background clipboard publication red; root validation prototype pending",
   "environment": "GitHub-hosted Windows Server desktop; not physical Win10/11",
   "productionFiles": {
-    "src-tauri/native/windows.ps1": "4101ab36af777c303751117e0c5115b56cd29b0ab21f8ded49b394fdad83737a",
+    "src-tauri/native/windows.ps1": "093f5910619dfbed9b8f8b1f60b5066e19e7b751ffa120a2c5c4fcfe8a9796d7",
     "src-tauri/src/main.rs": "2d90d96b7907f45b2108b8d3bd6c0bc79a50abed14a38b5a87e414f530f20060",
     "src-tauri/src/platform.rs": "9697e36d255d43b77b5a2c2c323661194119ed126ce369054d99e2e32d54101b",
     "tests/frontend-interactions.mjs": "94583b8186dbc5512c9caf5abebd837cff44552f6b0a179f79890a8fcf7528da"
@@ -103,7 +103,88 @@
     },
     "full": {
       "run": 40544606324,
-      "status": "pending"
+      "status": "failure",
+      "rawGates": 11,
+      "successfulGates": 9,
+      "failedGates": [
+        "shortcutsUi preparation before actual case",
+        "selectionRigorous old fixture11/16"
+      ],
+      "windowsRustPassed": 228,
+      "windowsRustIgnored": 1,
+      "nsisInstalled": true,
+      "realModelCases": 6,
+      "installedAppChains": 3
+    },
+    "immutableAppSupplement": {
+      "run": 40549765310,
+      "fixtureSource": "6300dcf",
+      "productSource": "4385e3448d2c56df4575a0a991b0f6a271bfd708",
+      "sha256": "6684d75fe79f9e1b327c866d459970ef91c726a296397e2626184e70def41bd6",
+      "bytes": 5809152,
+      "cases": 16,
+      "passed": 16,
+      "realMouseSelections": 7,
+      "rebuilt": false,
+      "currentHeadAcceptance": false
+    },
+    "browser810": {
+      "run": 40550008786,
+      "actualHelperCalls": 48,
+      "passed": 47,
+      "coldFirstPassed": 5,
+      "coldFirstRequired": 6,
+      "setupFailures": 0,
+      "allClipboardAndForegroundPreserved": true,
+      "allIdentityGuardsRetained": true,
+      "firstQueryMilliseconds": 2297.4643,
+      "failure": "initialPane50033 thenGroup50026 strict RuntimeId mismatch; not timeout",
+      "scope": "native helper on installed Edge/Chrome; not registered Tauri shortcut",
+      "rawLogSha256": "9e577982e3f2bf5b1176f346456ad91cd1fb99db35537613f6851e895c7b12ce"
+    },
+    "clipboard810": {
+      "run": 40550008709,
+      "executed": 3,
+      "passed": 2,
+      "baseline": "passed",
+      "newActualCtrlC": "CANCELLED; independent copy preserved",
+      "samePidBackgroundPublication": "failure; wrongsource and own restoration overwrite"
     }
-  }
+  },
+  "budgetFixture": {
+    "pureHostCasesPassed": 5,
+    "assertions": 26,
+    "windowsPrivateWorkerCases": 3,
+    "windowsStatus": "not run"
+  },
+  "diagnosticTimeline": [
+    {
+      "source": "11b8e3d",
+      "run": 40545865325,
+      "actual": 48,
+      "passed": 42,
+      "finding": "initialDocument vs actualGroup RuntimeId mismatch"
+    },
+    {
+      "source": "cac0167",
+      "run": 40546585120,
+      "actual": 48,
+      "passed": 47,
+      "finding": "ordinaryFocus then sameElementCache; first system call2s cutoff"
+    },
+    {
+      "source": "c74fb19",
+      "run": 40548339120,
+      "actual": 48,
+      "passed": 47,
+      "finding": "original2s failure retained; abandoned system call returned2185.9692ms; nextRPC not started"
+    },
+    {
+      "source": "810563b",
+      "run": 40550008786,
+      "actual": 48,
+      "passed": 47,
+      "finding": "whole selected-text monotonic5000ms budget; first Pane thenGroup identity mismatch retained"
+    }
+  ]
 }

@@ -735,6 +735,34 @@ public static class EchoLingoNative {
     static AutomationElement CurrentSelectionFocus(SelectionContext context) {
         List<AutomationElement> ancestors; return CurrentSelectionFocus(context, out ancestors);
     }
+    static void ValidateSelectionSourceRoot(SelectionContext context) {
+        // Validate only the captured source's native root before asking for its
+        // focus. This uses the same query worker/budget and reads no selection,
+        // descendant, or preliminary FocusedElement identity.
+        RequireSelectionQueryActive();
+        IntPtr root = GetAncestor(context.Foreground, 2);
+        uint process; uint thread = GetWindowThreadProcessId(root, out process);
+        if (context.Foreground == IntPtr.Zero || root == IntPtr.Zero || process == 0 || thread == 0
+            || GetForegroundWindow() != context.Foreground)
+            throw new InvalidOperationException("SELECTION: The source window is no longer available; select text and retry.");
+        SelectionStage(24, 0);
+        AutomationElement source = AutomationElement.FromHandle(root);
+        SelectionStage(25, 0); RequireSelectionQueryActive();
+        if (source == null)
+            throw new InvalidOperationException("SELECTION: The source window accessibility root is unavailable; select text and retry.");
+        SelectionStage(26, 0);
+        source = source.GetUpdatedCache(SelectionCache());
+        SelectionStage(27, 0); RequireSelectionQueryActive();
+        AutomationElement.AutomationElementInformation info = source.Cached;
+        if (info.IsPassword)
+            throw new InvalidOperationException("PROTECTED: Selected text is inside a password control.");
+        uint currentProcess; uint currentThread = GetWindowThreadProcessId(root, out currentProcess);
+        if (new IntPtr(info.NativeWindowHandle) != root || unchecked((uint)info.ProcessId) != process
+            || info.ControlType == null || GetForegroundWindow() != context.Foreground
+            || GetAncestor(context.Foreground, 2) != root || currentProcess != process || currentThread != thread)
+            throw new InvalidOperationException("SELECTION: The source window accessibility root changed; select text and retry.");
+        SelectionStage(28, 0);
+    }
     static SelectionContext CaptureSelectionContext() {
         try {
             SelectionContext context = new SelectionContext();
@@ -743,6 +771,7 @@ public static class EchoLingoNative {
             if (nativePid != 0 && nativePid == ExcludedSourceProcessId)
                 throw new InvalidOperationException("NO_SELECTION: EchoLingo is the foreground application.");
             if (nativePid != 0) context.SourceProcesses.Add(unchecked((int)nativePid));
+            ValidateSelectionSourceRoot(context);
             AutomationElement focused = CurrentSelectionFocus(context);
             int process = focused.Cached.ProcessId;
             if (process != 0) context.SourceProcesses.Add(process);

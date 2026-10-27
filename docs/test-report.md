@@ -2,18 +2,25 @@
 
 更新时间：2026-10-28，Asia/Shanghai。本报告分别记录本机执行、CI 和真实桌面边界，未运行不算通过。[本轮原始本机证据](validation/macos-preview-20261025.json)。
 
-## 2026-10-28 Alt+D 严格冷启动、精确内容和竞态复核（新候选待验收）
+## 2026-10-28 Alt+D 严格冷启动、精确内容和竞态复核
 
 | 执行 | 原始结果及解释 |
 |---|---|
-| 浏览器653/40541154743 |Edge/Chrome各3fresh进程、48required；30rows含6准备失败，实际helper24次/23通过。Edge冷首次鼠标选区DOM精确却原生UIA超时，其后独立audit159ms正常；禁止预热/强制AX/重试。contenteditable焦点产生的collapsed range使6次setup为空，另18项未执行。修正明确DOM准备后再测，不改原红 |
-| 剪贴板653/40541158106 |3执行/1通过。250ms延迟copy基线成功；背景同PID发布及实际第二Ctrl+C均被当作原选文，helper PID自己恢复旧clipboard、早于源应用后续真实原copy发布，故错文和覆盖均因果确认 |
-| 实际App0e0/40542535831 |15/16执行，raw8pass含1个负向误判，应至多7有效pass。同HWND早期A快捷键已造成B在下一明确B快捷键前产生1mock+1history，负向判定修正为失败。固定empty仍旧source/FGfalse，未注入文字。5鼠标setup失败0hotkey，manual-input超时未分类；不能用setup失败声称产品取词失败或通过 |
-| Notepad830/40542927823及08/40543536555 |均0hotkey，未验收；首次cleanup覆盖主错已修正，第二次保留NOTEPAD_CLASSIC_EDITOR_NOT_UNIQUE+MOCK_THREAD_NOT_STOPPED。不附着其他PID/程序替代真实Notepad，不继续放宽准备门禁 |
-| 候选4385e34本机 |224Rust通过/1引擎专用ignored；76前端单位/类型/构建/完整假IPC UI通过（含pinned blank ACK/立即输入）；完整C#5/net48、PS AST0，原copy policy97断言、新ticket21断言通过。源代码互审无阻断；不代替Windows hook/物理取词 |
-| 新候选实际Windows |浏览器40544606772：48实际helper/42passed/0setupfail，6fresh首例全失败（1timeout/5runtimeidentity阶段快速失败，待进一步诊断）；其余正例30和空/password12全部通过。copy40544607335为2/3，用户第二Ctrl+C安全取消/无覆盖，背景写入仍红。完整CI40544606324运行中。full新增实际单次Alt+D矩阵和精确stage hash/bytes，worker标量测试单独进程，不能为browser UIA预热。结果不得被上方旧case通过覆盖 |
+| 浏览器653/40541154743 |48required；30rows含6准备失败，实际helper24次/23通过，18项未执行。Edge首次真实鼠标选区DOM精确却UIA超时；未预热/强制AX/重试。contenteditable准备修正另测，原红保留 |
+| 剪贴板653/40541158106 |3执行/1通过；背景同PID发布及真实第二Ctrl+C均被误当原选文，helper恢复旧clipboard；后续源实际原copy发布的时序确认覆盖 |
+| 实际App0e0/40542535831 |15/16执行，raw8pass含负向误判，至多7有效pass。同窗口A请求晚读B已产生1请求+1历史；固定empty保留旧文且不聚焦，5鼠标准备失败0hotkey |
+| Notepad830/40542927823、08/40543536555 |均0hotkey，未验收；第二次保留NOTEPAD_CLASSIC_EDITOR_NOT_UNIQUE和独立清理错误，不附着不同PID/替换生成应用冒充 |
+| 候选4385本机 |224Rust/1引擎专用ignored、76前端/类型/构建/完整假IPC UI通过；C#5/net48、PS AST0；不等于真实Windows或物理取词 |
+| full4385/40544606324 |failure保持。11门禁9success/2failure（旧快捷键UI准备0case；当时严格App11/16）。Windows228Rust/1ignored、NSIS安装、6实际模型及3安装后链通过 |
+| 4385严格App补测6300/40549765310 |同一不可变stage SHA6684d75f…bd6/5,809,152B，无重建，16/16通过；7次真实鼠标拖选，单Alt+D精确文本+请求+历史，固定连续更新、空框直接输入、编辑取消、原生焦点变更取消、管理页保留。不是810完整程序验收 |
+| 浏览器4385/40544606772、11b/40545865325 |各48实际/42通过、0setup失败；6fresh首次全失败。11b明确其余快速失败是Document→Group的RuntimeId不等，非异常取ID；6冷启动不算通过 |
+| 浏览器cac/40546585120 |改普通FocusedElement→同元素GetUpdatedCache，48实际/47通过，冷5/6；首例2秒截止，其他35正例和12空/password负例通过，所有FG/富clipboard保持 |
+| c74诊断/40548339120 |保留2秒失败后，受控诊断只观察已废弃同一worker：调用2185.9692ms返回，未启动新RPC/未复用结果。不把迟到返回当完整选文成功 |
+| 浏览器810/40550008786 |共享5秒预算，48实际/47通过，冷5/6，0setup失败。首次query1约2297ms成功返回Pane，query2约17ms返回Group，严格身份拒绝；没有超时，不能靠延时宣称修复。剩余预算单调递减，FG/clipboard全保持 |
+| 剪贴板810/40550008709 |3执行/2通过：基线、实际第二Ctrl+C取消且不覆盖通过；背景同PID发布仍错文+helper恢复覆盖，原始failure保留 |
+| 预算夹具 |5纯逻辑项26断言本机通过；3真实Windows私有worker项尚未执行，不记8/8 |
 
-新修复保留旧任务恢复警告/取消排序，OCR空结果/错误继续保留固定内容；仅Alt+D空选区进入空白编辑器。仅新键盘复制可被票据观察；任意同PID后台clipboard发布的因果来源仍无法由标准owner/sequence识别，此原反例不能声称修好。native HWND焦点也不覆盖所有同HWND DOM选区变化。没有实体Win10/11、WPS、IME/多屏/提权窗口或Mac安装版新验收。[精确证据](validation/windows-selection-rigorous-20261028.json)。
+当前没有新版安装器交付。标准clipboard API不能给任意后台发布提供本次Ctrl+C事务身份；现有兼容回退保留此边界。native HWND焦点不覆盖每个DOM变更。实体Win10/11、WPS、IME/多屏/提权窗口未验收；本轮Windows为GitHub-hosted Server桌面。未修改Mac安装、签名、TCC、钥匙串或用户凭据。[精确证据](validation/windows-selection-rigorous-20261028.json)。
 
 ## 2026-10-28 latest-intent：同一程序的固定连续操作通过，浏览器范围部分待验收
 
