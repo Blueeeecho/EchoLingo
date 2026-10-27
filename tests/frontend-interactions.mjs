@@ -24,6 +24,7 @@ try {
     const fixture = window.__qa = { permissionState: { platform: 'macos', supported: true, identity: 'application-process', runningBundledApp: true, bundleIdentifier: 'io.github.qa.echolingo', processId: 1, accessibilityGranted: false, screenCaptureGranted: false }, permissionReads: 0, permissionRequests: [], permissionSettings: [], holdTranslation: false, releaseTranslation: () => {}, translationError: null, settings: state, saveCalls: 0, keyCalls: 0, ocrKeyCalls: 0, ocrTestCalls: 0, ocrDeleteCalls: 0, credentialWrites: [], settingsWrites: [], hideCalls: 0, layoutCalls: [], showCalls: [], translationRequests: [], dragCalls: 0, holdSave: false, failSave: false, releaseSave: () => {}, emit: (name, payload) => listeners.get(name)?.({ event: name, payload, id: 1 }) };
     Object.assign(fixture, { nextTranslationId: 0, cancellationRequests: [], holdBegin: false, holdBeginBeforeAllocate: false, beginAttempts: [], releaseBegin: () => {}, presentation: { epoch: 0, presented: true }, holdFit: false, fitWaits: 0, releaseFit: () => {}, showPopupAttempts: [], permissionAtShow: [], failPermissionSettings: false, holdPermissionSettings: false, releasePermissionSettings: () => {} });
     Object.assign(fixture, { systemStatus: { platform: 'macos', supported: true, ready: false, requiresSetup: true, status: 'downloadRequired', message: 'QA 语言包尚未准备', minimumVersion: '26.0' }, systemStatusCalls: [], systemPrepareCalls: [], keyDeleteCalls: 0 });
+    Object.assign(fixture, { shortcutLeases: [], nextShortcutLease: 0, holdShortcutBegin: false, releaseShortcutBegin: () => {}, holdShortcutEnd: false, shortcutEndWaits: 0, releaseShortcutEnd: () => {} });
     Object.assign(fixture, { copies: [], spoken: [], permissionOverride: null, managementShows: [] });
     Object.assign(fixture, { credentialStates: {}, credentialReadCalls: 0, translationTestCalls: 0, settingsReads: 0 });
     Object.assign(fixture, { resizeRequests: [], nativeResizeRequests: [], holdResize: false, releaseResize: () => {} });
@@ -104,6 +105,10 @@ try {
           if (fixture.holdPermissionSettings) await new Promise((resolve) => { fixture.releasePermissionSettings = resolve; });
           if (fixture.failPermissionSettings) throw new Error('QA internal permission-link failure detail');
           return;
+        }
+        if (command === 'set_shortcut_recording') {
+          if (args.active) { const id = ++fixture.nextShortcutLease; fixture.shortcutLeases.push({ active: true, id }); if (fixture.holdShortcutBegin) await new Promise(resolve => { fixture.releaseShortcutBegin = resolve; }); return id; }
+          fixture.shortcutLeases.push({ active: false, id: args.leaseId }); if (fixture.holdShortcutEnd) { fixture.shortcutEndWaits++; await new Promise(resolve => { fixture.releaseShortcutEnd = resolve; }); } return args.leaseId;
         }
         if (command === 'diagnostics') return { warnings: [] };
         if (command === 'save_settings') {
@@ -697,6 +702,145 @@ try {
   await page.locator('#cancel-provider-dialog').click();
   await page.evaluate(() => { window.__qa.failSave = false; });
 
+  // Recorder uses an acknowledged bounded native lease; these assertions exercise
+  // the frontend/fake IPC only, not OS-wide shortcut registration.
+  assert.equal(await page.locator('[data-shortcut-record]').count(), 2);
+  await page.locator('[data-shortcut-record="selection"]').click();
+  await page.waitForFunction(() => window.__qa.shortcutLeases.at(-1)?.active === true);
+  await page.locator('#shortcut-feedback').getByText('请按快捷键', { exact: false }).waitFor();
+  await page.keyboard.down('Control'); await page.keyboard.down('Shift'); await page.keyboard.down('t');
+  assert.equal(await page.locator('input[name="selection"]').inputValue(), 'Alt+D');
+  await page.keyboard.up('t'); await page.keyboard.up('Shift'); await page.keyboard.up('Control');
+  await page.waitForFunction(() => document.querySelector('input[name="selection"]').value === 'Ctrl+Shift+T');
+  assert.equal(await page.evaluate(() => window.__qa.shortcutLeases.at(-1).active), false);
+  await page.locator('#save-shortcuts').click();
+  await page.waitForFunction(() => window.__qa.settings.shortcuts.selection === 'Ctrl+Shift+T');
+  // A backend registration/save rejection must retain both the committed
+  // binding and the editable candidate; it must not claim success.
+  await page.locator('input[name="selection"]').fill('Ctrl+Shift+K');
+  await page.evaluate(() => { window.__qa.failSave = true; });
+  await page.locator('#save-shortcuts').click();
+  await page.locator('#shortcut-feedback').getByText('QA save failure', { exact: false }).waitFor();
+  assert.equal(await page.evaluate(() => window.__qa.settings.shortcuts.selection), 'Ctrl+Shift+T');
+  assert.equal(await page.locator('input[name="selection"]').inputValue(), 'Ctrl+Shift+K');
+  assert.equal(await page.locator('#save-shortcuts').isEnabled(), true);
+  await page.evaluate(() => { window.__qa.failSave = false; });
+  // A preference save must not erase a shortcut draft.
+  await page.locator('input[name="selection"]').fill('Ctrl+Shift+Y');
+  await page.locator('#theme-select').selectOption('dark');
+  await page.waitForFunction(() => window.__qa.settings.theme === 'dark');
+  assert.equal(await page.locator('input[name="selection"]').inputValue(), 'Ctrl+Shift+Y');
+  const hideBeforeCancel = await page.evaluate(() => window.__qa.hideCalls);
+  await page.locator('[data-shortcut-record="selection"]').click();
+  await page.locator('#shortcut-feedback').getByText('请按快捷键', { exact: false }).waitFor();
+  await page.keyboard.press('Escape');
+  await page.waitForFunction(() => window.__qa.shortcutLeases.at(-1)?.active === false);
+  assert.equal(await page.evaluate(() => window.__qa.hideCalls), hideBeforeCancel);
+  assert.equal(await page.locator('input[name="selection"]').inputValue(), 'Ctrl+Shift+Y');
+  await page.locator('[data-shortcut-record="silentOcr"]').click();
+  await page.locator('#shortcut-feedback').getByText('请按快捷键', { exact: false }).waitFor();
+  await page.locator('input[name="silentOcr"]').dispatchEvent('keydown', { key: 'Process', code: 'KeyS', keyCode: 229, isComposing: true });
+  await page.locator('#shortcut-feedback').getByText('请先结束输入法组合', { exact: false }).waitFor();
+  await page.locator('input[name="silentOcr"]').dispatchEvent('keyup', { key: 'Process', code: 'KeyS', keyCode: 229, isComposing: true });
+  assert.equal(await page.locator('input[name="silentOcr"]').inputValue(), 'Alt+C');
+  await page.keyboard.press('Escape');
+  await page.waitForFunction(() => window.__qa.shortcutLeases.at(-1)?.active === false);
+  // A delayed end ACK cannot commit a candidate after navigation cancels it.
+  await page.evaluate(() => { window.__qa.holdShortcutEnd = true; });
+  await page.locator('[data-shortcut-record="silentOcr"]').click();
+  await page.locator('#shortcut-feedback').getByText('请按快捷键', { exact: false }).waitFor();
+  await page.keyboard.press('Control+Shift+r');
+  await page.waitForFunction(() => window.__qa.shortcutEndWaits === 1);
+  await page.getByRole('button', { name: '返回翻译', exact: true }).click();
+  await page.evaluate(() => { window.__qa.holdShortcutEnd = false; window.__qa.releaseShortcutEnd(); });
+  await page.locator('#more-toggle').click(); await page.locator('button[data-view="settings"]').click();
+  assert.equal(await page.locator('input[name="silentOcr"]').inputValue(), 'Alt+C');
+  // Leaving settings before the begin reply still ends exactly that lease.
+  await page.evaluate(() => { window.__qa.holdShortcutBegin = true; });
+  await page.locator('[data-shortcut-record="silentOcr"]').click();
+  await page.getByRole('button', { name: '返回翻译', exact: true }).click();
+  await page.evaluate(() => { window.__qa.holdShortcutBegin = false; window.__qa.releaseShortcutBegin(); });
+  await page.waitForFunction(() => window.__qa.shortcutLeases.at(-1)?.active === false);
+  const lastLease = await page.evaluate(() => window.__qa.shortcutLeases.slice(-2));
+  assert.equal(lastLease[0].id, lastLease[1].id);
+  await page.locator('#more-toggle').click();
+  await page.locator('button[data-view="settings"]').click();
+  // The OS can consume the registered main key, so no DOM D/S event is
+  // invented here. A matching native release supplies only that configured
+  // combo; a held modifier still prevents completion.
+  await page.locator('[data-shortcut-record="selection"]').click();
+  await page.locator('#shortcut-feedback').getByText('请按快捷键', { exact: false }).waitFor();
+  await page.locator('#shortcut-selection').dispatchEvent('keydown', { key: 'Alt', code: 'AltLeft', altKey: true });
+  await page.evaluate(() => { const id = window.__qa.shortcutLeases.at(-1).id; window.__qa.emit('shortcut-recorded', { leaseId: id - 1, shortcut: 'Alt+X', modifiersDown: 0 }); });
+  assert.equal(await page.locator('#shortcut-selection').inputValue(), 'Ctrl+Shift+Y');
+  await page.evaluate(() => { const id = window.__qa.shortcutLeases.at(-1).id; window.__qa.emit('shortcut-recorded', { leaseId: id, shortcut: 'Alt+D', modifiersDown: 2 }); });
+  await page.locator('#shortcut-feedback').getByText('已记录 Alt+D', { exact: false }).waitFor();
+  assert.equal(await page.locator('#shortcut-selection').inputValue(), 'Ctrl+Shift+Y');
+  await page.locator('#shortcut-selection').dispatchEvent('keyup', { key: 'Alt', code: 'AltLeft', altKey: false });
+  await page.waitForFunction(() => document.querySelector('#shortcut-selection').value === 'Alt+D');
+  // A native release whose IPC arrives after the DOM modifier release can
+  // complete immediately, despite the older native snapshot saying held.
+  await page.locator('[data-shortcut-record="silentOcr"]').click();
+  await page.locator('#shortcut-feedback').getByText('请按快捷键', { exact: false }).waitFor();
+  await page.locator('#shortcut-silentOcr').dispatchEvent('keydown', { key: 'Alt', code: 'AltLeft', altKey: true });
+  await page.locator('#shortcut-silentOcr').dispatchEvent('keyup', { key: 'Alt', code: 'AltLeft', altKey: false });
+  await page.evaluate(() => { const id = window.__qa.shortcutLeases.at(-1).id; window.__qa.emit('shortcut-recorded', { leaseId: id, shortcut: 'Alt+S', modifiersDown: 2 }); });
+  await page.waitForFunction(() => document.querySelector('#shortcut-silentOcr').value === 'Alt+S');
+  // A modifier held before the recorder's DOM listeners saw a down is still
+  // held. Native main-key release alone must not finish such a recording.
+  await page.locator('[data-shortcut-record="selection"]').click();
+  await page.locator('#shortcut-feedback').getByText('请按快捷键', { exact: false }).waitFor();
+  await page.evaluate(() => { const id = window.__qa.shortcutLeases.at(-1).id; window.__qa.emit('shortcut-recorded', { leaseId: id, shortcut: 'Ctrl+Shift+T', modifiersDown: 16 }); });
+  await page.locator('#shortcut-feedback').getByText('请按快捷键', { exact: false }).waitFor();
+  await page.evaluate(() => { const id = window.__qa.shortcutLeases.at(-1).id; window.__qa.emit('shortcut-recorded', { leaseId: id, shortcut: 'Ctrl+Shift+T', modifiersDown: 5 }); });
+  assert.equal(await page.locator('#shortcut-selection').inputValue(), 'Alt+D');
+  assert.equal(await page.evaluate(() => window.__qa.shortcutLeases.at(-1).active), true);
+  await page.locator('#shortcut-selection').dispatchEvent('keyup', { key: 'Control', code: 'ControlLeft', shiftKey: true });
+  assert.equal(await page.evaluate(() => window.__qa.shortcutLeases.at(-1).active), true);
+  await page.locator('#shortcut-selection').dispatchEvent('keyup', { key: 'Shift', code: 'ShiftLeft' });
+  await page.waitForFunction(() => document.querySelector('#shortcut-selection').value === 'Ctrl+Shift+T');
+  // A platform without native modifier evidence waits for an actual DOM up;
+  // it cannot assume that missing DOM downs meant all modifiers were released.
+  await page.locator('[data-shortcut-record="selection"]').click();
+  await page.locator('#shortcut-feedback').getByText('请按快捷键', { exact: false }).waitFor();
+  await page.evaluate(() => { const id = window.__qa.shortcutLeases.at(-1).id; window.__qa.emit('shortcut-recorded', { leaseId: id, shortcut: 'Alt+D', modifiersDown: null }); });
+  assert.equal(await page.locator('#shortcut-selection').inputValue(), 'Ctrl+Shift+T');
+  assert.equal(await page.evaluate(() => window.__qa.shortcutLeases.at(-1).active), true);
+  await page.locator('#shortcut-selection').dispatchEvent('keyup', { key: 'Alt', code: 'AltLeft' });
+  await page.waitForFunction(() => document.querySelector('#shortcut-selection').value === 'Alt+D');
+  // A Windows snapshot can establish that pre-held modifiers are all released
+  // even if the main key and modifier events never reached the DOM.
+  await page.locator('[data-shortcut-record="selection"]').click();
+  await page.locator('#shortcut-feedback').getByText('请按快捷键', { exact: false }).waitFor();
+  await page.evaluate(() => { const id = window.__qa.shortcutLeases.at(-1).id; window.__qa.emit('shortcut-recorded', { leaseId: id, shortcut: 'Ctrl+Shift+T', modifiersDown: 0 }); });
+  await page.waitForFunction(() => document.querySelector('#shortcut-selection').value === 'Ctrl+Shift+T');
+  // Esc after a candidate, while its modifiers are still held, cancels too.
+  await page.locator('[data-shortcut-record="selection"]').click();
+  await page.locator('#shortcut-feedback').getByText('请按快捷键', { exact: false }).waitFor();
+  for (const event of [
+    ['keydown', { key: 'Control', code: 'ControlLeft', ctrlKey: true }],
+    ['keydown', { key: 'k', code: 'KeyK', ctrlKey: true }],
+    ['keydown', { key: 'Escape', code: 'Escape', ctrlKey: true }],
+    ['keyup', { key: 'Escape', code: 'Escape', ctrlKey: true }],
+    ['keyup', { key: 'k', code: 'KeyK', ctrlKey: true }],
+    ['keyup', { key: 'Control', code: 'ControlLeft', ctrlKey: false }],
+  ]) await page.locator('#shortcut-selection').dispatchEvent(...event);
+  await page.waitForFunction(() => window.__qa.shortcutLeases.at(-1)?.active === false);
+  assert.equal(await page.locator('#shortcut-selection').inputValue(), 'Ctrl+Shift+T');
+  // The frontend's deadline starts before begin IPC, so a >14s late ACK cannot
+  // expose an apparently active recorder after its native protection expired.
+  await page.evaluate(() => { window.__qa.holdShortcutBegin = true; });
+  await page.locator('[data-shortcut-record="selection"]').click();
+  await page.evaluate(() => {
+    const now = performance.now.bind(performance);
+    Object.defineProperty(performance, 'now', { configurable: true, value: () => now() + 15000 });
+    window.__qa.holdShortcutBegin = false; window.__qa.releaseShortcutBegin();
+  });
+  await page.locator('#shortcut-feedback').getByText('录制准备已超时', { exact: false }).waitFor();
+  await page.evaluate(() => { delete performance.now; });
+  assert.equal(await page.evaluate(() => window.__qa.shortcutLeases.at(-1).active), false);
+  assert.equal(await page.locator('#shortcut-selection').inputValue(), 'Ctrl+Shift+T');
+  await page.locator('#shortcut-advanced > summary').click();
   // Multiple blanks disable those shortcuts; only nonempty values are compared.
   await page.locator('input[name="selection"]').fill('');
   await page.locator('input[name="capture"]').fill('');
@@ -706,7 +850,7 @@ try {
   await page.locator('input[name="selection"]').fill('Ctrl+P');
   await page.locator('input[name="capture"]').fill('ctrl+p');
   await page.locator('#save-shortcuts').click();
-  await page.getByText('不同操作不能使用相同的快捷键。').waitFor();
+  await page.locator('#shortcut-feedback').getByText('不同操作不能使用相同的快捷键。', { exact: false }).waitFor();
   assert.equal(await page.evaluate(() => window.__qa.saveCalls), savesBeforeDuplicate);
 
   // Presets populate the documented protocol/base while model names remain editable.
@@ -959,6 +1103,15 @@ try {
   assert.match(await page.locator('#source-text').inputValue(), /正文，\n下一行/);
   assert.equal(await page.evaluate(() => window.__qa.translationRequests.length), beforeQueued.requests);
 
+  // Auto-translating OCR carries origin separately from its translate mode;
+  // normalize only captured OCR and retain the exact raw capture for restore.
+  const rawSpacedOcr = '中 文 测 试，\n换 行 识 别。';
+  await page.evaluate(text => window.__qa.emit('source-text', { text, mode: 'translate', captureOrigin: 'ocr' }), rawSpacedOcr);
+  await page.waitForFunction(() => document.querySelector('#source-text').value === '中文测试，换行识别。');
+  await page.locator('#more-toggle').click(); await page.locator('#restore-original-breaks').click();
+  assert.equal(await page.locator('#source-text').inputValue(), rawSpacedOcr);
+  console.log('PASS: core shortcut recording/save/cancel/IME/navigation/late ACK/draft/failure frontend checks and OCR-origin normalization/raw restore. Isolated DOM and fake IPC only.');
+
   // Blocked capture keeps its permission metadata while a service editor owns
   // the window, then presents the guide after the user closes that editor.
   await goView('settings');
@@ -1042,7 +1195,7 @@ try {
   // prepared in management geometry before the native focused presentation.
   const openNativeSettings = () => page.evaluate(() => {
     const state = window.__qa.nativeHide();
-    window.__qa.pendingSettings = { presentationEpoch: state.epoch };
+    window.__qa.pendingSettings = { presentationEpoch: state.epoch, section: 'shortcuts' };
     window.__qa.emit('open-settings', window.__qa.pendingSettings);
     return state.epoch;
   });
@@ -1054,6 +1207,7 @@ try {
   assert.equal(await page.locator('#ocr-provider-list').isVisible(), true);
   assert.equal(await page.locator('#shortcuts-form').isVisible(), true);
   assert.deepEqual(await page.evaluate(() => window.__qa.managementShows.at(-1)), { view: 'settings', layout: await page.evaluate(() => window.__qa.layoutCalls.at(-1)) });
+  await page.waitForFunction(() => document.activeElement?.id === 'shortcut-selection');
   await page.evaluate((presentationEpoch) => window.__qa.emit('open-settings', { presentationEpoch }), settingsEpoch);
   assert.equal(await page.evaluate(() => window.__qa.managementShows.length), managementBefore + 1);
   // Built-in translation never prepares/downloads from a status refresh. Its

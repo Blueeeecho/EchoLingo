@@ -1,5 +1,40 @@
 import { describe, expect, it } from 'vitest';
-import { normalizeCapturedText } from '../src/text-normalization';
+import { normalizeCapturedText, normalizeOcrCapturedText } from '../src/text-normalization';
+
+describe('OCR Chinese spacing repair', () => {
+  it('repairs single spaces between Chinese glyphs and punctuation only for OCR', () => {
+    expect(normalizeOcrCapturedText('回 声 译 中 文 测 试 2468')).toBe('回声译中文测试 2468');
+    expect(normalizeOcrCapturedText('这 是 测 试 ， 请 继 续 。')).toBe('这是测试，请继续。');
+    expect(normalizeCapturedText('回 声 译 中 文')).toBe('回 声 译 中 文');
+  });
+
+  it('repairs OCR wraps together with spaces, retaining explicit paragraphs', () => {
+    expect(normalizeOcrCapturedText('我 们 正 在\r\n使 用 这 个 功 能')).toBe('我们正在使用这个功能');
+    expect(normalizeOcrCapturedText('我 们 正 在\n使 用 这 个 功 能\n\n这 是 新 段 落 。'))
+      .toBe('我们正在使用这个功能\n\n这是新段落。');
+    expect(normalizeOcrCapturedText('- 第 一 个 项 目\n- 第 二 个 项 目')).toBe('- 第一个项目\n- 第二个项目');
+    expect(normalizeOcrCapturedText('# 中 文 标 题\n正 文 内 容 。')).toBe('# 中文标题\n正文内容。');
+  });
+
+  it('keeps meaningful Latin, numeric, Korean and mixed-script spacing', () => {
+    for (const text of ['English words and quiet_pin', '한국어 문장 사이 공백', '100 000 123', '中文 API 接口 2026 年', '中  文  对  齐']) {
+      expect(normalizeOcrCapturedText(text)).toBe(text);
+    }
+  });
+
+  it('preserves code, configuration, tables, inline literals and indentation', () => {
+    for (const text of [
+      '```text\n中 文 空 格\n```', '~~~text\n中 文 空 格\n~~~',
+      '`中 文` 空 格', '  中 文 缩 进', '中 文\t表 格', '中 文 | 表 格',
+      'message: 中 文 配 置', 'const message = "中 文";', 'git commit -m "中 文"',
+      '- message: 中 文 配 置', '中 文  对 齐', 'https://example.com/中 文',
+    ]) expect(normalizeOcrCapturedText(text)).toBe(text);
+  });
+
+  it('retains exact empty rows and whitespace with no eligible prose', () => {
+    for (const text of ['', ' ', '\n\n', '  \n\t\n']) expect(normalizeOcrCapturedText(text)).toBe(text);
+  });
+});
 
 describe('native capture text normalization', () => {
   it('leaves visual wraps without newline and internal spacing unchanged', () => {

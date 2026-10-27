@@ -199,6 +199,9 @@ public static class EchoLingoOwnedDirectory {
     $engine = Join-Path $resourceRoot 'bin\echolingo-offline-engine.exe'
     Assert-Fixture ((Test-Path -LiteralPath $app -PathType Leaf) -and (Test-Path -LiteralPath $engine -PathType Leaf) -and (Test-Path -LiteralPath (Join-Path $installRoot 'uninstall.exe') -PathType Leaf)) 'NSIS did not install the app, uninstaller and offline engine at fixed resource paths.'
     $report.resources = Verify-Resources $resourceRoot
+    $resourceAudit = @(& python (Join-Path $PSScriptRoot 'audit-windows-resources.py') --installed-root $resourceRoot)
+    Assert-Fixture ($LASTEXITCODE -eq 0) 'Actual installed resource inventory is not the exact runtime allowlist.'
+    $report.resourceAllowlist = ($resourceAudit -join "`n") | ConvertFrom-Json
     $report.applicationSha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $app).Hash.ToLowerInvariant()
     $report.engineSha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $engine).Hash.ToLowerInvariant()
     $report.engineBytes = (Get-Item -LiteralPath $engine).Length

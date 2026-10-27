@@ -4,7 +4,13 @@ fn main() {
     println!("cargo:rerun-if-changed=native/macos_capture.swift");
     println!("cargo:rerun-if-changed=native/macos_window.swift");
     println!("cargo:rerun-if-changed=native/windows.ps1");
+    println!("cargo:rerun-if-changed=../scripts/build-windows-native-helper.ps1");
     println!("cargo:rerun-if-env-changed=MACOSX_DEPLOYMENT_TARGET");
+
+    if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("windows") {
+        build_windows_native_helper();
+        return;
+    }
 
     if std::env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("macos") {
         return;
@@ -78,4 +84,41 @@ fn main() {
     println!("cargo:rustc-link-search=native={}", swift_library.display());
     println!("cargo:rustc-link-search=native=/usr/lib/swift");
     println!("cargo:rustc-link-arg=-Wl,-rpath,/usr/lib/swift");
+}
+
+fn build_windows_native_helper() {
+    assert!(
+        std::env::var("HOST").is_ok_and(|host| host.contains("windows")),
+        "The Windows native helper must be built on Windows with its .NET Framework compiler; cross-compiling the Rust target alone is insufficient"
+    );
+    let system_root = std::env::var_os("SystemRoot").expect("Windows SystemRoot is unavailable");
+    let powershell = std::path::PathBuf::from(system_root)
+        .join("System32/WindowsPowerShell/v1.0/powershell.exe");
+    let output = std::path::PathBuf::from(std::env::var_os("OUT_DIR").unwrap())
+        .join("echolingo-windows-native.dll");
+    let build = std::process::Command::new(powershell)
+        .args([
+            "-NoLogo",
+            "-NoProfile",
+            "-NonInteractive",
+            "-STA",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-File",
+        ])
+        .arg("../scripts/build-windows-native-helper.ps1")
+        .args(["-HelperPath", "native/windows.ps1", "-OutputPath"])
+        .arg(&output)
+        .output()
+        .expect("Starting the Windows .NET Framework helper compiler failed");
+    assert!(
+        build.status.success(),
+        "Windows native helper compilation failed:\n{}\n{}",
+        String::from_utf8_lossy(&build.stdout),
+        String::from_utf8_lossy(&build.stderr)
+    );
+    assert!(
+        output.is_file(),
+        "Windows native helper compiler produced no DLL"
+    );
 }

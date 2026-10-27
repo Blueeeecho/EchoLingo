@@ -2,6 +2,18 @@
 
 Updated: 2026-10-25, Asia/Shanghai. Stage: v0.1.0 preview hardening and acceptance.
 
+## 2026-10-27 Windows11 interaction investigation — candidate under review, not installed/accepted
+
+The owner reports blue OCR frames but left clicks still reach ordinary non-fullscreen application buttons, plus slow Alt+S readiness/dragging and unwanted OCR spaces/wraps. Earlier Server2025 generated-window passes do not override this physical Windows11 failure. The mouse-interception cause remains unproved; a visible frame is not proof of a working mouse hook.
+
+Candidate changes remove the fixed Windows180ms delay, embed a build-time Framework DLL instead of recompiling C# on every operation, coalesce MOVE-triggered UI wakes with the16ms heartbeat retained, reduce redundant edge HWND updates, and preserve bounded no-content capture-health metadata. A750ms sustained input mismatch cancels visibly without a screenshot; this is a fail-safe, not proof the owner bug is fixed. OCR-only Han spacing repair and native paragraph-pitch inference preserve raw restore, explicit paragraphs, code/Latin/Korean/numbers and manually typed input.
+
+Two core shortcuts now have recording/manual editing and transactional immediate registration/persistence. An early installed-exe CLI checks actual temporary RegisterHotKey availability without a WebView/credential read/settings write; installation warns on conflicts and offers shortcut settings. Silent/passive installation never launches settings or displays this prompt. Unknown checks are distinct from occupied/reserved keys. Independent review identified that WM_HOTKEY combinations need a lease-bound event bridge to be recorded, and found delayed-ACK/Esc and DLL cache identity boundaries; fixes and actual Windows verification are in progress.
+
+Initial host checks:193Rust pass/1resource-runtime ignored,71TS unit pass and complete isolated fake-IPC UI pass. These precede the final independent-review fixes and are not final candidate or Windows-native acceptance. Expanded ordinary-peer drag, exact-DLL load/failure, same-runner A/B and actual packaged WebView+SendInput shortcut fixtures are prepared for a new full CI. No Mac signing/install/permissions, user credentials or stopped local Win10VM were touched.
+
+Size audit of the previous delivered archive:94,674,254B outer ZIP includes75,210,904B NSIS and19,456,259B corresponding engine source.104,470,603B unpacked bilingual offline models dominate runtime resources. New runtime allowlist excludes195,072B development metadata while retaining every model and original license/source notice; compressed savings must be measured after the new build. The source attachment remains separately available; it must not be confused with installed application code.
+
 ## 2026-10-27 Windows OCR hover-window guidance: controlled runtime and preview complete
 
 Alt+S keeps the current-display screen border and adds a thin blue frame around the actual hovered application root. Desktop/taskbar, unknown, known-own/known-affinity-excluded or occlusion-mismatched targets keep only the screen border. Starting left-drag clears the window hint and keeps the arbitrary-region OCR→source fill→automatic translation flow. Metadata only,80ms UI-thread queries,12 allocated thin HWNDs/display; no whole-display surface, window title/text/pixels, focus or extra permission for hints. The disabled-window ambiguity found in independent review was repaired before runtime verification.

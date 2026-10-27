@@ -3,7 +3,7 @@
 # Run in an unlocked isolated test session; it moves the pointer inside its own
 # window and tests the real helper hook/transparent overlays via SendInput.
 [CmdletBinding()]
-param([string]$HelperPath = '')
+param([string]$HelperPath = '', [string]$NativeAssemblyPath = '', [switch]$PerformanceDiagnostics)
 $ErrorActionPreference = 'Stop'
 [Console]::OutputEncoding = [Text.UTF8Encoding]::new($false)
 try {
@@ -15,6 +15,7 @@ try {
     }
     if ([string]::IsNullOrWhiteSpace($HelperPath)) { $HelperPath = Join-Path $PSScriptRoot '..\src-tauri\native\windows.ps1' }
     $HelperPath = (Resolve-Path -LiteralPath $HelperPath).Path
+    if (-not [string]::IsNullOrWhiteSpace($NativeAssemblyPath)) { $NativeAssemblyPath = (Resolve-Path -LiteralPath $NativeAssemblyPath).Path }
     Add-Type -AssemblyName System.Windows.Forms
     Add-Type -AssemblyName System.Drawing
     Add-Type -AssemblyName System.Web.Extensions
@@ -32,6 +33,7 @@ using System.Web.Script.Serialization;
 using System.Windows.Forms;
 
 public static class EchoLingoLiveCaptureSmoke {
+    static string nativeArguments = "";
     sealed class PassiveGeneratedLayer : Form {
         public PassiveGeneratedLayer() {
             AutoScaleMode = AutoScaleMode.None; FormBorderStyle = FormBorderStyle.None;
@@ -93,6 +95,7 @@ public static class EchoLingoLiveCaptureSmoke {
         public Dictionary<string, object> ForegroundFailure;
         public Dictionary<string, object> LastEdges;
         public Dictionary<string, object> HoverTrial;
+        public Dictionary<string, object> CrossPeerTrial;
         public TrialContext(Form source) { Source = source; }
     }
     static string WindowId(IntPtr window) { return "0x" + window.ToInt64().ToString("X"); }
@@ -412,16 +415,18 @@ public static class EchoLingoLiveCaptureSmoke {
             MoveAndSettle(context, "prepare-pointer-A-before-helper", aPoint);
             RequireGeneratedTarget(aPoint, form.Handle, IntPtr.Zero);
             ProcessStartInfo start = new ProcessStartInfo("powershell.exe");
-            start.Arguments = "-NoProfile -STA -ExecutionPolicy Bypass -File \"" + helper + "\" -Mode capture-image";
+            start.Arguments = "-NoProfile -STA -ExecutionPolicy Bypass -File \"" + helper + "\" -Mode capture-image" + nativeArguments;
             start.UseShellExecute = false; start.CreateNoWindow = true;
             start.RedirectStandardOutput = true; start.RedirectStandardError = true;
             start.StandardOutputEncoding = Encoding.UTF8; start.StandardErrorEncoding = Encoding.UTF8;
+            Stopwatch startup = Stopwatch.StartNew();
             using (Process process = Process.Start(start)) {
                 context.HelperProcessId = process.Id; metrics["helperProcessId"] = process.Id;
                 Task<string> output = process.StandardOutput.ReadToEndAsync(), error = process.StandardError.ReadToEndAsync();
                 try {
                     List<EdgeWindow> atA = ObserveHoverPhase(context, process, display, aFrame, Rectangle.Empty,
                         "hover-A", 25000, observations, known);
+                    metrics["helperStartupToReadyMilliseconds"] = startup.Elapsed.TotalMilliseconds;
                     List<IntPtr> screenHandles = RoleHandles(atA, Perimeter(display, display));
                     List<IntPtr> hoverHandles = RoleHandles(atA, Perimeter(aFrame, display));
                     MoveAndSettle(context, "move-to-generated-B", bPoint); RequireGeneratedTarget(bPoint, layer.Handle, IntPtr.Zero);
@@ -486,6 +491,10 @@ public static class EchoLingoLiveCaptureSmoke {
                     JavaScriptSerializer json = new JavaScriptSerializer(); json.MaxJsonLength = 16 * 1024 * 1024;
                     Dictionary<string, object> reply = json.Deserialize<Dictionary<string, object>>(output.GetAwaiter().GetResult());
                     Assert(process.ExitCode == 0 && (bool)reply["ok"], "Hover free-drag capture failed.");
+                    if (reply.ContainsKey("nativeBackend")) metrics["nativeBackend"] = reply["nativeBackend"];
+                    if (reply.ContainsKey("helperPerformance")) metrics["helperPerformance"] = reply["helperPerformance"];
+                    if (reply.ContainsKey("capturePerformance")) metrics["capturePerformance"] = reply["capturePerformance"];
+                    if (reply.ContainsKey("captureHealth")) metrics["captureHealth"] = reply["captureHealth"];
                     using (MemoryStream bytes = new MemoryStream(Convert.FromBase64String((string)reply["imageBase64"])))
                     using (Bitmap image = new Bitmap(bytes)) {
                         Assert(image.Width == crop.Width && image.Height == crop.Height, "Hover snapped capture to a window instead of the free physical region.");
@@ -560,10 +569,11 @@ public static class EchoLingoLiveCaptureSmoke {
             hoverFrame = Frame(hoverTarget);
             context.Stage = "start-helper";
             ProcessStartInfo start = new ProcessStartInfo("powershell.exe");
-            start.Arguments = "-NoProfile -STA -ExecutionPolicy Bypass -File \"" + helper + "\" -Mode capture-image";
+            start.Arguments = "-NoProfile -STA -ExecutionPolicy Bypass -File \"" + helper + "\" -Mode capture-image" + nativeArguments;
             start.UseShellExecute = false; start.CreateNoWindow = true;
             start.RedirectStandardOutput = true; start.RedirectStandardError = true;
             start.StandardOutputEncoding = Encoding.UTF8; start.StandardErrorEncoding = Encoding.UTF8;
+            Stopwatch startup = Stopwatch.StartNew();
             using (Process process = Process.Start(start)) {
                 context.HelperProcessId = process.Id;
                 Task<string> output = process.StandardOutput.ReadToEndAsync();
@@ -576,6 +586,7 @@ public static class EchoLingoLiveCaptureSmoke {
                     // have exact four-edge perimeters. A bare count of4/8 is
                     // insufficient: the actual physical geometries must match.
                     WaitEdges(context, process, display, hoverFrame, Rectangle.Empty, "wait-ready-overlays", 25000);
+                    metrics["helperStartupToReadyMilliseconds"] = startup.Elapsed.TotalMilliseconds;
                     context.Stage = "inspect-ready-overlays";
                     int readyCount; long readyLargest;
                     metrics["readyVisibleBorderAreaPixels"] = BorderArea(process.Id, out readyCount, out readyLargest);
@@ -634,6 +645,7 @@ public static class EchoLingoLiveCaptureSmoke {
                     } else {
                         context.Stage = "measure-before-drag";
                         process.Refresh(); TimeSpan cpuBefore = process.TotalProcessorTime;
+                        Stopwatch dragWall = Stopwatch.StartNew();
                         metrics["helperPrivateBytesBeforeDrag"] = process.PrivateMemorySize64;
                         metrics["helperWorkingSetBytesBeforeDrag"] = process.WorkingSet64;
                         Button(context, "selection-left-down", 0x0002); Thread.Sleep(80);
@@ -669,6 +681,7 @@ public static class EchoLingoLiveCaptureSmoke {
                         context.Stage = "measure-drag";
                         process.Refresh();
                         metrics["helperCpuMillisecondsDuringDrag"] = (process.TotalProcessorTime - cpuBefore).TotalMilliseconds;
+                        metrics["dragWallMilliseconds"] = dragWall.Elapsed.TotalMilliseconds;
                         metrics["helperPrivateBytesDuringDrag"] = process.PrivateMemorySize64;
                         metrics["helperWorkingSetBytesDuringDrag"] = process.WorkingSet64;
                         metrics["helperPeakWorkingSetBytesDuringSession"] = process.PeakWorkingSet64;
@@ -684,6 +697,15 @@ public static class EchoLingoLiveCaptureSmoke {
                     Assert(process.WaitForExit(10000), "Capture helper did not finish after the fixture selection/cancellation.");
                     JavaScriptSerializer json = new JavaScriptSerializer(); json.MaxJsonLength = 16 * 1024 * 1024;
                     Dictionary<string, object> reply = json.Deserialize<Dictionary<string, object>>(output.GetAwaiter().GetResult());
+                    metrics["nativeBackend"] = reply.ContainsKey("nativeBackend") ? reply["nativeBackend"] : "legacy-source-compiled-cli";
+                    if (reply.ContainsKey("helperPerformance")) metrics["helperPerformance"] = reply["helperPerformance"];
+                    if (reply.ContainsKey("capturePerformance")) metrics["capturePerformance"] = reply["capturePerformance"];
+                    if (reply.ContainsKey("captureHealth")) {
+                        metrics["captureHealth"] = reply["captureHealth"];
+                        Dictionary<string, object> health = (Dictionary<string, object>)reply["captureHealth"];
+                        if (capture) Assert(Convert.ToInt64(health["hookMouseDowns"]) > 0 && Convert.ToInt64(health["hookMouseUps"]) > 0,
+                            "Visible blue borders did not prove a real mouse down/up capture.");
+                    }
                     context.Stage = "verify-helper-response";
                     if (!capture) {
                         Assert(!(bool)reply["ok"] && process.ExitCode != 0 && ((string)reply["error"]).StartsWith("CANCELLED:", StringComparison.Ordinal), "Cancel did not return CANCELLED.");
@@ -717,7 +739,160 @@ public static class EchoLingoLiveCaptureSmoke {
             if (layer != null) OnUi(form, delegate { layer.Close(); layer.Dispose(); });
         }
     }
-    public static Dictionary<string, object> Run(string helper) {
+    // A separate ninth session keeps the original eight trials/counts intact.
+    // Both opaque ordinary peers belong to this fixture, with no Owner/parent
+    // relationship and no topmost/no-activate shortcut. The ROI spans both.
+    static Dictionary<string, object> CrossPeerTrial(TrialContext context, string helper) {
+        Form form = context.Source, peer = null;
+        Button originButton = null, endButton = null;
+        Rectangle previousBounds = Rectangle.Empty, display = Rectangle.Empty;
+        FormBorderStyle previousBorder = FormBorderStyle.FixedDialog;
+        Point first = Point.Empty, last = Point.Empty;
+        IntPtr peerHwnd = IntPtr.Zero;
+        int peerButtons = 0, originButtons = 0, peerClicks = 0;
+        MouseEventHandler sourceEvents = delegate { originButtons++; };
+        bool leftHeld = false;
+        Dictionary<string, object> metrics = new Dictionary<string, object>();
+        context.CrossPeerTrial = metrics; metrics["passed"] = false;
+        context.Mode = "cross-peer-capture"; context.Stage = "prepare-independent-ordinary-peers";
+        context.HelperProcessId = 0; context.ForegroundFailure = null; context.LastEdges = null;
+        context.GeneratedLayerHwnd = IntPtr.Zero;
+        Color liveA = Color.FromArgb(220, 70, 85), liveB = Color.FromArgb(40, 180, 90);
+        try {
+            OnUi(form, delegate {
+                previousBounds = form.Bounds; previousBorder = form.FormBorderStyle;
+                Rectangle area = Screen.FromControl(form).WorkingArea; display = Screen.FromControl(form).Bounds;
+                Assert(area.Width >= 720 && area.Height >= 360, "Peer fixture needs an actual720x360 generated-window work area.");
+                form.FormBorderStyle = FormBorderStyle.None; form.TopMost = false;
+                form.Bounds = new Rectangle(area.Left + 40, area.Top + 40, 320, 240);
+                form.BackColor = Color.FromArgb(50, 210, 110);
+                peer = new Form(); peer.Text = "EchoLingo generated independent peer B";
+                peer.AutoScaleMode = AutoScaleMode.None; peer.FormBorderStyle = FormBorderStyle.None;
+                peer.StartPosition = FormStartPosition.Manual; peer.ShowInTaskbar = false; peer.TopMost = false;
+                peer.Bounds = new Rectangle(form.Left + 280, form.Top, 320, 240);
+                peer.BackColor = Color.FromArgb(210, 120, 40);
+                originButton = new Button(); originButton.Text = "Generated A"; originButton.Bounds = new Rectangle(25, 45, 75, 35);
+                endButton = new Button(); endButton.Text = "Generated B"; endButton.Bounds = new Rectangle(185, 165, 75, 35);
+                foreach (Button button in new Button[] { originButton, endButton }) {
+                    button.FlatStyle = FlatStyle.Flat; button.UseVisualStyleBackColor = false;
+                    button.BackColor = Color.FromArgb(230, 150, 40); button.ForeColor = Color.Black;
+                }
+                originButton.MouseDown += delegate { originButtons++; }; originButton.MouseUp += delegate { originButtons++; };
+                endButton.MouseDown += delegate { peerButtons++; }; endButton.MouseUp += delegate { peerButtons++; };
+                originButton.Click += delegate { peerClicks++; }; endButton.Click += delegate { peerClicks++; };
+                peer.MouseDown += delegate { peerButtons++; }; peer.MouseUp += delegate { peerButtons++; };
+                form.MouseDown += sourceEvents; form.MouseUp += sourceEvents;
+                form.Controls.Add(originButton); peer.Controls.Add(endButton);
+                peer.Show(); peerHwnd = peer.Handle;
+                form.Activate(); SetForegroundWindow(form.Handle);
+                Assert(GetForegroundWindow() == form.Handle, "Peer source A could not hold actual foreground before helper startup.");
+                Assert(form.Handle != peerHwnd && GetWindow(form.Handle, 4) == IntPtr.Zero && GetWindow(peerHwnd, 4) == IntPtr.Zero,
+                    "The generated A/B windows are not independent ownerless peers.");
+                Assert((GetWindowLongPtr(form.Handle, -20).ToInt64() & 8) == 0 && (GetWindowLongPtr(peerHwnd, -20).ToInt64() & 8) == 0,
+                    "The peer fixture accidentally created a topmost window.");
+                first = form.PointToScreen(new Point(40, 60)); last = peer.PointToScreen(new Point(200, 180));
+                Assert(GetAncestor(WindowFromPoint(first), 2) == form.Handle && GetAncestor(WindowFromPoint(last), 2) == peerHwnd,
+                    "Actual pointer endpoints do not hit distinct generated peers.");
+                form.Refresh(); peer.Refresh();
+            });
+            RequireFixtureForeground(context, "peer-source-ready-before-helper");
+            uint peerOwner; GetWindowThreadProcessId(peerHwnd, out peerOwner);
+            Assert(peerOwner == Process.GetCurrentProcess().Id, "Peer B is not fixture-owned.");
+            MoveAndSettle(context, "move-to-generated-A-button", first);
+            Rectangle hover = Frame(form.Handle);
+            ProcessStartInfo start = new ProcessStartInfo("powershell.exe");
+            start.Arguments = "-NoProfile -STA -ExecutionPolicy Bypass -File \"" + helper + "\" -Mode capture-image" + nativeArguments;
+            start.UseShellExecute = false; start.CreateNoWindow = true;
+            start.RedirectStandardOutput = true; start.RedirectStandardError = true;
+            start.StandardOutputEncoding = Encoding.UTF8; start.StandardErrorEncoding = Encoding.UTF8;
+            Stopwatch startup = Stopwatch.StartNew();
+            using (Process process = Process.Start(start)) {
+                context.HelperProcessId = process.Id;
+                Task<string> output = process.StandardOutput.ReadToEndAsync(), errors = process.StandardError.ReadToEndAsync();
+                try {
+                    WaitEdges(context, process, display, hover, Rectangle.Empty, "peer-ready-exact-screen-plus-A-hover", 25000);
+                    metrics["helperStartupToReadyMilliseconds"] = startup.Elapsed.TotalMilliseconds;
+                    OnUi(form, delegate { form.BackColor = liveA; peer.BackColor = liveB; form.Refresh(); peer.Refresh(); });
+                    Thread.Sleep(150);
+                    Assert(GetAncestor(WindowFromPoint(first), 2) == form.Handle && GetAncestor(WindowFromPoint(last), 2) == peerHwnd,
+                        "A generated peer was obscured before cross-window drag; no input will be sent.");
+                    Button(context, "peer-A-button-left-down", 0x0002); leftHeld = true;
+                    Thread.Sleep(100); Move(context, "peer-drag-to-B-button", last);
+                    Rectangle selection = Rectangle.FromLTRB(first.X - 1, first.Y - 1, last.X + 1, last.Y + 1);
+                    WaitEdges(context, process, display, Rectangle.Empty, selection, "peer-drag-exact-free-ROI-no-hover", 1500);
+                    // Observe a deliberately held real drag beyond the750ms health
+                    // threshold. Polling must not falsely cancel an owned pair.
+                    Thread.Sleep(900);
+                    WaitEdges(context, process, display, Rectangle.Empty, selection, "peer-held-drag-still-owned", 1500);
+                    Assert(GetAncestor(WindowFromPoint(last), 2) == peerHwnd, "Drag release no longer targets generated B.");
+                    Button(context, "peer-B-button-left-up", 0x0004); leftHeld = false;
+                    Assert(process.WaitForExit(10000), "Cross-peer capture did not complete after release.");
+                    JavaScriptSerializer json = new JavaScriptSerializer(); json.MaxJsonLength = 16 * 1024 * 1024;
+                    Dictionary<string, object> reply = json.Deserialize<Dictionary<string, object>>(output.GetAwaiter().GetResult());
+                    if (reply.ContainsKey("captureHealth")) metrics["captureHealth"] = reply["captureHealth"];
+                    Assert((bool)reply["ok"] && process.ExitCode == 0, "Cross-peer selection failed or was cancelled.");
+                    metrics["nativeBackend"] = reply.ContainsKey("nativeBackend") ? reply["nativeBackend"] : "legacy-source-compiled-cli";
+                    if (reply.ContainsKey("captureHealth")) {
+                        Dictionary<string, object> health = (Dictionary<string, object>)reply["captureHealth"];
+                        Assert(Convert.ToInt64(health["hookMouseDowns"]) > 0 && Convert.ToInt64(health["hookMouseUps"]) > 0,
+                            "Cross-peer visible borders did not prove owned hook down/up.");
+                        Assert(!health.ContainsKey("mismatchKind") || Convert.ToInt64(health["mismatchKind"]) == 0, "A real held cross-peer drag caused a health mismatch.");
+                        metrics["captureHealth"] = health;
+                    }
+                    using (MemoryStream bytes = new MemoryStream(Convert.FromBase64String((string)reply["imageBase64"])))
+                    using (Bitmap image = new Bitmap(bytes)) {
+                        Assert(image.Width == last.X - first.X && image.Height == last.Y - first.Y, "Cross-peer free ROI dimensions changed.");
+                        Color a = image.GetPixel(10, image.Height - 10), b = image.GetPixel(image.Width - 10, 10);
+                        Assert(Math.Abs(a.R-liveA.R) <= 2 && Math.Abs(a.G-liveA.G) <= 2 && Math.Abs(a.B-liveA.B) <= 2 &&
+                            Math.Abs(b.R-liveB.R) <= 2 && Math.Abs(b.G-liveB.G) <= 2 && Math.Abs(b.B-liveB.B) <= 2,
+                            "Cross-peer screenshot did not retain both newly changed generated sources.");
+                        for (int y = 0; y < image.Height; y++) for (int x = 0; x < image.Width; x++) {
+                            Color pixel = image.GetPixel(x,y);
+                            Assert(!(Math.Abs(pixel.R-45) <= 2 && Math.Abs(pixel.G-145) <= 2 && Math.Abs(pixel.B-255) <= 2),
+                                "A blue screen/hover/selection hint pixel entered the cross-peer capture.");
+                        }
+                        metrics["capturedPhysicalWidth"] = image.Width; metrics["capturedPhysicalHeight"] = image.Height;
+                    }
+                    RequireFixtureForeground(context, "peer-capture-complete");
+                    OnUi(form, delegate { Assert(originButtons == 0 && peerButtons == 0 && peerClicks == 0,
+                        "Capture down/up or click reached an underlying generated peer button/window."); });
+                    Assert(ReadyOverlays(process.Id) == 0, "Cross-peer helper left capture borders alive.");
+                    metrics["mode"] = context.Mode; metrics["passed"] = true; metrics["foregroundPreserved"] = true;
+                    metrics["independentOrdinaryPeers"] = true; metrics["sourceAHwnd"] = WindowId(form.Handle); metrics["sourceBHwnd"] = WindowId(peerHwnd);
+                    metrics["sourceProcessId"] = Process.GetCurrentProcess().Id; metrics["helperProcessId"] = process.Id;
+                    metrics["startPhysicalPoint"] = new int[] { first.X, first.Y }; metrics["endPhysicalPoint"] = new int[] { last.X, last.Y };
+                    metrics["underlyingMouseEvents"] = originButtons + peerButtons; metrics["underlyingButtonClicks"] = peerClicks;
+                    metrics["hoverHiddenDuringDrag"] = true; metrics["blueHintPixelsInCapture"] = 0; metrics["heldDragMilliseconds"] = 900;
+                    return metrics;
+                } finally {
+                    if (leftHeld && !process.HasExited) {
+                        // Failure may activate peer B when interception is the
+                        // very behavior under test. Release only over exact
+                        // independently verified fixture A/B HWNDs, never any
+                        // foreign foreground window, before killing the helper.
+                        IntPtr foreground = GetForegroundWindow(); uint owner;
+                        GetWindowThreadProcessId(foreground, out owner);
+                        if ((foreground == form.Handle || foreground == peerHwnd) && owner == Process.GetCurrentProcess().Id) {
+                            INPUT release = new INPUT(); release.data.mouse.flags = 0x0004;
+                            SendInput(1, new INPUT[] { release }, Marshal.SizeOf(typeof(INPUT)));
+                        }
+                    }
+                    if (!process.HasExited) { process.Kill(); process.WaitForExit(3000); }
+                }
+            }
+        } finally {
+            OnUi(form, delegate {
+                if (peer != null) { peer.Close(); peer.Dispose(); }
+                form.MouseDown -= sourceEvents; form.MouseUp -= sourceEvents;
+                if (originButton != null) { form.Controls.Remove(originButton); originButton.Dispose(); }
+                form.FormBorderStyle = previousBorder; form.Bounds = previousBounds;
+            });
+        }
+    }
+    public static Dictionary<string, object> Run(string helper, string assembly, bool performance) {
+        Assert(!assembly.Contains("\""), "Invalid native DLL path.");
+        nativeArguments = String.IsNullOrEmpty(assembly) ? "" : " -NativeAssemblyPath \"" + assembly + "\"";
+        if (performance) nativeArguments += " -PerformanceDiagnostics";
         SetProcessDpiAwarenessContext(new IntPtr(-4));
         Assert(SetThreadDpiAwarenessContext(new IntPtr(-4)) != IntPtr.Zero, "Fixture could not establish physical per-monitor coordinates.");
         Dictionary<string, object> report = new Dictionary<string, object>();
@@ -761,6 +936,8 @@ public static class EchoLingoLiveCaptureSmoke {
                         report["hoverOverlayAbsentInCapturePassed"] = true;
                         report["disabledWindowOcclusionPassed"] = true;
                         report["observedAllocatedEdgeWindowCount"] = hover["observedAllocatedEdgeWindowCount"];
+                        report["crossPeerCapture"] = CrossPeerTrial(context, helper);
+                        report["crossPeerCapturePassed"] = true;
                         context.Stage = "verify-generated-source-input";
                         OnUi(form, delegate {
                             Assert(sourceMouseEvents == 0, "Selection/cancel button input reached the generated source window.");
@@ -778,6 +955,7 @@ public static class EchoLingoLiveCaptureSmoke {
                         report["foregroundAtFailure"] = context.ForegroundFailure ?? ForegroundMetadata(context, GetForegroundWindow());
                         if (context.LastEdges != null) report["lastObservedEdges"] = context.LastEdges;
                         if (context.HoverTrial != null) report["partialHoverTrial"] = context.HoverTrial;
+                        if (context.CrossPeerTrial != null) report["crossPeerCapture"] = context.CrossPeerTrial;
                     }
                     finally {
                         try { if (restorePointer && GetForegroundWindow() == form.Handle) Move(context, "restore-original-pointer", originalPointer); }
@@ -801,7 +979,7 @@ public static class EchoLingoLiveCaptureSmoke {
 '@
     $references = @([System.Windows.Forms.Form].Assembly.Location, [System.Drawing.Bitmap].Assembly.Location, [System.Web.Script.Serialization.JavaScriptSerializer].Assembly.Location)
     Add-Type -TypeDefinition $source -ReferencedAssemblies $references
-    $result = [EchoLingoLiveCaptureSmoke]::Run($HelperPath)
+    $result = [EchoLingoLiveCaptureSmoke]::Run($HelperPath, $NativeAssemblyPath, [bool]$PerformanceDiagnostics)
     [Console]::Out.WriteLine(($result | ConvertTo-Json -Depth 10 -Compress))
     if (-not $result['ok']) { exit 1 }
 } catch {

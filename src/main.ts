@@ -2,14 +2,15 @@ import './styles.css';
 import { createOcrUi } from './ocr-ui';
 import { installPanelLayout } from './panel-layout';
 import type { TranslationPresentation } from './panel-layout';
-import { normalizeCapturedText } from './text-normalization';
+import { normalizeCapturedText, normalizeOcrCapturedText } from './text-normalization';
+import { createShortcutEditor, type NativeRecordedShortcut } from './shortcut-editor';
 import { credentialScope } from './credential-scope';
 import { credentialMayExist, credentialStateOf, credentialStatusLabel } from './credential-state';
 import { inferProviderPreset, PROVIDER_PRESETS, qwenBaseUrl, qwenSettingsFromUrl } from './provider-presets';
 import type { ProviderPresetId, QwenRegion } from './provider-presets';
 import { invoke, isTauri } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
-import { defaultSettings, errorMessage, userFacingError, filterHistory, LANGUAGES, languageName, MAX_TEXT_LENGTH, normalizeTimestamp, SHORTCUT_LABELS, validateProvider, isLocalProvider } from './model';
+import { defaultSettings, errorMessage, userFacingError, filterHistory, LANGUAGES, languageName, MAX_TEXT_LENGTH, normalizeTimestamp, validateProvider, isLocalProvider } from './model';
 import type { Action, CredentialState, HistoryEntry, PermissionKind, Provider, ProviderKind, Settings, ShortcutAction, SourceTextEvent, SystemTranslationStatus, TranslationProgress, TranslationResult } from './types';
 
 const desktop = isTauri();
@@ -72,7 +73,8 @@ let originalCapture: SourceTextEvent | null = null;
 let queuedCapture: SourceTextEvent | null = null;
 interface InputFocusRequest { epoch: number; generation: number; intentRevision: number }
 let queuedInputFocus: InputFocusRequest | null = null;
-let pendingSettingsOpen: { presentationEpoch: number } | null = null;
+type NativeSettingsRequest = { presentationEpoch: number; section?: 'shortcuts' };
+let pendingSettingsOpen: NativeSettingsRequest | null = null;
 let latestSettingsOpenEpoch = -1;
 let confirmResolve: ((value: boolean) => void) | null = null;
 const cleanupListeners: Array<() => void> = [];
@@ -149,6 +151,7 @@ function reportError(error: unknown): void { toast(userFacingError(error), 'erro
 function run(work: () => Promise<unknown>): void { void work().catch(reportError); }
 function setView(view: string): void {
   if (!['translate', 'history', 'settings'].includes(view)) return;
+  if (currentView === 'settings' && view !== 'settings') shortcutEditor.leave();
   if (view !== currentView) focusIntentRevision += 1;
   closeMoreMenu();
   currentView = view; document.body.dataset.view = view;
@@ -296,7 +299,8 @@ async function receiveCapturedText(payload: SourceTextEvent & { presentationEpoc
   if (allModals.some((modal) => !modal.hidden)) { queuedCapture = payload; queuedInputFocus = null; return; }
   pendingTranslate = false; clearToast();
   setView('translate');
-  const normalized = payload.mode === 'input' ? payload.text : normalizeCapturedText(payload.text);
+  const normalized = payload.mode === 'input' ? payload.text
+    : payload.captureOrigin === 'ocr' || payload.mode === 'ocr' ? normalizeOcrCapturedText(payload.text) : normalizeCapturedText(payload.text);
   setSourceText(normalized);
   // A passive shortcut must not revive a control's old keyboard-focus ring.
   // Blur only this WebView's retained DOM focus; never focus another element
@@ -363,7 +367,7 @@ async function receiveInputFocus(payload: unknown): Promise<void> {
   if (presentationFocusIntent?.epoch !== epoch || presentationFocusIntent.intentRevision !== focusIntentRevision) return;
   requestInputFocus({ epoch: current.epoch, generation, intentRevision: presentationFocusIntent.intentRevision });
 }
-async function openSettingsFromNative(payload: { presentationEpoch: number }): Promise<void> {
+async function openSettingsFromNative(payload: NativeSettingsRequest): Promise<void> {
   if (!settingsReady) {
     if (!pendingSettingsOpen || payload.presentationEpoch > pendingSettingsOpen.presentationEpoch) pendingSettingsOpen = payload;
     return;
@@ -373,9 +377,15 @@ async function openSettingsFromNative(payload: { presentationEpoch: number }): P
   pendingTranslate = false;
   clearToast(); clearPermissionGuidance(); stopPendingTranslation();
   setView('settings');
+  const intent = focusIntentRevision;
   try {
     const presentation = await panelLayout.presentManagement(payload.presentationEpoch);
     if (presentation) applyTranslationPresentation(presentation);
+    if (payload.section === 'shortcuts' && currentView === 'settings' && latestSettingsOpenEpoch === payload.presentationEpoch
+      && intent === focusIntentRevision && (!desktop || (presentation?.presented === true && presentation.epoch === translationPresentation.epoch))) {
+      const input = $<HTMLInputElement>('#shortcut-selection');
+      input.scrollIntoView({ block: 'center' }); input.focus({ preventScroll: true });
+    }
   } catch (error) {
     if (!errorMessage(error).startsWith('CANCELLED:')) throw error;
   }
@@ -704,16 +714,21 @@ async function refreshSystemTranslationStatus(prepare = false): Promise<void> {
     }
   }
 }
+let previewShortcutLease = 0;
+const shortcutEditor = createShortcutEditor({
+  form: $<HTMLFormElement>('#shortcuts-form'), saveButton: $<HTMLButtonElement>('#save-shortcuts'),
+  mac: /Mac/.test(navigator.platform), desktop,
+  canRecord: () => currentView === 'settings' && settingsReady,
+  begin: () => desktop ? invoke<number>('set_shortcut_recording', { active: true, leaseId: null }) : Promise.resolve(++previewShortcutLease),
+  end: async (id) => { if (desktop) await invoke('set_shortcut_recording', { active: false, leaseId: id }); },
+  save: (values) => updateSettings((next) => { next.shortcuts = values; }),
+  error: userFacingError, changed: notifyLayout,
+});
 function renderSettings(): void {
   renderProviders(); renderPopupServices();
   renderSystemTranslationSetup();
   ocrUi.render();
-  const shortcutsForm = $('#shortcuts-form'); shortcutsForm.replaceChildren();
-  for (const [action, label] of Object.entries(SHORTCUT_LABELS)) {
-    const row = node('label', 'shortcut-row'); row.append(node('span', '', label));
-    const input = node('input'); input.type = 'text'; input.value = settings.shortcuts[action as ShortcutAction]; input.name = action; input.maxLength = 80; input.autocomplete = 'off'; input.spellcheck = false; input.placeholder = '留空禁用';
-    input.setAttribute('aria-label', `${label}快捷键`); row.append(input); shortcutsForm.append(row);
-  }
+  shortcutEditor.render(settings.shortcuts, settingsReady);
   $<HTMLSelectElement>('#theme-select').value = settings.theme;
   $<HTMLInputElement>('#save-history').checked = settings.saveHistory;
   $<HTMLInputElement>('#max-history').value = String(settings.maxHistory);
@@ -1136,13 +1151,6 @@ $<HTMLInputElement>('#max-history').addEventListener('change', (event) => {
     finally { renderSettings(); }
   });
 });
-$('#save-shortcuts').addEventListener('click', () => run(async () => {
-  const values = Object.fromEntries(new FormData($<HTMLFormElement>('#shortcuts-form')).entries()) as Record<ShortcutAction, string>;
-  const normalized = Object.values(values).map((value) => value.trim().toLowerCase()).filter(Boolean);
-  if (new Set(normalized).size !== normalized.length) throw new Error('不同操作不能使用相同的快捷键。');
-  await updateSettings((next) => { for (const action of Object.keys(SHORTCUT_LABELS) as ShortcutAction[]) next.shortcuts[action] = values[action].trim(); });
-  toast(desktop ? '快捷键已保存。若注册失败，将显示系统返回的原因。' : '快捷键已在预览中更新；桌面应用才能注册全局快捷键。');
-}));
 $('#add-provider').addEventListener('click', () => openProviderDialog());
 $('#provider-kind').addEventListener('change', () => { providerKindChanged(true); updateProviderCredentialState(); });
 $('#provider-url').addEventListener('input', () => updateProviderCredentialState());
@@ -1226,7 +1234,7 @@ document.addEventListener('keydown', (event) => {
     else if (currentView !== 'translate') setView('translate');
   }
 });
-window.addEventListener('beforeunload', () => { cancelActiveTranslation(); panelLayout.dispose(); for (const unlisten of cleanupListeners) unlisten(); if ('speechSynthesis' in window) window.speechSynthesis.cancel(); });
+window.addEventListener('beforeunload', () => { shortcutEditor.dispose(); cancelActiveTranslation(); panelLayout.dispose(); for (const unlisten of cleanupListeners) unlisten(); if ('speechSynthesis' in window) window.speechSynthesis.cancel(); });
 
 async function initialize(): Promise<void> {
   const presetSelect = $<HTMLSelectElement>('#provider-preset');
@@ -1245,13 +1253,14 @@ async function initialize(): Promise<void> {
     // Listen before loading settings so an incoming native selection is not lost during startup.
     cleanupListeners.push(await listen<SourceTextEvent & { presentationEpoch?: number }>('source-text', (event) => run(() => receiveCapturedText(event.payload))));
     cleanupListeners.push(await listen<unknown>('focus-input', (event) => run(() => receiveInputFocus(event.payload))));
-    cleanupListeners.push(await listen<{ presentationEpoch: number }>('open-settings', (event) => run(() => openSettingsFromNative(event.payload))));
+    cleanupListeners.push(await listen<NativeSettingsRequest>('open-settings', (event) => run(() => openSettingsFromNative(event.payload))));
     cleanupListeners.push(await listen<TranslationPresentation>('translation-presentation', (event) => applyTranslationPresentation(event.payload)));
     cleanupListeners.push(await listen<TranslationProgress>('translation-progress', (event) => receiveTranslationProgress(event.payload)));
     cleanupListeners.push(await listen<string>('action-error', (event) => handleActionError(event.payload)));
     cleanupListeners.push(await listen<string>('shortcut-error', (event) => toast(event.payload, 'error', 8000)));
+    cleanupListeners.push(await listen<NativeRecordedShortcut>('shortcut-recorded', (event) => shortcutEditor.receiveNative(event.payload)));
     applyTranslationPresentation(await invoke<TranslationPresentation>('get_translation_presentation'));
-    const startupSettings = await invoke<{ presentationEpoch: number } | null>('get_pending_settings');
+    const startupSettings = await invoke<NativeSettingsRequest | null>('get_pending_settings');
     if (startupSettings) pendingSettingsOpen = !pendingSettingsOpen || startupSettings.presentationEpoch > pendingSettingsOpen.presentationEpoch ? startupSettings : pendingSettingsOpen;
     settings = await invoke<Settings>('get_settings');
     settingsReady = true;
@@ -1260,7 +1269,7 @@ async function initialize(): Promise<void> {
     await loadHistory(); status('准备就绪');
     if (pendingSettingsOpen) { const request = pendingSettingsOpen; pendingSettingsOpen = null; await openSettingsFromNative(request); }
     if (pendingTranslate) run(translate);
-    const diagnostic = await invoke<{ warnings?: unknown }>('diagnostics').catch(() => null);
+    const diagnostic = await invoke<{ warnings?: unknown }>('diagnostics', document.documentElement.dataset.platform === 'windows' ? { includeNative: false } : {}).catch(() => null);
     if (Array.isArray(diagnostic?.warnings) && diagnostic.warnings.length > 0) toast(diagnostic.warnings.filter((warning): warning is string => typeof warning === 'string').join('\n'), 'error', 10_000);
   } catch (error) {
     status('启动检查失败'); reportError(error);

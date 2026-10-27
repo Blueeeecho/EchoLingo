@@ -86,6 +86,9 @@ jobs:
         run: |
           python scripts/package-offline-source.py --engine-work-dir "$env:RUNNER_TEMP/echolingo-offline-engine-build" --output "$env:RUNNER_TEMP/EchoLingo-offline-engine-source.zip"
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Audit exact Windows runtime resource allowlist
+        if: runner.os == 'Windows'
+        run: python scripts/audit-windows-resources.py --staged
       - run: npm ci
       - run: npm run check
       - run: npm test
@@ -119,13 +122,85 @@ jobs:
         run: cargo fmt --manifest-path src-tauri/Cargo.toml --check
       - name: Build desktop installer
         run: npm run tauri build -- --bundles ${{ runner.os == 'Windows' && 'nsis' || 'dmg' }}
+      - name: Identify the actual embedded precompiled Windows helper
+        id: windows_native_candidate
+        if: runner.os == 'Windows'
+        shell: powershell
+        run: |
+          $dll = Get-ChildItem src-tauri/target/release/build -Recurse -File -Filter echolingo-windows-native.dll | Sort-Object LastWriteTimeUtc -Descending | Select-Object -First 1
+          if ($null -eq $dll) { throw 'The production Windows native DLL was not built.' }
+          $appBytes = [IO.File]::ReadAllBytes((Resolve-Path src-tauri/target/release/echolingo.exe))
+          $dllBytes = [IO.File]::ReadAllBytes($dll.FullName)
+          Add-Type -TypeDefinition @'
+          public static class EchoLingoExactPayload {
+            public static int Find(byte[] binary, byte[] payload) {
+              if (payload.Length == 0) return -1;
+              for (int i = 0; i <= binary.Length - payload.Length; i++) {
+                if (binary[i] != payload[0]) continue;
+                int j = 1; while (j < payload.Length && binary[i+j] == payload[j]) j++;
+                if (j == payload.Length) return i;
+              }
+              return -1;
+            }
+          }
+          '@
+          $payloadOffset = [EchoLingoExactPayload]::Find($appBytes, $dllBytes)
+          if ($payloadOffset -lt 0) { throw 'The selected complete DLL is not embedded byte-for-byte in the actual application.' }
+          "path=$($dll.FullName)" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+          [ordered]@{ dllBytes = $dllBytes.Length; dllSha256 = (Get-FileHash $dll.FullName -Algorithm SHA256).Hash.ToLowerInvariant(); completePayloadEmbedded = $true; exactPayloadOffset = $payloadOffset } | ConvertTo-Json -Compress
+      - name: Windows real shortcut conflict CLI probe
+        id: windows_shortcut_install
+        if: runner.os == 'Windows'
+        continue-on-error: true
+        timeout-minutes: 3
+        shell: powershell
+        run: |
+          $output = @(& powershell.exe -NoProfile -STA -ExecutionPolicy Bypass -File tests/windows-shortcut-install-smoke.ps1 -ApplicationPath src-tauri/target/release/echolingo.exe -IsolatedTestSession 2>&1)
+          $fixtureExit = $LASTEXITCODE
+          $output | Out-File "$env:RUNNER_TEMP/echolingo-shortcut-install.log" -Encoding utf8
+          $output | Write-Output
+          exit $fixtureExit
+      - name: Windows native assembly load and fail-closed checks
+        if: runner.os == 'Windows'
+        shell: powershell
+        run: powershell.exe -NoProfile -STA -ExecutionPolicy Bypass -File tests/windows-native-assembly-smoke.ps1 -NativeAssemblyPath '${{ steps.windows_native_candidate.outputs.path }}'
+      - name: Actual packaged Windows shortcut settings and registered-key recording
+        id: windows_shortcuts_ui
+        if: runner.os == 'Windows'
+        continue-on-error: true
+        timeout-minutes: 4
+        shell: powershell
+        run: |
+          $output = @(node tests/windows-shortcuts-ui.mjs src-tauri/target/release/echolingo.exe --isolated-test-session 2>&1)
+          $fixtureExit = $LASTEXITCODE
+          $output | Out-File "$env:RUNNER_TEMP/echolingo-shortcuts-ui.log" -Encoding utf8
+          $output | Write-Output
+          exit $fixtureExit
       - name: Windows live transparent region selector desktop smoke
         id: windows_live_capture
         if: runner.os == 'Windows'
         continue-on-error: true
         timeout-minutes: 3
         shell: powershell
-        run: powershell.exe -NoProfile -STA -ExecutionPolicy Bypass -File tests/windows-live-capture-smoke.ps1
+        run: powershell.exe -NoProfile -STA -ExecutionPolicy Bypass -File tests/windows-live-capture-smoke.ps1 -NativeAssemblyPath '${{ steps.windows_native_candidate.outputs.path }}'
+      - name: Same-runner actual helper startup and drag A-B measurements
+        id: windows_helper_performance
+        if: runner.os == 'Windows'
+        continue-on-error: true
+        timeout-minutes: 6
+        shell: powershell
+        run: |
+          git fetch --no-tags --depth=1 origin ab4405cc15e2ca204459b2fd40389924aa994695
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          [Console]::OutputEncoding = [Text.UTF8Encoding]::new($false)
+          $baseline = "$env:RUNNER_TEMP/echolingo-ab4405c-windows.ps1"
+          git show ab4405cc15e2ca204459b2fd40389924aa994695:src-tauri/native/windows.ps1 | Out-File $baseline -Encoding utf8
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $output = @(& powershell.exe -NoProfile -STA -ExecutionPolicy Bypass -File tests/windows-helper-performance-smoke.ps1 -BaselineHelperPath $baseline -NativeAssemblyPath '${{ steps.windows_native_candidate.outputs.path }}' 2>&1)
+          $fixtureExit = $LASTEXITCODE
+          $output | Out-File "$env:RUNNER_TEMP/echolingo-helper-performance.log" -Encoding utf8
+          $output | Write-Output
+          exit $fixtureExit
       - name: Windows application shortcut and OCR integration smoke
         id: windows_application_core
         if: runner.os == 'Windows'
@@ -155,6 +230,9 @@ jobs:
           if-no-files-found: warn
           path: |
             ${{ runner.temp }}/echolingo-offline-validation.json
+            ${{ runner.temp }}/echolingo-shortcut-install.log
+            ${{ runner.temp }}/echolingo-shortcuts-ui.log
+            ${{ runner.temp }}/echolingo-helper-performance.log
             ${{ runner.temp }}/EchoLingo-offline-engine-source.zip
             resources/offline-translation/manifest.json
             src-tauri/target/release/echolingo.exe
@@ -181,6 +259,9 @@ jobs:
             applicationCore = '${{ steps.windows_application_core.outcome }}'
             popupVisibility = '${{ steps.windows_popup_visibility.outcome }}'
             installedOffline = '${{ steps.windows_installed_offline.outcome }}'
+            shortcutInstall = '${{ steps.windows_shortcut_install.outcome }}'
+            shortcutsUi = '${{ steps.windows_shortcuts_ui.outcome }}'
+            helperPerformance = '${{ steps.windows_helper_performance.outcome }}'
           }
           $taskOutcomes | ConvertTo-Json -Compress
           if (@($taskOutcomes.Values | Where-Object { $_ -ne 'success' }).Count -gt 0) {

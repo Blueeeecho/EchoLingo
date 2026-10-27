@@ -26,6 +26,7 @@ tokio = { version = "1", features = ["time", "sync", "macros", "rt-multi-thread"
 keyring = { version = "3", features = ["apple-native"] }
 
 [target.'cfg(target_os = "windows")'.dependencies]
+global-hotkey = "=0.8.0"
 keyring = { version = "3", features = ["windows-native"] }
 
 [target.'cfg(not(any(target_os = "macos", target_os = "windows")))'.dependencies]

@@ -398,12 +398,58 @@ pub fn show_without_activation(_window: &tauri::WebviewWindow) -> Result<(), Str
 }
 
 pub fn diagnostics() -> Value {
-    match run("diagnostics", None) {
+    let value = match run("diagnostics", None) {
         Ok(result) => result.get("diagnostics").cloned().unwrap_or(result),
         Err(error) => {
             json!({ "platform": std::env::consts::OS, "available": false, "error": error })
         }
+    };
+    #[cfg(target_os = "windows")]
+    {
+        let mut value = value;
+        value["lastCaptureHealth"] = windows_capture_health()
+            .lock()
+            .map(|v| v.clone())
+            .unwrap_or(Value::Null);
+        value
     }
+    #[cfg(not(target_os = "windows"))]
+    value
+}
+
+#[cfg(target_os = "windows")]
+fn windows_capture_health() -> &'static std::sync::Mutex<Value> {
+    static HEALTH: std::sync::OnceLock<std::sync::Mutex<Value>> = std::sync::OnceLock::new();
+    HEALTH.get_or_init(|| std::sync::Mutex::new(Value::Null))
+}
+
+#[cfg(any(target_os = "windows", test))]
+fn bounded_capture_health(value: &Value) -> Value {
+    const FIELDS: &[&str] = &[
+        "hookMouseDowns",
+        "hookMouseUps",
+        "hookMouseMoves",
+        "hookEscapeDowns",
+        "hookEscapeUps",
+        "moveWakesPosted",
+        "movePostFailures",
+        "uiPhase",
+        "inputArmed",
+        "leftSwallowed",
+        "physicalLeftDown",
+        "dragging",
+        "knownPointer",
+        "desktopMatched",
+        "mismatchKind",
+        "hookRunningAfterStop",
+    ];
+    let mut safe = serde_json::Map::new();
+    for field in FIELDS {
+        if let Some(number) = value.get(field).and_then(Value::as_u64) {
+            safe.insert((*field).to_owned(), json!(number));
+        }
+    }
+    Value::Object(safe)
 }
 
 /// Read the bounded metadata of the last selected-text attempt in this process.
@@ -645,6 +691,13 @@ fn run(mode: &str, input: Option<&str>) -> Result<Value, String> {
     use std::process::Stdio;
     use std::time::{Duration, Instant};
 
+    let capture = matches!(mode, "capture-ocr" | "capture-image");
+    if capture {
+        if let Ok(mut health) = windows_capture_health().lock() {
+            *health = json!({"helperResponseReceived": 0});
+        }
+    }
+
     let mut command = native_command(mode)?;
     command
         .stdin(if input.is_some() {
@@ -729,6 +782,15 @@ fn run(mode: &str, input: Option<&str>) -> Result<Value, String> {
             "NATIVE_START: System helper exited with {status}. {detail}"
         ));
     }
+    if capture {
+        if let Ok(reply) = serde_json::from_slice::<Value>(&output) {
+            let mut safe = bounded_capture_health(&reply["captureHealth"]);
+            safe["helperResponseReceived"] = json!(1);
+            if let Ok(mut health) = windows_capture_health().lock() {
+                *health = safe;
+            }
+        }
+    }
     parse_response(&output, status.success())
 }
 
@@ -801,12 +863,44 @@ fn run(mode: &str, input: Option<&str>) -> Result<Value, String> {
     result
 }
 
+// Cached paths are an optimization, not proof of the file's current contents.
+// Bound every read to the embedded DLL's exact size and never load a changed
+// (even otherwise valid) assembly or silently repair it during a shortcut.
+#[cfg(any(target_os = "windows", test))]
+fn verify_native_assembly(path: &std::path::Path, expected: &[u8]) -> Result<(), String> {
+    use std::io::Read;
+    let check = (|| -> std::io::Result<bool> {
+        let metadata = std::fs::symlink_metadata(path)?;
+        if !metadata.is_file()
+            || metadata.file_type().is_symlink()
+            || metadata.len() != expected.len() as u64
+        {
+            return Ok(false);
+        }
+        let file = std::fs::File::open(path)?;
+        if file.metadata()?.len() != expected.len() as u64 {
+            return Ok(false);
+        }
+        let mut actual = Vec::with_capacity(expected.len());
+        file.take(expected.len() as u64 + 1)
+            .read_to_end(&mut actual)?;
+        Ok(actual == expected)
+    })();
+    if check.unwrap_or(false) {
+        Ok(())
+    } else {
+        Err("NATIVE_ASSEMBLY: The packaged Windows native DLL changed or is unavailable. Restart or reinstall EchoLingo.".into())
+    }
+}
+
 #[cfg(target_os = "windows")]
 fn native_command(mode: &str) -> Result<std::process::Command, String> {
+    use sha2::{Digest, Sha256};
     use std::os::windows::process::CommandExt;
     use std::sync::OnceLock;
-    static SCRIPT: OnceLock<Result<std::path::PathBuf, String>> = OnceLock::new();
-    let path = SCRIPT
+    static HELPER: OnceLock<Result<(std::path::PathBuf, std::path::PathBuf), String>> =
+        OnceLock::new();
+    let (path, assembly) = HELPER
         .get_or_init(|| {
             let local =
                 std::env::var_os("LOCALAPPDATA").ok_or("NATIVE: LOCALAPPDATA is unavailable.")?;
@@ -815,10 +909,18 @@ fn native_command(mode: &str) -> Result<std::process::Command, String> {
             // Windows PowerShell 5.1 needs a BOM to decode non-ASCII source reliably.
             let mut bytes = vec![0xef, 0xbb, 0xbf];
             bytes.extend_from_slice(include_bytes!("../native/windows.ps1"));
-            materialize(&folder, "echolingo-native-helper.ps1", &bytes)
+            let script = materialize(&folder, "echolingo-native-helper.ps1", &bytes)?;
+            let dll = include_bytes!(concat!(env!("OUT_DIR"), "/echolingo-windows-native.dll"));
+            let digest = format!("{:x}", Sha256::digest(dll));
+            let assembly = materialize(&folder, &format!("echolingo-native-{digest}.dll"), dll)?;
+            Ok((script, assembly))
         })
         .as_ref()
         .map_err(Clone::clone)?;
+    verify_native_assembly(
+        assembly,
+        include_bytes!(concat!(env!("OUT_DIR"), "/echolingo-windows-native.dll")),
+    )?;
     let system_root = std::env::var_os("SystemRoot").ok_or("NATIVE: SystemRoot is unavailable.")?;
     let powershell = std::path::PathBuf::from(system_root)
         .join("System32/WindowsPowerShell/v1.0/powershell.exe");
@@ -834,7 +936,8 @@ fn native_command(mode: &str) -> Result<std::process::Command, String> {
             "-File",
         ])
         .arg(path)
-        .args(["-Mode", mode]);
+        .args(["-Mode", mode, "-NativeAssemblyPath"])
+        .arg(assembly);
     // No command shell, interpolation, user-supplied code, execution-policy change
     // to the machine, or visible console window. Copy text travels through stdin.
     command.creation_flags(0x08000000); // CREATE_NO_WINDOW
@@ -901,6 +1004,53 @@ fn materialize(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn native_assembly_cache_rechecks_mutation_after_initial_success_without_repair() {
+        let directory = std::env::temp_dir().join(format!(
+            "echolingo-assembly-integrity-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir(&directory).unwrap();
+        let path = directory.join("generated.dll");
+        let expected = b"MZ-generated-assembly-identity-A";
+        std::fs::write(&path, expected).unwrap();
+        assert!(super::verify_native_assembly(&path, expected).is_ok());
+        // A same-length replacement, not only corrupt/missing DLL loading,
+        // must be rejected after the path has already passed its first check.
+        let changed = b"MZ-generated-assembly-identity-B";
+        std::fs::write(&path, changed).unwrap();
+        let error = super::verify_native_assembly(&path, expected).unwrap_err();
+        assert!(error.starts_with("NATIVE_ASSEMBLY:"));
+        assert_eq!(std::fs::read(&path).unwrap(), changed);
+        std::fs::write(&path, b"MZ-oversized-generated-assembly-identity-B-extra").unwrap();
+        assert!(super::verify_native_assembly(&path, expected).is_err());
+        std::fs::remove_file(&path).unwrap();
+        assert!(super::verify_native_assembly(&path, expected).is_err());
+        std::fs::remove_dir(directory).unwrap();
+    }
+
+    #[test]
+    fn capture_health_keeps_only_bounded_unsigned_metadata_even_on_failure() {
+        let safe = super::bounded_capture_health(&serde_json::json!({
+            "hookMouseDowns": 0, "hookMouseUps": 7, "hookMouseMoves": 42,
+            "knownPointer": 1, "desktopMatched": 1, "mismatchKind": 1,
+            "uiPhase": "original text", "dragging": -1,
+            "source": "never retain", "title": "never retain", "imageBase64": "never retain",
+            "trajectory": [1, 2, 3], "credentials": {"value": "never retain"}
+        }));
+        assert_eq!(
+            safe,
+            serde_json::json!({"hookMouseDowns":0,"hookMouseUps":7,"hookMouseMoves":42,"knownPointer":1,"desktopMatched":1,"mismatchKind":1})
+        );
+        assert_eq!(
+            super::bounded_capture_health(&serde_json::json!(null)),
+            serde_json::json!({})
+        );
+    }
     #[test]
     fn hide_confirms_native_state_when_runtime_hide_was_a_cached_noop() {
         let visible = std::cell::Cell::new(true);

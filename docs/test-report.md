@@ -2,6 +2,18 @@
 
 更新时间：2026-10-25，Asia/Shanghai。本报告分别记录本机执行、CI 和真实桌面边界，未运行不算通过。[本轮原始本机证据](validation/macos-preview-20261025.json)。
 
+## 2026-10-27 Windows11 interaction investigation — candidate under review, not installed/accepted
+
+The owner reports blue OCR frames but left clicks still reach ordinary non-fullscreen application buttons, plus slow Alt+S readiness/dragging and unwanted OCR spaces/wraps. Earlier Server2025 generated-window passes do not override this physical Windows11 failure. The mouse-interception cause remains unproved; a visible frame is not proof of a working mouse hook.
+
+Candidate changes remove the fixed Windows180ms delay, embed a build-time Framework DLL instead of recompiling C# on every operation, coalesce MOVE-triggered UI wakes with the16ms heartbeat retained, reduce redundant edge HWND updates, and preserve bounded no-content capture-health metadata. A750ms sustained input mismatch cancels visibly without a screenshot; this is a fail-safe, not proof the owner bug is fixed. OCR-only Han spacing repair and native paragraph-pitch inference preserve raw restore, explicit paragraphs, code/Latin/Korean/numbers and manually typed input.
+
+Two core shortcuts now have recording/manual editing and transactional immediate registration/persistence. An early installed-exe CLI checks actual temporary RegisterHotKey availability without a WebView/credential read/settings write; installation warns on conflicts and offers shortcut settings. Silent/passive installation never launches settings or displays this prompt. Unknown checks are distinct from occupied/reserved keys. Independent review identified that WM_HOTKEY combinations need a lease-bound event bridge to be recorded, and found delayed-ACK/Esc and DLL cache identity boundaries; fixes and actual Windows verification are in progress.
+
+Initial host checks:193Rust pass/1resource-runtime ignored,71TS unit pass and complete isolated fake-IPC UI pass. These precede the final independent-review fixes and are not final candidate or Windows-native acceptance. Expanded ordinary-peer drag, exact-DLL load/failure, same-runner A/B and actual packaged WebView+SendInput shortcut fixtures are prepared for a new full CI. No Mac signing/install/permissions, user credentials or stopped local Win10VM were touched.
+
+Size audit of the previous delivered archive:94,674,254B outer ZIP includes75,210,904B NSIS and19,456,259B corresponding engine source.104,470,603B unpacked bilingual offline models dominate runtime resources. New runtime allowlist excludes195,072B development metadata while retaining every model and original license/source notice; compressed savings must be measured after the new build. The source attachment remains separately available; it must not be confused with installed application code.
+
 ## 2026-10-27 Windows 悬停窗口蓝框：受控实测与预览包完成
 
 Windows Alt+S保留当前屏幕蓝边，悬停时增加实际应用窗口蓝框；桌面/任务栏或不确定目标只保留屏幕框。左拖清除悬停提示，仍按实际任意区域OCR→填入原文→自动翻译。使用每屏12个薄边HWND、80ms元数据查询，不在hook线程枚举，不取标题/文本/截图、不抢焦点或增加授权。独立审阅发现的disabled遮挡歧义已在实测前修正。

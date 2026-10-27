@@ -166,7 +166,7 @@ def main():
                 member = zipfile.ZipInfo(name, date_time=(1980, 1, 1, 0, 0, 0))
                 member.compress_type = zipfile.ZIP_DEFLATED
                 member.external_attr = 0o100644 << 16
-                archive.writestr(member, data)
+                archive.writestr(member, data, compresslevel=9)
         with zipfile.ZipFile(temporary) as archive:
             if archive.testzip() is not None:
                 raise ValueError("source archive CRC verification failed")

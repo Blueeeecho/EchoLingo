@@ -895,6 +895,7 @@ name = "echolingo"
 version = "0.1.0"
 dependencies = [
  "futures-util",
+ "global-hotkey",
  "hmac",
  "keyring",
  "reqwest 0.12.28",

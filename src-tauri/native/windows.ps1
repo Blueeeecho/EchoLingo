@@ -3,14 +3,28 @@
 [CmdletBinding()]
 param(
     [ValidateSet('selected-text', 'capture-ocr', 'capture-image', 'clipboard', 'copy', 'diagnostics', 'self-test', 'capture-state-self-test')]
-    [string]$Mode = $env:ECHOLINGO_NATIVE_MODE
+    [string]$Mode = $env:ECHOLINGO_NATIVE_MODE,
+    # Production always supplies its embedded, content-addressed DLL. Omission
+    # is the standalone source-development/fixture path, never a load fallback.
+    [string]$NativeAssemblyPath = '',
+    [switch]$PerformanceDiagnostics
 )
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
 [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)
 [Console]::InputEncoding = [System.Text.UTF8Encoding]::new($false)
+$script:NativeBackend = 'uninitialized'
+$script:HelperWatch = [Diagnostics.Stopwatch]::StartNew()
+$script:HelperPhases = @{}
 
 function Write-Result($Value) {
+    $Value['nativeBackend'] = $script:NativeBackend
+    if ('CaptureHealth' -as [type]) { $Value['captureHealth'] = [CaptureHealth]::Snapshot() }
+    if ($PerformanceDiagnostics) {
+        $script:HelperPhases['replyMilliseconds'] = $script:HelperWatch.Elapsed.TotalMilliseconds
+        $Value['helperPerformance'] = $script:HelperPhases
+        if ('CapturePerformance' -as [type]) { $Value['capturePerformance'] = [CapturePerformance]::Snapshot() }
+    }
     [Console]::Out.WriteLine(($Value | ConvertTo-Json -Depth 12 -Compress))
 }
 
@@ -20,6 +34,23 @@ try {
     Add-Type -AssemblyName UIAutomationClient
     Add-Type -AssemblyName UIAutomationTypes
     Add-Type -AssemblyName WindowsBase
+    $script:HelperPhases['assembliesLoadedMilliseconds'] = $script:HelperWatch.Elapsed.TotalMilliseconds
+    if (-not [string]::IsNullOrWhiteSpace($NativeAssemblyPath)) {
+        $script:NativeBackend = 'precompiled-framework-dll'
+        if (-not [IO.Path]::IsPathRooted($NativeAssemblyPath) -or -not [IO.File]::Exists($NativeAssemblyPath) -or
+            [IO.Path]::GetExtension($NativeAssemblyPath) -ne '.dll') {
+            throw 'NATIVE_ASSEMBLY: The packaged Windows native DLL is missing or invalid.'
+        }
+        try {
+            Add-Type -Path $NativeAssemblyPath
+            if (-not ('EchoLingoNative' -as [type]) -or -not ('CapturePerformance' -as [type]) -or
+                -not [string]::Equals([IO.Path]::GetFullPath([EchoLingoNative].Assembly.Location), [IO.Path]::GetFullPath($NativeAssemblyPath), [StringComparison]::OrdinalIgnoreCase)) {
+                throw 'Native types do not belong to the packaged DLL.'
+            }
+        }
+        catch { throw 'NATIVE_ASSEMBLY: The packaged Windows native DLL could not be loaded. Reinstall the application.' }
+    } else {
+    $script:NativeBackend = 'source-compiled-cli'
     $source = @'
 using System;
 using System.Collections.Generic;
@@ -37,6 +68,31 @@ using System.Windows.Forms;
 // Pure policies shared by the real UIA/copy path and synthetic tests. A null
 // UIA result is unavailable, while a supported empty range remains an explicit
 // empty selection. A clipboard clear alone is not a completed copy operation.
+// Numeric, opt-in in-process timings only. No source/window/clipboard content.
+public static class CapturePerformance {
+    static readonly Stopwatch clock = new Stopwatch();
+    static readonly Dictionary<string, double> values = new Dictionary<string, double>();
+    public static bool Enabled { get; private set; }
+    public static void Enable() { values.Clear(); clock.Restart(); Enabled = true; }
+    public static long Begin() { return Enabled ? Stopwatch.GetTimestamp() : 0; }
+    public static void Mark(string stage) { if (Enabled && !values.ContainsKey(stage)) values[stage] = clock.Elapsed.TotalMilliseconds; }
+    public static void Set(string name, double value) { if (Enabled) values[name] = value; }
+    public static void End(string name, long started) {
+        if (!Enabled || started == 0) return;
+        double elapsed = (Stopwatch.GetTimestamp() - started) * 1000.0 / Stopwatch.Frequency, count, total, maximum;
+        values.TryGetValue(name + "Count", out count); values.TryGetValue(name + "TotalMilliseconds", out total); values.TryGetValue(name + "MaxMilliseconds", out maximum);
+        values[name + "Count"] = count + 1; values[name + "TotalMilliseconds"] = total + elapsed;
+        values[name + "MaxMilliseconds"] = Math.Max(maximum, elapsed);
+    }
+    public static Dictionary<string, double> Snapshot() { return new Dictionary<string, double>(values); }
+}
+
+public static class CaptureHealth {
+    static readonly Dictionary<string, long> values = new Dictionary<string, long>();
+    public static void Set(string name, long value) { values[name] = value; }
+    public static Dictionary<string, long> Snapshot() { return new Dictionary<string, long>(values); }
+}
+
 public static class SelectionCopyPolicy {
     public const string InputBlocked = "SELECTION: Windows blocked copy input. Elevated or protected apps may not allow selection capture; try screenshot OCR.";
     public static T RequireFocus<T>(T focused) where T : class {
@@ -411,10 +467,13 @@ public static class EchoLingoNative {
             // Validate both sides of BitBlt and discard pixels if the saved
             // physical rectangle no longer belongs to the same configuration.
             if (DwmFlush() < 0) throw new InvalidOperationException("CAPTURE: Windows could not finish removing the selection overlay.");
+            CapturePerformance.Mark("dwmFlushedMilliseconds");
             picker.ValidateCaptureEnvironment();
             using (Bitmap crop = ScreenBitmap(selected)) {
+                CapturePerformance.Mark("pixelsCapturedMilliseconds");
                 picker.ValidateCaptureEnvironment();
                 crop.Save(path, ImageFormat.Png);
+                CapturePerformance.Mark("pngSavedMilliseconds");
             }
         }
     }
@@ -512,8 +571,8 @@ public sealed class CaptureSelectionState {
         int inputAssertions = CaptureInputPolicy.SelfTest();
         int topologyAssertions = CaptureTopologyPolicy.SelfTest();
         int outlineAssertions = CaptureOutlinePolicy.SelfTest();
-        int hoverAssertions = CaptureHoverPolicy.SelfTest();
-        return new Dictionary<string, object> { { "captureStateFixturePassed", true }, { "fixtureAssertions", 11 + inputAssertions + topologyAssertions + outlineAssertions + hoverAssertions }, { "inputPolicyAssertions", inputAssertions }, { "topologyPolicyAssertions", topologyAssertions }, { "outlinePolicyAssertions", outlineAssertions }, { "hoverPolicyAssertions", hoverAssertions }, { "hoverQueryMilliseconds", CaptureHoverPolicy.QueryMilliseconds }, { "releaseGraceMilliseconds", 500 }, { "screenCaptured", false }, { "clipboardChanged", false }, { "interactiveCaptureTested", false } };
+        int hoverAssertions = CaptureHoverPolicy.SelfTest(), redrawAssertions = CaptureMoveMailbox.SelfTest(), healthAssertions = CaptureInputHealthPolicy.SelfTest();
+        return new Dictionary<string, object> { { "captureStateFixturePassed", true }, { "fixtureAssertions", 11 + inputAssertions + topologyAssertions + outlineAssertions + hoverAssertions + redrawAssertions + healthAssertions }, { "inputPolicyAssertions", inputAssertions }, { "topologyPolicyAssertions", topologyAssertions }, { "outlinePolicyAssertions", outlineAssertions }, { "hoverPolicyAssertions", hoverAssertions }, { "redrawPolicyAssertions", redrawAssertions }, { "inputHealthPolicyAssertions", healthAssertions }, { "hoverQueryMilliseconds", CaptureHoverPolicy.QueryMilliseconds }, { "releaseGraceMilliseconds", 500 }, { "screenCaptured", false }, { "clipboardChanged", false }, { "interactiveCaptureTested", false } };
     }
 }
 
@@ -602,6 +661,34 @@ public sealed class CaptureInputPolicy {
     }
 }
 
+// Physical polling is only a health check. It never invents a drag/release or
+// crop from input that the mouse hook did not actually own.
+public sealed class CaptureInputHealthPolicy {
+    int mismatch;
+    long since = -1;
+    public int Observe(bool armed, bool finished, bool dragging, bool swallowed, bool physicalLeft, long elapsed) {
+        int observed = !armed || finished ? 0 : !dragging && !swallowed && physicalLeft ? 1 : dragging && swallowed && !physicalLeft ? 2 : 0;
+        if (elapsed < 0 || observed == 0) { mismatch = 0; since = -1; return 0; }
+        if (observed != mismatch || since < 0 || elapsed < since) { mismatch = observed; since = elapsed; return 0; }
+        return elapsed - since >= 750 ? mismatch : 0;
+    }
+    public static int SelfTest() {
+        int assertions = 0;
+        Action<bool> check = delegate(bool ok) { if (!ok) throw new InvalidOperationException("SELF_TEST: Capture input health guard failed."); assertions++; };
+        CaptureInputHealthPolicy health = new CaptureInputHealthPolicy();
+        check(health.Observe(false, false, false, false, true, 0) == 0 && health.Observe(false, false, false, false, true, 2000) == 0);
+        check(health.Observe(true, false, false, false, true, 2100) == 0 && health.Observe(true, false, false, false, true, 2849) == 0);
+        check(health.Observe(true, false, false, false, true, 2850) == 1);
+        check(health.Observe(true, false, true, true, true, 2860) == 0);
+        check(health.Observe(true, false, true, true, false, 3000) == 0 && health.Observe(true, false, true, true, false, 3749) == 0);
+        check(health.Observe(true, false, true, true, false, 3750) == 2);
+        check(health.Observe(true, true, false, false, false, 3760) == 0);
+        check(health.Observe(true, false, true, true, false, 4000) == 0 && health.Observe(true, false, true, true, false, 3900) == 0);
+        check(health.Observe(true, false, true, true, true, 5000) == 0 && health.Observe(true, false, true, true, false, 6000) == 0);
+        return assertions;
+    }
+}
+
 public struct CaptureDisplaySnapshot {
     public readonly string Device;
     public readonly Rectangle Bounds;
@@ -648,6 +735,66 @@ public sealed class CaptureTopologyPolicy {
         Assert(expected.Invalid && !expected.Matches(new CaptureTopologyPolicy(new CaptureDisplaySnapshot[] { main, left }, 2)), "An invalidated capture cannot become valid when displays return to their previous arrangement.");
         return 7;
     }
+}
+
+// The hook only publishes one atomically packed point and at most one queued
+// wake. It never waits for the UI, enters the selection lock, or queries HWNDs.
+public sealed class CaptureMoveMailbox {
+    readonly Func<bool> post;
+    long point, moves, posts, failures;
+    int active = 1, pending, hasPoint;
+    public CaptureMoveMailbox(Func<bool> postWake) { post = postWake; }
+    public void Publish(Point value, bool wake) {
+        if (Interlocked.CompareExchange(ref active, 0, 0) == 0) return;
+        Interlocked.Exchange(ref point, ((long)(uint)value.X << 32) | (uint)value.Y);
+        Interlocked.Exchange(ref hasPoint, 1);
+        if (!wake) return;
+        Interlocked.Increment(ref moves);
+        if (Interlocked.CompareExchange(ref pending, 1, 0) != 0) return;
+        bool posted = false;
+        try { posted = Interlocked.CompareExchange(ref active, 0, 0) != 0 && post(); }
+        catch { } // A lost decorative wake must not escape a native hook callback.
+        if (posted) Interlocked.Increment(ref posts);
+        else { Interlocked.Increment(ref failures); Interlocked.Exchange(ref pending, 0); }
+    }
+    public bool TakeWake() { return Interlocked.Exchange(ref pending, 0) != 0 && Interlocked.CompareExchange(ref active, 0, 0) != 0; }
+    public bool TryRead(out Point value) {
+        long packed = Interlocked.Read(ref point);
+        value = new Point(unchecked((int)(packed >> 32)), unchecked((int)packed));
+        return Interlocked.CompareExchange(ref active, 0, 0) != 0 && Interlocked.CompareExchange(ref hasPoint, 0, 0) != 0;
+    }
+    public void Stop() { Interlocked.Exchange(ref active, 0); Interlocked.Exchange(ref pending, 0); }
+    public long Moves { get { return Interlocked.Read(ref moves); } }
+    public long Posts { get { return Interlocked.Read(ref posts); } }
+    public long Failures { get { return Interlocked.Read(ref failures); } }
+    public static int SelfTest() {
+        int assertions = 0, queued = 0; Point observed;
+        Action<bool> check = delegate(bool ok) { if (!ok) throw new InvalidOperationException("SELF_TEST: Capture move coalescing failed."); assertions++; };
+        CaptureMoveMailbox box = new CaptureMoveMailbox(delegate { queued++; return true; });
+        check(!box.TryRead(out observed));
+        for (int i = 0; i < 1000; i++) box.Publish(new Point(-1000 + i, Int32.MinValue + i), true);
+        check(queued == 1 && box.Moves == 1000 && box.Posts == 1);
+        check(box.TryRead(out observed) && observed == new Point(-1, Int32.MinValue + 999));
+        check(box.TakeWake()); check(!box.TakeWake()); box.Publish(new Point(Int32.MaxValue, -400), true);
+        check(queued == 2 && box.TryRead(out observed) && observed == new Point(Int32.MaxValue, -400));
+        box.Publish(new Point(2, 3), false); check(queued == 2 && box.TryRead(out observed) && observed == new Point(2, 3));
+        box.Stop(); box.Publish(new Point(7, 8), true); check(queued == 2 && !box.TakeWake() && !box.TryRead(out observed));
+        int attempts = 0; CaptureMoveMailbox failed = new CaptureMoveMailbox(delegate { attempts++; return false; });
+        failed.Publish(new Point(1, 2), true); failed.Publish(new Point(3, 4), true);
+        check(attempts == 2 && failed.Failures == 2 && failed.TryRead(out observed) && observed == new Point(3, 4));
+        CaptureMoveMailbox throwing = new CaptureMoveMailbox(delegate { throw new InvalidOperationException(); });
+        throwing.Publish(new Point(4, 5), true); check(throwing.Failures == 1 && throwing.TryRead(out observed));
+        CaptureRedrawPolicy redraw = new CaptureRedrawPolicy();
+        check(redraw.IsDue(0)); redraw.Presented(0); check(!redraw.IsDue(15) && redraw.IsDue(16));
+        redraw.Presented(16); check(!redraw.IsDue(20) && redraw.IsDue(32));
+        check(!redraw.IsDue(-1) && !redraw.IsDue(15)); check(redraw.IsDue(5000));
+        return assertions;
+    }
+}
+public sealed class CaptureRedrawPolicy {
+    long presented = -1;
+    public bool IsDue(long elapsed) { return elapsed >= 0 && (presented < 0 || (elapsed >= presented && elapsed - presented >= 16)); }
+    public void Presented(long elapsed) { presented = elapsed; }
 }
 
 // These temporary probes are never shown or ordered. GetDpiForWindow reports
@@ -892,12 +1039,17 @@ sealed class CaptureEdgeWindow : Form {
     public void Present(Rectangle edge, bool raise) {
         if (edge.Width <= 0 || edge.Height <= 0) { if (Visible) Hide(); return; }
         bool changed = Bounds != edge, showing = !Visible;
-        if (changed) Bounds = edge;
-        if (showing) Show();
+        if (showing) { Bounds = edge; Show(); }
         // HWND_TOPMOST is a group, not permanent precedence over other topmost
         // windows. Refresh its order passively, at most once per 250ms when idle.
-        if ((changed || showing || raise) && !SetWindowPos(Handle, new IntPtr(-1), 0, 0, 0, 0, 0x0010 | 0x0200 | 0x0001 | 0x0002))
-            throw new InvalidOperationException("CAPTURE_OVERLAY: Windows could not display the selection border above ordinary windows.");
+        if (changed || showing || raise) {
+            // A visible edge moves/resizes and optionally repairs Z order in
+            // one native call, instead of Bounds followed by another Z call.
+            uint flags = 0x0010 | 0x0200; // NOACTIVATE | NOOWNERZORDER
+            if (!raise && !showing) flags |= 0x0004; // Keep existing Z order during ordinary drag.
+            if (!SetWindowPos(Handle, new IntPtr(-1), edge.X, edge.Y, edge.Width, edge.Height, flags))
+                throw new InvalidOperationException("CAPTURE_OVERLAY: Windows could not display the selection border above ordinary windows.");
+        }
     }
 }
 
@@ -932,6 +1084,33 @@ sealed class CaptureOverlay : IDisposable {
 // Movement/wheel and all non-Escape keys immediately pass through. The UI
 // samples physical pointer motion; hooks retain only selection button/Esc state.
 // https://learn.microsoft.com/windows/win32/winmsg/lowlevelmouseproc
+sealed class CaptureWakeWindow : NativeWindow, IDisposable {
+    const int WakeMessage = 0x8000 + 0x361;
+    [DllImport("user32.dll", EntryPoint="PostMessageW")] static extern bool PostMessage(IntPtr window, uint message, IntPtr word, IntPtr parameter);
+    static int nextToken;
+    readonly IntPtr token, target;
+    readonly Action update;
+    CaptureMoveMailbox mailbox;
+    int stopped;
+    public CaptureWakeWindow(Action onMove) {
+        update = onMove; token = new IntPtr(Interlocked.Increment(ref nextToken));
+        CreateParams parameters = new CreateParams(); parameters.Parent = new IntPtr(-3); // HWND_MESSAGE: invisible, no Z order or activation.
+        CreateHandle(parameters); target = Handle;
+        if (target == IntPtr.Zero) throw new InvalidOperationException("CAPTURE_INPUT: Windows could not create the capture update listener.");
+    }
+    public void Bind(CaptureMoveMailbox value) { mailbox = value; }
+    public bool Post() { return Interlocked.CompareExchange(ref stopped, 0, 0) == 0 && PostMessage(target, WakeMessage, token, IntPtr.Zero); }
+    protected override void WndProc(ref Message message) {
+        if (message.Msg == WakeMessage) {
+            if (message.WParam == token && Interlocked.CompareExchange(ref stopped, 0, 0) == 0 && mailbox != null && mailbox.TakeWake()) update();
+            return;
+        }
+        base.WndProc(ref message);
+    }
+    public void Stop() { Interlocked.Exchange(ref stopped, 1); if (mailbox != null) mailbox.Stop(); }
+    public void Dispose() { Stop(); DestroyHandle(); }
+}
+
 sealed class CaptureInputPump : IDisposable {
     delegate IntPtr MouseHook(int code, IntPtr message, IntPtr data);
     delegate IntPtr KeyboardHook(int code, IntPtr message, IntPtr data);
@@ -951,6 +1130,7 @@ sealed class CaptureInputPump : IDisposable {
     readonly object gate;
     readonly CaptureSelectionState state;
     readonly CaptureInputPolicy input;
+    readonly CaptureMoveMailbox moves;
     readonly MouseHook callback;
     readonly KeyboardHook keyboardCallback;
     readonly ManualResetEvent ready = new ManualResetEvent(false);
@@ -960,10 +1140,15 @@ sealed class CaptureInputPump : IDisposable {
     volatile bool running;
     volatile string failure;
     int stopRequested;
+    long mouseDowns, mouseUps, escapeDowns, escapeUps;
+    public long MouseDowns { get { return Interlocked.Read(ref mouseDowns); } }
+    public long MouseUps { get { return Interlocked.Read(ref mouseUps); } }
+    public long EscapeDowns { get { return Interlocked.Read(ref escapeDowns); } }
+    public long EscapeUps { get { return Interlocked.Read(ref escapeUps); } }
     public bool Running { get { return running; } }
     public string Failure { get { return failure; } }
-    public CaptureInputPump(object selectionGate, CaptureSelectionState selection, CaptureInputPolicy policy) {
-        gate = selectionGate; state = selection; input = policy;
+    public CaptureInputPump(object selectionGate, CaptureSelectionState selection, CaptureInputPolicy policy, CaptureMoveMailbox mailbox) {
+        gate = selectionGate; state = selection; input = policy; moves = mailbox;
         callback = OnMouse; keyboardCallback = OnKeyboard;
     }
     static bool Down(int key) { return (GetAsyncKeyState(key) & 0x8000) != 0; }
@@ -1007,6 +1192,7 @@ sealed class CaptureInputPump : IDisposable {
         int kind = message.ToInt32();
         bool down = kind == 0x0100 || kind == 0x0104, up = kind == 0x0101 || kind == 0x0105;
         if ((!down && !up) || Marshal.ReadInt32(data) != 0x1B) return CallNextHookEx(keyboardHook, code, message, data);
+        if (down) Interlocked.Increment(ref escapeDowns); else Interlocked.Increment(ref escapeUps);
         bool consumed;
         lock (gate) { consumed = input.Escape(down, up); if (input.EscapeCancelled) state.Cancel(); }
         return consumed ? new IntPtr(1) : CallNextHookEx(keyboardHook, code, message, data);
@@ -1014,10 +1200,19 @@ sealed class CaptureInputPump : IDisposable {
     IntPtr OnMouse(int code, IntPtr message, IntPtr data) {
         if (code != 0) return CallNextHookEx(hook, code, message, data);
         int kind = message.ToInt32();
+        if (kind == 0x0200) {
+            // No lock, HWND lookup, drawing, or consumed movement on this
+            // synchronous hook thread. The latest point replaces older moves.
+            try { moves.Publish(new Point(Marshal.ReadInt32(data, 0), Marshal.ReadInt32(data, 4)), true); }
+            catch { moves.Stop(); } // Continue with the existing physical-cursor heartbeat.
+            return CallNextHookEx(hook, code, message, data);
+        }
         if (kind != 0x0201 && kind != 0x0202 && kind != 0x0204 && kind != 0x0205)
             return CallNextHookEx(hook, code, message, data);
+        if (kind == 0x0201 || kind == 0x0204) Interlocked.Increment(ref mouseDowns); else Interlocked.Increment(ref mouseUps);
         try {
             Point pointer = new Point(Marshal.ReadInt32(data, 0), Marshal.ReadInt32(data, 4));
+            moves.Publish(pointer, false);
             lock (gate) if (input.Mouse(kind, pointer, state)) return new IntPtr(1);
         } catch { Fail("CAPTURE_INPUT: Region selection could not process pointer input."); return new IntPtr(1); }
         return CallNextHookEx(hook, code, message, data);
@@ -1054,6 +1249,10 @@ sealed class RegionPicker : ApplicationContext {
     readonly CaptureHoverPolicy hoverPolicy = new CaptureHoverPolicy();
     readonly CaptureHoverResolver hoverResolver;
     readonly object selectionGate = new object();
+    readonly CaptureRedrawPolicy redraw = new CaptureRedrawPolicy();
+    readonly CaptureInputHealthPolicy health = new CaptureInputHealthPolicy();
+    readonly CaptureWakeWindow wake;
+    readonly CaptureMoveMailbox moves;
     CaptureInputPump inputPump;
     bool stopping, cleaned, observing;
     int renderedHighlight = -2;
@@ -1072,11 +1271,14 @@ sealed class RegionPicker : ApplicationContext {
         Microsoft.Win32.SystemEvents.DisplaySettingsChanged += DisplaysChanged;
         observing = true;
         try {
+            wake = new CaptureWakeWindow(OnMoveWake);
+            moves = new CaptureMoveMailbox(wake.Post); wake.Bind(moves);
             for (int i = 0; i < rectangles.Length; i++) overlays.Add(new CaptureOverlay(rectangles[i], i, displays[i].Dpi, InvalidateEnvironment, handles.Add));
             hoverResolver = new CaptureHoverResolver(handles);
         } catch { Dispose(); throw; }
         timer.Interval = 16;
         timer.Tick += Tick;
+        CapturePerformance.Mark("pickerConstructedMilliseconds");
     }
     static bool Down(int key) { return (GetAsyncKeyState(key) & 0x8000) != 0; }
     static CaptureTopologyPolicy ReadTopology() {
@@ -1101,7 +1303,13 @@ sealed class RegionPicker : ApplicationContext {
         try {
             string activeName = DesktopName(active), currentName = DesktopName(GetThreadDesktop(GetCurrentThreadId()));
             if (activeName == null || currentName == null || !String.Equals(activeName, currentName, StringComparison.Ordinal))
+            {
+                CapturePerformance.Set("desktopMatched", 0);
+                CaptureHealth.Set("desktopMatched", 0);
                 throw new InvalidOperationException("CAPTURE_DESKTOP_UNAVAILABLE: Return to the unlocked Windows desktop; protected system dialogs cannot be selected.");
+            }
+            CapturePerformance.Set("desktopMatched", 1);
+            CaptureHealth.Set("desktopMatched", 1);
         } finally { if (active != IntPtr.Zero) CloseDesktop(active); }
     }
     public void ValidateCaptureEnvironment() {
@@ -1112,7 +1320,8 @@ sealed class RegionPicker : ApplicationContext {
     }
     public Rectangle SelectRegion() {
         try {
-            inputPump = new CaptureInputPump(selectionGate, state, input); inputPump.Start();
+            inputPump = new CaptureInputPump(selectionGate, state, input, moves); inputPump.Start();
+            CapturePerformance.Mark("inputReadyMilliseconds");
             ValidateCaptureEnvironment();
             lifetime.Start(); timer.Start();
             Application.Run(this);
@@ -1123,11 +1332,18 @@ sealed class RegionPicker : ApplicationContext {
         foreach (IntPtr handle in handles) if (IsWindow(handle)) throw new InvalidOperationException("CAPTURE: A selection overlay could not be removed.");
         return state.Selected;
     }
-    void Tick(object sender, EventArgs args) {
+    void Tick(object sender, EventArgs args) { UpdateFrame(false); }
+    void OnMoveWake() { if (!cleaned && !stopping && lifetime.IsRunning) UpdateFrame(true); }
+    void UpdateFrame(bool moved) {
+        if (cleaned) return;
         long elapsed = lifetime.ElapsedMilliseconds;
-        bool raise = elapsed - lastRaise >= 250, finished, dragging, mayStop, releaseExceeded;
+        bool redrawDue = redraw.IsDue(elapsed);
+        if (moved && !redrawDue) return; // The unchanged 16ms heartbeat supplies a final coalesced frame.
+        long frameStarted = CapturePerformance.Begin();
+        bool raise = elapsed - lastRaise >= 250, finished, dragging, mayStop, releaseExceeded, armed, swallowed;
         int highlighted; Rectangle selected; Point pointer;
-        if (!GetPhysicalCursorPos(out pointer)) failure = "CAPTURE: Windows could not read the capture pointer.";
+        if (!(moved && moves.TryRead(out pointer)) && !GetPhysicalCursorPos(out pointer)) failure = "CAPTURE: Windows could not read the capture pointer.";
+        else { CapturePerformance.Set("knownPointer", 1); CaptureHealth.Set("knownPointer", 1); }
         if (inputPump != null && (inputPump.Failure != null || !inputPump.Running)) failure = inputPump.Failure ?? "CAPTURE_INPUT: The selection input listener stopped; no screenshot was taken.";
         if (topology.Invalid) failure = "CAPTURE_DISPLAY_CHANGED: Display geometry or DPI changed; select the region again.";
         if (raise) {
@@ -1138,11 +1354,27 @@ sealed class RegionPicker : ApplicationContext {
         lock (selectionGate) {
             if (!input.Armed) input.ResyncReleasedButtons(left, right);
             if (input.EscapeCancelled || failure != null) state.Cancel();
+            int mismatch = health.Observe(input.Armed, state.Finished, state.Dragging, input.LeftSwallowed, left, elapsed);
+            if (mismatch != 0) {
+                CaptureHealth.Set("mismatchKind", mismatch);
+                failure = "CAPTURE_INPUT_STATE: The capture mouse listener lost a press or release. Selection was cancelled without taking a screenshot; retry and include the capture diagnostics.";
+                state.Cancel();
+            }
             state.Expire(elapsed);
             if (!state.Finished) state.Move(pointer);
             finished = state.Finished; dragging = state.Dragging; highlighted = state.Highlighted; selected = state.Selected;
             mayStop = input.MayStop(finished, elapsed); releaseExceeded = input.ReleaseGraceExceeded;
+            armed = input.Armed; swallowed = input.LeftSwallowed;
         }
+        CapturePerformance.Set("uiPhase", finished ? 3 : dragging ? 2 : armed ? 1 : 0);
+        CapturePerformance.Set("inputArmed", armed ? 1 : 0);
+        CapturePerformance.Set("leftSwallowed", swallowed ? 1 : 0);
+        CapturePerformance.Set("physicalLeftDown", left ? 1 : 0);
+        CaptureHealth.Set("uiPhase", finished ? 3 : dragging ? 2 : armed ? 1 : 0);
+        CaptureHealth.Set("inputArmed", armed ? 1 : 0);
+        CaptureHealth.Set("leftSwallowed", swallowed ? 1 : 0);
+        CaptureHealth.Set("physicalLeftDown", left ? 1 : 0);
+        CaptureHealth.Set("dragging", dragging ? 1 : 0);
         Rectangle hovered = Rectangle.Empty;
         if (!finished && !dragging && highlighted >= 0) {
             if (hoverPolicy.BeginQuery(elapsed)) {
@@ -1155,14 +1387,15 @@ sealed class RegionPicker : ApplicationContext {
         // Recheck only phase under its short lock; native queries stay outside.
         lock (selectionGate) if (state.Dragging || state.Finished) { hovered = Rectangle.Empty; hoverPolicy.Clear(); }
         if (finished) {
-            if (!stopping) { stopping = true; foreach (CaptureOverlay overlay in overlays) overlay.Hide(); }
+            if (!stopping) { stopping = true; CapturePerformance.Mark("selectionFinishedMilliseconds"); foreach (CaptureOverlay overlay in overlays) overlay.Hide(); }
             // Keep a short bounded drain for matching mouse/Escape releases.
             if (mayStop) {
-                if (releaseExceeded)
+                if (releaseExceeded && failure == null)
                     failure = "CAPTURE_INPUT_RELEASE: Selection stopped while a button or Escape was still held. Release it before retrying; no screenshot was taken.";
                 ExitThread();
             }
-        } else if (raise || renderedHighlight != highlighted || renderedSelection != selected || renderedHover != hovered) {
+        } else if (redrawDue && (raise || renderedHighlight != highlighted || renderedSelection != selected || renderedHover != hovered)) {
+            redraw.Presented(elapsed);
             renderedHighlight = highlighted; renderedSelection = selected; renderedHover = hovered;
             try { foreach (CaptureOverlay overlay in overlays) overlay.Present(highlighted, selected, hovered, raise); }
             catch (Exception error) {
@@ -1171,7 +1404,9 @@ sealed class RegionPicker : ApplicationContext {
                 lock (selectionGate) state.Cancel();
             }
             if (raise) lastRaise = elapsed;
+            CapturePerformance.Mark("firstBordersVisibleMilliseconds");
         }
+        CapturePerformance.End(moved ? "moveFrame" : "heartbeatFrame", frameStarted);
     }
     void DisplaysChanged(object sender, EventArgs args) {
         // A separate sticky flag remains effective after state.End(). It is
@@ -1182,12 +1417,22 @@ sealed class RegionPicker : ApplicationContext {
         if (cleaned) return;
         cleaned = true;
         timer.Stop();
+        if (wake != null) wake.Stop();
         if (inputPump != null) {
             if (!inputPump.Stop()) failure = "CAPTURE_INPUT: Windows could not stop the selection input listener; no screenshot was taken.";
             else if (inputPump.Failure != null) failure = inputPump.Failure;
+            CapturePerformance.Set("hookMouseDowns", inputPump.MouseDowns); CapturePerformance.Set("hookMouseUps", inputPump.MouseUps);
+            CapturePerformance.Set("hookEscapeDowns", inputPump.EscapeDowns); CapturePerformance.Set("hookEscapeUps", inputPump.EscapeUps);
+            CaptureHealth.Set("hookMouseDowns", inputPump.MouseDowns); CaptureHealth.Set("hookMouseUps", inputPump.MouseUps);
+            CaptureHealth.Set("hookEscapeDowns", inputPump.EscapeDowns); CaptureHealth.Set("hookEscapeUps", inputPump.EscapeUps);
+            CaptureHealth.Set("hookRunningAfterStop", inputPump.Running ? 1 : 0);
             inputPump.Dispose(); inputPump = null;
         }
         foreach (CaptureOverlay overlay in overlays) overlay.Dispose();
+        if (moves != null) { CapturePerformance.Set("movesPublished", moves.Moves); CapturePerformance.Set("moveWakesPosted", moves.Posts); CapturePerformance.Set("movePostFailures", moves.Failures); }
+        if (moves != null) { CaptureHealth.Set("hookMouseMoves", moves.Moves); CaptureHealth.Set("moveWakesPosted", moves.Posts); CaptureHealth.Set("movePostFailures", moves.Failures); }
+        if (wake != null) wake.Dispose();
+        CapturePerformance.Mark("overlaysDisposedMilliseconds");
     }
     protected override void Dispose(bool disposing) {
         if (disposing) {
@@ -1206,6 +1451,9 @@ sealed class RegionPicker : ApplicationContext {
         [System.Windows.DependencyObject].Assembly.Location
     ) | Select-Object -Unique
     Add-Type -TypeDefinition $source -ReferencedAssemblies $references
+    }
+    $script:HelperPhases['nativeTypesReadyMilliseconds'] = $script:HelperWatch.Elapsed.TotalMilliseconds
+    if ($PerformanceDiagnostics) { [CapturePerformance]::Enable() }
     [EchoLingoNative]::ConfigureDpi()
 
     function Initialize-Ocr {
@@ -1255,6 +1503,31 @@ sealed class RegionPicker : ApplicationContext {
         $middle = [int][Math]::Floor($heights.Count / 2)
         $median = [double]$heights[$middle]
         if (($heights.Count % 2) -eq 0) { $median = ([double]$heights[$middle - 1] + $median) / 2 }
+        # Estimate ordinary baseline pitch within each consecutive column.
+        # Glyph height alone cannot distinguish generous leading from a blank
+        # paragraph. The lower median resists a single unusually large gap.
+        $groups = [int[]]::new($OcrLines.Count)
+        $pitches = @{}
+        $group = 0
+        for ($i = 1; $i -lt $OcrLines.Count; $i++) {
+            $a = $OcrLines[$i - 1]; $b = $OcrLines[$i]
+            if ((Test-OcrBounds $a) -and (Test-OcrBounds $b)) {
+                $overlap = [Math]::Max(0, [Math]::Min(($a.X + $a.Width), ($b.X + $b.Width)) - [Math]::Max($a.X, $b.X))
+                $sameColumn = $overlap -gt (0.1 * [Math]::Min($a.Width, $b.Width))
+                if (-not $sameColumn -and $b.Y -lt ($a.Y - 0.9 * $median)) { $group++ }
+                $pitch = [double]$b.Y - [double]$a.Y
+                if ($sameColumn -and $pitch -gt 0 -and -not (Test-OcrStructuralLine ([string]$a.Text)) -and -not (Test-OcrStructuralLine ([string]$b.Text))) {
+                    if (-not $pitches.ContainsKey($group)) { $pitches[$group] = [Collections.Generic.List[double]]::new() }
+                    $pitches[$group].Add($pitch)
+                }
+            }
+            $groups[$i] = $group
+        }
+        $normalPitch = @{}
+        foreach ($key in @($pitches.Keys)) {
+            $ordered = @($pitches[$key] | Sort-Object)
+            if ($ordered.Count -ge 2) { $normalPitch[$key] = [double]$ordered[[int][Math]::Floor(($ordered.Count - 1) / 2)] }
+        }
         $builder = [Text.StringBuilder]::new()
         $insideCodeFence = $false
         for ($index = 0; $index -lt $OcrLines.Count; $index++) {
@@ -1271,7 +1544,12 @@ sealed class RegionPicker : ApplicationContext {
                     $overlap = [Math]::Max(0, [Math]::Min(([double]$previous.X + [double]$previous.Width), ([double]$current.X + [double]$current.Width)) - [Math]::Max([double]$previous.X, [double]$current.X))
                     $columnReset = ($overlap -le (0.1 * [Math]::Min([double]$previous.Width, [double]$current.Width))) -and
                         ([double]$current.Y -lt ([double]$previous.Y - 0.9 * $referenceHeight))
-                    $paragraphBreak = ($verticalGap -ge (0.9 * $referenceHeight)) -or $columnReset
+                    $pitch = [double]$current.Y - [double]$previous.Y
+                    $baseline = $normalPitch[$groups[$index]]
+                    $unusualPitch = $null -ne $baseline -and $pitch -ge (1.6 * $baseline) -and
+                        ($pitch - $baseline) -ge [Math]::Max((0.9 * $referenceHeight), (0.35 * $baseline))
+                    $absoluteGap = $verticalGap -ge (3.0 * $referenceHeight)
+                    $paragraphBreak = $columnReset -or $unusualPitch -or $absoluteGap
                 }
                 if ($paragraphBreak) { $null = $builder.Append("`n`n") }
                 else { $null = $builder.Append("`n") }
@@ -1336,8 +1614,24 @@ sealed class RegionPicker : ApplicationContext {
         if ((Join-OcrLayoutLines $structured) -cne "- first item`n  indented continuation`n    return value;") {
             throw 'SELF_TEST: OCR layout changed a list or indented code line.'
         }
+        $leading = @(
+            [pscustomobject]@{ Text = 'wide first'; X = 0; Y = 0; Width = 100; Height = 10 }
+            [pscustomobject]@{ Text = 'wide second'; X = 0; Y = 24; Width = 100; Height = 10 }
+            [pscustomobject]@{ Text = 'wide third'; X = 0; Y = 48; Width = 100; Height = 10 }
+            [pscustomobject]@{ Text = 'new paragraph'; X = 0; Y = 102; Width = 100; Height = 10 }
+            [pscustomobject]@{ Text = 'paragraph continued'; X = 0; Y = 126; Width = 100; Height = 10 }
+        )
+        if ((Join-OcrLayoutLines $leading) -cne "wide first`nwide second`nwide third`n`nnew paragraph`nparagraph continued") {
+            throw 'SELF_TEST: Ordinary wide leading became an empty paragraph, or a real paragraph gap was lost.'
+        }
+        if ((Join-OcrLayoutLines @($leading[0], $leading[1])) -cne "wide first`nwide second") {
+            throw 'SELF_TEST: Sparse OCR lines must not infer a paragraph from glyph height alone.'
+        }
+        $invalid = @([pscustomobject]@{ Text = 'unmodified  spaces'; X = [double]::NaN; Y = 0; Width = 100; Height = 10 })
+        if ((Join-OcrLayoutLines $invalid) -cne 'unmodified  spaces') { throw 'SELF_TEST: Invalid geometry changed original recognizer text.' }
     }
     function Get-OcrText([string]$Path) {
+        $script:HelperPhases['ocrStartMilliseconds'] = $script:HelperWatch.Elapsed.TotalMilliseconds
         Initialize-Ocr
         $script:OcrDeadline = [DateTime]::UtcNow.AddSeconds(30)
         $engine = [Windows.Media.Ocr.OcrEngine]::TryCreateFromUserProfileLanguages()
@@ -1345,6 +1639,7 @@ sealed class RegionPicker : ApplicationContext {
             $languages = @([Windows.Media.Ocr.OcrEngine]::AvailableRecognizerLanguages)
             if ($languages.Count -gt 0) { $engine = [Windows.Media.Ocr.OcrEngine]::TryCreateFromLanguage($languages[0]) }
         }
+        $script:HelperPhases['ocrEngineReadyMilliseconds'] = $script:HelperWatch.Elapsed.TotalMilliseconds
         if ($null -eq $engine) {
             throw 'OCR_LANGUAGE_MISSING: Install an OCR-capable language in Windows Settings > Time & language > Language & region > Language options. English or Chinese basic typing/OCR language features are suitable.'
         }
@@ -1359,7 +1654,9 @@ sealed class RegionPicker : ApplicationContext {
                 throw "OCR_IMAGE_TOO_LARGE: Selected image exceeds the Windows OCR limit of $maximum pixels per dimension. Select a smaller region."
             }
             $bitmap = Await-WinRt ($decoder.GetSoftwareBitmapAsync([Windows.Graphics.Imaging.BitmapPixelFormat]::Bgra8, [Windows.Graphics.Imaging.BitmapAlphaMode]::Premultiplied)) ([Windows.Graphics.Imaging.SoftwareBitmap])
+            $script:HelperPhases['ocrBitmapReadyMilliseconds'] = $script:HelperWatch.Elapsed.TotalMilliseconds
             $result = Await-WinRt ($engine.RecognizeAsync($bitmap)) ([Windows.Media.Ocr.OcrResult])
+            $script:HelperPhases['ocrRecognizedMilliseconds'] = $script:HelperWatch.Elapsed.TotalMilliseconds
             $lines = @(Get-OcrLayoutLines $result)
             $allowGeometry = $true
             try {
@@ -1385,7 +1682,7 @@ sealed class RegionPicker : ApplicationContext {
             $available = @([Windows.Media.Ocr.OcrEngine]::AvailableRecognizerLanguages | ForEach-Object { $_.LanguageTag })
         } catch { $ocrError = $_.Exception.Message }
         return @{
-            platform = 'windows'; helper = 'windows-powershell-dotnet-winrt'; localOcr = $true
+            platform = 'windows'; helper = 'windows-powershell-dotnet-winrt'; nativeBackend = $script:NativeBackend; localOcr = $true
             ocrEngine = 'Windows.Media.Ocr'; ocrLanguages = $available; ocrAvailable = ($available.Count -gt 0)
             ocrError = $ocrError; powerShellVersion = $PSVersionTable.PSVersion.ToString()
             selection = 'UI Automation TextPattern, then Ctrl+C with clipboard restoration'

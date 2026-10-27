@@ -176,3 +176,30 @@ export function normalizeCapturedText(text: string): string {
   }
   return result.join('\n');
 }
+
+/** OCR can return a space between every Chinese glyph. Limit this repair to
+ * prose from OCR; spaces in selected/typed text, Latin words, Korean, numbers,
+ * aligned columns and executable text are not evidence of an OCR artifact. */
+export function normalizeOcrCapturedText(text: string): string {
+  let fence: { character: string; length: number } | null = null;
+  const cleaned = text.replace(/\r\n?/gu, '\n').split('\n').map((line) => {
+    const marker = /^\s{0,3}(`{3,}|~{3,})/u.exec(line)?.[1];
+    if (marker) {
+      if (!fence) fence = { character: marker[0], length: marker.length };
+      else if (marker[0] === fence.character && marker.length >= fence.length
+        && new RegExp(`^\\s{0,3}${fence.character}{${fence.length},}\\s*$`, 'u').test(line)) fence = null;
+      return line;
+    }
+    if (fence) return line;
+    // Keep list/heading boundaries while allowing prose within them to repair.
+    // Do not strip indentation before the structural safety check.
+    const prefix = /^(?:#{1,6} |[-+*•▪▫‣⁃◦] |\[[ xX]\] |\d{1,4}[.)、．] ?|[一二三四五六七八九十百]+[、.)．] ?|[（(][\d一二三四五六七八九十]+[）)] ?)/u.exec(line)?.[0] ?? '';
+    const body = line.slice(prefix.length);
+    if (obviousStructure(body)) return line;
+    // A lookahead leaves the right glyph available to repair the next pair.
+    // Only a single ASCII space is eligible; wide spacing can be layout.
+    const repaired = body.replace(/([\p{Script=Han}，。！？；：、（）「」『』【】《》“”‘’]) (?=[\p{Script=Han}，。！？；：、（）「」『』【】《》“”‘’])/gu, '$1');
+    return prefix + repaired;
+  }).join('\n');
+  return normalizeCapturedText(cleaned);
+}

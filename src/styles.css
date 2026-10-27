@@ -290,3 +290,17 @@ body[data-view="translate"] .result-provider { font-size: 10px; }
 #mac-permission-card { scroll-margin-top: 12px; }
 #max-history { width: 82px; padding: 7px 9px; font-size: 11px; border: 1px solid var(--border); border-radius: 6px; background: var(--surface-soft); }
 .diagnostics-details > summary { cursor: pointer; font-size: 12px; font-weight: 550; color: var(--secondary); }
+.shortcut-binding { display: grid; grid-template-columns: minmax(115px, 1fr) minmax(180px, 1.4fr); gap: 12px; align-items: center; }
+.shortcut-binding > label { font-size: 12px; line-height: 1.6; color: var(--text); }
+.shortcut-binding small { display: block; font-size: 10px; color: var(--muted); font-weight: 400; }
+.shortcut-binding-control { display: flex; gap: 7px; min-width: 0; }
+.shortcut-binding-control input { width: 100%; min-width: 0; max-width: none; padding: 8px 10px; border: 1px solid var(--border); border-radius: 6px; background: var(--surface-soft); color: inherit; font: inherit; font-size: 12px; }
+.shortcut-record { flex: 0 0 76px; min-height: 34px; padding: 6px 8px; font-size: 11px; }
+.shortcut-record[aria-pressed="true"] { outline: 2px solid var(--accent); outline-offset: 1px; }
+.shortcut-advanced { border-top: 1px solid var(--border); padding-top: 10px; }
+.shortcut-advanced summary { cursor: pointer; font-size: 11px; color: var(--secondary); margin-bottom: 12px; }
+.shortcut-advanced .shortcut-binding { margin-top: 10px; }
+.shortcut-feedback { font-size: 11px; line-height: 1.7; margin: 0; color: var(--secondary); white-space: pre-line; }
+.shortcut-feedback:empty { display: none; }
+.shortcut-feedback[data-error="true"] { color: var(--danger, #b42318); }
+@media (max-width: 560px) { .shortcut-binding { grid-template-columns: 1fr; gap: 5px; } }
