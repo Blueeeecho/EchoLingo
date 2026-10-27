@@ -36,7 +36,9 @@ fn requested(arguments: &[String]) -> Option<bool> {
 }
 
 #[cfg(any(target_os = "windows", test))]
-use crate::model::{migrate_shortcut_defaults, Settings};
+use crate::model::{
+    migrate_core_preferences, migrate_shortcut_defaults, validate_settings, Settings,
+};
 #[cfg(any(target_os = "windows", test))]
 use tauri_plugin_global_shortcut::Shortcut;
 
@@ -64,6 +66,12 @@ fn bindings(bytes: Option<&[u8]>) -> Result<Vec<Binding>, ()> {
         Some(_) => return Err(()),
         None => Settings::default(),
     };
+    // Match startup's pre-validation migration before choosing its shortcut
+    // set. Startup falls back to defaults for invalid settings; a read-only
+    // installer check cannot call the discarded configured keys available or
+    // attribute a default conflict to them, so report unknown instead.
+    migrate_core_preferences(&mut settings);
+    validate_settings(&settings).map_err(|_| ())?;
     migrate_shortcut_defaults(&mut settings);
     let shortcuts = crate::shortcut_bindings::normalized(&settings.shortcuts).map_err(|_| ())?;
     [
@@ -516,6 +524,36 @@ mod tests {
         }
         assert!(bindings(Some(&vec![b' '; MAX_SETTINGS_BYTES + 1])).is_err());
         assert!(bindings(Some(&configured("Ctrl+A", "Control+KeyA"))).is_err());
+    }
+    #[test]
+    fn startup_invalid_settings_cannot_report_disabled_keys_as_available() {
+        let mut settings: Settings = serde_json::from_slice(&configured("", "")).unwrap();
+        assert!(validate_settings(&settings).is_ok());
+        assert!(bindings(Some(&serde_json::to_vec(&settings).unwrap()))
+            .unwrap()
+            .iter()
+            .all(|row| row.shortcut.is_none()));
+        settings.providers[0].id.clear();
+        assert!(validate_settings(&settings).is_err());
+        // Startup discards these disabled keys and uses defaults. The probe
+        // must stop before native registration rather than return success.
+        assert!(bindings(Some(&serde_json::to_vec(&settings).unwrap())).is_err());
+    }
+    #[test]
+    fn valid_legacy_preferences_migrate_before_validation_and_keep_custom_keys() {
+        let mut settings: Settings =
+            serde_json::from_slice(&configured("control+keyd", "")).unwrap();
+        settings.max_history = 200;
+        settings.auto_hide_seconds = 15;
+        assert!(validate_settings(&settings).is_err());
+        let rows = bindings(Some(&serde_json::to_vec(&settings).unwrap())).unwrap();
+        let mut registry = FakeRegistry::new(vec![], false);
+        assert_eq!(
+            check(&mut registry, rows).protocol(),
+            (0, "selection=Ctrl+D\nsilentOcr=\n".into())
+        );
+        assert!(registry.active.is_empty());
+        assert_eq!(registry.removed.len(), 1);
     }
     #[test]
     fn only_actual_conflicts_are_reported_and_no_others_registration_is_removed() {

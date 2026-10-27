@@ -83,6 +83,17 @@ public static class EchoLingoShortcutOwner {
     $legacy.shortcuts.input = 'F12'
     [IO.File]::WriteAllText($settings, ($legacy | ConvertTo-Json -Depth 4 -Compress), [Text.UTF8Encoding]::new($false))
     Probe 2 "input=F12`n" 'compatible-enabled-reserved-key'
+    Set-Bindings '' ''
+    $invalid = [IO.File]::ReadAllText($settings) | ConvertFrom-Json
+    $invalid | Add-Member -NotePropertyName providers -NotePropertyValue @(@{ id=''; name='Fixture local service'; kind='offline'; baseUrl=''; model=''; prompt=''; enabled=$true })
+    [IO.File]::WriteAllText($settings, ($invalid | ConvertTo-Json -Depth 6 -Compress), [Text.UTF8Encoding]::new($false))
+    Probe 3 '' 'startup-invalid-provider-cannot-report-disabled-keys-available'
+    Set-Bindings 'Ctrl+Alt+Shift+F9' 'Ctrl+Alt+Shift+F10'
+    $migrated = [IO.File]::ReadAllText($settings) | ConvertFrom-Json
+    $migrated | Add-Member -NotePropertyName maxHistory -NotePropertyValue 200
+    $migrated | Add-Member -NotePropertyName autoHideSeconds -NotePropertyValue 15
+    [IO.File]::WriteAllText($settings, ($migrated | ConvertTo-Json -Depth 6 -Compress), [Text.UTF8Encoding]::new($false))
+    Probe 0 "selection=Ctrl+Alt+Shift+F9`nsilentOcr=Ctrl+Alt+Shift+F10`n" 'valid-legacy-preferences-migrate-readonly-before-validation'
     [IO.File]::WriteAllText($settings, '{broken')
     Probe 3 '' 'invalid-settings-unknown-not-conflict'
     [IO.File]::WriteAllText($settings, (' ' * (2MB + 1)))
