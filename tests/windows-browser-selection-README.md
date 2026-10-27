@@ -39,8 +39,21 @@ worker entry/FocusedElement/cache/runtime-ID stages and parent depth/start/end
 measurements, and verifies source-root/password identity. The owning STA pumps
 its generated OLE clipboard window during bounded waits. Acquisition failure and
 post-helper-audit failure are separate fields. Audit success cannot turn a failed
-first acquisition into a pass. Production still has 2000ms per SelectionQuery,
-not a 2000ms limit for its complete multi-query workflow.
+first acquisition into a pass. The previous 2000ms-per-query results remain
+failures. Production now explicitly gives one SelectedText call a shared
+5000ms monotonic budget from its entry, including time spent between its UIA
+queries. A query receives the remaining session time; it does not reset the
+budget or retain the old independent 2000ms cap. Completion returns immediately.
+The isolated scalar worker fixture, which has no SelectedText session, retains
+its 2000ms infrastructure timeout; that is not the product acquisition contract.
+The shared deadline rejects new provider/input work and late results. It is
+separate from latest-intent cancellation. Once copy input has been emitted,
+its bounded completion and required clipboard restoration run before the
+deadline/source is checked again; restoration warnings take precedence.
+This is not a promise that helper startup or uninterruptible OLE/cleanup always
+finishes within 5000ms. The contract change must pass a new real matrix and
+cannot convert an old timeout, diagnostic drain or altered-DLL measurement
+into a historical pass.
 
 The helper is invoked with explicit performance diagnostics. Only the numeric
 whitelist of up to 16 query durations, last stages/depths and three startup/reply
@@ -60,8 +73,8 @@ are numeric enums, never exception messages, runtime IDs, names or content.
 Stage 21 means the single ordinary FocusedElement returned, 22 the same-element
 cache update started, and 23 that cache update returned. An active-query check
 between these calls prevents a late focus reply from starting another RPC.
-Only an explicit diagnostic query that already failed its unchanged 2000ms
-deadline may conditionally observe that same abandoned task for up to 3000ms.
+Only an explicit diagnostic query that already failed its applicable deadline
+may conditionally observe that same abandoned task for up to 3000ms.
 The task is poisoned first; cancellation ends the observation immediately.
 No late result is consumed and no request is retried. Original query duration,
 failure stage and exception enum stay frozen at failure. Separate numeric drain
@@ -69,6 +82,9 @@ fields report observation duration, whether the worker finished, its stage and
 exception category at observation end. WorkerCompletionObservedMilliseconds is
 the caller's observation time (5ms polling), not a naturally completed selection
 or an acceptance pass. Non-diagnostic calls receive no added observation wait.
+An optional observation failure is recorded only as DrainObservationError=1;
+it cannot replace the original deadline exception. Normal cancellation checks
+outside this diagnostic observation retain their original behavior.
 No accessibility warm-up or timeout/retry change accompanies these diagnostics.
 
 A failed case keeps the overall result false. Only after generated clipboard

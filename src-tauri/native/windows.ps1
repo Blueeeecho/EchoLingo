@@ -440,6 +440,49 @@ public static class EchoLingoNative {
         public int InitialRoleId;
         public readonly HashSet<int> SourceProcesses = new HashSet<int>();
     }
+    sealed class SelectionBudgetExceededException : InvalidOperationException {
+        public SelectionBudgetExceededException() : base("SELECTION: The selected-text accessibility budget was exhausted; no further copy input was sent.") { }
+    }
+    sealed class SelectionBudget {
+        readonly Stopwatch elapsed = Stopwatch.StartNew();
+        volatile bool ended;
+        public long LimitMilliseconds { get; private set; }
+        public SelectionBudget(long milliseconds) {
+            if (milliseconds <= 0) throw new ArgumentOutOfRangeException("milliseconds");
+            LimitMilliseconds = milliseconds;
+        }
+        public long RemainingMilliseconds { get { return ended ? 0 : Math.Max(0, LimitMilliseconds - elapsed.ElapsedMilliseconds); } }
+        public double ElapsedMilliseconds { get { return elapsed.Elapsed.TotalMilliseconds; } }
+        public bool Expired { get { return RemainingMilliseconds <= 0; } }
+        public void RequireActive() {
+            if (Expired) throw new SelectionBudgetExceededException();
+        }
+        public void End() { ended = true; }
+    }
+    sealed class SelectionSession : IDisposable {
+        readonly SelectionSession previous;
+        public readonly SelectionBudget Budget;
+        bool disposed;
+        public SelectionSession() : this(new SelectionBudget(5000)) { }
+        // Private injectable budget is used by isolated reflection fixtures;
+        // the sole production entry above always uses the fixed 5000ms budget.
+        SelectionSession(SelectionBudget budget) {
+            if (budget == null) throw new ArgumentNullException("budget");
+            previous = currentSelectionSession; Budget = budget; currentSelectionSession = this;
+        }
+        public void RequireActive() { Budget.RequireActive(); }
+        public void Dispose() {
+            if (disposed) return; disposed = true; Budget.End();
+            if (Object.ReferenceEquals(currentSelectionSession, this)) currentSelectionSession = previous;
+        }
+    }
+    [ThreadStatic] static SelectionSession currentSelectionSession;
+    static void RequireSelectionBudget() {
+        SelectionSession session = currentSelectionSession;
+        if (session == null || !session.Budget.Expired) return;
+        lock (selectionWorkerGate) { if (selectionWorker != null) selectionWorker.Abandon(); }
+        session.RequireActive();
+    }
     // One windowless MTA owns all UIA calls for this helper invocation. Never
     // move live AutomationElements between apartments or abort a provider call.
     sealed class SelectionAutomationWorker {
@@ -473,6 +516,7 @@ public static class EchoLingoNative {
         public void Abandon() { lock (gate) { unusable = true; wake.Set(); } }
     }
     sealed class SelectionTrace {
+        public SelectionBudget Budget;
         public volatile int Stage, Depth;
         public volatile int InitialRoleId, FreshRoleId, InitialIdentityLength, FreshIdentityLength;
         public volatile int IdentityCompared, IdentityEqual, RootWalkReason, ExceptionKind;
@@ -494,58 +538,72 @@ public static class EchoLingoNative {
         NativeCancellation.ThrowIfRequested();
         if (selectionTrace != null && selectionTrace.Abandoned)
             throw new OperationCanceledException("CANCELLED: The accessibility query expired.");
+        if (selectionTrace != null && selectionTrace.Budget != null) selectionTrace.Budget.RequireActive();
     }
     static T SelectionQuery<T>(Func<T> query) {
         NativeCancellation.ThrowIfRequested();
+        RequireSelectionBudget();
+        SelectionBudget budget = currentSelectionSession == null ? null : currentSelectionSession.Budget;
+        long budgetRemainingAtStart = budget == null ? 0 : budget.RemainingMilliseconds;
         SelectionAutomationWorker worker;
         lock (selectionWorkerGate) {
             if (selectionWorker == null) selectionWorker = new SelectionAutomationWorker();
             worker = selectionWorker;
         }
-        SelectionTrace trace = new SelectionTrace();
+        SelectionTrace trace = new SelectionTrace(); trace.Budget = budget;
         int index = ++selectionQueryCount;
         Stopwatch elapsed = Stopwatch.StartNew();
-        bool deadlineExceeded = false, drainAttempted = false, completionObserved = false, drainCancelled = false;
+        bool deadlineExceeded = false, drainAttempted = false, completionObserved = false, drainCancelled = false, drainObservationError = false;
         double outcomeMilliseconds = -1, drainMilliseconds = 0, completionObservedMilliseconds = 0;
+        double budgetElapsedAtOutcome = -1;
         int outcomeStage = -1, outcomeDepth = 0, outcomeExceptionKind = 0;
         Task<T> task = worker.Enqueue(delegate {
             selectionTrace = trace; SelectionStage(1, 0);
-            try { return query(); } catch (Exception error) { SelectionException(error); throw; }
+            try { RequireSelectionQueryActive(); return query(); } catch (Exception error) { SelectionException(error); throw; }
             finally { selectionTrace = null; }
         });
         try {
             while (!task.IsCompleted) {
                 NativeCancellation.ThrowIfRequested();
-                if (elapsed.ElapsedMilliseconds >= 2000) {
+                if (budget == null ? elapsed.ElapsedMilliseconds >= 2000 : budget.Expired) {
                     deadlineExceeded = true;
+                    if (budget != null) budget.RequireActive();
                     throw new InvalidOperationException("SELECTION: The source accessibility provider did not answer in time; no copy input was sent.");
                 }
                 Thread.Sleep(5); // Condition polling, never a fixed preparation delay.
             }
             NativeCancellation.ThrowIfRequested();
+            if (budget != null) budget.RequireActive();
             if (task.IsFaulted) throw task.Exception.InnerException;
             return task.Result;
-        } catch {
+        } catch (Exception queryError) {
+            if (queryError is SelectionBudgetExceededException) deadlineExceeded = true;
             outcomeMilliseconds = elapsed.Elapsed.TotalMilliseconds;
+            budgetElapsedAtOutcome = budget == null ? 0 : budget.ElapsedMilliseconds;
             outcomeStage = trace.Stage; outcomeDepth = trace.Depth; outcomeExceptionKind = trace.ExceptionKind;
             trace.Abandoned = true; worker.Abandon();
             // Only explicit diagnostics observe the one already-in-flight task.
             // The original deadline error remains the outcome. Never use its
             // late result, issue another provider call or hold up a new intent.
             if (deadlineExceeded && CapturePerformance.Enabled) {
-                drainCancelled = NativeCancellation.Requested;
-                if (!drainCancelled) {
-                    drainAttempted = true; Stopwatch drain = Stopwatch.StartNew();
-                    while (!task.IsCompleted && drain.ElapsedMilliseconds < 3000) {
-                        if (NativeCancellation.Requested) { drainCancelled = true; break; }
-                        Thread.Sleep(5); // Conditional observation, not a settling delay.
+                Stopwatch drain = new Stopwatch();
+                try {
+                    drainCancelled = NativeCancellation.Requested;
+                    if (!drainCancelled) {
+                        drainAttempted = true; drain.Start();
+                        while (!task.IsCompleted && drain.ElapsedMilliseconds < 3000) {
+                            if (NativeCancellation.Requested) { drainCancelled = true; break; }
+                            Thread.Sleep(5); // Conditional observation, not a settling delay.
+                        }
                     }
+                    completionObserved = task.IsCompleted;
+                    if (completionObserved) {
+                        completionObservedMilliseconds = elapsed.Elapsed.TotalMilliseconds;
+                        if (task.IsFaulted) GC.KeepAlive(task.Exception); // Observe, never serialize an error/result.
+                    }
+                } catch { drainObservationError = true; }
+                finally {
                     drainMilliseconds = drain.Elapsed.TotalMilliseconds;
-                }
-                completionObserved = task.IsCompleted;
-                if (completionObserved) {
-                    completionObservedMilliseconds = elapsed.Elapsed.TotalMilliseconds;
-                    if (task.IsFaulted) GC.KeepAlive(task.Exception); // Observe, never serialize an error/result.
                 }
             }
             throw;
@@ -566,14 +624,20 @@ public static class EchoLingoNative {
                 CapturePerformance.Set(prefix + "IdentityEqual", trace.IdentityEqual);
                 CapturePerformance.Set(prefix + "RootWalkReason", trace.RootWalkReason);
                 CapturePerformance.Set(prefix + "ExceptionKind", outcomeStage < 0 ? trace.ExceptionKind : outcomeExceptionKind);
+                if (budget != null) {
+                    CapturePerformance.Set(prefix + "BudgetLimitMilliseconds", budget.LimitMilliseconds);
+                    CapturePerformance.Set(prefix + "BudgetRemainingAtStartMilliseconds", budgetRemainingAtStart);
+                    CapturePerformance.Set(prefix + "BudgetElapsedAtOutcomeMilliseconds", budgetElapsedAtOutcome < 0 ? budget.ElapsedMilliseconds : budgetElapsedAtOutcome);
+                }
                 if (deadlineExceeded) {
                     CapturePerformance.Set(prefix + "DeadlineExceeded", 1);
                     CapturePerformance.Set(prefix + "DrainAttempted", drainAttempted ? 1 : 0);
                     CapturePerformance.Set(prefix + "DrainMilliseconds", drainMilliseconds);
                     CapturePerformance.Set(prefix + "DrainCancelled", drainCancelled ? 1 : 0);
+                    CapturePerformance.Set(prefix + "DrainObservationError", drainObservationError ? 1 : 0);
                     CapturePerformance.Set(prefix + "WorkerCompletionObserved", completionObserved ? 1 : 0);
                     CapturePerformance.Set(prefix + "WorkerCompletionObservedMilliseconds", completionObservedMilliseconds);
-                    CapturePerformance.Set(prefix + "WorkerStillBlocked", completionObserved ? 0 : 1);
+                    CapturePerformance.Set(prefix + "WorkerStillBlocked", task.IsCompleted ? 0 : 1);
                     CapturePerformance.Set(prefix + "WorkerStageAtDrainEnd", trace.Stage);
                     CapturePerformance.Set(prefix + "WorkerExceptionKindAtDrainEnd", trace.ExceptionKind);
                 }
@@ -610,6 +674,7 @@ public static class EchoLingoNative {
             ancestors.Add(current);
             if (handle != 0 && new IntPtr(handle) == root) { if (selectionTrace != null) selectionTrace.RootWalkReason = 1; return true; }
             SelectionStage(5, depth);
+            RequireSelectionQueryActive();
             current = TreeWalker.RawViewWalker.GetParent(current, cache);
         }
         if (selectionTrace != null) selectionTrace.RootWalkReason = current == null ? 5 : 4;
@@ -622,7 +687,7 @@ public static class EchoLingoNative {
                 throw new InvalidOperationException("SELECTION: Foreground application changed; select text and retry.");
             }
             CacheRequest cache = SelectionCache(); AutomationElement focused;
-            SelectionStage(2, 0);
+            RequireSelectionQueryActive(); SelectionStage(2, 0);
             focused = SelectionCopyPolicy.RequireFocus(AutomationElement.FocusedElement);
             SelectionStage(21, 0); RequireSelectionQueryActive();
             SelectionStage(22, 0);
@@ -633,7 +698,7 @@ public static class EchoLingoNative {
             // must not become a new acquisition failure or weaken a guard.
             if (CapturePerformance.Enabled) { SelectionStage(20, 0); try { ControlType role = focused.Cached.ControlType; if (role != null) roleId = role.Id; } catch { } }
             if (selectionTrace != null) { selectionTrace.InitialRoleId = context.FocusIdentity == null ? roleId : context.InitialRoleId; selectionTrace.FreshRoleId = roleId; }
-            SelectionStage(3, 0); int[] identity = focused.GetRuntimeId(); SelectionStage(10, 0);
+            RequireSelectionQueryActive(); SelectionStage(3, 0); int[] identity = focused.GetRuntimeId(); SelectionStage(10, 0);
             bool identityCompared = context.FocusIdentity != null;
             bool identityEqual = identityCompared && SameIdentity(context.FocusIdentity, identity);
             if (selectionTrace != null) {
@@ -708,7 +773,7 @@ public static class EchoLingoNative {
                 AutomationElement element = ancestors[depth];
                 string role = element.Cached.ControlType.ProgrammaticName;
                 if (depth == 0 || role == "ControlType.Document" || role == "ControlType.Edit") {
-                    object raw; bool available = element.TryGetCurrentPattern(TextPattern.Pattern, out raw);
+                    RequireSelectionQueryActive(); object raw; bool available = element.TryGetCurrentPattern(TextPattern.Pattern, out raw);
                     TextPattern pattern = raw as TextPattern;
                     if (available && pattern == null) throw new InvalidOperationException("SELECTION: The source returned an invalid text provider; select text and retry.");
                     if (role == "ControlType.Document") {
@@ -786,6 +851,15 @@ public static class EchoLingoNative {
         return input;
     }
     public static string SelectedText() {
+        using (SelectionSession session = new SelectionSession()) {
+            string result = SelectedTextCore();
+            // Cleanup/restore exceptions from the core take precedence. The
+            // budget may reject a cleaned-up result; it must never skip cleanup.
+            RequireSelectionBudget();
+            return result;
+        }
+    }
+    static string SelectedTextCore() {
         NativeCancellation.ThrowIfRequested();
         SelectionContext context = SelectionQuery(CaptureSelectionContext);
         string direct = SelectionQuery(delegate { return AutomationSelection(context); });
@@ -794,6 +868,7 @@ public static class EchoLingoNative {
         DateTime deadline = DateTime.UtcNow.AddMilliseconds(1500);
         while (ModifiersDown()) {
             NativeCancellation.ThrowIfRequested();
+            RequireSelectionBudget();
             if (DateTime.UtcNow >= deadline) throw new InvalidOperationException("SELECTION: Release the shortcut keys and retry.");
             Thread.Sleep(20);
         }
@@ -831,6 +906,7 @@ public static class EchoLingoNative {
                     INPUT[] keys = new INPUT[] { Key(0x11, false, observer.Marker), Key(0x43, false, observer.Marker), Key(0x43, true, observer.Marker), Key(0x11, true, observer.Marker) };
                     Stopwatch clock = Stopwatch.StartNew();
                     observer.Issued();
+                    RequireSelectionBudget();
                     uint inserted = SendInput((uint)keys.Length, keys, Marshal.SizeOf(typeof(INPUT)));
                     if (inserted != keys.Length) {
                         // Ensure our Ctrl-down cannot leave a modifier stuck.
