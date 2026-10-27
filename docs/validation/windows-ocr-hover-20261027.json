@@ -1,0 +1,176 @@
+{
+  "status": "controlled-Windows-runtime-and-local-preview-complete",
+  "commit": "ab4405cc15e2ca204459b2fd40389924aa994695",
+  "ci": {
+    "runId": 40481264703,
+    "url": "https://github.com/Blueeeecho/EchoLingo/actions/runs/40481264703",
+    "mode": "full",
+    "conclusion": "failure",
+    "rawWindowsRuntimeOutcomes": {
+      "popupVisibility": "success",
+      "applicationCore": "failure",
+      "installedOffline": "success",
+      "liveCapture": "success"
+    },
+    "retainedFailure": "Original application fixture count==4 readiness timeout; no actual failing edge count was logged."
+  },
+  "behavior": {
+    "platform": "Windows preview first",
+    "screenOutlineRetained": true,
+    "hoveredApplicationOutline": true,
+    "leftDragKeepsArbitraryRegion": true,
+    "ordinaryClickWholeWindowCapture": false,
+    "queryMilliseconds": 80,
+    "thinHwndsPerDisplay": 12,
+    "newPermissionsOrFocusChanges": false
+  },
+  "frozenFiles": [
+    {
+      "path": "src-tauri/native/windows.ps1",
+      "sha256": "4a3674ff1b7da09b664fe807ead116d45b5689adcfc2bc2a47eea77ee6d7b1b7",
+      "bytes": 96110
+    },
+    {
+      "path": "tests/windows-live-capture-smoke.ps1",
+      "sha256": "acb79b2b7286c14a2550ff4d590dddb3ed83ded3a9915b253ae9ec7ec1377fe6",
+      "bytes": 60787
+    }
+  ],
+  "hostPurePolicyAssertions": 76,
+  "hostHoverPolicyAssertions": 30,
+  "hostChecksAreWindowsRuntime": false,
+  "reviewReports": [
+    {
+      "path": "/Users/wwq/Documents/Codex/2026-10-24/ni-ne/work/windows-capture-hover-20261027/occlusion-check/validation-report.json",
+      "sha256": "6898848656ff7ed5a75676adc1a7a43869ae4cc8d65da85009661ebd20fd4979"
+    },
+    {
+      "path": "/Users/wwq/Documents/Codex/2026-10-24/ni-ne/work/ocr-hover-window-20261027/windows-live-hover-fixture-validation.json",
+      "sha256": "5b28e9ad223961688596c46e2695a28c93090e60384cf2a5a7927ea9d8d31e8c"
+    },
+    {
+      "path": "/Users/wwq/Documents/Codex/2026-10-24/ni-ne/work/ocr-hover-window-20261027/windows-hover-independent-review.json",
+      "sha256": "64cc1f350d5a6f28425ed0dd14c1baf0b18a1704882112321635d1496651a795"
+    },
+    {
+      "path": "/Users/wwq/Documents/Codex/2026-10-24/ni-ne/work/ocr-hover-window-20261027/windows-live-hover-independent-review.json",
+      "sha256": "d0ae50c75e013776010d068b73700e6adb3602ea3083703fe6e23fb986e886f6"
+    },
+    {
+      "path": "/Users/wwq/Documents/Codex/2026-10-24/ni-ne/work/ocr-hover-window-20261027/macos-feasibility.json",
+      "sha256": "aeed6170ece52e4fe7a75e8569f145c75a5a71f6606693ecf580d1ab09bce549"
+    },
+    {
+      "path": "/Users/wwq/Documents/Codex/2026-10-24/ni-ne/work/ocr-hover-window-20261027/ci-ab4405c/verification-summary.json",
+      "sha256": "dd06410f3d4ea70a0ba1a286fdca574f361ea3b19673bb65274456bbf5616ba5"
+    },
+    {
+      "path": "/Users/wwq/Documents/Codex/2026-10-24/ni-ne/work/ocr-hover-window-20261027/ci-ef27367/verification-summary.json",
+      "sha256": "13828540bf4e8c00cdcc95581c09605d0583bd48814c57a033dea12b1e9600fb"
+    },
+    {
+      "path": "/Users/wwq/Documents/Codex/2026-10-24/ni-ne/work/ocr-hover-window-20261027/candidate-independent-audit.json",
+      "sha256": "5954af55915ddd736e1ac3bce2c634f981ced3c6812559f4f4e8d645f74e84fa"
+    },
+    {
+      "path": "/Users/wwq/Documents/Codex/2026-10-24/ni-ne/work/ocr-hover-window-20261027/targeted-workflow-review.json",
+      "sha256": "1560598462debe6747801584bdad42e573f635dc195450085254bc67ea5a1a6c"
+    },
+    {
+      "path": "/Users/wwq/Documents/Codex/2026-10-24/ni-ne/work/ocr-hover-window-20261027/application-hover-ready/independent-review.json",
+      "sha256": "3f481b7341f9a2f20b0e1f916a6ed4731f4e0474bf24550e1b85e4f9f43881ec"
+    },
+    {
+      "path": "/Users/wwq/Documents/Codex/2026-10-24/ni-ne/work/ocr-hover-window-20261027/windows-hover-preview-handoff.json",
+      "sha256": "8b3f8da912e26b464fd27ace6df341e4d97544f4acda3eb18ae001a8673d8285"
+    },
+    {
+      "path": "/Users/wwq/Documents/Codex/2026-10-24/ni-ne/work/ocr-hover-window-20261027/windows-hover-preview-independent-handoff-audit.json",
+      "sha256": "02b26056a85eaf99824c88922bbf6940f7afdaa19a035ff0649a794b68fc09a2"
+    }
+  ],
+  "macosParityImplemented": false,
+  "localWin10VmRestarted": false,
+  "knownOpenAcceptance": [
+    "Windows10 physical responsiveness/font/IME and consumer installation acceptance",
+    "Actual WPS/Edge target application matrix",
+    "Physical multi-display/mixed-DPI",
+    "Actual elevated installer OCR and secure-desktop restrictions",
+    "Pinned own-window capture-exclusion acceptance"
+  ],
+  "package": {
+    "path": "/Users/wwq/Documents/Codex/2026-10-24/ni-ne/outputs/EchoLingo-installers/windows-preview-20261027-hover-window/EchoLingo_0.1.0_preview_20261027_hover-window_windows_x64_with-source.zip",
+    "bytes": 94674254,
+    "sha256": "a6c99dbdc1908b108731e481c87ff554b84371868c272cde3937bfaa9d06328b",
+    "crcPassed": true,
+    "allMembersMatched": true
+  },
+  "supplement": {
+    "id": 40483707524,
+    "url": "https://github.com/Blueeeecho/EchoLingo/actions/runs/40483707524",
+    "conclusion": "success",
+    "source_unchanged_gate": true,
+    "exact_stage_binary_gate": true,
+    "canonical_lf_fixture_sha256": "23c89bc0111603acadc9d4ed7a0dbec418274109ad3b323fd14f4f97f2080bdd",
+    "actual_application_workflows": 3,
+    "strict_eight_edge_geometry_passed": true,
+    "cleanup_passed": true,
+    "scope": "Fixture-only supplement, no rebuild; original full run remains failed."
+  },
+  "sameApplicationCoverage": {
+    "windows_rust_pass": 142,
+    "mac_rust_pass": 146,
+    "rust_ignored_each": 1,
+    "frontend_unit_pass": 61,
+    "isolated_ui": "success",
+    "native_capture_policy_assertions": 76,
+    "hover_policy_assertions": 30,
+    "live_selector_trials": 8,
+    "popup_core_cases_passed": true,
+    "single_instance_handoff_passed": true,
+    "real_offline_model_cases": 6,
+    "installed_app_workflows": 3
+  },
+  "hoverRuntime": {
+    "window_following": true,
+    "screen_edge_retained": true,
+    "disabled_window_did_not_hint_underlying_A": true,
+    "visible_shell_fallback": true,
+    "hover_hidden_during_left_drag": true,
+    "free_region_dimensions": [
+      320,
+      220
+    ],
+    "distinct_allocated_edge_hwnds": 12,
+    "synthetic_pixel_probes_passed": 7,
+    "foreground_preserved": true,
+    "overlay_absent_in_capture": true,
+    "query_milliseconds": 80
+  },
+  "packageFiles": [
+    {
+      "path": "EchoLingo_0.1.0_x64-setup.exe",
+      "bytes": 75210904,
+      "sha256": "293a26483add21e2b37a6d9aa3069d35aa6e31622807bcb9d472c6cbda76066a"
+    },
+    {
+      "path": "EchoLingo-offline-engine-source.zip",
+      "bytes": 19456259,
+      "sha256": "b82a524a22438455668dcdf32745be03c99aa727e40374364a9464741cc6bdfd"
+    }
+  ],
+  "stageExeSha256": "199d3f29c2d44fb64fa4960a6b62d61ade4bff5cec685828a6602be19c070007",
+  "installedExeSha256": "c6f719be98d94e8125f5add79568be32028a0dfffb62b6b94c1aeabae77ad797",
+  "nsisMarkerOnlyDifferenceBytes": 3,
+  "macosCanonicalUnchanged": {
+    "path": "/Users/wwq/Applications/EchoLingo.app/Contents/MacOS/echolingo",
+    "sha256": "7eafe813acac4d9ce9aacb1ab02205eb17c19a9df5cc1e57ee0d627faff75944",
+    "bytes": 5396160,
+    "expectedSha256": "7eafe813acac4d9ce9aacb1ab02205eb17c19a9df5cc1e57ee0d627faff75944",
+    "readOnly": true,
+    "launchedOrSigned": false,
+    "unchanged": true
+  },
+  "stableOrPublicReleasePublished": false,
+  "finalArchiveIndependentChecksPassed": 35
+}

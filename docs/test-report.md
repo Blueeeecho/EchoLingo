@@ -2,11 +2,22 @@
 
 更新时间：2026-10-25，Asia/Shanghai。本报告分别记录本机执行、CI 和真实桌面边界，未运行不算通过。[本轮原始本机证据](validation/macos-preview-20261025.json)。
 
-## 2026-10-27 Windows 悬停窗口蓝框（真实回归待执行）
+## 2026-10-27 Windows 悬停窗口蓝框：受控实测与预览包完成
 
-Windows Alt+S待机保留当前屏幕蓝边，并以DWM实际窗口边界提示鼠标悬停的应用。开始左拖清除悬停提示，继续任意区域OCR→原文填入→自动翻译，不吸附、不单击整窗截图。使用每屏额外4个薄边HWND，80ms元数据查询在UI线程，不进入同步hook；未知、桌面/任务栏、自身/排除或遮挡不一致仅保留屏幕框。
+Windows Alt+S保留当前屏幕蓝边，悬停时增加实际应用窗口蓝框；桌面/任务栏或不确定目标只保留屏幕框。左拖清除悬停提示，仍按实际任意区域OCR→填入原文→自动翻译。使用每屏12个薄边HWND、80ms元数据查询，不在hook线程枚举，不取标题/文本/截图、不抢焦点或增加授权。独立审阅发现的disabled遮挡歧义已在实测前修正。
 
-最终helper4a3674ff…已通过C#5/net48交叉编译、PS7AST及76项生产纯策略实际.NET8执行（含30hover）。审阅发现WindowFromPoint忽略disabled窗而可能误框下层，已用不跳过disabled的desktop-child hit保守核对修正。真实A/B/disabled遮挡/shell提示切换、自由ROI、无边框像素及完整app/NSIS回归仍待WindowsCI，不以host结果代替。Mac对应功能未实现；canonical7eafe813与已停止的本机Win10VM未操作。
+| 实际检查 | 结果 | 范围 |
+|---|---|---|
+| 完整CI40481264703/live |8/8通过；A→B、419.7ms disabled B正确框、真实Shell_TrayWnd回退仅4边、回B、按住左拖隐藏hover、12distinct HWND、320×220自由ROI、7/7 RGB无蓝边入图 |WindowsServer2025受控生成窗口；单屏 |
+| 原full其他desktop |popup全部核心行为/第二实例、真实NSIS安装、6模型和安装后选词/空框/左拖OCR自动离线翻译通过 |真实程序与模型；不等于Win10实体机 |
+| 原full应用夹具 |前2链通过后，旧count==4 readiness超时，故原full正确保持failure；没有记录当时实际边数 |该错误未被COE结论掩盖 |
+| 仅夹具ef27367定向40483707524 |源码未改+stageSHA199d3f29…硬校验；3实际链和源窗口/PID/physicalpointer/DWM稳定/唯一directchildhelper/screen4+hover4精确几何全部通过，清理true |同一原始程序，无重建；mock翻译，与原full真实离线模型检查分开 |
+| 常规回归 |142WindowsRust/146MacRust，各1ignored；61frontend、完整隔离UI；实际nativeOCR/选词剪贴板、76策略(30hover)通过 |不外推消费应用/物理多屏/流畅度 |
+| 分发完整性 |API ZIP SHA/size/CRC、完整冻结helper payload、stage与installed仅3bytes NSIS marker差异、对应source ZIP及最终5members逐字节检查通过 |未签名预览，未发布稳定或公开Release |
+
+[新版完整下载包](/Users/wwq/Documents/Codex/2026-10-24/ni-ne/outputs/EchoLingo-installers/windows-preview-20261027-hover-window/EchoLingo_0.1.0_preview_20261027_hover-window_windows_x64_with-source.zip)：94,674,254B，SHA256a6c99dbdc1908b108731e481c87ff554b84371868c272cde3937bfaa9d06328b。内含75,210,904B NSIS(293a2648…)及19,456,259B引擎源码(b82a524a…)、说明/精确摘要/校验表。轻量离线模型对技术标识符/路径质量有限，不以非空输出当高质量翻译。
+
+Mac对应功能未实现，canonical7eafe813只读hash不变，未签名/安装/重启或申请权限。已停止的本机Win10VM未重启、不作新版验收。Win10实机性能/字体/IME及消费环境、WPS/Edge、物理多屏/混合DPI、实际提权安装窗/安全桌面和固定自身窗口排除仍待验收。[完整证据](validation/windows-ocr-hover-20261027.json)。
 
 ## 本轮完成
 
