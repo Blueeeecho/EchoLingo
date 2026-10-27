@@ -7,11 +7,20 @@ and after building the exact native .NET Framework DLL from the helper source:
 node tests/windows-browser-selection-smoke.mjs --helper src-tauri/native/windows.ps1 --native-assembly C:\owned-build\EchoLingo.Native.dll
 ```
 
-Both installed Edge and installed Chrome are tested when found in standard
-Program Files locations. An unavailable browser is explicitly listed; it is not
-counted as accepted. No browser is downloaded. Each browser gets three rounds,
+Both Edge and Chrome must be installed in standard Program Files locations.
+An unavailable browser is explicitly listed and fails setup; a single-browser
+24-case run cannot pass this matrix. No browser is downloaded. Each browser gets three rounds,
 each with a freshly launched browser, new marked profile and new bridge process.
 This is a fresh-process/profile test, not an OS cold-boot benchmark.
+
+`--browser-order edge-first|chrome-first` selects the order of the installed
+browsers; the default is `edge-first`. The report records the requested order
+and the actual order of attempted browser groups. CI runs both orders on two
+independent `windows-latest` runners, each requiring 48 cases across both
+browsers. The complete two-runner matrix requires 96 cases, with separate raw
+artifacts and a failure gate for each order. This isolates the prior browser
+group's influence within a job; it does not prove the OS UIA service was untouched
+before the job or establish that first cold acquisition is repaired.
 
 Each round has eight predeclared cases: English body text selected with actual
 `page.mouse` down/drag/up, Chinese body punctuation, selected document text while

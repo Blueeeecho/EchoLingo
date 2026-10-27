@@ -1,7 +1,7 @@
 {
   "updated": "2026-10-28 Asia/Shanghai",
   "candidate": "810563be38f660f5042754a3ee611416c0328250",
-  "status": "Not accepted: browser47/48, cold5/6; background clipboard publication red; root validation prototype pending",
+  "status": "Not accepted: first cold native acquisition unresolved; all ineffective source initializations reverted; final dual browser-order and new full-stage regression pending",
   "environment": "GitHub-hosted Windows Server desktop; not physical Win10/11",
   "productionFiles": {
     "src-tauri/native/windows.ps1": "093f5910619dfbed9b8f8b1f60b5066e19e7b751ffa120a2c5c4fcfe8a9796d7",
@@ -166,6 +166,22 @@
       "firstQueryMilliseconds": 2524.881,
       "firstHelperMilliseconds": 3348.511,
       "secondQueryMilliseconds": 10.919
+    },
+    "browser93bMsaaContrast": {
+      "run": 40555594514,
+      "source": "93b9ed37979979daefc92f171c958334a5cb4cf1",
+      "required": 48,
+      "executed": 48,
+      "passed": 42,
+      "coldFirstPassed": 0,
+      "coldFirstRequired": 6,
+      "setupFailures": 0,
+      "finding": "all6 first calls initialPane50033 thenGroup50026 strictidentity mismatch; no deadline; root MSAA interface request ineffective and regressed5 previously passing cold calls",
+      "all6MsaaAttempted": true,
+      "all6NativeFocusWasRoot": true,
+      "all6MsaaHResult": 0,
+      "all6MsaaObjectReturned": true,
+      "disposition": "revert exactly to810 PS and bridge; no additional initialization experiment"
     }
   },
   "budgetFixture": {
@@ -212,13 +228,5 @@
       "passed": 47,
       "finding": "whole selected-text monotonic5000ms budget; first Pane thenGroup identity mismatch retained"
     }
-  ],
-  "pendingContrast": {
-    "kind": "native-focus HWND MSAA interface only",
-    "status": "hostchecks and independent review passed; actual cold browser pending",
-    "psSha256": "629e0b40bf031d7af6d6adfa177651b624f5a3ded8e5182d44103e9f4c76e255",
-    "readsMsaaPropertiesFocusSelectionOrChildren": false,
-    "relaxesIdentityGuard": false,
-    "resetsBudget": false
-  }
+  ]
 }

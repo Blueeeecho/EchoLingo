@@ -13,7 +13,8 @@ import { chromium } from '@playwright/test';
 const here=path.dirname(fileURLToPath(import.meta.url));
 const flags=new Map();
 for(let i=2;i<process.argv.length;i+=2) flags.set(process.argv[i],process.argv[i+1]);
-const report={ok:false,actualBrowserTested:false,actualApplicationTested:false,generatedLocalPageOnly:true,existingProfileAccessed:false,userContentRead:false,helperRetries:0,roundsPerBrowser:3,casesPerRound:8,freshBrowserProfilePerRound:true,osColdBootTested:false,rounds:[],cases:[]};
+const browserOrder=flags.has('--browser-order')?flags.get('--browser-order'):'edge-first';
+const report={ok:false,actualBrowserTested:false,actualApplicationTested:false,generatedLocalPageOnly:true,existingProfileAccessed:false,userContentRead:false,helperRetries:0,roundsPerBrowser:3,casesPerRound:8,freshBrowserProfilePerRound:true,osColdBootTested:false,requestedBrowserOrder:browserOrder??null,actualBrowserOrder:[],rounds:[],cases:[]};
 const digest=async file=>createHash('sha256').update(await readFile(file)).digest('hex');
 const bounded=(promise,ms,reason)=>new Promise((resolve,reject)=>{const timer=setTimeout(()=>reject(new Error(reason)),ms);promise.then(value=>{clearTimeout(timer);resolve(value);},error=>{clearTimeout(timer);reject(error);});});
 const sleep=ms=>new Promise(resolve=>setTimeout(resolve,ms));
@@ -130,10 +131,16 @@ async function runRound(candidate,round,helper,assembly){
   return result;
 }
 try{
+  assert.ok(browserOrder==='edge-first'||browserOrder==='chrome-first','BROWSER_ORDER_INVALID');
   assert.equal(process.platform,'win32','WINDOWS_REQUIRED');assert.equal(process.env.GITHUB_ACTIONS,'true','EPHEMERAL_GITHUB_REQUIRED');assert.equal(process.env.RUNNER_ENVIRONMENT,'github-hosted','GITHUB_HOSTED_REQUIRED');assert.ok(flags.has('--native-assembly'),'NATIVE_ASSEMBLY_REQUIRED');
   const helper=await realpath(flags.get('--helper')??path.join(here,'../src-tauri/native/windows.ps1')),assembly=await realpath(flags.get('--native-assembly'));assert.equal(path.extname(assembly).toLowerCase(),'.dll');report.helperSha256=await digest(helper);report.nativeAssemblySha256=await digest(assembly);
-  const candidates=await installedBrowsers();report.availableBrowserKinds=candidates.map(value=>value.kind);report.unavailableBrowserKinds=['edge','chrome'].filter(kind=>!candidates.some(value=>value.kind===kind));assert.ok(candidates.length>0,'INSTALLED_EDGE_OR_CHROME_UNAVAILABLE');report.requiredCases=candidates.length*3*8;report.requiredFreshBrowserRounds=candidates.length*3;
-  for(const candidate of candidates)for(let round=1;round<=3;round++){const result=await runRound(candidate,round,helper,assembly);report.rounds.push(result);report.actualBrowserTested||=result.actualBrowserTested===true;}
+  const installed=await installedBrowsers();report.availableBrowserKinds=installed.map(value=>value.kind);report.unavailableBrowserKinds=['edge','chrome'].filter(kind=>!installed.some(value=>value.kind===kind));assert.ok(installed.length===2,'EDGE_AND_CHROME_REQUIRED');
+  const priority=browserOrder==='edge-first'?['edge','chrome']:['chrome','edge'];
+  const candidates=[...installed].sort((first,second)=>priority.indexOf(first.kind)-priority.indexOf(second.kind));report.requiredCases=candidates.length*3*8;report.requiredFreshBrowserRounds=candidates.length*3;
+  for(const candidate of candidates){
+    report.actualBrowserOrder.push(candidate.kind);
+    for(let round=1;round<=3;round++){const result=await runRound(candidate,round,helper,assembly);report.rounds.push(result);report.actualBrowserTested||=result.actualBrowserTested===true;}
+  }
   report.ok=report.rounds.length===report.requiredFreshBrowserRounds&&report.rounds.every(value=>value.ok);
 }catch(error){report.error=String(error.message).replace(/wss?:\/\/[^\s]+/g,'[owned-debug-endpoint]').slice(0,1024);report.setupInconclusive=report.cases.length===0;}
 finally{report.executedCases=report.cases.length;report.passedCases=report.cases.filter(value=>value.ok).length;report.helperInvocations=report.cases.reduce((total,value)=>total+(value.helperInvocations??0),0);report.externalPageRequests=report.rounds.reduce((total,value)=>total+value.externalPageRequests,0);console.log(JSON.stringify(report));process.exitCode=report.ok?0:1;}

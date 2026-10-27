@@ -824,8 +824,12 @@ jobs:
           if ($outcome -ne 'success') { throw 'Targeted actual shortcut UI diagnostics incomplete or failed.' }
 
   windows-browser-diagnostics:
-    name: Actual installed browser selected-text diagnostics
+    name: Actual installed browser selected-text diagnostics (${{ matrix.browser_order }})
     if: github.event_name == 'workflow_dispatch' && github.event.inputs.mode == 'windows-browser-diagnostics'
+    strategy:
+      fail-fast: false
+      matrix:
+        browser_order: [edge-first, chrome-first]
     runs-on: windows-latest
     timeout-minutes: 12
     steps:
@@ -846,7 +850,7 @@ jobs:
         run: |
           $ErrorActionPreference = 'Continue'
           $global:LASTEXITCODE = 1
-          $output = @(& node tests/windows-browser-selection-smoke.mjs --helper src-tauri/native/windows.ps1 --native-assembly "$env:RUNNER_TEMP/echolingo-browser-native.dll" 2>&1)
+          $output = @(& node tests/windows-browser-selection-smoke.mjs --helper src-tauri/native/windows.ps1 --native-assembly "$env:RUNNER_TEMP/echolingo-browser-native.dll" --browser-order '${{ matrix.browser_order }}' 2>&1)
           $fixtureExit = $LASTEXITCODE
           $output | Out-File "$env:RUNNER_TEMP/echolingo-browser-selection.log" -Encoding utf8
           $output | Write-Output
@@ -854,7 +858,7 @@ jobs:
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: EchoLingo-Windows-browser-selection
+          name: EchoLingo-Windows-browser-selection-${{ matrix.browser_order }}
           if-no-files-found: warn
           path: |
             ${{ runner.temp }}/echolingo-browser-selection.log
@@ -863,7 +867,7 @@ jobs:
         shell: powershell
         run: |
           $outcome = '${{ steps.browser.outcome }}'
-          [ordered]@{ scope = 'Fresh generated-page installed Chromium native selection; no Tauri/WPS/all-app acceptance'; browser = $outcome } | ConvertTo-Json -Compress
+          [ordered]@{ scope = 'Fresh generated-page installed Chromium native selection; no Tauri/WPS/all-app acceptance'; browserOrder = '${{ matrix.browser_order }}'; browser = $outcome } | ConvertTo-Json -Compress
           if ($outcome -ne 'success') { throw 'Actual browser selection failed or was inconclusive.' }
 
   windows-latest-intent-diagnostics:
