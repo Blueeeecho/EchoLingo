@@ -9,12 +9,12 @@ on:
         description: Full regression or exact-binary desktop diagnostics
         type: choice
         default: full
-        options: [full, windows-popup-diagnostics, windows-application-diagnostics]
+        options: [full, windows-popup-diagnostics, windows-application-diagnostics, windows-input-plane-experiment]
 permissions:
   contents: read
 jobs:
   desktop:
-    if: github.event.inputs.mode != 'windows-popup-diagnostics' && github.event.inputs.mode != 'windows-application-diagnostics'
+    if: github.event.inputs.mode != 'windows-popup-diagnostics' && github.event.inputs.mode != 'windows-application-diagnostics' && github.event.inputs.mode != 'windows-input-plane-experiment'
     strategy:
       fail-fast: false
       matrix:
@@ -269,7 +269,7 @@ jobs:
           }
 
   frontend-interactions:
-    if: github.event.inputs.mode != 'windows-popup-diagnostics' && github.event.inputs.mode != 'windows-application-diagnostics'
+    if: github.event.inputs.mode != 'windows-popup-diagnostics' && github.event.inputs.mode != 'windows-application-diagnostics' && github.event.inputs.mode != 'windows-input-plane-experiment'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -435,3 +435,34 @@ jobs:
           $applicationOutcome = '${{ steps.application.outcome }}'
           [ordered]@{ scope = 'targeted-application-only'; applicationCore = $applicationOutcome } | ConvertTo-Json -Compress
           if ($applicationOutcome -ne 'success') { throw 'Targeted application diagnostics incomplete or failed.' }
+
+  windows-input-plane-experiment:
+    if: github.event_name == 'workflow_dispatch' && github.event.inputs.mode == 'windows-input-plane-experiment'
+    runs-on: windows-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - name: Generated ordinary-window transparent input ownership experiment
+        id: experiment
+        continue-on-error: true
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Continue'
+          $output = @(& powershell.exe -NoProfile -STA -ExecutionPolicy Bypass -File tests/windows-input-plane-experiment.ps1 -IsolatedTestSession 2>&1)
+          $fixtureExit = $LASTEXITCODE
+          $output | Out-File "$env:RUNNER_TEMP/echolingo-input-plane-experiment.log" -Encoding utf8
+          $output | Write-Output
+          exit $fixtureExit
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: EchoLingo-Windows-input-plane-experiment
+          if-no-files-found: warn
+          path: ${{ runner.temp }}/echolingo-input-plane-experiment.log
+      - name: Gate experiment outcome without declaring product acceptance
+        if: always()
+        shell: powershell
+        run: |
+          $outcome = '${{ steps.experiment.outcome }}'
+          [ordered]@{ scope = 'Standalone input-plane feasibility only; no production app acceptance'; outcome = $outcome } | ConvertTo-Json -Compress
+          if ($outcome -ne 'success') { throw 'Transparent input-plane experiment did not pass.' }
