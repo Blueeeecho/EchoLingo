@@ -239,6 +239,31 @@ public static class EchoLingoIntegrityBoundarySmoke {
         }
         return safe;
     }
+    static string SafeOwnedStderr(string value) {
+        // Only this fresh, credential-free helper. Never serialize its stdout,
+        // imageBase64, environment, command line or token-user SID.
+        StringBuilder safe=new StringBuilder();
+        foreach(string line in value.Replace("\r","").Split('\n')) {
+            if(System.Text.RegularExpressions.Regex.IsMatch(line,"(?i)imageBase64|data:image/|authorization|api.?key|password|credential"))continue;
+            safe.AppendLine(System.Text.RegularExpressions.Regex.Replace(line,"[A-Za-z0-9+/]{160,}={0,2}","[redacted-long-value]"));
+        }
+        string result=safe.ToString();return result.Substring(Math.Max(0,result.Length-4000));
+    }
+    static void PreserveChildOutput(RestrictedChild process,Task<string> output,Dictionary<string,object> report) {
+        try {
+            bool complete=output!=null&&output.Wait(1000);report["helperStdoutCompleted"]=complete;
+            if(complete) {
+                string raw=output.GetAwaiter().GetResult();report["helperStdoutCharacters"]=raw.Length;
+                if(String.IsNullOrWhiteSpace(raw))report["helperReplyMissing"]=true;
+                else try { report["helperDiagnostics"]=SafeReply(json.Deserialize<Dictionary<string,object>>(raw)); }
+                catch { report["helperReplyMalformedOrIncomplete"]=true; }
+            }
+        }catch{report["helperStdoutReadFailed"]=true;}
+        try {
+            bool complete=process.Error.Wait(1000);report["helperStderrCompleted"]=complete;
+            if(complete) { string raw=process.Error.GetAwaiter().GetResult();report["helperStderrCharacters"]=raw.Length;if(raw.Length>0)report["helperOwnedStderrTail"]=SafeOwnedStderr(raw); }
+        }catch{report["helperStderrReadFailed"]=true;}
+    }
     static Dictionary<string,object> Case(string helper,string assembly,string backend,string kind) {
         Dictionary<string,object> report=new Dictionary<string,object> { { "mode",kind },{ "ok",false } };
         Form source=null;IntPtr hwnd=IntPtr.Zero;uint sourceThread=0;int downs=0,ups=0,clicks=0;
@@ -269,11 +294,15 @@ public static class EchoLingoIntegrityBoundarySmoke {
             Need(GetWindow(hwnd,4)==IntPtr.Zero&&GetParent(hwnd)==IntPtr.Zero&&frame!=display&&display.Contains(frame),"Source is not an ordinary ownerless non-fullscreen window.");
             Need(GetAncestor(WindowFromPoint(first),2)==hwnd,"Generated source endpoint is initially obscured; no input sent.");
             Send(new INPUT[] { Move(first) });Thread.Sleep(80);
-            process=StartRestricted(helper,assembly,backend);output=process.Output;
+            report["sourceHwnd"]=Id(hwnd);report["sourceProcessId"]=sourcePid;report["sourceUiThreadId"]=sourceThread;report["controllerThreadId"]=GetCurrentThreadId();report["sourcePhysicalDwmBounds"]=Rect(frame);
+            Stopwatch launch=Stopwatch.StartNew();process=StartRestricted(helper,assembly,backend);output=process.Output;
+            report["restrictedLaunchAndTokenVerificationMilliseconds"]=launch.Elapsed.TotalMilliseconds;report["helperProcessId"]=process.Id;
             report["sourceToken"]=ownToken.Public();report["actualHelperToken"]=process.Token.Public();report["sameUserVerified"]=SameUser(ownToken.User,process.Token.User);
             report["syntheticSelfRestrictedToken"]=true;report["sourceTopmost"]=kind=="high-topmost-source";
             Dictionary<string,object> observed=new Dictionary<string,object>();report["readyObservation"]=observed;Stopwatch clock=Stopwatch.StartNew();bool pickerReady=false;
             while(clock.ElapsedMilliseconds<25000&&!process.HasExited) {if(Ready(process.Id,hwnd,frame,display,first,observed)){pickerReady=true;break;}Thread.Sleep(10);}
+            report["readinessWaitMilliseconds"]=clock.Elapsed.TotalMilliseconds;report["helperExitedAfterReadyWait"]=process.HasExited;
+            report["readinessWaitStoppedBecause"]=pickerReady?"ready":process.HasExited?"helper-exited":"strict-25000ms-deadline";
             Need(pickerReady,"Exact production input plane/screen+hover readiness was not observed.");
             report["helperReadyMilliseconds"]=clock.Elapsed.TotalMilliseconds;report["helperProcessId"]=process.Id;report["sourceHwnd"]=Id(hwnd);report["sourceProcessId"]=sourcePid;
             report["sourceUiThreadId"]=sourceThread;report["controllerThreadId"]=GetCurrentThreadId();report["sourcePhysicalDwmBounds"]=Rect(frame);report["sourceNotFullscreen"]=true;
@@ -315,13 +344,16 @@ public static class EchoLingoIntegrityBoundarySmoke {
             if(source!=null&&!source.IsDisposed)try{source.Invoke((Action)delegate { if(GetCapture()==hwnd)ReleaseCapture(); });}catch{}
             if(partialInput&&GetForegroundWindow()==hwnd)try{Send(new INPUT[] { Mouse(4) });}catch{}
             if(process!=null) {
-                if(!process.HasExited&&GetForegroundWindow()==hwnd)try{Escape(hwnd);process.WaitForExit(3000);}catch{}
-                if(!process.HasExited){process.Kill();process.WaitForExit(3000);}
-                if(output!=null&&output.IsCompleted)try{report["helperDiagnostics"]=SafeReply(json.Deserialize<Dictionary<string,object>>(output.GetAwaiter().GetResult()));}catch{}
-                process.Dispose();
+                report["helperExitedBeforeFixtureCleanup"]=process.HasExited;
+                if(!process.HasExited&&GetForegroundWindow()==hwnd)try{report["helperCleanupEscapeSent"]=true;Escape(hwnd);process.WaitForExit(3000);}catch{}
+                if(!process.HasExited){report["helperTerminatedByFixture"]=true;process.Kill();process.WaitForExit(3000);}
+                report["helperExitedAfterFixtureCleanup"]=process.HasExited;
+                if(process.HasExited)report["helperExitCode"]=process.ExitCode;
+                else{report["ok"]=false;report["status"]="failure";report["cleanupError"]="Owned restricted helper did not terminate.";}
+                PreserveChildOutput(process,output,report);process.Dispose();
             }
             if(source!=null&&!source.IsDisposed)try{source.Invoke((Action)delegate { source.Close(); });}catch{}
-            if(!ui.Join(5000)){report["ok"]=false;report["cleanupError"]="Own generated source UI thread did not stop.";}ready.Dispose();
+            if(!ui.Join(5000)){report["ok"]=false;report["status"]="failure";report["cleanupError"]="Own generated source UI thread did not stop.";}ready.Dispose();
         }
         return report;
     }

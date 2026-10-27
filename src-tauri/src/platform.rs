@@ -451,6 +451,13 @@ fn bounded_capture_health(value: &Value) -> Value {
         "inputPlaneVisibleCount",
         "inputPlaneRemainingAfterCleanup",
         "inputPlaneFallbackUsed",
+        "nativeHostReady",
+        "nativeHostArmed",
+        "nativeHostDowns",
+        "nativeHostUps",
+        "nativeHostMoves",
+        "nativeHostStopped",
+        "nativeHostFailed",
     ];
     let mut safe = serde_json::Map::new();
     for field in FIELDS {
@@ -708,6 +715,19 @@ fn run(mode: &str, input: Option<&str>) -> Result<Value, String> {
     }
 
     let mut command = native_command(mode)?;
+    let mut capture_session = if capture {
+        Some(crate::windows_capture_input::Session::begin()?)
+    } else {
+        None
+    };
+    if let Some(session) = &capture_session {
+        command.args([
+            "-CaptureHostThreadId",
+            &session.thread().to_string(),
+            "-CaptureHostToken",
+            &session.token().to_string(),
+        ]);
+    }
     command
         .stdin(if input.is_some() {
             Stdio::piped()
@@ -719,6 +739,9 @@ fn run(mode: &str, input: Option<&str>) -> Result<Value, String> {
     let mut child = command
         .spawn()
         .map_err(|error| format!("NATIVE_START: Could not start the system helper: {error}"))?;
+    if let Some(session) = &capture_session {
+        session.bind_child(child.id());
+    }
     // Drain both pipes concurrently so a long OCR result cannot deadlock wait().
     let stdout = child.stdout.take().ok_or("NATIVE: Missing output pipe.")?;
     let stderr = child.stderr.take().ok_or("NATIVE: Missing error pipe.")?;
@@ -752,11 +775,17 @@ fn run(mode: &str, input: Option<&str>) -> Result<Value, String> {
             Ok(Some(status)) => break status,
             Ok(None) if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(30)),
             Ok(None) => {
+                if let Some(session) = &mut capture_session {
+                    session.close();
+                }
                 let _ = child.kill();
                 let _ = child.wait();
                 return Err("NATIVE_TIMEOUT: The system helper stopped responding. Retry; if this persists, check system permissions and OCR language installation.".into());
             }
             Err(error) => {
+                if let Some(session) = &mut capture_session {
+                    session.close();
+                }
                 let _ = child.kill();
                 let _ = child.wait();
                 return Err(format!(
@@ -765,6 +794,9 @@ fn run(mode: &str, input: Option<&str>) -> Result<Value, String> {
             }
         }
     };
+    if let Some(session) = &mut capture_session {
+        session.close();
+    }
     let output = output_thread
         .join()
         .map_err(|_| "NATIVE: Output reader failed.".to_string())?

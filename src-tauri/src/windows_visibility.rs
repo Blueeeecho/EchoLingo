@@ -212,6 +212,13 @@ mod native {
         fn CallNextHookEx(hook: Handle, code: i32, wparam: usize, lparam: isize) -> isize;
         fn UnhookWindowsHookEx(hook: Handle) -> i32;
         fn GetMessageW(message: *mut Message, window: Handle, minimum: u32, maximum: u32) -> i32;
+        fn PeekMessageW(
+            message: *mut Message,
+            window: Handle,
+            minimum: u32,
+            maximum: u32,
+            remove: u32,
+        ) -> i32;
         fn TranslateMessage(message: *const Message) -> i32;
         fn DispatchMessageW(message: *const Message) -> isize;
         fn PostThreadMessageW(thread: u32, message: u32, wparam: usize, lparam: isize) -> i32;
@@ -242,6 +249,17 @@ mod native {
 
     // No app-state locks, waiting, painting, logging or user-content access.
     unsafe extern "system" fn mouse(code: i32, wparam: usize, lparam: isize) -> isize {
+        if code == 0 && lparam != 0 {
+            let data = unsafe { &*(lparam as *const MouseData) };
+            if crate::windows_capture_input::mouse(
+                wparam as u32,
+                data.point.x,
+                data.point.y,
+                data.mouse_data,
+            ) {
+                return 1;
+            }
+        }
         if code == 0 && matches!(wparam, 0x0201 | 0x0204) && lparam != 0 {
             if let Some(shared) = SHARED.get() {
                 if let Some(token) = shared.gate.token() {
@@ -325,7 +343,8 @@ mod native {
                 }
                 // SAFETY: The static callback remains alive until the dedicated
                 // thread removes its hook; GetMessage pumps its required messages.
-                let hook = unsafe {
+                crate::windows_capture_input::initialize();
+                let mut hook = unsafe {
                     SetWindowsHookExW(14, Some(mouse), GetModuleHandleW(std::ptr::null()), 0)
                 };
                 if hook.is_null() {
@@ -342,16 +361,86 @@ mod native {
                 shared
                     .thread
                     .store(u64::from(unsafe { GetCurrentThreadId() }), Ordering::SeqCst);
-                let _ = ready.send(Ok(()));
                 let mut message: Message = unsafe { std::mem::zeroed() };
+                // Establish the queue before publishing the host ID. A capture
+                // may immediately PostThreadMessage its refresh request.
+                unsafe {
+                    PeekMessageW(&mut message, std::ptr::null_mut(), 0, 0, 0);
+                }
+                crate::windows_capture_input::publish_host_thread(unsafe { GetCurrentThreadId() });
+                let _ = ready.send(Ok(()));
+                let mut refresh_disabled = false;
+                let mut failed_rollback_hook = std::ptr::null_mut();
                 while unsafe { GetMessageW(&mut message, std::ptr::null_mut(), 0, 0) } > 0 {
+                    if let Some(token) = crate::windows_capture_input::refresh_token(
+                        message.message,
+                        message.wparam,
+                        message.lparam,
+                    ) {
+                        // Install first, so failure never silently removes the
+                        // working outside-click observer. Refresh only once per
+                        // explicit capture, not on a timer or recovery loop.
+                        let replacement = if refresh_disabled {
+                            std::ptr::null_mut()
+                        } else {
+                            unsafe {
+                                SetWindowsHookExW(
+                                    14,
+                                    Some(mouse),
+                                    GetModuleHandleW(std::ptr::null()),
+                                    0,
+                                )
+                            }
+                        };
+                        let removed = if replacement.is_null() {
+                            false
+                        } else {
+                            (unsafe { UnhookWindowsHookEx(hook) }) != 0
+                        };
+                        let removal_error = if !replacement.is_null() && !removed {
+                            std::io::Error::last_os_error().raw_os_error()
+                        } else {
+                            None
+                        };
+                        let success = if replacement.is_null() {
+                            false
+                        } else if crate::windows_capture_input::replacement_is_valid(
+                            removed,
+                            removal_error,
+                        ) {
+                            hook = replacement;
+                            crate::windows_capture_input::publish_host_thread(unsafe {
+                                GetCurrentThreadId()
+                            });
+                            true
+                        } else {
+                            if unsafe { UnhookWindowsHookEx(replacement) } == 0 {
+                                failed_rollback_hook = replacement;
+                                refresh_disabled = true;
+                            }
+                            false
+                        };
+                        crate::windows_capture_input::refresh_result(token, success);
+                        continue;
+                    }
+                    if crate::windows_capture_input::control(
+                        message.message,
+                        message.wparam,
+                        message.lparam,
+                    ) {
+                        continue;
+                    }
                     unsafe {
                         TranslateMessage(&message);
                         DispatchMessageW(&message);
                     }
                 }
                 shared.gate.disarm();
+                crate::windows_capture_input::clear_host_thread();
                 unsafe {
+                    if !failed_rollback_hook.is_null() {
+                        UnhookWindowsHookEx(failed_rollback_hook);
+                    }
                     UnhookWindowsHookEx(hook);
                     SetThreadDpiAwarenessContext(previous_dpi);
                 }

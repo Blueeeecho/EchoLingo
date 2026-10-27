@@ -12,7 +12,10 @@ param(
     # never select this switch; it exercises the same HWND fallback without a
     # global mouse hook, while retaining Escape cancellation.
     [ValidateSet('hybrid', 'planeOnly')]
-    [string]$InputBackend = 'hybrid'
+    [string]$InputBackend = 'hybrid',
+    # Explicit packaged native session. No source/window content is transferred.
+    [uint32]$CaptureHostThreadId = 0,
+    [long]$CaptureHostToken = 0
 )
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
@@ -34,6 +37,10 @@ function Write-Result($Value) {
 }
 
 try {
+    if (($CaptureHostThreadId -eq 0) -ne ($CaptureHostToken -eq 0) -or $CaptureHostToken -lt 0 -or
+        ($CaptureHostThreadId -ne 0 -and ($Mode -notin 'capture-ocr','capture-image' -or $InputBackend -ne 'hybrid'))) {
+        throw 'CAPTURE_ARGUMENT: Native input session parameters are invalid.'
+    }
     if ($InputBackend -eq 'planeOnly' -and $Mode -ne 'capture-image') {
         throw 'CAPTURE_ARGUMENT: planeOnly is available only for explicit capture-image diagnostics.'
     }
@@ -98,6 +105,7 @@ public static class CapturePerformance {
 public static class CaptureHealth {
     static readonly Dictionary<string, long> values = new Dictionary<string, long>();
     public static void Set(string name, long value) { values[name] = value; }
+    public static void Increment(string name) { long value;values.TryGetValue(name,out value);values[name]=value+1; }
     public static Dictionary<string, long> Snapshot() { return new Dictionary<string, long>(values); }
 }
 
@@ -462,7 +470,8 @@ public static class EchoLingoNative {
         } catch { bitmap.Dispose(); throw; }
     }
     public static void CaptureRegion(string path) { CaptureRegion(path, true); }
-    public static void CaptureRegion(string path, bool mouseHook) {
+    public static void CaptureRegion(string path, bool mouseHook) { CaptureRegion(path, mouseHook, 0, 0); }
+    public static void CaptureRegion(string path, bool mouseHook, uint hostThread, long hostToken) {
         ConfigureDpi();
         try {
             if (GetAwarenessFromDpiAwarenessContext(GetThreadDpiAwarenessContext()) != 2)
@@ -470,7 +479,7 @@ public static class EchoLingoNative {
         } catch (EntryPointNotFoundException) {
             throw new InvalidOperationException("CAPTURE_DPI: This Windows version lacks per-monitor capture coordinates.");
         }
-        using (RegionPicker picker = new RegionPicker(mouseHook)) {
+        using (RegionPicker picker = new RegionPicker(mouseHook, hostThread, hostToken)) {
             Rectangle selected = picker.SelectRegion();
             // Observing display changes continues after selection completion.
             // Validate both sides of BitBlt and discard pixels if the saved
@@ -1337,6 +1346,77 @@ sealed class CaptureInputPlanes : IDisposable {
     }
 }
 
+// The production Rust hook consumes legacy input before it reaches any source
+// HWND. This own message-only mailbox transfers scalar physical coordinates;
+// no focus/activation, shared pointers, clipboard or content crosses this bridge.
+sealed class CaptureDelegatedInput : NativeWindow, IDisposable {
+    const uint Ready=0x8381, Arm=0x8382, MoveAck=0x8383, StopMessage=0x8384, Ping=0x8385;
+    const int ReadyAck=0x8390, ArmAck=0x8391, MoveMessage=0x8392, LeftDown=0x8393, LeftUp=0x8394, RightDown=0x8395, RightUp=0x8396, StopAck=0x8397, Failed=0x8398, PingAck=0x8399;
+    [DllImport("user32.dll", EntryPoint="PostThreadMessageW")] static extern bool PostThreadMessage(uint thread, uint message, IntPtr word, IntPtr parameter);
+    [DllImport("user32.dll")] static extern bool GetPhysicalCursorPos(out Point pointer);
+    readonly uint host;
+    readonly IntPtr token;
+    readonly object gate;
+    readonly CaptureSelectionState state;
+    readonly CaptureInputPolicy input;
+    readonly CaptureMoveMailbox moves;
+    readonly Stopwatch clock=Stopwatch.StartNew();
+    long lastControl=-250, lastAck, lastPing=-250;
+    bool ready, armed, finishing, stopAck, disposed;
+    public bool Armed { get { return armed&&!finishing&&failure==null; } }
+    string failure;
+    public string Failure { get { return failure; } }
+    void Fail() { failure="CAPTURE_INPUT_HOST: The native region input session could not continue; no screenshot was taken.";CaptureHealth.Set("nativeHostFailed",1);lock(gate)state.Cancel(); }
+    bool Send(uint kind) { if(disposed||!PostThreadMessage(host,kind,Handle,token)){Fail();return false;}return true; }
+    public CaptureDelegatedInput(uint thread,long session,object selectionGate,CaptureSelectionState selection,CaptureInputPolicy policy,CaptureMoveMailbox mailbox) {
+        if(IntPtr.Size!=8||thread==0||session<=0)throw new InvalidOperationException("CAPTURE_INPUT_HOST: Invalid native input session.");
+        host=thread;token=new IntPtr(session);gate=selectionGate;state=selection;input=policy;moves=mailbox;
+        CreateParams parameters=new CreateParams();parameters.Parent=new IntPtr(-3);CreateHandle(parameters);
+        if(Handle==IntPtr.Zero)throw new InvalidOperationException("CAPTURE_INPUT_HOST: Native mailbox creation failed.");
+    }
+    public void Pulse(bool finished) {
+        if(disposed)return;
+        long now=clock.ElapsedMilliseconds;
+        if(finished)finishing=true;
+        if(!ready&&now>3000){Fail();return;}
+        if(ready&&now-lastAck>1250){Fail();return;}
+        if(now-lastControl<50)return;lastControl=now;
+        if(!ready){Send(Ready);return;}
+        if(finishing){if(!stopAck)Send(StopMessage);return;}
+        bool mayArm;lock(gate)mayArm=input.Armed&&!state.Finished;
+        if(!armed&&mayArm)Send(Arm);
+        if(now-lastPing>=250){lastPing=now;Send(Ping);}
+    }
+    protected override void WndProc(ref Message message) {
+        if(message.Msg>=ReadyAck&&message.Msg<=PingAck){
+            if(message.WParam!=token||disposed)return;
+            lastAck=clock.ElapsedMilliseconds;
+            if(message.Msg==ReadyAck){ready=true;CaptureHealth.Set("nativeHostReady",1);}
+            else if(message.Msg==ArmAck){armed=true;CaptureHealth.Set("nativeHostArmed",1);}
+            else if(message.Msg==Failed||(message.Msg==PingAck&&message.LParam!=IntPtr.Zero)){Fail();}
+            else if(message.Msg==StopAck){stopAck=true;CaptureHealth.Set("nativeHostStopped",1);if(message.LParam!=IntPtr.Zero)Fail();}
+            else if(message.Msg==MoveMessage){
+                Point pointer;if(GetPhysicalCursorPos(out pointer))moves.Publish(pointer,true,false);
+                CaptureHealth.Increment("nativeHostMoves");Send(MoveAck);
+            }else if(message.Msg>=LeftDown&&message.Msg<=RightUp){
+                long packed=message.LParam.ToInt64();Point pointer=new Point(unchecked((int)(packed>>32)),unchecked((int)packed));
+                int kind=message.Msg==LeftDown?0x0201:message.Msg==LeftUp?0x0202:message.Msg==RightDown?0x0204:0x0205;
+                CaptureHealth.Increment(kind==0x0201||kind==0x0204?"nativeHostDowns":"nativeHostUps");
+                moves.Publish(pointer,false);lock(gate)input.Mouse(kind,pointer,state);
+            }
+            return;
+        }
+        base.WndProc(ref message);
+    }
+    public bool Stop() {
+        if(disposed)return stopAck&&failure==null;
+        finishing=true;Stopwatch wait=Stopwatch.StartNew();
+        do{Pulse(true);Application.DoEvents();if(stopAck)break;Thread.Sleep(5);}while(wait.ElapsedMilliseconds<600);
+        if(!stopAck)Fail();return stopAck&&failure==null;
+    }
+    public void Dispose(){if(disposed)return;Stop();disposed=true;DestroyHandle();}
+}
+
 sealed class CaptureInputPump : IDisposable {
     delegate IntPtr MouseHook(int code, IntPtr message, IntPtr data);
     delegate IntPtr KeyboardHook(int code, IntPtr message, IntPtr data);
@@ -1491,15 +1571,19 @@ sealed class RegionPicker : ApplicationContext {
     readonly CaptureWakeWindow wake;
     readonly CaptureMoveMailbox moves;
     CaptureInputPump inputPump;
+    CaptureDelegatedInput delegated;
+    readonly uint hostThread;
+    readonly long hostToken;
     bool stopping, cleaned, observing;
     int renderedHighlight = -2;
     Rectangle renderedSelection;
     Rectangle renderedHover;
     long lastRaise = -250;
     string failure;
-    public RegionPicker(bool useMouseHook) {
-        mouseHook = useMouseHook;
-        CaptureHealth.Set("inputBackend", mouseHook ? 1 : 2);
+    public RegionPicker(bool useMouseHook, uint nativeHostThread, long nativeHostToken) {
+        hostThread=nativeHostThread;hostToken=nativeHostToken;
+        mouseHook = useMouseHook && hostThread==0;
+        CaptureHealth.Set("inputBackend", hostThread!=0 ? 3 : mouseHook ? 1 : 2);
         Point pointer;
         if (!GetPhysicalCursorPos(out pointer)) throw new InvalidOperationException("CAPTURE: Windows could not read the capture pointer.");
         topology = ReadTopology();
@@ -1563,6 +1647,7 @@ sealed class RegionPicker : ApplicationContext {
     public Rectangle SelectRegion() {
         try {
             inputPump = new CaptureInputPump(selectionGate, state, input, moves, mouseHook); inputPump.Start();
+            if(hostThread!=0)delegated=new CaptureDelegatedInput(hostThread,hostToken,selectionGate,state,input,moves);
             CapturePerformance.Mark("inputReadyMilliseconds");
             ValidateCaptureEnvironment();
             lifetime.Start(); timer.Start();
@@ -1608,6 +1693,11 @@ sealed class RegionPicker : ApplicationContext {
             finished = state.Finished; dragging = state.Dragging; highlighted = state.Highlighted; selected = state.Selected;
             mayStop = input.MayStop(finished, elapsed); releaseExceeded = input.ReleaseGraceExceeded;
             armed = input.Armed; swallowed = input.LeftSwallowed;
+        }
+        if(delegated!=null){
+            delegated.Pulse(finished);
+            if(delegated.Failure!=null){failure=delegated.Failure;lock(selectionGate)state.Cancel();}
+            armed=armed&&delegated.Armed;
         }
         CapturePerformance.Set("uiPhase", finished ? 3 : dragging ? 2 : armed ? 1 : 0);
         CapturePerformance.Set("inputArmed", armed ? 1 : 0);
@@ -1669,6 +1759,10 @@ sealed class RegionPicker : ApplicationContext {
         cleaned = true;
         timer.Stop();
         if (wake != null) wake.Stop();
+        if(delegated!=null){
+            if(!delegated.Stop())failure=delegated.Failure??"CAPTURE_INPUT_HOST: Native input could not stop safely; no screenshot was taken.";
+            delegated.Dispose();delegated=null;
+        }
         if (inputPump != null) {
             if (!inputPump.Stop()) failure = "CAPTURE_INPUT: Windows could not stop the selection input listener; no screenshot was taken.";
             else if (inputPump.Failure != null) failure = inputPump.Failure;
@@ -1993,7 +2087,7 @@ sealed class RegionPicker : ApplicationContext {
         { $_ -in 'capture-ocr', 'capture-image', 'self-test' } {
             $path = [IO.Path]::Combine([IO.Path]::GetTempPath(), ('echolingo-' + [Guid]::NewGuid().ToString('N') + '.png'))
             try {
-                if ($Mode -in 'capture-ocr', 'capture-image') { [EchoLingoNative]::CaptureRegion($path, ($InputBackend -ne 'planeOnly')) }
+                if ($Mode -in 'capture-ocr', 'capture-image') { [EchoLingoNative]::CaptureRegion($path, ($InputBackend -ne 'planeOnly'), $CaptureHostThreadId, $CaptureHostToken) }
                 else { [EchoLingoNative]::CreateFixture($path) }
                 if ($Mode -eq 'capture-image') {
                     Write-Result @{ ok = $true; imageBase64 = (Get-PngBase64 $path) }

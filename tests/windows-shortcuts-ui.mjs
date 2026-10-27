@@ -22,12 +22,31 @@ let app, browser, holder, port, page, appSpawnError;
 let stage = 'owned-fixture-setup', lastCdpError;
 const started = Date.now(), stages = [];
 const appOutput = { stdout: '', stderr: '' }, cleanupErrors = [];
-let failure, diagnostics, nativeKeySends = 0;
+let failure, diagnostics, actualApplicationToken, nativeKeySends = 0;
 const bounded = (value, limit = 8192) => String(value ?? '').slice(-limit);
 function enter(value) { stage = value; stages.push({ stage, elapsedMilliseconds: Date.now() - started }); }
 function requireAppRunning() {
   if (appSpawnError) throw appSpawnError;
   if (app && (app.exitCode !== null || app.signalCode !== null)) throw new Error(`Actual app exited during ${stage}: exit=${app.exitCode}, signal=${app.signalCode}`);
+}
+// Query only this fixture's actual app token. Never serialize a SID, process
+// command line, environment or user content. Comparison stays inside Win32.
+function applicationToken(pid) {
+  assert.ok(Number.isSafeInteger(pid) && pid > 0);
+  return JSON.parse(shell(`Add-Type -TypeDefinition @'
+using System;using System.Diagnostics;using System.Runtime.InteropServices;using System.Security.Principal;
+public static class EchoLingoUiToken {
+[DllImport("advapi32.dll",SetLastError=true)]static extern bool OpenProcessToken(IntPtr process,uint access,out IntPtr token);
+[DllImport("advapi32.dll",SetLastError=true)]static extern bool GetTokenInformation(IntPtr token,int kind,IntPtr data,uint size,out uint length);
+[DllImport("advapi32.dll")]static extern IntPtr GetSidSubAuthorityCount(IntPtr sid);
+[DllImport("advapi32.dll")]static extern IntPtr GetSidSubAuthority(IntPtr sid,uint index);
+[DllImport("kernel32.dll")]static extern bool CloseHandle(IntPtr handle);
+static IntPtr Read(IntPtr token,int kind){uint size;GetTokenInformation(token,kind,IntPtr.Zero,0,out size);if(size==0||size>65536)throw new Exception("TOKEN_SIZE");IntPtr p=Marshal.AllocHGlobal((int)size);if(!GetTokenInformation(token,kind,p,size,out size)){Marshal.FreeHGlobal(p);throw new Exception("TOKEN_READ");}return p;}
+static int Number(IntPtr token,int kind){IntPtr p=Read(token,kind);try{return Marshal.ReadInt32(p);}finally{Marshal.FreeHGlobal(p);}}
+public static object Query(int pid){using(Process process=Process.GetProcessById(pid))using(WindowsIdentity own=WindowsIdentity.GetCurrent()){IntPtr token;if(!OpenProcessToken(process.Handle,8,out token))throw new Exception("TOKEN_OPEN");try{IntPtr p=Read(token,25);int integrity;try{IntPtr sid=Marshal.ReadIntPtr(p);byte n=Marshal.ReadByte(GetSidSubAuthorityCount(sid));if(n==0)throw new Exception("TOKEN_IL");integrity=Marshal.ReadInt32(GetSidSubAuthority(sid,(uint)(n-1)));}finally{Marshal.FreeHGlobal(p);}p=Read(token,1);bool same;try{same=own.User.Equals(new SecurityIdentifier(Marshal.ReadIntPtr(p)));}finally{Marshal.FreeHGlobal(p);}return new {integrityRid=integrity,uiAccess=Number(token,26),elevated=Number(token,20),elevationType=Number(token,18),sessionId=Number(token,12),sameSession=Number(token,12)==Process.GetCurrentProcess().SessionId,sameUser=same};}finally{CloseHandle(token);}}}
+}
+'@
+[EchoLingoUiToken]::Query(${pid}) | ConvertTo-Json -Compress`));
 }
 const cases = [];
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -64,6 +83,10 @@ try {
   app = spawn(executable, ['--configure-shortcuts'], { stdio: ['ignore', 'pipe', 'pipe'], env: { ...process.env, WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS: `--remote-debugging-port=${port} --remote-debugging-address=127.0.0.1`, WEBVIEW2_USER_DATA_FOLDER: path.join(roots[1], 'webview-shortcut-fixture') } });
   app.once('error', (error) => { appSpawnError = error; });
   for (const channel of ['stdout', 'stderr']) app[channel].on('data', (data) => { appOutput[channel] = bounded(appOutput[channel] + data); });
+  actualApplicationToken = applicationToken(app.pid);
+  if (process.env.ECHOLINGO_TEST_EXPECT_MEDIUM === '1') {
+    assert.equal(actualApplicationToken.integrityRid, 8192); assert.equal(actualApplicationToken.uiAccess, 0); assert.equal(actualApplicationToken.sameUser, true); assert.equal(actualApplicationToken.sameSession, true);
+  }
   enter('actual-packaged-webview-cdp-readiness');
   await until(async () => {
     requireAppRunning();
@@ -122,7 +145,7 @@ try {
   diagnostics = {
     stage, elapsedMilliseconds: Date.now() - started,
     app: app ? { pid: app.pid, exitCode: app.exitCode, signalCode: app.signalCode, spawnError: bounded(appSpawnError?.stack, 4000) } : null,
-    lastCdpError, appOutput,
+    lastCdpError, appOutput, actualApplicationToken,
   };
   if (Number.isInteger(port)) {
     try {
@@ -141,6 +164,11 @@ try {
     try {
       const code = `$children = @(Get-CimInstance Win32_Process -Filter 'ParentProcessId=${app.pid}' | Select-Object -First 16 ProcessId,ParentProcessId,Name); ConvertTo-Json -InputObject $children -Compress`;
       diagnostics.directChildProcesses = JSON.parse(shell(code));
+      for (const child of diagnostics.directChildProcesses) {
+        if (child.Name?.toLowerCase() !== 'msedgewebview2.exe') continue;
+        try { child.fileVersion = bounded(shell(`(Get-Process -Id ${Number(child.ProcessId)} -ErrorAction Stop).MainModule.FileVersionInfo.FileVersion`), 80); }
+        catch (error) { child.versionReadError = bounded(error.message, 300); }
+      }
     } catch (probeError) { diagnostics.processMetadataError = bounded(probeError.message, 1000); }
   }
   if (browser) {
@@ -175,7 +203,7 @@ try {
 }
 const report = {
   ok: !failure && cleanupErrors.length === 0, stage, stages, elapsedMilliseconds: Date.now() - started, cases,
-  actualPackagedWebView: Boolean(browser), actualWindowsSendInput: nativeKeySends > 0, nativeKeySends, fakeIpcUsed: false, externalTranslation: false,
+  actualApplicationToken, webViewBrowserVersion: browser ? bounded(browser.version(), 120) : undefined, actualPackagedWebView: Boolean(browser), actualWindowsSendInput: nativeKeySends > 0, nativeKeySends, fakeIpcUsed: false, externalTranslation: false,
   scope: 'Disposable Server desktop and generated keys only; physical Windows11/IME remains unverified.',
 };
 if (failure) { report.error = bounded(failure.message, 4000); report.stack = bounded(failure.stack, 12000); report.diagnostics = diagnostics; }

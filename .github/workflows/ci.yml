@@ -9,12 +9,12 @@ on:
         description: Full regression or exact-binary desktop diagnostics
         type: choice
         default: full
-        options: [full, windows-popup-diagnostics, windows-application-diagnostics, windows-input-plane-experiment, windows-native-diagnostics, windows-shortcuts-ui-diagnostics]
+        options: [full, windows-popup-diagnostics, windows-application-diagnostics, windows-input-plane-experiment, windows-native-diagnostics, windows-shortcuts-ui-diagnostics, windows-shortcuts-ui-medium-diagnostics]
 permissions:
   contents: read
 jobs:
   desktop:
-    if: github.event.inputs.mode != 'windows-popup-diagnostics' && github.event.inputs.mode != 'windows-application-diagnostics' && github.event.inputs.mode != 'windows-input-plane-experiment' && github.event.inputs.mode != 'windows-native-diagnostics' && github.event.inputs.mode != 'windows-shortcuts-ui-diagnostics'
+    if: github.event.inputs.mode != 'windows-popup-diagnostics' && github.event.inputs.mode != 'windows-application-diagnostics' && github.event.inputs.mode != 'windows-input-plane-experiment' && github.event.inputs.mode != 'windows-native-diagnostics' && github.event.inputs.mode != 'windows-shortcuts-ui-diagnostics' && github.event.inputs.mode != 'windows-shortcuts-ui-medium-diagnostics'
     strategy:
       fail-fast: false
       matrix:
@@ -278,7 +278,7 @@ jobs:
           }
 
   frontend-interactions:
-    if: github.event.inputs.mode != 'windows-popup-diagnostics' && github.event.inputs.mode != 'windows-application-diagnostics' && github.event.inputs.mode != 'windows-input-plane-experiment' && github.event.inputs.mode != 'windows-native-diagnostics' && github.event.inputs.mode != 'windows-shortcuts-ui-diagnostics'
+    if: github.event.inputs.mode != 'windows-popup-diagnostics' && github.event.inputs.mode != 'windows-application-diagnostics' && github.event.inputs.mode != 'windows-input-plane-experiment' && github.event.inputs.mode != 'windows-native-diagnostics' && github.event.inputs.mode != 'windows-shortcuts-ui-diagnostics' && github.event.inputs.mode != 'windows-shortcuts-ui-medium-diagnostics'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -489,7 +489,7 @@ jobs:
     name: Windows native helper diagnostics (fresh Framework DLL)
     if: github.event_name == 'workflow_dispatch' && github.event.inputs.mode == 'windows-native-diagnostics'
     runs-on: windows-latest
-    timeout-minutes: 10
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
       - name: Compile exact native helper without the app or offline engine
@@ -566,6 +566,22 @@ jobs:
           $output | Out-File "$env:RUNNER_TEMP/echolingo-native-integrity-boundary.log" -Encoding utf8
           $output | Write-Output
           exit $fixtureExit
+      - name: Exact native Rust host delegated capture and input ownership
+        id: delegated
+        continue-on-error: true
+        timeout-minutes: 8
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          & rustc --edition=2021 tests/windows-delegated-capture-harness.rs -O -o "$env:RUNNER_TEMP/echolingo-capture-input-harness.exe"
+          if ($LASTEXITCODE -ne 0) { throw 'The exact production input modules did not compile for Windows.' }
+          $ErrorActionPreference = 'Continue'
+          $global:LASTEXITCODE = 1
+          $output = @(& powershell.exe -NoProfile -STA -ExecutionPolicy Bypass -File tests/windows-delegated-capture-smoke.ps1 -HelperPath src-tauri/native/windows.ps1 -NativeAssemblyPath "$env:RUNNER_TEMP/echolingo-native-diagnostics.dll" -HarnessPath "$env:RUNNER_TEMP/echolingo-capture-input-harness.exe" -IsolatedTestSession 2>&1)
+          $fixtureExit = $LASTEXITCODE
+          $output | Out-File "$env:RUNNER_TEMP/echolingo-native-delegated-capture.log" -Encoding utf8
+          $output | Write-Output
+          exit $fixtureExit
       - uses: actions/upload-artifact@v4
         if: always()
         with:
@@ -577,17 +593,18 @@ jobs:
             ${{ runner.temp }}/echolingo-native-ownership-*.log
             ${{ runner.temp }}/echolingo-native-active-experiment.log
             ${{ runner.temp }}/echolingo-native-integrity-boundary.log
+            ${{ runner.temp }}/echolingo-native-delegated-capture.log
       - name: Gate raw native outcomes
         if: always()
         shell: powershell
         run: |
-          $outcomes = @{ ocr = '${{ steps.ocr.outcome }}'; assembly = '${{ steps.assembly.outcome }}'; live = '${{ steps.live.outcome }}'; ownership = '${{ steps.ownership.outcome }}'; activeExperiment = '${{ steps.active.outcome }}'; integrityBoundary = '${{ steps.integrity.outcome }}' }
+          $outcomes = @{ ocr = '${{ steps.ocr.outcome }}'; assembly = '${{ steps.assembly.outcome }}'; live = '${{ steps.live.outcome }}'; ownership = '${{ steps.ownership.outcome }}'; activeExperiment = '${{ steps.active.outcome }}'; integrityBoundary = '${{ steps.integrity.outcome }}'; delegatedCapture = '${{ steps.delegated.outcome }}' }
           $outcomes | ConvertTo-Json -Compress
           if (@($outcomes.Values | Where-Object { $_ -ne 'success' }).Count -gt 0) { throw 'Fresh native Windows checks failed or incomplete; this is not app acceptance.' }
 
   windows-shortcuts-ui-diagnostics:
     name: Targeted shortcut UI diagnostics (exact 0a08830 binary)
-    if: github.event_name == 'workflow_dispatch' && github.event.inputs.mode == 'windows-shortcuts-ui-diagnostics'
+    if: github.event_name == 'workflow_dispatch' && (github.event.inputs.mode == 'windows-shortcuts-ui-diagnostics' || github.event.inputs.mode == 'windows-shortcuts-ui-medium-diagnostics')
     runs-on: windows-latest
     timeout-minutes: 6
     permissions:
@@ -598,6 +615,7 @@ jobs:
         with:
           fetch-depth: 0
       - name: Require unchanged exact packaged application source
+        if: github.event.inputs.mode == 'windows-shortcuts-ui-diagnostics'
         shell: powershell
         run: |
           git diff --quiet 0a08830f8286a2d54aa658c8876b013a8b1696b1 HEAD -- src src-tauri resources assets scripts index.html package.json package-lock.json vite.config.ts tsconfig.json tsconfig.node.json .cargo
@@ -624,7 +642,8 @@ jobs:
           $candidateHash = (Get-FileHash -LiteralPath $candidatePath -Algorithm SHA256).Hash.ToLowerInvariant()
           if ($candidateFiles[0].Length -ne 5717504 -or $candidateHash -ne '046a33fd4498e7ef2e14a49f694f0a1fa9e6e2af1805d1538358e8bcfce77090') { throw 'Exact stage executable identity mismatch.' }
           $identity = [ordered]@{
-            scope = 'Targeted actual shortcut UI only; no rebuild or full-run success claim'
+            scope = 'Historical exact 0a08830 shortcut UI only; never current-checkout or full-run acceptance'
+            diagnosticMode = '${{ github.event.inputs.mode }}'
             sourceRun = 40502410316
             sourceArtifactId = 12734022372
             applicationSource = '0a08830f8286a2d54aa658c8876b013a8b1696b1'
@@ -642,12 +661,17 @@ jobs:
         shell: powershell
         env:
           ECHOLINGO_SHORTCUT_UI_CANDIDATE: ${{ steps.candidate.outputs.path }}
+          ECHOLINGO_SHORTCUT_UI_MEDIUM: ${{ github.event.inputs.mode == 'windows-shortcuts-ui-medium-diagnostics' }}
         run: |
           $ErrorActionPreference = 'Continue'
           $output = @(); $fixtureExit = 1
           $global:LASTEXITCODE = 1 # A missing/unlaunchable node must never reuse a null/success exit code.
           try {
-            $output = @(node tests/windows-shortcuts-ui.mjs $env:ECHOLINGO_SHORTCUT_UI_CANDIDATE --isolated-test-session 2>&1)
+            if ($env:ECHOLINGO_SHORTCUT_UI_MEDIUM -eq 'true') {
+              $output = @(& powershell.exe -NoProfile -STA -ExecutionPolicy Bypass -File tests/windows-shortcuts-ui-medium.ps1 -ApplicationPath $env:ECHOLINGO_SHORTCUT_UI_CANDIDATE -IsolatedTestSession 2>&1)
+            } else {
+              $output = @(node tests/windows-shortcuts-ui.mjs $env:ECHOLINGO_SHORTCUT_UI_CANDIDATE --isolated-test-session 2>&1)
+            }
             $fixtureExit = $LASTEXITCODE
           } finally {
             $output | Out-File "$env:RUNNER_TEMP/echolingo-shortcuts-ui.log" -Encoding utf8
