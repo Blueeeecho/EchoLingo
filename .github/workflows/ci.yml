@@ -848,7 +848,7 @@ jobs:
           if ($outcome -ne 'success') { throw 'Actual browser selection failed or was inconclusive.' }
 
   windows-latest-intent-diagnostics:
-    name: Registered-shortcut diagnostics (exact 4cf37d8 binary)
+    name: Registered-shortcut diagnostics (immutable full-run candidate)
     if: github.event_name == 'workflow_dispatch' && (github.event.inputs.mode == 'windows-latest-intent-diagnostics' || github.event.inputs.mode == 'windows-selection-application-diagnostics' || github.event.inputs.mode == 'windows-selection-notepad-diagnostics')
     runs-on: windows-latest
     timeout-minutes: 6
@@ -857,25 +857,28 @@ jobs:
       actions: read
     steps:
       - uses: actions/checkout@v4
-      - name: Verify production source is unchanged and retrieve exact built candidate
+      - name: Verify immutable source-run identity and retrieve exact built candidate
         shell: powershell
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          git fetch --no-tags --depth=1 origin 4cf37d8fb506ee28387f433f86832e91b281468d
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          git diff --exit-code 4cf37d8fb506ee28387f433f86832e91b281468d HEAD -- src src-tauri package.json package-lock.json assets resources scripts
-          if ($LASTEXITCODE -ne 0) { throw 'Production source changed; this exact-binary supplement is invalid.' }
-          $destination = "$env:RUNNER_TEMP/echolingo-4cf37d8-latest-intent"
-          gh run download 40529706953 --repo Blueeeecho/EchoLingo --name EchoLingo-Windows-offline-evidence --dir $destination
+          $strict = '${{ github.event.inputs.mode }}' -eq 'windows-selection-application-diagnostics'
+          $source = if ($strict) { '4385e3448d2c56df4575a0a991b0f6a271bfd708' } else { '4cf37d8fb506ee28387f433f86832e91b281468d' }
+          $run = if ($strict) { '40544606324' } else { '40529706953' }
+          $expectedHash = if ($strict) { '6684d75fe79f9e1b327c866d459970ef91c726a296397e2626184e70def41bd6' } else { '86373b0c771b6644b66b6dc0f8a8c50295b6b7da50a8b1227953d11e78b1cf03' }
+          $expectedBytes = if ($strict) { 5809152 } else { 5784064 }
+          $actualSource = gh run view $run --repo Blueeeecho/EchoLingo --json headSha --jq .headSha
+          if ($LASTEXITCODE -ne 0 -or $actualSource.Trim() -ne $source) { throw 'The immutable full-run source identity differs.' }
+          $destination = "$env:RUNNER_TEMP/echolingo-immutable-selection-candidate"
+          gh run download $run --repo Blueeeecho/EchoLingo --name EchoLingo-Windows-offline-evidence --dir $destination
           if ($LASTEXITCODE -ne 0) { throw 'The exact full-run evidence artifact could not be retrieved.' }
           $candidates = @(Get-ChildItem -LiteralPath $destination -Recurse -File -Filter echolingo.exe)
           if ($candidates.Count -ne 1) { throw 'Expected exactly one staged application.' }
           $candidate = $candidates[0].FullName
           $hash = (Get-FileHash -LiteralPath $candidate -Algorithm SHA256).Hash.ToLowerInvariant()
-          if ($hash -ne '86373b0c771b6644b66b6dc0f8a8c50295b6b7da50a8b1227953d11e78b1cf03' -or $candidates[0].Length -ne 5784064) { throw 'Actual application identity differs from the full-run candidate.' }
+          if ($hash -ne $expectedHash -or $candidates[0].Length -ne $expectedBytes) { throw 'Actual application identity differs from the full-run candidate.' }
           "ECHOLINGO_APPLICATION_CANDIDATE=$candidate" | Out-File $env:GITHUB_ENV -Encoding utf8 -Append
-          [ordered]@{ applicationSourceUnchanged = $true; reusedRun = 40529706953; applicationSha256 = $hash; applicationBytes = $candidates[0].Length; rebuilt = $false } | ConvertTo-Json -Compress
+          [ordered]@{ candidateSourceVerified = $true; candidateSourceCommit = $source; fixtureHeadCommit = (git rev-parse HEAD); candidateIsCurrentHead = $false; reusedRun = $run; applicationSha256 = $hash; applicationBytes = $candidates[0].Length; rebuilt = $false; scope = 'Exact historical candidate; cannot establish acceptance of newer HEAD production changes' } | ConvertTo-Json -Compress
       - name: Actual registered selection shortcuts and pinned updates
         id: latest
         continue-on-error: true
@@ -887,7 +890,9 @@ jobs:
           if ('${{ github.event.inputs.mode }}' -eq 'windows-selection-notepad-diagnostics') {
             $output = @(& powershell.exe -NoProfile -STA -ExecutionPolicy Bypass -File tests/windows-selection-notepad-smoke.ps1 -ApplicationPath $env:ECHOLINGO_APPLICATION_CANDIDATE -IsolatedTestSession 2>&1)
           } elseif ('${{ github.event.inputs.mode }}' -eq 'windows-selection-application-diagnostics') {
-            $output = @(& powershell.exe -NoProfile -STA -ExecutionPolicy Bypass -File tests/windows-selection-application-smoke.ps1 -ApplicationPath $env:ECHOLINGO_APPLICATION_CANDIDATE -IsolatedTestSession 2>&1)
+            $hash = (Get-FileHash -LiteralPath $env:ECHOLINGO_APPLICATION_CANDIDATE -Algorithm SHA256).Hash.ToLowerInvariant()
+            $bytes = (Get-Item -LiteralPath $env:ECHOLINGO_APPLICATION_CANDIDATE).Length
+            $output = @(& powershell.exe -NoProfile -STA -ExecutionPolicy Bypass -File tests/windows-selection-application-smoke.ps1 -ApplicationPath $env:ECHOLINGO_APPLICATION_CANDIDATE -ExpectedApplicationSha256 $hash -ExpectedApplicationBytes $bytes -IsolatedTestSession 2>&1)
           } else {
             $output = @(& powershell.exe -NoProfile -STA -ExecutionPolicy Bypass -File tests/windows-application-smoke.ps1 -ApplicationPath $env:ECHOLINGO_APPLICATION_CANDIDATE -LatestIntentTests 2>&1)
           }
@@ -906,7 +911,7 @@ jobs:
         shell: powershell
         run: |
           $outcome = '${{ steps.latest.outcome }}'
-          [ordered]@{ scope = 'Exact 4cf37d8 built-app pinned latest-intent supplement; original full gate remains unchanged'; latestIntent = $outcome } | ConvertTo-Json -Compress
+          [ordered]@{ scope = 'Immutable full-run candidate supplement; original full gate unchanged; newer HEAD production is not tested by this run'; latestIntent = $outcome } | ConvertTo-Json -Compress
           if ($outcome -ne 'success') { throw 'Exact-binary latest-intent workflows failed or were incomplete.' }
 
   windows-selection-clipboard-diagnostics:
