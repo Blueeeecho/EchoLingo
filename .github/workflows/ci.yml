@@ -6,7 +6,7 @@ on:
   workflow_dispatch:
     inputs:
       mode:
-        description: Full regression or targeted popup diagnostics using the exact 47eb candidate
+        description: Full regression or targeted popup diagnostics using the exact c133 candidate
         type: choice
         default: full
         options: [full, windows-popup-diagnostics]
@@ -210,7 +210,7 @@ jobs:
           npm run test:ui
 
   windows-popup-diagnostics:
-    name: Targeted popup diagnostics (reused 47eb binary)
+    name: Targeted popup diagnostics (reused c133 binary)
     if: github.event_name == 'workflow_dispatch' && github.event.inputs.mode == 'windows-popup-diagnostics'
     runs-on: windows-latest
     permissions:
@@ -223,12 +223,12 @@ jobs:
       - name: Require unchanged application source
         shell: powershell
         run: |
-          git diff --quiet 47eb30ae4093637f23de921a68599024620ae88f HEAD -- src src-tauri index.html package.json package-lock.json resources
+          git diff --quiet c1338ba5a6f557b5f9245d7316775c5dd20310f0 HEAD -- src src-tauri index.html package.json package-lock.json resources
           if ($LASTEXITCODE -ne 0) { throw 'Application changed; use the full build instead of the reused binary.' }
       - uses: actions/download-artifact@v4
         with:
           name: EchoLingo-Windows-offline-evidence
-          run-id: 40470704055
+          run-id: 40475539423
           github-token: ${{ github.token }}
           path: popup-candidate-evidence
       - name: Verify exact previously built application
@@ -239,7 +239,7 @@ jobs:
           if ($candidateFiles.Count -ne 1) { throw 'Expected exactly one staged candidate executable.' }
           $candidatePath = $candidateFiles[0].FullName
           $candidateHash = (Get-FileHash -LiteralPath $candidatePath -Algorithm SHA256).Hash.ToLowerInvariant()
-          if ($candidateHash -ne 'b9924c182cc55eed10bccd396f0f9fc035ae15700b97bc3348996595478a0c08') { throw 'Candidate identity mismatch.' }
+          if ($candidateHash -ne '97d461e75a83fb3e71dcde3feddfb1dbc2ea5f27ff63dc572bfc7292fedc667e') { throw 'Candidate identity mismatch.' }
           # Windows checkout can convert LF to CRLF. Preserve the exact file
           # digest and an explicit LF digest for comparison with Git snapshots.
           $fixtureText = [IO.File]::ReadAllText((Resolve-Path tests/windows-popup-visibility-smoke.ps1)).Replace("`r`n", "`n")
@@ -249,8 +249,8 @@ jobs:
           } finally { $fixtureDigest.Dispose() }
           [ordered]@{
             scope = 'Targeted popup diagnostics only; not a full build or release acceptance'
-            sourceRun = 40470704055
-            applicationSource = '47eb30ae4093637f23de921a68599024620ae88f'
+            sourceRun = 40475539423
+            applicationSource = 'c1338ba5a6f557b5f9245d7316775c5dd20310f0'
             stagedSha256 = $candidateHash
             checkoutFixtureSha256 = (Get-FileHash tests/windows-popup-visibility-smoke.ps1 -Algorithm SHA256).Hash.ToLowerInvariant()
             canonicalLfFixtureSha256 = $fixtureLfHash

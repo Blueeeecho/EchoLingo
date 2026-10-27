@@ -304,7 +304,8 @@ public static class EchoLingoPopupVisibilitySmoke {
         object pattern;
         if (element.TryGetCurrentPattern(InvokePattern.Pattern, out pattern)) ((InvokePattern)pattern).Invoke();
         else if (element.TryGetCurrentPattern(TogglePattern.Pattern, out pattern)) ((TogglePattern)pattern).Toggle();
-        else throw new InvalidOperationException("Control has neither Invoke nor Toggle action: " + name);
+        else if (element.TryGetCurrentPattern(ExpandCollapsePattern.Pattern, out pattern)) ((ExpandCollapsePattern)pattern).Expand();
+        else throw new InvalidOperationException("Control has no Invoke, Toggle or ExpandCollapse action: " + name);
     }
     static Dictionary<string, object> ReadinessMetadata(Process app, IntPtr main) {
         Dictionary<string, object> value = new Dictionary<string, object>();
@@ -326,7 +327,7 @@ public static class EchoLingoPopupVisibilitySmoke {
         List<Dictionary<string, object>> controls = new List<Dictionary<string, object>>();
         // Read only static fixture-targeted control metadata. Never inspect
         // source values, provider fields, clipboard or arbitrary UIA names.
-        foreach (string name in new string[] { "\u8fd4\u56de\u7ffb\u8bd1", "\u9489\u4f4f\u7a97\u53e3", "\u9690\u85cf\u7a97\u53e3" }) {
+        foreach (string name in new string[] { "\u8fd4\u56de\u7ffb\u8bd1", "\u9489\u4f4f\u7a97\u53e3", "\u9690\u85cf\u7a97\u53e3", "\u66f4\u591a" }) {
             Dictionary<string, object> control = new Dictionary<string, object> { { "name", name } };
             try {
                 AutomationElement element = Element(main, name); control["found"] = element != null;
@@ -335,6 +336,9 @@ public static class EchoLingoPopupVisibilitySmoke {
                     control["enabled"] = element.Current.IsEnabled; control["offscreen"] = element.Current.IsOffscreen;
                     object pattern; control["supportsInvoke"] = element.TryGetCurrentPattern(InvokePattern.Pattern, out pattern);
                     control["supportsToggle"] = element.TryGetCurrentPattern(TogglePattern.Pattern, out pattern);
+                    bool expand = element.TryGetCurrentPattern(ExpandCollapsePattern.Pattern, out pattern);
+                    control["supportsExpandCollapse"] = expand;
+                    if (expand) control["expandCollapseState"] = ((ExpandCollapsePattern)pattern).Current.ExpandCollapseState.ToString();
                 }
             } catch (Exception error) { control["metadataError"] = error.GetType().Name; }
             controls.Add(control);
