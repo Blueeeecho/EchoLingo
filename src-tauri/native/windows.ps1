@@ -7,7 +7,12 @@ param(
     # Production always supplies its embedded, content-addressed DLL. Omission
     # is the standalone source-development/fixture path, never a load fallback.
     [string]$NativeAssemblyPath = '',
-    [switch]$PerformanceDiagnostics
+    [switch]$PerformanceDiagnostics,
+    # Explicit standalone capture-image diagnostics only. Packaged Rust calls
+    # never select this switch; it exercises the same HWND fallback without a
+    # global mouse hook, while retaining Escape cancellation.
+    [ValidateSet('hybrid', 'planeOnly')]
+    [string]$InputBackend = 'hybrid'
 )
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
@@ -29,6 +34,9 @@ function Write-Result($Value) {
 }
 
 try {
+    if ($InputBackend -eq 'planeOnly' -and $Mode -ne 'capture-image') {
+        throw 'CAPTURE_ARGUMENT: planeOnly is available only for explicit capture-image diagnostics.'
+    }
     Add-Type -AssemblyName System.Windows.Forms
     Add-Type -AssemblyName System.Drawing
     Add-Type -AssemblyName UIAutomationClient
@@ -453,7 +461,8 @@ public static class EchoLingoNative {
             return bitmap;
         } catch { bitmap.Dispose(); throw; }
     }
-    public static void CaptureRegion(string path) {
+    public static void CaptureRegion(string path) { CaptureRegion(path, true); }
+    public static void CaptureRegion(string path, bool mouseHook) {
         ConfigureDpi();
         try {
             if (GetAwarenessFromDpiAwarenessContext(GetThreadDpiAwarenessContext()) != 2)
@@ -461,7 +470,7 @@ public static class EchoLingoNative {
         } catch (EntryPointNotFoundException) {
             throw new InvalidOperationException("CAPTURE_DPI: This Windows version lacks per-monitor capture coordinates.");
         }
-        using (RegionPicker picker = new RegionPicker()) {
+        using (RegionPicker picker = new RegionPicker(mouseHook)) {
             Rectangle selected = picker.SelectRegion();
             // Observing display changes continues after selection completion.
             // Validate both sides of BitBlt and discard pixels if the saved
@@ -588,6 +597,7 @@ public sealed class CaptureInputPolicy {
     public bool ReleaseGraceExceeded { get; private set; }
     long stoppingAt = -1;
     public bool PendingRelease { get { return LeftSwallowed || RightSwallowed || EscapeSwallowed; } }
+    public bool PlaneReady(CaptureSelectionState state) { return Armed && !state.Finished; }
     public void ResyncReleasedButtons(bool left, bool right) {
         if (Armed || PendingRelease) return;
         initialLeft = left; initialRight = right;
@@ -624,6 +634,16 @@ public sealed class CaptureInputPolicy {
         state.Move(pointer);
         return false;
     }
+    public void AbortOwnedMouse(int kind, CaptureSelectionState state) {
+        // A native HWND already owns this event even if coordinate decoding
+        // failed. Drain the matching up without fabricating a crop or sending
+        // a compensating click into another application.
+        if (kind == 0x0201) LeftSwallowed = true;
+        if (kind == 0x0204) RightSwallowed = true;
+        if (kind == 0x0202) LeftSwallowed = false;
+        if (kind == 0x0205) RightSwallowed = false;
+        state.Cancel();
+    }
     public bool MayStop(bool finished, long elapsedMilliseconds) {
         if (!finished) return false;
         if (stoppingAt < 0) stoppingAt = elapsedMilliseconds;
@@ -657,17 +677,37 @@ public sealed class CaptureInputPolicy {
         CaptureInputPolicy grace = new CaptureInputPolicy(); grace.Escape(true, false);
         Assert(!grace.MayStop(true, 120000) && !grace.MayStop(true, 120499), "Shutdown must allow a bounded matching-release grace.");
         Assert(grace.MayStop(true, 120500) && grace.ReleaseGraceExceeded, "A held key must not keep hooks installed without a deadline.");
-        return 11;
+        CaptureInputPolicy handoff = new CaptureInputPolicy(); handoff.ResyncReleasedButtons(false, false);
+        CaptureSelectionState cross = new CaptureSelectionState(new Rectangle[] { new Rectangle(-800, 0, 800, 600), new Rectangle(0, 0, 800, 600) }, Point.Empty);
+        Assert(handoff.Mouse(0x0201, new Point(-100, 100), cross) && cross.Dragging, "A hook-owned down must begin the shared drag.");
+        Assert(handoff.Mouse(0x0202, new Point(100, 200), cross) && cross.Finished && !handoff.PendingRelease && cross.Selected == new Rectangle(-100, 100, 200, 100), "A plane-owned up on another display must finish the original hook-owned drag.");
+        Assert(!handoff.Mouse(0x0202, new Point(500, 500), cross) && cross.Selected == new Rectangle(-100, 100, 200, 100), "A duplicate up must not change a completed crop.");
+        CaptureInputPolicy reverseHandoff = new CaptureInputPolicy(); reverseHandoff.ResyncReleasedButtons(false, false);
+        CaptureSelectionState reverseCross = new CaptureSelectionState(new Rectangle[] { new Rectangle(0, 0, 800, 600) }, Point.Empty);
+        Assert(reverseHandoff.Mouse(0x0201, new Point(20, 20), reverseCross) && reverseCross.Dragging, "A plane-owned down must use the same selection policy.");
+        Assert(reverseHandoff.Mouse(0x0202, new Point(80, 60), reverseCross) && reverseCross.Selected == new Rectangle(20, 20, 60, 40), "A hook-owned up must finish a plane-owned down only once.");
+        CaptureInputPolicy abort = new CaptureInputPolicy(); CaptureSelectionState abortState = new CaptureSelectionState(new Rectangle[] { new Rectangle(0, 0, 800, 600) }, Point.Empty);
+        abort.ResyncReleasedButtons(false, false); abort.AbortOwnedMouse(0x0201, abortState);
+        Assert(abortState.Cancelled && abort.PendingRelease && !abort.PlaneReady(abortState), "A failed owned down must cancel without dropping the matching-up drain.");
+        Assert(abort.Mouse(0x0202, Point.Empty, abortState) && !abort.PendingRelease, "An aborted HWND down must consume its matching up without fabricating pixels.");
+        CaptureInputPolicy beforePlane = new CaptureInputPolicy(); CaptureSelectionState beforeState = new CaptureSelectionState(new Rectangle[] { new Rectangle(0, 0, 800, 600) }, Point.Empty);
+        beforePlane.ResyncReleasedButtons(true, false);
+        Assert(!beforePlane.PlaneReady(beforeState), "An input plane must stay hidden while a pre-existing source press is held.");
+        Assert(!beforePlane.Mouse(0x0202, Point.Empty, beforeState) && beforePlane.PlaneReady(beforeState) && !beforeState.Dragging, "The old source up must remain unconsumed before a fresh plane can appear.");
+        Assert(beforePlane.Mouse(0x0204, new Point(10, 10), beforeState) && beforeState.Cancelled && beforePlane.Mouse(0x0205, new Point(10, 10), beforeState) && !beforePlane.PendingRelease, "Plane right cancellation must drain its real matching release.");
+        return 21;
     }
 }
 
-// Physical polling is only a health check. It never invents a drag/release or
-// crop from input that the mouse hook did not actually own.
+// Physical polling is only a one-way health check. GetAsyncKeyState can return
+// zero when its query fails, and is not proof of our owned matching release.
+// False MUST NOT cancel a valid long drag. Only an actual
+// owned up ends it; Escape/right/desktop change/timeout remain cancellation.
 public sealed class CaptureInputHealthPolicy {
     int mismatch;
     long since = -1;
     public int Observe(bool armed, bool finished, bool dragging, bool swallowed, bool physicalLeft, long elapsed) {
-        int observed = !armed || finished ? 0 : !dragging && !swallowed && physicalLeft ? 1 : dragging && swallowed && !physicalLeft ? 2 : 0;
+        int observed = armed && !finished && !dragging && !swallowed && physicalLeft ? 1 : 0;
         if (elapsed < 0 || observed == 0) { mismatch = 0; since = -1; return 0; }
         if (observed != mismatch || since < 0 || elapsed < since) { mismatch = observed; since = elapsed; return 0; }
         return elapsed - since >= 750 ? mismatch : 0;
@@ -681,10 +721,10 @@ public sealed class CaptureInputHealthPolicy {
         check(health.Observe(true, false, false, false, true, 2850) == 1);
         check(health.Observe(true, false, true, true, true, 2860) == 0);
         check(health.Observe(true, false, true, true, false, 3000) == 0 && health.Observe(true, false, true, true, false, 3749) == 0);
-        check(health.Observe(true, false, true, true, false, 3750) == 2);
+        check(health.Observe(true, false, true, true, false, 3750) == 0);
         check(health.Observe(true, true, false, false, false, 3760) == 0);
         check(health.Observe(true, false, true, true, false, 4000) == 0 && health.Observe(true, false, true, true, false, 3900) == 0);
-        check(health.Observe(true, false, true, true, true, 5000) == 0 && health.Observe(true, false, true, true, false, 6000) == 0);
+        check(health.Observe(true, false, true, true, true, 5000) == 0 && health.Observe(true, false, true, true, false, 6000) == 0 && health.Observe(true, false, true, true, false, 120000) == 0);
         return assertions;
     }
 }
@@ -744,12 +784,13 @@ public sealed class CaptureMoveMailbox {
     long point, moves, posts, failures;
     int active = 1, pending, hasPoint;
     public CaptureMoveMailbox(Func<bool> postWake) { post = postWake; }
-    public void Publish(Point value, bool wake) {
+    public void Publish(Point value, bool wake) { Publish(value, wake, wake); }
+    public void Publish(Point value, bool wake, bool hookMove) {
         if (Interlocked.CompareExchange(ref active, 0, 0) == 0) return;
         Interlocked.Exchange(ref point, ((long)(uint)value.X << 32) | (uint)value.Y);
         Interlocked.Exchange(ref hasPoint, 1);
         if (!wake) return;
-        Interlocked.Increment(ref moves);
+        if (hookMove) Interlocked.Increment(ref moves);
         if (Interlocked.CompareExchange(ref pending, 1, 0) != 0) return;
         bool posted = false;
         try { posted = Interlocked.CompareExchange(ref active, 0, 0) != 0 && post(); }
@@ -784,6 +825,9 @@ public sealed class CaptureMoveMailbox {
         check(attempts == 2 && failed.Failures == 2 && failed.TryRead(out observed) && observed == new Point(3, 4));
         CaptureMoveMailbox throwing = new CaptureMoveMailbox(delegate { throw new InvalidOperationException(); });
         throwing.Publish(new Point(4, 5), true); check(throwing.Failures == 1 && throwing.TryRead(out observed));
+        CaptureMoveMailbox plane = new CaptureMoveMailbox(delegate { return true; });
+        plane.Publish(new Point(-5, 30), true, false);
+        check(plane.Moves == 0 && plane.Posts == 1 && plane.TakeWake() && plane.TryRead(out observed) && observed == new Point(-5, 30));
         CaptureRedrawPolicy redraw = new CaptureRedrawPolicy();
         check(redraw.IsDue(0)); redraw.Presented(0); check(!redraw.IsDue(15) && redraw.IsDue(16));
         redraw.Presented(16); check(!redraw.IsDue(20) && redraw.IsDue(32));
@@ -872,12 +916,10 @@ public sealed class CaptureHoverPolicy {
         return name == "Progman" || name == "WorkerW" || name == "Shell_TrayWnd" || name == "Shell_SecondaryTrayWnd"
             || name == "SHELLDLL_DefView" || name == "SysListView32";
     }
-    public static IntPtr OcclusionCheckedRoot(IntPtr pointRoot, IntPtr desktopRoot, bool pointIsOwnHint) {
-        // WindowFromPoint skips disabled windows. The desktop child hit keeps
-        // them, so disagreement can mean a disabled root occludes the apparent
-        // target. Never highlight the enabled window behind it. Own thin-edge
-        // hits may use the independently verified transparent-skipping result.
-        return desktopRoot != IntPtr.Zero && (pointIsOwnHint || pointRoot == desktopRoot) ? desktopRoot : IntPtr.Zero;
+    public static bool KnownOverlay(IntPtr window, ICollection<IntPtr> hints, ICollection<IntPtr> planes) {
+        // Only registered overlay handles may be skipped by the metadata walk.
+        // Being in our process alone never grants a transparent exception.
+        return window != IntPtr.Zero && (hints.Contains(window) || planes.Contains(window));
     }
     public static Rectangle CandidateFrame(CaptureHoverCandidate candidate, Point pointer) {
         return candidate.RootKnown && candidate.Visible && !candidate.Minimized && candidate.CloakKnown && candidate.Cloaked == 0
@@ -922,12 +964,13 @@ public sealed class CaptureHoverPolicy {
         candidate = valid; candidate.ClassName = null; reject(candidate);
         foreach (string shell in new string[] { "Progman", "WorkerW", "Shell_TrayWnd", "Shell_SecondaryTrayWnd", "SHELLDLL_DefView", "SysListView32" }) { candidate = valid; candidate.ClassName = shell; reject(candidate); }
         check(CandidateFrame(valid, new Point(200, 100)).IsEmpty, "Right/bottom frame edges are exclusive and cannot retain a stale hover.");
-        IntPtr enabled = new IntPtr(20), disabled = new IntPtr(30), hint = new IntPtr(40);
-        check(OcclusionCheckedRoot(enabled, enabled, false) == enabled, "Agreeing native roots must retain an ordinary window hint.");
-        check(OcclusionCheckedRoot(enabled, disabled, false) == IntPtr.Zero, "A disabled top window must prevent highlighting the enabled root behind it.");
-        check(OcclusionCheckedRoot(IntPtr.Zero, disabled, false) == IntPtr.Zero, "An unavailable direct hit cannot establish an ordinary hover root.");
-        check(OcclusionCheckedRoot(hint, enabled, true) == enabled, "A known own thin edge may use the independent transparent-skipping desktop hit.");
-        check(OcclusionCheckedRoot(hint, IntPtr.Zero, true) == IntPtr.Zero, "A failed underlying hit must not restore a previous hint.");
+        IntPtr ordinary = new IntPtr(20), disabled = new IntPtr(30), hint = new IntPtr(40), plane = new IntPtr(50);
+        ICollection<IntPtr> hints = new HashSet<IntPtr> { hint }, planes = new HashSet<IntPtr> { plane };
+        check(!KnownOverlay(ordinary, hints, planes), "An ordinary root must not be skipped as our overlay.");
+        check(!KnownOverlay(disabled, hints, planes), "A disabled root must not be skipped as an overlay, obscuring the enabled root beneath it.");
+        check(!KnownOverlay(IntPtr.Zero, hints, planes), "An unavailable root cannot count as a registered overlay.");
+        check(KnownOverlay(hint, hints, planes), "A registered thin edge may be skipped by the metadata-only underlay query.");
+        check(KnownOverlay(plane, hints, planes), "A registered input plane may be skipped without changing live hit testing.");
         CaptureHoverPolicy policy = new CaptureHoverPolicy();
         check(policy.BeginQuery(0), "The initial hover query must be available immediately."); policy.SetFrame(bounds);
         check(policy.Current(pointer, 0, true) == bounds && !policy.BeginQuery(79), "Idle native metadata queries must be throttled.");
@@ -944,12 +987,15 @@ public sealed class CaptureHoverPolicy {
 // or while selectionGate is held. A failed/ambiguous hint is simply omitted.
 sealed class CaptureHoverResolver {
     [StructLayout(LayoutKind.Sequential)] struct FrameRect { public int left, top, right, bottom; }
-    [DllImport("user32.dll")] static extern IntPtr WindowFromPoint(Point point);
     [DllImport("user32.dll")] static extern IntPtr GetAncestor(IntPtr window, uint kind);
     [DllImport("user32.dll")] static extern IntPtr GetDesktopWindow();
     [DllImport("user32.dll")] static extern IntPtr GetShellWindow();
     [DllImport("user32.dll")] static extern bool ScreenToClient(IntPtr window, ref Point point);
     [DllImport("user32.dll")] static extern IntPtr ChildWindowFromPointEx(IntPtr window, Point point, uint flags);
+    [DllImport("user32.dll")] static extern IntPtr GetWindow(IntPtr window, uint relation);
+    [DllImport("user32.dll")] static extern bool GetWindowRect(IntPtr window, out FrameRect bounds);
+    [DllImport("user32.dll", EntryPoint="GetWindowLongPtrW")] static extern IntPtr GetWindowLongPointer(IntPtr window, int index);
+    [DllImport("user32.dll", EntryPoint="GetWindowLongW")] static extern int GetWindowLong32(IntPtr window, int index);
     [DllImport("user32.dll")] static extern bool IsWindow(IntPtr window);
     [DllImport("user32.dll")] static extern bool IsWindowVisible(IntPtr window);
     [DllImport("user32.dll")] static extern bool IsIconic(IntPtr window);
@@ -959,18 +1005,44 @@ sealed class CaptureHoverResolver {
     [DllImport("dwmapi.dll", EntryPoint="DwmGetWindowAttribute")] static extern int DwmFrame(IntPtr window, uint attribute, out FrameRect value, int size);
     [DllImport("dwmapi.dll", EntryPoint="DwmGetWindowAttribute")] static extern int DwmCloak(IntPtr window, uint attribute, out uint value, int size);
     readonly ICollection<IntPtr> hints;
+    readonly ICollection<IntPtr> planes;
     readonly uint process = (uint)Process.GetCurrentProcess().Id;
-    public CaptureHoverResolver(ICollection<IntPtr> ownHints) { hints = ownHints; }
+    public CaptureHoverResolver(ICollection<IntPtr> ownHints, ICollection<IntPtr> inputPlanes) { hints = ownHints; planes = inputPlanes; }
     bool OwnWindow(IntPtr window) {
         if (window == IntPtr.Zero) return false;
         uint owner; GetWindowThreadProcessId(window, out owner);
-        return owner == process || hints.Contains(window);
+        return owner == process || CaptureHoverPolicy.KnownOverlay(window, hints, planes);
+    }
+    IntPtr UnderlyingRoot(Point pointer, IntPtr first, IntPtr desktop) {
+        // The non-transparent input plane is intentionally the first desktop
+        // hit. Walk beneath only our EXACT registered overlay HWNDs; never
+        // hide/retag them to query underneath or skip arbitrary own-PID windows.
+        // Include disabled roots (WindowFromPoint omits them). GetWindow can
+        // race destruction/reordering, so bound traversal and reject cycles.
+        HashSet<IntPtr> visited = new HashSet<IntPtr>();
+        IntPtr current = first;
+        for (int count = 0; count < 256 && current != IntPtr.Zero && current != desktop; count++) {
+            if (!visited.Add(current) || !IsWindow(current) || GetAncestor(current, 2) != current) return IntPtr.Zero;
+            if (!CaptureHoverPolicy.KnownOverlay(current, hints, planes) && IsWindowVisible(current) && !IsIconic(current)) {
+                FrameRect bounds;
+                if (!GetWindowRect(current, out bounds)) return IntPtr.Zero;
+                Rectangle rectangle = CaptureHoverPolicy.Bounds(bounds.left, bounds.top, bounds.right, bounds.bottom);
+                if (rectangle.IsEmpty && bounds.left != bounds.right && bounds.top != bounds.bottom) return IntPtr.Zero;
+                if (!rectangle.IsEmpty && rectangle.Contains(pointer)) {
+                    long style = IntPtr.Size == 8 ? GetWindowLongPointer(current, -20).ToInt64() : GetWindowLong32(current, -20);
+                    if ((style & 0x20) == 0) {
+                        uint cloaked;
+                        if (DwmCloak(current, 14, out cloaked, sizeof(uint)) != 0) return IntPtr.Zero;
+                        if (cloaked == 0) return OwnWindow(current) ? IntPtr.Zero : current;
+                    }
+                }
+            }
+            current = GetWindow(current, 2); // GW_HWNDNEXT; no titles/content/foreign messages.
+        }
+        return IntPtr.Zero;
     }
     public Rectangle Resolve(Point pointer) {
-        IntPtr hit = WindowFromPoint(pointer), desktop = GetDesktopWindow();
-        IntPtr pointRoot = hit == IntPtr.Zero ? IntPtr.Zero : GetAncestor(hit, 2);
-        bool ownHint = hints.Contains(hit) || hints.Contains(pointRoot);
-        if (!ownHint && (OwnWindow(hit) || OwnWindow(pointRoot))) return Rectangle.Empty;
+        IntPtr desktop = GetDesktopWindow();
         // Check real top-level occlusion on every throttled query, not only
         // over our own bars. Unlike WindowFromPoint, this deliberately keeps
         // disabled roots; skipping them could frame an obscured window behind.
@@ -979,7 +1051,7 @@ sealed class CaptureHoverResolver {
         if (desktop == IntPtr.Zero || !ScreenToClient(desktop, ref client)) return Rectangle.Empty;
         IntPtr desktopHit = ChildWindowFromPointEx(desktop, client, 0x1 | 0x4); // SKIPINVISIBLE | SKIPTRANSPARENT
         IntPtr desktopRoot = desktopHit == IntPtr.Zero ? IntPtr.Zero : GetAncestor(desktopHit, 2);
-        IntPtr root = CaptureHoverPolicy.OcclusionCheckedRoot(pointRoot, desktopRoot, ownHint);
+        IntPtr root = UnderlyingRoot(pointer, desktopRoot, desktop);
         if (root == IntPtr.Zero || root == desktop || root == GetShellWindow() || OwnWindow(root)
             || !IsWindow(root) || !IsWindowVisible(root) || IsIconic(root)) return Rectangle.Empty;
         uint owner;
@@ -1111,6 +1183,160 @@ sealed class CaptureWakeWindow : NativeWindow, IDisposable {
     public void Dispose() { Stop(); DestroyHandle(); }
 }
 
+// One rectangular input HWND per physical display, with no redirection bitmap,
+// layered alpha, GDI background, swap chain or DirectComposition surface. The
+// desktop remains live and fully visible; User32 still hit-tests the rectangle.
+// Normal hook-owned buttons never reach this WndProc. If Windows removes or
+// bypasses that mouse hook, these HWND messages use the SAME selection policy.
+// https://learn.microsoft.com/en-us/archive/msdn-magazine/2014/june/windows-with-c-high-performance-window-layering-using-the-windows-composition-engine
+sealed class CaptureInputPlanes : IDisposable {
+    delegate IntPtr WindowProc(IntPtr window, uint message, IntPtr wp, IntPtr lp);
+    [StructLayout(LayoutKind.Sequential, CharSet=CharSet.Unicode)] struct WindowClass {
+        public uint size, style; public IntPtr procedure; public int classBytes, windowBytes;
+        public IntPtr instance, icon, cursor, background; public string menu, name; public IntPtr smallIcon;
+    }
+    [StructLayout(LayoutKind.Sequential)] struct PaintData {
+        public IntPtr dc; public int erase; public RectangleData rectangle; public int restore, update;
+        [MarshalAs(UnmanagedType.ByValArray, SizeConst=32)] public byte[] reserved;
+    }
+    [StructLayout(LayoutKind.Sequential)] struct RectangleData { public int left, top, right, bottom; }
+    [DllImport("kernel32.dll", CharSet=CharSet.Unicode)] static extern IntPtr GetModuleHandle(string name);
+    [DllImport("user32.dll", CharSet=CharSet.Unicode, SetLastError=true)] static extern ushort RegisterClassEx(ref WindowClass value);
+    [DllImport("user32.dll", CharSet=CharSet.Unicode)] static extern bool UnregisterClass(string name, IntPtr module);
+    [DllImport("user32.dll", CharSet=CharSet.Unicode, SetLastError=true)] static extern IntPtr CreateWindowEx(uint ex, string cls, string title, uint style, int x, int y, int width, int height, IntPtr parent, IntPtr menu, IntPtr module, IntPtr parameter);
+    [DllImport("user32.dll", CharSet=CharSet.Unicode)] static extern IntPtr DefWindowProc(IntPtr window, uint message, IntPtr wp, IntPtr lp);
+    [DllImport("user32.dll")] static extern bool DestroyWindow(IntPtr window);
+    [DllImport("user32.dll")] static extern bool IsWindow(IntPtr window);
+    [DllImport("user32.dll")] static extern bool IsWindowVisible(IntPtr window);
+    [DllImport("user32.dll")] static extern bool ClientToScreen(IntPtr window, ref Point point);
+    [DllImport("user32.dll")] static extern bool GetPhysicalCursorPos(out Point point);
+    [DllImport("user32.dll")] static extern IntPtr LoadCursor(IntPtr instance, IntPtr name);
+    [DllImport("user32.dll", EntryPoint="GetWindowLongPtrW")] static extern IntPtr GetWindowLongPointer(IntPtr window, int index);
+    [DllImport("user32.dll", EntryPoint="GetWindowLongW")] static extern int GetWindowLong32(IntPtr window, int index);
+    [DllImport("user32.dll", SetLastError=true)] static extern bool SetWindowPos(IntPtr window, IntPtr after, int x, int y, int width, int height, uint flags);
+    [DllImport("user32.dll")] static extern IntPtr BeginPaint(IntPtr window, out PaintData paint);
+    [DllImport("user32.dll")] static extern bool EndPaint(IntPtr window, ref PaintData paint);
+    [DllImport("dwmapi.dll")] static extern int DwmIsCompositionEnabled([MarshalAs(UnmanagedType.Bool)] out bool enabled);
+    const uint Styles = 0x00200000 | 0x08000000 | 0x00000080 | 0x00000008; // NOREDIR/NOACTIVATE/TOOLWINDOW/TOPMOST
+    readonly WindowProc callback;
+    readonly List<IntPtr> handles = new List<IntPtr>();
+    readonly object gate;
+    readonly CaptureSelectionState state;
+    readonly CaptureInputPolicy input;
+    readonly CaptureMoveMailbox moves;
+    readonly Action invalidated;
+    readonly IntPtr instance;
+    readonly string className;
+    bool registered, shown, disposed;
+    long downs, ups, movement;
+    string failure;
+    public ICollection<IntPtr> Handles { get { return handles; } }
+    public string Failure { get { return failure; } }
+    public long Downs { get { return downs; } }
+    public long Ups { get { return ups; } }
+    public long Moves { get { return movement; } }
+    public int Count { get { return handles.Count; } }
+    public int VisibleCount { get { int count = 0; foreach (IntPtr window in handles) if (IsWindowVisible(window)) count++; return count; } }
+    public int RemainingCount { get { int count = 0; foreach (IntPtr window in handles) if (IsWindow(window)) count++; return count; } }
+    static bool StylesMatch(IntPtr window, bool topmost) {
+        long actual = IntPtr.Size == 8 ? GetWindowLongPointer(window, -20).ToInt64() : GetWindowLong32(window, -20);
+        uint expected = topmost ? Styles : Styles & ~0x8U;
+        return (actual & expected) == expected && (actual & (0x00080000 | 0x00000020)) == 0;
+    }
+    public CaptureInputPlanes(Rectangle[] displays, object selectionGate, CaptureSelectionState selection,
+        CaptureInputPolicy policy, CaptureMoveMailbox mailbox, Action onInvalidated, Action<IntPtr> register) {
+        gate = selectionGate; state = selection; input = policy; moves = mailbox; invalidated = onInvalidated;
+        callback = WndProc; instance = GetModuleHandle(null);
+        className = "EchoLingoCaptureInputPlane-" + Process.GetCurrentProcess().Id;
+        try {
+            bool composition;
+            if (DwmIsCompositionEnabled(out composition) != 0 || !composition)
+                throw new InvalidOperationException("CAPTURE_INPUT_PLANE: Windows desktop composition is unavailable; no screenshot was taken.");
+            WindowClass value = new WindowClass(); value.size = (uint)Marshal.SizeOf(typeof(WindowClass));
+            value.instance = instance; value.name = className; value.procedure = Marshal.GetFunctionPointerForDelegate(callback);
+            value.cursor = LoadCursor(IntPtr.Zero, new IntPtr(32515)); // Shared system crosshair; no owned GDI resource.
+            // No CS_DBLCLKS: every physical press remains a normal button down.
+            if (RegisterClassEx(ref value) == 0)
+                throw new InvalidOperationException("CAPTURE_INPUT_PLANE: Windows could not create the capture input class.");
+            registered = true;
+            foreach (Rectangle display in displays) {
+                if (display.Width <= 0 || display.Height <= 0 || display.Width > Int16.MaxValue || display.Height > Int16.MaxValue)
+                    throw new InvalidOperationException("CAPTURE_INPUT_PLANE: The display exceeds Windows mouse-message coordinate limits.");
+                // Created hidden. Do not eat an existing source application's
+                // matching up: Show waits until the shared startup gate arms.
+                IntPtr window = CreateWindowEx(Styles, className, "", 0x80000000, display.X, display.Y, display.Width, display.Height,
+                    IntPtr.Zero, IntPtr.Zero, instance, IntPtr.Zero);
+                if (window == IntPtr.Zero) throw new InvalidOperationException("CAPTURE_INPUT_PLANE: Windows could not create a display input window.");
+                handles.Add(window); register(window);
+                if (!StylesMatch(window, false))
+                    throw new InvalidOperationException("CAPTURE_INPUT_PLANE: The capture input window styles could not be verified.");
+            }
+        } catch { Dispose(); throw; }
+    }
+    public bool Present(bool raise) {
+        if (disposed) throw new InvalidOperationException("CAPTURE_INPUT_PLANE: The capture input windows have already stopped.");
+        lock (gate) if (!input.PlaneReady(state)) return false;
+        if (shown && !raise) return true;
+        foreach (IntPtr window in handles) {
+            uint flags = 0x0001 | 0x0002 | 0x0010 | 0x0200; // NOSIZE/NOMOVE/NOACTIVATE/NOOWNERZORDER
+            if (!shown) flags |= 0x0040;
+            if (!SetWindowPos(window, new IntPtr(-1), 0, 0, 0, 0, flags) || !IsWindowVisible(window) || !StylesMatch(window, true))
+                throw new InvalidOperationException("CAPTURE_INPUT_PLANE: Windows could not show the capture input windows without activation.");
+        }
+        shown = true;
+        return true;
+    }
+    void Abort(int kind) {
+        failure = "CAPTURE_INPUT_PLANE: Windows could not process capture input; selection was cancelled without taking a screenshot.";
+        lock (gate) input.AbortOwnedMouse(kind, state);
+    }
+    IntPtr WndProc(IntPtr window, uint message, IntPtr wp, IntPtr lp) {
+        try {
+            if (message == 0x0084) return new IntPtr(1); // HTCLIENT; never transparent hit testing.
+            if (message == 0x0021) return new IntPtr(3); // MA_NOACTIVATE; keep the actual first down.
+            if (message == 0x0014) return new IntPtr(1); // No background brush or GDI surface.
+            if (message == 0x000F) { PaintData paint; BeginPaint(window, out paint); EndPaint(window, ref paint); return IntPtr.Zero; }
+            if (message == 0x007E || (message == 0x02E0 && shown)) { invalidated(); return IntPtr.Zero; }
+            if (message == 0x001F) { lock (gate) state.Cancel(); return IntPtr.Zero; } // WM_CANCELMODE
+            if (message == 0x0215) { lock (gate) state.Cancel(); return IntPtr.Zero; } // Unexpected WM_CAPTURECHANGED; never activate to recapture.
+            if (message >= 0x0200 && message <= 0x020E) {
+                // Other buttons/wheel stay inside capture mode too. Never let
+                // DefWindowProc turn XBUTTON into a foreign WM_APPCOMMAND.
+                if (disposed || !shown) return IntPtr.Zero;
+                int kind = (int)message;
+                if (kind != 0x0200 && kind != 0x0201 && kind != 0x0202 && kind != 0x0204 && kind != 0x0205) return IntPtr.Zero;
+                long packed = lp.ToInt64();
+                Point pointer = new Point(unchecked((short)(packed & 0xffff)), unchecked((short)((packed >> 16) & 0xffff)));
+                if (!ClientToScreen(window, ref pointer)) { Abort(kind); return IntPtr.Zero; }
+                if (kind == 0x0200) {
+                    movement++;
+                    // A queued HWND move can be older than a fresh hook move.
+                    // Read the current physical pointer on the UI thread so
+                    // this fallback cannot regress the shared latest mailbox.
+                    Point latest; if (GetPhysicalCursorPos(out latest)) moves.Publish(latest, true, false);
+                }
+                else {
+                    if (kind == 0x0201 || kind == 0x0204) downs++; else ups++;
+                    moves.Publish(pointer, false);
+                    lock (gate) input.Mouse(kind, pointer, state);
+                }
+                return IntPtr.Zero;
+            }
+        } catch { Abort((int)message); return IntPtr.Zero; }
+        return DefWindowProc(window, message, wp, lp);
+    }
+    public void Dispose() {
+        if (disposed) return;
+        disposed = true;
+        foreach (IntPtr window in handles) if (IsWindow(window) && !DestroyWindow(window))
+            failure = "CAPTURE_INPUT_PLANE: Windows could not remove a capture input window; no screenshot was taken.";
+        if (registered && !UnregisterClass(className, instance))
+            failure = "CAPTURE_INPUT_PLANE: Windows could not release the capture input class; no screenshot was taken.";
+        registered = false;
+        GC.KeepAlive(callback);
+    }
+}
+
 sealed class CaptureInputPump : IDisposable {
     delegate IntPtr MouseHook(int code, IntPtr message, IntPtr data);
     delegate IntPtr KeyboardHook(int code, IntPtr message, IntPtr data);
@@ -1131,6 +1357,7 @@ sealed class CaptureInputPump : IDisposable {
     readonly CaptureSelectionState state;
     readonly CaptureInputPolicy input;
     readonly CaptureMoveMailbox moves;
+    readonly bool installMouseHook;
     readonly MouseHook callback;
     readonly KeyboardHook keyboardCallback;
     readonly ManualResetEvent ready = new ManualResetEvent(false);
@@ -1141,14 +1368,16 @@ sealed class CaptureInputPump : IDisposable {
     volatile string failure;
     int stopRequested;
     long mouseDowns, mouseUps, escapeDowns, escapeUps;
+    long mouseHookInstalled;
     public long MouseDowns { get { return Interlocked.Read(ref mouseDowns); } }
     public long MouseUps { get { return Interlocked.Read(ref mouseUps); } }
     public long EscapeDowns { get { return Interlocked.Read(ref escapeDowns); } }
     public long EscapeUps { get { return Interlocked.Read(ref escapeUps); } }
+    public long MouseHookInstalled { get { return Interlocked.Read(ref mouseHookInstalled); } }
     public bool Running { get { return running; } }
     public string Failure { get { return failure; } }
-    public CaptureInputPump(object selectionGate, CaptureSelectionState selection, CaptureInputPolicy policy, CaptureMoveMailbox mailbox) {
-        gate = selectionGate; state = selection; input = policy; moves = mailbox;
+    public CaptureInputPump(object selectionGate, CaptureSelectionState selection, CaptureInputPolicy policy, CaptureMoveMailbox mailbox, bool mouseHook) {
+        gate = selectionGate; state = selection; input = policy; moves = mailbox; installMouseHook = mouseHook;
         callback = OnMouse; keyboardCallback = OnKeyboard;
     }
     static bool Down(int key) { return (GetAsyncKeyState(key) & 0x8000) != 0; }
@@ -1164,8 +1393,13 @@ sealed class CaptureInputPump : IDisposable {
             threadId = GetCurrentThreadId();
             NativeMessage message;
             PeekMessage(out message, IntPtr.Zero, 0, 0, 0); // Establish queue before publishing readiness/WM_QUIT.
-            hook = SetWindowsHookEx(14, callback, GetModuleHandle(null), 0);
-            if (hook == IntPtr.Zero) { Fail("CAPTURE_INPUT: Windows could not start region selection."); return; }
+            if (installMouseHook) {
+                hook = SetWindowsHookEx(14, callback, GetModuleHandle(null), 0);
+                // A verified input plane is always present before blue-ready.
+                // A failed or later silently removed mouse hook can therefore
+                // use normal HWND input, without clicking the source beneath.
+                if (hook != IntPtr.Zero) Interlocked.Exchange(ref mouseHookInstalled, 1);
+            }
             keyboardHook = SetKeyboardHook(13, keyboardCallback, GetModuleHandle(null), 0);
             if (keyboardHook == IntPtr.Zero) { Fail("CAPTURE_INPUT: Windows could not install Escape cancellation."); return; }
             lock (gate) {
@@ -1241,6 +1475,9 @@ sealed class RegionPicker : ApplicationContext {
     [DllImport("user32.dll", CharSet=CharSet.Unicode, SetLastError=true)] static extern bool GetUserObjectInformation(IntPtr handle, int index, StringBuilder information, int length, out int needed);
     readonly List<CaptureOverlay> overlays = new List<CaptureOverlay>();
     readonly List<IntPtr> handles = new List<IntPtr>();
+    readonly List<IntPtr> hintHandles = new List<IntPtr>();
+    readonly CaptureInputPlanes planes;
+    readonly bool mouseHook;
     readonly System.Windows.Forms.Timer timer = new System.Windows.Forms.Timer();
     readonly Stopwatch lifetime = new Stopwatch();
     readonly CaptureSelectionState state;
@@ -1260,7 +1497,9 @@ sealed class RegionPicker : ApplicationContext {
     Rectangle renderedHover;
     long lastRaise = -250;
     string failure;
-    public RegionPicker() {
+    public RegionPicker(bool useMouseHook) {
+        mouseHook = useMouseHook;
+        CaptureHealth.Set("inputBackend", mouseHook ? 1 : 2);
         Point pointer;
         if (!GetPhysicalCursorPos(out pointer)) throw new InvalidOperationException("CAPTURE: Windows could not read the capture pointer.");
         topology = ReadTopology();
@@ -1273,8 +1512,11 @@ sealed class RegionPicker : ApplicationContext {
         try {
             wake = new CaptureWakeWindow(OnMoveWake);
             moves = new CaptureMoveMailbox(wake.Post); wake.Bind(moves);
-            for (int i = 0; i < rectangles.Length; i++) overlays.Add(new CaptureOverlay(rectangles[i], i, displays[i].Dpi, InvalidateEnvironment, handles.Add));
-            hoverResolver = new CaptureHoverResolver(handles);
+            planes = new CaptureInputPlanes(rectangles, selectionGate, state, input, moves, InvalidateEnvironment, handles.Add);
+            CaptureHealth.Set("inputPlaneCount", planes.Count);
+            for (int i = 0; i < rectangles.Length; i++) overlays.Add(new CaptureOverlay(rectangles[i], i, displays[i].Dpi, InvalidateEnvironment,
+                delegate(IntPtr handle) { handles.Add(handle); hintHandles.Add(handle); }));
+            hoverResolver = new CaptureHoverResolver(hintHandles, planes.Handles);
         } catch { Dispose(); throw; }
         timer.Interval = 16;
         timer.Tick += Tick;
@@ -1320,7 +1562,7 @@ sealed class RegionPicker : ApplicationContext {
     }
     public Rectangle SelectRegion() {
         try {
-            inputPump = new CaptureInputPump(selectionGate, state, input, moves); inputPump.Start();
+            inputPump = new CaptureInputPump(selectionGate, state, input, moves, mouseHook); inputPump.Start();
             CapturePerformance.Mark("inputReadyMilliseconds");
             ValidateCaptureEnvironment();
             lifetime.Start(); timer.Start();
@@ -1345,6 +1587,7 @@ sealed class RegionPicker : ApplicationContext {
         if (!(moved && moves.TryRead(out pointer)) && !GetPhysicalCursorPos(out pointer)) failure = "CAPTURE: Windows could not read the capture pointer.";
         else { CapturePerformance.Set("knownPointer", 1); CaptureHealth.Set("knownPointer", 1); }
         if (inputPump != null && (inputPump.Failure != null || !inputPump.Running)) failure = inputPump.Failure ?? "CAPTURE_INPUT: The selection input listener stopped; no screenshot was taken.";
+        if (planes != null && planes.Failure != null) failure = planes.Failure;
         if (topology.Invalid) failure = "CAPTURE_DISPLAY_CHANGED: Display geometry or DPI changed; select the region again.";
         if (raise) {
             try { ValidateInputDesktop(); }
@@ -1357,7 +1600,7 @@ sealed class RegionPicker : ApplicationContext {
             int mismatch = health.Observe(input.Armed, state.Finished, state.Dragging, input.LeftSwallowed, left, elapsed);
             if (mismatch != 0) {
                 CaptureHealth.Set("mismatchKind", mismatch);
-                failure = "CAPTURE_INPUT_STATE: The capture mouse listener lost a press or release. Selection was cancelled without taking a screenshot; retry and include the capture diagnostics.";
+                failure = "CAPTURE_INPUT_STATE: The capture input windows did not receive a mouse press. Selection was cancelled without taking a screenshot; retry and include the capture diagnostics.";
                 state.Cancel();
             }
             state.Expire(elapsed);
@@ -1376,7 +1619,7 @@ sealed class RegionPicker : ApplicationContext {
         CaptureHealth.Set("physicalLeftDown", left ? 1 : 0);
         CaptureHealth.Set("dragging", dragging ? 1 : 0);
         Rectangle hovered = Rectangle.Empty;
-        if (!finished && !dragging && highlighted >= 0) {
+        if (armed && !finished && !dragging && highlighted >= 0) {
             if (hoverPolicy.BeginQuery(elapsed)) {
                 try { hoverPolicy.SetFrame(hoverResolver.Resolve(pointer)); }
                 catch { hoverPolicy.Clear(); } // A decorative hint cannot invalidate free ROI selection.
@@ -1394,17 +1637,25 @@ sealed class RegionPicker : ApplicationContext {
                     failure = "CAPTURE_INPUT_RELEASE: Selection stopped while a button or Escape was still held. Release it before retrying; no screenshot was taken.";
                 ExitThread();
             }
-        } else if (redrawDue && (raise || renderedHighlight != highlighted || renderedSelection != selected || renderedHover != hovered)) {
+        } else if (armed && redrawDue && (raise || renderedHighlight != highlighted || renderedSelection != selected || renderedHover != hovered)) {
             redraw.Presented(elapsed);
             renderedHighlight = highlighted; renderedSelection = selected; renderedHover = hovered;
-            try { foreach (CaptureOverlay overlay in overlays) overlay.Present(highlighted, selected, hovered, raise); }
+            bool presented = false;
+            try {
+                // Repair the input plane first, THEN the thin blue windows,
+                // so input coverage never covers the visual hints in Z order.
+                if (planes.Present(raise)) {
+                    foreach (CaptureOverlay overlay in overlays) overlay.Present(highlighted, selected, hovered, raise);
+                    presented = true;
+                }
+            }
             catch (Exception error) {
                 failure = error is InvalidOperationException && error.Message.StartsWith("CAPTURE_", StringComparison.Ordinal)
                     ? error.Message : "CAPTURE_OVERLAY: Windows could not update the selection border; no screenshot was taken.";
                 lock (selectionGate) state.Cancel();
             }
-            if (raise) lastRaise = elapsed;
-            CapturePerformance.Mark("firstBordersVisibleMilliseconds");
+            if (presented && raise) lastRaise = elapsed;
+            if (presented) CapturePerformance.Mark("firstBordersVisibleMilliseconds");
         }
         CapturePerformance.End(moved ? "moveFrame" : "heartbeatFrame", frameStarted);
     }
@@ -1426,7 +1677,16 @@ sealed class RegionPicker : ApplicationContext {
             CaptureHealth.Set("hookMouseDowns", inputPump.MouseDowns); CaptureHealth.Set("hookMouseUps", inputPump.MouseUps);
             CaptureHealth.Set("hookEscapeDowns", inputPump.EscapeDowns); CaptureHealth.Set("hookEscapeUps", inputPump.EscapeUps);
             CaptureHealth.Set("hookRunningAfterStop", inputPump.Running ? 1 : 0);
+            CaptureHealth.Set("mouseHookInstalled", inputPump.MouseHookInstalled);
             inputPump.Dispose(); inputPump = null;
+        }
+        if (planes != null) {
+            CaptureHealth.Set("inputPlaneDowns", planes.Downs); CaptureHealth.Set("inputPlaneUps", planes.Ups); CaptureHealth.Set("inputPlaneMoves", planes.Moves);
+            CaptureHealth.Set("inputPlaneFallbackUsed", planes.Downs + planes.Ups > 0 ? 1 : 0);
+            planes.Dispose();
+            CaptureHealth.Set("inputPlaneVisibleCount", planes.VisibleCount);
+            CaptureHealth.Set("inputPlaneRemainingAfterCleanup", planes.RemainingCount);
+            if (planes.Failure != null) failure = planes.Failure;
         }
         foreach (CaptureOverlay overlay in overlays) overlay.Dispose();
         if (moves != null) { CapturePerformance.Set("movesPublished", moves.Moves); CapturePerformance.Set("moveWakesPosted", moves.Posts); CapturePerformance.Set("movePostFailures", moves.Failures); }
@@ -1733,7 +1993,7 @@ sealed class RegionPicker : ApplicationContext {
         { $_ -in 'capture-ocr', 'capture-image', 'self-test' } {
             $path = [IO.Path]::Combine([IO.Path]::GetTempPath(), ('echolingo-' + [Guid]::NewGuid().ToString('N') + '.png'))
             try {
-                if ($Mode -in 'capture-ocr', 'capture-image') { [EchoLingoNative]::CaptureRegion($path) }
+                if ($Mode -in 'capture-ocr', 'capture-image') { [EchoLingoNative]::CaptureRegion($path, ($InputBackend -ne 'planeOnly')) }
                 else { [EchoLingoNative]::CreateFixture($path) }
                 if ($Mode -eq 'capture-image') {
                     Write-Result @{ ok = $true; imageBase64 = (Get-PngBase64 $path) }

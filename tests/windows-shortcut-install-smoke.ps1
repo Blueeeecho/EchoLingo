@@ -21,7 +21,7 @@ function Probe([int]$Expected, [string]$ExpectedOutput, [string]$Name) {
         $stdout = $outputTask.GetAwaiter().GetResult().Replace("`r`n", "`n")
         $stderr = $errorTask.GetAwaiter().GetResult()
         Require ($process.ExitCode -eq $Expected) "$Name returned unexpected exit code $($process.ExitCode)."
-        Require ($stdout -eq $ExpectedOutput -and $stdout.Length -le 192 -and $stdout -notmatch '[^\x00-\x7f]') "$Name returned an invalid bounded ASCII protocol."
+        Require ($stdout -eq $ExpectedOutput -and $stdout.Length -le 480 -and $stdout -notmatch '[^\x00-\x7f]') "$Name returned an invalid bounded ASCII protocol."
         Require ([string]::IsNullOrEmpty($stderr)) "$Name unexpectedly printed an error or private data."
         $after = if (Test-Path -LiteralPath $script:settings) { (Get-FileHash -LiteralPath $script:settings -Algorithm SHA256).Hash } else { '' }
         Require ($before -eq $after) "$Name modified settings."
@@ -62,6 +62,11 @@ public static class EchoLingoShortcutOwner {
     Require ([EchoLingoShortcutOwner]::UnregisterHotKey([IntPtr]::Zero, 17031)) 'Cannot release fixture Alt+S.'
     $held = $false
     Probe 0 "selection=Alt+D`nsilentOcr=Alt+S`n" 'available-after-owner-release'
+    Require ([EchoLingoShortcutOwner]::RegisterHotKey([IntPtr]::Zero, 17031, 1, 0x41)) 'Cannot own the fixture compatible-input conflict.'
+    $held = $true
+    Probe 2 "input=Alt+A`n" 'compatible-enabled-binding-conflict-not-missed'
+    Require ([EchoLingoShortcutOwner]::UnregisterHotKey([IntPtr]::Zero, 17031)) 'Cannot release compatible fixture hotkey.'
+    $held = $false
     Set-Bindings 'Ctrl+Alt+Shift+F9' 'Ctrl+Alt+Shift+F10'
     Probe 0 "selection=Ctrl+Alt+Shift+F9`nsilentOcr=Ctrl+Alt+Shift+F10`n" 'existing-custom-settings'
     Require ([EchoLingoShortcutOwner]::RegisterHotKey([IntPtr]::Zero, 17031, 7, 0x79)) 'Cannot own the fixture custom OCR conflict.'
@@ -73,6 +78,11 @@ public static class EchoLingoShortcutOwner {
     Probe 0 "selection=`nsilentOcr=`n" 'explicitly-disabled-core-shortcuts'
     Set-Bindings 'F12' ''
     Probe 2 "selection=F12`n" 'windows-reserved-key'
+    Set-Bindings '' ''
+    $legacy = [IO.File]::ReadAllText($settings) | ConvertFrom-Json
+    $legacy.shortcuts.input = 'F12'
+    [IO.File]::WriteAllText($settings, ($legacy | ConvertTo-Json -Depth 4 -Compress), [Text.UTF8Encoding]::new($false))
+    Probe 2 "input=F12`n" 'compatible-enabled-reserved-key'
     [IO.File]::WriteAllText($settings, '{broken')
     Probe 3 '' 'invalid-settings-unknown-not-conflict'
     [IO.File]::WriteAllText($settings, (' ' * (2MB + 1)))

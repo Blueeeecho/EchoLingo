@@ -3,7 +3,7 @@
 # Run in an unlocked isolated test session; it moves the pointer inside its own
 # window and tests the real helper hook/transparent overlays via SendInput.
 [CmdletBinding()]
-param([string]$HelperPath = '', [string]$NativeAssemblyPath = '', [switch]$PerformanceDiagnostics)
+param([string]$HelperPath = '', [string]$NativeAssemblyPath = '', [switch]$PerformanceDiagnostics, [switch]$LegacyBaseline, [ValidateSet('hybrid','planeOnly')][string]$InputBackend = 'hybrid')
 $ErrorActionPreference = 'Stop'
 [Console]::OutputEncoding = [Text.UTF8Encoding]::new($false)
 try {
@@ -16,6 +16,12 @@ try {
     if ([string]::IsNullOrWhiteSpace($HelperPath)) { $HelperPath = Join-Path $PSScriptRoot '..\src-tauri\native\windows.ps1' }
     $HelperPath = (Resolve-Path -LiteralPath $HelperPath).Path
     if (-not [string]::IsNullOrWhiteSpace($NativeAssemblyPath)) { $NativeAssemblyPath = (Resolve-Path -LiteralPath $NativeAssemblyPath).Path }
+    if ($LegacyBaseline) {
+        $baselineText = [IO.File]::ReadAllText($HelperPath).TrimStart([char]0xfeff).Replace("`r`n", "`n")
+        $hash = [Security.Cryptography.SHA256]::Create()
+        try { $baselineHash = ([BitConverter]::ToString($hash.ComputeHash([Text.UTF8Encoding]::new($false).GetBytes($baselineText)))).Replace('-', '').ToLowerInvariant() } finally { $hash.Dispose() }
+        if ($baselineHash -ne '4a3674ff1b7da09b664fe807ead116d45b5689adcfc2bc2a47eea77ee6d7b1b7' -or $InputBackend -ne 'hybrid' -or $NativeAssemblyPath) { throw 'BASELINE_IDENTITY: Legacy expectations require the exact source-only ab4405c helper.' }
+    }
     Add-Type -AssemblyName System.Windows.Forms
     Add-Type -AssemblyName System.Drawing
     Add-Type -AssemblyName System.Web.Extensions
@@ -34,6 +40,9 @@ using System.Windows.Forms;
 
 public static class EchoLingoLiveCaptureSmoke {
     static string nativeArguments = "";
+    static bool requireInputPlanes = true;
+    static string inputBackend = "hybrid";
+    static int activeHelperProcessId;
     sealed class PassiveGeneratedLayer : Form {
         public PassiveGeneratedLayer() {
             AutoScaleMode = AutoScaleMode.None; FormBorderStyle = FormBorderStyle.None;
@@ -63,6 +72,7 @@ public static class EchoLingoLiveCaptureSmoke {
     [DllImport("user32.dll")] static extern bool IsWindow(IntPtr window);
     [DllImport("user32.dll")] static extern bool IsWindowEnabled(IntPtr window);
     [DllImport("user32.dll")] static extern IntPtr GetDesktopWindow();
+    [DllImport("user32.dll")] static extern IntPtr GetTopWindow(IntPtr parent);
     [DllImport("user32.dll")] static extern bool ScreenToClient(IntPtr window, ref Point point);
     [DllImport("user32.dll")] static extern IntPtr ChildWindowFromPointEx(IntPtr parent, Point point, uint flags);
     [DllImport("user32.dll")] static extern IntPtr WindowFromPoint(Point point);
@@ -94,6 +104,7 @@ public static class EchoLingoLiveCaptureSmoke {
         public IntPtr GeneratedLayerHwnd;
         public Dictionary<string, object> ForegroundFailure;
         public Dictionary<string, object> LastEdges;
+        public Dictionary<string, object> LastHelperDiagnostics;
         public Dictionary<string, object> HoverTrial;
         public Dictionary<string, object> CrossPeerTrial;
         public TrialContext(Form source) { Source = source; }
@@ -166,11 +177,133 @@ public static class EchoLingoLiveCaptureSmoke {
         }
         return result;
     }
+    static bool IsInputPlane(IntPtr window, int processId) {
+        StringBuilder name = new StringBuilder(256); GetClassName(window, name, name.Capacity);
+        return name.ToString() == "EchoLingoCaptureInputPlane-" + processId;
+    }
+    static List<EdgeWindow> InputPlanes(int processId, bool visibleOnly) {
+        List<EdgeWindow> result = new List<EdgeWindow>();
+        EnumWindows(delegate(IntPtr window, IntPtr unused) {
+            uint owner; GetWindowThreadProcessId(window, out owner);
+            if (owner != processId || !IsInputPlane(window, processId) || (visibleOnly && !IsWindowVisible(window))) return true;
+            long style = GetWindowLongPtr(window, -20).ToInt64();
+            const long required = 0x00200000L | 0x08000000L | 0x00000080L | 8;
+            Assert((style & required) == required && (style & (0x00080000L | 0x00000020L)) == 0,
+                "Input plane must be NoRedirection/NoActivate/ToolWindow/Topmost, never layered or transparent-style.");
+            RECT r; Assert(GetWindowRect(window, out r), "Cannot inspect the actual input plane.");
+            result.Add(new EdgeWindow { Handle = window, Bounds = Rectangle.FromLTRB(r.left,r.top,r.right,r.bottom) }); return true;
+        }, IntPtr.Zero);
+        return result;
+    }
+    static int AllocatedThinCount(int processId) {
+        int count = 0;
+        EnumWindows(delegate(IntPtr window, IntPtr unused) {
+            uint owner; GetWindowThreadProcessId(window, out owner);
+            long flags = GetWindowLongPtr(window, -20).ToInt64();
+            if (owner == processId && !IsInputPlane(window, processId) && (flags & (0x08000000L|0x00080000L|0x20L)) == (0x08000000L|0x00080000L|0x20L)) count++;
+            return true;
+        }, IntPtr.Zero); return count;
+    }
+    static bool Above(IntPtr upper, IntPtr lower) {
+        int count = 0; for (IntPtr window = GetWindow(lower,3); window != IntPtr.Zero && count++ < 4096; window = GetWindow(window,3)) if (window == upper) return true;
+        return false;
+    }
+    static bool PlaneComposition(int processId, List<EdgeWindow> edges, Point pointer, Dictionary<string,object> metadata) {
+        List<EdgeWindow> all = InputPlanes(processId,false), visible = InputPlanes(processId,true);
+        metadata["allocatedInputPlaneCount"] = all.Count; metadata["visibleInputPlaneCount"] = visible.Count;
+        metadata["requiredInputPlane"] = requireInputPlanes;
+        if (!requireInputPlanes) return all.Count == 0;
+        List<Rectangle> displays = new List<Rectangle>(); foreach (Screen screen in Screen.AllScreens) displays.Add(screen.Bounds);
+        bool geometry = all.Count == displays.Count && visible.Count == displays.Count;
+        List<Rectangle> remaining = new List<Rectangle>(displays);
+        List<Dictionary<string,object>> observed = new List<Dictionary<string,object>>();
+        foreach (EdgeWindow plane in visible) {
+            int index = remaining.IndexOf(plane.Bounds); if (index < 0) geometry = false; else remaining.RemoveAt(index);
+            observed.Add(new Dictionary<string,object> { { "hwnd",WindowId(plane.Handle) }, { "physicalBounds",RectValue(plane.Bounds) }, { "noRedirectionBitmap",true } });
+            foreach (EdgeWindow edge in edges) if (!Rectangle.Intersect(edge.Bounds,plane.Bounds).IsEmpty && !Above(edge.Handle,plane.Handle)) geometry = false;
+        }
+        int allocated = AllocatedThinCount(processId); metadata["allocatedThinWindowCount"] = allocated;
+        metadata["observedInputPlanes"] = observed;
+        geometry = geometry && remaining.Count == 0 && allocated == 12 * displays.Count;
+        IntPtr raw = WindowFromPoint(pointer), rawRoot = GetAncestor(raw,2);
+        Point client = pointer; IntPtr desktop = GetDesktopWindow();
+        bool mapped = desktop != IntPtr.Zero && ScreenToClient(desktop,ref client);
+        IntPtr through = mapped ? GetAncestor(ChildWindowFromPointEx(desktop,client,0x1|0x4),2) : IntPtr.Zero;
+        bool rawPlane = visible.Exists(delegate(EdgeWindow plane) { return plane.Handle == rawRoot && plane.Bounds.Contains(pointer); });
+        bool rawEdge = edges.Exists(delegate(EdgeWindow edge) { return edge.Handle == rawRoot && edge.Bounds.Contains(pointer); });
+        bool actualPlane = visible.Exists(delegate(EdgeWindow plane) { return plane.Handle == through && plane.Bounds.Contains(pointer); });
+        metadata["rawPointerRootHwnd"] = WindowId(rawRoot); metadata["transparentSkippingPointerRootHwnd"] = WindowId(through);
+        metadata["rawPointerIsExactPlane"] = rawPlane; metadata["rawPointerIsVerifiedThinEdge"] = rawEdge;
+        metadata["transparentSkippingHitIsExactPlane"] = actualPlane;
+        return geometry && actualPlane && (rawPlane || rawEdge);
+    }
+    static void RequirePlaneAt(int processId, Point pointer) {
+        Dictionary<string,object> observed = new Dictionary<string,object>();
+        Assert(PlaneComposition(processId,VisibleEdges(processId),pointer,observed), "The actual pointer does not hit the exact required helper input plane composition.");
+    }
+    static IntPtr UnderlyingRootAt(Point point, int helperId) {
+        int count = 0;
+        for (IntPtr window = GetTopWindow(IntPtr.Zero); window != IntPtr.Zero && count++ < 4096; window = GetWindow(window,2)) {
+            if (!IsWindowVisible(window)) continue;
+            uint owner; GetWindowThreadProcessId(window,out owner);
+            if (owner == helperId) continue; // Exact helper overlays are independently validated, never a foreign PID.
+            long style = GetWindowLongPtr(window,-20).ToInt64(); if ((style & 0x20) != 0) continue;
+            RECT r; if (GetWindowRect(window,out r) && Rectangle.FromLTRB(r.left,r.top,r.right,r.bottom).Contains(point)) return GetAncestor(window,2);
+        }
+        return IntPtr.Zero;
+    }
+    static Dictionary<string,object> SafeNumericMetadata(object value) {
+        Dictionary<string,object> source = value as Dictionary<string,object>;
+        Dictionary<string,object> result = new Dictionary<string,object>();
+        if (source == null || source.Count > 128) return result;
+        foreach (KeyValuePair<string,object> field in source) {
+            if (!System.Text.RegularExpressions.Regex.IsMatch(field.Key, "^[A-Za-z][A-Za-z0-9]{0,63}$")) continue;
+            if (!(field.Value is int || field.Value is long || field.Value is decimal || field.Value is double || field.Value is float)) continue;
+            double number = Convert.ToDouble(field.Value);
+            if (!Double.IsNaN(number) && !Double.IsInfinity(number)) result[field.Key] = field.Value;
+        }
+        return result;
+    }
+    static void PreserveExitedHelper(TrialContext context, Process process, Task<string> output, Dictionary<string,object> metrics) {
+        // A failed readiness/held-drag observation must retain a naturally
+        // exited helper's safe diagnosis, never its imageBase64 or stderr.
+        try {
+            if (!process.HasExited || !output.Wait(1000)) return;
+            string raw = output.GetAwaiter().GetResult();
+            if (String.IsNullOrEmpty(raw) || raw.Length > 16 * 1024 * 1024) return;
+            JavaScriptSerializer json = new JavaScriptSerializer(); json.MaxJsonLength = 16 * 1024 * 1024;
+            Dictionary<string,object> reply = json.Deserialize<Dictionary<string,object>>(raw);
+            Dictionary<string,object> safe = new Dictionary<string,object> { { "exitCode",process.ExitCode } };
+            if (reply.ContainsKey("ok") && reply["ok"] is bool) safe["ok"] = reply["ok"];
+            if (reply.ContainsKey("error") && reply["error"] is string) {
+                string error = (string)reply["error"]; safe["error"] = error.Substring(0,Math.Min(error.Length,600));
+            }
+            if (reply.ContainsKey("nativeBackend") && ((string)reply["nativeBackend"] == "precompiled-framework-dll" || (string)reply["nativeBackend"] == "source-compiled-cli")) safe["nativeBackend"] = reply["nativeBackend"];
+            foreach (string key in new string[] { "captureHealth","capturePerformance","helperPerformance" })
+                if (reply.ContainsKey(key)) safe[key] = SafeNumericMetadata(reply[key]);
+            metrics["helperExitedBeforeFixtureCleanup"] = true; metrics["helperDiagnostics"] = safe;
+            context.LastHelperDiagnostics = safe;
+        } catch { /* Diagnostic collection must not replace the original failure. */ }
+    }
+    static void VerifyBackend(Dictionary<string,object> reply, bool capture) {
+        if (!requireInputPlanes) return;
+        Assert(reply.ContainsKey("captureHealth"), "Candidate helper omitted real input backend metadata.");
+        Dictionary<string,object> health = (Dictionary<string,object>)reply["captureHealth"];
+        bool planeOnly = inputBackend == "planeOnly";
+        Assert(Convert.ToInt64(health["inputBackend"]) == (planeOnly ? 2 : 1), "Actual helper used a different input backend.");
+        Assert(Convert.ToInt64(health["mouseHookInstalled"]) == (planeOnly ? 0 : 1), "Forced plane-only did not actually disable the mouse hook.");
+        if (planeOnly) Assert(Convert.ToInt64(health["hookMouseMoves"])==0 && Convert.ToInt64(health["hookMouseDowns"])==0 && Convert.ToInt64(health["hookMouseUps"])==0,
+            "Forced no-hook session unexpectedly reported mouse hook events.");
+        Assert(Convert.ToInt64(health["inputPlaneCount"]) == Screen.AllScreens.Length && Convert.ToInt64(health["inputPlaneRemainingAfterCleanup"]) == 0,
+            "Input plane allocation/cleanup metadata is incorrect.");
+        if (planeOnly && capture) Assert(Convert.ToInt64(health["inputPlaneDowns"]) > 0 && Convert.ToInt64(health["inputPlaneUps"]) > 0 && Convert.ToInt64(health["inputPlaneFallbackUsed"]) == 1,
+            "No-hook fallback did not prove actual input HWND down/up delivery.");
+    }
     static List<EdgeWindow> VisibleEdges(int processId) {
         List<EdgeWindow> result = new List<EdgeWindow>();
         EnumWindows(delegate(IntPtr window, IntPtr unused) {
             uint owner; GetWindowThreadProcessId(window, out owner);
-            if (owner != processId || !IsWindowVisible(window)) return true;
+            if (owner != processId || !IsWindowVisible(window) || IsInputPlane(window,processId)) return true;
             long style = GetWindowLongPtr(window, -20).ToInt64();
             long required = 0x08000000L | 0x00080000L | 0x00000020L | 0x00000008L;
             Assert((style & required) == required, "Capture overlay lacks layered/transparent/no-activate/topmost styles.");
@@ -225,7 +358,9 @@ public static class EchoLingoLiveCaptureSmoke {
             RequireFixtureForeground(context, stage);
             actual = VisibleEdges(process.Id);
             context.LastEdges = EdgeMetadata(context, actual, stage, elapsed.Elapsed.TotalMilliseconds);
-            if (!process.HasExited && Matches(actual, expected)) return actual;
+            Point pointer; bool pointerKnown = GetPhysicalCursorPos(out pointer);
+            bool planesReady = pointerKnown && PlaneComposition(process.Id,actual,pointer,context.LastEdges);
+            if (!process.HasExited && Matches(actual, expected) && planesReady) return actual;
             if (process.HasExited) break;
             Thread.Sleep(20);
         } while (elapsed.ElapsedMilliseconds < budget);
@@ -240,17 +375,19 @@ public static class EchoLingoLiveCaptureSmoke {
         RequireFixtureForeground(context, stage);
     }
     static IntPtr RequireGeneratedTarget(Point point, IntPtr first, IntPtr second) {
-        IntPtr root = GetAncestor(WindowFromPoint(point), 2); uint owner;
+        if (requireInputPlanes && activeHelperProcessId != 0) RequirePlaneAt(activeHelperProcessId,point);
+        IntPtr root = requireInputPlanes && activeHelperProcessId != 0 ? UnderlyingRootAt(point,activeHelperProcessId) : GetAncestor(WindowFromPoint(point), 2); uint owner;
         GetWindowThreadProcessId(root, out owner);
         Assert((root == first || (second != IntPtr.Zero && root == second)) && owner == Process.GetCurrentProcess().Id,
             "Pointer target is not the exact generated source/layer; no fixture input will target another app.");
+        Assert(IsWindowVisible(root) && Frame(root).Contains(point), "Generated source frame/PID is no longer independently valid.");
         return root;
     }
     static long BorderArea(int processId, out int total, out long largest) {
         int count = 0; long area = 0, maximum = 0;
         EnumWindows(delegate(IntPtr window, IntPtr unused) {
             uint owner; GetWindowThreadProcessId(window, out owner);
-            if (owner == processId && IsWindowVisible(window)) {
+            if (owner == processId && IsWindowVisible(window) && !IsInputPlane(window,processId)) {
                 long style = GetWindowLongPtr(window, -20).ToInt64();
                 long required = 0x08000000L | 0x00080000L | 0x00000020L | 0x00000008L;
                 Assert((style & required) == required, "Capture overlay lacks layered/transparent/no-activate/topmost styles.");
@@ -271,7 +408,7 @@ public static class EchoLingoLiveCaptureSmoke {
         int borders = 0, steps = 0;
         for (IntPtr window = GetWindow(source, 3); window != IntPtr.Zero && steps++ < 4096; window = GetWindow(window, 3)) {
             uint owner; GetWindowThreadProcessId(window, out owner);
-            if (owner == processId && IsWindowVisible(window)) borders++;
+            if (owner == processId && IsWindowVisible(window) && !IsInputPlane(window,processId)) borders++;
         }
         return borders == expectedCount;
     }
@@ -279,7 +416,7 @@ public static class EchoLingoLiveCaptureSmoke {
         bool found = false;
         EnumWindows(delegate(IntPtr window, IntPtr unused) {
             uint owner; GetWindowThreadProcessId(window, out owner); RECT bounds;
-            if (owner == processId && IsWindowVisible(window) && GetWindowRect(window, out bounds)
+            if (owner == processId && IsWindowVisible(window) && !IsInputPlane(window,processId) && GetWindowRect(window, out bounds)
                 && bounds.left == origin.X - 1 && bounds.top == end.Y - 1
                 && bounds.right == end.X + 1 && bounds.bottom == end.Y + 1) found = true;
             return !found;
@@ -290,7 +427,7 @@ public static class EchoLingoLiveCaptureSmoke {
         return name == "Progman" || name == "WorkerW" || name == "Shell_TrayWnd" || name == "Shell_SecondaryTrayWnd";
     }
     static Dictionary<string, object> ShellAt(Point point, IntPtr expected) {
-        IntPtr hit = WindowFromPoint(point), root = GetAncestor(hit, 2); uint owner;
+        IntPtr hit = WindowFromPoint(point), root = requireInputPlanes && activeHelperProcessId != 0 ? UnderlyingRootAt(point,activeHelperProcessId) : GetAncestor(hit, 2); uint owner;
         GetWindowThreadProcessId(root, out owner);
         StringBuilder name = new StringBuilder(256); GetClassName(root, name, name.Capacity);
         if (root == IntPtr.Zero || (expected != IntPtr.Zero && root != expected) || owner == 0
@@ -379,7 +516,7 @@ public static class EchoLingoLiveCaptureSmoke {
     static Dictionary<string, object> HoverTrial(TrialContext context, string helper) {
         Form form = context.Source; Form layer = null; int layerButtons = 0; bool leftHeld = false;
         context.Mode = "hover-window-follow"; context.Stage = "prepare-two-generated-windows";
-        context.HelperProcessId = 0; context.ForegroundFailure = null; context.LastEdges = null;
+        context.HelperProcessId = 0; activeHelperProcessId = 0; context.LastHelperDiagnostics = null; context.ForegroundFailure = null; context.LastEdges = null;
         Dictionary<string, object> metrics = new Dictionary<string, object> { { "mode", context.Mode }, { "passed", false } };
         Stopwatch trialElapsed = Stopwatch.StartNew();
         metrics["readinessBudgetMilliseconds"] = 25000; metrics["hoverSettlementBudgetMilliseconds"] = 1500;
@@ -421,7 +558,7 @@ public static class EchoLingoLiveCaptureSmoke {
             start.StandardOutputEncoding = Encoding.UTF8; start.StandardErrorEncoding = Encoding.UTF8;
             Stopwatch startup = Stopwatch.StartNew();
             using (Process process = Process.Start(start)) {
-                context.HelperProcessId = process.Id; metrics["helperProcessId"] = process.Id;
+                context.HelperProcessId = process.Id; activeHelperProcessId = process.Id; metrics["helperProcessId"] = process.Id;
                 Task<string> output = process.StandardOutput.ReadToEndAsync(), error = process.StandardError.ReadToEndAsync();
                 try {
                     List<EdgeWindow> atA = ObserveHoverPhase(context, process, display, aFrame, Rectangle.Empty,
@@ -441,7 +578,7 @@ public static class EchoLingoLiveCaptureSmoke {
                     Assert(!IsWindowEnabled(layer.Handle) && IsWindowVisible(layer.Handle), "Generated B did not become a visible disabled native window.");
                     Point desktopPoint = bPoint; IntPtr desktop = GetDesktopWindow();
                     Assert(desktop != IntPtr.Zero && ScreenToClient(desktop, ref desktopPoint), "Cannot map generated occlusion point to desktop client coordinates.");
-                    IntPtr occluding = GetAncestor(ChildWindowFromPointEx(desktop, desktopPoint, 0x1 | 0x4), 2);
+                    IntPtr occluding = requireInputPlanes ? UnderlyingRootAt(bPoint,process.Id) : GetAncestor(ChildWindowFromPointEx(desktop, desktopPoint, 0x1 | 0x4), 2);
                     Assert(occluding == layer.Handle, "Disabled B is not independently observed as the actual opaque topmost occluder.");
                     metrics["disabledBActualOccluderHwnd"] = WindowId(occluding);
                     ObserveDisabledOcclusion(context, process, display, aFrame, bFrame, metrics, observations);
@@ -490,6 +627,7 @@ public static class EchoLingoLiveCaptureSmoke {
                     Assert(process.WaitForExit(10000), "Hover free-drag helper did not finish.");
                     JavaScriptSerializer json = new JavaScriptSerializer(); json.MaxJsonLength = 16 * 1024 * 1024;
                     Dictionary<string, object> reply = json.Deserialize<Dictionary<string, object>>(output.GetAwaiter().GetResult());
+                    VerifyBackend(reply, true);
                     Assert(process.ExitCode == 0 && (bool)reply["ok"], "Hover free-drag capture failed.");
                     if (reply.ContainsKey("nativeBackend")) metrics["nativeBackend"] = reply["nativeBackend"];
                     if (reply.ContainsKey("helperPerformance")) metrics["helperPerformance"] = reply["helperPerformance"];
@@ -521,12 +659,13 @@ public static class EchoLingoLiveCaptureSmoke {
                     RequireFixtureForeground(context, "hover-capture-complete");
                     OnUi(form, delegate { Assert(layerButtons == 0, "Selection button input reached generated B."); });
                     foreach (IntPtr edge in groups) Assert(!IsWindow(edge), "An observed edge HWND survived helper exit.");
-                    Assert(ReadyOverlays(process.Id) == 0, "Hover capture left visible border HWNDs.");
+                    Assert(ReadyOverlays(process.Id) == 0 && InputPlanes(process.Id,false).Count == 0, "Hover capture left visible border HWNDs.");
                     metrics["hoverOverlayAbsentInCapturePassed"] = true; metrics["freeRegionCapturePassed"] = true;
                     metrics["foregroundPreserved"] = true; metrics["passed"] = true;
                     return metrics;
                 } finally {
-                    if (leftHeld && !process.HasExited && GetForegroundWindow() == form.Handle) {
+                    PreserveExitedHelper(context,process,output,metrics);
+                    if (leftHeld && GetForegroundWindow() == form.Handle) {
                         Button(context, "cleanup-own-held-left-up", 0x0004); leftHeld = false;
                     }
                     if (!process.HasExited) { process.Kill(); process.WaitForExit(3000); }
@@ -539,7 +678,7 @@ public static class EchoLingoLiveCaptureSmoke {
     }
     static Dictionary<string, object> Trial(TrialContext context, string helper, string mode, Color liveColor) {
         Form form = context.Source;
-        context.Mode = mode; context.Stage = "prepare-generated-source"; context.HelperProcessId = 0; context.ForegroundFailure = null;
+        context.Mode = mode; context.Stage = "prepare-generated-source"; context.HelperProcessId = 0; activeHelperProcessId = 0; context.LastHelperDiagnostics = null; context.ForegroundFailure = null;
         context.LastEdges = null;
         context.GeneratedLayerHwnd = IntPtr.Zero;
         Form layer = null; int layerMouseEvents = 0;
@@ -575,11 +714,11 @@ public static class EchoLingoLiveCaptureSmoke {
             start.StandardOutputEncoding = Encoding.UTF8; start.StandardErrorEncoding = Encoding.UTF8;
             Stopwatch startup = Stopwatch.StartNew();
             using (Process process = Process.Start(start)) {
-                context.HelperProcessId = process.Id;
+                context.HelperProcessId = process.Id; activeHelperProcessId = process.Id;
                 Task<string> output = process.StandardOutput.ReadToEndAsync();
                 Task<string> error = process.StandardError.ReadToEndAsync();
                 Dictionary<string, object> metrics = new Dictionary<string, object>();
-                bool capture = mode == "capture" || mode == "capture-burst" || mode == "topmost-capture";
+                bool capture = mode == "capture" || mode == "capture-burst" || mode == "topmost-capture", leftHeld = false;
                 try {
                     context.Stage = "wait-ready-overlays";
                     // Both the pointer display and eligible generated window
@@ -648,7 +787,7 @@ public static class EchoLingoLiveCaptureSmoke {
                         Stopwatch dragWall = Stopwatch.StartNew();
                         metrics["helperPrivateBytesBeforeDrag"] = process.PrivateMemorySize64;
                         metrics["helperWorkingSetBytesBeforeDrag"] = process.WorkingSet64;
-                        Button(context, "selection-left-down", 0x0002); Thread.Sleep(80);
+                        Button(context, "selection-left-down", 0x0002); leftHeld = true; Thread.Sleep(80);
                         if (mode == "capture-burst") {
                             double longestInput = 0;
                             List<double> borderDelays = new List<double>();
@@ -691,19 +830,20 @@ public static class EchoLingoLiveCaptureSmoke {
                         metrics["draggingVisibleBorderAreaPixels"] = BorderArea(process.Id, out draggingCount, out draggingLargest);
                         metrics["draggingVisibleBorderWindowCount"] = draggingCount; metrics["draggingLargestSurfacePixels"] = draggingLargest;
                         metrics["hoverHiddenDuringDrag"] = true;
-                        Button(context, "selection-left-up", 0x0004);
+                        Button(context, "selection-left-up", 0x0004); leftHeld = false;
                     }
                     context.Stage = "wait-helper-exit";
                     Assert(process.WaitForExit(10000), "Capture helper did not finish after the fixture selection/cancellation.");
                     JavaScriptSerializer json = new JavaScriptSerializer(); json.MaxJsonLength = 16 * 1024 * 1024;
                     Dictionary<string, object> reply = json.Deserialize<Dictionary<string, object>>(output.GetAwaiter().GetResult());
+                    VerifyBackend(reply, capture);
                     metrics["nativeBackend"] = reply.ContainsKey("nativeBackend") ? reply["nativeBackend"] : "legacy-source-compiled-cli";
                     if (reply.ContainsKey("helperPerformance")) metrics["helperPerformance"] = reply["helperPerformance"];
                     if (reply.ContainsKey("capturePerformance")) metrics["capturePerformance"] = reply["capturePerformance"];
                     if (reply.ContainsKey("captureHealth")) {
                         metrics["captureHealth"] = reply["captureHealth"];
                         Dictionary<string, object> health = (Dictionary<string, object>)reply["captureHealth"];
-                        if (capture) Assert(Convert.ToInt64(health["hookMouseDowns"]) > 0 && Convert.ToInt64(health["hookMouseUps"]) > 0,
+                        if (capture && inputBackend != "planeOnly") Assert(Convert.ToInt64(health["hookMouseDowns"]) > 0 && Convert.ToInt64(health["hookMouseUps"]) > 0,
                             "Visible blue borders did not prove a real mouse down/up capture.");
                     }
                     context.Stage = "verify-helper-response";
@@ -726,12 +866,17 @@ public static class EchoLingoLiveCaptureSmoke {
                     context.Stage = "verify-generated-layer-input";
                     if (layer != null) OnUi(form, delegate { Assert(layerMouseEvents == 0, "Selection button input reached the generated topmost layer."); });
                     context.Stage = "verify-no-leftover-borders";
-                    Assert(ReadyOverlays(process.Id) == 0, "Capture border windows survived their helper process.");
+                    Assert(ReadyOverlays(process.Id) == 0 && InputPlanes(process.Id,false).Count == 0, "Capture border windows survived their helper process.");
                     metrics["mode"] = mode; metrics["passed"] = true; metrics["foregroundPreserved"] = true;
                     metrics["sourceHwnd"] = WindowId(form.Handle); metrics["sourceProcessId"] = Process.GetCurrentProcess().Id;
                     metrics["helperProcessId"] = process.Id;
                     return metrics;
                 } finally {
+                    PreserveExitedHelper(context,process,output,metrics);
+                    if (leftHeld && GetForegroundWindow()==form.Handle) {
+                        INPUT release=new INPUT(); release.data.mouse.flags=0x0004;
+                        SendInput(1,new INPUT[] { release },Marshal.SizeOf(typeof(INPUT)));
+                    }
                     if (!process.HasExited) { process.Kill(); process.WaitForExit(3000); }
                 }
             }
@@ -755,7 +900,7 @@ public static class EchoLingoLiveCaptureSmoke {
         Dictionary<string, object> metrics = new Dictionary<string, object>();
         context.CrossPeerTrial = metrics; metrics["passed"] = false;
         context.Mode = "cross-peer-capture"; context.Stage = "prepare-independent-ordinary-peers";
-        context.HelperProcessId = 0; context.ForegroundFailure = null; context.LastEdges = null;
+        context.HelperProcessId = 0; activeHelperProcessId = 0; context.LastHelperDiagnostics = null; context.ForegroundFailure = null; context.LastEdges = null;
         context.GeneratedLayerHwnd = IntPtr.Zero;
         Color liveA = Color.FromArgb(220, 70, 85), liveB = Color.FromArgb(40, 180, 90);
         try {
@@ -807,15 +952,14 @@ public static class EchoLingoLiveCaptureSmoke {
             start.StandardOutputEncoding = Encoding.UTF8; start.StandardErrorEncoding = Encoding.UTF8;
             Stopwatch startup = Stopwatch.StartNew();
             using (Process process = Process.Start(start)) {
-                context.HelperProcessId = process.Id;
+                context.HelperProcessId = process.Id; activeHelperProcessId = process.Id;
                 Task<string> output = process.StandardOutput.ReadToEndAsync(), errors = process.StandardError.ReadToEndAsync();
                 try {
                     WaitEdges(context, process, display, hover, Rectangle.Empty, "peer-ready-exact-screen-plus-A-hover", 25000);
                     metrics["helperStartupToReadyMilliseconds"] = startup.Elapsed.TotalMilliseconds;
                     OnUi(form, delegate { form.BackColor = liveA; peer.BackColor = liveB; form.Refresh(); peer.Refresh(); });
                     Thread.Sleep(150);
-                    Assert(GetAncestor(WindowFromPoint(first), 2) == form.Handle && GetAncestor(WindowFromPoint(last), 2) == peerHwnd,
-                        "A generated peer was obscured before cross-window drag; no input will be sent.");
+                    RequireGeneratedTarget(first,form.Handle,IntPtr.Zero); RequireGeneratedTarget(last,peerHwnd,IntPtr.Zero);
                     Button(context, "peer-A-button-left-down", 0x0002); leftHeld = true;
                     Thread.Sleep(100); Move(context, "peer-drag-to-B-button", last);
                     Rectangle selection = Rectangle.FromLTRB(first.X - 1, first.Y - 1, last.X + 1, last.Y + 1);
@@ -824,17 +968,20 @@ public static class EchoLingoLiveCaptureSmoke {
                     // threshold. Polling must not falsely cancel an owned pair.
                     Thread.Sleep(900);
                     WaitEdges(context, process, display, Rectangle.Empty, selection, "peer-held-drag-still-owned", 1500);
-                    Assert(GetAncestor(WindowFromPoint(last), 2) == peerHwnd, "Drag release no longer targets generated B.");
+                    RequireGeneratedTarget(last,peerHwnd,IntPtr.Zero);
                     Button(context, "peer-B-button-left-up", 0x0004); leftHeld = false;
                     Assert(process.WaitForExit(10000), "Cross-peer capture did not complete after release.");
                     JavaScriptSerializer json = new JavaScriptSerializer(); json.MaxJsonLength = 16 * 1024 * 1024;
                     Dictionary<string, object> reply = json.Deserialize<Dictionary<string, object>>(output.GetAwaiter().GetResult());
+                    VerifyBackend(reply, true);
+                    if (reply.ContainsKey("helperPerformance")) metrics["helperPerformance"] = reply["helperPerformance"];
+                    if (reply.ContainsKey("capturePerformance")) metrics["capturePerformance"] = reply["capturePerformance"];
                     if (reply.ContainsKey("captureHealth")) metrics["captureHealth"] = reply["captureHealth"];
                     Assert((bool)reply["ok"] && process.ExitCode == 0, "Cross-peer selection failed or was cancelled.");
                     metrics["nativeBackend"] = reply.ContainsKey("nativeBackend") ? reply["nativeBackend"] : "legacy-source-compiled-cli";
                     if (reply.ContainsKey("captureHealth")) {
                         Dictionary<string, object> health = (Dictionary<string, object>)reply["captureHealth"];
-                        Assert(Convert.ToInt64(health["hookMouseDowns"]) > 0 && Convert.ToInt64(health["hookMouseUps"]) > 0,
+                        Assert(inputBackend == "planeOnly" || (Convert.ToInt64(health["hookMouseDowns"]) > 0 && Convert.ToInt64(health["hookMouseUps"]) > 0),
                             "Cross-peer visible borders did not prove owned hook down/up.");
                         Assert(!health.ContainsKey("mismatchKind") || Convert.ToInt64(health["mismatchKind"]) == 0, "A real held cross-peer drag caused a health mismatch.");
                         metrics["captureHealth"] = health;
@@ -856,7 +1003,7 @@ public static class EchoLingoLiveCaptureSmoke {
                     RequireFixtureForeground(context, "peer-capture-complete");
                     OnUi(form, delegate { Assert(originButtons == 0 && peerButtons == 0 && peerClicks == 0,
                         "Capture down/up or click reached an underlying generated peer button/window."); });
-                    Assert(ReadyOverlays(process.Id) == 0, "Cross-peer helper left capture borders alive.");
+                    Assert(ReadyOverlays(process.Id) == 0 && InputPlanes(process.Id,false).Count == 0, "Cross-peer helper left capture borders alive.");
                     metrics["mode"] = context.Mode; metrics["passed"] = true; metrics["foregroundPreserved"] = true;
                     metrics["independentOrdinaryPeers"] = true; metrics["sourceAHwnd"] = WindowId(form.Handle); metrics["sourceBHwnd"] = WindowId(peerHwnd);
                     metrics["sourceProcessId"] = Process.GetCurrentProcess().Id; metrics["helperProcessId"] = process.Id;
@@ -865,7 +1012,8 @@ public static class EchoLingoLiveCaptureSmoke {
                     metrics["hoverHiddenDuringDrag"] = true; metrics["blueHintPixelsInCapture"] = 0; metrics["heldDragMilliseconds"] = 900;
                     return metrics;
                 } finally {
-                    if (leftHeld && !process.HasExited) {
+                    PreserveExitedHelper(context,process,output,metrics);
+                    if (leftHeld) {
                         // Failure may activate peer B when interception is the
                         // very behavior under test. Release only over exact
                         // independently verified fixture A/B HWNDs, never any
@@ -889,15 +1037,18 @@ public static class EchoLingoLiveCaptureSmoke {
             });
         }
     }
-    public static Dictionary<string, object> Run(string helper, string assembly, bool performance) {
+    public static Dictionary<string, object> Run(string helper, string assembly, bool performance, bool legacy, string backend) {
+        requireInputPlanes = !legacy; inputBackend = backend;
         Assert(!assembly.Contains("\""), "Invalid native DLL path.");
         nativeArguments = String.IsNullOrEmpty(assembly) ? "" : " -NativeAssemblyPath \"" + assembly + "\"";
         if (performance) nativeArguments += " -PerformanceDiagnostics";
+        if (backend == "planeOnly") nativeArguments += " -InputBackend planeOnly";
         SetProcessDpiAwarenessContext(new IntPtr(-4));
         Assert(SetThreadDpiAwarenessContext(new IntPtr(-4)) != IntPtr.Zero, "Fixture could not establish physical per-monitor coordinates.");
         Dictionary<string, object> report = new Dictionary<string, object>();
         List<Dictionary<string, object>> trials = new List<Dictionary<string, object>>();
         report["ok"] = false; report["trials"] = trials;
+        report["requiredInputPlanes"] = requireInputPlanes; report["requestedInputBackend"] = inputBackend;
         report["clipboardAccessed"] = false; report["userContentCaptured"] = false;
         report["multiMonitorInteractiveTested"] = false; report["mixedDpiInteractiveTested"] = false;
         report["pinnedAppExclusionTested"] = false; report["globalShortcutsTested"] = false;
@@ -938,6 +1089,7 @@ public static class EchoLingoLiveCaptureSmoke {
                         report["observedAllocatedEdgeWindowCount"] = hover["observedAllocatedEdgeWindowCount"];
                         report["crossPeerCapture"] = CrossPeerTrial(context, helper);
                         report["crossPeerCapturePassed"] = true;
+                        report["forcedPlaneOnlyEndToEndPassed"] = requireInputPlanes && inputBackend=="planeOnly";
                         context.Stage = "verify-generated-source-input";
                         OnUi(form, delegate {
                             Assert(sourceMouseEvents == 0, "Selection/cancel button input reached the generated source window.");
@@ -954,6 +1106,7 @@ public static class EchoLingoLiveCaptureSmoke {
                         report["failedMode"] = context.Mode; report["failedStage"] = context.Stage;
                         report["foregroundAtFailure"] = context.ForegroundFailure ?? ForegroundMetadata(context, GetForegroundWindow());
                         if (context.LastEdges != null) report["lastObservedEdges"] = context.LastEdges;
+                        if (context.LastHelperDiagnostics != null) report["lastHelperDiagnostics"] = context.LastHelperDiagnostics;
                         if (context.HoverTrial != null) report["partialHoverTrial"] = context.HoverTrial;
                         if (context.CrossPeerTrial != null) report["crossPeerCapture"] = context.CrossPeerTrial;
                     }
@@ -979,7 +1132,7 @@ public static class EchoLingoLiveCaptureSmoke {
 '@
     $references = @([System.Windows.Forms.Form].Assembly.Location, [System.Drawing.Bitmap].Assembly.Location, [System.Web.Script.Serialization.JavaScriptSerializer].Assembly.Location)
     Add-Type -TypeDefinition $source -ReferencedAssemblies $references
-    $result = [EchoLingoLiveCaptureSmoke]::Run($HelperPath, $NativeAssemblyPath, [bool]$PerformanceDiagnostics)
+    $result = [EchoLingoLiveCaptureSmoke]::Run($HelperPath, $NativeAssemblyPath, [bool]$PerformanceDiagnostics, [bool]$LegacyBaseline, $InputBackend)
     [Console]::Out.WriteLine(($result | ConvertTo-Json -Depth 10 -Compress))
     if (-not $result['ok']) { exit 1 }
 } catch {

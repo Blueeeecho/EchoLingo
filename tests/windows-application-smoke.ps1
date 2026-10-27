@@ -55,6 +55,12 @@ public static class EchoLingoApplicationSmoke {
     [DllImport("user32.dll")] static extern bool EnumWindows(EnumWindow callback, IntPtr parameter);
     [DllImport("user32.dll")] static extern uint GetWindowThreadProcessId(IntPtr window, out uint process);
     [DllImport("user32.dll")] static extern bool IsWindowVisible(IntPtr window);
+    [DllImport("user32.dll", CharSet=CharSet.Unicode)] static extern int GetClassName(IntPtr window, StringBuilder name, int capacity);
+    [DllImport("user32.dll")] static extern IntPtr GetDesktopWindow();
+    [DllImport("user32.dll")] static extern IntPtr GetTopWindow(IntPtr parent);
+    [DllImport("user32.dll")] static extern IntPtr GetWindow(IntPtr window, uint command);
+    [DllImport("user32.dll")] static extern bool ScreenToClient(IntPtr window, ref Point point);
+    [DllImport("user32.dll")] static extern IntPtr ChildWindowFromPointEx(IntPtr parent, Point point, uint flags);
     [DllImport("user32.dll")] static extern IntPtr WindowFromPoint(Point point);
     [DllImport("user32.dll")] static extern IntPtr GetAncestor(IntPtr window, uint flags);
     [DllImport("user32.dll")] static extern bool GetWindowRect(IntPtr window, out RECT rectangle);
@@ -172,7 +178,48 @@ public static class EchoLingoApplicationSmoke {
         }, IntPtr.Zero);
         return result;
     }
-    static int AppOverlays(int appId) { return AppOverlayWindows(appId).Count; }
+    static bool IsInputPlane(IntPtr window, uint processId) {
+        StringBuilder name = new StringBuilder(256); GetClassName(window,name,name.Capacity);
+        return name.ToString() == "EchoLingoCaptureInputPlane-" + processId;
+    }
+    static List<AppEdge> AppInputPlanes(int appId, bool visibleOnly) {
+        List<AppEdge> result = new List<AppEdge>();
+        Dictionary<uint,int> parents = new Dictionary<uint,int>();
+        EnumWindows(delegate(IntPtr window,IntPtr unused) {
+            uint owner; GetWindowThreadProcessId(window,out owner);
+            if (!IsInputPlane(window,owner) || (visibleOnly && !IsWindowVisible(window))) return true;
+            int parent; if (!parents.TryGetValue(owner,out parent)) { parent=ParentPid((int)owner); parents.Add(owner,parent); }
+            if (parent != appId) return true;
+            long style=GetWindowLongPtr(window,-20).ToInt64(), required=0x00200000L|0x08000000L|0x80L|8;
+            Assert((style&required)==required && (style&(0x00080000L|0x20L))==0,
+                "Actual input plane has incorrect NoRedirection/NoActivate/Topmost/ToolWindow styles.");
+            RECT r; Assert(GetWindowRect(window,out r),"Cannot inspect actual input plane rectangle.");
+            result.Add(new AppEdge { Handle=window, ProcessId=owner, ParentProcessId=parent, Bounds=Rectangle.FromLTRB(r.left,r.top,r.right,r.bottom) }); return true;
+        },IntPtr.Zero); return result;
+    }
+    static int AppOverlays(int appId) { return AppOverlayWindows(appId).Count + AppInputPlanes(appId,false).Count; }
+    static bool Above(IntPtr upper, IntPtr lower) {
+        int count=0; for (IntPtr window=GetWindow(lower,3); window!=IntPtr.Zero && count++<4096; window=GetWindow(window,3)) if (window==upper) return true;
+        return false;
+    }
+    static IntPtr UnderlyingRootAt(Point point, uint helper) {
+        int count=0;
+        for (IntPtr window=GetTopWindow(IntPtr.Zero); window!=IntPtr.Zero && count++<4096; window=GetWindow(window,2)) {
+            if (!IsWindowVisible(window)) continue;
+            uint owner; GetWindowThreadProcessId(window,out owner); if (owner==helper) continue;
+            if ((GetWindowLongPtr(window,-20).ToInt64()&0x20L)!=0) continue;
+            RECT r; if (GetWindowRect(window,out r) && Rectangle.FromLTRB(r.left,r.top,r.right,r.bottom).Contains(point)) return GetAncestor(window,2);
+        }
+        return IntPtr.Zero;
+    }
+    static int AllocatedThinCount(uint helper) {
+        int count=0;
+        EnumWindows(delegate(IntPtr window,IntPtr unused) {
+            uint owner; GetWindowThreadProcessId(window,out owner); long style=GetWindowLongPtr(window,-20).ToInt64();
+            if (owner==helper && !IsInputPlane(window,owner) && (style&(0x08000000L|0x00080000L|0x20L))==(0x08000000L|0x00080000L|0x20L)) count++;
+            return true;
+        },IntPtr.Zero); return count;
+    }
     static int[] RectValue(Rectangle value) { return new int[] { value.Left, value.Top, value.Width, value.Height }; }
     static string WindowId(IntPtr value) { return "0x" + value.ToInt64().ToString("X"); }
     static List<Rectangle> ExpectedPerimeter(Rectangle frame, Rectangle display) {
@@ -199,9 +246,10 @@ public static class EchoLingoApplicationSmoke {
         GetWindowThreadProcessId(target, out targetPid);
         RECT measured; int frameResult = DwmGetWindowAttribute(form.Handle, 9, out measured, Marshal.SizeOf(typeof(RECT)));
         Rectangle frame = frameResult == 0 ? Rectangle.FromLTRB(measured.left, measured.top, measured.right, measured.bottom) : Rectangle.Empty;
-        bool validSource = pointerKnown && pointer == expectedPointer && target == expectedSource && form.Handle == expectedSource
-            && targetPid == Process.GetCurrentProcess().Id && GetAncestor(target, 2) == target
-            && IsWindowVisible(target) && frame == expectedFrame && frame.Width > 0 && frame.Height > 0 && frame.Contains(pointer);
+        uint sourcePid; GetWindowThreadProcessId(expectedSource,out sourcePid);
+        bool validSource = pointerKnown && pointer == expectedPointer && form.Handle == expectedSource
+            && sourcePid == Process.GetCurrentProcess().Id && GetAncestor(expectedSource, 2) == expectedSource
+            && IsWindowVisible(expectedSource) && frame == expectedFrame && frame.Width > 0 && frame.Height > 0 && frame.Contains(pointer);
         List<Rectangle> screen = ExpectedPerimeter(display, display), hover = ExpectedPerimeter(expectedFrame, display);
         List<Rectangle> remaining = new List<Rectangle>(screen); remaining.AddRange(hover);
         List<AppEdge> actual = AppOverlayWindows(appId);
@@ -214,7 +262,40 @@ public static class EchoLingoApplicationSmoke {
             windows.Add(new Dictionary<string, object> { { "hwnd", WindowId(edge.Handle) },
                 { "helperProcessId", edge.ProcessId }, { "helperParentProcessId", edge.ParentProcessId }, { "physicalBounds", RectValue(edge.Bounds) } });
         }
-        bool ready = validSource && screen.Count == 4 && hover.Count == 4 && oneHelper && exactGeometry && remaining.Count == 0;
+        List<AppEdge> allPlanes=AppInputPlanes(appId,false), planes=AppInputPlanes(appId,true);
+        List<Rectangle> planeBounds=new List<Rectangle>(); foreach (Screen monitor in Screen.AllScreens) planeBounds.Add(monitor.Bounds);
+        bool exactPlanes=helper!=0 && allPlanes.Count==planeBounds.Count && planes.Count==planeBounds.Count;
+        List<Dictionary<string,object>> planeMetadata=new List<Dictionary<string,object>>();
+        foreach (AppEdge plane in planes) {
+            int index=planeBounds.IndexOf(plane.Bounds); if (index<0) exactPlanes=false; else planeBounds.RemoveAt(index);
+            if (plane.ProcessId!=helper) exactPlanes=false;
+            foreach (AppEdge edge in actual) if (!Rectangle.Intersect(edge.Bounds,plane.Bounds).IsEmpty && !Above(edge.Handle,plane.Handle)) exactPlanes=false;
+            planeMetadata.Add(new Dictionary<string,object> { { "hwnd",WindowId(plane.Handle) }, { "helperProcessId",plane.ProcessId }, { "physicalBounds",RectValue(plane.Bounds) } });
+        }
+        Point client=pointer; IntPtr desktop=GetDesktopWindow();
+        bool mapped=pointerKnown && desktop!=IntPtr.Zero && ScreenToClient(desktop,ref client);
+        IntPtr through=mapped ? GetAncestor(ChildWindowFromPointEx(desktop,client,0x1|0x4),2) : IntPtr.Zero;
+        bool rawPlane=planes.Exists(delegate(AppEdge plane) { return plane.Handle==target && plane.Bounds.Contains(pointer); });
+        bool rawThin=actual.Exists(delegate(AppEdge edge) { return edge.Handle==target && edge.Bounds.Contains(pointer); });
+        bool throughPlane=planes.Exists(delegate(AppEdge plane) { return plane.Handle==through && plane.Bounds.Contains(pointer); });
+        int thinAllocated=helper==0 ? 0 : AllocatedThinCount(helper), visibleOwned=0;
+        if (helper!=0) EnumWindows(delegate(IntPtr window,IntPtr unused) {
+            uint owner; GetWindowThreadProcessId(window,out owner); if (owner==helper && IsWindowVisible(window)) visibleOwned++;
+            return true;
+        },IntPtr.Zero);
+        exactPlanes=exactPlanes && visibleOwned==actual.Count+planes.Count;
+        probe["allVisibleHelperWindowsClassified"]=visibleOwned==actual.Count+planes.Count;
+        probe["actualVisibleHelperWindowCount"]=visibleOwned;
+        IntPtr underneath=helper==0 ? IntPtr.Zero : UnderlyingRootAt(pointer,helper);
+        validSource=validSource && underneath==expectedSource;
+        exactPlanes=exactPlanes && planeBounds.Count==0 && thinAllocated==12*Screen.AllScreens.Length;
+        bool ready = validSource && screen.Count == 4 && hover.Count == 4 && oneHelper && exactGeometry && remaining.Count == 0
+            && exactPlanes && throughPlane && (rawPlane || rawThin);
+        probe["requiredInputPlane"]=true; probe["allocatedInputPlaneCount"]=allPlanes.Count; probe["visibleInputPlaneCount"]=planes.Count;
+        probe["allocatedThinWindowCount"]=thinAllocated; probe["physicalInputPlaneMultisetMatches"]=exactPlanes;
+        probe["rawPointerIsExactPlane"]=rawPlane; probe["rawPointerIsVerifiedThinEdge"]=rawThin;
+        probe["transparentSkippingHitIsExactPlane"]=throughPlane; probe["transparentSkippingPointerRootHwnd"]=WindowId(through);
+        probe["independentlyUnderlyingSourceHwnd"]=WindowId(underneath); probe["observedInputPlanes"]=planeMetadata;
         probe["pointerPhysicalXY"] = pointerKnown ? (object)new int[] { pointer.X, pointer.Y } : null;
         probe["expectedPointerPhysicalXY"] = new int[] { expectedPointer.X, expectedPointer.Y };
         probe["pointerHitHwnd"] = WindowId(hit); probe["pointerRootHwnd"] = WindowId(target);

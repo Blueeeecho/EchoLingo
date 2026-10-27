@@ -508,10 +508,14 @@ jobs:
         shell: powershell
         run: |
           $ErrorActionPreference = 'Continue'
-          $output = @(& powershell.exe -NoProfile -STA -ExecutionPolicy Bypass -File tests/windows-live-capture-smoke.ps1 -NativeAssemblyPath "$env:RUNNER_TEMP/echolingo-native-diagnostics.dll" 2>&1)
-          $fixtureExit = $LASTEXITCODE
-          $output | Out-File "$env:RUNNER_TEMP/echolingo-native-live-diagnostics.log" -Encoding utf8
-          $output | Write-Output
+          $fixtureExit = 0
+          foreach ($backend in @('hybrid', 'planeOnly')) {
+            $output = @(& powershell.exe -NoProfile -STA -ExecutionPolicy Bypass -File tests/windows-live-capture-smoke.ps1 -NativeAssemblyPath "$env:RUNNER_TEMP/echolingo-native-diagnostics.dll" -InputBackend $backend 2>&1)
+            $backendExit = $LASTEXITCODE
+            $output | Out-File "$env:RUNNER_TEMP/echolingo-native-live-$backend.log" -Encoding utf8
+            $output | Write-Output
+            if ($backendExit -ne 0) { $fixtureExit = $backendExit }
+          }
           exit $fixtureExit
       - uses: actions/upload-artifact@v4
         if: always()
@@ -520,7 +524,7 @@ jobs:
           if-no-files-found: warn
           path: |
             ${{ runner.temp }}/echolingo-native-ocr-diagnostics.log
-            ${{ runner.temp }}/echolingo-native-live-diagnostics.log
+            ${{ runner.temp }}/echolingo-native-live-*.log
       - name: Gate raw native outcomes
         if: always()
         shell: powershell

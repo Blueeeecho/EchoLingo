@@ -38,32 +38,43 @@ try {
     $runs = [Collections.Generic.List[object]]::new()
     for ($i = 0; $i -lt $Iterations; $i++) {
         # Alternate order between repetitions to expose warm-cache/order effects.
-        $order = if (($i % 2) -eq 0) { @('baseline', 'candidate') } else { @('candidate', 'baseline') }
+        $order = if (($i % 2) -eq 0) { @('baseline', 'candidate', 'candidate-planeOnly') } else { @('candidate-planeOnly', 'candidate', 'baseline') }
         foreach ($variant in $order) {
             $arguments = @('-NoLogo', '-NoProfile', '-NonInteractive', '-STA', '-ExecutionPolicy', 'Bypass', '-File', $live, '-HelperPath')
-            if ($variant -eq 'candidate') { $arguments += @($HelperPath, '-NativeAssemblyPath', $NativeAssemblyPath, '-PerformanceDiagnostics') }
-            else { $arguments += $BaselineHelperPath }
+            if ($variant -ne 'baseline') {
+                $arguments += @($HelperPath, '-NativeAssemblyPath', $NativeAssemblyPath, '-PerformanceDiagnostics')
+                if ($variant -eq 'candidate-planeOnly') { $arguments += @('-InputBackend', 'planeOnly') }
+            } else { $arguments += @($BaselineHelperPath, '-LegacyBaseline') }
             $raw = @(& $powershell @arguments)
             $exit = $LASTEXITCODE
             $result = ($raw -join "`n") | ConvertFrom-Json
             $runs.Add(@{ variant = $variant; iteration = $i; report = $result })
-            if ($exit -ne 0 -or -not $result.ok -or @($result.trials).Count -ne 8) { throw "PERFORMANCE_FIXTURE: $variant did not pass all eight actual live/input/cancel/next-capture cases." }
-            if ($variant -eq 'candidate') {
-                foreach ($trial in $result.trials) {
+            if ($exit -ne 0 -or -not $result.ok -or @($result.trials).Count -ne 8 -or -not $result.crossPeerCapturePassed -or -not $result.crossPeerCapture.passed) { throw "PERFORMANCE_FIXTURE: $variant did not pass all eight actual live/input/cancel/next-capture cases plus independent ordinary-peer long drag." }
+            if ($variant -ne 'baseline') {
+                $planeOnly = $variant -eq 'candidate-planeOnly'
+                $expectedBackend = if ($planeOnly) { 2 } else { 1 }
+                $expectedMouseHook = if ($planeOnly) { 0 } else { 1 }
+                if (-not $result.requiredInputPlanes -or $result.requestedInputBackend -ne $(if ($planeOnly) { 'planeOnly' } else { 'hybrid' })) { throw 'PLANE_GATE: Candidate did not require the exact requested input plane implementation.' }
+                foreach ($trial in @($result.trials) + @($result.crossPeerCapture)) {
                     if ($trial.nativeBackend -ne 'precompiled-framework-dll' -or $null -eq $trial.helperPerformance -or $null -eq $trial.captureHealth) { throw 'PRECOMPILED_GATE: A candidate session did not use the exact explicit native DLL or provide safe timing/input metadata.' }
+                    if ($trial.captureHealth.inputBackend -ne $expectedBackend -or $trial.captureHealth.mouseHookInstalled -ne $expectedMouseHook -or $trial.captureHealth.inputPlaneCount -le 0 -or $trial.captureHealth.inputPlaneRemainingAfterCleanup -ne 0) { throw 'PLANE_GATE: Real helper backend/allocation/cleanup metadata did not match the requested mode.' }
+                    if ($planeOnly -and $trial.mode -notin @('escape-short','escape','right') -and ($trial.captureHealth.inputPlaneDowns -le 0 -or $trial.captureHealth.inputPlaneUps -le 0 -or $trial.captureHealth.inputPlaneFallbackUsed -ne 1)) { throw 'FALLBACK_GATE: Forced no-hook capture did not prove actual input plane down/up delivery.' }
                 }
                 $burst = @($result.trials | Where-Object { $_.mode -eq 'capture-burst' })[0]
-                if ($burst.captureHealth.hookMouseMoves -le 0 -or $burst.captureHealth.hookMouseDowns -le 0 -or $burst.captureHealth.hookMouseUps -le 0 -or $burst.capturePerformance.moveFrameCount -le 0) { throw 'INPUT_GATE: Candidate blue borders did not prove actual movement/down/up plus coalesced UI frame delivery.' }
+                if ($burst.capturePerformance.moveFrameCount -le 0) { throw 'INPUT_GATE: Candidate did not prove actual coalesced UI move frames.' }
+                if (-not $planeOnly -and ($burst.captureHealth.hookMouseMoves -le 0 -or $burst.captureHealth.hookMouseDowns -le 0 -or $burst.captureHealth.hookMouseUps -le 0)) { throw 'INPUT_GATE: Hybrid candidate did not prove actual hook movement/down/up.' }
+                if ($planeOnly -and ($burst.captureHealth.inputPlaneMoves -le 0 -or $burst.captureHealth.hookMouseMoves -ne 0 -or $burst.captureHealth.hookMouseDowns -ne 0 -or $burst.captureHealth.hookMouseUps -ne 0)) { throw 'FALLBACK_GATE: No-hook burst did not prove actual input plane moves.' }
             }
         }
     }
     $baseline = Get-Summary @($runs | Where-Object { $_.variant -eq 'baseline' })
     $candidate = Get-Summary @($runs | Where-Object { $_.variant -eq 'candidate' })
+    $planeOnly = Get-Summary @($runs | Where-Object { $_.variant -eq 'candidate-planeOnly' })
     [Console]::Out.WriteLine((@{
         ok = $true; baselineCanonicalSha256 = $baselineHash; candidateCanonicalSha256 = (Get-CanonicalHash $HelperPath)
         nativeAssemblySha256 = (Get-FileHash -LiteralPath $NativeAssemblyPath -Algorithm SHA256).Hash.ToLowerInvariant()
-        baseline = $baseline; candidate = $candidate; runs = $runs.ToArray()
-        scope = 'Same runner generated sources, fresh helper processes; OS cache not flushed. Descriptive A/B measurements, not physical Windows11 acceptance or a guaranteed speed-up.'
+        baseline = $baseline; candidate = $candidate; candidatePlaneOnly = $planeOnly; runs = $runs.ToArray()
+        scope = 'Same runner generated sources; baseline exact legacy source has no input planes; candidate hybrid and forced-no-mouse-hook planeOnly share the exact source/DLL. Fresh helper processes; OS cache not flushed. Descriptive A/B measurements, not physical Windows11 acceptance or a guaranteed speed-up.'
         userContentCaptured = $false; clipboardAccessed = $false; credentialsAccessed = $false
     } | ConvertTo-Json -Depth 18 -Compress))
 } catch {

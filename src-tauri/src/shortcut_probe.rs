@@ -1,6 +1,7 @@
 //! Early installer-only check. Call before constructing Tauri or its plugins.
 //! Exit0: available/disabled;2: occupied/reserved;3: unknown. Standard output
-//! contains at most two ASCII `action=combo` lines, and is empty for unknown.
+//! keeps two core lines for success, at most five conflict lines/480ASCII bytes,
+//! and is empty for unknown. Every enabled startup binding is checked.
 pub const FLAG: &str = "--check-shortcuts-on-install";
 
 /// `arguments` includes argv0. No flag means no file/process/registry access.
@@ -68,6 +69,9 @@ fn bindings(bytes: Option<&[u8]>) -> Result<Vec<Binding>, ()> {
     [
         ("selection", shortcuts.selection),
         ("silentOcr", shortcuts.silent_ocr),
+        ("capture", shortcuts.capture),
+        ("ocr", shortcuts.ocr),
+        ("input", shortcuts.input),
     ]
     .into_iter()
     .map(|(action, combo)| {
@@ -100,24 +104,33 @@ impl Outcome {
             Self::Conflict(rows) => (2, rows),
             Self::Unknown => return (3, String::new()),
         };
-        if rows.len() > 2 || (code == 0 && rows.len() != 2) || (code == 2 && rows.is_empty()) {
+        if rows.len() > 5 || (code == 0 && rows.len() != 5) || (code == 2 && rows.is_empty()) {
             return (3, String::new());
         }
         let mut output = String::new();
+        let mut seen = std::collections::HashSet::new();
         for row in rows {
-            if !matches!(row.action, "selection" | "silentOcr")
+            if !matches!(
+                row.action,
+                "selection" | "silentOcr" | "capture" | "ocr" | "input"
+            ) || !seen.insert(row.action)
                 || !row.combo.is_ascii()
                 || row.combo.len() > 80
                 || row.combo.bytes().any(|byte| byte.is_ascii_control())
             {
                 return (3, String::new());
             }
+            // Success preserves the original installer protocol. Legacy
+            // bindings still participated in registration and cleanup above.
+            if code == 0 && !matches!(row.action, "selection" | "silentOcr") {
+                continue;
+            }
             output.push_str(row.action);
             output.push('=');
             output.push_str(&row.combo);
             output.push('\n');
         }
-        if output.len() > 192 {
+        if output.len() > 480 {
             return (3, String::new());
         }
         (code, output)
@@ -422,6 +435,7 @@ mod tests {
         failures: VecDeque<RegisterFailure>,
         removed: Vec<u32>,
         fail_cleanup: bool,
+        conflict_id: Option<u32>,
     }
     impl FakeRegistry {
         fn new(failures: Vec<RegisterFailure>, fail_cleanup: bool) -> Self {
@@ -430,11 +444,15 @@ mod tests {
                 failures: failures.into(),
                 removed: Vec::new(),
                 fail_cleanup,
+                conflict_id: None,
             }
         }
     }
     impl ProbeRegistry for FakeRegistry {
         fn register(&mut self, shortcut: &Shortcut) -> Result<(), RegisterFailure> {
+            if self.conflict_id == Some(shortcut.id()) {
+                return Err(RegisterFailure::Conflict);
+            }
             if let Some(failure) = self.failures.pop_front() {
                 return Err(failure);
             }
@@ -462,9 +480,9 @@ mod tests {
         assert_eq!(run_if_requested(&args(&["app", FLAG, FLAG])), Some(3));
     }
     #[test]
-    fn missing_settings_uses_current_core_defaults_only() {
+    fn missing_settings_checks_all_defaults_but_success_lists_only_core_bindings() {
         let rows = bindings(None).unwrap();
-        assert_eq!(rows.len(), 2);
+        assert_eq!(rows.len(), 5);
         assert_eq!(
             Outcome::Available(rows).protocol(),
             (0, "selection=Alt+D\nsilentOcr=Alt+S\n".into())
@@ -505,7 +523,7 @@ mod tests {
         let (code, output) = check(&mut registry, bindings(None).unwrap()).protocol();
         assert_eq!((code, output), (2, "selection=Alt+D\n".into()));
         assert!(registry.active.is_empty());
-        assert_eq!(registry.removed.len(), 1);
+        assert_eq!(registry.removed.len(), 3);
     }
     #[test]
     fn ambiguous_native_failure_takes_precedence_over_known_conflict() {
@@ -517,7 +535,7 @@ mod tests {
             check(&mut registry, bindings(None).unwrap()).protocol(),
             (3, String::new())
         );
-        assert!(registry.removed.is_empty());
+        assert_eq!(registry.removed.len(), 2);
     }
     #[test]
     fn cleanup_failure_is_unknown_and_all_remaining_releases_are_attempted() {
@@ -526,7 +544,68 @@ mod tests {
             check(&mut registry, bindings(None).unwrap()).protocol(),
             (3, String::new())
         );
-        assert_eq!(registry.removed.len(), 2);
+        assert_eq!(registry.removed.len(), 4);
+    }
+
+    #[test]
+    fn legacy_input_conflict_is_reported_instead_of_false_core_success() {
+        let rows = bindings(None).unwrap();
+        let id = rows
+            .iter()
+            .find(|row| row.action == "input")
+            .unwrap()
+            .shortcut
+            .unwrap()
+            .id();
+        let mut registry = FakeRegistry::new(vec![], false);
+        registry.conflict_id = Some(id);
+        assert_eq!(
+            check(&mut registry, rows).protocol(),
+            (2, "input=Alt+A\n".into())
+        );
+        assert!(registry.active.is_empty());
+        assert_eq!(registry.removed.len(), 3);
+        assert!(!registry.removed.contains(&id));
+    }
+
+    #[test]
+    fn all_five_enabled_bindings_are_checked_and_released_on_success() {
+        let mut settings = Settings::default();
+        settings.shortcuts.capture = "Ctrl+F1".into();
+        let rows = bindings(Some(&serde_json::to_vec(&settings).unwrap())).unwrap();
+        let mut registry = FakeRegistry::new(vec![], false);
+        assert_eq!(
+            check(&mut registry, rows).protocol(),
+            (0, "selection=Alt+D\nsilentOcr=Alt+S\n".into())
+        );
+        assert!(registry.active.is_empty());
+        assert_eq!(registry.removed.len(), 5);
+    }
+
+    #[test]
+    fn disabled_bindings_are_not_registered_or_unregistered() {
+        let rows = bindings(Some(&configured("", ""))).unwrap();
+        let mut registry = FakeRegistry::new(vec![RegisterFailure::Conflict], false);
+        assert_eq!(
+            check(&mut registry, rows).protocol(),
+            (0, "selection=\nsilentOcr=\n".into())
+        );
+        assert_eq!(registry.failures.len(), 1);
+        assert!(registry.removed.is_empty() && registry.active.is_empty());
+    }
+
+    #[test]
+    fn legacy_f12_reaches_the_same_reserved_policy_as_a_core_binding() {
+        let mut settings = Settings::default();
+        settings.shortcuts.input = "F12".into();
+        let rows = bindings(Some(&serde_json::to_vec(&settings).unwrap())).unwrap();
+        let input = rows.iter().find(|row| row.action == "input").unwrap();
+        assert_eq!(input.combo, "F12");
+        assert!(windows_reserved(&input.shortcut.unwrap()));
+        assert_eq!(
+            Outcome::Conflict(vec![input.clone()]).protocol(),
+            (2, "input=F12\n".into())
+        );
     }
     #[test]
     fn protocol_refuses_control_characters_non_ascii_and_excess_rows() {

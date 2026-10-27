@@ -442,6 +442,15 @@ fn bounded_capture_health(value: &Value) -> Value {
         "desktopMatched",
         "mismatchKind",
         "hookRunningAfterStop",
+        "inputBackend",
+        "mouseHookInstalled",
+        "inputPlaneDowns",
+        "inputPlaneUps",
+        "inputPlaneMoves",
+        "inputPlaneCount",
+        "inputPlaneVisibleCount",
+        "inputPlaneRemainingAfterCleanup",
+        "inputPlaneFallbackUsed",
     ];
     let mut safe = serde_json::Map::new();
     for field in FIELDS {
@@ -1038,13 +1047,19 @@ mod tests {
         let safe = super::bounded_capture_health(&serde_json::json!({
             "hookMouseDowns": 0, "hookMouseUps": 7, "hookMouseMoves": 42,
             "knownPointer": 1, "desktopMatched": 1, "mismatchKind": 1,
+            "inputBackend": 2, "mouseHookInstalled": 0,
+            "inputPlaneDowns": 1, "inputPlaneUps": 1, "inputPlaneMoves": 18,
+            "inputPlaneCount": 2, "inputPlaneVisibleCount": 0,
+            "inputPlaneRemainingAfterCleanup": 0, "inputPlaneFallbackUsed": 1,
             "uiPhase": "original text", "dragging": -1,
             "source": "never retain", "title": "never retain", "imageBase64": "never retain",
             "trajectory": [1, 2, 3], "credentials": {"value": "never retain"}
         }));
         assert_eq!(
             safe,
-            serde_json::json!({"hookMouseDowns":0,"hookMouseUps":7,"hookMouseMoves":42,"knownPointer":1,"desktopMatched":1,"mismatchKind":1})
+            serde_json::json!({"hookMouseDowns":0,"hookMouseUps":7,"hookMouseMoves":42,"knownPointer":1,"desktopMatched":1,"mismatchKind":1,
+                "inputBackend":2,"mouseHookInstalled":0,"inputPlaneDowns":1,"inputPlaneUps":1,"inputPlaneMoves":18,
+                "inputPlaneCount":2,"inputPlaneVisibleCount":0,"inputPlaneRemainingAfterCleanup":0,"inputPlaneFallbackUsed":1})
         );
         assert_eq!(
             super::bounded_capture_health(&serde_json::json!(null)),
