@@ -182,11 +182,14 @@ mod native {
         fn DispatchMessageW(message: *const Message) -> isize;
         fn PostThreadMessageW(thread: u32, message: u32, wparam: usize, lparam: isize) -> i32;
         fn GetForegroundWindow() -> Handle;
+        fn WindowFromPoint(point: Point) -> Handle;
         fn GetAncestor(window: Handle, kind: u32) -> Handle;
         fn GetWindowThreadProcessId(window: Handle, process: *mut u32) -> u32;
         fn GetClassNameW(window: Handle, name: *mut u16, maximum: i32) -> i32;
         fn GetWindowRect(window: Handle, rectangle: *mut Rect) -> i32;
         fn SetThreadDpiAwarenessContext(context: Handle) -> Handle;
+        fn GetThreadDpiAwarenessContext() -> Handle;
+        fn GetAwarenessFromDpiAwarenessContext(context: Handle) -> i32;
     }
     #[link(name = "kernel32")]
     unsafe extern "system" {
@@ -232,7 +235,18 @@ mod native {
                                 width,
                                 height,
                             ) {
-                                let _ = shared.clicks.try_send(click);
+                                // An owned native dialog/menu or IME can sit
+                                // outside the main rect. Classify its HWND at
+                                // down too, before it closes or moves away.
+                                let target = unsafe {
+                                    WindowFromPoint(Point {
+                                        x: data.point.x,
+                                        y: data.point.y,
+                                    })
+                                };
+                                if external_window(window as isize, target) {
+                                    let _ = shared.clicks.try_send(click);
+                                }
                             }
                         }
                     }
@@ -258,8 +272,16 @@ mod native {
             .spawn(move || {
                 // MSLLHOOKSTRUCT points and GetWindowRect must share physical
                 // coordinates, including negative/mixed-DPI monitor layouts.
-                let previous_dpi = unsafe { SetThreadDpiAwarenessContext(-4isize as Handle) };
+                let mut previous_dpi = unsafe { SetThreadDpiAwarenessContext(-4isize as Handle) };
+                // Windows 10 1607 supports per-monitor V1; V2 starts at1703.
+                // Both provide the physical coordinates required by this pump.
                 if previous_dpi.is_null() {
+                    previous_dpi = unsafe { SetThreadDpiAwarenessContext(-3isize as Handle) };
+                }
+                let physical = unsafe {
+                    GetAwarenessFromDpiAwarenessContext(GetThreadDpiAwarenessContext()) == 2
+                };
+                if previous_dpi.is_null() || !physical {
                     let _ = ready.send(Err(
                         "Windows popup observation requires per-monitor physical coordinates"
                             .to_owned(),
@@ -344,26 +366,28 @@ mod native {
         }
     }
 
-    pub fn foreground_is_external(main_window: isize) -> bool {
-        // Treat unknown focus conservatively. Owned windows and standard IME
-        // UI are part of editing, not a request to dismiss the translation.
-        let foreground = unsafe { GetForegroundWindow() };
-        if foreground.is_null() {
+    fn window_is_owned(main_window: isize, target: Handle) -> bool {
+        if target.is_null() {
             return false;
         }
-        let root = unsafe { GetAncestor(foreground, 3) }; // GA_ROOTOWNER
+        let root = unsafe { GetAncestor(target, 3) }; // GA_ROOTOWNER
         let mut process = 0;
         unsafe {
-            GetWindowThreadProcessId(foreground, &mut process);
+            GetWindowThreadProcessId(target, &mut process);
         }
-        if foreground as isize == main_window
+        target as isize == main_window
             || root as isize == main_window
             || process == std::process::id()
-        {
+    }
+
+    fn external_window(main_window: isize, target: Handle) -> bool {
+        // Treat unknown focus conservatively. Owned windows and standard IME
+        // UI are part of editing, not a request to dismiss the translation.
+        if target.is_null() || window_is_owned(main_window, target) {
             return false;
         }
         let mut name = [0u16; 128];
-        let length = unsafe { GetClassNameW(foreground, name.as_mut_ptr(), name.len() as i32) };
+        let length = unsafe { GetClassNameW(target, name.as_mut_ptr(), name.len() as i32) };
         if length <= 0 {
             return false;
         }
@@ -371,19 +395,12 @@ mod native {
         external_focus(true, false, Some(class.as_str()))
     }
 
+    pub fn foreground_is_external(main_window: isize) -> bool {
+        external_window(main_window, unsafe { GetForegroundWindow() })
+    }
+
     pub fn foreground_is_owned(main_window: isize) -> bool {
-        let foreground = unsafe { GetForegroundWindow() };
-        if foreground.is_null() {
-            return false;
-        }
-        let root = unsafe { GetAncestor(foreground, 3) };
-        let mut process = 0;
-        unsafe {
-            GetWindowThreadProcessId(foreground, &mut process);
-        }
-        foreground as isize == main_window
-            || root as isize == main_window
-            || process == std::process::id()
+        window_is_owned(main_window, unsafe { GetForegroundWindow() })
     }
 }
 

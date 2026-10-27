@@ -32,6 +32,7 @@ public static class EchoLingoPopupVisibilitySmoke {
     [DllImport("user32.dll")] static extern bool EnumWindows(Enumerate callback, IntPtr unused);
     [DllImport("user32.dll")] static extern uint GetWindowThreadProcessId(IntPtr window, out uint process);
     [DllImport("user32.dll")] static extern IntPtr GetForegroundWindow();
+    [DllImport("user32.dll")] static extern IntPtr GetAncestor(IntPtr window, uint kind);
     [DllImport("user32.dll")] static extern bool SetForegroundWindow(IntPtr window);
     [DllImport("user32.dll")] static extern bool IsWindowVisible(IntPtr window);
     [DllImport("user32.dll")] static extern bool GetWindowRect(IntPtr window, out RECT rectangle);
@@ -50,6 +51,11 @@ public static class EchoLingoPopupVisibilitySmoke {
     [StructLayout(LayoutKind.Sequential)] struct KEY { public ushort vk, scan; public uint flags, time; public UIntPtr extra; }
     [StructLayout(LayoutKind.Explicit)] struct INPUTDATA { [FieldOffset(0)] public MOUSE mouse; [FieldOffset(0)] public KEY key; }
     [StructLayout(LayoutKind.Sequential)] struct INPUT { public uint type; public INPUTDATA data; }
+    sealed class Owner : IWin32Window {
+        readonly IntPtr handle;
+        public Owner(IntPtr window) { handle = window; }
+        public IntPtr Handle { get { return handle; } }
+    }
 
     static void Require(bool value, string message) { if (!value) throw new InvalidOperationException(message); }
     static void Wait(Func<bool> condition, int milliseconds, string failure) {
@@ -98,6 +104,18 @@ public static class EchoLingoPopupVisibilitySmoke {
         INPUT up = down; up.data.mouse.flags = 4; Send(new INPUT[] { up });
         Wait(delegate { RECT after; return GetWindowRect(app, out after) && (after.left != before.left || after.top != before.top); }, 2000, "Native toolbar did not actually move; drag retention was not tested.");
         Require(IsWindowVisible(app), "An inside toolbar down was reclassified outside after native movement.");
+    }
+    static void ResizeOwnEdge(IntPtr app) {
+        Require(GetForegroundWindow() == app, "Own popup not foreground; resize aborted.");
+        RECT before; Require(GetWindowRect(app, out before), "Own resize bounds unavailable.");
+        int x = before.right - 2, y = (before.top + before.bottom) / 2;
+        Require(SetCursorPos(x, y), "Could not position generated resize gesture.");
+        INPUT down = new INPUT(); down.type = 0; down.data.mouse.flags = 2; Send(new INPUT[] { down });
+        Thread.Sleep(40);
+        for (int step = 1; step <= 4; step++) { SetCursorPos(x + step * 5, y); Thread.Sleep(20); }
+        INPUT up = down; up.data.mouse.flags = 4; Send(new INPUT[] { up });
+        Wait(delegate { RECT after; return GetWindowRect(app, out after) && after.right - after.left != before.right - before.left; }, 2000, "Native edge did not actually resize; retention was not tested.");
+        Require(IsWindowVisible(app), "An inside edge down was reclassified outside after native resizing.");
     }
     static AutomationElement Element(IntPtr app, string name) {
         return AutomationElement.FromHandle(app).FindFirst(TreeScope.Descendants,
@@ -154,6 +172,7 @@ public static class EchoLingoPopupVisibilitySmoke {
             };
             File.WriteAllText(Path.Combine(roaming, "settings.json"), json.Serialize(settings), new UTF8Encoding(false));
             SetProcessDpiAwarenessContext(new IntPtr(-4));
+            Require(Screen.PrimaryScreen.Bounds.Width >= 1024 && Screen.PrimaryScreen.Bounds.Height >= 600, "Generated desktop fixture needs at least 1024x600; no product failure inferred.");
             using (Form form = new Form()) using (TextBox source = new TextBox()) {
                 form.Text = "EchoLingo generated visibility source"; form.Bounds = new Rectangle(30, 120, 720, 420);
                 source.Multiline = true; source.SetBounds(20, 20, 660, 100); source.Text = "EchoLingo popup visibility generated source 2468";
@@ -196,6 +215,20 @@ public static class EchoLingoPopupVisibilitySmoke {
                             Click(bounds.left + 70, bounds.top + 70, form, main, false); Thread.Sleep(150);
                             Require(IsWindowVisible(main), "Inside click hid the popup."); report["insideClickRetainedPassed"] = true;
                             DragOwnToolbar(main); report["actualToolbarDragRetainedPassed"] = true;
+                            moveApp(); ResizeOwnEdge(main); report["actualEdgeResizeRetainedPassed"] = true;
+                            using (Form ownedDialog = new Form()) {
+                                Ui(form, delegate {
+                                    ownedDialog.Text = "EchoLingo generated native owned-window fixture";
+                                    ownedDialog.StartPosition = FormStartPosition.Manual; ownedDialog.Bounds = new Rectangle(30, 360, 240, 140);
+                                    ownedDialog.Show(new Owner(main));
+                                });
+                                Wait(delegate { return GetForegroundWindow() == ownedDialog.Handle; }, 2000, "Generated owned window did not gain focus.");
+                                Require(GetAncestor(ownedDialog.Handle, 3) == main, "Generated owned window has no actual app-root ownership; case not tested.");
+                                Click(60, 450, ownedDialog, main, true); Thread.Sleep(150);
+                                Require(IsWindowVisible(main), "Clicking an actual owned window dismissed its popup owner.");
+                                report["generatedNativeOwnedWindowRetainedPassed"] = true;
+                                Ui(form, delegate { ownedDialog.Close(); });
+                            }
                             sourceFocus(); Wait(delegate { return !IsWindowVisible(main); }, 2000, "Actual foreground deactivation failed to hide input popup.");
                             report["focusDeactivationPassed"] = true;
                             Shortcut(form, 0x41); Wait(delegate { return IsWindowVisible(main); }, 5000, "Pin test input did not show."); moveApp();
