@@ -2,6 +2,19 @@
 
 更新时间：2026-10-28，Asia/Shanghai。本报告分别记录本机执行、CI 和真实桌面边界，未运行不算通过。[本轮原始本机证据](validation/macos-preview-20261025.json)。
 
+## 2026-10-28 Alt+D 严格冷启动、精确内容和竞态复核（新候选待验收）
+
+| 执行 | 原始结果及解释 |
+|---|---|
+| 浏览器653/40541154743 |Edge/Chrome各3fresh进程、48required；30rows含6准备失败，实际helper24次/23通过。Edge冷首次鼠标选区DOM精确却原生UIA超时，其后独立audit159ms正常；禁止预热/强制AX/重试。contenteditable焦点产生的collapsed range使6次setup为空，另18项未执行。修正明确DOM准备后再测，不改原红 |
+| 剪贴板653/40541158106 |3执行/1通过。250ms延迟copy基线成功；背景同PID发布及实际第二Ctrl+C均被当作原选文，helper PID自己恢复旧clipboard、早于源应用后续真实原copy发布，故错文和覆盖均因果确认 |
+| 实际App0e0/40542535831 |15/16执行，raw8pass含1个负向误判，应至多7有效pass。同HWND早期A快捷键已造成B在下一明确B快捷键前产生1mock+1history，负向判定修正为失败。固定empty仍旧source/FGfalse，未注入文字。5鼠标setup失败0hotkey，manual-input超时未分类；不能用setup失败声称产品取词失败或通过 |
+| Notepad830/40542927823及08/40543536555 |均0hotkey，未验收；首次cleanup覆盖主错已修正，第二次保留NOTEPAD_CLASSIC_EDITOR_NOT_UNIQUE+MOCK_THREAD_NOT_STOPPED。不附着其他PID/程序替代真实Notepad，不继续放宽准备门禁 |
+| 候选4385e34本机 |224Rust通过/1引擎专用ignored；76前端单位/类型/构建/完整假IPC UI通过（含pinned blank ACK/立即输入）；完整C#5/net48、PS AST0，原copy policy97断言、新ticket21断言通过。源代码互审无阻断；不代替Windows hook/物理取词 |
+| 新候选实际Windows |浏览器40544606772：48实际helper/42passed/0setupfail，6fresh首例全失败（1timeout/5runtimeidentity阶段快速失败，待进一步诊断）；其余正例30和空/password12全部通过。copy40544607335为2/3，用户第二Ctrl+C安全取消/无覆盖，背景写入仍红。完整CI40544606324运行中。full新增实际单次Alt+D矩阵和精确stage hash/bytes，worker标量测试单独进程，不能为browser UIA预热。结果不得被上方旧case通过覆盖 |
+
+新修复保留旧任务恢复警告/取消排序，OCR空结果/错误继续保留固定内容；仅Alt+D空选区进入空白编辑器。仅新键盘复制可被票据观察；任意同PID后台clipboard发布的因果来源仍无法由标准owner/sequence识别，此原反例不能声称修好。native HWND焦点也不覆盖所有同HWND DOM选区变化。没有实体Win10/11、WPS、IME/多屏/提权窗口或Mac安装版新验收。[精确证据](validation/windows-selection-rigorous-20261028.json)。
+
 ## 2026-10-28 latest-intent：同一程序的固定连续操作通过，浏览器范围部分待验收
 
 | 检查 | 实际结果与边界 |

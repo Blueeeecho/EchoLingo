@@ -1,0 +1,109 @@
+{
+  "updated": "2026-10-28 Asia/Shanghai",
+  "candidate": "4385e3448d2c56df4575a0a991b0f6a271bfd708",
+  "status": "Candidate4385 runtime FAILED: cold first browser 6/6 fail; copy2/3 with known background publication red; full build pending",
+  "environment": "GitHub-hosted Windows Server desktop; not physical Win10/11",
+  "productionFiles": {
+    "src-tauri/native/windows.ps1": "4101ab36af777c303751117e0c5115b56cd29b0ab21f8ded49b394fdad83737a",
+    "src-tauri/src/main.rs": "2d90d96b7907f45b2108b8d3bd6c0bc79a50abed14a38b5a87e414f530f20060",
+    "src-tauri/src/platform.rs": "9697e36d255d43b77b5a2c2c323661194119ed126ce369054d99e2e32d54101b",
+    "tests/frontend-interactions.mjs": "94583b8186dbc5512c9caf5abebd837cff44552f6b0a179f79890a8fcf7528da"
+  },
+  "host": {
+    "rustPassed": 224,
+    "rustIgnored": 1,
+    "frontendUnitPassed": 76,
+    "fullFakeIpcUiPassed": true,
+    "typecheckBuildFmtDiffPassed": true,
+    "csharp5net48AndPsAst": "passed; exact specialist freeze reports in work"
+  },
+  "baselineRuns": [
+    {
+      "run": 40541154743,
+      "source": "653df24",
+      "scope": "fresh Edge/Chrome native helper",
+      "required": 48,
+      "caseRows": 30,
+      "actualHelperCalls": 24,
+      "passedHelperCalls": 23,
+      "setupFailures": 6,
+      "unexecuted": 18,
+      "conclusion": "failure; Edge cold first mouse native UIA timeout"
+    },
+    {
+      "run": 40541158106,
+      "source": "653df24",
+      "scope": "real clipboard fallback same-source publication races",
+      "required": 3,
+      "executed": 3,
+      "passed": 1,
+      "conclusion": "failure; both independent writes returned as source and helper restored old clipboard"
+    },
+    {
+      "run": 40542535831,
+      "source": "0e0f7cb",
+      "scope": "actual Tauri one Alt+D per intent",
+      "required": 16,
+      "executed": 15,
+      "rawPassed": 8,
+      "validPassedAtMost": 7,
+      "conclusion": "failure; negative same-window case falsely accepted early, late B import proven by pre-next-hotkey request/history ledger; pinned empty real failure; five mouse setups failed without hotkey; manual input timeout unclassified"
+    },
+    {
+      "run": 40542927823,
+      "source": "8307941",
+      "scope": "Notepad",
+      "actualHotkeys": 0,
+      "conclusion": "inconclusive; primary error initially overwritten by cleanup error"
+    },
+    {
+      "run": 40543536555,
+      "source": "08f5578",
+      "scope": "Notepad",
+      "actualHotkeys": 0,
+      "conclusion": "inconclusive; classic editor not unique; cleanup error retained separately"
+    }
+  ],
+  "candidateRuns": {
+    "full": 40544606324,
+    "browser": 40544606772,
+    "clipboard": 40544607335
+  },
+  "limits": [
+    "No physical Windows/WPS acceptance",
+    "New keyboard-copy ticket cannot attribute arbitrary same-PID background clipboard publications",
+    "Native focus HWND is not complete DOM/control logical selection identity",
+    "No Mac signing/install/privacy/Keychain/credential changes",
+    "No stopped VM restarted"
+  ],
+  "package": "No new candidate installer delivered yet; prior immutable preview remains known limited",
+  "candidateOutcomes": {
+    "browser": {
+      "run": 40544606772,
+      "actualHelperCalls": 48,
+      "passed": 42,
+      "setupFailures": 0,
+      "positiveCases": 36,
+      "positivePassed": 30,
+      "emptyPasswordNegatives": 12,
+      "negativePassed": 12,
+      "freshFirstFailures": 6,
+      "firstTimeout": 1,
+      "firstRuntimeIdentityStageQuickFailures": 5,
+      "allClipboardAndForegroundPreserved": true,
+      "reasonForQuickFailure": "Need bounded numeric diagnosis; stage3 does not distinguish GetRuntimeId exception from mismatch."
+    },
+    "clipboard": {
+      "run": 40544607335,
+      "executed": 3,
+      "passed": 2,
+      "baseline": "passed",
+      "newRealCtrlC": "passed; CANCELLED, no helper restoration over independent write",
+      "samePidBackgroundPublication": "failure retained; wrong source and helper-owned original restoration"
+    },
+    "full": {
+      "run": 40544606324,
+      "status": "pending"
+    }
+  }
+}
