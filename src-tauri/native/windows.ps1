@@ -512,7 +512,8 @@ public sealed class CaptureSelectionState {
         int inputAssertions = CaptureInputPolicy.SelfTest();
         int topologyAssertions = CaptureTopologyPolicy.SelfTest();
         int outlineAssertions = CaptureOutlinePolicy.SelfTest();
-        return new Dictionary<string, object> { { "captureStateFixturePassed", true }, { "fixtureAssertions", 11 + inputAssertions + topologyAssertions + outlineAssertions }, { "inputPolicyAssertions", inputAssertions }, { "topologyPolicyAssertions", topologyAssertions }, { "outlinePolicyAssertions", outlineAssertions }, { "releaseGraceMilliseconds", 500 }, { "screenCaptured", false }, { "clipboardChanged", false }, { "interactiveCaptureTested", false } };
+        int hoverAssertions = CaptureHoverPolicy.SelfTest();
+        return new Dictionary<string, object> { { "captureStateFixturePassed", true }, { "fixtureAssertions", 11 + inputAssertions + topologyAssertions + outlineAssertions + hoverAssertions }, { "inputPolicyAssertions", inputAssertions }, { "topologyPolicyAssertions", topologyAssertions }, { "outlinePolicyAssertions", outlineAssertions }, { "hoverPolicyAssertions", hoverAssertions }, { "hoverQueryMilliseconds", CaptureHoverPolicy.QueryMilliseconds }, { "releaseGraceMilliseconds", 500 }, { "screenCaptured", false }, { "clipboardChanged", false }, { "interactiveCaptureTested", false } };
     }
 }
 
@@ -703,6 +704,158 @@ public static class CaptureOutlinePolicy {
     }
 }
 
+// Decorative metadata only. This policy cannot start/end a drag, alter its
+// freely selected ROI, capture pixels, inspect content or request activation.
+public struct CaptureHoverCandidate {
+    public Rectangle Frame;
+    public string ClassName;
+    public bool RootKnown, Visible, Minimized, CloakKnown, OwnWindow, ShellWindow, ExcludedFromCapture;
+    public uint Cloaked;
+}
+public sealed class CaptureHoverPolicy {
+    public const int QueryMilliseconds = 80;
+    long queriedAt = -1;
+    Rectangle frame;
+    public static Rectangle Bounds(int left, int top, int right, int bottom) {
+        long width = (long)right - left, height = (long)bottom - top;
+        return width > 0 && height > 0 && width <= Int32.MaxValue && height <= Int32.MaxValue
+            ? new Rectangle(left, top, (int)width, (int)height) : Rectangle.Empty;
+    }
+    public static bool ShellClass(string name) {
+        return name == "Progman" || name == "WorkerW" || name == "Shell_TrayWnd" || name == "Shell_SecondaryTrayWnd"
+            || name == "SHELLDLL_DefView" || name == "SysListView32";
+    }
+    public static IntPtr OcclusionCheckedRoot(IntPtr pointRoot, IntPtr desktopRoot, bool pointIsOwnHint) {
+        // WindowFromPoint skips disabled windows. The desktop child hit keeps
+        // them, so disagreement can mean a disabled root occludes the apparent
+        // target. Never highlight the enabled window behind it. Own thin-edge
+        // hits may use the independently verified transparent-skipping result.
+        return desktopRoot != IntPtr.Zero && (pointIsOwnHint || pointRoot == desktopRoot) ? desktopRoot : IntPtr.Zero;
+    }
+    public static Rectangle CandidateFrame(CaptureHoverCandidate candidate, Point pointer) {
+        return candidate.RootKnown && candidate.Visible && !candidate.Minimized && candidate.CloakKnown && candidate.Cloaked == 0
+            && !candidate.OwnWindow && !candidate.ShellWindow && !candidate.ExcludedFromCapture
+            && !String.IsNullOrEmpty(candidate.ClassName) && !ShellClass(candidate.ClassName)
+            && candidate.Frame.Width > 0 && candidate.Frame.Height > 0 && candidate.Frame.Contains(pointer)
+            ? candidate.Frame : Rectangle.Empty;
+    }
+    public void Clear() { frame = Rectangle.Empty; }
+    public bool BeginQuery(long elapsed) {
+        if (elapsed < 0 || (queriedAt >= 0 && elapsed < queriedAt)) { Clear(); return false; }
+        if (queriedAt >= 0 && elapsed - queriedAt < QueryMilliseconds) return false;
+        queriedAt = elapsed; Clear(); // Failure must never reuse an old frame.
+        return true;
+    }
+    public void SetFrame(Rectangle value) { frame = value; }
+    public Rectangle Current(Point pointer, long elapsed, bool idle) {
+        if (!idle || queriedAt < 0 || elapsed < queriedAt || elapsed - queriedAt >= QueryMilliseconds) { Clear(); return Rectangle.Empty; }
+        return frame.Width > 0 && frame.Height > 0 && frame.Contains(pointer) ? frame : Rectangle.Empty;
+    }
+    public static int SelfTest() {
+        int assertions = 0;
+        Action<bool, string> check = delegate(bool value, string message) {
+            if (!value) throw new InvalidOperationException("SELF_TEST: " + message);
+            assertions++;
+        };
+        Rectangle bounds = Bounds(-1400, -200, 200, 700);
+        check(bounds == new Rectangle(-1400, -200, 1600, 900), "Hover frames must retain physical negative origins.");
+        check(Bounds(4, 0, 4, 100).IsEmpty && Bounds(Int32.MinValue, 0, Int32.MaxValue, 100).IsEmpty, "Empty/overflow hover frames must be rejected.");
+        Point pointer = new Point(-300, 100);
+        CaptureHoverCandidate valid = new CaptureHoverCandidate { Frame = bounds, ClassName = "GeneratedWindow", RootKnown = true, Visible = true, CloakKnown = true };
+        check(CandidateFrame(valid, pointer) == bounds, "Eligible real root metadata must keep its exact visible frame, without snapping the ROI.");
+        Action<CaptureHoverCandidate> reject = delegate(CaptureHoverCandidate bad) { check(CandidateFrame(bad, pointer).IsEmpty, "Ineligible/unknown hover metadata must fall back to the screen outline."); };
+        CaptureHoverCandidate candidate = valid; candidate.Visible = false; reject(candidate);
+        candidate = valid; candidate.Minimized = true; reject(candidate);
+        candidate = valid; candidate.CloakKnown = false; reject(candidate);
+        candidate = valid; candidate.Cloaked = 1; reject(candidate);
+        candidate = valid; candidate.OwnWindow = true; reject(candidate);
+        candidate = valid; candidate.ShellWindow = true; reject(candidate);
+        candidate = valid; candidate.ExcludedFromCapture = true; reject(candidate);
+        candidate = valid; candidate.RootKnown = false; reject(candidate);
+        candidate = valid; candidate.ClassName = null; reject(candidate);
+        foreach (string shell in new string[] { "Progman", "WorkerW", "Shell_TrayWnd", "Shell_SecondaryTrayWnd", "SHELLDLL_DefView", "SysListView32" }) { candidate = valid; candidate.ClassName = shell; reject(candidate); }
+        check(CandidateFrame(valid, new Point(200, 100)).IsEmpty, "Right/bottom frame edges are exclusive and cannot retain a stale hover.");
+        IntPtr enabled = new IntPtr(20), disabled = new IntPtr(30), hint = new IntPtr(40);
+        check(OcclusionCheckedRoot(enabled, enabled, false) == enabled, "Agreeing native roots must retain an ordinary window hint.");
+        check(OcclusionCheckedRoot(enabled, disabled, false) == IntPtr.Zero, "A disabled top window must prevent highlighting the enabled root behind it.");
+        check(OcclusionCheckedRoot(IntPtr.Zero, disabled, false) == IntPtr.Zero, "An unavailable direct hit cannot establish an ordinary hover root.");
+        check(OcclusionCheckedRoot(hint, enabled, true) == enabled, "A known own thin edge may use the independent transparent-skipping desktop hit.");
+        check(OcclusionCheckedRoot(hint, IntPtr.Zero, true) == IntPtr.Zero, "A failed underlying hit must not restore a previous hint.");
+        CaptureHoverPolicy policy = new CaptureHoverPolicy();
+        check(policy.BeginQuery(0), "The initial hover query must be available immediately."); policy.SetFrame(bounds);
+        check(policy.Current(pointer, 0, true) == bounds && !policy.BeginQuery(79), "Idle native metadata queries must be throttled.");
+        check(policy.Current(pointer, 80, true).IsEmpty, "An expired frame must never be reused.");
+        check(policy.BeginQuery(80) && policy.Current(pointer, 80, true).IsEmpty, "Beginning a replacement query must clear old geometry before native failure.");
+        policy.SetFrame(bounds);
+        check(policy.Current(pointer, 81, false).IsEmpty && policy.Current(pointer, 82, true).IsEmpty, "Dragging/completion must clear hover immediately without restoring cached geometry.");
+        check(!policy.BeginQuery(20) && policy.Current(pointer, 20, true).IsEmpty, "Backwards timestamps cannot restore an old frame.");
+        return assertions;
+    }
+}
+
+// Read-only native metadata, called only by the UI timer and never by a hook
+// or while selectionGate is held. A failed/ambiguous hint is simply omitted.
+sealed class CaptureHoverResolver {
+    [StructLayout(LayoutKind.Sequential)] struct FrameRect { public int left, top, right, bottom; }
+    [DllImport("user32.dll")] static extern IntPtr WindowFromPoint(Point point);
+    [DllImport("user32.dll")] static extern IntPtr GetAncestor(IntPtr window, uint kind);
+    [DllImport("user32.dll")] static extern IntPtr GetDesktopWindow();
+    [DllImport("user32.dll")] static extern IntPtr GetShellWindow();
+    [DllImport("user32.dll")] static extern bool ScreenToClient(IntPtr window, ref Point point);
+    [DllImport("user32.dll")] static extern IntPtr ChildWindowFromPointEx(IntPtr window, Point point, uint flags);
+    [DllImport("user32.dll")] static extern bool IsWindow(IntPtr window);
+    [DllImport("user32.dll")] static extern bool IsWindowVisible(IntPtr window);
+    [DllImport("user32.dll")] static extern bool IsIconic(IntPtr window);
+    [DllImport("user32.dll")] static extern uint GetWindowThreadProcessId(IntPtr window, out uint process);
+    [DllImport("user32.dll", CharSet=CharSet.Unicode)] static extern int GetClassName(IntPtr window, StringBuilder name, int capacity);
+    [DllImport("user32.dll")] static extern bool GetWindowDisplayAffinity(IntPtr window, out uint affinity);
+    [DllImport("dwmapi.dll", EntryPoint="DwmGetWindowAttribute")] static extern int DwmFrame(IntPtr window, uint attribute, out FrameRect value, int size);
+    [DllImport("dwmapi.dll", EntryPoint="DwmGetWindowAttribute")] static extern int DwmCloak(IntPtr window, uint attribute, out uint value, int size);
+    readonly ICollection<IntPtr> hints;
+    readonly uint process = (uint)Process.GetCurrentProcess().Id;
+    public CaptureHoverResolver(ICollection<IntPtr> ownHints) { hints = ownHints; }
+    bool OwnWindow(IntPtr window) {
+        if (window == IntPtr.Zero) return false;
+        uint owner; GetWindowThreadProcessId(window, out owner);
+        return owner == process || hints.Contains(window);
+    }
+    public Rectangle Resolve(Point pointer) {
+        IntPtr hit = WindowFromPoint(pointer), desktop = GetDesktopWindow();
+        IntPtr pointRoot = hit == IntPtr.Zero ? IntPtr.Zero : GetAncestor(hit, 2);
+        bool ownHint = hints.Contains(hit) || hints.Contains(pointRoot);
+        if (!ownHint && (OwnWindow(hit) || OwnWindow(pointRoot))) return Rectangle.Empty;
+        // Check real top-level occlusion on every throttled query, not only
+        // over our own bars. Unlike WindowFromPoint, this deliberately keeps
+        // disabled roots; skipping them could frame an obscured window behind.
+        // Convert physical screen coordinates, including negative displays.
+        Point client = pointer;
+        if (desktop == IntPtr.Zero || !ScreenToClient(desktop, ref client)) return Rectangle.Empty;
+        IntPtr desktopHit = ChildWindowFromPointEx(desktop, client, 0x1 | 0x4); // SKIPINVISIBLE | SKIPTRANSPARENT
+        IntPtr desktopRoot = desktopHit == IntPtr.Zero ? IntPtr.Zero : GetAncestor(desktopHit, 2);
+        IntPtr root = CaptureHoverPolicy.OcclusionCheckedRoot(pointRoot, desktopRoot, ownHint);
+        if (root == IntPtr.Zero || root == desktop || root == GetShellWindow() || OwnWindow(root)
+            || !IsWindow(root) || !IsWindowVisible(root) || IsIconic(root)) return Rectangle.Empty;
+        uint owner;
+        if (GetWindowThreadProcessId(root, out owner) == 0 || owner == 0) return Rectangle.Empty;
+        StringBuilder name = new StringBuilder(256);
+        if (GetClassName(root, name, name.Capacity) == 0 || CaptureHoverPolicy.ShellClass(name.ToString())) return Rectangle.Empty;
+        uint cloaked; FrameRect frame;
+        if (DwmCloak(root, 14, out cloaked, sizeof(uint)) != 0 || cloaked != 0
+            || DwmFrame(root, 9, out frame, Marshal.SizeOf(typeof(FrameRect))) != 0) return Rectangle.Empty;
+        // Optional documented read: failure is common for ordinary non-layered
+        // windows and does not imply exclusion. Never change another app's flag.
+        uint affinity; bool excluded = GetWindowDisplayAffinity(root, out affinity) && (affinity == 0x11 || affinity == 0x1);
+        uint after;
+        CaptureHoverCandidate candidate = new CaptureHoverCandidate {
+            Frame = CaptureHoverPolicy.Bounds(frame.left, frame.top, frame.right, frame.bottom), ClassName = name.ToString(),
+            RootKnown = IsWindow(root) && GetAncestor(root, 2) == root && GetWindowThreadProcessId(root, out after) != 0 && after == owner,
+            Visible = IsWindowVisible(root), Minimized = IsIconic(root), CloakKnown = true, Cloaked = cloaked,
+            OwnWindow = false, ShellWindow = false, ExcludedFromCapture = excluded
+        };
+        return CaptureHoverPolicy.CandidateFrame(candidate, pointer);
+    }
+}
+
 // A color-keyed, click-through HWND only as wide as the blue edge. Unlike a
 // full-screen DoubleBuffered Form, it cannot allocate/repaint a 4K frame for
 // each drag update. No activation, dimming, frozen screenshot or source pixels.
@@ -751,7 +904,7 @@ sealed class CaptureEdgeWindow : Form {
 sealed class CaptureOverlay : IDisposable {
     readonly Rectangle screen;
     readonly int index;
-    readonly CaptureEdgeWindow[] edges = new CaptureEdgeWindow[8];
+    readonly CaptureEdgeWindow[] edges = new CaptureEdgeWindow[12];
     public CaptureOverlay(Rectangle display, int screenIndex, uint dpi, Action onInvalidated, Action<IntPtr> register) {
         screen = display; index = screenIndex;
         try {
@@ -761,12 +914,13 @@ sealed class CaptureOverlay : IDisposable {
             }
         } catch { Dispose(); throw; }
     }
-    public void Present(int highlighted, Rectangle selected, bool raise) {
+    public void Present(int highlighted, Rectangle selected, Rectangle hovered, bool raise) {
         Rectangle[] border = CaptureOutlinePolicy.Edges(highlighted == index ? screen : Rectangle.Empty, screen);
         Rectangle outline = selected;
         if (outline.Width > 0 && outline.Height > 0) outline.Inflate(1, 1);
         Rectangle[] selection = CaptureOutlinePolicy.Edges(outline, screen);
-        for (int i = 0; i < 4; i++) { edges[i].Present(border[i], raise); edges[i + 4].Present(selection[i], raise); }
+        Rectangle[] window = CaptureOutlinePolicy.Edges(hovered, screen);
+        for (int i = 0; i < 4; i++) { edges[i].Present(border[i], raise); edges[i + 4].Present(selection[i], raise); edges[i + 8].Present(window[i], raise); }
     }
     public void Hide() { foreach (CaptureEdgeWindow edge in edges) if (edge != null) edge.Hide(); }
     public void Dispose() { foreach (CaptureEdgeWindow edge in edges) if (edge != null) { edge.Close(); edge.Dispose(); } }
@@ -897,11 +1051,14 @@ sealed class RegionPicker : ApplicationContext {
     readonly CaptureSelectionState state;
     readonly CaptureInputPolicy input = new CaptureInputPolicy();
     readonly CaptureTopologyPolicy topology;
+    readonly CaptureHoverPolicy hoverPolicy = new CaptureHoverPolicy();
+    readonly CaptureHoverResolver hoverResolver;
     readonly object selectionGate = new object();
     CaptureInputPump inputPump;
     bool stopping, cleaned, observing;
     int renderedHighlight = -2;
     Rectangle renderedSelection;
+    Rectangle renderedHover;
     long lastRaise = -250;
     string failure;
     public RegionPicker() {
@@ -916,6 +1073,7 @@ sealed class RegionPicker : ApplicationContext {
         observing = true;
         try {
             for (int i = 0; i < rectangles.Length; i++) overlays.Add(new CaptureOverlay(rectangles[i], i, displays[i].Dpi, InvalidateEnvironment, handles.Add));
+            hoverResolver = new CaptureHoverResolver(handles);
         } catch { Dispose(); throw; }
         timer.Interval = 16;
         timer.Tick += Tick;
@@ -967,7 +1125,7 @@ sealed class RegionPicker : ApplicationContext {
     }
     void Tick(object sender, EventArgs args) {
         long elapsed = lifetime.ElapsedMilliseconds;
-        bool raise = elapsed - lastRaise >= 250, finished, mayStop, releaseExceeded;
+        bool raise = elapsed - lastRaise >= 250, finished, dragging, mayStop, releaseExceeded;
         int highlighted; Rectangle selected; Point pointer;
         if (!GetPhysicalCursorPos(out pointer)) failure = "CAPTURE: Windows could not read the capture pointer.";
         if (inputPump != null && (inputPump.Failure != null || !inputPump.Running)) failure = inputPump.Failure ?? "CAPTURE_INPUT: The selection input listener stopped; no screenshot was taken.";
@@ -982,9 +1140,20 @@ sealed class RegionPicker : ApplicationContext {
             if (input.EscapeCancelled || failure != null) state.Cancel();
             state.Expire(elapsed);
             if (!state.Finished) state.Move(pointer);
-            finished = state.Finished; highlighted = state.Highlighted; selected = state.Selected;
+            finished = state.Finished; dragging = state.Dragging; highlighted = state.Highlighted; selected = state.Selected;
             mayStop = input.MayStop(finished, elapsed); releaseExceeded = input.ReleaseGraceExceeded;
         }
+        Rectangle hovered = Rectangle.Empty;
+        if (!finished && !dragging && highlighted >= 0) {
+            if (hoverPolicy.BeginQuery(elapsed)) {
+                try { hoverPolicy.SetFrame(hoverResolver.Resolve(pointer)); }
+                catch { hoverPolicy.Clear(); } // A decorative hint cannot invalidate free ROI selection.
+            }
+            hovered = hoverPolicy.Current(pointer, lifetime.ElapsedMilliseconds, true);
+        } else hoverPolicy.Clear();
+        // The input pump may begin/end a drag while metadata is being queried.
+        // Recheck only phase under its short lock; native queries stay outside.
+        lock (selectionGate) if (state.Dragging || state.Finished) { hovered = Rectangle.Empty; hoverPolicy.Clear(); }
         if (finished) {
             if (!stopping) { stopping = true; foreach (CaptureOverlay overlay in overlays) overlay.Hide(); }
             // Keep a short bounded drain for matching mouse/Escape releases.
@@ -993,9 +1162,9 @@ sealed class RegionPicker : ApplicationContext {
                     failure = "CAPTURE_INPUT_RELEASE: Selection stopped while a button or Escape was still held. Release it before retrying; no screenshot was taken.";
                 ExitThread();
             }
-        } else if (raise || renderedHighlight != highlighted || renderedSelection != selected) {
-            renderedHighlight = highlighted; renderedSelection = selected;
-            try { foreach (CaptureOverlay overlay in overlays) overlay.Present(highlighted, selected, raise); }
+        } else if (raise || renderedHighlight != highlighted || renderedSelection != selected || renderedHover != hovered) {
+            renderedHighlight = highlighted; renderedSelection = selected; renderedHover = hovered;
+            try { foreach (CaptureOverlay overlay in overlays) overlay.Present(highlighted, selected, hovered, raise); }
             catch (Exception error) {
                 failure = error is InvalidOperationException && error.Message.StartsWith("CAPTURE_", StringComparison.Ordinal)
                     ? error.Message : "CAPTURE_OVERLAY: Windows could not update the selection border; no screenshot was taken.";

@@ -2,6 +2,12 @@
 
 Updated: 2026-10-25, Asia/Shanghai. Stage: v0.1.0 preview hardening and acceptance.
 
+## 2026-10-27 Windows OCR hover-window guidance in verification
+
+Added a metadata-only blue frame around the actual application root under the pointer, alongside the current-display screen border. Starting left-drag clears the window hint and keeps the existing arbitrary-region OCR → source fill → automatic translation flow. Desktop/shell, unknown, own/excluded and mismatched occlusion metadata keep only the screen edge. Four extra thin HWNDs per display replace no full-screen surface; queries are throttled to80ms and stay off the input-hook thread. No text, title, screenshot or credential is read for a hint; no focus, security or permission change.
+
+C#5/net48 compilation, PowerShell7 AST and76 production pure capture-policy assertions (30hover) passed on the host. An independent review's disabled-window occlusion issue was repaired by checking the direct root against a desktop-child hit which retains disabled windows. Actual Windows hint-switch/free-ROI/pixel and complete app/installer regressions remain pending. This change is Windows-first; the installed Mac7eafe813 bundle and local stopped Win10VM are untouched. Do not treat host checks as Windows runtime acceptance.
+
 ## Latest work: cancellation, language fidelity and repeatable verification
 - Translation requests now have backend tickets and a presentation epoch. Edit, clear, Stop, Escape, close, outside-click hide and a new capture abort the old HTTP future. A hide before ticket allocation also invalidates the request; stale hide/source events or delayed layout cannot resurrect an abandoned popup.
 - Cancelled/superseded translations cannot commit history. Completion uses current privacy settings; clearing all history invalidates pending begins. Byte accounting includes JSON array delimiters, and a single oversized result is discarded before it can evict other healthy records.

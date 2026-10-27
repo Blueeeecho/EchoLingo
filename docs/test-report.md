@@ -2,6 +2,12 @@
 
 更新时间：2026-10-25，Asia/Shanghai。本报告分别记录本机执行、CI 和真实桌面边界，未运行不算通过。[本轮原始本机证据](validation/macos-preview-20261025.json)。
 
+## 2026-10-27 Windows 悬停窗口蓝框（真实回归待执行）
+
+Windows Alt+S待机保留当前屏幕蓝边，并以DWM实际窗口边界提示鼠标悬停的应用。开始左拖清除悬停提示，继续任意区域OCR→原文填入→自动翻译，不吸附、不单击整窗截图。使用每屏额外4个薄边HWND，80ms元数据查询在UI线程，不进入同步hook；未知、桌面/任务栏、自身/排除或遮挡不一致仅保留屏幕框。
+
+最终helper4a3674ff…已通过C#5/net48交叉编译、PS7AST及76项生产纯策略实际.NET8执行（含30hover）。审阅发现WindowFromPoint忽略disabled窗而可能误框下层，已用不跳过disabled的desktop-child hit保守核对修正。真实A/B/disabled遮挡/shell提示切换、自由ROI、无边框像素及完整app/NSIS回归仍待WindowsCI，不以host结果代替。Mac对应功能未实现；canonical7eafe813与已停止的本机Win10VM未操作。
+
 ## 本轮完成
 
 | 验证项 | 结果 | 覆盖与限制 |
