@@ -200,19 +200,35 @@ jobs:
         timeout-minutes: 4
         shell: powershell
         run: |
-          # Windows PowerShell's default Stop preference aborts on native
-          # stderr before the captured output can be saved. Keep the actual
-          # Node exit code and preserve every diagnostic line in finally.
+          # Drive the real packaged settings through UIA and Win32 input.
+          # Preserve raw failures; no remote-debugging or restricted-token setup.
           $ErrorActionPreference = 'Continue'
           $output = @(); $fixtureExit = 1
           $global:LASTEXITCODE = 1 # A missing/unlaunchable node must never reuse a null/success exit code.
           try {
-            $output = @(& powershell.exe -NoProfile -STA -ExecutionPolicy Bypass -File tests/windows-shortcuts-ui-medium.ps1 -ApplicationPath src-tauri/target/release/echolingo.exe -IsolatedTestSession 2>&1)
+            $candidate = (Resolve-Path src-tauri/target/release/echolingo.exe).Path
+            $hash = (Get-FileHash -LiteralPath $candidate -Algorithm SHA256).Hash.ToLowerInvariant()
+            $bytes = (Get-Item -LiteralPath $candidate).Length
+            $output = @(& powershell.exe -NoProfile -STA -ExecutionPolicy Bypass -File tests/windows-shortcuts-uia-smoke.ps1 -ApplicationPath $candidate -ExpectedApplicationSha256 $hash -ExpectedApplicationBytes $bytes -IsolatedTestSession 2>&1)
             $fixtureExit = $LASTEXITCODE
           } finally {
             $output | Out-File "$env:RUNNER_TEMP/echolingo-shortcuts-ui.log" -Encoding utf8
             $output | Write-Output
           }
+          exit $fixtureExit
+      - name: Actual custom selected-text and OCR shortcut workflows
+        id: windows_custom_shortcuts
+        if: runner.os == 'Windows'
+        continue-on-error: true
+        timeout-minutes: 3
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Continue'
+          $global:LASTEXITCODE = 1
+          $output = @(& powershell.exe -NoProfile -STA -ExecutionPolicy Bypass -File tests/windows-application-smoke.ps1 -ApplicationPath src-tauri/target/release/echolingo.exe -CustomShortcutsTests 2>&1)
+          $fixtureExit = $LASTEXITCODE
+          $output | Out-File "$env:RUNNER_TEMP/echolingo-custom-shortcuts.log" -Encoding utf8
+          $output | Write-Output
           exit $fixtureExit
       - name: Windows live transparent region selector desktop smoke
         id: windows_live_capture
@@ -317,6 +333,7 @@ jobs:
             ${{ runner.temp }}/echolingo-offline-validation.json
             ${{ runner.temp }}/echolingo-shortcut-install.log
             ${{ runner.temp }}/echolingo-shortcuts-ui.log
+            ${{ runner.temp }}/echolingo-custom-shortcuts.log
             ${{ runner.temp }}/echolingo-native-delegated-capture.log
             ${{ runner.temp }}/echolingo-helper-performance.log
             ${{ runner.temp }}/echolingo-selection-document.log
@@ -353,6 +370,7 @@ jobs:
             installedOffline = '${{ steps.windows_installed_offline.outcome }}'
             shortcutInstall = '${{ steps.windows_shortcut_install.outcome }}'
             shortcutsUi = '${{ steps.windows_shortcuts_ui.outcome }}'
+            customShortcuts = '${{ steps.windows_custom_shortcuts.outcome }}'
             helperPerformance = '${{ steps.windows_helper_performance.outcome }}'
             delegatedCapture = '${{ steps.windows_delegated_capture.outcome }}'
             selectionDocument = '${{ steps.windows_selection_document.outcome }}'
@@ -792,7 +810,9 @@ jobs:
             sourceArtifactApiDigest = if ($current) { 'sha256:94e355b8d0e9d713ad2d0329ed01f22961252ff5e6c8f05397458ff34bef9a5d' } else { 'sha256:74145ae5b69cb755124cc2e565cc9d287206f435b20b5d830c4c0ffd7c5dd33d' }
             stagedBytes = $candidateFiles[0].Length
             stagedSha256 = $candidateHash
-            checkoutFixtureSha256 = (Get-FileHash tests/windows-shortcuts-ui.mjs -Algorithm SHA256).Hash.ToLowerInvariant()
+            checkoutFixtureSha256 = if ($current) { (Get-FileHash tests/windows-shortcuts-uia-smoke.ps1 -Algorithm SHA256).Hash.ToLowerInvariant() } else { (Get-FileHash tests/windows-shortcuts-ui.mjs -Algorithm SHA256).Hash.ToLowerInvariant() }
+            checkoutUiaCSharpSha256 = if ($current) { (Get-FileHash tests/windows-shortcuts-uia-fixture.cs -Algorithm SHA256).Hash.ToLowerInvariant() } else { $null }
+            driver = if ($current) { 'real-UIA-and-Win32; normal hosted token' } else { 'historical-CDP-toolchain' }
           }
           $identity | ConvertTo-Json -Compress | Tee-Object -FilePath "$env:RUNNER_TEMP/echolingo-shortcuts-ui-identity.json"
           "path=$candidatePath" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
@@ -809,7 +829,9 @@ jobs:
           $output = @(); $fixtureExit = 1
           $global:LASTEXITCODE = 1 # A missing/unlaunchable node must never reuse a null/success exit code.
           try {
-            if ($env:ECHOLINGO_SHORTCUT_UI_MEDIUM -eq 'true') {
+            if ('${{ github.event.inputs.mode }}' -eq 'windows-shortcuts-current-diagnostics') {
+              $output = @(& powershell.exe -NoProfile -STA -ExecutionPolicy Bypass -File tests/windows-shortcuts-uia-smoke.ps1 -ApplicationPath $env:ECHOLINGO_SHORTCUT_UI_CANDIDATE -ExpectedApplicationSha256 '3e767c7046adcf8ef6b137f5811b0966efc8613f671f1f3d575f185b3c074539' -ExpectedApplicationBytes 5825536 -IsolatedTestSession 2>&1)
+            } elseif ($env:ECHOLINGO_SHORTCUT_UI_MEDIUM -eq 'true') {
               $output = @(& powershell.exe -NoProfile -STA -ExecutionPolicy Bypass -File tests/windows-shortcuts-ui-medium.ps1 -ApplicationPath $env:ECHOLINGO_SHORTCUT_UI_CANDIDATE -IsolatedTestSession 2>&1)
             } else {
               $output = @(node tests/windows-shortcuts-ui.mjs $env:ECHOLINGO_SHORTCUT_UI_CANDIDATE --isolated-test-session 2>&1)
@@ -820,6 +842,20 @@ jobs:
             $output | Write-Output
           }
           exit $fixtureExit
+      - name: Loaded custom bindings execute selected-text and native OCR
+        if: github.event.inputs.mode == 'windows-shortcuts-current-diagnostics'
+        id: custom
+        continue-on-error: true
+        timeout-minutes: 3
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Continue'
+          $global:LASTEXITCODE = 1
+          $output = @(& powershell.exe -NoProfile -STA -ExecutionPolicy Bypass -File tests/windows-application-smoke.ps1 -ApplicationPath '${{ steps.candidate.outputs.path }}' -CustomShortcutsTests 2>&1)
+          $fixtureExit = $LASTEXITCODE
+          $output | Out-File "$env:RUNNER_TEMP/echolingo-custom-shortcuts.log" -Encoding utf8
+          $output | Write-Output
+          exit $fixtureExit
       - uses: actions/upload-artifact@v4
         if: always()
         with:
@@ -827,6 +863,7 @@ jobs:
           if-no-files-found: warn
           path: |
             ${{ runner.temp }}/echolingo-shortcuts-ui.log
+            ${{ runner.temp }}/echolingo-custom-shortcuts.log
             ${{ runner.temp }}/echolingo-shortcuts-ui-identity.json
       - name: Gate targeted shortcut UI raw outcome
         if: always()
@@ -834,7 +871,9 @@ jobs:
         run: |
           $outcome = '${{ steps.shortcuts_ui.outcome }}'
           [ordered]@{ scope = 'targeted-shortcut-ui-only'; shortcutUi = $outcome } | ConvertTo-Json -Compress
-          if ($outcome -ne 'success') { throw 'Targeted actual shortcut UI diagnostics incomplete or failed.' }
+          $custom = '${{ steps.custom.outcome }}'
+          [ordered]@{ scope = 'Configured custom-key real workflows; separate from UI save/restart checks'; customShortcutWorkflows = $custom } | ConvertTo-Json -Compress
+          if ($outcome -ne 'success' -or ('${{ github.event.inputs.mode }}' -eq 'windows-shortcuts-current-diagnostics' -and $custom -ne 'success')) { throw 'Targeted actual shortcut UI or configured workflows incomplete or failed.' }
 
   windows-browser-diagnostics:
     name: Actual installed browser selected-text diagnostics (${{ matrix.browser_order }})

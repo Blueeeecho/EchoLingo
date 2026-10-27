@@ -1,8 +1,9 @@
 # Real built-app integration, restricted to an ephemeral GitHub-hosted Windows
 # desktop. Never run this against a user's installed app or existing app data.
 # It creates generated source content, a loopback mock and empty owned app dirs.
+# CustomShortcutsTests exercises loaded custom bindings, not Settings UI saving.
 [CmdletBinding()]
-param([string]$ApplicationPath = '', [switch]$OfflineTranslation, [switch]$InstalledPackage, [switch]$LatestIntentTests)
+param([string]$ApplicationPath = '', [switch]$OfflineTranslation, [switch]$InstalledPackage, [switch]$LatestIntentTests, [switch]$CustomShortcutsTests)
 $ErrorActionPreference = 'Stop'
 [Console]::OutputEncoding = [Text.UTF8Encoding]::new($false)
 try {
@@ -18,6 +19,7 @@ try {
         $ApplicationPath = Join-Path $PSScriptRoot '..\src-tauri\target\release\echolingo.exe'
     }
     if ($LatestIntentTests -and $OfflineTranslation) { throw 'LATEST_INTENT_MOCK_ONLY: Existing three offline-model flows are unchanged.' }
+    if ($CustomShortcutsTests -and ($OfflineTranslation -or $LatestIntentTests)) { throw 'CUSTOM_SHORTCUTS_MOCK_ONLY: Run the three loaded-custom-bindings workflows separately from offline/latest-intent modes.' }
     $ApplicationPath = (Resolve-Path -LiteralPath $ApplicationPath).Path
     Add-Type -AssemblyName System.Windows.Forms
     Add-Type -AssemblyName System.Drawing
@@ -78,6 +80,8 @@ public static class EchoLingoApplicationSmoke {
     [DllImport("dwmapi.dll")] static extern int DwmGetWindowAttribute(IntPtr window, uint attribute, out RECT rectangle, int size);
     [DllImport("user32.dll", EntryPoint="GetWindowLongPtrW")] static extern IntPtr GetWindowLongPtr(IntPtr window, int index);
     [DllImport("user32.dll")] static extern uint SendInput(uint count, INPUT[] input, int size);
+    [DllImport("user32.dll", SetLastError=true)] static extern bool RegisterHotKey(IntPtr window, int id, uint modifiers, uint key);
+    [DllImport("user32.dll", SetLastError=true)] static extern bool UnregisterHotKey(IntPtr window, int id);
     [DllImport("user32.dll")] static extern bool SetProcessDpiAwarenessContext(IntPtr context);
     [DllImport("user32.dll")] static extern IntPtr SetThreadDpiAwarenessContext(IntPtr context);
     [DllImport("user32.dll")] static extern bool GetPhysicalCursorPos(out Point point);
@@ -95,10 +99,18 @@ public static class EchoLingoApplicationSmoke {
     static void RequireForeground(Form form) { Assert(GetForegroundWindow() == form.Handle, "Generated source lost foreground; no input sent elsewhere."); }
     static INPUT Key(ushort key, bool up) { INPUT input = new INPUT(); input.type = 1; input.data.keyboard.vk = key; input.data.keyboard.flags = up ? 2U : 0U; return input; }
     static void Send(INPUT[] input) { Assert(SendInput((uint)input.Length, input, Marshal.SizeOf(typeof(INPUT))) == input.Length, "Windows rejected generated fixture input."); }
-    static void Shortcut(Form form, ushort key) {
+    static void Shortcut(Form form, ushort key, bool customBindings=false) {
         RequireForeground(form);
         // Exactly one hotkey; do not retry and conceal a lost first event.
-        Send(new INPUT[] { Key(0x12, false), Key(key, false), Key(key, true), Key(0x12, true) });
+        Send(customBindings ? new INPUT[] { Key(0x11, false), Key(0x12, false), Key(0x10, false), Key(key, false), Key(key, true), Key(0x10, true), Key(0x12, true), Key(0x11, true) }
+            : new INPUT[] { Key(0x12, false), Key(key, false), Key(key, true), Key(0x12, true) });
+    }
+    static Dictionary<string, object> ProbeHotkey(int id, string name, uint modifiers, uint key, bool available) {
+        bool registered = RegisterHotKey(IntPtr.Zero, id, modifiers, key);
+        int error = registered ? 0 : Marshal.GetLastWin32Error();
+        if (registered) Assert(UnregisterHotKey(IntPtr.Zero, id), "Could not release the fixture's temporary hotkey probe: " + name);
+        Assert(registered == available && (available || error == 1409), "Unexpected independent hotkey availability: " + name + "; Win32=" + error);
+        return new Dictionary<string, object> { { "shortcut", name }, { "available", registered }, { "win32Error", error }, { "probeHoldsRegistration", false }, { "ownershipAttributedByProbeAlone", false } };
     }
     static void TypeIntoApp(int processId) {
         Assert(ForegroundPid() == processId, "Blank popup did not become foreground; no text sent elsewhere.");
@@ -109,12 +121,14 @@ public static class EchoLingoApplicationSmoke {
         }
         input.Add(Key(0x0D, false)); input.Add(Key(0x0D, true)); Send(input.ToArray());
     }
-    static void ReleaseOwnInput(Form form, Process app) {
+    static void ReleaseOwnInput(Form form, Process app, bool customBindings=false) {
         // A failed partial SendInput must not leave a generated modifier/button
         // held. Restrict these releases to our source or our own actual app.
         if (GetForegroundWindow() != form.Handle && (app == null || ForegroundPid() != app.Id)) return;
         INPUT mouse = new INPUT(); mouse.data.mouse.flags = 4;
-        INPUT[] input = new INPUT[] { Key(0x12, true), Key(0x44, true), Key(0x53, true), Key(0x0D, true), mouse };
+        INPUT[] input = customBindings
+            ? new INPUT[] { Key(0x11, true), Key(0x12, true), Key(0x10, true), Key(0x78, true), Key(0x79, true), Key(0x0D, true), mouse }
+            : new INPUT[] { Key(0x12, true), Key(0x44, true), Key(0x53, true), Key(0x0D, true), mouse };
         SendInput((uint)input.Length, input, Marshal.SizeOf(typeof(INPUT)));
     }
     static string KnownFolder(string id) {
@@ -356,6 +370,9 @@ public static class EchoLingoApplicationSmoke {
             new OrCondition(new PropertyCondition(AutomationElement.AutomationIdProperty,"source-text"),new PropertyCondition(AutomationElement.NameProperty,"\u539f\u6587"))));
         object pattern;return element!=null&&!element.Current.IsOffscreen&&element.TryGetCurrentPattern(ValuePattern.Pattern,out pattern)&&String.Equals(((ValuePattern)pattern).Current.Value,expected,foldCase?StringComparison.OrdinalIgnoreCase:StringComparison.Ordinal);
     }
+    static bool AppSourceMatches(int process, string expected, bool foldCase=false) {
+        IntPtr main = MainWindow(process); return main != IntPtr.Zero && SourceMatches(main, expected, foldCase);
+    }
     static Dictionary<string,object> MainMetadata(Process app) {
         IntPtr main=MainWindow(app.Id);uint affinity;bool affinityOk=GetWindowDisplayAffinity(main,out affinity);int affinityError=affinityOk?0:Marshal.GetLastWin32Error();RECT r;bool rectOk=GetWindowRect(main,out r);
         return new Dictionary<string,object>{{"mainHwnd",WindowId(main)},{"mainProcessId",app.Id},{"visible",main!=IntPtr.Zero&&IsWindowVisible(main)},
@@ -542,8 +559,9 @@ public static class EchoLingoApplicationSmoke {
         using (Process command = Process.Start(stop)) { command.StandardOutput.ReadToEnd(); command.StandardError.ReadToEnd(); Assert(command.WaitForExit(10000), "Own process-tree cleanup timed out."); }
         Assert(app.WaitForExit(5000), "Own application did not exit during cleanup.");
     }
-    public static Dictionary<string, object> Run(string executable, bool offline, bool installed, bool latest) {
+    public static Dictionary<string, object> Run(string executable, bool offline, bool installed, bool latest, bool customBindings) {
         Assert(!latest||!offline,"Latest-intent extra tests are mock-only.");
+        Assert(!customBindings||(!offline&&!latest),"Loaded-custom-bindings workflows require their own mock-only run.");
         Offline = offline; ActualTranslations.Clear();
         Dictionary<string, object> report = new Dictionary<string, object>(); List<string> passed = new List<string>();
         report["ok"] = false; report["passed"] = passed; report["actualApplicationTested"] = false;
@@ -551,6 +569,20 @@ public static class EchoLingoApplicationSmoke {
         report["credentialsCreated"] = false; report["credentialAccessScope"] = offline ? "None: bundled offline provider" : "One random absent provider account; no existing credential or key supplied";
         report["translationBackend"] = offline ? "real-bundled-offline-model" : "loopback-mock";
         report["multiMonitorTested"] = false; report["fullscreenTested"] = false; report["installedPackageTested"] = installed;
+        string selectionShortcut = customBindings ? "Ctrl+Alt+Shift+F9" : "Alt+D", silentOcrShortcut = customBindings ? "Ctrl+Alt+Shift+F10" : "Alt+S";
+        ushort selectionKey = customBindings ? (ushort)0x78 : (ushort)0x44, silentOcrKey = customBindings ? (ushort)0x79 : (ushort)0x53;
+        List<Dictionary<string, object>> customCases = new List<Dictionary<string, object>>();
+        Dictionary<string, object> hotkeys = new Dictionary<string, object>();
+        if (customBindings) {
+            report["customShortcutsTestsRequested"] = true; report["shortcutWorkflow"] = "loaded-custom-bindings";
+            report["startupSettingsWrittenDirectly"] = true;
+            report["settingsUiSaveTested"] = false; report["restartPersistenceTested"] = false;
+            report["selectionShortcut"] = selectionShortcut; report["silentOcrShortcut"] = silentOcrShortcut;
+            report["customShortcutRequiredWorkflowCount"] = 3; report["customShortcutCases"] = customCases;
+            report["customShortcutExecutedWorkflowCount"] = 0; report["customShortcutPassedWorkflowCount"] = 0;
+            report["hotkeyAvailability"] = hotkeys; report["customBindingCallbacksProveApplicationOwnership"] = false;
+            report["uiAutomationSelectorsUsed"] = true;
+        }
         string token = Guid.NewGuid().ToString("N"), providerId = offline ? "offline-translation" : "ci-application-" + Guid.NewGuid().ToString("N");
         List<string> owned = new List<string>(); Process app = null;
         string root = Path.Combine(Path.GetTempPath(), "echolingo-app-smoke-" + token);
@@ -571,7 +603,7 @@ public static class EchoLingoApplicationSmoke {
                     { "providers", new object[] { new Dictionary<string, object> { { "id", providerId }, { "name", offline ? "Real bundled offline model" : "Loopback generated fixture" }, { "kind", offline ? "offline" : "libretranslate" }, { "baseUrl", offline ? "" : server.Url }, { "model", "" }, { "enabled", true }, { "prompt", "" } } } },
                     { "ocrProviders", new object[0] }, { "activeOcrProviderId", null }, { "sourceLanguage", "auto" }, { "targetLanguage", "auto" },
                     { "languageDirectionVersion", 1 }, { "shortcutDefaultsVersion", 1 }, { "saveHistory", true }, { "maxHistory", 20 }, { "theme", "light" }, { "autoHideSeconds", 0 },
-                    { "shortcuts", new Dictionary<string, object> { { "selection", "Alt+D" }, { "capture", "" }, { "ocr", "Alt+Shift+S" }, { "silentOcr", "Alt+S" }, { "input", "Alt+A" } } }
+                    { "shortcuts", new Dictionary<string, object> { { "selection", selectionShortcut }, { "capture", "" }, { "ocr", "Alt+Shift+S" }, { "silentOcr", silentOcrShortcut }, { "input", "Alt+A" } } }
                 };
                 File.WriteAllText(Path.Combine(roaming, "settings.json"), json.Serialize(settings), new UTF8Encoding(false));
                 SetProcessDpiAwarenessContext(new IntPtr(-4));
@@ -596,25 +628,35 @@ public static class EchoLingoApplicationSmoke {
                                 start.EnvironmentVariables["LOCALAPPDATA"] = childLocal;
                                 start.EnvironmentVariables["TEMP"] = childTemp; start.EnvironmentVariables["TMP"] = childTemp;
                                 start.EnvironmentVariables["WEBVIEW2_USER_DATA_FOLDER"] = Path.Combine(local, "webview-fixture");
+                                if (customBindings) hotkeys["beforeApplicationStart"] = new object[] {
+                                    ProbeHotkey(0x6E19, selectionShortcut, 7, 0x78, true), ProbeHotkey(0x6E1A, silentOcrShortcut, 7, 0x79, true),
+                                    ProbeHotkey(0x6E1B, "Alt+D", 1, 0x44, true), ProbeHotkey(0x6E1C, "Alt+S", 1, 0x53, true) };
                                 app = Process.Start(start); report["applicationProcessId"] = app.Id; report["actualApplicationTested"] = true;
                                 try { Assert(app.WaitForInputIdle(15000), "Actual app did not become input-idle."); } catch (InvalidOperationException) { throw new InvalidOperationException("Actual app has no observable GUI message loop."); }
                                 WaitFor(delegate { return AppWindows(app.Id, false).Count > 0; }, 20, "Actual app native window was not created.", app);
                                 // Message-loop readiness is not frontend subscription readiness.
                                 // Warm the actual packaged WebView once; do not repeat shortcuts.
                                 Thread.Sleep(4000);
+                                if (customBindings) hotkeys["afterApplicationStart"] = new object[] {
+                                    ProbeHotkey(0x6E19, selectionShortcut, 7, 0x78, false), ProbeHotkey(0x6E1A, silentOcrShortcut, 7, 0x79, false),
+                                    ProbeHotkey(0x6E1B, "Alt+D", 1, 0x44, true), ProbeHotkey(0x6E1C, "Alt+S", 1, 0x53, true) };
                                 OnUi(form, delegate { form.Activate(); SetForegroundWindow(form.Handle); source.Focus(); source.Select(7, Selected.Length); }); Thread.Sleep(150);
-                                Shortcut(form, 0x44);
-                                WaitFor(delegate { if (server != null && server.Error != null) throw new InvalidOperationException(server.Error); return HasHistory(history, Selected, "selection", providerId); }, 45, "Alt+D never produced valid translation/history from the configured backend.", app);
+                                Shortcut(form, selectionKey, customBindings);
+                                if (customBindings) report["customShortcutExecutedWorkflowCount"] = 1;
+                                WaitFor(delegate { if (server != null && server.Error != null) throw new InvalidOperationException(server.Error); return HasHistory(history, Selected, "selection", providerId) && (!customBindings || AppSourceMatches(app.Id, Selected)); }, 45, selectionShortcut + (customBindings ? " never produced valid source/translation/history from the configured backend." : " never produced valid translation/history from the configured backend."), app);
                                 Assert(server == null || server.Count == 1, "Selection triggered duplicate or unrelated requests.");
                                 RequireForeground(form); List<Dictionary<string, object>> passive = AppWindows(app.Id, true);
                                 Assert(passive.Count == 1 && (bool)passive[0]["topmost"], "Selection popup was not a visible topmost own window."); report["selectionWindow"] = passive[0];
-                                passed.Add("Actual Alt+D -> native source selection -> frontend automatic translation -> " + (offline ? "real offline en-zh model" : "loopback mock") + " -> durable synthetic history; source foreground preserved");
+                                passed.Add("Actual " + selectionShortcut + " -> native source selection -> frontend automatic translation -> " + (offline ? "real offline en-zh model" : "loopback mock") + " -> durable synthetic history; source foreground preserved");
+                                if (customBindings) customCases.Add(new Dictionary<string, object> { { "workflow", "selection" }, { "shortcut", selectionShortcut }, { "hotkeyPresses", 1 }, { "actualSourceMatched", true }, { "mockRequestsAfter", server.Count }, { "durableHistoryMatched", true }, { "ok", true } });
                                 OnUi(form, delegate { form.Activate(); SetForegroundWindow(form.Handle); source.Focus(); source.Select(0, 0); }); Thread.Sleep(150);
-                                Shortcut(form, 0x44);
-                                WaitFor(delegate { return ForegroundPid() == app.Id; }, 15, "Empty Alt+D did not focus the actual application.", app); Thread.Sleep(150); TypeIntoApp(app.Id);
-                                WaitFor(delegate { if (server != null && server.Error != null) throw new InvalidOperationException(server.Error); return HasHistory(history, Typed, "typed", providerId); }, 45, "Blank popup typing+Enter did not translate exact full text.", app);
+                                Shortcut(form, selectionKey, customBindings);
+                                if (customBindings) report["customShortcutExecutedWorkflowCount"] = 2;
+                                WaitFor(delegate { return ForegroundPid() == app.Id; }, 15, "Empty " + selectionShortcut + " did not focus the actual application.", app); Thread.Sleep(150); TypeIntoApp(app.Id);
+                                WaitFor(delegate { if (server != null && server.Error != null) throw new InvalidOperationException(server.Error); return HasHistory(history, Typed, "typed", providerId) && (!customBindings || AppSourceMatches(app.Id, Typed)); }, 45, "Blank popup typing+Enter did not translate exact full text.", app);
                                 Assert(server == null || server.Count == 2, "Empty selection or typed submission sent duplicate/unexpected requests.");
-                                passed.Add("Actual empty Alt+D -> focused blank source -> first Unicode SendInput text + Enter -> " + (offline ? "real offline zh-en model" : "second mock") + "/history");
+                                passed.Add("Actual empty " + selectionShortcut + " -> focused blank source -> first Unicode SendInput text + Enter -> " + (offline ? "real offline zh-en model" : "second mock") + "/history");
+                                if (customBindings) customCases.Add(new Dictionary<string, object> { { "workflow", "empty-selection-typing" }, { "shortcut", selectionShortcut }, { "hotkeyPresses", 1 }, { "actualSourceMatched", true }, { "mockRequestsAfter", server.Count }, { "durableHistoryMatched", true }, { "ok", true } });
                                 OnUi(form, delegate { form.Activate(); SetForegroundWindow(form.Handle); source.Focus(); source.Select(0, 0); }); Thread.Sleep(150);
                                 Point first = Point.Empty, last = Point.Empty;
                                 Rectangle pointerDisplay = Rectangle.Empty;
@@ -632,18 +674,26 @@ public static class EchoLingoApplicationSmoke {
                                 // cannot satisfy the readiness condition.
                                 move(first);
                                 Dictionary<string, object> ocrReady = new Dictionary<string, object>(); report["ocrOverlayReadiness"] = ocrReady;
-                                Shortcut(form, 0x53);
+                                Shortcut(form, silentOcrKey, customBindings);
+                                if (customBindings) report["customShortcutExecutedWorkflowCount"] = 3;
                                 Stopwatch readyElapsed = Stopwatch.StartNew();
                                 WaitFor(delegate { return AppOcrReady(form, app.Id, ocrSource, ocrSourceFrame, first, pointerDisplay, ocrReady); }, 25,
-                                    "Actual Alt+S did not create exact screen and generated-source hover thin edge perimeters.", app);
+                                    "Actual " + silentOcrShortcut + " did not create exact screen and generated-source hover thin edge perimeters.", app);
                                 ocrReady["observedAfterHotkeyMilliseconds"] = readyElapsed.Elapsed.TotalMilliseconds;
                                 move(first); Thread.Sleep(100); INPUT down = new INPUT(); down.data.mouse.flags = 2; Send(new INPUT[] { down }); Thread.Sleep(100); move(last); Thread.Sleep(100);
                                 RequireForeground(form); INPUT up = new INPUT(); up.data.mouse.flags = 4; Send(new INPUT[] { up });
-                                WaitFor(delegate { if (server != null && server.Error != null) throw new InvalidOperationException(server.Error); return HasHistory(history, OcrText, "ocr", providerId); }, 50, "Actual Alt+S left-drag OCR did not fill/translate exact generated text.", app);
+                                WaitFor(delegate { if (server != null && server.Error != null) throw new InvalidOperationException(server.Error); return HasHistory(history, OcrText, "ocr", providerId) && (!customBindings || AppSourceMatches(app.Id, OcrText, true)); }, 50, "Actual " + silentOcrShortcut + " left-drag OCR did not fill/translate exact generated text.", app);
                                 Assert(server == null || server.Count == 3, "OCR caused duplicate or unexpected translations."); RequireForeground(form);
                                 OnUi(form, delegate { Assert(sourceMouseEvents == 0, "OCR drag reached generated source control."); });
                                 Assert(AppOverlays(app.Id) == 0, "Actual OCR left selection overlays behind.");
-                                passed.Add("Actual Alt+S -> production transparent overlays -> left-drag -> WinRT OCR -> frontend source/automatic " + (offline ? "real offline model" : "mock") + " translation -> history; foreground preserved");
+                                passed.Add("Actual " + silentOcrShortcut + " -> production transparent overlays -> left-drag -> WinRT OCR -> frontend source/automatic " + (offline ? "real offline model" : "mock") + " translation -> history; foreground preserved");
+                                if (customBindings) {
+                                    customCases.Add(new Dictionary<string, object> { { "workflow", "left-drag-winrt-ocr" }, { "shortcut", silentOcrShortcut }, { "hotkeyPresses", 1 }, { "actualSourceMatched", true }, { "mockRequestsAfter", server.Count }, { "durableHistoryMatched", true }, { "ok", true } });
+                                    int count = new JavaScriptSerializer().Deserialize<object[]>(File.ReadAllText(history)).Length;
+                                    Assert(count == 3 && customCases.Count == 3, "Custom bindings did not complete exactly three distinct generated histories/workflows.");
+                                    report["customShortcutHistoryCount"] = count; report["customShortcutPassedWorkflowCount"] = customCases.Count;
+                                    report["customBindingCallbacksProveApplicationOwnership"] = true;
+                                }
                                 if(latest) LatestIntents(form,source,image,app,server,history,providerId,passed,report,
                                     delegate(string text){OnUi(form,delegate{paintedOcrText=text;paintedOcrFontPoints=24;image.Refresh();});},delegate{int events=0;OnUi(form,delegate{events=sourceMouseEvents;});return events;});
                                 report["mockRequests"] = server == null ? new List<Dictionary<string, object>>() : server.Requests;
@@ -653,7 +703,8 @@ public static class EchoLingoApplicationSmoke {
                                 report["actualOfflineTranslations"] = ActualTranslations; report["ok"] = true;
                             } catch (Exception error) { report["error"] = error.Message;if(app!=null&&!app.HasExited){try{report["ownMainFailureMetadata"]=MainMetadata(app);}catch(Exception diagnostic){report["mainMetadataErrorType"]=diagnostic.GetType().Name;}} }
                             finally {
-                                if (!(bool)report["ok"]) ReleaseOwnInput(form, app);
+                                if (customBindings) report["customShortcutPassedWorkflowCount"] = customCases.Count;
+                                if (!(bool)report["ok"]) ReleaseOwnInput(form, app, customBindings);
                                 try { KillOwnTree(app); report["ownApplicationTreeStopped"] = true; } catch (Exception error) { report["ok"] = false; report["cleanupError"] = error.Message; }
                                 if (restorePointer && GetForegroundWindow() == form.Handle) {
                                     // Restore only while our generated source remains foreground.
@@ -684,7 +735,7 @@ public static class EchoLingoApplicationSmoke {
         [Web.Script.Serialization.JavaScriptSerializer].Assembly.Location, [Management.ManagementObject].Assembly.Location, [Windows.Automation.AutomationElement].Assembly.Location,
         [Windows.Automation.ControlType].Assembly.Location, [Windows.DependencyObject].Assembly.Location) | Select-Object -Unique
     Add-Type -TypeDefinition $source -ReferencedAssemblies $references
-    $result = [EchoLingoApplicationSmoke]::Run($ApplicationPath, [bool]$OfflineTranslation, [bool]$InstalledPackage, [bool]$LatestIntentTests)
+    $result = [EchoLingoApplicationSmoke]::Run($ApplicationPath, [bool]$OfflineTranslation, [bool]$InstalledPackage, [bool]$LatestIntentTests, [bool]$CustomShortcutsTests)
     $result['powerShellVersion'] = $PSVersionTable.PSVersion.ToString()
     $result['applicationSha256'] = (Get-FileHash -Algorithm SHA256 -LiteralPath $ApplicationPath).Hash.ToLowerInvariant()
     [Console]::Out.WriteLine(($result | ConvertTo-Json -Depth 12 -Compress))
