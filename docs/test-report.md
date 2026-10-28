@@ -1,5 +1,20 @@
 # 0.1.0 预览版验证报告
 
+<!-- selection-github-recheck-20261028:start -->
+## 2026-10-28 GitHub对照后的空Edit→祖先Document回归
+
+现场：机主21b预览仍不能稳定取得WPS/Google网页选文；同位置手动Ctrl+C可用。下文旧完整15/15不是该现场已通过的证据。
+
+修正旧测试的错误预期：原EmptyEdit场景的leaf空range而Document有实际选区，应成功读取父选区；新增EmptyEditEmptyDocument、EmptyEditNoDocument、EmptyEditPasswordDocument和SelectedEdit，共15项。精确断言leaf/doc选区查询次数、零额外Ctrl+C、原富剪贴板和前台保留、零DocumentRange和零provider focus。
+
+- 本机完整native和夹具C#5/net48编译、PS7.4.6 AST零错误、现有纯策略149断言通过；是编译/纯策略验证，不是Windows UIA运行。
+- 独立审查两文件冻结摘要：helper3c2154d5…938f1e；fixture2e0976b3…60983，无阻断。
+- 旧生产+新夹具2996051/[40646617955](https://github.com/Blueeeecho/EchoLingo/actions/runs/40646617955)：原始selection=failure，前三场景通过，第四EmptyEdit返回NO_SELECTION；真实生成UIA拓扑复现旧错误。continue-on-error步骤conclusion=success不改变raw失败。
+- 修复19c724d/[40647286036](https://github.com/Blueeeecho/EchoLingo/actions/runs/40647286036)：同一夹具15/15全case.ok=true；selection、assembly、OCR、delegatedCapture四项原始outcome字面success。EmptyEdit/空Document/无Document/密码Document/非空Edit的leaf/doc/copy次数分别1/1/0、1/1/0、1/0/0、0/0/0、1/0/0。15项富剪贴板/源前台均保留，零全文读取。两提交只差helper12增8删，夹具相同；不是放宽断言或等待后的通过。独立代理与主代理均核对raw JSON，[证据](validation/windows-selection-ancestor-20261028.json)。
+
+只继续读取已验证祖先Document.GetSelection，没有扩大空Edit复制、放宽密码/根/身份守卫、读取全文、添加固定等待或重试。此回归不等于机主WPS/任意Google页面、已安装Tauri应用或新NSIS验收；当前安装包未更新。[研究证据与边界](windows-selection-github-recheck-20261028.zh-CN.md)。
+<!-- selection-github-recheck-20261028:end -->
+
 <!-- selection-services-20261028:start -->
 ## 2026-10-28 Windows新取词/API/录制包完整验收
 

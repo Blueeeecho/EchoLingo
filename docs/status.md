@@ -2,6 +2,18 @@
 
 Updated: 2026-10-28, Asia/Shanghai. Stage: v0.1.0 preview hardening and acceptance.
 
+<!-- selection-github-recheck-20261028:start -->
+## 2026-10-28 机主取词仍失败：GitHub对照确认空Edit提前终止缺口
+
+机主反馈21b安装包在WPS/Google等网页仍弹空原文，并确认同位置手动Ctrl+C可以正确复制；这不是已通过的实体应用验收。旧15/15及48次受控浏览器结果保留下文，不能据此覆盖现场失败。
+
+对照[selection-hook已合入的焦点/祖先选区修复](https://github.com/0xfullex/selection-hook/issues/18)，发现本项目虽有祖先Document查询，却在焦点Edit返回空range时提前NO_SELECTION；原夹具EmptyEdit的父Document实际有选文，却把拒绝列为通过。已独立修正为继续只读已验证祖先Document的真实GetSelection；祖先也空或缺失仍零复制，密码祖先仍在读取前拒绝，非空Edit照常返回。没有全文探测、新等待、重按或引入Node/Electron。
+
+新15场景夹具和完整native C#5/net48编译、PowerShell AST及149项纯策略断言通过；独立静态审查通过。旧生产+新夹具2996051/[40646617955](https://github.com/Blueeeecho/EchoLingo/actions/runs/40646617955)已真实复现第四项EmptyEdit的NO_SELECTION。修复19c724d/[40647286036](https://github.com/Blueeeecho/EchoLingo/actions/runs/40647286036)同夹具15/15通过、原始selection/assembly/OCR/delegatedCapture四门禁success；两端差异只有20行helper。全部保留富剪贴板/源前台且零全文读取。不是注册快捷键、真实浏览器、新安装包或实体WPS通过声明。[调研与实现对照](windows-selection-github-recheck-20261028.zh-CN.md)、[精确记录](validation/windows-selection-ancestor-20261028.json)。
+
+既有复制兜底还可能被其他身份/格式/来源校验拒绝；没有把这条已确认缺口提前当成机主全部失败根因。未更换旧安装包、操作Mac签名/权限/钥匙串/用户凭据或本地VM。
+<!-- selection-github-recheck-20261028:end -->
+
 <!-- selection-services-20261028:start -->
 ## 2026-10-28 Windows取词、官方接口与录制修复：新包15/15通过，等待机主实测
 
