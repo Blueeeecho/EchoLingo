@@ -1,5 +1,13 @@
 # 0.1.0 预览版验证报告
 
+
+<!-- selection-resize-field-20261028:start -->
+## 2026-10-28 机主现场取词仍失败：已缩到复制前原生焦点校验
+
+此前936e包的受控16/16不覆盖机主现场失败。Ctrl+Shift+D对照后浏览器正常，WPS仍空；切换复制兼容后仍空。机主实际attempt29：configuredCopyStrategy1、copyPhase1、copyNativeContextValid0、copyDispatchInserted0、selectionQueryCount0，helper445ms。不是Ctrl+C已发送但WPS不复制，而是本程序第一道上下文校验提前拒绝。具体invalid分支旧诊断未区分；跨进程same-root焦点是已查到的过严条件，正在用真实Windows反例验证，尚未宣称WPS修好。
+
+并行修正拖宽时页面旧尺寸与native窗口互相拉扯、重复textarea测量；译文Latin字体改为系统TimesNewRoman并保留中文fallback。前端单位84、类型/构建和完整隔离UI已通过；resize新增独立调度测试通过，独审提出missing-end事件可能阻塞展示，正在加权威完成确认。尚未完成新的Windows原生/安装包验收、没有新版包交付。Mac规范安装/签名/权限/凭据及停止的本地VM未变。[本轮调研](windows-selection-native-context-research.zh-CN.md)。
+<!-- selection-resize-field-20261028:end -->
 <!-- windows-copy-compatibility-20261028:start -->
 ## 2026-10-28 默认复制兼容版已打包：完整 Windows 16/16 通过
 

@@ -844,21 +844,57 @@ public static class EchoLingoNative {
         return context;
     }
     static SelectionCopyPolicy.NativeContext NativeSelectionContext(IntPtr foreground) {
+        return NativeSelectionContext(foreground, false);
+    }
+    static SelectionCopyPolicy.NativeContext NativeSelectionInvalid(SelectionCopyPolicy.NativeContext snapshot, bool diagnostics, int reason) {
+        if (diagnostics) CaptureHealth.Set("copyNativeInvalidReason", reason);
+        return snapshot;
+    }
+    static SelectionCopyPolicy.NativeContext NativeSelectionContext(IntPtr foreground, bool diagnostics) {
         RequireSelectionQueryActive();
         SelectionCopyPolicy.NativeContext snapshot = new SelectionCopyPolicy.NativeContext();
-        if (foreground == IntPtr.Zero || GetForegroundWindow() != foreground) return snapshot;
+        if (diagnostics) {
+            foreach (string field in new string[] { "copyNativeInvalidReason", "copyNativeGtiSucceeded", "copyNativeGtiFlags",
+                "copyNativeFocusPresent", "copyNativeFocusProcessMatchesForeground", "copyNativeFocusRootMatchesForeground",
+                "copyNativeActivePresent", "copyNativeActiveRootMatchesForeground" }) CaptureHealth.Set(field, 0);
+        }
+        if (foreground == IntPtr.Zero) return NativeSelectionInvalid(snapshot, diagnostics, 1);
+        if (GetForegroundWindow() != foreground) return NativeSelectionInvalid(snapshot, diagnostics, 2);
         uint process; uint thread = GetWindowThreadProcessId(foreground, out process);
         IntPtr root = GetAncestor(foreground, 2);
-        if (thread == 0 || process == 0 || root == IntPtr.Zero) return snapshot;
+        if (thread == 0) return NativeSelectionInvalid(snapshot, diagnostics, 3);
+        if (process == 0) return NativeSelectionInvalid(snapshot, diagnostics, 4);
+        if (root == IntPtr.Zero) return NativeSelectionInvalid(snapshot, diagnostics, 5);
         GUITHREADINFO info = new GUITHREADINFO(); info.cbSize = (uint)Marshal.SizeOf(typeof(GUITHREADINFO));
-        if (!GetGUIThreadInfo(thread, ref info) || info.focus == IntPtr.Zero) return snapshot;
+        bool succeeded = GetGUIThreadInfo(thread, ref info);
+        if (diagnostics) {
+            CaptureHealth.Set("copyNativeGtiSucceeded", succeeded ? 1 : 0);
+            if (succeeded) {
+                CaptureHealth.Set("copyNativeGtiFlags", info.flags);
+                CaptureHealth.Set("copyNativeFocusPresent", info.focus != IntPtr.Zero ? 1 : 0);
+                CaptureHealth.Set("copyNativeActivePresent", info.active != IntPtr.Zero ? 1 : 0);
+                CaptureHealth.Set("copyNativeActiveRootMatchesForeground", info.active != IntPtr.Zero && GetAncestor(info.active, 2) == root ? 1 : 0);
+            }
+        }
+        if (!succeeded) return NativeSelectionInvalid(snapshot, diagnostics, 6);
+        if (info.focus == IntPtr.Zero) return NativeSelectionInvalid(snapshot, diagnostics, 7);
         uint focusProcess; uint focusThread = GetWindowThreadProcessId(info.focus, out focusProcess);
-        if (focusThread == 0 || focusProcess != process || GetAncestor(info.focus, 2) != root) return snapshot;
+        IntPtr focusRoot = GetAncestor(info.focus, 2);
+        if (diagnostics) {
+            CaptureHealth.Set("copyNativeFocusProcessMatchesForeground", focusProcess != 0 && focusProcess == process ? 1 : 0);
+            CaptureHealth.Set("copyNativeFocusRootMatchesForeground", focusRoot != IntPtr.Zero && focusRoot == root ? 1 : 0);
+        }
+        if (focusThread == 0) return NativeSelectionInvalid(snapshot, diagnostics, 8);
+        if (focusProcess == 0) return NativeSelectionInvalid(snapshot, diagnostics, 9);
+        if (focusProcess != process) return NativeSelectionInvalid(snapshot, diagnostics, 10);
+        if (focusRoot != root) return NativeSelectionInvalid(snapshot, diagnostics, 11);
         bool released = true;
         foreach (int key in new int[] { 1, 2, 4, 5, 6 }) if ((GetAsyncKeyState(key) & 0x8000) != 0) released = false;
         uint currentProcess;
-        if (GetForegroundWindow() != foreground || GetAncestor(foreground, 2) != root
-            || GetWindowThreadProcessId(foreground, out currentProcess) != thread || currentProcess != process) return snapshot;
+        if (GetForegroundWindow() != foreground) return NativeSelectionInvalid(snapshot, diagnostics, 12);
+        if (GetAncestor(foreground, 2) != root) return NativeSelectionInvalid(snapshot, diagnostics, 13);
+        if (GetWindowThreadProcessId(foreground, out currentProcess) != thread) return NativeSelectionInvalid(snapshot, diagnostics, 14);
+        if (currentProcess != process) return NativeSelectionInvalid(snapshot, diagnostics, 15);
         snapshot.Foreground = foreground.ToInt64(); snapshot.Root = root.ToInt64(); snapshot.Focus = info.focus.ToInt64();
         snapshot.Process = process; snapshot.ForegroundThread = thread; snapshot.FocusThread = focusThread;
         snapshot.Valid = true; snapshot.MouseReleased = released;
@@ -1116,7 +1152,7 @@ public static class EchoLingoNative {
     static void RequireNativeCopyContext(SelectionCopyPolicy.NativeContext expected, int phase) {
         CaptureHealth.Set("copyPhase", phase); NativeCancellation.ThrowIfRequested(); RequireSelectionBudget();
         CaptureHealth.Increment("copyNativeContextChecks");
-        SelectionCopyPolicy.NativeContext current = NativeSelectionContext(new IntPtr(expected.Foreground));
+        SelectionCopyPolicy.NativeContext current = NativeSelectionContext(new IntPtr(expected.Foreground), true);
         if (!SelectionCopyPolicy.CanRestartUnreadSelection(true, null, false, expected, current)) {
             CaptureHealth.Set("copyNativeGuardReason", !current.Valid ? 1 : !current.MouseReleased ? 2 : 3);
             throw new OperationCanceledException("CANCELLED: The source window or focused control changed before copy completed.");
@@ -1127,7 +1163,10 @@ public static class EchoLingoNative {
         foreach (string name in new string[] { "copyStrategy", "copyPhase", "copyNativeContextValid", "copyNativeContextChecks",
             "copyNativeGuardReason", "copyNativeEditable", "copyNativeProtection", "copyNativeSelectionKnown", "copyNativeSelectionNonempty",
             "copyProtectionProbe", "copyProtectionProbeMilliseconds", "copyProtectionUnknown", "copySnapshotOutcome", "copyDispatchInserted",
-            "copyOwnInputObserved", "copyOwnerOutcome", "copyClipboardRestored", "copyTerminalReason" }) CaptureHealth.Set(name, 0);
+            "copyOwnInputObserved", "copyOwnerOutcome", "copyClipboardRestored", "copyTerminalReason",
+            "copyNativeInvalidReason", "copyNativeGtiSucceeded", "copyNativeGtiFlags", "copyNativeFocusPresent",
+            "copyNativeFocusProcessMatchesForeground", "copyNativeFocusRootMatchesForeground", "copyNativeActivePresent",
+            "copyNativeActiveRootMatchesForeground" }) CaptureHealth.Set(name, 0);
         CaptureHealth.Set("copyStrategy", 1); CaptureHealth.Set("copyProtectionUnknown", 1);
         using (SelectionSession session = new SelectionSession()) {
             try {
@@ -1150,7 +1189,7 @@ public static class EchoLingoNative {
     static string SelectedTextCopyCore() {
         CaptureHealth.Set("copyPhase", 1); NativeCancellation.ThrowIfRequested();
         SelectionContext context = NewSelectionContext();
-        SelectionCopyPolicy.NativeContext expected = NativeSelectionContext(context.Foreground);
+        SelectionCopyPolicy.NativeContext expected = NativeSelectionContext(context.Foreground, true);
         CaptureHealth.Set("copyNativeContextValid", expected.Valid ? 1 : 0);
         if (!expected.Valid || !expected.MouseReleased) {
             CaptureHealth.Set("copyNativeGuardReason", !expected.Valid ? 1 : 2);

@@ -616,6 +616,14 @@ fn bounded_selection_health(value: &Value) -> Value {
         "copyNativeContextValid",
         "copyNativeContextChecks",
         "copyNativeGuardReason",
+        "copyNativeInvalidReason",
+        "copyNativeGtiSucceeded",
+        "copyNativeGtiFlags",
+        "copyNativeFocusPresent",
+        "copyNativeFocusProcessMatchesForeground",
+        "copyNativeFocusRootMatchesForeground",
+        "copyNativeActivePresent",
+        "copyNativeActiveRootMatchesForeground",
         "copyNativeEditable",
         "copyNativeProtection",
         "copyNativeSelectionKnown",
@@ -1696,6 +1704,10 @@ mod tests {
         let safe = super::bounded_selection_health(&json!({
             "copyStrategy": 1, "copyPhase": 4, "copyNativeContextValid": 1,
             "copyNativeContextChecks": 6, "copyNativeGuardReason": 0,
+            "copyNativeInvalidReason": 10, "copyNativeGtiSucceeded": 1,
+            "copyNativeGtiFlags": 0, "copyNativeFocusPresent": 1,
+            "copyNativeFocusProcessMatchesForeground": 0, "copyNativeFocusRootMatchesForeground": 1,
+            "copyNativeActivePresent": 1, "copyNativeActiveRootMatchesForeground": 1,
             "copyNativeEditable": 2, "copyNativeProtection": 0,
             "copyNativeSelectionKnown": 1, "copyNativeSelectionNonempty": 1,
             "copyProtectionProbe": 2, "copyProtectionProbeMilliseconds": 250,
@@ -1703,9 +1715,10 @@ mod tests {
             "copyDispatchInserted": 4, "copyOwnInputObserved": 1,
             "copyOwnerOutcome": 1, "copyClipboardRestored": 1, "copyTerminalReason": 0,
             "copyText": "private", "copyTitle": "private", "attemptId": 1,
+            "copyNativeFocusProcess": 2468, "copyNativeForeground": 1234,
             "actionResultNonempty": 1
         }));
-        assert_eq!(safe.as_object().unwrap().len(), 18);
+        assert_eq!(safe.as_object().unwrap().len(), 26);
         assert_eq!(safe["copyDispatchInserted"], 4);
         for invalid in [
             json!(-1),
