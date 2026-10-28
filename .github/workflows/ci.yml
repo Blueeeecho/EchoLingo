@@ -497,6 +497,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - name: Check public repository inputs
+        run: |
+          python3 scripts/check-repository.py
+          python3 -m unittest discover -s tests -p 'test_repository_hygiene.py'
       - uses: actions/setup-node@v4
         with:
           node-version: '24'

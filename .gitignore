@@ -13,3 +13,34 @@ playwright-report/
 *.log
 
 src-tauri/gen/
+
+# Local development notes and private handoff material
+/.codex-plans/
+/.codex/
+/.claude/
+/.cursor/
+/.internal/
+/work/
+/AGENTS.md
+/PROJECT.md
+/docs/validation/
+/docs/api-configuration-design.zh-CN.md
+/docs/bob-research.zh-CN.md
+/docs/implementation-plan.md
+/docs/local-preview.zh-CN.md
+/docs/official-website.zh-CN.md
+/docs/release-notes.zh-CN.md
+/docs/review-notes.md
+/docs/roadmap.zh-CN.md
+/docs/status.md
+/docs/test-report.md
+/docs/ui-notes.md
+/docs/windows-selection-github-recheck-20261028.zh-CN.md
+/docs/windows-selection-native-context-research.zh-CN.md
+/docs/windows-test-plan.zh-CN.md
+/docs/harmonyos-pc/
+/docs/harmonyos-*.md
+/.cache/
+__pycache__/
+*.pyc
+/website/

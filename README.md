@@ -10,7 +10,7 @@
 
 适用于 Windows 10 1809+ / Windows 11。运行安装程序后打开回声译，应用会驻留托盘；升级前先从托盘退出旧版。
 
-[版本与校验文件](https://github.com/Blueeeecho/EchoLingo/releases/tag/0.1.0-beta.1) · [macOS 进展](https://github.com/Blueeeecho/EchoLingo/releases) · [项目说明](PROJECT.md)
+[版本与校验文件](https://github.com/Blueeeecho/EchoLingo/releases/tag/0.1.0-beta.1) · [macOS 进展](https://github.com/Blueeeecho/EchoLingo/releases) · [源码构建](docs/build.md)
 
 ## 两个快捷动作
 
@@ -25,7 +25,7 @@
 - **自由选择服务**：Windows 内置中英离线翻译，OCR 默认本机识别；也能配置自己的翻译与 OCR 服务。
 - **顺手的小功能**：原文与译文支持复制、朗读，保留主题切换、历史与收藏。历史默认最近 20 条，可调整为 1–100 条。
 
-在托盘菜单打开设置，即可配置服务、管理密钥或调整快捷键。详见[服务配置说明](docs/api-configuration-design.zh-CN.md)。
+在托盘菜单打开设置，即可配置服务、管理密钥或调整快捷键。详见[服务配置说明](docs/official-services.zh-CN.md)。
 
 ## 隐私与数据
 
@@ -35,7 +35,7 @@
 
 如果回声译对你有帮助，欢迎点亮右上角的 **⭐ Star**。让更多人发现这个小工具，也支持我们持续打磨。
 
-遇到问题或有新的想法，欢迎提交 [Issue](https://github.com/Blueeeecho/EchoLingo/issues)。开发入口见[项目说明](PROJECT.md)与[实现计划](docs/implementation-plan.md)。
+遇到问题或有新的想法，欢迎提交 [Issue](https://github.com/Blueeeecho/EchoLingo/issues)。源码构建与测试方式见[开发说明](docs/build.md)。
 
 ## 许可与商业授权
 

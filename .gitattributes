@@ -3,3 +3,16 @@
 resources/offline-translation/licenses/** -whitespace
 # Pinned registry and original notices retain identical bytes on Windows.
 resources/offline-translation/** -text
+
+# Keep local assistant state out of source archives.
+.codex-plans export-ignore
+.codex-plans/** export-ignore
+.codex export-ignore
+.claude export-ignore
+.cursor export-ignore
+.internal export-ignore
+work export-ignore
+AGENTS.md export-ignore
+PROJECT.md export-ignore
+docs/validation export-ignore
+docs/validation/** export-ignore

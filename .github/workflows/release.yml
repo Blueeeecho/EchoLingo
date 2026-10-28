@@ -82,6 +82,14 @@ jobs:
         run: |
           python scripts/package-offline-source.py --engine-work-dir "$env:RUNNER_TEMP/echolingo-offline-engine-build" --output "$env:RUNNER_TEMP/EchoLingo-offline-engine-source.zip"
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Check public release inputs
+        shell: bash
+        run: |
+          if [[ "$RUNNER_OS" == "Windows" ]]; then
+            python scripts/check-repository.py
+          else
+            python3 scripts/check-repository.py
+          fi
       - run: npm ci
       - run: npm run check
       - run: npm test
@@ -111,7 +119,7 @@ jobs:
             Windows includes bundled offline English-Chinese translation; macOS uses installed Apple translation models when available.
             Configure optional translation APIs in Settings. No API key is included.
             Unsigned Windows / ad-hoc signed macOS preview; no store submission or notarization.
-            See docs/test-report.md for verified coverage and manual acceptance items.
+            Usage and source-build instructions are in README.md and docs/build.md.
           releaseDraft: true
           prerelease: true
           args: ${{ matrix.args }}
