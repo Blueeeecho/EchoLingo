@@ -14,6 +14,9 @@ Updated: 2026-10-28, Asia/Shanghai. Stage: v0.1.0 preview hardening and acceptan
 合并78794c4/full40629457450现已构建：Windows272 Rust/1ignored、Mac268/1ignored及两端84前端通过。原15门禁14success/1failure；新APP实际44次Alt+D完整链通过，但Chrome一次前置只选到前缀、该次0热键及3项未执行，浏览器48项整项仍红。记事本最终清理实际通过，WPF/WinForms、真实改键UI6项/自定义新键3链、两浏览器OCR同源点击及NSIS安装后6模型/3离线链通过。包已生成但不是全通过修复版。新native original-suite补测40630899181仍95/96：冷Edge的Q1读循环返回后，Q2因Pane→Group RuntimeId变化拒绝，总约2.84秒而非5秒超时。非合并鼠标补测40631739232实际85次AltD全链通过，但2次坐标映射前置失败/9未执行，整项仍红。focus HWND初始化候选cf6/run40632178982仍95/96，首Edge同样身份拒绝且未超时；该61行候选已精确撤回，未叠加保留。冷首次问题仍未修好。原95/96首次Edge失败、同PID后台剪贴板发布反例、实体Win10/11/WPS/IME/全屏多屏等边界仍开放；GitHub-hosted Server不是这些实机验收。未安装/签名Mac、改TCC/钥匙串规则、读取真实厂商凭据或重启停止的本地VM。预览，不发布stable。
 
 [分层证据](validation/windows-selection-services-20261028.json)。
+
+最新夹具41e/run40633781813复用精确787程序，实测双order共96次单拖选/单AltD全链通过、0准备失败，84次同浏览器空白点击隐藏、12轮清理通过；不含下述新native修复。新候选只在初始现有selection策略候选全正常不支持TextPattern、未读到range/原文且未碰剪贴板时，对初次后置已知RuntimeId变化允许一次当前选区重采；源native窗口/焦点/线程/进程和鼠标释放状态必须保持，新context仍完整密码/root和post身份核验，无第二次/新listener/固定等待/预算重置。未知RID、有效空pattern、读取错误或已有A均不重采。它取得第一次实际可读的当前选文，不能冻结此前从未读到的A；同native焦点脚本改为B时可能读当前B。149纯策略断言/C#5/AST通过，双重源审无剩余阻断，Windows原红96尚待验证。
+
 <!-- selection-services-20261028:end -->
 
 <!-- shortcut-reconfiguration-20261028:start -->

@@ -244,6 +244,40 @@ sealed class SelectionCopyObserver : IDisposable {
 }
 
 public static class SelectionCopyPolicy {
+    public sealed class SelectionRuntimeIdChangedException : InvalidOperationException {
+        public SelectionRuntimeIdChangedException() : base("SELECTION: The focused control changed or is outside the source window; select text and retry.") { }
+    }
+    public static bool KnownRuntimeIdChange(int[] expected, int[] current) {
+        if (expected == null || current == null || expected.Length == 0 || current.Length == 0) return false;
+        if (expected.Length != current.Length) return true;
+        for (int i = 0; i < expected.Length; i++) if (expected[i] != current[i]) return true;
+        return false;
+    }
+    public sealed class ReadEvidence {
+        int patternQueries;
+        public bool PatternSeen { get; private set; }
+        public bool RangeReadAttempted { get; private set; }
+        public bool NoPatternComplete { get; private set; }
+        public void ObservePattern(bool available, bool validPattern) {
+            patternQueries++;
+            if (available || validPattern) { PatternSeen = true; NoPatternComplete = false; }
+        }
+        public void BeforeRangeRead() { RangeReadAttempted = true; NoPatternComplete = false; }
+        public void CompleteUnsupportedScan() { NoPatternComplete = patternQueries > 0 && !PatternSeen && !RangeReadAttempted; }
+    }
+    public sealed class NativeContext {
+        public long Foreground, Root, Focus;
+        public uint Process, ForegroundThread, FocusThread;
+        public bool Valid, MouseReleased;
+    }
+    public static bool CanRestartUnreadSelection(bool completeNoPattern, string text, bool alreadyRestarted, NativeContext before, NativeContext current) {
+        if (!completeNoPattern || !String.IsNullOrWhiteSpace(text) || alreadyRestarted || before == null || current == null
+            || !before.Valid || !current.Valid || !before.MouseReleased || !current.MouseReleased
+            || before.Foreground == 0 || before.Root == 0 || before.Focus == 0 || before.Process == 0 || before.ForegroundThread == 0 || before.FocusThread == 0)
+            return false;
+        return before.Foreground == current.Foreground && before.Root == current.Root && before.Focus == current.Focus
+            && before.Process == current.Process && before.ForegroundThread == current.ForegroundThread && before.FocusThread == current.FocusThread;
+    }
     public const string InputBlocked = "SELECTION: Windows blocked copy input. Elevated or protected apps may not allow selection capture; try screenshot OCR.";
     public static T RequireFocus<T>(T focused) where T : class {
         if (focused == null) throw new InvalidOperationException("SELECTION: The focused control is unavailable; select text and retry.");
@@ -408,6 +442,12 @@ public static class EchoLingoNative {
     [DllImport("user32.dll", SetLastError=true)] static extern bool EmptyClipboard();
     [DllImport("user32.dll")] static extern bool CloseClipboard();
     [DllImport("user32.dll")] static extern uint GetWindowThreadProcessId(IntPtr window, out uint process);
+    [DllImport("user32.dll")] static extern bool GetGUIThreadInfo(uint thread, ref GUITHREADINFO info);
+    [StructLayout(LayoutKind.Sequential)] struct GUITHREADINFO {
+        public uint cbSize, flags;
+        public IntPtr active, focus, capture, menuOwner, moveSize, caret;
+        public int caretLeft, caretTop, caretRight, caretBottom;
+    }
     [DllImport("user32.dll")] static extern uint SendInput(uint count, INPUT[] input, int size);
     [DllImport("user32.dll")] static extern bool SetProcessDpiAwarenessContext(IntPtr context);
     [DllImport("user32.dll")] static extern IntPtr SetThreadDpiAwarenessContext(IntPtr context);
@@ -452,6 +492,8 @@ public static class EchoLingoNative {
     sealed class InitialSelection {
         public SelectionContext Context;
         public string Text;
+        public bool NoPatternComplete;
+        public SelectionCopyPolicy.NativeContext Native;
     }
     sealed class SelectionBudgetExceededException : InvalidOperationException {
         public SelectionBudgetExceededException() : base("SELECTION: The selected-text accessibility budget was exhausted; no further copy input was sent.") { }
@@ -533,6 +575,8 @@ public static class EchoLingoNative {
         public volatile int Stage, Depth;
         public volatile int InitialRoleId, FreshRoleId, InitialIdentityLength, FreshIdentityLength;
         public volatile int IdentityCompared, IdentityEqual, RootWalkReason, ExceptionKind;
+        public volatile int PatternSeen, NoPatternComplete, RestartAttempted;
+        public volatile int NativeContextValid, NativeMouseReleased, NativeContextMatched;
         public volatile bool Abandoned;
         public void Mark(int stage, int depth) { Depth = depth; Stage = stage; }
     }
@@ -651,6 +695,12 @@ public static class EchoLingoNative {
                 CapturePerformance.Set(prefix + "IdentityEqual", trace.IdentityEqual);
                 CapturePerformance.Set(prefix + "RootWalkReason", trace.RootWalkReason);
                 CapturePerformance.Set(prefix + "ExceptionKind", outcomeStage < 0 ? trace.ExceptionKind : outcomeExceptionKind);
+                CapturePerformance.Set(prefix + "PatternSeen", trace.PatternSeen);
+                CapturePerformance.Set(prefix + "NoPatternComplete", trace.NoPatternComplete);
+                CapturePerformance.Set(prefix + "RestartAttempted", trace.RestartAttempted);
+                CapturePerformance.Set(prefix + "NativeContextValid", trace.NativeContextValid);
+                CapturePerformance.Set(prefix + "NativeMouseReleased", trace.NativeMouseReleased);
+                CapturePerformance.Set(prefix + "NativeContextMatched", trace.NativeContextMatched);
                 if (budget != null) {
                     CapturePerformance.Set(prefix + "BudgetLimitMilliseconds", budget.LimitMilliseconds);
                     CapturePerformance.Set(prefix + "BudgetRemainingAtStartMilliseconds", budgetRemainingAtStart);
@@ -736,6 +786,8 @@ public static class EchoLingoNative {
             }
             if (identityCompared && !identityEqual) {
                 SelectionStage(11, 0);
+                if (SelectionCopyPolicy.KnownRuntimeIdChange(context.FocusIdentity, identity))
+                    throw new SelectionCopyPolicy.SelectionRuntimeIdChangedException();
                 throw new InvalidOperationException("SELECTION: The focused control changed or is outside the source window; select text and retry.");
             }
             if (!FocusBelongsToWindow(focused, context.Foreground, cache, out ancestors))
@@ -771,18 +823,53 @@ public static class EchoLingoNative {
         if (nativePid != 0) context.SourceProcesses.Add(unchecked((int)nativePid));
         return context;
     }
-    static InitialSelection CaptureInitialSelection() {
+    static SelectionCopyPolicy.NativeContext NativeSelectionContext(IntPtr foreground) {
+        RequireSelectionQueryActive();
+        SelectionCopyPolicy.NativeContext snapshot = new SelectionCopyPolicy.NativeContext();
+        if (foreground == IntPtr.Zero || GetForegroundWindow() != foreground) return snapshot;
+        uint process; uint thread = GetWindowThreadProcessId(foreground, out process);
+        IntPtr root = GetAncestor(foreground, 2);
+        if (thread == 0 || process == 0 || root == IntPtr.Zero) return snapshot;
+        GUITHREADINFO info = new GUITHREADINFO(); info.cbSize = (uint)Marshal.SizeOf(typeof(GUITHREADINFO));
+        if (!GetGUIThreadInfo(thread, ref info) || info.focus == IntPtr.Zero) return snapshot;
+        uint focusProcess; uint focusThread = GetWindowThreadProcessId(info.focus, out focusProcess);
+        if (focusThread == 0 || focusProcess != process || GetAncestor(info.focus, 2) != root) return snapshot;
+        bool released = true;
+        foreach (int key in new int[] { 1, 2, 4, 5, 6 }) if ((GetAsyncKeyState(key) & 0x8000) != 0) released = false;
+        uint currentProcess;
+        if (GetForegroundWindow() != foreground || GetAncestor(foreground, 2) != root
+            || GetWindowThreadProcessId(foreground, out currentProcess) != thread || currentProcess != process) return snapshot;
+        snapshot.Foreground = foreground.ToInt64(); snapshot.Root = root.ToInt64(); snapshot.Focus = info.focus.ToInt64();
+        snapshot.Process = process; snapshot.ForegroundThread = thread; snapshot.FocusThread = focusThread;
+        snapshot.Valid = true; snapshot.MouseReleased = released;
+        RequireSelectionQueryActive(); return snapshot;
+    }
+    static void RequireUnreadRestartContext(SelectionCopyPolicy.NativeContext expected, SelectionCopyPolicy.NativeContext current) {
+        if (!SelectionCopyPolicy.CanRestartUnreadSelection(true, null, false, expected, current))
+            throw new OperationCanceledException("CANCELLED: The source context changed before current selection could be captured.");
+    }
+    static InitialSelection CaptureInitialSelection() { return CaptureInitialSelection(false, null); }
+    static InitialSelection CaptureInitialSelection(bool restarted, SelectionCopyPolicy.NativeContext expectedNative) {
         try {
+            if (restarted && selectionTrace != null) selectionTrace.RestartAttempted = 1;
             SelectionContext context = NewSelectionContext();
+            SelectionCopyPolicy.NativeContext native = NativeSelectionContext(context.Foreground);
+            if (selectionTrace != null) {
+                selectionTrace.NativeContextValid = native.Valid ? 1 : 0;
+                selectionTrace.NativeMouseReleased = native.MouseReleased ? 1 : 0;
+            }
+            if (expectedNative != null) RequireUnreadRestartContext(expectedNative, native);
             List<AutomationElement> ancestors;
             AutomationElement focused = CurrentSelectionFocus(context, out ancestors);
             int process = focused.Cached.ProcessId;
             if (process != 0) context.SourceProcesses.Add(process);
-            // Read A from this exact, fully validated first focus/ancestor
-            // snapshot. A second FocusedElement call must never supply the
-            // initial selection after a provider rebuild or focus change.
-            string text = ReadValidatedSelection(context, focused, ancestors);
-            return new InitialSelection { Context = context, Text = text };
+            // Read only this context's fully validated first focus/ancestor
+            // snapshot. An explicit unread-context restart creates a separate
+            // current capture; it never supplies or replaces this context's A.
+            bool noPatternComplete;
+            string text = ReadValidatedSelection(context, focused, ancestors, out noPatternComplete);
+            if (expectedNative != null) RequireUnreadRestartContext(expectedNative, NativeSelectionContext(context.Foreground));
+            return new InitialSelection { Context = context, Text = text, NoPatternComplete = noPatternComplete, Native = native };
         } catch (ElementNotAvailableException error) {
             SelectionException(error);
             throw new InvalidOperationException("SELECTION: The source control is no longer available; select text and retry.");
@@ -806,6 +893,11 @@ public static class EchoLingoNative {
         }
     }
     static string ReadValidatedSelection(SelectionContext context, AutomationElement focused, List<AutomationElement> ancestors) {
+        bool ignored; return ReadValidatedSelection(context, focused, ancestors, out ignored);
+    }
+    static string ReadValidatedSelection(SelectionContext context, AutomationElement focused, List<AutomationElement> ancestors, out bool noPatternComplete) {
+        noPatternComplete = false;
+        SelectionCopyPolicy.ReadEvidence evidence = new SelectionCopyPolicy.ReadEvidence();
         try {
             string focusedRole = focused.Cached.ControlType.ProgrammaticName;
             bool focusedEmpty = false, document = false;
@@ -819,6 +911,8 @@ public static class EchoLingoNative {
                 if (depth == 0 || role == "ControlType.Document" || role == "ControlType.Edit") {
                     RequireSelectionQueryActive(); object raw; bool available = element.TryGetCurrentPattern(TextPattern.Pattern, out raw);
                     TextPattern pattern = raw as TextPattern;
+                    evidence.ObservePattern(available, pattern != null);
+                    if (selectionTrace != null && evidence.PatternSeen) selectionTrace.PatternSeen = 1;
                     if (available && pattern == null) throw new InvalidOperationException("SELECTION: The source returned an invalid text provider; select text and retry.");
                     if (role == "ControlType.Document") {
                         document = true;
@@ -829,8 +923,8 @@ public static class EchoLingoNative {
                         // focused descendant can expose a different caret than
                         // the document selection; only walk this ancestor path.
                         string selected = SelectionCopyPolicy.ReadAutomation(false, true, true,
-                            delegate { RequireSelectionQueryActive(); SelectionStage(7, depth); return pattern.GetSelection(); },
-                            delegate(TextPatternRange range) { RequireSelectionQueryActive(); SelectionStage(8, depth); return range.GetText(-1); }, role != "ControlType.Edit");
+                            delegate { evidence.BeforeRangeRead(); RequireSelectionQueryActive(); SelectionStage(7, depth); return pattern.GetSelection(); },
+                            delegate(TextPatternRange range) { evidence.BeforeRangeRead(); RequireSelectionQueryActive(); SelectionStage(8, depth); return range.GetText(-1); }, role != "ControlType.Edit");
                         if (!String.IsNullOrWhiteSpace(selected)) return selected;
                         if (depth == 0) focusedEmpty = true;
                     }
@@ -841,8 +935,14 @@ public static class EchoLingoNative {
                     }
                 }
             }
-            if (document && DocumentCopyAllowed(focusedRole)) return null;
-            if (!focusedEmpty && SelectionCopyPolicy.CopyFallbackAllowed(focusedRole)) return null;
+            if ((document && DocumentCopyAllowed(focusedRole)) || (!focusedEmpty && SelectionCopyPolicy.CopyFallbackAllowed(focusedRole))) {
+                // Only normal completion of every candidate (focus/Document/Edit)
+                // can classify an unread context. Early Edit returns and errors
+                // never reach this point; any valid or attempted range is strict.
+                evidence.CompleteUnsupportedScan(); noPatternComplete = evidence.NoPatternComplete;
+                if (selectionTrace != null && noPatternComplete) selectionTrace.NoPatternComplete = 1;
+                return null;
+            }
             throw new InvalidOperationException("NO_SELECTION: No text is selected in the source application.");
         } catch (InvalidOperationException error) {
             if (error.Message.StartsWith("PROTECTED:") || error.Message.StartsWith("NO_SELECTION:") || error.Message.StartsWith("SELECTION:")) throw;
@@ -909,7 +1009,31 @@ public static class EchoLingoNative {
         InitialSelection initialSelection = SelectionQuery(CaptureInitialSelection);
         SelectionContext context = initialSelection.Context;
         string direct = initialSelection.Text;
-        RequireSelectionContext(context);
+        bool captureCurrentOnce = false;
+        if (initialSelection.NoPatternComplete && String.IsNullOrWhiteSpace(direct)) {
+            captureCurrentOnce = SelectionQuery(delegate {
+                try { CurrentSelectionFocus(context); return false; }
+                catch (SelectionCopyPolicy.SelectionRuntimeIdChangedException error) {
+                    // This completed, typed control flow is handled on the same
+                    // MTA. Every other exception keeps SelectionQuery's normal
+                    // poison behavior. Never revive an A that was already read.
+                    RequireSelectionQueryActive();
+                    bool nativeMatched = SelectionCopyPolicy.CanRestartUnreadSelection(initialSelection.NoPatternComplete, direct, false,
+                        initialSelection.Native, NativeSelectionContext(context.Foreground));
+                    if (selectionTrace != null) selectionTrace.NativeContextMatched = nativeMatched ? 1 : 0;
+                    if (!nativeMatched) throw;
+                    SelectionException(error); return true;
+                }
+            });
+        } else RequireSelectionContext(context);
+        if (captureCurrentOnce) {
+            // Read the currently available selection once, not a frozen A from
+            // the shortcut. Script changes inside the same native focus may be
+            // reflected here. No clipboard preservation/input has happened yet.
+            initialSelection = SelectionQuery(delegate { return CaptureInitialSelection(true, initialSelection.Native); });
+            context = initialSelection.Context; direct = initialSelection.Text;
+            RequireSelectionContext(context); // No second identity exception is handled.
+        }
         if (!String.IsNullOrWhiteSpace(direct)) return direct;
         DateTime deadline = DateTime.UtcNow.AddMilliseconds(1500);
         while (ModifiersDown()) {

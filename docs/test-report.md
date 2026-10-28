@@ -15,6 +15,9 @@
 | 新增服务 |Baidu/Youdao/Microsoft文本翻译、Youdao/Google OCR；协议/凭据/超限/重定向/错误脱敏/取消单测及专用表单、45固定URL精确对照passed；系统浏览器实际打开、新Windows诊断CLI和真实云账户未验收 |
 
 原95/96冷Edge失败、同PID后台剪贴板发布反例未关闭；同源点击在生成窗口和实际Edge/Chrome受控场景可通过，不据此断言所有应用已经修好。OS物理Win10/11/WPS、IME/多屏/全屏仍需机主复现。Mac规范程序未签名/安装/修改权限；新安装包已生成但尚非全通过修复版，未发布stable。[完整分层记录](validation/windows-selection-services-20261028.json)。
+
+最新夹具41e/run40633781813复用精确787程序，实测双order共96次单拖选/单AltD全链通过、0准备失败，84次同浏览器空白点击隐藏、12轮清理通过；不含下述新native修复。新候选只在初始现有selection策略候选全正常不支持TextPattern、未读到range/原文且未碰剪贴板时，对初次后置已知RuntimeId变化允许一次当前选区重采；源native窗口/焦点/线程/进程和鼠标释放状态必须保持，新context仍完整密码/root和post身份核验，无第二次/新listener/固定等待/预算重置。未知RID、有效空pattern、读取错误或已有A均不重采。它取得第一次实际可读的当前选文，不能冻结此前从未读到的A；同native焦点脚本改为B时可能读当前B。149纯策略断言/C#5/AST通过，双重源审无剩余阻断，Windows原红96尚待验证。
+
 <!-- selection-services-20261028:end -->
 
 <!-- shortcut-reconfiguration-20261028:start -->

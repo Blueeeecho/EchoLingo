@@ -65,6 +65,84 @@ public static class WindowsSelectionPolicyFixture {
         fixture.Frames.Add(new Frame(30, 12, "synthetic selected text 中文"));
         return fixture;
     }
+    static SelectionCopyPolicy.NativeContext NativeContext() {
+        return new SelectionCopyPolicy.NativeContext { Foreground = 101, Root = 101, Focus = 102,
+            Process = 201, ForegroundThread = 301, FocusThread = 302, Valid = true, MouseReleased = true };
+    }
+    static void UnreadRestartChecks() {
+        SelectionCopyPolicy.ReadEvidence absent = new SelectionCopyPolicy.ReadEvidence();
+        absent.CompleteUnsupportedScan();
+        Assert(!absent.NoPatternComplete, "No attempted candidate query cannot qualify as a complete unsupported path");
+        absent.ObservePattern(false, false); absent.ObservePattern(false, false); absent.ObservePattern(false, false);
+        absent.CompleteUnsupportedScan();
+        Assert(absent.NoPatternComplete && !absent.PatternSeen && !absent.RangeReadAttempted, "Only a normally completed all-unsupported candidate path can qualify");
+        SelectionCopyPolicy.ReadEvidence earlyEdit = new SelectionCopyPolicy.ReadEvidence(); earlyEdit.ObservePattern(false, false);
+        Assert(!earlyEdit.NoPatternComplete, "An unsupported Edit early return has not completed the candidate scan");
+        SelectionCopyPolicy.ReadEvidence failedQuery = new SelectionCopyPolicy.ReadEvidence();
+        Assert(!failedQuery.NoPatternComplete, "A provider query failure before normal completion cannot qualify");
+        foreach (bool validPattern in new bool[] { true, false }) {
+            SelectionCopyPolicy.ReadEvidence seen = new SelectionCopyPolicy.ReadEvidence(); seen.ObservePattern(true, validPattern);
+            seen.CompleteUnsupportedScan();
+            Assert(seen.PatternSeen && !seen.NoPatternComplete, "An available pattern is strict before GetSelection, including malformed or empty providers");
+        }
+        SelectionCopyPolicy.ReadEvidence inconsistent = new SelectionCopyPolicy.ReadEvidence(); inconsistent.ObservePattern(false, true); inconsistent.CompleteUnsupportedScan();
+        Assert(inconsistent.PatternSeen && !inconsistent.NoPatternComplete, "A returned valid pattern never becomes no-pattern evidence even with an inconsistent available flag");
+        SelectionCopyPolicy.ReadEvidence read = new SelectionCopyPolicy.ReadEvidence(); read.BeforeRangeRead(); read.CompleteUnsupportedScan();
+        Assert(read.RangeReadAttempted && !read.NoPatternComplete, "Any attempted range read prevents restart eligibility");
+        absent.ObservePattern(true, true);
+        Assert(!absent.NoPatternComplete, "Subsequently observing a valid pattern invalidates completed unsupported evidence");
+        foreach (bool emptyDocument in new bool[] { false, true }) {
+            SelectionCopyPolicy.ReadEvidence empty = new SelectionCopyPolicy.ReadEvidence(); empty.ObservePattern(true, true);
+            try { SelectionCopyPolicy.ReadAutomation(false, true, true,
+                delegate { empty.BeforeRangeRead(); return new string[0]; }, delegate(string value) { empty.BeforeRangeRead(); return value; }, emptyDocument); }
+            catch (InvalidOperationException error) { Assert(error.Message.StartsWith("NO_SELECTION:", StringComparison.Ordinal), "Valid empty Edit remains NO_SELECTION"); }
+            empty.CompleteUnsupportedScan();
+            Assert(empty.PatternSeen && empty.RangeReadAttempted && !empty.NoPatternComplete, "Valid empty Edit and Document providers must remain strict");
+        }
+        SelectionCopyPolicy.ReadEvidence stale = new SelectionCopyPolicy.ReadEvidence(); stale.ObservePattern(true, true);
+        Error(delegate { SelectionCopyPolicy.ReadAutomation(false, true, true,
+            delegate { stale.BeforeRangeRead(); return new string[] { "generated range" }; },
+            delegate(string value) { stale.BeforeRangeRead(); throw new InvalidOperationException("SELECTION: generated stale range"); }); }, "SELECTION:");
+        Assert(!stale.NoPatternComplete, "A range exception cannot reclassify a real pattern as unsupported");
+        SelectionCopyPolicy.NativeContext before = NativeContext(), current = NativeContext();
+        Assert(SelectionCopyPolicy.CanRestartUnreadSelection(true, null, false, before, current), "A complete unread scan permits current selection B from matching native context; it does not prove an unseen shortcut-time A");
+        Assert(SelectionCopyPolicy.CanRestartUnreadSelection(true, " ", false, before, current), "Unread whitespace has no captured A to preserve");
+        Assert(!SelectionCopyPolicy.CanRestartUnreadSelection(false, null, false, before, current), "Unavailable, early-return, valid-empty or failed scans cannot restart");
+        Assert(!SelectionCopyPolicy.CanRestartUnreadSelection(true, "already captured A", false, before, current), "Previously read A must never be replaced by current B");
+        Assert(!SelectionCopyPolicy.CanRestartUnreadSelection(true, null, true, before, current), "A second context transition is never retried");
+        Assert(!SelectionCopyPolicy.CanRestartUnreadSelection(true, null, false, null, current)
+            && !SelectionCopyPolicy.CanRestartUnreadSelection(true, null, false, before, null), "Unknown native context cannot authorize current capture");
+        Action<SelectionCopyPolicy.NativeContext>[] changes = new Action<SelectionCopyPolicy.NativeContext>[] {
+            delegate(SelectionCopyPolicy.NativeContext value) { value.Valid = false; },
+            delegate(SelectionCopyPolicy.NativeContext value) { value.MouseReleased = false; },
+            delegate(SelectionCopyPolicy.NativeContext value) { value.Foreground++; },
+            delegate(SelectionCopyPolicy.NativeContext value) { value.Root++; },
+            delegate(SelectionCopyPolicy.NativeContext value) { value.Focus++; },
+            delegate(SelectionCopyPolicy.NativeContext value) { value.Process++; },
+            delegate(SelectionCopyPolicy.NativeContext value) { value.ForegroundThread++; },
+            delegate(SelectionCopyPolicy.NativeContext value) { value.FocusThread++; }
+        };
+        foreach (Action<SelectionCopyPolicy.NativeContext> change in changes) {
+            current = NativeContext(); change(current);
+            Assert(!SelectionCopyPolicy.CanRestartUnreadSelection(true, null, false, before, current), "Every native context, validity and released-mouse boundary must match");
+        }
+        current = NativeContext(); before.MouseReleased = false;
+        Assert(!SelectionCopyPolicy.CanRestartUnreadSelection(true, null, false, before, current), "Mouse already held at Q1 entry disables restart");
+        before = NativeContext(); before.Valid = false;
+        Assert(!SelectionCopyPolicy.CanRestartUnreadSelection(true, null, false, before, current), "An invalid Q1 snapshot cannot be replaced by a valid later one");
+        before = NativeContext(); before.Focus = 0; current.Focus = 0;
+        Assert(!SelectionCopyPolicy.CanRestartUnreadSelection(true, null, false, before, current), "Two unknown zero focus handles do not constitute matching context");
+        Assert(SelectionCopyPolicy.KnownRuntimeIdChange(new int[] { 1, 2 }, new int[] { 1, 3 }), "Two real unequal RuntimeIds can use typed changed-identity control flow");
+        Assert(SelectionCopyPolicy.KnownRuntimeIdChange(new int[] { 1 }, new int[] { 1, 2 }), "Different nonempty opaque RuntimeId lengths still represent a known change");
+        Assert(!SelectionCopyPolicy.KnownRuntimeIdChange(new int[] { 1, 2 }, new int[] { 1, 2 }), "Equal RuntimeIds are not a transition");
+        Assert(!SelectionCopyPolicy.KnownRuntimeIdChange(null, new int[] { 1 }), "Unknown initial identity cannot authorize a current capture");
+        Assert(!SelectionCopyPolicy.KnownRuntimeIdChange(new int[0], new int[] { 1 }), "Empty initial identity cannot authorize a current capture");
+        Assert(!SelectionCopyPolicy.KnownRuntimeIdChange(new int[] { 1 }, null), "Unavailable fresh RuntimeId stays a generic error, not restart control flow");
+        Assert(!SelectionCopyPolicy.KnownRuntimeIdChange(new int[] { 1 }, new int[0]), "Empty fresh RuntimeId stays a generic error, not restart control flow");
+        SelectionCopyPolicy.SelectionRuntimeIdChangedException typed = new SelectionCopyPolicy.SelectionRuntimeIdChangedException();
+        Assert(typed.Message == "SELECTION: The focused control changed or is outside the source window; select text and retry.", "Typed RuntimeId failure preserves the public error text");
+        Assert(!(new InvalidOperationException("PROTECTED: generated") is SelectionCopyPolicy.SelectionRuntimeIdChangedException), "Protection and generic selection errors are not restart control flow");
+    }
     public static int Main() {
         try {
             Assert(SelectionCopyPolicy.AutomationText<string>(null, delegate(string text) { return text; }) == null,
@@ -284,6 +362,7 @@ public static class WindowsSelectionPolicyFixture {
             Error(delegate {SelectionCopyPolicy.ReadAutomation(false,true,true,delegate{return new string[]{(string)null};},delegate(string x){return x;},true);},"SELECTION:");
             Error(delegate {SelectionCopyPolicy.ReadAutomation(false,true,true,delegate{return new string[]{"range"};},delegate(string x){throw new InvalidOperationException("SELECTION: stale range");},true);},"SELECTION:");
             Assert(normal.OwnerChecks==2,"Owner validated after coherent read and again immediately before restore");
+            UnreadRestartChecks();
             Console.WriteLine("{\"ok\":true,\"selectionPolicyFixturePassed\":true,\"assertions\":" + assertions + ",\"windowsInteractiveTested\":false,\"clipboardAccessed\":false,\"inputSent\":false,\"screenCaptured\":false}");
             return 0;
         } catch (Exception error) { Console.Error.WriteLine(error); return 1; }

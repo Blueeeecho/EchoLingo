@@ -136,8 +136,8 @@
   ],
   "files": {
     "src-tauri/native/windows.ps1": {
-      "bytes": 184509,
-      "sha256": "32bca1c7b05f9b661193f874a223354ee4685439dc63787fb9518a76e7af4577"
+      "bytes": 193987,
+      "sha256": "8220b4112453e8be1bda87c5480e1fae70b960599d2abe7dee0de69e6ae8bd0d"
     },
     "src-tauri/src/platform.rs": {
       "bytes": 71980,
@@ -148,8 +148,8 @@
       "sha256": "ed5ff4fdafa62d321877c39b056050010843306bf35e63b644125b1986d956e4"
     },
     "tests/windows-selection-policy-fixture.cs": {
-      "bytes": 24979,
-      "sha256": "89f5807017ecef0a269f12efad767e3ee837a60ef2379af2184df7e1ff189db3"
+      "bytes": 33639,
+      "sha256": "d0b2ff25329e1c3e8ef7a5019f1738f834571e496cc088c9e18b86922a5ae711"
     },
     "src-tauri/src/translation_native.rs": {
       "bytes": 17885,
@@ -182,6 +182,14 @@
     "docs/official-services.zh-CN.md": {
       "bytes": 5713,
       "sha256": "b992f3d6b8917e249dbc5957e8a93731483e68234ac3360804177e0b982fe718"
+    },
+    "tests/windows-browser-selection-smoke.mjs": {
+      "bytes": 39048,
+      "sha256": "46c4c13c66383a22a6ab5816ca9d4cfcde3f14dd0e6cf609d118bcd2b46edeba"
+    },
+    "tests/windows-browser-selection-bridge.cs": {
+      "bytes": 55865,
+      "sha256": "22405d2f0c794193ff2ba9114c4bfcbe235d6ec0d266af94d33c90f958e8a29b"
     }
   },
   "credentialReview": {
@@ -272,5 +280,43 @@
     "reasonMarkersUnavailable": "Existing browser bridge suffix whitelist did not include three new opt-in fields; cannot infer attempted/skipped/root/child.",
     "restoredSourceSha256": "32bca1c7b05f9b661193f874a223354ee4685439dc63787fb9518a76e7af4577",
     "summaryFile": "/Users/wwq/Documents/Codex/2026-10-24/ni-ne/work/selection-dismiss-official-apis-20261028/ci-cf6cf57-native-focus-prime/summary.json"
+  },
+  "observedPointerApplicationSupplement": {
+    "source": "41e2cfb",
+    "runId": 40633781813,
+    "actualApplicationSource": "78794c468c2400318978ebbb728338a0ca11105b",
+    "actualSingleAltDPassed": 96,
+    "planned": 96,
+    "preparationFailures": 0,
+    "unexecuted": 0,
+    "sameSourceBlankClicksHidden": 84,
+    "freshRoundsCleaned": 12,
+    "maxClientEndpointErrorPixels": 0.5,
+    "physicalEndpointErrorPixels": 0,
+    "nativeMouseFlags": 57345,
+    "newNativeRecaptureNotIncluded": true,
+    "doesNotRewriteFullRun14of15OrOriginal95of96": true,
+    "summaryFile": "/Users/wwq/Documents/Codex/2026-10-24/ni-ne/work/selection-dismiss-official-apis-20261028/ci-41e2cfb-browser-app/summary.json",
+    "summarySha256": "5808c3c803f5c84ca0294644e0ae695e583c31c3de1afc354637480004e9ad12"
+  },
+  "currentSelectionRecaptureCandidate": {
+    "status": "source-reviewed-awaiting-native-Windows-acceptance",
+    "scope": "At most one new current capture only after complete normally unsupported selection-policy candidates and initial post-validation known RuntimeId change; no prior pattern/range/text, no clipboard touch.",
+    "nativeBinding": [
+      "foreground",
+      "root",
+      "process",
+      "foregroundThread",
+      "nativeFocusWindow",
+      "nativeFocusThread",
+      "releasedFiveMouseButtons"
+    ],
+    "qualification": "Unknown native context or fresh RuntimeId, prior valid/empty pattern, range error, early unsupported Edit, cancellation/budget failure or changed native context do not qualify.",
+    "safety": "Original strict identity/password/root checks run on new context and after it; no second retry, new hooks, activation, fixed wait, worker or budget reset. Original clipboard/restore and SelectionQuery poison bodies preserved.",
+    "meaning": "First successful currently available selection, not a frozen source A that was never readable. Same native window scripts can change selection to B before the actual first read.",
+    "hostPolicyAssertions": 149,
+    "realScriptMutationFixtureExecuted": false,
+    "freezeFile": "/Users/wwq/Documents/Codex/2026-10-24/ni-ne/work/selection-dismiss-official-apis-20261028/current-selection-restart/validation-and-freeze.json",
+    "sourceReviewFile": "/Users/wwq/Documents/Codex/2026-10-24/ni-ne/work/selection-dismiss-official-apis-20261028/unread-context-recapture/final-source-review.json"
   }
 }
