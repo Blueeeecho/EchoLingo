@@ -374,6 +374,18 @@ public static class EchoLingoApplicationSmoke {
             if(owner==process&&GetAncestor(window,2)==window&&name.ToString()=="Tauri Window")candidates.Add(window);return true;
         },IntPtr.Zero);return candidates.Count==1?candidates[0]:IntPtr.Zero;
     }
+    static Dictionary<string,object> NativeStartup(Process app) {
+        int trays=0,hotkeys=0;
+        EnumWindows(delegate(IntPtr window,IntPtr unused) {
+            uint owner;GetWindowThreadProcessId(window,out owner);
+            if(owner!=app.Id||GetAncestor(window,2)!=window)return true;
+            StringBuilder name=new StringBuilder(128);GetClassName(window,name,name.Capacity);
+            if(name.ToString()=="tray_icon_app")trays++;
+            if(name.ToString()=="global_hotkey_app")hotkeys++;
+            return true;
+        },IntPtr.Zero);
+        return new Dictionary<string,object>{{"trayWindowCount",trays},{"globalHotkeyWindowCount",hotkeys},{"nativeMilestoneIsNotFrontendReadiness",true},{"fixedFrontendWarmupMilliseconds",0}};
+    }
     static AutomationElement Element(IntPtr window,string name) {
         return AutomationElement.FromHandle(window).FindFirst(TreeScope.Descendants,new PropertyCondition(AutomationElement.NameProperty,name));
     }
@@ -401,6 +413,65 @@ public static class EchoLingoApplicationSmoke {
             {"style",GetWindowLongPtr(main,-16).ToInt64()},{"extendedStyle",GetWindowLongPtr(main,-20).ToInt64()},
             {"displayAffinityQuerySucceeded",affinityOk},{"displayAffinity",affinityOk?(object)affinity:null},{"displayAffinityWin32Error",affinityError},
             {"physicalBounds",rectOk?(object)new int[]{r.left,r.top,r.right-r.left,r.bottom-r.top}:null}};
+    }
+    sealed class FailedEditorObservation { public int Complete,Available,Visible,Nonempty,Failed; }
+    static HashSet<string> FailureHealthFields() {
+        HashSet<string> fields=new HashSet<string>(new string[]{"selectionQueryCount","helperResponseReceived","helperElapsedMilliseconds","helperResultNonempty","cancellationRequested","cancellationSignalled","cancellationSignalFailed","attemptId","attemptPhase","configuredCopyStrategy","actionResultOk","actionResultNonempty"});
+        foreach(string suffix in new string[]{"Stage","Depth","IdentityCompared","IdentityEqual","RootWalkReason","ExceptionKind","Milliseconds"})for(int i=1;i<=16;i++)fields.Add("selectionQuery"+i+suffix);
+        foreach(string key in new string[]{"copyStrategy","copyPhase","copyNativeContextValid","copyNativeContextChecks","copyNativeGuardReason","copyNativeEditable","copyNativeProtection","copyNativeSelectionKnown","copyNativeSelectionNonempty","copyProtectionProbe","copyProtectionProbeMilliseconds","copyProtectionUnknown","copySnapshotOutcome","copyDispatchInserted","copyOwnInputObserved","copyOwnerOutcome","copyClipboardRestored","copyTerminalReason","copyNativeInvalidReason","copyNativeGtiSucceeded","copyNativeGtiFlags","copyNativeFocusPresent","copyNativeFocusProcessMatchesForeground","copyNativeFocusRootMatchesForeground","copyNativeActivePresent","copyNativeActiveRootMatchesForeground"})fields.Add(key);
+        return fields;
+    }
+    static long BoundedDiagnosticNumber(object value,long maximum) {
+        Assert(value is int||value is long,"Failure diagnostic must contain integer metadata.");
+        long number=Convert.ToInt64(value);Assert(number>=0&&number<=maximum,"Failure diagnostic metadata exceeds its bound.");return number;
+    }
+    // One read-only export after the original action has already failed. This
+    // never retries a shortcut, changes focus or extends its acceptance budget.
+    static void ObserveFailedWorkflow(Dictionary<string,object> report,Process app,ProcessStartInfo primaryStart,
+        string executable,string roaming,string token,Form source,MockServer server) {
+        Dictionary<string,object> snapshot=new Dictionary<string,object>{{"takenAfterWorkflowFailure",1},{"budgetMilliseconds",2000},{"captureOrKeyRequests",0},{"primaryLaunchedWithSelectionDiagnostics",0}};
+        report["failureOnlyObservation"]=snapshot;Stopwatch budget=Stopwatch.StartNew();Process secondary=null;
+        FailedEditorObservation editor=new FailedEditorObservation();
+        try {
+            Assert(app!=null&&!app.HasExited,"Failure observation requires the owned primary.");
+            IntPtr main=MainWindow(app.Id);snapshot["ownMainFound"]=main!=IntPtr.Zero?1:0;snapshot["ownMainVisible"]=main!=IntPtr.Zero&&IsWindowVisible(main)?1:0;
+            snapshot["foregroundIsSource"]=GetForegroundWindow()==source.Handle?1:0;snapshot["foregroundIsApp"]=ForegroundPid()==app.Id?1:0;
+            snapshot["mockEnabled"]=server!=null?1:0;snapshot["mockRequestCount"]=server==null?0:server.Count;snapshot["mockErrorPresent"]=server!=null&&server.Error!=null?1:0;
+            Thread reader=new Thread(delegate(){try {
+                if(main==IntPtr.Zero)return;
+                AutomationElement own=AutomationElement.FromHandle(main);Assert(own!=null&&own.Current.ProcessId==app.Id,"Failure editor root is not owned.");
+                AutomationElement input=own.FindFirst(TreeScope.Descendants,new AndCondition(new PropertyCondition(AutomationElement.ControlTypeProperty,ControlType.Edit),new OrCondition(new PropertyCondition(AutomationElement.AutomationIdProperty,"source-text"),new PropertyCondition(AutomationElement.NameProperty,"\u539f\u6587"))));object raw;
+                if(input!=null){editor.Available=1;editor.Visible=input.Current.IsOffscreen?0:1;if(input.TryGetCurrentPattern(ValuePattern.Pattern,out raw))editor.Nonempty=String.IsNullOrEmpty(((ValuePattern)raw).Current.Value)?0:1;}
+            }catch{editor.Failed=1;}finally{Interlocked.Exchange(ref editor.Complete,1);}});
+            reader.IsBackground=true;reader.SetApartmentState(ApartmentState.MTA);reader.Start();
+            Assert(primaryStart!=null&&(File.GetAttributes(roaming)&FileAttributes.ReparsePoint)==0&&File.ReadAllText(Path.Combine(roaming,MarkerName))==token,"Failure diagnostic directory is not owned.");
+            string file=Path.Combine(roaming,"selection-diagnostics.json");
+            ProcessStartInfo start=new ProcessStartInfo(executable,"--selection-diagnostics");start.UseShellExecute=false;start.CreateNoWindow=true;
+            foreach(string key in new string[]{"APPDATA","LOCALAPPDATA","TEMP","TMP","WEBVIEW2_USER_DATA_FOLDER"})start.EnvironmentVariables[key]=primaryStart.EnvironmentVariables[key];
+            long earliest=(long)(DateTime.UtcNow-new DateTime(1970,1,1,0,0,0,DateTimeKind.Utc)).TotalMilliseconds;
+            snapshot["diagnosticExportsRequested"]=1;secondary=Process.Start(start);
+            while(budget.ElapsedMilliseconds<2000){if(secondary.HasExited)break;Thread.Sleep((int)Math.Min(10,Math.Max(1,2000-budget.ElapsedMilliseconds)));}
+            snapshot["diagnosticExportExited"]=secondary.HasExited?1:0;
+            if(secondary.HasExited&&secondary.ExitCode==0&&File.Exists(file)&&budget.ElapsedMilliseconds<2000){
+                Assert((File.GetAttributes(file)&FileAttributes.ReparsePoint)==0&&new FileInfo(file).Length>0&&new FileInfo(file).Length<=16384,"Failure diagnostic file exceeds its ownership/bound contract.");
+                Dictionary<string,object> payload=new JavaScriptSerializer().Deserialize<Dictionary<string,object>>(File.ReadAllText(file));
+                Assert((string)payload["diagnostic"]=="last-selection-attempt"&&BoundedDiagnosticNumber(payload["processId"],Int32.MaxValue)==app.Id&&String.Equals((string)payload["executablePath"],Path.GetFullPath(executable),StringComparison.OrdinalIgnoreCase),"Failure diagnostic primary identity differs.");
+                long recorded=BoundedDiagnosticNumber(payload["recordedAtUnixMs"],Int64.MaxValue),latest=(long)(DateTime.UtcNow-new DateTime(1970,1,1,0,0,0,DateTimeKind.Utc)).TotalMilliseconds;
+                snapshot["diagnosticIsFreshAfterFailure"]=recorded>=earliest&&recorded<=latest?1:0;
+                if(recorded>=earliest&&recorded<=latest){
+                    Dictionary<string,object> health=payload["diagnostics"] as Dictionary<string,object>;Assert(health!=null,"Failure numeric health is missing.");
+                    Dictionary<string,object> numeric=new Dictionary<string,object>();HashSet<string> allowed=FailureHealthFields();
+                    foreach(KeyValuePair<string,object> pair in health)if(allowed.Contains(pair.Key))numeric[pair.Key]=BoundedDiagnosticNumber(pair.Value,10000000);
+                    snapshot["nativeHealth"]=numeric;snapshot["primaryIdentityVerified"]=1;
+                }
+            }
+        }catch{snapshot["observationFailed"]=1;}
+        finally {
+            if(secondary!=null){try{if(!secondary.HasExited){secondary.Kill();snapshot["ownDiagnosticProcessStopped"]=1;}}catch{snapshot["ownDiagnosticProcessCleanupFailed"]=1;}secondary.Dispose();}
+            snapshot["sourceObservationCompleted"]=Interlocked.CompareExchange(ref editor.Complete,0,0)!=0?1:0;
+            if(Interlocked.CompareExchange(ref editor.Complete,0,0)!=0){snapshot["sourceAvailable"]=editor.Available;snapshot["sourceVisible"]=editor.Visible;snapshot["sourceNonempty"]=editor.Nonempty;snapshot["sourceObservationFailed"]=editor.Failed;}
+            snapshot["elapsedMilliseconds"]=Math.Min(10000000,budget.ElapsedMilliseconds);
+        }
     }
     sealed class PinnedVisibilityWatch : IDisposable {
         readonly IntPtr window;readonly Thread thread;volatile bool stop;int samples,hidden;long maximumGapTicks;
@@ -595,6 +666,7 @@ public static class EchoLingoApplicationSmoke {
         ushort selectionKey = customBindings ? (ushort)0x78 : (ushort)0x44, silentOcrKey = customBindings ? (ushort)0x79 : (ushort)0x53;
         List<Dictionary<string, object>> customCases = new List<Dictionary<string, object>>();
         Dictionary<string, object> hotkeys = new Dictionary<string, object>();
+        report["startupHotkeyAvailability"]=hotkeys;
         if (customBindings) {
             report["customShortcutsTestsRequested"] = true; report["shortcutWorkflow"] = "loaded-custom-bindings";
             report["startupSettingsWrittenDirectly"] = true;
@@ -643,9 +715,10 @@ public static class EchoLingoApplicationSmoke {
                     form.Shown += delegate {
                         Thread worker = new Thread(delegate() {
                             Point originalPointer = Point.Empty; bool restorePointer = GetPhysicalCursorPos(out originalPointer);
+                            ProcessStartInfo start=null;string stage="launch-owned-application";
                             try {
                                 Assert(SetThreadDpiAwarenessContext(new IntPtr(-4)) != IntPtr.Zero, "Fixture worker physical coordinates unavailable.");
-                                ProcessStartInfo start = new ProcessStartInfo(executable); start.UseShellExecute = false; start.CreateNoWindow = true;
+                                start = new ProcessStartInfo(executable); start.UseShellExecute = false; start.CreateNoWindow = true;
                                 start.EnvironmentVariables["APPDATA"] = Path.Combine(root, "UnusedRoamingEnvironment");
                                 start.EnvironmentVariables["LOCALAPPDATA"] = childLocal;
                                 start.EnvironmentVariables["TEMP"] = childTemp; start.EnvironmentVariables["TMP"] = childTemp;
@@ -653,16 +726,22 @@ public static class EchoLingoApplicationSmoke {
                                 if (customBindings) hotkeys["beforeApplicationStart"] = new object[] {
                                     ProbeHotkey(0x6E19, selectionShortcut, 7, 0x78, true), ProbeHotkey(0x6E1A, silentOcrShortcut, 7, 0x79, true),
                                     ProbeHotkey(0x6E1B, "Alt+D", 1, 0x44, true), ProbeHotkey(0x6E1C, "Alt+S", 1, 0x53, true) };
+                                else hotkeys["beforeApplicationStart"]=ProbeHotkey(0x6E19,selectionShortcut,1,selectionKey,true);
                                 app = Process.Start(start); report["applicationProcessId"] = app.Id; report["actualApplicationTested"] = true;
                                 try { Assert(app.WaitForInputIdle(15000), "Actual app did not become input-idle."); } catch (InvalidOperationException) { throw new InvalidOperationException("Actual app has no observable GUI message loop."); }
-                                WaitFor(delegate { return AppWindows(app.Id, false).Count > 0; }, 20, "Actual app native window was not created.", app);
-                                // Message-loop readiness is not frontend subscription readiness.
-                                // Warm the actual packaged WebView once; do not repeat shortcuts.
-                                Thread.Sleep(4000);
+                                stage="native-startup-milestone";
+                                // tray-icon 0.25.1 creates this owned top-level
+                                // window after setup has called install_shortcuts.
+                                // Observe without showing/focusing or repeatedly
+                                // stealing a shortcut registration. This remains
+                                // a native milestone, not frontend readiness proof.
+                                WaitFor(delegate { var readiness=NativeStartup(app);report["beforeFirstHotkeyReadiness"]=readiness;return MainWindow(app.Id)!=IntPtr.Zero&&Convert.ToInt32(readiness["trayWindowCount"])==1; },20,"Actual app did not reach its unique main and after-shortcut tray milestone.",app);
                                 if (customBindings) hotkeys["afterApplicationStart"] = new object[] {
                                     ProbeHotkey(0x6E19, selectionShortcut, 7, 0x78, false), ProbeHotkey(0x6E1A, silentOcrShortcut, 7, 0x79, false),
                                     ProbeHotkey(0x6E1B, "Alt+D", 1, 0x44, true), ProbeHotkey(0x6E1C, "Alt+S", 1, 0x53, true) };
+                                else hotkeys["afterApplicationStart"]=ProbeHotkey(0x6E19,selectionShortcut,1,selectionKey,false);
                                 OnUi(form, delegate { form.Activate(); SetForegroundWindow(form.Handle); source.Focus(); source.Select(7, Selected.Length); }); Thread.Sleep(150);
+                                stage="first-selected-text-shortcut";
                                 Shortcut(form, selectionKey, customBindings);
                                 if (customBindings) report["customShortcutExecutedWorkflowCount"] = 1;
                                 WaitFor(delegate { if (server != null && server.Error != null) throw new InvalidOperationException(server.Error); return HasHistory(history, Selected, "selection", providerId) && (!customBindings || AppSourceMatches(app.Id, Selected)); }, 45, selectionShortcut + (customBindings ? " never produced valid source/translation/history from the configured backend." : " never produced valid translation/history from the configured backend."), app);
@@ -672,6 +751,7 @@ public static class EchoLingoApplicationSmoke {
                                 passed.Add("Actual " + selectionShortcut + " -> native source selection -> frontend automatic translation -> " + (offline ? "real offline en-zh model" : "loopback mock") + " -> durable synthetic history; source foreground preserved");
                                 if (customBindings) customCases.Add(new Dictionary<string, object> { { "workflow", "selection" }, { "shortcut", selectionShortcut }, { "hotkeyPresses", 1 }, { "actualSourceMatched", true }, { "mockRequestsAfter", server.Count }, { "durableHistoryMatched", true }, { "ok", true } });
                                 OnUi(form, delegate { form.Activate(); SetForegroundWindow(form.Handle); source.Focus(); source.Select(0, 0); }); Thread.Sleep(150);
+                                stage="empty-selection-and-typed-submit";
                                 Shortcut(form, selectionKey, customBindings);
                                 if (customBindings) report["customShortcutExecutedWorkflowCount"] = 2;
                                 WaitFor(delegate { return ForegroundPid() == app.Id; }, 15, "Empty " + selectionShortcut + " did not focus the actual application.", app); Thread.Sleep(150); TypeIntoApp(app.Id);
@@ -696,6 +776,7 @@ public static class EchoLingoApplicationSmoke {
                                 // cannot satisfy the readiness condition.
                                 move(first);
                                 Dictionary<string, object> ocrReady = new Dictionary<string, object>(); report["ocrOverlayReadiness"] = ocrReady;
+                                stage="first-region-ocr";
                                 Shortcut(form, silentOcrKey, customBindings);
                                 if (customBindings) report["customShortcutExecutedWorkflowCount"] = 3;
                                 Stopwatch readyElapsed = Stopwatch.StartNew();
@@ -716,6 +797,7 @@ public static class EchoLingoApplicationSmoke {
                                     report["customShortcutHistoryCount"] = count; report["customShortcutPassedWorkflowCount"] = customCases.Count;
                                     report["customBindingCallbacksProveApplicationOwnership"] = true;
                                 }
+                                stage="latest-intent-workflows";
                                 if(latest) LatestIntents(form,source,image,app,server,history,providerId,passed,report,
                                     delegate(string text){OnUi(form,delegate{paintedOcrText=text;paintedOcrFontPoints=24;image.Refresh();});},delegate{int events=0;OnUi(form,delegate{events=sourceMouseEvents;});return events;});
                                 report["mockRequests"] = server == null ? new List<Dictionary<string, object>>() : server.Requests;
@@ -723,7 +805,7 @@ public static class EchoLingoApplicationSmoke {
                                     Assert(ActualTranslations.Count == 3 && new JavaScriptSerializer().Deserialize<object[]>(File.ReadAllText(history)).Length == 3, "Offline flows did not produce exactly three successful synthetic histories.");
                                 }
                                 report["actualOfflineTranslations"] = ActualTranslations; report["ok"] = true;
-                            } catch (Exception error) { report["error"] = error.Message;InputPlaneStyleException planeError=error as InputPlaneStyleException;if(planeError!=null)report["inputPlaneStyleFailure"]=planeError.ScalarMetadata;if(app!=null&&!app.HasExited){try{report["ownMainFailureMetadata"]=MainMetadata(app);}catch(Exception diagnostic){report["mainMetadataErrorType"]=diagnostic.GetType().Name;}} }
+                            } catch (Exception error) { report["failedStage"]=stage;report["error"] = error.Message;InputPlaneStyleException planeError=error as InputPlaneStyleException;if(planeError!=null)report["inputPlaneStyleFailure"]=planeError.ScalarMetadata;if(app!=null&&!app.HasExited){try{report["ownMainFailureMetadata"]=MainMetadata(app);}catch(Exception diagnostic){report["mainMetadataErrorType"]=diagnostic.GetType().Name;}ObserveFailedWorkflow(report,app,start,executable,roaming,token,form,server);} }
                             finally {
                                 if (customBindings) report["customShortcutPassedWorkflowCount"] = customCases.Count;
                                 if (!(bool)report["ok"]) ReleaseOwnInput(form, app, customBindings);

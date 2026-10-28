@@ -5,6 +5,8 @@ public static partial class EchoLingoPopupVisibilitySmoke {
     [System.Runtime.InteropServices.DllImport("user32.dll")] static extern bool GetClientRect(System.IntPtr window, out RECT bounds);
     [System.Runtime.InteropServices.DllImport("user32.dll")] static extern bool GetGUIThreadInfo(uint thread, ref ResizeGuiInfo info);
     [System.Runtime.InteropServices.DllImport("user32.dll")] static extern short GetAsyncKeyState(int key);
+    [System.Runtime.InteropServices.DllImport("user32.dll", SetLastError=true)] static extern bool RegisterHotKey(System.IntPtr window, int id, uint modifiers, uint key);
+    [System.Runtime.InteropServices.DllImport("user32.dll", SetLastError=true)] static extern bool UnregisterHotKey(System.IntPtr window, int id);
     [System.Runtime.InteropServices.StructLayout(System.Runtime.InteropServices.LayoutKind.Sequential)]
     struct ResizeGuiInfo {
         public uint size, flags;
@@ -21,6 +23,29 @@ public static partial class EchoLingoPopupVisibilitySmoke {
         RECT bounds; Require(GetWindowRect(main, out bounds), "Own window bounds are unavailable."); return bounds;
     }
     static int ResizeWidth(System.IntPtr main) { RECT bounds = ResizeBounds(main); return bounds.right - bounds.left; }
+    static System.Collections.Generic.Dictionary<string, object> ResizeInputRegistrationProbe() {
+        // Never call while production may be registering: a successful probe
+        // temporarily owns the binding. Call only before launch or after the
+        // own tray HWND proves setup has already attempted registrations.
+        const int probeId = 0x6e51;
+        SetLastError(0); bool acquired = RegisterHotKey(System.IntPtr.Zero, probeId, 1, 0x41);
+        int error = acquired ? 0 : System.Runtime.InteropServices.Marshal.GetLastWin32Error();
+        bool released = !acquired || UnregisterHotKey(System.IntPtr.Zero, probeId);
+        return new System.Collections.Generic.Dictionary<string, object> { { "attempts", 1 }, { "acquired", acquired }, { "lastError", error }, { "released", released } };
+    }
+    static int ResizeOwnedTrayCount(int process) {
+        int count = 0;
+        EnumWindows(delegate(System.IntPtr window, System.IntPtr unused) {
+            uint owner; GetWindowThreadProcessId(window, out owner);
+            if (owner != process || GetAncestor(window, 2) != window) return true;
+            var name = new System.Text.StringBuilder(64); GetClassName(window, name, name.Capacity);
+            // Cargo.lock tray-icon 0.25.1 creates this ordinary top-level
+            // owner after main.rs setup's synchronous install_shortcuts call.
+            if (name.ToString() == "tray_icon_app") count++;
+            return true;
+        }, System.IntPtr.Zero);
+        return count;
+    }
     static System.Collections.Generic.Dictionary<string, object> ResizeStartupMetadata(Process app, System.IntPtr main, System.IntPtr source, System.IntPtr editor) {
         System.IntPtr foreground = GetForegroundWindow();
         var candidates = MainWindowCandidates(app.Id); uint process;
@@ -148,10 +173,37 @@ public static partial class EchoLingoPopupVisibilitySmoke {
                             string temp = Path.Combine(root, "Temp"); Directory.CreateDirectory(temp);
                             start.EnvironmentVariables["TEMP"] = temp; start.EnvironmentVariables["TMP"] = temp;
                             start.EnvironmentVariables["WEBVIEW2_USER_DATA_FOLDER"] = Path.Combine(local, "fixture-webview");
+                            var startup = new System.Collections.Generic.Dictionary<string, object> {
+                                { "readinessDeadlineMilliseconds", 20000 }, { "trayPolls", 0 }, { "mainFirstObservedMilliseconds", -1.0 },
+                                { "trayFirstObservedMilliseconds", -1.0 }, { "earliestColdStartKeyTested", false }, { "nativePreparationShowRequests", 0 }
+                            };
+                            report["inputShortcutStartupReadiness"] = startup;
+                            stage = "input-shortcut-no-initial-conflict";
+                            Stopwatch startupObservation = Stopwatch.StartNew();
+                            var initialProbe = ResizeInputRegistrationProbe(); startup["initialProbe"] = initialProbe;
+                            startup["initialProbeObservedMilliseconds"] = startupObservation.Elapsed.TotalMilliseconds;
+                            Require((bool)initialProbe["acquired"] && (bool)initialProbe["released"], "Alt+A is not initially available/released on this isolated desktop; no app launched.");
+                            stage = "launch-real-stage-app";
                             app = Process.Start(start); report["applicationProcessId"] = app.Id;
                             Require(app.WaitForInputIdle(15000), "New app native message loop did not become input-idle.");
+                            startup["nativeInputIdleObservedMilliseconds"] = startupObservation.Elapsed.TotalMilliseconds;
                             System.IntPtr main = System.IntPtr.Zero;
-                            Wait(delegate { Require(!app.HasExited, "New app exited before its HWND became ready."); main = MainWindow(app.Id); return main != System.IntPtr.Zero; }, 20000, "No unique owned main HWND became ready.");
+                            stage = "wait-own-native-setup-milestone";
+                            Wait(delegate {
+                                Require(!app.HasExited, "New app exited before its HWND became ready."); main = MainWindow(app.Id);
+                                int trayCount = ResizeOwnedTrayCount(app.Id); int poll = (int)startup["trayPolls"];
+                                if (poll == 0) startup["firstPollTrayCount"] = trayCount;
+                                startup["trayPolls"] = poll + 1; startup["lastTrayCount"] = trayCount;
+                                if (main != System.IntPtr.Zero && (double)startup["mainFirstObservedMilliseconds"] < 0) startup["mainFirstObservedMilliseconds"] = startupObservation.Elapsed.TotalMilliseconds;
+                                if (trayCount == 1 && (double)startup["trayFirstObservedMilliseconds"] < 0) startup["trayFirstObservedMilliseconds"] = startupObservation.Elapsed.TotalMilliseconds;
+                                return main != System.IntPtr.Zero && trayCount == 1;
+                            }, 20000, "No unique owned main/tray HWND setup milestone became ready.");
+                            stage = "input-shortcut-post-setup-registration";
+                            var finalProbe = ResizeInputRegistrationProbe(); startup["postSetupProbe"] = finalProbe;
+                            startup["postSetupProbeObservedMilliseconds"] = startupObservation.Elapsed.TotalMilliseconds;
+                            Require(!(bool)finalProbe["acquired"] && (int)finalProbe["lastError"] == 1409 && (bool)finalProbe["released"], "Alt+A is not registered after own setup attempted registration; no shortcut sent.");
+                            // An occupied binding alone does not identify its owner; the one
+                            // actual Alt+A and unchanged popup gate below must still pass.
                             Require(!IsWindowVisible(main), "Fresh dedicated app did not start silently.");
                             stage = "single-actual-input-shortcut";
                             var readiness = new System.Collections.Generic.Dictionary<string, object> {
