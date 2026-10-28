@@ -408,6 +408,12 @@ public static class EchoLingoNative {
     [DllImport("user32.dll", SetLastError=true)] static extern bool EmptyClipboard();
     [DllImport("user32.dll")] static extern bool CloseClipboard();
     [DllImport("user32.dll")] static extern uint GetWindowThreadProcessId(IntPtr window, out uint process);
+    [DllImport("user32.dll")] static extern bool GetGUIThreadInfo(uint thread, ref GUITHREADINFO info);
+    [StructLayout(LayoutKind.Sequential)] struct GUITHREADINFO {
+        public uint cbSize, flags;
+        public IntPtr active, focus, capture, menuOwner, moveSize, caret;
+        public int caretLeft, caretTop, caretRight, caretBottom;
+    }
     [DllImport("user32.dll")] static extern uint SendInput(uint count, INPUT[] input, int size);
     [DllImport("user32.dll")] static extern bool SetProcessDpiAwarenessContext(IntPtr context);
     [DllImport("user32.dll")] static extern IntPtr SetThreadDpiAwarenessContext(IntPtr context);
@@ -533,6 +539,7 @@ public static class EchoLingoNative {
         public volatile int Stage, Depth;
         public volatile int InitialRoleId, FreshRoleId, InitialIdentityLength, FreshIdentityLength;
         public volatile int IdentityCompared, IdentityEqual, RootWalkReason, ExceptionKind;
+        public volatile int NativeFocusPrimeAttempted, NativeFocusPrimeCompleted, NativeFocusPrimeIsRoot;
         public volatile bool Abandoned;
         public void Mark(int stage, int depth) { Depth = depth; Stage = stage; }
     }
@@ -651,6 +658,9 @@ public static class EchoLingoNative {
                 CapturePerformance.Set(prefix + "IdentityEqual", trace.IdentityEqual);
                 CapturePerformance.Set(prefix + "RootWalkReason", trace.RootWalkReason);
                 CapturePerformance.Set(prefix + "ExceptionKind", outcomeStage < 0 ? trace.ExceptionKind : outcomeExceptionKind);
+                CapturePerformance.Set(prefix + "NativeFocusPrimeAttempted", trace.NativeFocusPrimeAttempted);
+                CapturePerformance.Set(prefix + "NativeFocusPrimeCompleted", trace.NativeFocusPrimeCompleted);
+                CapturePerformance.Set(prefix + "NativeFocusPrimeIsRoot", trace.NativeFocusPrimeIsRoot);
                 if (budget != null) {
                     CapturePerformance.Set(prefix + "BudgetLimitMilliseconds", budget.LimitMilliseconds);
                     CapturePerformance.Set(prefix + "BudgetRemainingAtStartMilliseconds", budgetRemainingAtStart);
@@ -771,9 +781,60 @@ public static class EchoLingoNative {
         if (nativePid != 0) context.SourceProcesses.Add(unchecked((int)nativePid));
         return context;
     }
+    static void InitializeSelectionNativeFocus(SelectionContext context) {
+        RequireSelectionQueryActive(); SelectionStage(24, 0);
+        IntPtr foreground = context.Foreground;
+        if (foreground == IntPtr.Zero || GetForegroundWindow() != foreground)
+            throw new OperationCanceledException("CANCELLED: The source foreground changed before accessibility initialization.");
+        uint sourcePid; uint sourceThread = GetWindowThreadProcessId(foreground, out sourcePid);
+        IntPtr sourceRoot = GetAncestor(foreground, 2);
+        if (sourceThread == 0 || sourcePid == 0 || sourceRoot == IntPtr.Zero) return;
+        GUITHREADINFO before = new GUITHREADINFO(); before.cbSize = (uint)Marshal.SizeOf(typeof(GUITHREADINFO));
+        if (!GetGUIThreadInfo(sourceThread, ref before) || before.focus == IntPtr.Zero) return;
+        uint focusPid; uint focusThread = GetWindowThreadProcessId(before.focus, out focusPid);
+        // A missing or unrelated native focus is not a reason to change the
+        // existing UIA path. Only initialize the already validated source HWND.
+        if (focusThread == 0 || focusPid != sourcePid || GetAncestor(before.focus, 2) != sourceRoot) return;
+        uint currentPid;
+        if (GetForegroundWindow() != foreground || GetWindowThreadProcessId(foreground, out currentPid) != sourceThread || currentPid != sourcePid)
+            throw new OperationCanceledException("CANCELLED: The source foreground changed before accessibility initialization.");
+        RequireSelectionQueryActive(); SelectionStage(25, 0);
+        if (CapturePerformance.Enabled && selectionTrace != null) {
+            selectionTrace.NativeFocusPrimeAttempted = 1;
+            selectionTrace.NativeFocusPrimeIsRoot = before.focus == sourceRoot ? 1 : 0;
+        }
+        AutomationElement initialized;
+        try {
+            // Create this one provider object before the first FocusedElement
+            // call. Do not read its properties, text, patterns or children, or
+            // use it instead of the normal identity/password/ancestor checks.
+            initialized = AutomationElement.FromHandle(before.focus);
+        } catch (Exception error) {
+            SelectionException(error);
+            if (error is OperationCanceledException || error is SelectionBudgetExceededException) throw;
+            RequireSelectionQueryActive();
+            throw new InvalidOperationException("SELECTION: The source accessibility provider could not be initialized; no copy input was sent.");
+        }
+        if (CapturePerformance.Enabled && selectionTrace != null) selectionTrace.NativeFocusPrimeCompleted = 1;
+        SelectionStage(26, 0); RequireSelectionQueryActive();
+        if (initialized == null)
+            throw new InvalidOperationException("SELECTION: The source accessibility provider is unavailable; no copy input was sent.");
+        SelectionStage(27, 0);
+        GUITHREADINFO after = new GUITHREADINFO(); after.cbSize = before.cbSize;
+        if (!GetGUIThreadInfo(sourceThread, ref after))
+            throw new InvalidOperationException("SELECTION: The source focus could not be verified after accessibility initialization; no copy input was sent.");
+        uint afterFocusPid;
+        if (GetForegroundWindow() != foreground || GetAncestor(foreground, 2) != sourceRoot
+            || GetWindowThreadProcessId(foreground, out currentPid) != sourceThread || currentPid != sourcePid
+            || after.focus != before.focus || GetWindowThreadProcessId(after.focus, out afterFocusPid) != focusThread
+            || afterFocusPid != sourcePid || GetAncestor(after.focus, 2) != sourceRoot)
+            throw new OperationCanceledException("CANCELLED: The source focus changed during accessibility initialization.");
+        RequireSelectionQueryActive();
+    }
     static InitialSelection CaptureInitialSelection() {
         try {
             SelectionContext context = NewSelectionContext();
+            InitializeSelectionNativeFocus(context);
             List<AutomationElement> ancestors;
             AutomationElement focused = CurrentSelectionFocus(context, out ancestors);
             int process = focused.Cached.ProcessId;

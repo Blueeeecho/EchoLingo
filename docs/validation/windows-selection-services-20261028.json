@@ -1,7 +1,7 @@
 {
   "schemaVersion": 1,
   "date": "2026-10-28",
-  "stage": "new-source-awaiting-full-Windows-build",
+  "stage": "candidate-built-full-has-one-fixture-failure-and-original-native-cold-defect-remains",
   "productBaseline": "295a0ce45296d4310ee1b6a7c8e536b5911e1625",
   "fixtureHead": "5f4dbba",
   "host": {
@@ -64,20 +64,69 @@
     }
   ],
   "newWindowsAcceptance": {
-    "runId": null,
-    "status": "not_dispatched",
-    "rawGates": 15,
-    "browserMouseCasesPlanned": 48,
-    "nonBrowserSources": [
-      "System32 Notepad",
-      "generated WPF",
-      "generated WinForms in existing rigorous matrix"
-    ],
-    "browserOcr": [
-      "Edge",
-      "Chrome"
-    ],
-    "shortcutRegressionRetained": true
+    "runId": 40629457450,
+    "source": "78794c468c2400318978ebbb728338a0ca11105b",
+    "status": "completed",
+    "conclusion": "failure",
+    "gateCounts": {
+      "required": 15,
+      "success": 14,
+      "failure": 1
+    },
+    "rawGates": {
+      "nonbrowserSelection": "success",
+      "selectionInternals": "success",
+      "shortcutsUi": "success",
+      "installedOffline": "success",
+      "applicationCore": "success",
+      "actualBrowserOcr": "success",
+      "popupVisibility": "success",
+      "selectionDocument": "success",
+      "liveCapture": "success",
+      "helperPerformance": "success",
+      "customShortcuts": "success",
+      "delegatedCapture": "success",
+      "actualBrowserSelection": "failure",
+      "shortcutInstall": "success",
+      "rigorousSelection": "success"
+    },
+    "stageApplication": {
+      "bytes": 5907456,
+      "sha256": "4a95547650bab7b44b567a45804ffcc828bfecb1365662266e001652a6a1e638"
+    },
+    "embeddedNativeAssembly": {
+      "dllBytes": 101888,
+      "dllSha256": "b797b64053099d1f5cbcb468d98454f9f0d37aaded671951f4eee43bb94be11b",
+      "completePayloadEmbedded": true,
+      "exactPayloadOffset": 4607330
+    },
+    "rustWindowsPassed": 272,
+    "rustMacPassed": 268,
+    "rustIgnoredEach": 1,
+    "frontendUnitPassed": 84,
+    "actualBrowserSelection": {
+      "planned": 48,
+      "prepared": 45,
+      "actualAltD": 44,
+      "completeChainPassed": 44,
+      "preparationFailures": 1,
+      "unexecuted": 3,
+      "setupFailure": "Chrome round1 case5 prefix selection; no hotkey sent for that case.",
+      "roundsCleanupConfirmed": 6,
+      "notAProductEmptySourceObservation": true
+    },
+    "nonBrowser": {
+      "notepadCorePassed": 1,
+      "notepadCleanupPassed": true,
+      "wpfPassed": 3,
+      "winformsPassed": 16
+    },
+    "shortcutUiPassed": 6,
+    "customShortcutChainsPassed": 3,
+    "realInstalledOfflineModelsPassed": 6,
+    "realInstalledAppOfflineChainsPassed": 3,
+    "summaryFile": "/Users/wwq/Documents/Codex/2026-10-24/ni-ne/work/selection-dismiss-official-apis-20261028/ci-78794c4/summary.json",
+    "summarySha256": "08a46769034c847faf708887e9d121607275b32d42fbfefbc6b7b8b3f9a0a55e"
   },
   "limitations": [
     "Hosted Windows Server is not physical Windows 10/11 acceptance.",
@@ -140,5 +189,70 @@
     "fixed": "New adapters use colon-separated translation/OCR namespaces and explicit domain scopes; existing seven protocols retain exact old accounts/scopes.",
     "tests": "Four additional dummy-only tests cover collision/cache/metadata/delete isolation, all new adapter names, legacy compatibility, and kind-change invalidation.",
     "rootReview": "Reviewed all load/cache/display/save/delete/invalidate call sites and frontend delete-before-settings order; no blocking finding."
+  },
+  "originalColdRegression": {
+    "runId": 40630899181,
+    "source": "7982a628ae1e6374b71c39e1e94af0b12a85c81a",
+    "productEqualTo78794c4": true,
+    "nativeHelperOnly": true,
+    "actualRegisteredHotkeyTested": false,
+    "planned": 96,
+    "passed": 95,
+    "failed": 1,
+    "preparationFailures": 0,
+    "failedFirstCase": "Edge body-mouse-en cold first",
+    "firstQuery": {
+      "milliseconds": 2642.0321,
+      "lastStage": 6,
+      "depth": 9,
+      "initialRole": 50033,
+      "exceptionKind": 0
+    },
+    "secondQuery": {
+      "milliseconds": 12.6909,
+      "lastStage": 11,
+      "initialRole": 50033,
+      "freshRole": 50026,
+      "identityCompared": 1,
+      "identityEqual": 0,
+      "exceptionKind": 5
+    },
+    "budgetMilliseconds": 5000,
+    "failedWithinBudgetAtMilliseconds": 2838.0592,
+    "causeAtRejection": "RuntimeId changed Pane to Group at post-read identity guard, not timeout.",
+    "cannotInferFromTrace": [
+      "No ancestor Document existed",
+      "GetSelection/GetText were never called earlier in the walk"
+    ],
+    "summaryFile": "/Users/wwq/Documents/Codex/2026-10-24/ni-ne/work/selection-dismiss-official-apis-20261028/ci-7982a62-original-native/summary.json",
+    "summarySha256": "2e2d7185909de551544eac07ba6d9ac393ab62e150d881264edcf9b1e00eefa9"
+  },
+  "pendingTrials": [
+    {
+      "runId": 40631739232,
+      "scope": "Exact78794 application with noncoalesced OS mouse fixture, both browser orders96; no product repair claimed.",
+      "status": "in_progress"
+    },
+    {
+      "scope": "Native focused-HWND UIA provider initialization before first FocusedElement. Same guards/budget; not yet committed or proven.",
+      "status": "implementation_trial"
+    }
+  ],
+  "nativeFocusInitializationTrial": {
+    "status": "unverified-candidate",
+    "sha256": "792923b1f1331043189c177b59478dfed8382da7c178253402ea68b91520296b",
+    "bytes": 189162,
+    "method": "One AutomationElement.FromHandle on validated native focused HWND before initial FocusedElement; object not used to read text or replace existing identity/password/root guards.",
+    "bounds": "Same initial MTA and shared5s budget, nativefocus/foreground verified before and after. No wait/retry/rebind/activation/clipboard input.",
+    "newOptInMetadata": [
+      "NativeFocusPrimeAttempted",
+      "NativeFocusPrimeCompleted",
+      "NativeFocusPrimeIsRoot"
+    ],
+    "references": [
+      "https://learn.microsoft.com/dotnet/api/system.windows.automation.automationelement.fromhandle",
+      "https://learn.microsoft.com/windows/win32/winauto/uiauto-threading"
+    ],
+    "acceptance": "Run exact new original96 before retaining; prior95/96 remains failure."
   }
 }
