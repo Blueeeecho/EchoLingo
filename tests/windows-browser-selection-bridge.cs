@@ -28,6 +28,7 @@ public static class WindowsBrowserSelectionBridge {
     [DllImport("user32.dll")] static extern bool IsWindowVisible(IntPtr window);
     [DllImport("user32.dll")] static extern IntPtr WindowFromPoint(POINT point);
     [DllImport("user32.dll")] static extern bool SetCursorPos(int x,int y);
+    [DllImport("user32.dll")] static extern int GetSystemMetrics(int index);
     [DllImport("user32.dll")] static extern bool SetProcessDpiAwarenessContext(IntPtr context);
     [DllImport("user32.dll")] static extern IntPtr SetThreadDpiAwarenessContext(IntPtr context);
     [DllImport("user32.dll",CharSet=CharSet.Unicode)] static extern int GetClassName(IntPtr window,StringBuilder name,int capacity);
@@ -187,10 +188,15 @@ public static class WindowsBrowserSelectionBridge {
         int x=Convert.ToInt32(command["x"]),y=Convert.ToInt32(command["y"]),endX=Convert.ToInt32(command["endX"]),endY=Convert.ToInt32(command["endY"]);POINT p=new POINT();p.x=x;p.y=y;
         Need(GetAncestor(WindowFromPoint(p),2)==root&&(GetAsyncKeyState(1)&0x8000)==0,"NATIVE_DRAG_START_UNVERIFIED_OR_HELD");Need(Math.Abs(endX)<=32767&&Math.Abs(endY)<=32767,"NATIVE_DRAG_END_BOUND");
         INPUT down=new INPUT();down.type=0;down.data.mouse.flags=2;INPUT up=down;up.data.mouse.flags=4;uint sent=0;
-        try{Need(SetCursorPos(x,y),"NATIVE_DRAG_POSITION_FAILED");sent=SendInput(1,new INPUT[]{down},Marshal.SizeOf(typeof(INPUT)));Need(sent==1,"NATIVE_DRAG_DOWN_REJECTED");for(int step=1;step<=8;step++){Need(GetForegroundWindow()==root,"NATIVE_DRAG_SOURCE_FOREGROUND_CHANGED");Need(SetCursorPos(x+(endX-x)*step/8,y+(endY-y)*step/8),"NATIVE_DRAG_MOVE_FAILED");Thread.Sleep(15);}Need(SendInput(1,new INPUT[]{up},Marshal.SizeOf(typeof(INPUT)))==1,"NATIVE_DRAG_UP_REJECTED");sent=0;}
+        try{Need(SetCursorPos(x,y),"NATIVE_DRAG_POSITION_FAILED");sent=SendInput(1,new INPUT[]{down},Marshal.SizeOf(typeof(INPUT)));Need(sent==1,"NATIVE_DRAG_DOWN_REJECTED");for(int step=1;step<=8;step++){Need(GetForegroundWindow()==root,"NATIVE_DRAG_SOURCE_FOREGROUND_CHANGED");Need(SetCursorPos(x+(endX-x)*step/8,y+(endY-y)*step/8),"NATIVE_DRAG_MOVE_FAILED");Thread.Sleep(15);}int desktopLeft=GetSystemMetrics(76),desktopTop=GetSystemMetrics(77),desktopWidth=GetSystemMetrics(78),desktopHeight=GetSystemMetrics(79);Need(desktopWidth>1&&desktopHeight>1&&endX>=desktopLeft&&endX<desktopLeft+desktopWidth&&endY>=desktopTop&&endY<desktopTop+desktopHeight,"NATIVE_DRAG_END_OUTSIDE_DESKTOP");INPUT finalMove=new INPUT();finalMove.type=0;finalMove.data.mouse.flags=0x8000|0x4000|1;finalMove.data.mouse.x=(int)Math.Round((endX-desktopLeft)*65535.0/(desktopWidth-1));finalMove.data.mouse.y=(int)Math.Round((endY-desktopTop)*65535.0/(desktopHeight-1));Need(SendInput(2,new INPUT[]{finalMove,up},Marshal.SizeOf(typeof(INPUT)))==2,"NATIVE_DRAG_FINAL_MOVE_UP_REJECTED");sent=0;}
         finally{if(sent!=0)SendInput(1,new INPUT[]{up},Marshal.SizeOf(typeof(INPUT)));}
         Stopwatch release=Stopwatch.StartNew();while((GetAsyncKeyState(1)&0x8000)!=0&&release.ElapsedMilliseconds<1000)Thread.Sleep(2);Need((GetAsyncKeyState(1)&0x8000)==0,"NATIVE_DRAG_LEFT_RELEASE_NOT_OBSERVED");
         return new Dictionary<string,object>{{"ok",true},{"nativeMouseDragPairsSent",1},{"nativeMouseLeftReleased",true},{"mouseInputBackend","Win32 SendInput down/up + SetCursorPos moves"},{"preHelperUiaCalls",0}};
+    }
+    static Dictionary<string,object> OutsideClickOnce(Dictionary<string,object> command){
+        Need(HostedApplication!=null&&HostedApplication.Visible,"OUTSIDE_CLICK_REQUIRES_PREVIOUS_VISIBLE_POPUP");IntPtr root=BrowserMain(Convert.ToInt32(command["browserPid"]));Need(GetForegroundWindow()==root,"OUTSIDE_CLICK_SOURCE_FOREGROUND_CHANGED");POINT point=new POINT();point.x=Convert.ToInt32(command["x"]);point.y=Convert.ToInt32(command["y"]);Need(GetAncestor(WindowFromPoint(point),2)==root&&(GetAsyncKeyState(1)&0x8000)==0,"OUTSIDE_CLICK_POINT_NOT_OWN_BROWSER_OR_MOUSE_HELD");
+        INPUT down=new INPUT();down.type=0;down.data.mouse.flags=2;INPUT up=down;up.data.mouse.flags=4;Stopwatch watch=Stopwatch.StartNew();uint sent=SendInput(2,new INPUT[]{down,up},Marshal.SizeOf(typeof(INPUT)));if(sent!=2){if(sent>0)SendInput(1,new INPUT[]{up},Marshal.SizeOf(typeof(INPUT)));throw new InvalidOperationException("OUTSIDE_CLICK_INPUT_REJECTED_NO_RETRY");}
+        while(watch.ElapsedMilliseconds<2000){Need(GetForegroundWindow()==root,"OUTSIDE_CLICK_CHANGED_BROWSER_FOREGROUND");if(!HostedApplication.Visible)return new Dictionary<string,object>{{"ok",true},{"outsideClickPairsSent",1},{"previousPopupVisibleBeforeClick",true},{"previousPopupHidden",true},{"sourceForegroundPreserved",true},{"hideObservedMilliseconds",watch.Elapsed.TotalMilliseconds}};Application.DoEvents();Thread.Sleep(5);}throw new InvalidOperationException("ONE_SAME_BROWSER_OUTSIDE_CLICK_DID_NOT_HIDE_POPUP");
     }
     sealed class AppSession {
         const string Identifier="io.github.blueeeecho.echolingo",Marker=".echolingo-browser-app-owned";
@@ -269,9 +275,12 @@ public static class WindowsBrowserSelectionBridge {
             string line;while((line=Console.ReadLine())!=null){
                 Need(line.Length<=4096,"BRIDGE_COMMAND_BOUND");Dictionary<string,object> command=Json.Deserialize<Dictionary<string,object>>(line.TrimStart('\ufeff'));string op=Convert.ToString(command["op"]);
                 if(op=="close"){bool cleared=ClearOwnedClipboard();Dictionary<string,object> cleanup=HostedApplication==null?null:HostedApplication.Close();Reply(new Dictionary<string,object>{{"ok",cleared&&(cleanup==null||Convert.ToBoolean(cleanup["ok"]))},{"closing",true},{"clipboardCleanupComplete",cleared},{"applicationCleanup",cleanup}});return;}
-                if(op=="mouse-point"){Reply(GuardMouseStart(command));continue;}
-                if(op=="mouse-drag"){Reply(DragMouseOnce(command));continue;}
-                try{Need(op=="case","BRIDGE_UNSUPPORTED_COMMAND");Reply(RunCase(command));}
+                try{
+                    if(op!="case"){Stage="native-mouse-"+op;LastMetadata=new Dictionary<string,object>{{"ok",false},{"helperInvocations",0},{"actualShortcutPresses",0},{"safeToContinue",false},{"preHelperUiaCalls",0}};}
+                    if(op=="mouse-point"){Reply(GuardMouseStart(command));continue;}
+                    if(op=="mouse-drag"){Reply(DragMouseOnce(command));continue;}
+                    if(op=="outside-click"){Reply(OutsideClickOnce(command));continue;}
+                    Need(op=="case","BRIDGE_UNSUPPORTED_COMMAND");Reply(RunCase(command));}
                 catch(Exception error){while(error.InnerException!=null)error=error.InnerException;Dictionary<string,object> failure=LastMetadata??new Dictionary<string,object>();failure["ok"]=false;failure["error"]=error.Message;failure["errorType"]=error.GetType().Name;failure["stage"]=Stage;failure["setupInconclusive"]=Stage=="native-identity";failure["browserRootCandidates"]=windowInventory;failure["boundBrowserRootHwnd"]=WindowId(boundMain);Reply(failure);}
             }
         }finally{try{if(HostedApplication!=null)HostedApplication.Close();}finally{ClearOwnedClipboard();}}

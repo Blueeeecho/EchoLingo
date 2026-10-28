@@ -88,6 +88,16 @@ async function prepareMouseRepeat(page,test,lines,browserPid){
   // repeat a drag, or change the page to manufacture the expected selection.
   return {domSelectionVerified:true,method:test.method,samePage:true,bodyMutationAfterLoad:false,generatedMouseDowns:selected.mouseDowns,generatedMouseUps:selected.mouseUps,generatedMouseUpButtons:selected.mouseUpButtons,mouseStartNativeGuard:nativeGuard};
 }
+async function dismissPreviousPopupByClick(page,lines,browserPid){
+  const blank=await page.evaluate(()=>{window.__mouseDowns=0;window.__mouseUps=0;window.__lastMouseUpButtons=null;window.__lastNativePointer=null;window.__lastDownWasBlank=false;const x=6,y=window.innerHeight-8,e=document.elementFromPoint(x,y),border=(window.outerWidth-window.innerWidth)/2;return {x,y,screenX:Math.round(window.screenX+border+x),screenY:Math.round(window.screenY+window.outerHeight-window.innerHeight-border+y),blank:e===document.body||e===document.documentElement,hasFocus:document.hasFocus()};});
+  assert.equal(blank.blank,true,'GENERATED_EMPTY_BROWSER_POINT_NOT_BLANK');assert.equal(blank.hasFocus,true,'OUTSIDE_CLICK_BROWSER_DOCUMENT_NOT_FOCUSED');
+  const guard=await lines.request({op:'mouse-point',browserPid,x:blank.screenX,y:blank.screenY},5000);assert.equal(guard.ok,true,'OUTSIDE_CLICK_NOT_BOUND_BROWSER');
+  await page.waitForFunction(({x,y})=>window.__lastNativePointer&&Math.abs(window.__lastNativePointer.screenX-x)<=1&&Math.abs(window.__lastNativePointer.screenY-y)<=1,{x:blank.screenX,y:blank.screenY},{timeout:2000});
+  const mapped=await page.evaluate(()=>window.__lastNativePointer);assert.ok(Math.abs(mapped.clientX-blank.x)<=1&&Math.abs(mapped.clientY-blank.y)<=1,'OUTSIDE_CLICK_SCREEN_VIEWPORT_MAPPING_MISMATCH');
+  const reply=await lines.request({op:'outside-click',browserPid,x:blank.screenX,y:blank.screenY},5000);assert.equal(reply.ok,true,'SAME_BROWSER_OUTSIDE_CLICK_DID_NOT_HIDE_POPUP');
+  await page.waitForFunction(()=>window.__mouseDowns===1&&window.__mouseUps===1&&window.__lastMouseUpButtons===0&&window.__lastDownWasBlank,null,{timeout:2000});
+  return {...reply,generatedBrowserBlankClickVerified:true};
+}
 async function prepare(page,test,tag){
   await page.bringToFront();
   const state=await page.evaluate(({test,tag})=>{
@@ -129,7 +139,7 @@ async function runRound(candidate,round,helper,assembly,application){
     root=await mkdtemp(path.join(tmpdir(),'echolingo-browser-selection-'));marker=randomUUID();await writeFile(path.join(root,'.echolingo-owned'),marker,{flag:'wx'});profile=path.join(root,'profile');await mkdir(profile);
     const tag=candidate.kind+'-r'+round,tests=selectionSuite==='same-page-mouse'?mouseCasesFor(tag):casesFor(tag);
     const repeatBody=selectionSuite==='same-page-mouse'?tests.map(test=>'<p><span id="'+test.target+'">'+test.expected+'</span></p>').join(''):'';
-    const html='<!doctype html><meta charset="utf-8"><meta http-equiv="Content-Security-Policy" content="default-src \'none\'; script-src \'unsafe-inline\'; style-src \'unsafe-inline\'; connect-src \'none\'"><title>EchoLingo generated browser selection fixture</title><style>body{font:18px Segoe UI;padding:35px}span{white-space:pre}textarea,[contenteditable],input{display:block;width:700px;height:55px;margin:12px 0}p{margin:10px 0}</style><body tabindex="0">'+repeatBody+'<p><span id="body-text"></span></p><a id="link" href="#generated">Generated focused link</a><p><span id="link-text"></span></p><textarea id="area"></textarea><div id="editable" contenteditable="true"></div><input id="protected" type="password"><script>window.__copyCount=0;document.addEventListener("copy",()=>window.__copyCount++);document.addEventListener("mousedown",()=>window.__mouseDowns++);document.addEventListener("mouseup",event=>{window.__mouseUps++;window.__lastMouseUpButtons=event.buttons;});document.addEventListener("mousemove",event=>{window.__lastNativePointer={screenX:event.screenX,screenY:event.screenY,clientX:event.clientX,clientY:event.clientY};});</script>';
+    const html='<!doctype html><meta charset="utf-8"><meta http-equiv="Content-Security-Policy" content="default-src \'none\'; script-src \'unsafe-inline\'; style-src \'unsafe-inline\'; connect-src \'none\'"><title>EchoLingo generated browser selection fixture</title><style>body{font:18px Segoe UI;padding:35px}span{white-space:pre}textarea,[contenteditable],input{display:block;width:700px;height:55px;margin:12px 0}p{margin:10px 0}</style><body tabindex="0">'+repeatBody+'<p><span id="body-text"></span></p><a id="link" href="#generated">Generated focused link</a><p><span id="link-text"></span></p><textarea id="area"></textarea><div id="editable" contenteditable="true"></div><input id="protected" type="password"><script>window.__copyCount=0;document.addEventListener("copy",()=>window.__copyCount++);document.addEventListener("mousedown",event=>{window.__mouseDowns++;window.__lastDownWasBlank=event.target===document.body||event.target===document.documentElement;});document.addEventListener("mouseup",event=>{window.__mouseUps++;window.__lastMouseUpButtons=event.buttons;});document.addEventListener("mousemove",event=>{window.__lastNativePointer={screenX:event.screenX,screenY:event.screenY,clientX:event.clientX,clientY:event.clientY};});</script>';
     const translations=new Map(tests.map((test,index)=>[test.expected,{result:'Generated mock translation '+tag+'-'+index,count:0}]));let mockError=null;
     server=createServer(async(request,response)=>{
       if(request.url==='/translate'&&application){
@@ -157,6 +167,7 @@ async function runRound(candidate,round,helper,assembly,application){
     for(const test of tests){
       const row={browserKind:candidate.kind,round,name:test.name,ok:false,helperInvocations:0,setupMethod:test.method};result.cases.push(row);report.cases.push(row);
       try{
+        if(application&&shortcutPresses>0)row.previousPopupOutsideClick=await dismissPreviousPopupByClick(page,lines,browserProcess.pid);
         Object.assign(row,selectionSuite==='same-page-mouse'?await prepareMouseRepeat(page,test,application?lines:null,browserProcess.pid):await prepare(page,test,tag));if(application)row.firstActualAltDInFreshBrowser=shortcutPresses===0;else row.firstHelperInFreshBrowser=invoked===0;
         const mock=translations.get(test.expected),mockBefore=mock.count;
         const reply=await lines.request({op:'case',browserPid:browserProcess.pid,expected:test.expected,outcome:test.outcome??'selection',requiredRole:test.requiredRole,requireMouseReleased:selectionSuite==='same-page-mouse',expectedTranslation:mock.result},application?40000:20000);Object.assign(row,reply);row.bridgeExpectationPassed=reply.ok;row.ok=false;invoked+=reply.helperInvocations??0;shortcutPresses+=reply.actualShortcutPresses??0;
