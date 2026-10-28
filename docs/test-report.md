@@ -1,5 +1,18 @@
 # 0.1.0 预览版验证报告
 
+<!-- selection-ancestor-package-20261028:start -->
+## 2026-10-28 祖先选区候选包：新完整构建原始14/15，保留失败
+
+源码61ea258/[full40649280066](https://github.com/Blueeeecho/EchoLingo/actions/runs/40649280066)：Windowsfailure、macOS和frontend-interactions success。原始.outcomes为14success/1failure；COE绿色步骤conclusion不是实际通过依据。
+
+- 唯一红项rigorousSelection：16项要求，执行13/通过12，第13项rapid-A-then-new-selection-B报MOCK_FAILURE:InvalidOperationException:MOCK_CONTROLLED_REPLY_NOT_RELEASED，后三项未执行。夹具先等B完成才释放A，A仅hold20秒而B观察预算30秒；现有全局错误会先中断观察，不能认定mock是唯一根因。未通过改等待、重按或补测改写原红。
+- 同次完整DLL的Document15/15；实际浏览器单拖选/单Alt+D48/48，42次同源点击隐藏；记事本1/WPF3、设置UI6/独立custom3、两浏览器真实WinRT OCR链通过。严格WinForms矩阵本次仅12通过，不能沿用旧16/16。
+- 实际NSIS安装后2方向模型6个输入与3条真实离线应用链通过，无mock翻译；48运行资源allowlist、原许可证和清理通过。Windows272/Mac268Rust各1资源ignored、各84前端单位、28Python和完整隔离UI通过；物理IME/WPS/Win10/11不在本轮验收中。
+- 安装器75,322,200B/e63509a4…a6ae14，stage5,923,840B/abaa92fd…b3594。API ZIP大小/完整摘要/CRC、完整新helper197258B/a507ccce…f110b和同构建DLL唯一嵌入均核对。7zz静态解出安装程序等实际CI安装SHA，较stage仅唯一UNK→NSS的3B差异；没有本地PE执行。66ce对应源码归档及2104项原清单审计复用条件仍成立。
+
+交付为有已知红项的候选预览，不称全部问题修复。README、test-results和package-verification均明确14/15、快速连续任务失败及实体现场待验收；旧21b及此前候选保持不变。[候选安装包](/Users/wwq/Documents/Codex/2026-10-24/ni-ne/outputs/EchoLingo-installers/windows-preview-20261028-selection-ancestor/EchoLingo_0.1.0_preview_20261028_selection-ancestor_x64-setup.exe)、[精确验证](validation/windows-selection-ancestor-package-20261028.json)。
+<!-- selection-ancestor-package-20261028:end -->
+
 <!-- selection-github-recheck-20261028:start -->
 ## 2026-10-28 GitHub对照后的空Edit→祖先Document回归
 

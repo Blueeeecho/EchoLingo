@@ -2,6 +2,18 @@
 
 Updated: 2026-10-28, Asia/Shanghai. Stage: v0.1.0 preview hardening and acceptance.
 
+<!-- selection-ancestor-package-20261028:start -->
+## 2026-10-28 祖先选区修正候选包已生成：完整回归14/15
+
+[Windows x64候选安装器](/Users/wwq/Documents/Codex/2026-10-24/ni-ne/outputs/EchoLingo-installers/windows-preview-20261028-selection-ancestor/EchoLingo_0.1.0_preview_20261028_selection-ancestor_x64-setup.exe)：75,322,200B，SHA256 `e63509a489f5e58b0f3a5124df4ab8fdee73238dbed9616e236303eb97a6ae14`。包含下文空Edit→真实祖先选区修正；完整源码61ea258/[40649280066](https://github.com/Blueeeecho/EchoLingo/actions/runs/40649280066)，生产代码与已审19c724d一致。六文件目录附对应引擎源码、候选说明、原始失败摘要及校验清单。
+
+本轮原始Windows门禁14/15，整体Windows作业failure；不称全通过修复版。唯一失败rigorousSelection：要求16、执行13、通过12，rapid-A-then-new-selection-B报MOCK_CONTROLLED_REPLY_NOT_RELEASED，后三项未执行。A的测试回复等待20秒、B完成观察预算30秒，当前错误掩盖B具体停点，不能归因为单纯夹具错误或已确认产品根因。原红保持；未放宽时间或重按后把它改绿。
+
+其余：同次内嵌DLL原生Document15/15、实际注册Alt+D浏览器48/48及42次同源外部点击隐藏、设置改键6、独立自定义键3链、真实WinRT OCR、实际NSIS安装后两方向模型6输入/3应用链通过。Windows272Rust/Mac268Rust各1ignored、前端各84项及隔离UI通过；不把隔离IME守卫称为物理输入法验收。
+
+API ZIP摘要/大小/CRC、完整新helper CRLF197258B/a507ccce…f110b、同次完整DLL及唯一嵌入、NSIS解出程序与stage仅UNK→NSS三字节差异、实际安装报告及原资源/对应源码66ce归档一致均已核对。没有在本机执行Windows安装器、替换/签名Mac应用、修改权限/钥匙串/凭据或启动本地VM。实体WPS/Google网页/Win10/11仍待机主使用新候选验收，剪贴板同PID并发来源边界仍开放；未发布stable。[本轮证据](validation/windows-selection-ancestor-package-20261028.json)。
+<!-- selection-ancestor-package-20261028:end -->
+
 <!-- selection-github-recheck-20261028:start -->
 ## 2026-10-28 机主取词仍失败：GitHub对照确认空Edit提前终止缺口
 
