@@ -222,7 +222,7 @@
         title: "中英翻译，离线也能用。",
         description: "Windows 预览包内置中英离线翻译引擎，无需填写 API Key。把常用的中英翻译留在本机处理。",
         tags: ["Windows", "中英离线", "免 API Key"],
-        footnote: "适用于提供离线引擎的 Windows 安装包；语言范围为中文与英文，兼容性与已知限制见预览版说明。",
+        footnote: "安装后即可使用本机中英翻译，也可以在设置中添加自己常用的翻译服务。",
       },
       system: {
         title: "接上 Mac 自带的翻译能力。",

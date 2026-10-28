@@ -24,7 +24,7 @@ Commit only this directory's deployable files to the website branch. Verify the 
 
 - Keep the three primary selling points: unobtrusive translation, lightweight design and configurable services.
 - The workflow illustration uses labeled fixed samples. It is not a live translation service or a screenshot of acceptance testing.
-- The current app is a preview under verification. The public Releases page currently has no public installers. Do not fabricate a download URL, publish a draft release, claim stable availability or imply all-app compatibility.
+- Windows Beta 1 is available from the public release `https://github.com/Blueeeecho/EchoLingo/releases/tag/0.1.0-beta.1`. Link its exact installer asset from the Windows platform card. Keep beta wording and concise installation instructions.
 - Update `index.html` platform/release status, FAQ and visible verification date when real downloads are available. Update `sitemap.xml` after substantive page changes.
 - `privacy.html` distinguishes local OCR, cloud text/images, OS credentials, local history and GitHub hosting access logs.
 - No external fonts/scripts, analytics, account UI, API-key fields or network requests belong in the browser demo.
