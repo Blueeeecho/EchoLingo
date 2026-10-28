@@ -19,7 +19,7 @@ The Windows helper is embedded, extracted under `%LOCALAPPDATA%\EchoLingo\native
 
 The macOS adapter is compiled by `build.rs` as a Swift static library and linked into the Rust executable. It no longer extracts or launches a cached `echolingo-native-helper`. Accessibility and Screen Recording checks therefore execute in the application process, eliminating the former separate helper identity. The adapter never activates the source application or the EchoLingo window. Use the installed `/Applications/EchoLingo.app` consistently rather than alternating between debug builds and output copies.
 
-Shortcut operations only preflight permissions. Settings exposes read-only `permission_status`, explicit `request_permission` and fixed-pane `open_permission_settings` commands, with only `accessibility` / `screenCapture` accepted. A status refresh never requests access. Empty or unavailable selection opens a blank, nonactivating popup without an error toast; failed clipboard restoration remains an actionable warning. macOS still controls permission grants, and a new application identity may require the owner to authorize it once.
+Shortcut operations only preflight permissions. A blocked capture/OCR action presents a persistent card with explicit system-settings and first-use-guide buttons, prepared in the same epoch-bound source event before inactive popup display. Empty selection remains quiet. Settings exposes read-only `permission_status`, explicit `request_permission` and fixed-pane `open_permission_settings` commands, with only `accessibility` / `screenCapture` accepted. A status refresh never requests access. Empty or unavailable selection opens a blank, nonactivating popup without an error toast; failed clipboard restoration remains an actionable warning. macOS still controls permission grants, and a new application identity may require the owner to authorize it once.
 
 This fixes the separate-helper and repeated-request paths; it does not make an ad hoc signature stable across rebuilds. Apple explains that ad hoc designated requirements are tied to a specific code version, so upgrades can invalidate recorded authorization. A distribution needs a consistent Apple signing identity and separate clean-machine TCC/Gatekeeper acceptance. See [Apple TN3127: code identity and designated requirements](https://developer.apple.com/documentation/technotes/tn3127-inside-code-signing-requirements).
 
@@ -153,7 +153,6 @@ Record OS build, application version, permissions, installed OCR languages, disp
 - [Apple: CGEvent location](https://developer.apple.com/documentation/coregraphics/cgevent/location)
 - [Apple: Aggregate event counters](https://developer.apple.com/documentation/coregraphics/cgeventsource/counterforeventtype%28_%3Aeventtype%3A%29)
 - [Apple: Ordering a window without making it key](https://developer.apple.com/documentation/appkit/nswindow/orderfrontregardless%28%29)
-
 
 ## Windows last-selection diagnostic export (2026-10-28 source)
 
