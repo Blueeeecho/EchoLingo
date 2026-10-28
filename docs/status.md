@@ -1,5 +1,16 @@
 # EchoLingo status and handoff
 
+<!-- beta1-release-20261028:start -->
+## 2026-10-28 首个内测版已发布
+
+机主确认当前Windows包可用并授权发布。已公开 [EchoLingo 0.1.0 Beta 1](https://github.com/Blueeeecho/EchoLingo/releases/tag/0.1.0-beta.1)，标记为 prerelease；公告和官网按机主要求保留简洁内测标识、下载和安装说明。
+
+安装器沿用已确认包，未重新构建：75,296,280B，SHA256 `1d18a4fb2fd39da4503d1650f213e591c54f9a3804a587838cbb3d200160f0c9`；tag指向952d6096e618a5349aaa40d2ea40aed2751e6e34。同一Release附精确对应的离线引擎源码与校验清单，三项资产的服务端摘要/大小均与本地一致。公开网页200、安装器和源码匿名Range206、校验清单内容一致。
+
+[官网](https://blueeeecho.github.io/EchoLingo/)下载按钮直达该EXE；gh-pages仅三份静态文件变更，209861d863f1b3303678c10da39f5aea34b6ad26已built。公开首页、脚本、样式、隐私页及两图标共6份文件与本地逐字节一致，Mac发布页与鸿蒙项目入口保持。[发布验证](validation/beta1-release-20261028.json)。
+<!-- beta1-release-20261028:end -->
+
+
 
 <!-- selection-resize-field-20261028:start -->
 ## 2026-10-28 取词修复候选已交付准备；WPS交由机主实测，性能优化后置

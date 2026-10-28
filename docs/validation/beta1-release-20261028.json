@@ -1,0 +1,161 @@
+{
+  "date": "2026-10-28",
+  "version": "0.1.0-beta.1",
+  "ownerConfirmedCurrentPackageUsable": true,
+  "ownerAuthorizedPublicRelease": true,
+  "publicCopyPreference": "Simple beta label, download and install steps",
+  "repository": "Blueeeecho/EchoLingo",
+  "sourceCommit": "952d6096e618a5349aaa40d2ea40aed2751e6e34",
+  "rebuildPerformed": false,
+  "release": {
+    "id": 426654684,
+    "url": "https://github.com/Blueeeecho/EchoLingo/releases/tag/0.1.0-beta.1",
+    "draft": false,
+    "prerelease": true,
+    "publishedAt": "2026-10-28T12:47:23Z",
+    "assets": [
+      {
+        "id": 684969061,
+        "name": "EchoLingo-offline-engine-source.zip",
+        "bytes": 19272655,
+        "digest": "sha256:66ce29624429bfdcdb4f265815402e9bd2a8b324535bc1d9d13bcfa267d8fd3c",
+        "url": "https://github.com/Blueeeecho/EchoLingo/releases/download/0.1.0-beta.1/EchoLingo-offline-engine-source.zip"
+      },
+      {
+        "id": 684969057,
+        "name": "EchoLingo_0.1.0-beta.1_windows_x64-setup.exe",
+        "bytes": 75296280,
+        "digest": "sha256:1d18a4fb2fd39da4503d1650f213e591c54f9a3804a587838cbb3d200160f0c9",
+        "url": "https://github.com/Blueeeecho/EchoLingo/releases/download/0.1.0-beta.1/EchoLingo_0.1.0-beta.1_windows_x64-setup.exe"
+      },
+      {
+        "id": 684969058,
+        "name": "SHA256SUMS.txt",
+        "bytes": 213,
+        "digest": "sha256:5afcbd4c1ebf26de32f9a88e51245474560ff4bbfcb5c7c48b55d0a6dd4c8a76",
+        "url": "https://github.com/Blueeeecho/EchoLingo/releases/download/0.1.0-beta.1/SHA256SUMS.txt"
+      }
+    ]
+  },
+  "githubPublicAccess": {
+    "ok": true,
+    "checks": [
+      {
+        "name": "release-page",
+        "publicUrl": "https://github.com/Blueeeecho/EchoLingo/releases/tag/0.1.0-beta.1",
+        "anonymous": true,
+        "httpStatus": 200,
+        "range": null,
+        "prefixOrContentVerified": true,
+        "bytesRead": 191054,
+        "finalHost": "github.com"
+      },
+      {
+        "name": "EchoLingo_0.1.0-beta.1_windows_x64-setup.exe",
+        "publicUrl": "https://github.com/Blueeeecho/EchoLingo/releases/download/0.1.0-beta.1/EchoLingo_0.1.0-beta.1_windows_x64-setup.exe",
+        "anonymous": true,
+        "httpStatus": 206,
+        "range": "bytes 0-31/75296280",
+        "prefixOrContentVerified": true,
+        "bytesRead": 32,
+        "finalHost": "release-assets.githubusercontent.com"
+      },
+      {
+        "name": "EchoLingo-offline-engine-source.zip",
+        "publicUrl": "https://github.com/Blueeeecho/EchoLingo/releases/download/0.1.0-beta.1/EchoLingo-offline-engine-source.zip",
+        "anonymous": true,
+        "httpStatus": 206,
+        "range": "bytes 0-31/19272655",
+        "prefixOrContentVerified": true,
+        "bytesRead": 32,
+        "finalHost": "release-assets.githubusercontent.com"
+      },
+      {
+        "name": "SHA256SUMS.txt",
+        "publicUrl": "https://github.com/Blueeeecho/EchoLingo/releases/download/0.1.0-beta.1/SHA256SUMS.txt",
+        "anonymous": true,
+        "httpStatus": 206,
+        "range": "bytes 0-212/213",
+        "prefixOrContentVerified": true,
+        "bytesRead": 213,
+        "finalHost": "release-assets.githubusercontent.com"
+      }
+    ]
+  },
+  "website": {
+    "ok": true,
+    "pagesCommit": "209861d863f1b3303678c10da39f5aea34b6ad26",
+    "website": "https://blueeeecho.github.io/EchoLingo/",
+    "checks": [
+      {
+        "path": "index.html",
+        "url": "https://blueeeecho.github.io/EchoLingo/?beta=0.1.0-beta.1",
+        "anonymous": true,
+        "httpStatus": 200,
+        "bytes": 23804,
+        "sha256": "08b188ccac06454601775228b78302e9f7d40415007caef04934c687397f9e46",
+        "matchesLocal": true
+      },
+      {
+        "path": "app.js",
+        "url": "https://blueeeecho.github.io/EchoLingo/app.js?beta=0.1.0-beta.1",
+        "anonymous": true,
+        "httpStatus": 200,
+        "bytes": 14228,
+        "sha256": "49c3ce6f7f40e9c691deaa8baa22142abfc6b9a96a1f9575f31482107a15f91b",
+        "matchesLocal": true
+      },
+      {
+        "path": "styles.css",
+        "url": "https://blueeeecho.github.io/EchoLingo/styles.css?beta=0.1.0-beta.1",
+        "anonymous": true,
+        "httpStatus": 200,
+        "bytes": 52617,
+        "sha256": "a1f0e201064f77202d2ef48b6067383c7c12adad2b4bed6fbeb42d067c24c82b",
+        "matchesLocal": true
+      },
+      {
+        "path": "privacy.html",
+        "url": "https://blueeeecho.github.io/EchoLingo/privacy.html?beta=0.1.0-beta.1",
+        "anonymous": true,
+        "httpStatus": 200,
+        "bytes": 5682,
+        "sha256": "5ba4ce7585943a9f8221484d2154a4965805597d167f5f9263333b4d5f54b132",
+        "matchesLocal": true
+      },
+      {
+        "path": "assets/favicon.png",
+        "url": "https://blueeeecho.github.io/EchoLingo/assets/favicon.png?beta=0.1.0-beta.1",
+        "anonymous": true,
+        "httpStatus": 200,
+        "bytes": 14165,
+        "sha256": "b618f3f6e5009654e70cc4e1a1502b42329b353df7323a9032482b4abb9a6d78",
+        "matchesLocal": true
+      },
+      {
+        "path": "assets/echolingo-icon.png",
+        "url": "https://blueeeecho.github.io/EchoLingo/assets/echolingo-icon.png?beta=0.1.0-beta.1",
+        "anonymous": true,
+        "httpStatus": 200,
+        "bytes": 47781,
+        "sha256": "d4d38cc8b28a9b09fbc3b04d79f726f2236969f749e754176b41bba71a89ab4b",
+        "matchesLocal": true
+      }
+    ]
+  },
+  "pagesBuild": {
+    "status": "built",
+    "commit": "209861d863f1b3303678c10da39f5aea34b6ad26",
+    "error": {
+      "message": null
+    }
+  },
+  "staticLinkCheck": {
+    "correctWindowsInstaller": true,
+    "macReleaseLinkPreserved": true,
+    "harmonyProjectLinkPreserved": true,
+    "noUnrelatedAppSourcesDeployed": true
+  },
+  "localMacAppChanged": false,
+  "credentialsRead": false
+}
