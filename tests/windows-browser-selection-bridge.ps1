@@ -2,7 +2,7 @@
 [CmdletBinding()]
 param([string]$HelperPath,[string]$NativeAssemblyPath,[Parameter(Mandatory=$true)][string]$BrowserExecutable,
     [string]$ApplicationPath,[string]$MockBaseUrl,[string]$ProviderId,
-    [string]$ExpectedApplicationSha256='8490a973c9e4f4568b851f61524a4ef8f554d8b3a506b12dd19ba34f0dd22a4b',[long]$ExpectedApplicationBytes=5825536)
+    [string]$ExpectedApplicationSha256='8490a973c9e4f4568b851f61524a4ef8f554d8b3a506b12dd19ba34f0dd22a4b',[long]$ExpectedApplicationBytes=5825536,[switch]$ColdEdgeDiagnostics)
 $ErrorActionPreference='Stop'
 [Console]::OutputEncoding=[Text.UTF8Encoding]::new($false)
 [Console]::InputEncoding=[Text.UTF8Encoding]::new($false)
@@ -18,8 +18,9 @@ try {
         $NativeAssemblyPath=(Resolve-Path -LiteralPath $NativeAssemblyPath).Path
     }
     $BrowserExecutable=(Resolve-Path -LiteralPath $BrowserExecutable).Path
-    Add-Type -AssemblyName System.Windows.Forms,System.Web.Extensions,UIAutomationClient,UIAutomationTypes,WindowsBase
+    if($ColdEdgeDiagnostics -and -not $ApplicationPath){throw 'COLD_DIAGNOSTICS_REQUIRE_APPLICATION'}
+    Add-Type -AssemblyName System.Drawing,System.Windows.Forms,System.Web.Extensions,UIAutomationClient,UIAutomationTypes,WindowsBase
     $source=[IO.File]::ReadAllText((Join-Path $PSScriptRoot 'windows-browser-selection-bridge.cs'))
-    Add-Type -TypeDefinition $source -ReferencedAssemblies @([Windows.Forms.Form].Assembly.Location,[Web.Script.Serialization.JavaScriptSerializer].Assembly.Location,[Windows.Automation.AutomationElement].Assembly.Location,[Windows.Automation.ControlType].Assembly.Location,[Windows.DependencyObject].Assembly.Location)
-    [WindowsBrowserSelectionBridge]::Run($HelperPath,$NativeAssemblyPath,$BrowserExecutable,$ApplicationPath,$MockBaseUrl,$ProviderId,$ExpectedApplicationSha256,$ExpectedApplicationBytes)
+    Add-Type -TypeDefinition $source -ReferencedAssemblies @([Drawing.Bitmap].Assembly.Location,[Windows.Forms.Form].Assembly.Location,[Web.Script.Serialization.JavaScriptSerializer].Assembly.Location,[Windows.Automation.AutomationElement].Assembly.Location,[Windows.Automation.ControlType].Assembly.Location,[Windows.DependencyObject].Assembly.Location)
+    [WindowsBrowserSelectionBridge]::Run($HelperPath,$NativeAssemblyPath,$BrowserExecutable,$ApplicationPath,$MockBaseUrl,$ProviderId,$ExpectedApplicationSha256,$ExpectedApplicationBytes,[bool]$ColdEdgeDiagnostics)
 }catch{$reason=$_.Exception;while($null -ne $reason.InnerException){$reason=$reason.InnerException};[Console]::Out.WriteLine((@{ok=$false;bridgeStartupFailure=$true;error=$reason.Message;errorType=$reason.GetType().Name}|ConvertTo-Json -Compress));exit 1}

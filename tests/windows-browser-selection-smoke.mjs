@@ -1,5 +1,5 @@
 // Real installed Chromium, fresh owned profile and generated loopback page.
-// Tests native selected-text acquisition; it does not launch EchoLingo/Tauri.
+// Native mode calls the helper; --application exercises the actual registered Alt+D.
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { mkdtemp, mkdir, writeFile, readFile, lstat, realpath, rm, stat } from 'node:fs/promises';
@@ -16,7 +16,8 @@ for(let i=2;i<process.argv.length;i+=2) flags.set(process.argv[i],process.argv[i
 const browserOrder=flags.has('--browser-order')?flags.get('--browser-order'):'edge-first';
 const selectionSuite=flags.get('--selection-suite')??'original';
 const applicationMode=flags.has('--application');
-const report={ok:false,actualBrowserTested:false,actualApplicationTested:false,actualRegisteredAltD:applicationMode,generatedLocalPageOnly:true,existingProfileAccessed:false,userContentRead:false,helperRetries:0,roundsPerBrowser:3,casesPerRound:8,freshBrowserProfilePerRound:true,osColdBootTested:false,requestedBrowserOrder:browserOrder??null,selectionSuite,actualBrowserOrder:[],rounds:[],cases:[]};
+const coldEdgeCases=Number(flags.get('--cold-edge-cases')??0);
+const report={ok:false,actualBrowserTested:false,actualApplicationTested:false,actualRegisteredAltD:applicationMode,generatedLocalPageOnly:true,existingProfileAccessed:false,userContentRead:false,helperRetries:0,roundsPerBrowser:coldEdgeCases||3,casesPerRound:coldEdgeCases?1:8,freshBrowserProfilePerRound:true,osColdBootTested:false,requestedBrowserOrder:browserOrder??null,selectionSuite,coldEdgeDiagnosticProfiles:coldEdgeCases,actualBrowserOrder:[],rounds:[],cases:[]};
 const digest=async file=>createHash('sha256').update(await readFile(file)).digest('hex');
 const bounded=(promise,ms,reason)=>new Promise((resolve,reject)=>{const timer=setTimeout(()=>reject(new Error(reason)),ms);promise.then(value=>{clearTimeout(timer);resolve(value);},error=>{clearTimeout(timer);reject(error);});});
 const sleep=ms=>new Promise(resolve=>setTimeout(resolve,ms));
@@ -133,7 +134,7 @@ async function prepare(page,test,tag){
   return {domSelectionVerified:true,method:test.method};
 }
 async function runRound(candidate,round,helper,assembly,application){
-  const result={browserKind:candidate.kind,round,ok:false,requiredCases:8,cases:[],externalPageRequests:0,freshProcessAndProfile:true,forcedRendererAccessibility:false};
+  const result={browserKind:candidate.kind,round,ok:false,requiredCases:coldEdgeCases?1:8,cases:[],externalPageRequests:0,freshProcessAndProfile:true,forcedRendererAccessibility:false};
   let root,profile,marker,browserProcess,bridgeProcess,browser,server,lines;
   try{
     root=await mkdtemp(path.join(tmpdir(),'echolingo-browser-selection-'));marker=randomUUID();await writeFile(path.join(root,'.echolingo-owned'),marker,{flag:'wx'});profile=path.join(root,'profile');await mkdir(profile);
@@ -152,6 +153,7 @@ async function runRound(candidate,round,helper,assembly,application){
     const bridgeArgs=['-NoLogo','-NoProfile','-STA','-ExecutionPolicy','Bypass','-File',path.join(here,'windows-browser-selection-bridge.ps1'),'-BrowserExecutable',candidate.executable];
     if(!application)bridgeArgs.push('-HelperPath',helper,'-NativeAssemblyPath',assembly);
     if(application)bridgeArgs.push('-ApplicationPath',application.path,'-ExpectedApplicationSha256',application.sha256,'-ExpectedApplicationBytes',String(application.bytes),'-MockBaseUrl',origin,'-ProviderId','generated-browser-'+marker);
+    if(coldEdgeCases)bridgeArgs.push('-ColdEdgeDiagnostics');
     bridgeProcess=spawn(path.join(process.env.SystemRoot,'System32/WindowsPowerShell/v1.0/powershell.exe'),bridgeArgs,{windowsHide:true,stdio:['pipe','pipe','pipe']});
     bridgeProcess.stderr.on('data',data=>{result.bridgeStderrBytes=(result.bridgeStderrBytes??0)+data.length;});lines=new Lines(bridgeProcess);const greeting=await lines.next(application?65000:10000);assert.equal(greeting.ready,true,'BRIDGE_STARTUP_FAILED');result.bridgeProcessId=greeting.bridgeProcessId;if(application){result.applicationIdentity=greeting.application;result.actualApplicationTested=true;report.actualApplicationTested=true;}
     browserProcess=spawn(candidate.executable,['--user-data-dir='+profile,'--remote-debugging-address=127.0.0.1','--remote-debugging-port=0','--no-first-run','--no-default-browser-check','--disable-background-networking','--disable-component-update','--disable-sync','--disable-extensions','--disable-quic','--host-resolver-rules=MAP * ~NOTFOUND, EXCLUDE 127.0.0.1','--force-device-scale-factor=1','--enable-automation','--new-window','about:blank'],{windowsHide:false,stdio:'ignore'});
@@ -164,19 +166,19 @@ async function runRound(candidate,round,helper,assembly,application){
     const contexts=browser.contexts();assert.equal(contexts.length,1,'FRESH_CONTEXT_COUNT');const context=contexts[0];await context.route('**/*',route=>{if(route.request().url().startsWith(origin+'/'))return route.continue();result.externalPageRequests++;return route.abort();});
     const page=context.pages()[0]??await context.newPage();await page.goto(sourceUrl,{waitUntil:'load',timeout:10000});assert.equal(page.url(),sourceUrl);result.actualBrowserTested=true;
     let invoked=0,shortcutPresses=0;
-    for(const test of tests){
+    for(const test of coldEdgeCases?tests.slice(0,1):tests){
       const row={browserKind:candidate.kind,round,name:test.name,ok:false,helperInvocations:0,setupMethod:test.method};result.cases.push(row);report.cases.push(row);
       try{
         if(application&&shortcutPresses>0)row.previousPopupOutsideClick=await dismissPreviousPopupByClick(page,lines,browserProcess.pid);
         Object.assign(row,selectionSuite==='same-page-mouse'?await prepareMouseRepeat(page,test,application?lines:null,browserProcess.pid):await prepare(page,test,tag));if(application)row.firstActualAltDInFreshBrowser=shortcutPresses===0;else row.firstHelperInFreshBrowser=invoked===0;
         const mock=translations.get(test.expected),mockBefore=mock.count;
-        const reply=await lines.request({op:'case',browserPid:browserProcess.pid,expected:test.expected,outcome:test.outcome??'selection',requiredRole:test.requiredRole,requireMouseReleased:selectionSuite==='same-page-mouse',expectedTranslation:mock.result},application?40000:20000);Object.assign(row,reply);row.bridgeExpectationPassed=reply.ok;row.ok=false;invoked+=reply.helperInvocations??0;shortcutPresses+=reply.actualShortcutPresses??0;
+        const reply=await lines.request({op:'case',browserPid:browserProcess.pid,expected:test.expected,outcome:test.outcome??'selection',requiredRole:test.requiredRole,requireMouseReleased:selectionSuite==='same-page-mouse',expectedTranslation:mock.result},coldEdgeCases?50000:application?40000:20000);Object.assign(row,reply);row.bridgeExpectationPassed=reply.ok;row.ok=false;invoked+=reply.helperInvocations??0;shortcutPresses+=reply.actualShortcutPresses??0;
         if(application){row.newMockRequests=mock.count-mockBefore;row.mockError=mockError;assert.equal(mockError,null,'MOCK_REQUEST_REJECTED');assert.ok(row.newMockRequests>=0&&row.newMockRequests<=1,'ACTUAL_APP_DUPLICATE_MOCK_REQUEST');if(reply.ok)assert.equal(row.newMockRequests,1,'ACTUAL_APP_NEW_MOCK_REQUEST_MISSING');const after=await page.evaluate(target=>({selected:window.getSelection().toString(),body:document.getElementById(target).textContent,hasFocus:document.hasFocus()}),test.target);row.domSelectionUnchangedAfterHotkey=after.selected===test.expected;row.generatedBodyUnchangedAfterHotkey=after.body===test.expected;row.browserDocumentFocusedAfterHotkey=after.hasFocus;if(reply.ok){assert.equal(row.domSelectionUnchangedAfterHotkey,true,'ACTUAL_ALT_D_CHANGED_BROWSER_SELECTION');assert.equal(row.generatedBodyUnchangedAfterHotkey,true,'ACTUAL_ALT_D_EDITED_BROWSER');assert.equal(after.hasFocus,true,'ACTUAL_ALT_D_FOCUSED_BROWSER_CHROME');}}
         row.domCopyEvents=await page.evaluate(()=>window.__copyCount);assert.ok(row.domCopyEvents<=1,'COPY_RETRIED');if(test.outcome==='empty'||test.outcome==='protected')assert.equal(row.domCopyEvents,0,'NEGATIVE_CONTROL_RECEIVED_COPY');row.nativeClipboardCopyExercised=row.domCopyEvents===1;
         row.ok=reply.ok===true;if(!row.ok&&!reply.safeToContinue){result.remainingCasesUnexecuted=true;break;}
       }catch(error){row.error=String(error.message).replace(/wss?:\/\/[^\s]+/g,'[owned-debug-endpoint]').slice(0,1024);row.setupInconclusive=application?(row.actualShortcutPresses??0)===0:(row.helperInvocations??0)===0;result.remainingCasesUnexecuted=true;break;}
     }
-    result.helperInvocations=invoked;result.actualShortcutPresses=shortcutPresses;result.ok=result.cases.length===8&&result.cases.every(value=>value.ok)&&result.externalPageRequests===0;
+    result.helperInvocations=invoked;result.actualShortcutPresses=shortcutPresses;result.ok=result.cases.length===result.requiredCases&&result.cases.every(value=>value.ok)&&result.externalPageRequests===0;
   }catch(error){result.error=String(error.message).replace(/wss?:\/\/[^\s]+/g,'[owned-debug-endpoint]').slice(0,1024);result.setupInconclusive=result.cases.every(value=>(value.helperInvocations??0)===0);}
   finally{
     try{if(lines&&!lines.closed){const closing=await lines.request({op:'close'},application?30000:3000);assert.equal(closing.ok,true);assert.equal(closing.closing,true);assert.equal(closing.clipboardCleanupComplete,true);result.generatedClipboardCleanupConfirmed=true;if(application){assert.equal(closing.applicationCleanup.ok,true,'OWN_APPLICATION_CLEANUP_FAILED');result.applicationCleanup=closing.applicationCleanup;}}}catch{result.ok=false;result.bridgeCloseIncomplete=true;}
@@ -192,16 +194,17 @@ async function runRound(candidate,round,helper,assembly,application){
 try{
   assert.ok(browserOrder==='edge-first'||browserOrder==='chrome-first','BROWSER_ORDER_INVALID');
   assert.ok(selectionSuite==='original'||selectionSuite==='same-page-mouse','SELECTION_SUITE_INVALID');
+  assert.ok(Number.isInteger(coldEdgeCases)&&coldEdgeCases>=0&&coldEdgeCases<=2,'COLD_EDGE_PROFILE_COUNT_INVALID');if(coldEdgeCases){assert.equal(applicationMode,true,'COLD_EDGE_REQUIRES_APPLICATION');assert.equal(browserOrder,'edge-first','COLD_EDGE_REQUIRES_EDGE_FIRST');}
   assert.equal(process.platform,'win32','WINDOWS_REQUIRED');assert.equal(process.env.GITHUB_ACTIONS,'true','EPHEMERAL_GITHUB_REQUIRED');assert.equal(process.env.RUNNER_ENVIRONMENT,'github-hosted','GITHUB_HOSTED_REQUIRED');
   let helper=null,assembly=null,application=null;
   if(applicationMode){assert.equal(selectionSuite,'same-page-mouse','APPLICATION_MODE_REQUIRES_REAL_MOUSE_SUITE');const executable=await realpath(flags.get('--application')),expected=flags.get('--expected-application-sha256')??'8490a973c9e4f4568b851f61524a4ef8f554d8b3a506b12dd19ba34f0dd22a4b',bytes=Number(flags.get('--expected-application-bytes')??5825536);assert.match(expected,/^[a-f0-9]{64}$/);assert.ok(Number.isSafeInteger(bytes)&&bytes>0);assert.equal((await stat(executable)).size,bytes,'EXACT_APPLICATION_BYTES');assert.equal(await digest(executable),expected,'EXACT_APPLICATION_SHA256');application={path:executable,sha256:expected,bytes};report.applicationSha256=expected;report.applicationBytes=bytes;report.translationBackend='generated-loopback-mock';}
   else{assert.ok(flags.has('--native-assembly'),'NATIVE_ASSEMBLY_REQUIRED');helper=await realpath(flags.get('--helper')??path.join(here,'../src-tauri/native/windows.ps1'));assembly=await realpath(flags.get('--native-assembly'));assert.equal(path.extname(assembly).toLowerCase(),'.dll');report.helperSha256=await digest(helper);report.nativeAssemblySha256=await digest(assembly);}
-  const installed=await installedBrowsers();report.availableBrowserKinds=installed.map(value=>value.kind);report.unavailableBrowserKinds=['edge','chrome'].filter(kind=>!installed.some(value=>value.kind===kind));assert.ok(installed.length===2,'EDGE_AND_CHROME_REQUIRED');
+  const installed=await installedBrowsers();report.availableBrowserKinds=installed.map(value=>value.kind);report.unavailableBrowserKinds=['edge','chrome'].filter(kind=>!installed.some(value=>value.kind===kind));if(coldEdgeCases)assert.ok(installed.some(value=>value.kind==='edge'),'EDGE_REQUIRED');else assert.ok(installed.length===2,'EDGE_AND_CHROME_REQUIRED');
   const priority=browserOrder==='edge-first'?['edge','chrome']:['chrome','edge'];
-  const candidates=[...installed].sort((first,second)=>priority.indexOf(first.kind)-priority.indexOf(second.kind));report.requiredCases=candidates.length*3*8;report.requiredFreshBrowserRounds=candidates.length*3;
+  const candidates=(coldEdgeCases?installed.filter(value=>value.kind==='edge'):[...installed]).sort((first,second)=>priority.indexOf(first.kind)-priority.indexOf(second.kind));report.requiredCases=candidates.length*(coldEdgeCases||3)*(coldEdgeCases?1:8);report.requiredFreshBrowserRounds=candidates.length*(coldEdgeCases||3);
   for(const candidate of candidates){
     report.actualBrowserOrder.push(candidate.kind);
-    for(let round=1;round<=3;round++){const result=await runRound(candidate,round,helper,assembly,application);report.rounds.push(result);report.actualBrowserTested||=result.actualBrowserTested===true;}
+    for(let round=1;round<=(coldEdgeCases||3);round++){const result=await runRound(candidate,round,helper,assembly,application);report.rounds.push(result);report.actualBrowserTested||=result.actualBrowserTested===true;}
   }
   report.ok=report.rounds.length===report.requiredFreshBrowserRounds&&report.rounds.every(value=>value.ok);
 }catch(error){report.error=String(error.message).replace(/wss?:\/\/[^\s]+/g,'[owned-debug-endpoint]').slice(0,1024);report.setupInconclusive=report.cases.length===0;}
