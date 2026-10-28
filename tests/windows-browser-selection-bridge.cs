@@ -51,6 +51,7 @@ public static class WindowsBrowserSelectionBridge {
     static bool seeded;
     static string Stage="setup";static Dictionary<string,object> LastMetadata;
     static AppSession HostedApplication;
+    static string ShortcutGesture="instant";
     static IntPtr boundMain,boundOwner;static int boundPid;static uint boundThread;static long boundStyleKind;
     static List<Dictionary<string,object>> windowInventory=new List<Dictionary<string,object>>();
     static void Need(bool value,string error){if(!value)throw new InvalidOperationException(error);}
@@ -217,7 +218,7 @@ public static class WindowsBrowserSelectionBridge {
         public AppSession(string executable,string mockUrl,string providerId,string hash,long bytes,bool diagnostics){
             Diagnostics=diagnostics;
             provider=providerId;Need(provider.StartsWith("generated-browser-",StringComparison.Ordinal)&&provider.Length<=100,"APP_PROVIDER_NOT_GENERATED");Uri endpoint;Need(Uri.TryCreate(mockUrl,UriKind.Absolute,out endpoint)&&endpoint.Scheme=="http"&&endpoint.Host=="127.0.0.1"&&endpoint.Port>1024&&endpoint.AbsolutePath=="/","APP_MOCK_NOT_LOOPBACK");
-            Identity=new Dictionary<string,object>{{"applicationSha256",hash},{"applicationBytes",bytes},{"actualApplicationTested",true},{"actualRegisteredAltD",true},{"fakeIpcUsed",false},{"translationBackend","generated-loopback-mock"},{"credentialScope","One random absent provider ID only; no existing credential account"},{"nativeReadinessIsOsRegistrationProof",false},{"fixedFrontendWarmupMilliseconds",0},{"preHotkeyAppUiaCalls",0}};
+            Identity=new Dictionary<string,object>{{"applicationSha256",hash},{"applicationBytes",bytes},{"actualApplicationTested",true},{"actualRegisteredAltD",true},{"shortcutGesture",ShortcutGesture},{"fakeIpcUsed",false},{"translationBackend","generated-loopback-mock"},{"credentialScope","One random absent provider ID only; no existing credential account"},{"nativeReadinessIsOsRegistrationProof",false},{"fixedFrontendWarmupMilliseconds",0},{"preHotkeyAppUiaCalls",0}};
             try{
                 foreach(Process p in Process.GetProcessesByName(Path.GetFileNameWithoutExtension(executable)))using(p)Need(p.HasExited,"EXISTING_APP_PROCESS_REFUSED");
                 string roaming=Path.Combine(Folder("3EB685DB-65F9-4CF6-A03A-E3EF65729F3D"),Identifier),local=Path.Combine(Folder("F1B32785-6FBA-4FCF-9D55-7B8E7F157091"),Identifier),root=Path.Combine(Path.GetTempPath(),"echolingo-browser-app-"+token);
@@ -280,12 +281,31 @@ public static class WindowsBrowserSelectionBridge {
         }
     }
     static INPUT AppKey(ushort code,bool up){INPUT i=new INPUT();i.type=1;i.data.key.key=code;i.data.key.flags=up?2U:0U;return i;}
+    static void SendAppShortcut(IntPtr main,Dictionary<string,object> metadata){
+        metadata["shortcutGesture"]=ShortcutGesture;metadata["shortcutGestureAttempts"]=1;
+        metadata["gestureAltLeadMilliseconds"]=ShortcutGesture=="paced"?40:0;metadata["gestureDHoldMilliseconds"]=ShortcutGesture=="paced"?80:0;
+        if(ShortcutGesture=="instant"){
+            INPUT[] keys=new INPUT[]{AppKey(0x12,false),AppKey(0x44,false),AppKey(0x44,true),AppKey(0x12,true)};uint sent=SendInput(4,keys,Marshal.SizeOf(typeof(INPUT)));metadata["actualShortcutPresses"]=1;metadata["insertedInputEvents"]=sent;if(sent!=4){SendInput(2,new INPUT[]{AppKey(0x44,true),AppKey(0x12,true)},Marshal.SizeOf(typeof(INPUT)));throw new InvalidOperationException("APP_ALT_D_INPUT_REJECTED_NO_RETRY");}return;
+        }
+        Need((GetAsyncKeyState(0x44)&0x8000)==0,"APP_GESTURE_D_ALREADY_HELD");bool altOwned=false,dOwned=false;uint inserted=0;Stopwatch gesture=Stopwatch.StartNew();
+        metadata["gestureOwnedKeyCleanupRequired"]=false;
+        try{
+            Stage="actual-alt-d-once:alt-down";uint alt=SendInput(1,new INPUT[]{AppKey(0x12,false)},Marshal.SizeOf(typeof(INPUT)));inserted+=alt;altOwned=alt==1;Need(alt==1,"APP_GESTURE_ALT_DOWN_REJECTED_NO_RETRY");
+            // These are test-only human gesture intervals, never product waits.
+            Thread.Sleep(40);metadata["gestureSourceForegroundAfterAltLead"]=GetForegroundWindow()==main;Need(GetForegroundWindow()==main,"APP_GESTURE_SOURCE_CHANGED_AFTER_ALT");
+            Stage="actual-alt-d-once:d-down";uint down=SendInput(1,new INPUT[]{AppKey(0x44,false)},Marshal.SizeOf(typeof(INPUT)));inserted+=down;dOwned=down==1;metadata["actualShortcutPresses"]=dOwned?1:0;metadata["gestureDDownAtMilliseconds"]=gesture.Elapsed.TotalMilliseconds;Need(down==1,"APP_GESTURE_D_DOWN_REJECTED_NO_RETRY");
+            Thread.Sleep(80);Stage="actual-alt-d-once:release";uint up=SendInput(2,new INPUT[]{AppKey(0x44,true),AppKey(0x12,true)},Marshal.SizeOf(typeof(INPUT)));inserted+=up;if(up>=1)dOwned=false;if(up>=2)altOwned=false;Need(up==2,"APP_GESTURE_RELEASE_REJECTED_NO_RETRY");
+        }finally{
+            metadata["insertedInputEvents"]=inserted;metadata["gestureDurationMilliseconds"]=gesture.Elapsed.TotalMilliseconds;
+            if(dOwned||altOwned){var release=new List<INPUT>();if(dOwned)release.Add(AppKey(0x44,true));if(altOwned)release.Add(AppKey(0x12,true));metadata["gestureOwnedKeyCleanupRequired"]=true;metadata["gestureOwnedKeyCleanupExpectedEvents"]=release.Count;metadata["gestureOwnedKeyCleanupInsertedEvents"]=SendInput((uint)release.Count,release.ToArray(),Marshal.SizeOf(typeof(INPUT)));}
+        }
+    }
     static Dictionary<string,object> RunApplicationCase(Dictionary<string,object> command,IntPtr main,Dictionary<string,object> metadata){
         string expected=Convert.ToString(command["expected"]),translation=Convert.ToString(command["expectedTranslation"]);Need(Convert.ToString(command["outcome"])=="selection"&&expected.Length>0&&translation.Length<=512,"APP_GENERATED_SELECTION_REQUIRED");
         metadata["actualApplicationTested"]=true;metadata["actualRegisteredAltD"]=true;metadata["helperInvocations"]=0;metadata["actualShortcutPresses"]=0;metadata["preHotkeyAppUiaCalls"]=0;metadata["safeToContinue"]=false;
         Stage="app-clipboard-seed";DataObject seed=Seed();int before=HostedApplication.HistoryCount(expected,translation);metadata["historyExactCountBefore"]=before;metadata["popupVisibleBeforeHotkey"]=HostedApplication.Visible;
         Need(GetForegroundWindow()==main&&(GetAsyncKeyState(1)&0x8000)==0,"APP_SOURCE_OR_MOUSE_CHANGED_BEFORE_HOTKEY");foreach(int key in new int[]{0x10,0x11,0x12,0x5B,0x5C})Need((GetAsyncKeyState(key)&0x8000)==0,"APP_SHORTCUT_MODIFIER_ALREADY_HELD");
-        INPUT[] keys=new INPUT[]{AppKey(0x12,false),AppKey(0x44,false),AppKey(0x44,true),AppKey(0x12,true)};Stopwatch clock=Stopwatch.StartNew();Stage="actual-alt-d-once";uint sent=SendInput(4,keys,Marshal.SizeOf(typeof(INPUT)));metadata["actualShortcutPresses"]=1;metadata["insertedInputEvents"]=sent;if(sent!=4){SendInput(2,new INPUT[]{AppKey(0x44,true),AppKey(0x12,true)},Marshal.SizeOf(typeof(INPUT)));throw new InvalidOperationException("APP_ALT_D_INPUT_REJECTED_NO_RETRY");}
+        Stopwatch clock=Stopwatch.StartNew();Stage="actual-alt-d-once";SendAppShortcut(main,metadata);
         Stage="actual-app-source-and-new-history";bool exact=false,foregroundAlways=true;int staleReads=0;while(clock.ElapsedMilliseconds<30000){
             metadata["popupNativeVisible"]=HostedApplication.Visible;bool sourceForeground=GetForegroundWindow()==main;foregroundAlways=foregroundAlways&&sourceForeground;metadata["sourceForegroundPreserved"]=sourceForeground;metadata["sourceForegroundPreservedThroughoutObservation"]=foregroundAlways;
             // Wait only for native presentation before the first app UIA read:
@@ -300,7 +320,8 @@ public static class WindowsBrowserSelectionBridge {
             if(HostedApplication.Diagnostics)try{metadata["ownAppFailureDiagnostics"]=HostedApplication.FailureDiagnostics();}catch(Exception e){metadata["ownAppFailureDiagnosticErrorType"]=e.GetType().Name;metadata["ownAppFailureDiagnosticErrorHResult"]=e.HResult;}
         }return metadata;
     }
-    public static void Run(string helper,string assembly,string browser,string application,string mockUrl,string provider,string hash,long bytes,bool diagnostics){
+    public static void Run(string helper,string assembly,string browser,string application,string mockUrl,string provider,string hash,long bytes,bool diagnostics,string shortcutGesture){
+        Need(shortcutGesture=="instant"||shortcutGesture=="paced","SHORTCUT_GESTURE_INVALID");Need(shortcutGesture=="instant"||!String.IsNullOrEmpty(application),"PACED_GESTURE_REQUIRES_APPLICATION");ShortcutGesture=shortcutGesture;
         Helper=String.IsNullOrEmpty(helper)?null:Path.GetFullPath(helper);Assembly=String.IsNullOrEmpty(assembly)?null:Path.GetFullPath(assembly);Browser=Path.GetFullPath(browser);Need(Helper==null||!Helper.Contains("\"")&&!Assembly.Contains("\""),"INVALID_FIXTURE_PATH");
         IDataObject existing=Clipboard.GetDataObject();Need(existing==null||existing.GetFormats(false).Length==0,"FRESH_EMPTY_CLIPBOARD_REQUIRED");
         try{
