@@ -900,7 +900,7 @@ public static class EchoLingoNative {
         SelectionCopyPolicy.ReadEvidence evidence = new SelectionCopyPolicy.ReadEvidence();
         try {
             string focusedRole = focused.Cached.ControlType.ProgrammaticName;
-            bool focusedEmpty = false, document = false;
+            bool focusedEmpty = false, document = false, emptyEdit = false;
             // Validate the complete bounded ancestor chain before reading any
             // selected text. A provider below a protected ancestor must never
             // disclose its range just because its own IsPassword is false.
@@ -908,7 +908,7 @@ public static class EchoLingoNative {
                 RequireSelectionQueryActive(); SelectionStage(6, depth);
                 AutomationElement element = ancestors[depth];
                 string role = element.Cached.ControlType.ProgrammaticName;
-                if (depth == 0 || role == "ControlType.Document" || role == "ControlType.Edit") {
+                if (depth == 0 || role == "ControlType.Document" || (role == "ControlType.Edit" && !emptyEdit)) {
                     RequireSelectionQueryActive(); object raw; bool available = element.TryGetCurrentPattern(TextPattern.Pattern, out raw);
                     TextPattern pattern = raw as TextPattern;
                     evidence.ObservePattern(available, pattern != null);
@@ -919,14 +919,18 @@ public static class EchoLingoNative {
                         if (element.Cached.ProcessId != 0) context.SourceProcesses.Add(element.Cached.ProcessId);
                     }
                     if (available) {
-                        // An empty Edit is authoritative. A document or its
-                        // focused descendant can expose a different caret than
-                        // the document selection; only walk this ancestor path.
+                        // Keyboard focus can remain in an empty Edit while its
+                        // ancestor Document owns the visible mouse selection.
+                        // Continue only this validated ancestor path. A real
+                        // empty Edit still forbids clipboard fallback if no
+                        // ancestor Document supplies actual selected text.
+                        bool editSelectionReturned = false;
                         string selected = SelectionCopyPolicy.ReadAutomation(false, true, true,
-                            delegate { evidence.BeforeRangeRead(); RequireSelectionQueryActive(); SelectionStage(7, depth); return pattern.GetSelection(); },
-                            delegate(TextPatternRange range) { evidence.BeforeRangeRead(); RequireSelectionQueryActive(); SelectionStage(8, depth); return range.GetText(-1); }, role != "ControlType.Edit");
+                            delegate { evidence.BeforeRangeRead(); RequireSelectionQueryActive(); SelectionStage(7, depth); TextPatternRange[] ranges = pattern.GetSelection(); editSelectionReturned = role == "ControlType.Edit" && ranges != null; return ranges; },
+                            delegate(TextPatternRange range) { evidence.BeforeRangeRead(); RequireSelectionQueryActive(); SelectionStage(8, depth); return range.GetText(-1); }, true);
                         if (!String.IsNullOrWhiteSpace(selected)) return selected;
                         if (depth == 0) focusedEmpty = true;
+                        if (editSelectionReturned) { emptyEdit = true; continue; }
                     }
                     if (role == "ControlType.Edit") {
                         if (!SelectionCopyPolicy.CopyFallbackAllowed(focusedRole))
@@ -935,7 +939,7 @@ public static class EchoLingoNative {
                     }
                 }
             }
-            if ((document && DocumentCopyAllowed(focusedRole)) || (!focusedEmpty && SelectionCopyPolicy.CopyFallbackAllowed(focusedRole))) {
+            if (!emptyEdit && ((document && DocumentCopyAllowed(focusedRole)) || (!focusedEmpty && SelectionCopyPolicy.CopyFallbackAllowed(focusedRole)))) {
                 // Only normal completion of every candidate (focus/Document/Edit)
                 // can classify an unread context. Early Edit returns and errors
                 // never reach this point; any valid or attempted range is strict.
