@@ -2,6 +2,18 @@
 
 Updated: 2026-10-28, Asia/Shanghai. Stage: v0.1.0 preview hardening and acceptance.
 
+<!-- windows-copy-compatibility-20261028:start -->
+## 2026-10-28 默认复制兼容取词：已实现，Windows 新回归进行中
+
+机主再次确认 WPS/Google 等内容手动 Ctrl+C 正常、Alt+D 仍空，并选择“复制兼容模式优先”。新源码96b4f9a新增独立 copy 路径：后台一次 Ctrl+C 不再以完整 UIA 选区树/RuntimeId 成功为前提，读到文字后仍被动展示并自动翻译；不增加用户步骤或启动权限提示。严格 auto 路径保留且本轮逐字节未改。Windows 新设置和旧配置缺字段均默认 copy，用户显式 auto 保留，其他 API/快捷键/主题/历史设置保留。只有已确认原生密码/密码元数据拒绝；自定义未知控件的无选区复制整行边界已在设置中说明。
+
+原生前台/根窗口/焦点/线程/进程、单次输入票据、剪贴板来源/序列及全格式恢复守卫继续保留。复杂剪贴板格式和独立 broker 发布仍可能拒绝，不能承诺“凡手动复制均必然成功”。新增18项有界数值 copy 诊断及每次 Alt+D 开始即重置的 attempt：旧任务不能覆盖新诊断，原文/标题/凭据不进入记录。未新增固定准备等待；密码元数据 RPC 有250ms完成上限，完成即继续。
+
+本机完整 native C#5/net48/PowerShell AST 与168纯策略断言通过；Rust273通过/1资源专用ignored、前端84及完整隔离UI通过。新增12场景真实 Windows copy 夹具（UIA无pattern/故障/动态ID、原生Edit/RichEdit、密码/空框、无复制响应及明确整行反例）已提交等待执行，旧auto15与严格应用矩阵必须显式auto，不冒充默认copy验收。
+
+空 Alt+D 外部不隐藏的现场报告尚未复现：旧不可变61ea/abaa92fd的定向[40655607791](https://github.com/Blueeeecho/EchoLingo/actions/runs/40655607791)原始popupVisibility=success，新增空框同源单击隐藏26.67ms、固定保留、取消固定同源已前台再次单击隐藏26.61ms均通过。没有据此宣称现场已修复，也未盲增新的原生前台观察器。本轮尚无新安装包；Mac规范应用/签名/权限/钥匙串/真实API凭据与停止的本地VM均未操作。[设计和验证边界](windows-selection-copy-compatibility.zh-CN.md)。
+<!-- windows-copy-compatibility-20261028:end -->
+
 <!-- selection-ancestor-package-20261028:start -->
 ## 2026-10-28 祖先选区修正候选包已生成：完整回归14/15
 
