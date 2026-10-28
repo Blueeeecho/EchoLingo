@@ -1,5 +1,13 @@
 # 0.1.0 预览版验证报告
 
+<!-- main-sync-20261028:start -->
+## 2026-10-28 主分支源码同步
+
+机主已经确认当前Windows包可用并授权发布；此前只发布安装包和更新main展示文件，功能源码仍在codex/windows-interaction-performance，旧PR #1停在3d372be。此次同步将完整功能历史与main62735330合并，保留README/Star/标准MIT + Commons Clause及Windows OCR指引。合并仅两份报告的重复段落冲突，解决后业务源码与ec626475逐字节一致，包含Beta1源码952d6096及实际修复f1bff11e；没有重新构建、替换或改写已发布安装包/tag。
+
+本轮宿主Rust277通过/1资源专用ignored，前端84通过，类型检查、构建及完整隔离界面回归通过（DOM/mock IPC，非已安装桌面验收）。原Windows完整16/18和后续补验边界继续保留，源码合并不是新的实体Windows或Mac安装验收。GitHub PR合并和远端核对结果见[同步证据](validation/main-sync-20261028.json)。官网继续独立gh-pages；本地Mac签名/安装、权限、钥匙串和并行鸿蒙工作未改动。
+<!-- main-sync-20261028:end -->
+
 <!-- project-presentation-license-20261028:start -->
 ## 2026-10-28 项目介绍、Star 邀请与许可更新
 
