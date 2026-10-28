@@ -11,7 +11,7 @@ Updated: 2026-10-28, Asia/Shanghai. Stage: v0.1.0 preview hardening and acceptan
 
 本轮先对已交付295程序做不可变复核：e5adb8f/run40622643576实际86次Alt+D中85次完整链通过；另1次已得到精确新请求/历史，但自有窗口UIA未观察到输入框，尚不能归为原生空选区或排除显示问题。未发热键的前置鼠标准备失败和未执行项分别保留在原始记录，不称应用拒绝取词。5f4dbba的三轮实际复核：40626825246较接近物理按键时序的首次Edge为2/2；40626825226 Edge与Chrome各1次实际Alt+S→WinRT OCR→新译文/历史→点击原浏览器空白隐藏通过，隐藏观测25.0/16.3ms；40626825523 WPF3/3、WinForms16/16、System32记事本核心1/1，但记事本测试服务退出失败使该整项仍红。其最后异步停止修正仅通过21项本机清理测试，尚待新Windows完整运行。均未把旧程序的通过算给候选。
 
-合并78794c4/full40629457450现已构建：Windows272 Rust/1ignored、Mac268/1ignored及两端84前端通过。原15门禁14success/1failure；新APP实际44次Alt+D完整链通过，但Chrome一次前置只选到前缀、该次0热键及3项未执行，浏览器48项整项仍红。记事本最终清理实际通过，WPF/WinForms、真实改键UI6项/自定义新键3链、两浏览器OCR同源点击及NSIS安装后6模型/3离线链通过。包已生成但不是全通过修复版。新native original-suite补测40630899181仍95/96：冷Edge的Q1读循环返回后，Q2因Pane→Group RuntimeId变化拒绝，总约2.84秒而非5秒超时。正在分别验证非合并鼠标夹具和实际focus HWND初始化候选；不取消身份守卫或宣称问题已修好。原95/96首次Edge失败、同PID后台剪贴板发布反例、实体Win10/11/WPS/IME/全屏多屏等边界仍开放；GitHub-hosted Server不是这些实机验收。未安装/签名Mac、改TCC/钥匙串规则、读取真实厂商凭据或重启停止的本地VM。预览，不发布stable。
+合并78794c4/full40629457450现已构建：Windows272 Rust/1ignored、Mac268/1ignored及两端84前端通过。原15门禁14success/1failure；新APP实际44次Alt+D完整链通过，但Chrome一次前置只选到前缀、该次0热键及3项未执行，浏览器48项整项仍红。记事本最终清理实际通过，WPF/WinForms、真实改键UI6项/自定义新键3链、两浏览器OCR同源点击及NSIS安装后6模型/3离线链通过。包已生成但不是全通过修复版。新native original-suite补测40630899181仍95/96：冷Edge的Q1读循环返回后，Q2因Pane→Group RuntimeId变化拒绝，总约2.84秒而非5秒超时。非合并鼠标补测40631739232实际85次AltD全链通过，但2次坐标映射前置失败/9未执行，整项仍红。focus HWND初始化候选cf6/run40632178982仍95/96，首Edge同样身份拒绝且未超时；该61行候选已精确撤回，未叠加保留。冷首次问题仍未修好。原95/96首次Edge失败、同PID后台剪贴板发布反例、实体Win10/11/WPS/IME/全屏多屏等边界仍开放；GitHub-hosted Server不是这些实机验收。未安装/签名Mac、改TCC/钥匙串规则、读取真实厂商凭据或重启停止的本地VM。预览，不发布stable。
 
 [分层证据](validation/windows-selection-services-20261028.json)。
 <!-- selection-services-20261028:end -->

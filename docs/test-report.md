@@ -11,7 +11,7 @@
 | released295/5f4dbba |40626825246 Edge冷首2/2；40626825226 Edge+Chrome各1/1实际AltS/左拖/WinRT/自动译文+历史/同源click隐藏，ROI底层mousedown/up0/0；不是新候选或物理Win11验收 |
 | 非浏览器/清理 |40623644694和40626825523均WPF3/3、WinForms16/16及真实记事本核心1/1，但记事本mock退出失败，整体仍failure；新BeginAccept+stopEvent/MTA补丁21项本机exactMock测试passed，未抹去旧红 |
 | 新源码Windows |78794/full40629457450：Windows272 Rust/1ignored、Mac268/1ignored、两端84前端及隔离UI通过；15gate14success/1failure。实际APP44次AltD全链通过，另1鼠标前置前缀失败/3未执行，48项整项仍红。记事本cleanup实际通过，WPF3/WinForms16、UI6/customkeys3、真实NSIS6模型+3链通过 |
-| 新native旧红回归 |7982/source与787产品相同，40630899181 original-suite仍95/96且0setup失败：冷Edge Q1 Stage6返回，Q2 Stage11 Pane→Group identity不等，2.84s未到5s。不能用新full其他绿覆盖；focus HWND prime候选尚未验证 |
+| 新native旧红回归 |7982/source与787产品相同，40630899181 original-suite仍95/96且0setup失败：冷Edge Q1 Stage6返回，Q2 Stage11 Pane→Group identity不等，2.84s未到5s。不能用新full其他绿覆盖；focus HWND prime候选cf6/run40632178982仍95/96，已精确撤回；非合并鼠标的85次实际APP全链通过，2映射前置失败/9未执行仍红 |
 | 新增服务 |Baidu/Youdao/Microsoft文本翻译、Youdao/Google OCR；协议/凭据/超限/重定向/错误脱敏/取消单测及专用表单、45固定URL精确对照passed；系统浏览器实际打开、新Windows诊断CLI和真实云账户未验收 |
 
 原95/96冷Edge失败、同PID后台剪贴板发布反例未关闭；同源点击在生成窗口和实际Edge/Chrome受控场景可通过，不据此断言所有应用已经修好。OS物理Win10/11/WPS、IME/多屏/全屏仍需机主复现。Mac规范程序未签名/安装/修改权限；新安装包已生成但尚非全通过修复版，未发布stable。[完整分层记录](validation/windows-selection-services-20261028.json)。

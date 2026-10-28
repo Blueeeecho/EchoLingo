@@ -231,15 +231,21 @@
     {
       "runId": 40631739232,
       "scope": "Exact78794 application with noncoalesced OS mouse fixture, both browser orders96; no product repair claimed.",
-      "status": "in_progress"
+      "status": "completed-failure",
+      "actualAltD": 85,
+      "actualCompleteChainsPassed": 85,
+      "preparationFailures": 2,
+      "unexecuted": 9,
+      "mouseNoCoalesceInsertionVerified": true,
+      "causeAtFixtureRejection": "screen-to-viewport mapping assertions before hotkey, not product empty source."
     },
     {
       "scope": "Native focused-HWND UIA provider initialization before first FocusedElement. Same guards/budget; not yet committed or proven.",
-      "status": "implementation_trial"
+      "status": "reverted-after-failed-acceptance"
     }
   ],
   "nativeFocusInitializationTrial": {
-    "status": "unverified-candidate",
+    "status": "reverted-after-failed-acceptance",
     "sha256": "792923b1f1331043189c177b59478dfed8382da7c178253402ea68b91520296b",
     "bytes": 189162,
     "method": "One AutomationElement.FromHandle on validated native focused HWND before initial FocusedElement; object not used to read text or replace existing identity/password/root guards.",
@@ -253,6 +259,18 @@
       "https://learn.microsoft.com/dotnet/api/system.windows.automation.automationelement.fromhandle",
       "https://learn.microsoft.com/windows/win32/winauto/uiauto-threading"
     ],
-    "acceptance": "Run exact new original96 before retaining; prior95/96 remains failure."
+    "acceptance": "Run exact new original96 before retaining; prior95/96 remains failure.",
+    "runId": 40632178982,
+    "candidateCommit": "cf6cf57",
+    "nativeCases": 96,
+    "passed": 95,
+    "failed": 1,
+    "sameFirstEdgeRuntimeIdTransitionRejected": true,
+    "failedAtMilliseconds": 1705.8265,
+    "timeout": false,
+    "initializationMarkersObservable": false,
+    "reasonMarkersUnavailable": "Existing browser bridge suffix whitelist did not include three new opt-in fields; cannot infer attempted/skipped/root/child.",
+    "restoredSourceSha256": "32bca1c7b05f9b661193f874a223354ee4685439dc63787fb9518a76e7af4577",
+    "summaryFile": "/Users/wwq/Documents/Codex/2026-10-24/ni-ne/work/selection-dismiss-official-apis-20261028/ci-cf6cf57-native-focus-prime/summary.json"
   }
 }
