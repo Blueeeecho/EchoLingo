@@ -1153,11 +1153,11 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-      - name: Require immutable released application source
+      - name: Require immutable candidate application source
         shell: powershell
         run: |
-          git diff --quiet 295a0ce45296d4310ee1b6a7c8e536b5911e1625 HEAD -- src src-tauri index.html package.json package-lock.json resources assets scripts .cargo
-          if ($LASTEXITCODE -ne 0) { throw 'Production changed; rebuild instead of claiming released-binary acceptance.' }
+          git diff --quiet 78794c468c2400318978ebbb728338a0ca11105b HEAD -- src src-tauri index.html package.json package-lock.json resources assets scripts .cargo
+          if ($LASTEXITCODE -ne 0) { throw 'Production changed; rebuild instead of claiming candidate-binary acceptance.' }
       - uses: actions/setup-node@v4
         with:
           node-version: '24'
@@ -1166,19 +1166,19 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           name: EchoLingo-Windows-offline-evidence
-          run-id: '40572666385'
+          run-id: '40629457450'
           github-token: ${{ github.token }}
           path: selection-browser-app-candidate
-      - name: Verify exact released stage executable
+      - name: Verify exact candidate stage executable
         id: candidate
         shell: powershell
         run: |
           $files = @(Get-ChildItem selection-browser-app-candidate -Recurse -File -Filter echolingo.exe)
           if ($files.Count -ne 1) { throw 'Expected one exact stage executable.' }
           $hash = (Get-FileHash -LiteralPath $files[0].FullName -Algorithm SHA256).Hash.ToLowerInvariant()
-          if ($files[0].Length -ne 5825536 -or $hash -ne '8490a973c9e4f4568b851f61524a4ef8f554d8b3a506b12dd19ba34f0dd22a4b') { throw 'Released application identity mismatch.' }
+          if ($files[0].Length -ne 5907456 -or $hash -ne '4a95547650bab7b44b567a45804ffcc828bfecb1365662266e001652a6a1e638') { throw 'Candidate application identity mismatch.' }
           "path=$($files[0].FullName)" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
-          [ordered]@{ applicationSource='295a0ce45296d4310ee1b6a7c8e536b5911e1625'; sourceRun=40572666385; stageBytes=$files[0].Length; stageSha256=$hash; fixtureCommit='${{ github.sha }}'; browserOrder='${{ matrix.browser_order }}' } | ConvertTo-Json -Compress
+          [ordered]@{ applicationSource='78794c468c2400318978ebbb728338a0ca11105b'; sourceRun=40629457450; stageBytes=$files[0].Length; stageSha256=$hash; fixtureCommit='${{ github.sha }}'; browserOrder='${{ matrix.browser_order }}' } | ConvertTo-Json -Compress
       - name: Mouse release then actual single registered Alt+D
         id: selection
         continue-on-error: true
@@ -1187,7 +1187,7 @@ jobs:
         run: |
           $ErrorActionPreference = 'Continue'
           $global:LASTEXITCODE = 1
-          $output = @(& node tests/windows-browser-selection-smoke.mjs --selection-suite same-page-mouse --browser-order '${{ matrix.browser_order }}' --application '${{ steps.candidate.outputs.path }}' --expected-application-sha256 8490a973c9e4f4568b851f61524a4ef8f554d8b3a506b12dd19ba34f0dd22a4b --expected-application-bytes 5825536 2>&1)
+          $output = @(& node tests/windows-browser-selection-smoke.mjs --selection-suite same-page-mouse --shortcut-gesture paced --browser-order '${{ matrix.browser_order }}' --application '${{ steps.candidate.outputs.path }}' --expected-application-sha256 4a95547650bab7b44b567a45804ffcc828bfecb1365662266e001652a6a1e638 --expected-application-bytes 5907456 2>&1)
           $code = $LASTEXITCODE
           $output | Out-File "$env:RUNNER_TEMP/echolingo-browser-app-selection.log" -Encoding utf8
           $output | Write-Output
@@ -1203,7 +1203,7 @@ jobs:
         shell: powershell
         run: |
           $outcome = '${{ steps.selection.outcome }}'
-          [ordered]@{ scope='Released295 application; actual mouse then single Alt+D; generated browser pages only'; selection=$outcome; physicalWindows11Tested=$false; wpsTested=$false } | ConvertTo-Json -Compress
+          [ordered]@{ scope='Candidate78794 application; actual mouse then single Alt+D; generated browser pages only'; selection=$outcome; physicalWindows11Tested=$false; wpsTested=$false } | ConvertTo-Json -Compress
           if ($outcome -ne 'success') { throw 'Actual browser registered-Alt+D chain incomplete or failed.' }
 
   windows-selection-nonbrowser-app-diagnostics:
