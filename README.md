@@ -1,87 +1,46 @@
-<p align="center"><img src="assets/icon.svg" width="90" alt="EchoLingo icon" /></p>
+<p align="center"><img src="https://blueeeecho.github.io/EchoLingo/assets/echolingo-icon.png" width="96" alt="EchoLingo · 回声译" /></p>
 <h1 align="center">EchoLingo · 回声译</h1>
-<p align="center">选中文字，按下快捷键。翻译就在眼前。</p>
-<p align="center">Windows 优先 · macOS 支持 · 系统离线 OCR · 自定义翻译与 OCR API</p>
+<p align="center"><strong>让陌生的语言，有熟悉的回声。</strong></p>
+<p align="center">轻量的桌面选词翻译与无感 OCR 工具，让理解跟上思路。</p>
+<p align="center"><a href="https://blueeeecho.github.io/EchoLingo/">官方网站</a> · <a href="https://github.com/Blueeeecho/EchoLingo/releases/tag/0.1.0-beta.1">下载 Beta 1</a> · <a href="https://github.com/Blueeeecho/EchoLingo/issues">反馈与建议</a></p>
 
-**0.1.0 预览版开发中。** 本项目独立实现 Bob 风格的桌面翻译工作流，非 Bob 官方产品，不使用 Bob 专有代码或素材，也不直接兼容 Bob 插件。
+## 下载与安装
 
-## 初版功能
+**[下载 Windows 内测版 Beta 1（x64）](https://github.com/Blueeeecho/EchoLingo/releases/download/0.1.0-beta.1/EchoLingo_0.1.0-beta.1_windows_x64-setup.exe)**
 
-- 在其他应用选中文字后，用全局快捷键取词并翻译。
-- 框选屏幕区域，OCR 后直接翻译；或只识字、静默复制到剪贴板。默认使用系统离线 OCR。
-- 输入翻译、剪贴板翻译，多服务结果对照。
-- 自定义 OpenAI 兼容 API、DeepL、LibreTranslate；常用供应商预设可编辑端点、模型和提示词。
-- OCR 可选择本机、百度、腾讯、兼容视觉模型，或高级 HTTP JSON 网关。凭证按各自协议填写。
-- 本地历史与收藏、搜索/清除、浮窗默认置顶、点击外部隐藏、托盘常驻、深浅主题。
-- 原生 WebView + Rust；不捆绑 Chromium 或 OCR 大模型。
+适用于 Windows 10 1809+ / Windows 11。运行安装程序后打开回声译，应用会驻留托盘；升级前先从托盘退出旧版。
 
-## 获取与运行
+[版本与校验文件](https://github.com/Blueeeecho/EchoLingo/releases/tag/0.1.0-beta.1) · [macOS 进展](https://github.com/Blueeeecho/EchoLingo/releases) · [项目说明](PROJECT.md)
 
-安装包通过 [GitHub Actions](https://github.com/Blueeeecho/EchoLingo/actions) 构建，验证后的预览版位于 [Releases](https://github.com/Blueeeecho/EchoLingo/releases)。没有附件时说明尚未完成验证，请勿把源代码 ZIP 当安装包。
+## 两个快捷动作
 
-- Windows：Windows 10 1809+ / Windows 11 x64，需系统 OCR 语言包与 WebView2。安装包可安装缺失的 WebView2（需要联网）。
-- macOS：macOS 12+，当前优先 Apple Silicon。取词可能需要辅助功能权限，截图需要屏幕录制权限。原生 helper 的授权与应用本身可能不同，见诊断与 [原生说明](docs/native-testing.md)。
-- 初版安装包尚无商业代码签名/Apple 公证，会出现系统来源提示；不包含商店上架或自动更新。
+- **选词翻译**：在原应用中选中文字，按 `Alt+D`，原文自动填入浮窗并翻译。
+- **无感 OCR**：按 `Alt+S`，用鼠标左键拖动框选，松开后自动识字、填入原文并翻译。
 
-## 首次配置
+空按 `Alt+D` 可以直接输入。原文随时可编辑，`Enter` 翻译，`Shift+Enter` 换行，`Esc` 取消框选。快捷键可在设置中修改；Mac 上 Alt 对应 Option。
 
-1. 打开“设置”，选择翻译供应商预设，再确认 API 地址和模型。OpenAI 兼容服务可填 `https://your-provider.example/v1` 或完整 `/chat/completions` 端点。
-2. 填写**自己的** API 密钥。密钥保存到 Windows Credential Manager / macOS Keychain，不写入配置文件。
-3. 点击“测试连接”。测试会发送 `Hello`，可能消耗少量供应商 API 额度。应用不附赠翻译额度。
-4. 回到其他应用选中文字，按快捷键。扫描 PDF 或图片使用截图翻译。
+## 按你的习惯使用
 
-DeepL 可使用 `https://api-free.deepl.com/v2` 或 Pro 的 `https://api.deepl.com/v2`；LibreTranslate 填你自己的实例地址。本地服务可用 `http://127.0.0.1:端口`，远程服务要求 HTTPS。
+- **安静轻量**：托盘常驻，按需唤起；点击外部隐藏，钉住后保留。使用系统 WebView，无需捆绑 Chromium。
+- **自由选择服务**：Windows 内置中英离线翻译，OCR 默认本机识别；也能配置自己的翻译与 OCR 服务。
+- **顺手的小功能**：原文与译文支持复制、朗读，保留主题切换、历史与收藏。历史默认最近 20 条，可调整为 1–100 条。
 
-OCR 默认不需要密钥。需要云端识别时，在“OCR 服务”中添加供应商：百度填写 API Key 与 Secret Key；腾讯填写 SecretId 与 SecretKey，临时凭证另填 Token。保存配置后可用生成的测试图检查连接，再选择它作为当前 OCR。测试会上传该测试图，启用云端 OCR 后会上传你主动框选的截图。通用 JSON 网关供已有自建接口使用，不能代替厂商原生签名协议。详见 [服务配置设计](docs/api-configuration-design.zh-CN.md)。
-
-## 默认快捷键
-
-| 功能 | Windows | macOS |
-|---|---|---|
-| 划词翻译 | Alt+D | Option+D |
-| 截图翻译 | Alt+S | Option+S |
-| 截图 OCR | Alt+Shift+S | Option+Shift+S |
-| 静默 OCR 到剪贴板 | Alt+C | Option+C |
-| 输入翻译 | Alt+A | Option+A |
-
-设置中可修改或留空禁用。快捷键冲突会报告错误；若同时运行 Bob 等工具，需为其中一个更换快捷键。没有选中文字时按 Alt+D，会打开空白浮窗，不激活应用或自动聚焦输入框。用户主动点击输入区后可输入，Ctrl/Cmd+Enter 翻译，Esc 取消截图/隐藏窗口。
-
-启动默认只出现在托盘/菜单栏，不主动弹窗口。浮窗默认位于其他普通窗口之上；点击外部立即隐藏，不使用倒计时。“钉住窗口”可让它在点击外部后保留。关闭窗口后应用仍在托盘运行，从托盘菜单退出。
+在托盘菜单打开设置，即可配置服务、管理密钥或调整快捷键。详见[服务配置说明](docs/api-configuration-design.zh-CN.md)。
 
 ## 隐私与数据
 
-本机 OCR 在系统内离线执行；只有明确选择云端 OCR 后，截图才会发送到选定服务。截图临时文件在处理结束后删除。翻译会把文本发送给你启用的供应商。无遥测、无常驻剪贴板监听。
+本机 OCR 和离线翻译在电脑上处理；选择云端服务后，文字或图片才会发送给你指定的服务。密钥存于系统凭据库，历史保存在本机。应用无遥测，不在后台持续轮询剪贴板。[阅读隐私说明](docs/privacy.md)。
 
-历史默认保存在本机，可关闭或清除。密钥位于系统凭据库；其他设置和历史保存在应用数据目录（可在“权限与诊断”查看）。首次配置前请先阅读 [隐私说明](docs/privacy.md)。
+## 支持回声译
 
-## 本地开发
+如果回声译对你有帮助，欢迎点亮右上角的 **⭐ Star**。让更多人发现这个小工具，也支持我们持续打磨。
 
-需要 Node.js 24 LTS、Rust stable（1.90+）和平台编译工具。macOS 仅桌面开发使用 Xcode Command Line Tools 即可；Windows 需要 MSVC C++ Build Tools 和 WebView2，详见 [Tauri 官方环境要求](https://v2.tauri.app/start/prerequisites/)。
+遇到问题或有新的想法，欢迎提交 [Issue](https://github.com/Blueeeecho/EchoLingo/issues)。开发入口见[项目说明](PROJECT.md)与[实现计划](docs/implementation-plan.md)。
 
-```sh
-npm ci
-npm test
-npm run build
-cargo test --manifest-path src-tauri/Cargo.toml
-npm run tauri dev
-# 当前平台安装包
-npm run tauri build
-```
+## 许可与商业授权
 
-Windows 原生 OCR 非交互自测（不修改剪贴板）：
+当前项目自有代码采用 **MIT + Commons Clause v1.0**，源码可查看、学习、修改和按条款分发。Commons Clause 限制其定义的“Sell”，并不禁止一切商业使用；涉及该限制的销售或收费服务，需要另行取得授权。详见 [LICENSE](LICENSE) 和[授权说明](LICENSING.md)。
 
-```powershell
-powershell.exe -NoProfile -STA -ExecutionPolicy Bypass -File src-tauri/native/windows.ps1 -Mode self-test
-```
+第三方组件与模型保留各自许可。已按 MIT 发布的旧版本继续适用其原有授权。
 
-## 项目文档
-
-- [项目要求与入口](PROJECT.md)
-- [Bob 详细研究与可复现交互](docs/bob-research.zh-CN.md)
-- [开发进度](docs/status.md) · [验证报告](docs/test-report.md)
-- [个性化需求与路线图](docs/roadmap.zh-CN.md)
-- [原生平台说明](docs/native-testing.md)
-
-原图覆盖翻译、连续 OCR、任意插件执行和完整词典功能尚未实现。Windows 多屏、混合 DPI、特定应用选文等必须按报告补真实桌面验收，不能用构建成功替代。
-
-MIT License. Bob、Windows、macOS 及各翻译服务商标归各自所有者。
+<sub>感谢 Bob 在桌面翻译体验上的探索与启发。</sub>
