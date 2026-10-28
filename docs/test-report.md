@@ -2,11 +2,15 @@
 
 
 <!-- selection-resize-field-20261028:start -->
-## 2026-10-28 机主现场取词仍失败：已缩到复制前原生焦点校验
+## 2026-10-28 取词现场已缩到复制前校验；跨进程合法焦点反例已复现
 
-此前936e包的受控16/16不覆盖机主现场失败。Ctrl+Shift+D对照后浏览器正常，WPS仍空；切换复制兼容后仍空。机主实际attempt29：configuredCopyStrategy1、copyPhase1、copyNativeContextValid0、copyDispatchInserted0、selectionQueryCount0，helper445ms。不是Ctrl+C已发送但WPS不复制，而是本程序第一道上下文校验提前拒绝。具体invalid分支旧诊断未区分；跨进程same-root焦点是已查到的过严条件，正在用真实Windows反例验证，尚未宣称WPS修好。
+机主936e包仍失败：Ctrl+Shift+D对照后浏览器正常，WPS严格/复制兼容均空。实际Copy attempt29为phase1/nativeContextValid0/dispatch0/queryCount0、helper445ms，表明本程序复制前拒绝，非WPS未响应已发送的Ctrl+C；旧字段不能区分具体invalid子条件。
 
-并行修正拖宽时页面旧尺寸与native窗口互相拉扯、重复textarea测量；译文Latin字体改为系统TimesNewRoman并保留中文fallback。前端单位84、类型/构建和完整隔离UI已通过；resize新增独立调度测试通过，独审提出missing-end事件可能阻塞展示，正在加权威完成确认。尚未完成新的Windows原生/安装包验收、没有新版包交付。Mac规范安装/签名/权限/凭据及停止的本地VM未变。[本轮调研](windows-selection-native-context-research.zh-CN.md)。
+官方Win32及MIT selection-hook源码调研后，真实Windows [62a81b7/run40681500777](https://github.com/Blueeeecho/EchoLingo/actions/runs/40681500777)已证明一个通用代码缺口：同一GA_ROOT的跨进程编辑控件手动Ctrl+C精确成功，旧helper却因PID不同在phase1/reason10拒绝，2/2反例对照通过、源焦点/富剪贴板保持。先前18d/ddf两轮夹具手动复制失败原红保留，未倒认产品成功。该缺口不是已证WPS全部根因。
+
+Copy-only最小修正已写，绑定非零FocusProcess并前后核对，仅把已验证焦点PID加入来源；任意broker/NULL owner仍拒绝，Strict Auto原门禁保留。177纯策略断言通过，同一真实Windows夹具ExpectSuccess待执行；尚未宣称WPS修复或新包交付。
+
+合并缩放修正：native拖动期间暂停自动回写，结束按实际宽度记录偏好；消除重复textarea测量/约束更新；权威oneshot确认防丢end卡住显式展示。TimesNewRoman仅译文Latin字形，中文/界面保留fallback。Rust277passed/1引擎资源ignored、前端84/完整隔离UI、独立layout10项通过，Windows cfg仅抽取类型检查；真实app双边拖动新夹具已写/审，待完整构建。Mac规范安装/签名/TCC/钥匙串、运行凭据与停止的本地VM未变。[调研](windows-selection-native-context-research.zh-CN.md)。
 <!-- selection-resize-field-20261028:end -->
 <!-- windows-copy-compatibility-20261028:start -->
 ## 2026-10-28 默认复制兼容版已打包：完整 Windows 16/16 通过

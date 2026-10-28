@@ -273,7 +273,7 @@ public static class SelectionCopyPolicy {
     }
     public sealed class NativeContext {
         public long Foreground, Root, Focus;
-        public uint Process, ForegroundThread, FocusThread;
+        public uint Process, ForegroundThread, FocusThread, FocusProcess;
         public bool Valid, MouseReleased;
     }
     public static bool CanRestartUnreadSelection(bool completeNoPattern, string text, bool alreadyRestarted, NativeContext before, NativeContext current) {
@@ -283,6 +283,14 @@ public static class SelectionCopyPolicy {
             return false;
         return before.Foreground == current.Foreground && before.Root == current.Root && before.Focus == current.Focus
             && before.Process == current.Process && before.ForegroundThread == current.ForegroundThread && before.FocusThread == current.FocusThread;
+    }
+    // A same-root child HWND can legitimately belong to another process. Copy
+    // binds both process identities; its focus cannot inherit another child's
+    // clipboard authority merely because the frame window stayed unchanged.
+    public static bool CanCopyFromNativeContext(NativeContext before, NativeContext current) {
+        return CanRestartUnreadSelection(true, null, false, before, current)
+            && before.FocusProcess != 0 && current.FocusProcess != 0
+            && before.FocusProcess == current.FocusProcess;
     }
     // Only the explicit compatibility entry uses this policy. A generic custom
     // provider has no universal native selection bit: unknown is permitted in
@@ -844,13 +852,16 @@ public static class EchoLingoNative {
         return context;
     }
     static SelectionCopyPolicy.NativeContext NativeSelectionContext(IntPtr foreground) {
-        return NativeSelectionContext(foreground, false);
+        return NativeSelectionContext(foreground, false, false);
+    }
+    static SelectionCopyPolicy.NativeContext NativeCopySelectionContext(IntPtr foreground) {
+        return NativeSelectionContext(foreground, true, true);
     }
     static SelectionCopyPolicy.NativeContext NativeSelectionInvalid(SelectionCopyPolicy.NativeContext snapshot, bool diagnostics, int reason) {
         if (diagnostics) CaptureHealth.Set("copyNativeInvalidReason", reason);
         return snapshot;
     }
-    static SelectionCopyPolicy.NativeContext NativeSelectionContext(IntPtr foreground, bool diagnostics) {
+    static SelectionCopyPolicy.NativeContext NativeSelectionContext(IntPtr foreground, bool diagnostics, bool allowCrossProcessFocus) {
         RequireSelectionQueryActive();
         SelectionCopyPolicy.NativeContext snapshot = new SelectionCopyPolicy.NativeContext();
         if (diagnostics) {
@@ -886,7 +897,7 @@ public static class EchoLingoNative {
         }
         if (focusThread == 0) return NativeSelectionInvalid(snapshot, diagnostics, 8);
         if (focusProcess == 0) return NativeSelectionInvalid(snapshot, diagnostics, 9);
-        if (focusProcess != process) return NativeSelectionInvalid(snapshot, diagnostics, 10);
+        if (!allowCrossProcessFocus && focusProcess != process) return NativeSelectionInvalid(snapshot, diagnostics, 10);
         if (focusRoot != root) return NativeSelectionInvalid(snapshot, diagnostics, 11);
         bool released = true;
         foreach (int key in new int[] { 1, 2, 4, 5, 6 }) if ((GetAsyncKeyState(key) & 0x8000) != 0) released = false;
@@ -896,7 +907,7 @@ public static class EchoLingoNative {
         if (GetWindowThreadProcessId(foreground, out currentProcess) != thread) return NativeSelectionInvalid(snapshot, diagnostics, 14);
         if (currentProcess != process) return NativeSelectionInvalid(snapshot, diagnostics, 15);
         snapshot.Foreground = foreground.ToInt64(); snapshot.Root = root.ToInt64(); snapshot.Focus = info.focus.ToInt64();
-        snapshot.Process = process; snapshot.ForegroundThread = thread; snapshot.FocusThread = focusThread;
+        snapshot.Process = process; snapshot.ForegroundThread = thread; snapshot.FocusThread = focusThread; snapshot.FocusProcess = focusProcess;
         snapshot.Valid = true; snapshot.MouseReleased = released;
         RequireSelectionQueryActive(); return snapshot;
     }
@@ -1152,8 +1163,8 @@ public static class EchoLingoNative {
     static void RequireNativeCopyContext(SelectionCopyPolicy.NativeContext expected, int phase) {
         CaptureHealth.Set("copyPhase", phase); NativeCancellation.ThrowIfRequested(); RequireSelectionBudget();
         CaptureHealth.Increment("copyNativeContextChecks");
-        SelectionCopyPolicy.NativeContext current = NativeSelectionContext(new IntPtr(expected.Foreground), true);
-        if (!SelectionCopyPolicy.CanRestartUnreadSelection(true, null, false, expected, current)) {
+        SelectionCopyPolicy.NativeContext current = NativeCopySelectionContext(new IntPtr(expected.Foreground));
+        if (!SelectionCopyPolicy.CanCopyFromNativeContext(expected, current)) {
             CaptureHealth.Set("copyNativeGuardReason", !current.Valid ? 1 : !current.MouseReleased ? 2 : 3);
             throw new OperationCanceledException("CANCELLED: The source window or focused control changed before copy completed.");
         }
@@ -1189,12 +1200,15 @@ public static class EchoLingoNative {
     static string SelectedTextCopyCore() {
         CaptureHealth.Set("copyPhase", 1); NativeCancellation.ThrowIfRequested();
         SelectionContext context = NewSelectionContext();
-        SelectionCopyPolicy.NativeContext expected = NativeSelectionContext(context.Foreground, true);
+        SelectionCopyPolicy.NativeContext expected = NativeCopySelectionContext(context.Foreground);
         CaptureHealth.Set("copyNativeContextValid", expected.Valid ? 1 : 0);
         if (!expected.Valid || !expected.MouseReleased) {
             CaptureHealth.Set("copyNativeGuardReason", !expected.Valid ? 1 : 2);
             throw new InvalidOperationException("SELECTION: Release the mouse in the source window before copying the selection.");
         }
+        // The completed native snapshot validated this nonzero focus PID via
+        // the exact foreground GA_ROOT. No arbitrary broker/owner is admitted.
+        context.SourceProcesses.Add(unchecked((int)expected.FocusProcess));
         DateTime deadline = DateTime.UtcNow.AddMilliseconds(1500);
         while (ModifiersDown()) {
             NativeCancellation.ThrowIfRequested(); RequireSelectionBudget();

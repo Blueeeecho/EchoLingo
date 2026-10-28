@@ -166,6 +166,27 @@ public static class WindowsSelectionPolicyFixture {
         capture(false, false, false, 0, 0);
         Assert(copies == 3, "Only the explicitly invoked compatibility policy permits unknown custom selection; this does not prove that Ctrl+C will not copy a whole line");
     }
+    static void CrossProcessCopyContextChecks() {
+        SelectionCopyPolicy.NativeContext before=NativeContext(),current=NativeContext();
+        before.FocusProcess=current.FocusProcess=before.Process+100;
+        Assert(SelectionCopyPolicy.CanCopyFromNativeContext(before,current),"An already validated same-root foreign child can be copied while both process identities remain stable");
+        current.FocusProcess++;
+        Assert(!SelectionCopyPolicy.CanCopyFromNativeContext(before,current),"A different focus process cannot reuse the prior child's clipboard authority even with unchanged HWND/thread/frame metadata");
+        current=NativeContext();current.FocusProcess=before.FocusProcess;current.Root++;
+        Assert(!SelectionCopyPolicy.CanCopyFromNativeContext(before,current),"An alternative root remains rejected; process or owner-window affinity cannot replace GA_ROOT equality");
+        current=NativeContext();current.FocusProcess=before.FocusProcess;current.Valid=false;
+        Assert(!SelectionCopyPolicy.CanCopyFromNativeContext(before,current),"Invalid native ancestry is not repaired by a matching focus process");
+        current=NativeContext();current.FocusProcess=before.FocusProcess;current.Process++;
+        Assert(!SelectionCopyPolicy.CanCopyFromNativeContext(before,current),"A changed foreground process still cancels copy even if the focused child identity remains stable");
+        current=NativeContext();current.FocusProcess=0;
+        Assert(!SelectionCopyPolicy.CanCopyFromNativeContext(before,current),"An unknown current focus process is not clipboard authority");
+        before.FocusProcess=0;
+        Assert(!SelectionCopyPolicy.CanCopyFromNativeContext(before,current),"Two zero focus process IDs cannot establish copy identity");
+        Assert(!SelectionCopyPolicy.CanCopyFromNativeContext(null,current)&&!SelectionCopyPolicy.CanCopyFromNativeContext(current,null),"Missing native snapshots cannot authorize copy");
+        // Strict unread/UIA policy intentionally retains its original checks.
+        before=NativeContext();current=NativeContext();before.FocusProcess=1;current.FocusProcess=2;
+        Assert(SelectionCopyPolicy.CanRestartUnreadSelection(true,null,false,before,current),"The legacy strict unread comparator does not inherit the new copy-only focus-process policy");
+    }
     public static int Main() {
         try {
             Assert(SelectionCopyPolicy.AutomationText<string>(null, delegate(string text) { return text; }) == null,
@@ -387,6 +408,7 @@ public static class WindowsSelectionPolicyFixture {
             Assert(normal.OwnerChecks==2,"Owner validated after coherent read and again immediately before restore");
             UnreadRestartChecks();
             CompatibilityCopyChecks();
+            CrossProcessCopyContextChecks();
             Console.WriteLine("{\"ok\":true,\"selectionPolicyFixturePassed\":true,\"assertions\":" + assertions + ",\"windowsInteractiveTested\":false,\"clipboardAccessed\":false,\"inputSent\":false,\"screenCaptured\":false}");
             return 0;
         } catch (Exception error) { Console.Error.WriteLine(error); return 1; }

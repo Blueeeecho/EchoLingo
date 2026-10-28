@@ -1,4 +1,5 @@
 import { invoke } from '@tauri-apps/api/core';
+import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 
 export interface TranslationPresentation { epoch: number; presented: boolean }
 
@@ -8,6 +9,9 @@ export function installPanelLayout(desktop: boolean, getPresentation: () => Tran
   if (!desktop) return { dispose: () => {}, presentPopup: async () => null, presentManagement: async () => null };
   let frame = 0, pending = false, disposed = false, last = '';
   let inFlight: Promise<void> | null = null;
+  let nativeSizingRevision: number | null = null, completedSizingRevision = 0;
+  let unlistenSizing: UnlistenFn | null = null;
+  const nativeSizingSupported = /Win/.test(navigator.platform);
   const shell = document.querySelector<HTMLElement>('.app-shell');
   const boundedSize = (value: number): number => Math.min(100_000, Math.max(1, Math.ceil(Number.isFinite(value) ? value : 1)));
   const measure = (): { presentation: string; contentHeight: number; contentWidth: number } => {
@@ -26,6 +30,7 @@ export function installPanelLayout(desktop: boolean, getPresentation: () => Tran
     if (disposed) return Promise.resolve();
     inFlight = (async () => {
       while (pending && !disposed) {
+        if (nativeSizingRevision !== null) break;
         pending = false;
         const payload = measure(), key = JSON.stringify(payload);
         if (key === last) continue;
@@ -36,9 +41,29 @@ export function installPanelLayout(desktop: boolean, getPresentation: () => Tran
     return inFlight;
   };
   const schedule = (): void => {
+    pending = true;
+    if (nativeSizingRevision !== null) return;
     if (disposed || frame) return;
     frame = requestAnimationFrame(() => { frame = 0; pending = true; void drain(); });
   };
+  if (nativeSizingSupported) void listen<unknown>('popup-native-sizing', ({ payload: value }) => {
+    if (disposed || !value || typeof value !== 'object') return;
+    const payload = value as { revision: number; active: boolean; presentationEpoch: number };
+    if (typeof payload.revision !== 'number' || !Number.isSafeInteger(payload.revision) || payload.revision <= 0
+      || typeof payload.active !== 'boolean' || typeof payload.presentationEpoch !== 'number'
+      || !Number.isSafeInteger(payload.presentationEpoch) || payload.presentationEpoch < 0) return;
+    if (payload.active) {
+      if (payload.revision <= completedSizingRevision || (nativeSizingRevision !== null && payload.revision < nativeSizingRevision)) return;
+      nativeSizingRevision = payload.revision;
+      cancelAnimationFrame(frame); frame = 0; pending = true;
+    } else {
+      if (payload.revision <= completedSizingRevision || (nativeSizingRevision !== null && payload.revision < nativeSizingRevision)) return;
+      completedSizingRevision = payload.revision; nativeSizingRevision = null;
+      // Read the current DOM again. Never reuse a former gesture's dimensions
+      // or presentation; fitting cannot show or focus a newer popup.
+      last = ''; schedule();
+    }
+  }).then((unlisten) => { if (disposed) unlisten(); else unlistenSizing = unlisten; }).catch(() => {});
   const observer = new ResizeObserver(schedule);
   if (shell) observer.observe(shell);
   document.querySelectorAll('.view').forEach((view) => observer.observe(view));
@@ -134,6 +159,7 @@ export function installPanelLayout(desktop: boolean, getPresentation: () => Tran
   schedule();
   const dispose = (): void => {
     disposed = true; clearGesture(); widthViewObserver.disconnect(); observer.disconnect(); cancelAnimationFrame(frame);
+    unlistenSizing?.(); unlistenSizing = null;
     document.body.classList.remove('popup-resize-enabled');
     window.removeEventListener('echolingo:layout', schedule);
     window.removeEventListener('resize', schedule);
@@ -146,20 +172,35 @@ export function installPanelLayout(desktop: boolean, getPresentation: () => Tran
     document.removeEventListener('lostpointercapture', cancelWidth);
     document.removeEventListener('visibilitychange', checkWidthPresentation);
   };
+  const preparePresentation = async (): Promise<boolean> => {
+    do {
+      if (nativeSizingSupported) {
+        let completed: number;
+        try { completed = await invoke<number>('wait_for_window_sizing'); } catch { return false; }
+        if (disposed || !Number.isSafeInteger(completed) || completed < 0) return false;
+        completedSizingRevision = Math.max(completedSizingRevision, completed);
+        // Events only reduce live-layout traffic. This native acknowledgement
+        // is authoritative even if the corresponding end event was not delivered.
+        if (nativeSizingRevision !== null && nativeSizingRevision <= completed) { nativeSizingRevision = null; last = ''; }
+        if (nativeSizingRevision !== null) continue;
+      }
+      cancelAnimationFrame(frame); frame = 0; pending = true;
+      await drain();
+    } while (nativeSizingRevision !== null && !disposed);
+    return !disposed;
+  };
   const presentPopup = async (presentationEpoch: number, focusInput = false, reuseVisiblePopup = false): Promise<TranslationPresentation | null> => {
-    cancelAnimationFrame(frame); frame = 0; pending = true;
-    await drain();
+    if (!await preparePresentation()) return null;
     // The source event has switched the DOM and fitted its content before the
     // native window is shown, so a previous settings page cannot flash first.
-    if (!disposed && document.body.dataset.view === 'translate') return invoke<TranslationPresentation>('show_popup', { presentationEpoch, focusInput, reuseVisiblePopup });
+    if (!disposed && document.body.dataset.view === 'translate' && presentationEpoch >= getPresentation().epoch) return invoke<TranslationPresentation>('show_popup', { presentationEpoch, focusInput, reuseVisiblePopup });
     return null;
   };
   const presentManagement = async (presentationEpoch: number): Promise<TranslationPresentation | null> => {
-    cancelAnimationFrame(frame); frame = 0; pending = true;
-    await drain();
+    if (!await preparePresentation()) return null;
     // A tray/Dock/menu Settings action is explicit: prepare management first,
     // then allow the native command to activate only this requested view.
-    if (!disposed && document.body.dataset.view === 'settings') return invoke<TranslationPresentation>('show_management', { presentationEpoch });
+    if (!disposed && document.body.dataset.view === 'settings' && presentationEpoch >= getPresentation().epoch) return invoke<TranslationPresentation>('show_management', { presentationEpoch });
     return null;
   };
   return { dispose, presentPopup, presentManagement };

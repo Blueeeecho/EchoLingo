@@ -2704,6 +2704,7 @@ fn main() {
         })
         .invoke_handler(tauri::generate_handler![
             fit_window_with_visibility,
+            window_layout::wait_for_window_sizing,
             window_layout::start_window_drag,
             window_layout::start_window_resize,
             window_layout::resize_popup_width,

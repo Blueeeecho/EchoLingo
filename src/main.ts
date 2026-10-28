@@ -209,15 +209,21 @@ function renderLanguages(): void {
 function resizeSourceEditor(): void {
   if (currentView === 'translate') {
     source.style.height = '0px';
-    const height = Math.min(100, Math.max(source.value.trim() ? 25 : 46, source.scrollHeight));
+    const naturalHeight = source.scrollHeight;
+    const height = Math.min(100, Math.max(source.value.trim() ? 25 : 46, naturalHeight));
     source.style.height = `${height}px`;
-    source.style.overflowY = source.scrollHeight > 100 ? 'auto' : 'hidden';
+    source.style.overflowY = naturalHeight > 100 ? 'auto' : 'hidden';
   }
   const empty = !source.value.trim();
   document.body.classList.toggle('source-empty', empty);
   translateButton.disabled = !settingsReady || (!translating && empty);
   for (const id of ['#copy-source', '#speak-source', '#clear-source']) $<HTMLButtonElement>(id).disabled = empty;
   notifyLayout();
+}
+let sourceResizeFrame = 0;
+function scheduleSourceEditorResize(): void {
+  if (sourceResizeFrame) return;
+  sourceResizeFrame = requestAnimationFrame(() => { sourceResizeFrame = 0; resizeSourceEditor(); });
 }
 function setLoading(value: boolean): void {
   translating = value;
@@ -1173,7 +1179,7 @@ for (const button of document.querySelectorAll<HTMLButtonElement>('[data-open-pe
 window.addEventListener('focus', () => { if (currentView === 'settings') void refreshPermissionStatus(); });
 translateButton.addEventListener('click', () => { if (translating) stopPendingTranslation(); else run(translate); });
 source.addEventListener('input', () => { clearPermissionGuidance(); clearOriginalCapture(); resizeSourceEditor(); invalidateResults(); });
-window.addEventListener('resize', resizeSourceEditor);
+window.addEventListener('resize', scheduleSourceEditorResize);
 $('#restore-original-breaks').addEventListener('click', () => {
   const original = originalCapture;
   if (!original) return;
@@ -1205,7 +1211,6 @@ $('#popup-more-menu').addEventListener('click', (event) => {
 document.addEventListener('pointerdown', (event) => {
   if (!$('#popup-more-menu').hidden && !(event.target as HTMLElement).closest('.popup-toolbar')) closeMoreMenu();
 });
-window.addEventListener('resize', () => { if (currentView === 'translate') resizeSourceEditor(); });
 $('#pin-button').addEventListener('click', () => run(async () => {
   if (!requireDesktop()) return;
   const next = !pinned; await invoke('set_pinned', { pinned: next }); pinned = next;

@@ -188,6 +188,18 @@ jobs:
           $output | Out-File "$env:RUNNER_TEMP/echolingo-selection-compat.log" -Encoding utf8
           $output | Write-Output
           exit $fixtureExit
+      - name: Windows same-root cross-process selected text and clipboard preservation
+        id: windows_selection_native_focus
+        if: runner.os == 'Windows'
+        continue-on-error: true
+        timeout-minutes: 4
+        shell: powershell
+        run: |
+          $output = @(& powershell.exe -NoProfile -STA -ExecutionPolicy Bypass -File tests/windows-selection-native-focus-smoke.ps1 -NativeAssemblyPath '${{ steps.windows_native_candidate.outputs.path }}' -OutputDirectory "$env:RUNNER_TEMP/echolingo-stage-native-focus" -ExpectCrossProcessSuccess -IsolatedTestSession 2>&1)
+          $fixtureExit = $LASTEXITCODE
+          $output | Out-File "$env:RUNNER_TEMP/echolingo-selection-native-focus.log" -Encoding utf8
+          $output | Write-Output
+          exit $fixtureExit
       - name: Windows exact native host delegated input ownership
         id: windows_delegated_capture
         if: runner.os == 'Windows'
@@ -286,6 +298,18 @@ jobs:
         timeout-minutes: 5
         shell: powershell
         run: powershell.exe -NoProfile -STA -ExecutionPolicy Bypass -File tests/windows-popup-visibility-smoke.ps1 -ApplicationPath src-tauri/target/release/echolingo.exe -IsolatedTestSession
+      - name: Windows actual popup edge resizing and width retention
+        id: windows_popup_resize
+        if: runner.os == 'Windows'
+        continue-on-error: true
+        timeout-minutes: 5
+        shell: powershell
+        run: |
+          $output = @(& powershell.exe -NoProfile -STA -ExecutionPolicy Bypass -File tests/windows-popup-resize-smoke.ps1 -ApplicationPath src-tauri/target/release/echolingo.exe -IsolatedTestSession 2>&1)
+          $fixtureExit = $LASTEXITCODE
+          $output | Out-File "$env:RUNNER_TEMP/echolingo-popup-resize.log" -Encoding utf8
+          $output | Write-Output
+          exit $fixtureExit
       - name: Windows rigorous single-press selection application matrix
         id: windows_selection_rigorous
         if: runner.os == 'Windows'
@@ -408,8 +432,10 @@ jobs:
             ${{ runner.temp }}/echolingo-custom-shortcuts.log
             ${{ runner.temp }}/echolingo-native-delegated-capture.log
             ${{ runner.temp }}/echolingo-helper-performance.log
+            ${{ runner.temp }}/echolingo-popup-resize.log
             ${{ runner.temp }}/echolingo-selection-document.log
             ${{ runner.temp }}/echolingo-selection-compat.log
+            ${{ runner.temp }}/echolingo-selection-native-focus.log
             ${{ runner.temp }}/echolingo-application-latest-intent.log
             ${{ runner.temp }}/echolingo-selection-rigorous.log
             ${{ runner.temp }}/echolingo-selection-budget.log
@@ -445,6 +471,7 @@ jobs:
             liveCapture = '${{ steps.windows_live_capture.outcome }}'
             applicationCore = '${{ steps.windows_application_core.outcome }}'
             popupVisibility = '${{ steps.windows_popup_visibility.outcome }}'
+            popupResize = '${{ steps.windows_popup_resize.outcome }}'
             installedOffline = '${{ steps.windows_installed_offline.outcome }}'
             shortcutInstall = '${{ steps.windows_shortcut_install.outcome }}'
             shortcutsUi = '${{ steps.windows_shortcuts_ui.outcome }}'
@@ -453,6 +480,7 @@ jobs:
             delegatedCapture = '${{ steps.windows_delegated_capture.outcome }}'
             selectionDocument = '${{ steps.windows_selection_document.outcome }}'
             selectionCompatibility = '${{ steps.windows_selection_compat.outcome }}'
+            selectionNativeFocus = '${{ steps.windows_selection_native_focus.outcome }}'
             rigorousSelection = '${{ steps.windows_selection_rigorous.outcome }}'
             selectionInternals = '${{ steps.windows_selection_internals.outcome }}'
             nonbrowserSelection = '${{ steps.windows_nonbrowser_selection.outcome }}'
@@ -494,6 +522,7 @@ jobs:
           npm run dev > "$RUNNER_TEMP/echolingo-vite.log" 2>&1 &
           curl --retry 20 --retry-connrefused --retry-delay 1 -s http://127.0.0.1:1420/ > /dev/null
           npm run test:ui
+          node tests/panel-layout-performance.mjs
 
   windows-popup-diagnostics:
     name: Targeted popup diagnostics (verified immutable candidate)
@@ -1501,13 +1530,13 @@ jobs:
       - name: Compile exact native helper without an app build
         shell: powershell
         run: powershell.exe -NoProfile -STA -ExecutionPolicy Bypass -File scripts/build-windows-native-helper.ps1 -HelperPath src-tauri/native/windows.ps1 -OutputPath "$env:RUNNER_TEMP/echolingo-focus-context.dll"
-      - name: Reproduce same-root cross-process focus rejection before input
+      - name: Verify same-root cross-process copy after the minimal fix
         id: focus
         continue-on-error: true
         timeout-minutes: 4
         shell: powershell
         run: |
-          $output = @(& powershell.exe -NoProfile -STA -ExecutionPolicy Bypass -File tests/windows-selection-native-focus-smoke.ps1 -NativeAssemblyPath "$env:RUNNER_TEMP/echolingo-focus-context.dll" -OutputDirectory "$env:RUNNER_TEMP/echolingo-generated-focus-fixture" -IsolatedTestSession 2>&1)
+          $output = @(& powershell.exe -NoProfile -STA -ExecutionPolicy Bypass -File tests/windows-selection-native-focus-smoke.ps1 -NativeAssemblyPath "$env:RUNNER_TEMP/echolingo-focus-context.dll" -OutputDirectory "$env:RUNNER_TEMP/echolingo-generated-focus-fixture" -ExpectCrossProcessSuccess -IsolatedTestSession 2>&1)
           $code = $LASTEXITCODE
           $output | Out-File "$env:RUNNER_TEMP/echolingo-focus-context.log" -Encoding utf8
           $output | Write-Output
@@ -1526,4 +1555,4 @@ jobs:
         run: |
           $outcome = '${{ steps.focus.outcome }}'
           [ordered]@{ scope='Generated same-root embedded cross-process Edit; manual copy then production helper'; focus=$outcome; appBuilt=$false; actualWpsTested=$false; physicalWindowsTested=$false } | ConvertTo-Json -Compress
-          if ($outcome -ne 'success') { throw 'Native focus counterexample was not reproduced.' }
+          if ($outcome -ne 'success') { throw 'Native focus copy verification did not pass.' }

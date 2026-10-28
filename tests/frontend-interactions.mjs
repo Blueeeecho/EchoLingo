@@ -154,6 +154,7 @@ try {
         if (command === 'test_provider') { fixture.translationTestCalls++; fixture.credentialReadCalls++; const provider = fixture.settings.providers.find(item => item.id === args.providerId); if (provider) fixture.setCredentialState(provider, 'ready'); return 'QA translation credential test succeeded'; }
         if (command === 'test_ocr_provider') { fixture.ocrTestCalls++; fixture.credentialReadCalls++; const provider = fixture.settings.ocrProviders.find(item => item.id === args.providerId); if (provider && fixture.credentialStates[scope(provider)]) fixture.setCredentialState(provider, 'ready'); return 'QA OCR test succeeded'; }
         if (command === 'hide_window') { fixture.hideCalls++; fixture.nativeHide(); return; }
+        if (command === 'wait_for_window_sizing') return 0;
         if (command === 'fit_window') { fixture.layoutCalls.push(args); if (fixture.holdFit) { fixture.fitWaits++; await new Promise((resolve) => { fixture.releaseFit = resolve; }); } return; }
         if (command === 'start_window_drag') { fixture.dragCalls++; return; }
         if (command === 'start_window_resize') { fixture.nativeResizeRequests.push(structuredClone(args)); return; }
@@ -1563,6 +1564,8 @@ try {
   await page.evaluate((old) => window.__qa.emit('translation-presentation', old), overtakenHide);
   assert.equal(await page.evaluate(() => window.__qa.translationRequests.at(-1).text), 'QA latest reopened ticket wins');
   assert.equal(await page.locator('.result-text').isVisible(), true);
+  assert.match(await page.locator('.result-text').evaluate((element) => getComputedStyle(element).fontFamily), /^"?Times New Roman"?,/);
+  assert.doesNotMatch(await page.locator('#source-text').evaluate((element) => getComputedStyle(element).fontFamily), /Times New Roman/);
 
   // Fitting content is asynchronous. An older capture must not show its popup
   // after the user has already hidden it and reopened a newer input window.
@@ -1576,8 +1579,11 @@ try {
   await page.waitForFunction((count) => window.__qa.fitWaits > count, beforeDelayedPopup.fits);
   await page.evaluate(() => { window.__qa.nativeHide(false); window.__qa.nativeShow(); });
   await page.locator('#source-text').fill('QA newer input survives delayed popup');
-  await page.evaluate(() => { window.__qa.holdFit = false; window.__qa.releaseFit(); });
-  await page.waitForFunction((count) => window.__qa.showPopupAttempts.length > count, beforeDelayedPopup.attempts);
+  await page.evaluate(async () => {
+    window.__qa.holdFit = false; window.__qa.releaseFit();
+    await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+  });
+  assert.equal(await page.evaluate(() => window.__qa.showPopupAttempts.length), beforeDelayedPopup.attempts);
   assert.equal(await page.evaluate(() => window.__qa.showCalls.length), beforeDelayedPopup.shows);
   assert.equal(await page.evaluate(() => window.__qa.translationRequests.length), beforeDelayedPopup.requests);
   assert.equal(await page.locator('#source-text').inputValue(), 'QA newer input survives delayed popup');
@@ -2232,6 +2238,20 @@ try {
   await page.evaluate(() => { window.__qa.failSave = false; });
   await page.locator('#windows-selection-strategy').selectOption('copy');
   await page.waitForFunction(() => window.__qa.settings.windowsSelectionStrategy === 'copy');
+  await goView('translate');
+  await page.locator('#source-text').fill('English translation font fixture');
+  await page.locator('#source-text').press('Enter');
+  await page.getByText('Isolated test translation fixture', { exact: true }).waitFor();
+  const readingFonts = await page.evaluate(() => ({
+    result: getComputedStyle(document.querySelector('.result-text')).fontFamily,
+    source: getComputedStyle(document.querySelector('#source-text')).fontFamily,
+    action: getComputedStyle(document.querySelector('.result-actions button')).fontFamily,
+  }));
+  assert.match(readingFonts.result, /^"?Times New Roman"?,/);
+  assert.match(readingFonts.result, /SimSun/);
+  assert.match(readingFonts.source, /^SimSun,/);
+  assert.doesNotMatch(readingFonts.action, /Times New Roman/);
+  console.log('PASS: translated Latin font prefers installed Times New Roman; Windows retains SimSun CJK fallback/source and UI action typography. Computed CSS only, not physical font rendering.');
   await page.goto(process.env.ECHOLINGO_TEST_URL ?? 'http://127.0.0.1:1420/');
   await page.waitForFunction(() => document.querySelector('#footer-status')?.textContent === '准备就绪');
   await goView('settings');
