@@ -67,6 +67,7 @@ public static class EchoLingoApplicationSmoke {
     [DllImport("user32.dll")] static extern bool EnumWindows(EnumWindow callback, IntPtr parameter);
     [DllImport("user32.dll")] static extern uint GetWindowThreadProcessId(IntPtr window, out uint process);
     [DllImport("user32.dll", SetLastError=true)] static extern bool GetWindowDisplayAffinity(IntPtr window, out uint affinity);
+    [DllImport("user32.dll")] static extern bool IsWindow(IntPtr window);
     [DllImport("user32.dll")] static extern bool IsWindowVisible(IntPtr window);
     [DllImport("user32.dll", CharSet=CharSet.Unicode)] static extern int GetClassName(IntPtr window, StringBuilder name, int capacity);
     [DllImport("user32.dll")] static extern IntPtr GetDesktopWindow();
@@ -207,7 +208,13 @@ public static class EchoLingoApplicationSmoke {
         StringBuilder name = new StringBuilder(256); GetClassName(window,name,name.Capacity);
         return name.ToString() == "EchoLingoCaptureInputPlane-" + processId;
     }
-    static List<AppEdge> AppInputPlanes(int appId, bool visibleOnly) {
+    sealed class InputPlaneStyleException : InvalidOperationException {
+        public readonly Dictionary<string,object> ScalarMetadata;
+        public InputPlaneStyleException(Dictionary<string,object> metadata)
+            : base("ASSERTION_FAILED: Actual input plane has incorrect NoRedirection/NoActivate/Topmost/ToolWindow styles.") { ScalarMetadata=metadata; }
+    }
+    static long hiddenPlaneStyleChecks, hiddenPlaneWithoutTopmostChecks, visiblePlaneStyleChecks;
+    static List<AppEdge> AppInputPlanes(int appId, bool visibleOnly, uint edgeHelper=0, uint rejectedHelper=0) {
         List<AppEdge> result = new List<AppEdge>();
         Dictionary<uint,int> parents = new Dictionary<uint,int>();
         EnumWindows(delegate(IntPtr window,IntPtr unused) {
@@ -215,9 +222,24 @@ public static class EchoLingoApplicationSmoke {
             if (!IsInputPlane(window,owner) || (visibleOnly && !IsWindowVisible(window))) return true;
             int parent; if (!parents.TryGetValue(owner,out parent)) { parent=ParentPid((int)owner); parents.Add(owner,parent); }
             if (parent != appId) return true;
-            long style=GetWindowLongPtr(window,-20).ToInt64(), required=0x00200000L|0x08000000L|0x80L|8;
-            Assert((style&required)==required && (style&(0x00080000L|0x20L))==0,
-                "Actual input plane has incorrect NoRedirection/NoActivate/Topmost/ToolWindow styles.");
+            // Production verifies hidden construction before Present() adds
+            // HWND_TOPMOST. A new picker can be observed in that valid phase
+            // while the previous helper is stopping. Visible planes, including
+            // those of the old helper, still require the complete shown styles.
+            bool visible=IsWindowVisible(window), requireTopmost=visibleOnly||visible;
+            long style=GetWindowLongPtr(window,-20).ToInt64(), required=0x00200000L|0x08000000L|0x80L|(requireTopmost?8L:0L);
+            if (requireTopmost) visiblePlaneStyleChecks++; else { hiddenPlaneStyleChecks++; if ((style&8)==0) hiddenPlaneWithoutTopmostChecks++; }
+            if ((style&required)!=required || (style&(0x00080000L|0x20L))!=0) {
+                throw new InputPlaneStyleException(new Dictionary<string,object> {
+                    {"scanPhase",visibleOnly?1:0},{"visibleAtStyleRead",visible},{"topmostRequired",requireTopmost},
+                    {"extendedStyle",style},{"requiredExtendedStyle",required},{"noRedirection",(style&0x00200000L)!=0},
+                    {"noActivate",(style&0x08000000L)!=0},{"toolWindow",(style&0x80L)!=0},{"topmost",(style&8L)!=0},
+                    {"layered",(style&0x00080000L)!=0},{"transparent",(style&0x20L)!=0},
+                    {"windowExistsAfterStyleRead",IsWindow(window)},{"visibleAfterStyleRead",IsWindowVisible(window)},
+                    {"edgeHelperKnown",edgeHelper!=0},{"matchesEdgeHelper",edgeHelper!=0&&owner==edgeHelper},
+                    {"rejectedHelperKnown",rejectedHelper!=0},{"matchesRejectedHelper",rejectedHelper!=0&&owner==rejectedHelper}
+                });
+            }
             RECT r; Assert(GetWindowRect(window,out r),"Cannot inspect actual input plane rectangle.");
             result.Add(new AppEdge { Handle=window, ProcessId=owner, ParentProcessId=parent, Bounds=Rectangle.FromLTRB(r.left,r.top,r.right,r.bottom) }); return true;
         },IntPtr.Zero); return result;
@@ -263,7 +285,7 @@ public static class EchoLingoApplicationSmoke {
         return result;
     }
     static bool AppOcrReady(Form form, int appId, IntPtr expectedSource, Rectangle expectedFrame,
-        Point expectedPointer, Rectangle display, Dictionary<string, object> probe) {
+        Point expectedPointer, Rectangle display, Dictionary<string, object> probe, uint rejectedHelper=0) {
         RequireForeground(form);
         Point pointer; bool pointerKnown = GetPhysicalCursorPos(out pointer);
         IntPtr hit = pointerKnown ? WindowFromPoint(pointer) : IntPtr.Zero;
@@ -287,7 +309,7 @@ public static class EchoLingoApplicationSmoke {
             windows.Add(new Dictionary<string, object> { { "hwnd", WindowId(edge.Handle) },
                 { "helperProcessId", edge.ProcessId }, { "helperParentProcessId", edge.ParentProcessId }, { "physicalBounds", RectValue(edge.Bounds) } });
         }
-        List<AppEdge> allPlanes=AppInputPlanes(appId,false), planes=AppInputPlanes(appId,true);
+        List<AppEdge> allPlanes=AppInputPlanes(appId,false,helper,rejectedHelper), planes=AppInputPlanes(appId,true,helper,rejectedHelper);
         List<Rectangle> planeBounds=new List<Rectangle>(); foreach (Screen monitor in Screen.AllScreens) planeBounds.Add(monitor.Bounds);
         bool exactPlanes=helper!=0 && allPlanes.Count==planeBounds.Count && planes.Count==planeBounds.Count;
         List<Dictionary<string,object>> planeMetadata=new List<Dictionary<string,object>>();
@@ -426,7 +448,7 @@ public static class EchoLingoApplicationSmoke {
         Point first=Point.Empty,last=Point.Empty;Rectangle display=Rectangle.Empty;OnUi(form,delegate{first=image.PointToScreen(new Point(2,2));last=image.PointToScreen(new Point(image.Width-2,image.Height-2));display=Screen.FromPoint(first).Bounds;});
         RECT raw;Assert(DwmGetWindowAttribute(form.Handle,9,out raw,Marshal.SizeOf(typeof(RECT)))==0,"Cannot measure generated picker source.");Rectangle frame=Rectangle.FromLTRB(raw.left,raw.top,raw.right,raw.bottom);
         MoveGenerated(form,first);Dictionary<string,object> probe=new Dictionary<string,object>();Stopwatch time=Stopwatch.StartNew();Shortcut(form,0x53);
-        WaitFor(delegate{visibility.Check();return AppOcrReady(form,app.Id,form.Handle,frame,first,display,probe)&&Convert.ToUInt32(probe["helperProcessId"])!=rejectedPid;},25,"Pinned latest Alt+S did not create a new exact ready helper.",app);
+        WaitFor(delegate{visibility.Check();return AppOcrReady(form,app.Id,form.Handle,frame,first,display,probe,rejectedPid)&&Convert.ToUInt32(probe["helperProcessId"])!=rejectedPid;},25,"Pinned latest Alt+S did not create a new exact ready helper.",app);
         visibility.Check();probe["hotkeyToReadyMilliseconds"]=time.Elapsed.TotalMilliseconds;probe["rejectedPreviousHelperPid"]=rejectedPid;probe["first"]=new int[]{first.X,first.Y};probe["last"]=new int[]{last.X,last.Y};probe["pinnedMainMetadata"]=MainMetadata(app);return probe;
     }
     static bool ProcessExited(uint pid){try{using(Process process=Process.GetProcessById((int)pid))return process.HasExited;}catch(ArgumentException){return true;}}
@@ -562,7 +584,7 @@ public static class EchoLingoApplicationSmoke {
     public static Dictionary<string, object> Run(string executable, bool offline, bool installed, bool latest, bool customBindings) {
         Assert(!latest||!offline,"Latest-intent extra tests are mock-only.");
         Assert(!customBindings||(!offline&&!latest),"Loaded-custom-bindings workflows require their own mock-only run.");
-        Offline = offline; ActualTranslations.Clear();
+        Offline = offline; ActualTranslations.Clear(); hiddenPlaneStyleChecks=hiddenPlaneWithoutTopmostChecks=visiblePlaneStyleChecks=0;
         Dictionary<string, object> report = new Dictionary<string, object>(); List<string> passed = new List<string>();
         report["ok"] = false; report["passed"] = passed; report["actualApplicationTested"] = false;
         report["latestIntentTestsRequested"]=latest; report["singleHotkeyPerAction"] = true; report["uiAutomationSelectorsUsed"] = false;
@@ -701,7 +723,7 @@ public static class EchoLingoApplicationSmoke {
                                     Assert(ActualTranslations.Count == 3 && new JavaScriptSerializer().Deserialize<object[]>(File.ReadAllText(history)).Length == 3, "Offline flows did not produce exactly three successful synthetic histories.");
                                 }
                                 report["actualOfflineTranslations"] = ActualTranslations; report["ok"] = true;
-                            } catch (Exception error) { report["error"] = error.Message;if(app!=null&&!app.HasExited){try{report["ownMainFailureMetadata"]=MainMetadata(app);}catch(Exception diagnostic){report["mainMetadataErrorType"]=diagnostic.GetType().Name;}} }
+                            } catch (Exception error) { report["error"] = error.Message;InputPlaneStyleException planeError=error as InputPlaneStyleException;if(planeError!=null)report["inputPlaneStyleFailure"]=planeError.ScalarMetadata;if(app!=null&&!app.HasExited){try{report["ownMainFailureMetadata"]=MainMetadata(app);}catch(Exception diagnostic){report["mainMetadataErrorType"]=diagnostic.GetType().Name;}} }
                             finally {
                                 if (customBindings) report["customShortcutPassedWorkflowCount"] = customCases.Count;
                                 if (!(bool)report["ok"]) ReleaseOwnInput(form, app, customBindings);
@@ -720,6 +742,7 @@ public static class EchoLingoApplicationSmoke {
             }
         } catch (Exception error) { report["error"] = error.Message; }
         finally {
+            report["inputPlaneStyleChecks"]=new Dictionary<string,object>{{"hidden",hiddenPlaneStyleChecks},{"hiddenWithoutTopmost",hiddenPlaneWithoutTopmostChecks},{"visibleRequiringTopmost",visiblePlaneStyleChecks},{"visiblePlanesStillRequireTopmost",true},{"hiddenPlanesCannotSatisfyReadiness",true}};
             for (int index = owned.Count - 1; index >= 0; index--) {
                 try { CleanDirectory(owned[index], token); }
                 catch (Exception error) { report["ok"] = false; report["directoryCleanupError"] = error.Message; }

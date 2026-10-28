@@ -4,6 +4,7 @@ public static partial class EchoLingoPopupVisibilitySmoke {
     [System.Runtime.InteropServices.DllImport("user32.dll")] static extern uint GetDpiForWindow(System.IntPtr window);
     [System.Runtime.InteropServices.DllImport("user32.dll")] static extern bool GetClientRect(System.IntPtr window, out RECT bounds);
     [System.Runtime.InteropServices.DllImport("user32.dll")] static extern bool GetGUIThreadInfo(uint thread, ref ResizeGuiInfo info);
+    [System.Runtime.InteropServices.DllImport("user32.dll")] static extern short GetAsyncKeyState(int key);
     [System.Runtime.InteropServices.StructLayout(System.Runtime.InteropServices.LayoutKind.Sequential)]
     struct ResizeGuiInfo {
         public uint size, flags;
@@ -20,6 +21,29 @@ public static partial class EchoLingoPopupVisibilitySmoke {
         RECT bounds; Require(GetWindowRect(main, out bounds), "Own window bounds are unavailable."); return bounds;
     }
     static int ResizeWidth(System.IntPtr main) { RECT bounds = ResizeBounds(main); return bounds.right - bounds.left; }
+    static System.Collections.Generic.Dictionary<string, object> ResizeStartupMetadata(Process app, System.IntPtr main, System.IntPtr source, System.IntPtr editor) {
+        System.IntPtr foreground = GetForegroundWindow();
+        var candidates = MainWindowCandidates(app.Id); uint process;
+        uint mainThread = GetWindowThreadProcessId(main, out process);
+        bool owned = process == app.Id && candidates.Count == 1 && candidates[0] == main;
+        uint sourceThread = GetWindowThreadProcessId(source, out process);
+        ResizeGuiInfo mainInfo = new ResizeGuiInfo(), sourceInfo = new ResizeGuiInfo();
+        mainInfo.size = sourceInfo.size = (uint)System.Runtime.InteropServices.Marshal.SizeOf(typeof(ResizeGuiInfo));
+        bool mainGti = owned && mainThread != 0 && GetGUIThreadInfo(mainThread, ref mainInfo);
+        bool sourceGti = sourceThread != 0 && GetGUIThreadInfo(sourceThread, ref sourceInfo);
+        return new System.Collections.Generic.Dictionary<string, object> {
+            { "appExited", app.HasExited }, { "mainCandidateCount", candidates.Count }, { "uniqueMainStillOwned", owned },
+            { "nativeVisible", owned && IsWindowVisible(main) }, { "foregroundPresent", foreground != System.IntPtr.Zero },
+            { "foregroundIsMain", foreground == main }, { "foregroundIsGeneratedSource", foreground == source },
+            { "mainGtiAvailable", mainGti }, { "mainGtiFlags", mainInfo.flags },
+            { "mainNativeFocusPresent", mainGti && mainInfo.focus != System.IntPtr.Zero },
+            { "mainNativeFocusRootMatches", mainGti && mainInfo.focus != System.IntPtr.Zero && GetAncestor(mainInfo.focus, 2) == main },
+            { "sourceGtiAvailable", sourceGti }, { "sourceGtiFlags", sourceInfo.flags },
+            { "sourceNativeFocusIsEditor", sourceGti && sourceInfo.focus == editor },
+            { "altHeld", (GetAsyncKeyState(0x12) & 0x8000) != 0 }, { "aHeld", (GetAsyncKeyState(0x41) & 0x8000) != 0 },
+            { "controlHeld", (GetAsyncKeyState(0x11) & 0x8000) != 0 }, { "leftMouseHeld", (GetAsyncKeyState(1) & 0x8000) != 0 }
+        };
+    }
     static void SetGeneratedResizeSource(System.IntPtr main, string text) {
         System.Windows.Automation.AutomationElement edit = System.Windows.Automation.AutomationElement.FromHandle(main).FindFirst(
             System.Windows.Automation.TreeScope.Descendants, new System.Windows.Automation.AndCondition(
@@ -115,6 +139,7 @@ public static partial class EchoLingoPopupVisibilitySmoke {
                 bool done = false;
                 form.FormClosing += delegate(object sender, System.Windows.Forms.FormClosingEventArgs args) { if (!done) args.Cancel = true; };
                 form.Shown += delegate {
+                    System.IntPtr sourceHandle = form.Handle, editorHandle = editor.Handle;
                     var worker = new System.Threading.Thread(delegate() {
                         try {
                             Require(SetThreadDpiAwarenessContext(new System.IntPtr(-4)) != System.IntPtr.Zero, "Physical test coordinates are unavailable.");
@@ -129,10 +154,45 @@ public static partial class EchoLingoPopupVisibilitySmoke {
                             Wait(delegate { Require(!app.HasExited, "New app exited before its HWND became ready."); main = MainWindow(app.Id); return main != System.IntPtr.Zero; }, 20000, "No unique owned main HWND became ready.");
                             Require(!IsWindowVisible(main), "Fresh dedicated app did not start silently.");
                             stage = "single-actual-input-shortcut";
-                            Ui(form, delegate { form.Activate(); SetForegroundWindow(form.Handle); editor.Focus(); });
+                            var readiness = new System.Collections.Generic.Dictionary<string, object> {
+                                { "deadlineMilliseconds", 20000 }, { "shortcutPresses", 0 }, { "insertedKeyboardEvents", 0 },
+                                { "pollCount", 0 }, { "visiblePolls", 0 }, { "foregroundMainPolls", 0 }, { "sourceQueries", 0 },
+                                { "sourceAvailablePolls", 0 }, { "sourceQueryExceptions", 0 }, { "lastSourceQueryAttempted", false },
+                                { "lastSourceValueAvailable", false }, { "lastSourceValueKnown", false }
+                            };
+                            report["inputPopupReadiness"] = readiness;
+                            Ui(form, delegate { form.Activate(); readiness["sourceSetForegroundReturned"] = SetForegroundWindow(form.Handle); editor.Focus();
+                                readiness["sourceManagedContainsFocus"] = form.ContainsFocus; readiness["sourceManagedEditorFocused"] = editor.Focused; });
                             Wait(delegate { return GetForegroundWindow() == form.Handle; }, 3000, "Generated source is not foreground; no shortcut sent.");
+                            readiness["beforeShortcut"] = ResizeStartupMetadata(app, main, sourceHandle, editorHandle);
                             Shortcut(form, 0x41);
-                            Wait(delegate { return IsWindowVisible(main) && GetForegroundWindow() == main && SourceValue(main) != null; }, 20000, "One real Alt+A did not produce an editable focused popup.");
+                            readiness["shortcutPresses"] = 1; readiness["insertedKeyboardEvents"] = 4;
+                            Stopwatch inputObservation = Stopwatch.StartNew();
+                            try {
+                                Wait(delegate {
+                                    bool visible = IsWindowVisible(main), foreground = GetForegroundWindow() == main, sourceAvailable = false;
+                                    readiness["pollCount"] = (int)readiness["pollCount"] + 1;
+                                    if (visible) readiness["visiblePolls"] = (int)readiness["visiblePolls"] + 1;
+                                    if (foreground) readiness["foregroundMainPolls"] = (int)readiness["foregroundMainPolls"] + 1;
+                                    readiness["lastNativeVisible"] = visible; readiness["lastForegroundIsMain"] = foreground;
+                                    readiness["lastSourceQueryAttempted"] = visible && foreground;
+                                    readiness["lastSourceValueKnown"] = false; readiness["lastSourceValueAvailable"] = false;
+                                    // Preserve the original short-circuit gate/query order. A skipped
+                                    // UIA query remains unknown, rather than being called an empty editor.
+                                    if (visible && foreground) {
+                                        readiness["sourceQueries"] = (int)readiness["sourceQueries"] + 1;
+                                        Stopwatch query = Stopwatch.StartNew();
+                                        try { sourceAvailable = SourceValue(main) != null; readiness["lastSourceValueKnown"] = true; readiness["lastSourceValueAvailable"] = sourceAvailable;
+                                            if (sourceAvailable) readiness["sourceAvailablePolls"] = (int)readiness["sourceAvailablePolls"] + 1; }
+                                        catch (System.Exception error) { readiness["sourceQueryExceptions"] = (int)readiness["sourceQueryExceptions"] + 1; readiness["lastSourceQueryHResult"] = error.HResult; throw; }
+                                        finally { readiness["lastSourceQueryMilliseconds"] = query.Elapsed.TotalMilliseconds; }
+                                    }
+                                    return visible && foreground && sourceAvailable;
+                                }, 20000, "One real Alt+A did not produce an editable focused popup.");
+                            } finally {
+                                readiness["observedMilliseconds"] = inputObservation.Elapsed.TotalMilliseconds;
+                                readiness["afterObservation"] = ResizeStartupMetadata(app, main, sourceHandle, editorHandle);
+                            }
                             stage = "long-generated-source";
                             string text = string.Join("\n", new string[] {
                                 "Generated resize fixture: long source wraps repeatedly while the window changes width. No Enter is sent and no translation provider is enabled.",

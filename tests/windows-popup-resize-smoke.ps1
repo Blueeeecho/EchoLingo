@@ -33,6 +33,7 @@ try {
     $result = [EchoLingoPopupVisibilitySmoke]::RunResize($ApplicationPath)
     $result['applicationSha256'] = $applicationHash
     $result['applicationBytes'] = $applicationBytes
+    $result['resizeFixtureSha256'] = (Get-FileHash -LiteralPath (Join-Path $PSScriptRoot 'windows-popup-resize-fixture.cs') -Algorithm SHA256).Hash.ToLowerInvariant()
     if ((Get-FileHash -LiteralPath $ApplicationPath -Algorithm SHA256).Hash.ToLowerInvariant() -ne $applicationHash -or
         (Get-Item -LiteralPath $ApplicationPath).Length -ne $applicationBytes) { $result['ok'] = $false; $result['binaryChangedDuringTest'] = $true }
     $result | ConvertTo-Json -Depth 14 -Compress
