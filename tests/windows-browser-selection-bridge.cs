@@ -27,6 +27,7 @@ public static class WindowsBrowserSelectionBridge {
     [DllImport("user32.dll")] static extern bool IsWindowVisible(IntPtr window);
     [DllImport("user32.dll",CharSet=CharSet.Unicode)] static extern int GetClassName(IntPtr window,StringBuilder name,int capacity);
     [DllImport("user32.dll")] static extern uint GetClipboardSequenceNumber();
+    [DllImport("user32.dll")] static extern short GetAsyncKeyState(int key);
     [DllImport("user32.dll")] static extern IntPtr GetClipboardOwner();
     static readonly JavaScriptSerializer Json=new JavaScriptSerializer { MaxJsonLength=1048576 };
     static string Helper,Assembly,Browser;
@@ -112,6 +113,9 @@ public static class WindowsBrowserSelectionBridge {
         windowInventory=new List<Dictionary<string,object>>();bool alreadyBound=boundMain!=IntPtr.Zero;IntPtr main=BrowserMain(pid);if(GetForegroundWindow()!=main)SetForegroundWindow(main);
         Stopwatch focus=Stopwatch.StartNew();while(GetForegroundWindow()!=main&&focus.ElapsedMilliseconds<1000)Thread.Sleep(10);Need(GetForegroundWindow()==main,"BROWSER_NOT_FOREGROUND");
         metadata["boundBrowserRootHwnd"]=WindowId(main);metadata["browserRootCandidates"]=windowInventory;metadata["sameVerifiedBrowserRootReused"]=alreadyBound;metadata["initialUniqueBrowserRootBinding"]=!alreadyBound;
+        object requireReleased;if(command.TryGetValue("requireMouseReleased",out requireReleased)&&Convert.ToBoolean(requireReleased)){
+            bool released=(GetAsyncKeyState(1)&0x8000)==0;metadata["mouseLeftReleasedBeforeHelper"]=released;Need(released,"BROWSER_MOUSE_LEFT_NOT_RELEASED_BEFORE_HELPER");
+        }
         // No accessibility query precedes the helper: the first case measures
         // the real production client's cold UIA path, without a warm-up probe.
         Stage="clipboard-seed";DataObject seed=Seed();uint initial=ownedClipboard;string cancelName="Local\\EchoLingo-cancel-"+Guid.NewGuid().ToString("N");

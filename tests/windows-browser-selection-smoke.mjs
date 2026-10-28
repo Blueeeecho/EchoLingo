@@ -14,7 +14,8 @@ const here=path.dirname(fileURLToPath(import.meta.url));
 const flags=new Map();
 for(let i=2;i<process.argv.length;i+=2) flags.set(process.argv[i],process.argv[i+1]);
 const browserOrder=flags.has('--browser-order')?flags.get('--browser-order'):'edge-first';
-const report={ok:false,actualBrowserTested:false,actualApplicationTested:false,generatedLocalPageOnly:true,existingProfileAccessed:false,userContentRead:false,helperRetries:0,roundsPerBrowser:3,casesPerRound:8,freshBrowserProfilePerRound:true,osColdBootTested:false,requestedBrowserOrder:browserOrder??null,actualBrowserOrder:[],rounds:[],cases:[]};
+const selectionSuite=flags.get('--selection-suite')??'original';
+const report={ok:false,actualBrowserTested:false,actualApplicationTested:false,generatedLocalPageOnly:true,existingProfileAccessed:false,userContentRead:false,helperRetries:0,roundsPerBrowser:3,casesPerRound:8,freshBrowserProfilePerRound:true,osColdBootTested:false,requestedBrowserOrder:browserOrder??null,selectionSuite,actualBrowserOrder:[],rounds:[],cases:[]};
 const digest=async file=>createHash('sha256').update(await readFile(file)).digest('hex');
 const bounded=(promise,ms,reason)=>new Promise((resolve,reject)=>{const timer=setTimeout(()=>reject(new Error(reason)),ms);promise.then(value=>{clearTimeout(timer);resolve(value);},error=>{clearTimeout(timer);reject(error);});});
 const sleep=ms=>new Promise(resolve=>setTimeout(resolve,ms));
@@ -54,6 +55,31 @@ function casesFor(tag){return [
   {name:'textarea-empty',expected:'',outcome:'empty',method:'dom-textarea-empty',target:'area',requiredRole:'ControlType.Edit'},
   {name:'password-protected',expected:'',outcome:'protected',method:'dom-generated-password-selection',target:'protected',requiredRole:'ControlType.Edit'}
 ];}
+function mouseCasesFor(tag){
+  const texts=['First mouse selection, alpha_beta!','第二次拖选：你好，世界！','Third selection: (gamma), 2468.','第四段正文：“不同选区”！','Fifth selection; distinct words.','第六次选择，中文与 English。','Seventh line: left to right.','第八次反向拖选：末尾。'];
+  return texts.map((text,index)=>({name:'same-page-mouse-'+(index+1),target:'repeat-'+index,expected:text+' '+tag,method:index===7?'actual-mouse-drag-reverse':'actual-mouse-drag',requiredRole:''}));
+}
+async function prepareMouseRepeat(page,test){
+  await page.bringToFront();
+  const state=await page.evaluate(({target,expected})=>{
+    window.__copyCount=0;window.__mouseDowns=0;window.__mouseUps=0;window.__lastMouseUpButtons=null;window.getSelection().removeAllRanges();document.body.focus();
+    const element=document.getElementById(target);if(!element||element.textContent!==expected)throw new Error('GENERATED_STATIC_BODY_CHANGED');
+    element.scrollIntoView({block:'nearest'});const text=element.firstChild,first=document.createRange(),last=document.createRange();
+    first.setStart(text,0);first.setEnd(text,1);last.setStart(text,text.length-1);last.setEnd(text,text.length);
+    const a=first.getBoundingClientRect(),b=last.getBoundingClientRect();
+    return {mouse:{x1:a.left+.5,y1:a.top+a.height/2,x2:b.right-.5,y2:b.top+b.height/2},hasFocus:document.hasFocus(),textUnchanged:element.textContent===expected};
+  },test);
+  assert.equal(state.hasFocus,true,'GENERATED_DOM_NOT_FOCUSED');assert.equal(state.textUnchanged,true,'GENERATED_STATIC_BODY_CHANGED');
+  const m=state.mouse;assert.ok(Object.values(m).every(Number.isFinite),'GENERATED_MOUSE_COORDINATES_INVALID');
+  const reverse=test.method==='actual-mouse-drag-reverse';
+  await page.mouse.move(reverse?m.x2:m.x1,reverse?m.y2:m.y1);await page.mouse.down();await page.mouse.move(reverse?m.x1:m.x2,reverse?m.y1:m.y2,{steps:8});await page.mouse.up();
+  const selected=await page.evaluate(target=>({text:window.getSelection().toString(),hasFocus:document.hasFocus(),bodyText:document.getElementById(target).textContent,mouseDowns:window.__mouseDowns,mouseUps:window.__mouseUps,mouseUpButtons:window.__lastMouseUpButtons}),test.target);
+  assert.equal(selected.hasFocus,true,'GENERATED_DOM_LOST_FOCUS');assert.equal(selected.text,test.expected,'GENERATED_SELECTION_SETUP_MISMATCH');assert.equal(selected.bodyText,test.expected,'GENERATED_STATIC_BODY_CHANGED');
+  assert.equal(selected.mouseDowns,1,'GENERATED_MOUSE_DOWN_COUNT');assert.equal(selected.mouseUps,1,'GENERATED_MOUSE_UP_COUNT');assert.equal(selected.mouseUpButtons,0,'GENERATED_MOUSE_STILL_HELD');
+  // A failed mouse selection is a setup failure. Never assign a DOM range,
+  // repeat a drag, or change the page to manufacture the expected selection.
+  return {domSelectionVerified:true,method:test.method,samePage:true,bodyMutationAfterLoad:false,generatedMouseDowns:selected.mouseDowns,generatedMouseUps:selected.mouseUps,generatedMouseUpButtons:selected.mouseUpButtons};
+}
 async function prepare(page,test,tag){
   await page.bringToFront();
   const state=await page.evaluate(({test,tag})=>{
@@ -93,7 +119,9 @@ async function runRound(candidate,round,helper,assembly){
   let root,profile,marker,browserProcess,bridgeProcess,browser,server,lines;
   try{
     root=await mkdtemp(path.join(tmpdir(),'echolingo-browser-selection-'));marker=randomUUID();await writeFile(path.join(root,'.echolingo-owned'),marker,{flag:'wx'});profile=path.join(root,'profile');await mkdir(profile);
-    const html='<!doctype html><meta charset="utf-8"><meta http-equiv="Content-Security-Policy" content="default-src \'none\'; script-src \'unsafe-inline\'; style-src \'unsafe-inline\'; connect-src \'none\'"><title>EchoLingo generated browser selection fixture</title><style>body{font:18px Segoe UI;padding:35px}span{white-space:pre}textarea,[contenteditable],input{display:block;width:700px;height:55px;margin:12px 0}p{margin:10px 0}</style><body tabindex="0"><p><span id="body-text"></span></p><a id="link" href="#generated">Generated focused link</a><p><span id="link-text"></span></p><textarea id="area"></textarea><div id="editable" contenteditable="true"></div><input id="protected" type="password"><script>window.__copyCount=0;document.addEventListener("copy",()=>window.__copyCount++);</script>';
+    const tag=candidate.kind+'-r'+round,tests=selectionSuite==='same-page-mouse'?mouseCasesFor(tag):casesFor(tag);
+    const repeatBody=selectionSuite==='same-page-mouse'?tests.map(test=>'<p><span id="'+test.target+'">'+test.expected+'</span></p>').join(''):'';
+    const html='<!doctype html><meta charset="utf-8"><meta http-equiv="Content-Security-Policy" content="default-src \'none\'; script-src \'unsafe-inline\'; style-src \'unsafe-inline\'; connect-src \'none\'"><title>EchoLingo generated browser selection fixture</title><style>body{font:18px Segoe UI;padding:35px}span{white-space:pre}textarea,[contenteditable],input{display:block;width:700px;height:55px;margin:12px 0}p{margin:10px 0}</style><body tabindex="0">'+repeatBody+'<p><span id="body-text"></span></p><a id="link" href="#generated">Generated focused link</a><p><span id="link-text"></span></p><textarea id="area"></textarea><div id="editable" contenteditable="true"></div><input id="protected" type="password"><script>window.__copyCount=0;document.addEventListener("copy",()=>window.__copyCount++);document.addEventListener("mousedown",()=>window.__mouseDowns++);document.addEventListener("mouseup",event=>{window.__mouseUps++;window.__lastMouseUpButtons=event.buttons;});</script>';
     server=createServer((request,response)=>{if(request.url!='/source'){response.writeHead(404);response.end();return;}response.writeHead(200,{'Content-Type':'text/html; charset=utf-8','Cache-Control':'no-store'});response.end(html);});
     await new Promise((resolve,reject)=>{server.once('error',reject);server.listen(0,'127.0.0.1',resolve);});const origin='http://127.0.0.1:'+server.address().port,sourceUrl=origin+'/source';
     bridgeProcess=spawn(path.join(process.env.SystemRoot,'System32/WindowsPowerShell/v1.0/powershell.exe'),['-NoLogo','-NoProfile','-STA','-ExecutionPolicy','Bypass','-File',path.join(here,'windows-browser-selection-bridge.ps1'),'-HelperPath',helper,'-NativeAssemblyPath',assembly,'-BrowserExecutable',candidate.executable],{windowsHide:true,stdio:['pipe','pipe','pipe']});
@@ -107,12 +135,12 @@ async function runRound(candidate,round,helper,assembly){
     const commandLine=await session.send('Browser.getBrowserCommandLine');assert.ok(commandLine.arguments.includes('--user-data-dir='+profile),'CDP_PROFILE_NOT_OWN_FRESH_PROFILE');assert.ok(!commandLine.arguments.some(value=>value.startsWith('--force-renderer-accessibility')));result.freshProfileCommandLineVerified=true;result.browserVersion=browser.version();
     const contexts=browser.contexts();assert.equal(contexts.length,1,'FRESH_CONTEXT_COUNT');const context=contexts[0];await context.route('**/*',route=>{if(route.request().url().startsWith(origin+'/'))return route.continue();result.externalPageRequests++;return route.abort();});
     const page=context.pages()[0]??await context.newPage();await page.goto(sourceUrl,{waitUntil:'load',timeout:10000});assert.equal(page.url(),sourceUrl);result.actualBrowserTested=true;
-    const tag=candidate.kind+'-r'+round;let invoked=0;
-    for(const test of casesFor(tag)){
+    let invoked=0;
+    for(const test of tests){
       const row={browserKind:candidate.kind,round,name:test.name,ok:false,helperInvocations:0,setupMethod:test.method};result.cases.push(row);report.cases.push(row);
       try{
-        Object.assign(row,await prepare(page,test,tag));row.firstHelperInFreshBrowser=invoked===0;
-        const reply=await lines.request({op:'case',browserPid:browserProcess.pid,expected:test.expected,outcome:test.outcome??'selection',requiredRole:test.requiredRole});Object.assign(row,reply);row.bridgeExpectationPassed=reply.ok;row.ok=false;invoked+=reply.helperInvocations??0;
+        Object.assign(row,selectionSuite==='same-page-mouse'?await prepareMouseRepeat(page,test):await prepare(page,test,tag));row.firstHelperInFreshBrowser=invoked===0;
+        const reply=await lines.request({op:'case',browserPid:browserProcess.pid,expected:test.expected,outcome:test.outcome??'selection',requiredRole:test.requiredRole,requireMouseReleased:selectionSuite==='same-page-mouse'});Object.assign(row,reply);row.bridgeExpectationPassed=reply.ok;row.ok=false;invoked+=reply.helperInvocations??0;
         row.domCopyEvents=await page.evaluate(()=>window.__copyCount);assert.ok(row.domCopyEvents<=1,'COPY_RETRIED');if(test.outcome==='empty'||test.outcome==='protected')assert.equal(row.domCopyEvents,0,'NEGATIVE_CONTROL_RECEIVED_COPY');row.nativeClipboardCopyExercised=row.domCopyEvents===1;
         row.ok=reply.ok===true;if(!row.ok&&!reply.safeToContinue){result.remainingCasesUnexecuted=true;break;}
       }catch(error){row.error=String(error.message).replace(/wss?:\/\/[^\s]+/g,'[owned-debug-endpoint]').slice(0,1024);row.setupInconclusive=(row.helperInvocations??0)===0;result.remainingCasesUnexecuted=true;break;}
@@ -132,6 +160,7 @@ async function runRound(candidate,round,helper,assembly){
 }
 try{
   assert.ok(browserOrder==='edge-first'||browserOrder==='chrome-first','BROWSER_ORDER_INVALID');
+  assert.ok(selectionSuite==='original'||selectionSuite==='same-page-mouse','SELECTION_SUITE_INVALID');
   assert.equal(process.platform,'win32','WINDOWS_REQUIRED');assert.equal(process.env.GITHUB_ACTIONS,'true','EPHEMERAL_GITHUB_REQUIRED');assert.equal(process.env.RUNNER_ENVIRONMENT,'github-hosted','GITHUB_HOSTED_REQUIRED');assert.ok(flags.has('--native-assembly'),'NATIVE_ASSEMBLY_REQUIRED');
   const helper=await realpath(flags.get('--helper')??path.join(here,'../src-tauri/native/windows.ps1')),assembly=await realpath(flags.get('--native-assembly'));assert.equal(path.extname(assembly).toLowerCase(),'.dll');report.helperSha256=await digest(helper);report.nativeAssemblySha256=await digest(assembly);
   const installed=await installedBrowsers();report.availableBrowserKinds=installed.map(value=>value.kind);report.unavailableBrowserKinds=['edge','chrome'].filter(kind=>!installed.some(value=>value.kind===kind));assert.ok(installed.length===2,'EDGE_AND_CHROME_REQUIRED');

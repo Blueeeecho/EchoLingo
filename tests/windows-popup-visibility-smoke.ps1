@@ -12,13 +12,14 @@ try {
         throw 'TEST_APARTMENT: Run Windows powershell.exe -NoProfile -STA -File tests/windows-popup-visibility-smoke.ps1.'
     }
     $ApplicationPath = (Resolve-Path -LiteralPath $ApplicationPath).Path
-    Add-Type -AssemblyName System.Windows.Forms, System.Drawing, System.Web.Extensions, UIAutomationClient, UIAutomationTypes
+    Add-Type -AssemblyName System.Windows.Forms, System.Drawing, System.Web.Extensions, System.Management, UIAutomationClient, UIAutomationTypes
     $source = @'
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.Drawing;
 using System.IO;
+using System.Management;
 using System.Runtime.InteropServices;
 using System.Text;
 using System.Threading;
@@ -32,6 +33,7 @@ public static class EchoLingoPopupVisibilitySmoke {
     // class (src/lib.rs:790), confirmed by the actual Windows HWND inventory.
     // The global-hotkey helper is also a top-level HWND with default size.
     const string MainWindowClass = "Tauri Window";
+    const string OcrSource = "EchoLingo OCR visibility 2468";
     delegate bool Enumerate(IntPtr window, IntPtr unused);
     [DllImport("user32.dll")] static extern bool EnumWindows(Enumerate callback, IntPtr unused);
     [DllImport("user32.dll")] static extern uint GetWindowThreadProcessId(IntPtr window, out uint process);
@@ -270,6 +272,61 @@ public static class EchoLingoPopupVisibilitySmoke {
         click["targetMouseDownDelivered"] = true;
         return click;
     }
+    static int ParentProcess(uint process) {
+        using (ManagementObjectSearcher query = new ManagementObjectSearcher("SELECT ParentProcessId FROM Win32_Process WHERE ProcessId=" + process))
+            foreach (ManagementObject item in query.Get()) using (item) return Convert.ToInt32(item["ParentProcessId"]);
+        return 0;
+    }
+    static bool OcrSourceMatches(IntPtr main) {
+        AutomationElement edit = AutomationElement.FromHandle(main).FindFirst(TreeScope.Descendants, new AndCondition(
+            new PropertyCondition(AutomationElement.ControlTypeProperty, ControlType.Edit),
+            new OrCondition(new PropertyCondition(AutomationElement.AutomationIdProperty, "source-text"), new PropertyCondition(AutomationElement.NameProperty, "\u539f\u6587"))));
+        object pattern;
+        return edit != null && !edit.Current.IsOffscreen && edit.TryGetCurrentPattern(ValuePattern.Pattern, out pattern)
+            && String.Equals(((ValuePattern)pattern).Current.Value, OcrSource, StringComparison.OrdinalIgnoreCase);
+    }
+    static void OcrThenSameForegroundClick(Form form, Panel image, Process app, IntPtr main, Func<int> sourceClicks, Func<int> imageEvents, Dictionary<string, object> report) {
+        Dictionary<string, object> result = new Dictionary<string, object> { { "shortcutPresses", 0 }, { "dragPairsSent", 0 }, { "outsideClickPairsSent", 0 } };
+        report["ocrSameForegroundOutsideClick"] = result;
+        Require(!IsWindowVisible(main), "OCR same-source case requires its own hidden-popup baseline.");
+        Require(GetForegroundWindow() == form.Handle, "Generated OCR source is not foreground; no shortcut sent.");
+        result["sourceForegroundBeforeCapture"] = WindowIdentityMetadata(GetForegroundWindow());
+        Point first = Point.Empty, last = Point.Empty;
+        Ui(form, delegate { first = image.PointToScreen(new Point(2, 2)); last = image.PointToScreen(new Point(image.Width - 2, image.Height - 2)); });
+        Require(SetCursorPos(first.X, first.Y), "Cannot position pointer over generated OCR image.");
+        POINT start = new POINT(); start.x = first.X; start.y = first.Y;
+        Require(GetAncestor(WindowFromPoint(start), 2) == form.Handle, "Generated OCR image is occluded; no shortcut sent.");
+        int before = imageEvents();
+        Shortcut(form, 0x53); result["shortcutPresses"] = 1;
+        IntPtr plane = IntPtr.Zero; uint helper = 0;
+        Wait(delegate {
+            Require(GetForegroundWindow() == form.Handle, "OCR picker activated a different window.");
+            IntPtr candidate = WindowFromPoint(start); uint owner; GetWindowThreadProcessId(candidate, out owner);
+            StringBuilder name = new StringBuilder(256); GetClassName(candidate, name, name.Capacity);
+            if (name.ToString() != "EchoLingoCaptureInputPlane-" + owner) return false;
+            Require(ParentProcess(owner) == app.Id, "OCR input plane is not a direct child of this actual app.");
+            plane = candidate; helper = owner; return true;
+        }, 25000, "Actual Alt+S did not create its generated-source input plane.");
+        result["helperProcessId"] = helper; result["inputPlaneHwnd"] = "0x" + plane.ToInt64().ToString("X");
+        Require(GetForegroundWindow() == form.Handle, "Source foreground changed before the OCR drag.");
+        Rectangle desktop = SystemInformation.VirtualScreen;
+        INPUT down = new INPUT(); down.type = 0; down.data.mouse.flags = 2;
+        INPUT move = new INPUT(); move.type = 0; move.data.mouse.flags = 0x8000 | 0x4000 | 1;
+        move.data.mouse.x = (int)Math.Round((last.X - desktop.Left) * 65535.0 / (desktop.Width - 1));
+        move.data.mouse.y = (int)Math.Round((last.Y - desktop.Top) * 65535.0 / (desktop.Height - 1));
+        INPUT up = down; up.data.mouse.flags = 4;
+        Send(new INPUT[] { down, move, up }); result["dragPairsSent"] = 1;
+        Wait(delegate { Require(GetForegroundWindow() == form.Handle, "OCR result activated a different window."); return IsWindowVisible(main) && OcrSourceMatches(main); }, 50000, "Actual WinRT OCR did not show the exact generated source in the passive popup.");
+        result["generatedImageMouseEventsBefore"] = before; result["generatedImageMouseEventsAfter"] = imageEvents();
+        Require(imageEvents() == before, "OCR drag leaked input into the generated image control.");
+        Require(!IsWindowVisible(plane), "OCR input plane remains visible after the source result.");
+        result["actualWinRtSourceMatched"] = true; result["sourceForegroundBeforeOutsideClick"] = WindowIdentityMetadata(GetForegroundWindow());
+        Dictionary<string, object> click = ClickGeneratedBody(form, main, sourceClicks, report, "ocr-same-foreground-source-outside-click");
+        result["outsideClickPairsSent"] = 1;
+        Wait(delegate { Require(GetForegroundWindow() == form.Handle, "Same-source outside click changed foreground unexpectedly."); return !IsWindowVisible(main); }, 2000, "One click in the same foreground OCR source did not hide the unpinned popup.");
+        click["productHiddenObservedAfterClick"] = true; result["sourceForegroundUnchanged"] = true; result["passed"] = true;
+        report["ocrSameForegroundOutsideClickPassed"] = true; report["screenshotsTested"] = true;
+    }
     static void DragOwnToolbar(IntPtr app) {
         Require(GetForegroundWindow() == app, "Own input popup is not foreground; toolbar drag aborted.");
         RECT before; Require(GetWindowRect(app, out before), "Own toolbar bounds unavailable.");
@@ -393,10 +450,13 @@ public static class EchoLingoPopupVisibilitySmoke {
             File.WriteAllText(Path.Combine(roaming, "settings.json"), json.Serialize(settings), new UTF8Encoding(false));
             SetProcessDpiAwarenessContext(new IntPtr(-4));
             Require(Screen.PrimaryScreen.Bounds.Width >= 1024 && Screen.PrimaryScreen.Bounds.Height >= 600, "Generated desktop fixture needs at least 1024x600; no product failure inferred.");
-            using (Form form = new Form()) using (TextBox source = new TextBox()) {
+            using (Form form = new Form()) using (TextBox source = new TextBox()) using (Panel image = new Panel()) {
                 form.Text = "EchoLingo generated visibility source"; form.StartPosition = FormStartPosition.Manual; form.Bounds = new Rectangle(30, 120, 720, 420);
                 source.Multiline = true; source.SetBounds(20, 20, 660, 100); source.Text = "EchoLingo popup visibility generated source 2468";
-                form.Controls.Add(source); int clicksReachedSource = 0; form.MouseDown += delegate { Interlocked.Increment(ref clicksReachedSource); };
+                image.SetBounds(20, 145, 660, 145); image.BackColor = Color.White;
+                image.Paint += delegate(object sender, PaintEventArgs args) { using (Font font = new Font("Segoe UI", 26, FontStyle.Regular)) args.Graphics.DrawString(OcrSource, font, Brushes.Black, 12, 36); };
+                int imageMouseEvents = 0; image.MouseDown += delegate { Interlocked.Increment(ref imageMouseEvents); }; image.MouseUp += delegate { Interlocked.Increment(ref imageMouseEvents); };
+                form.Controls.Add(source); form.Controls.Add(image); int clicksReachedSource = 0; form.MouseDown += delegate { Interlocked.Increment(ref clicksReachedSource); };
                 Func<int> sourceClickCount = delegate { return Interlocked.CompareExchange(ref clicksReachedSource, 0, 0); };
                 bool done = false; Exception failure = null;
                 form.FormClosing += delegate(object sender, FormClosingEventArgs args) { if (!done) args.Cancel = true; };
@@ -491,6 +551,8 @@ public static class EchoLingoPopupVisibilitySmoke {
                             passiveClick["productHiddenObservedAfterClick"] = true;
                             report["passiveOutsideHideObserved"] = true; report["passiveSourceClickDelivered"] = true;
                             report["passiveOutsideClickPassed"] = true; report["outsideHideObservedMs"] = outside.ElapsedMilliseconds;
+                            stage = "ocr-same-foreground-source-outside-click";
+                            sourceFocus(); OcrThenSameForegroundClick(form, image, app, main, sourceClickCount, delegate { return Interlocked.CompareExchange(ref imageMouseEvents, 0, 0); }, report);
                             stage = "explicit-input-inside-retention";
                             sourceFocus(); Shortcut(form, 0x41);
                             Wait(delegate { return IsWindowVisible(main) && GetForegroundWindow() == main; }, 5000, "Explicit input did not focus the new app."); moveApp();
@@ -641,6 +703,7 @@ public static class EchoLingoPopupVisibilitySmoke {
 '@
     $references = @([System.Windows.Forms.Form].Assembly.Location, [System.Drawing.Bitmap].Assembly.Location,
         [System.Web.Script.Serialization.JavaScriptSerializer].Assembly.Location,
+        [System.Management.ManagementObject].Assembly.Location,
         [System.Windows.Automation.AutomationElement].Assembly.Location,
         [System.Windows.Automation.ControlType].Assembly.Location) | Select-Object -Unique
     Add-Type -TypeDefinition $source -ReferencedAssemblies $references -Language CSharp
