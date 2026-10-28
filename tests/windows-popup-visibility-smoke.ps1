@@ -277,13 +277,16 @@ public static class EchoLingoPopupVisibilitySmoke {
             foreach (ManagementObject item in query.Get()) using (item) return Convert.ToInt32(item["ParentProcessId"]);
         return 0;
     }
-    static bool OcrSourceMatches(IntPtr main) {
+    static string SourceValue(IntPtr main) {
         AutomationElement edit = AutomationElement.FromHandle(main).FindFirst(TreeScope.Descendants, new AndCondition(
             new PropertyCondition(AutomationElement.ControlTypeProperty, ControlType.Edit),
             new OrCondition(new PropertyCondition(AutomationElement.AutomationIdProperty, "source-text"), new PropertyCondition(AutomationElement.NameProperty, "\u539f\u6587"))));
         object pattern;
         return edit != null && !edit.Current.IsOffscreen && edit.TryGetCurrentPattern(ValuePattern.Pattern, out pattern)
-            && String.Equals(((ValuePattern)pattern).Current.Value, OcrSource, StringComparison.OrdinalIgnoreCase);
+            ? ((ValuePattern)pattern).Current.Value : null;
+    }
+    static bool OcrSourceMatches(IntPtr main) {
+        return String.Equals(SourceValue(main), OcrSource, StringComparison.OrdinalIgnoreCase);
     }
     static void OcrThenSameForegroundClick(Form form, Panel image, Process app, IntPtr main, Func<int> sourceClicks, Func<int> imageEvents, Dictionary<string, object> report) {
         Dictionary<string, object> result = new Dictionary<string, object> { { "shortcutPresses", 0 }, { "dragPairsSent", 0 }, { "outsideClickPairsSent", 0 } };
@@ -551,6 +554,35 @@ public static class EchoLingoPopupVisibilitySmoke {
                             passiveClick["productHiddenObservedAfterClick"] = true;
                             report["passiveOutsideHideObserved"] = true; report["passiveSourceClickDelivered"] = true;
                             report["passiveOutsideClickPassed"] = true; report["outsideHideObservedMs"] = outside.ElapsedMilliseconds;
+                            // Empty Alt+D is its own focused-input path, not the
+                            // passive selected/OCR presentation or Alt+A. Keep
+                            // the exact source HWND and send only one down/up.
+                            stage = "empty-selection-same-source-outside-click";
+                            sourceFocus(); Ui(form, delegate { source.Select(0, 0); }); Shortcut(form, 0x44);
+                            Wait(delegate { return IsWindowVisible(main) && GetForegroundWindow() == main && SourceValue(main) == ""; }, 12000,
+                                "Empty Alt+D did not produce a focused blank editor; no outside click sent.");
+                            moveApp();
+                            Dictionary<string, object> emptyClick = ClickGeneratedBody(form, main, sourceClickCount, report, "empty-selection-same-source-outside-click");
+                            Wait(delegate { return !IsWindowVisible(main); }, 2000, "One same-source click did not hide the unpinned empty Alt+D popup.");
+                            Require(GetForegroundWindow() == form.Handle, "Empty Alt+D dismissal did not leave the clicked source foreground.");
+                            emptyClick["productHiddenObservedAfterClick"] = true;
+                            report["emptySelectionSameSourceOutsideClickPassed"] = true;
+                            stage = "pinned-empty-selection-same-source-outside-retention";
+                            sourceFocus(); Ui(form, delegate { source.Select(0, 0); }); Shortcut(form, 0x44);
+                            Wait(delegate { return IsWindowVisible(main) && GetForegroundWindow() == main && SourceValue(main) == ""; }, 12000,
+                                "Pinned empty Alt+D case did not start from its own focused blank editor.");
+                            moveApp(); Invoke(main, "\u9489\u4f4f\u7a97\u53e3");
+                            Wait(delegate { return Element(main, "\u53d6\u6d88\u9489\u4f4f") != null; }, 5000, "Empty Alt+D pin state did not update.");
+                            ClickGeneratedBody(form, main, sourceClickCount, report, "pinned-empty-selection-same-source-outside-retention");
+                            Thread.Sleep(250);
+                            Require(IsWindowVisible(main), "Pinned empty Alt+D popup hid on the same-source click.");
+                            Require(GetForegroundWindow() == form.Handle, "Pinned empty Alt+D click did not reach the same source.");
+                            report["pinnedEmptySelectionOutsideRetainedPassed"] = true;
+                            Invoke(main, "\u53d6\u6d88\u9489\u4f4f");
+                            Wait(delegate { return Element(main, "\u9489\u4f4f\u7a97\u53e3") != null; }, 5000, "Empty Alt+D unpin state did not update.");
+                            ClickGeneratedBody(form, main, sourceClickCount, report, "unpinned-empty-selection-already-foreground-source-click");
+                            Wait(delegate { return !IsWindowVisible(main); }, 2000, "Unpin did not resume same-source click dismissal for the blank popup.");
+                            report["unpinnedEmptySelectionSameSourceOutsideClickPassed"] = true;
                             stage = "ocr-same-foreground-source-outside-click";
                             sourceFocus(); OcrThenSameForegroundClick(form, image, app, main, sourceClickCount, delegate { return Interlocked.CompareExchange(ref imageMouseEvents, 0, 0); }, report);
                             stage = "explicit-input-inside-retention";
