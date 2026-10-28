@@ -6,7 +6,7 @@ GitHub: https://github.com/Blueeeecho/EchoLingo
 
 ## 已确认的产品要求
 1. 名称含 Echo，用户已选 EchoLingo，中文名“回声译”。
-2. 轻量，尽量贴近 Bob 的快捷键工作流。
+2. 轻量，围绕选中文字快捷翻译与无感 OCR 两个核心工作流独立实现。
 3. 在其他应用选中文字，通过全局快捷键翻译。
 4. 区域截图 OCR，支持直接翻译或静默复制识别文字；默认本机，可明确选择云端。
 5. 支持用户自己的翻译与 OCR API、供应商对应凭据、端点、模型与提示词。
@@ -24,7 +24,6 @@ GitHub: https://github.com/Blueeeecho/EchoLingo
 Alt+S 默认实时无感 OCR：当前屏幕保留蓝色细边，悬停应用窗口时增加窗口蓝框；左键拖动后按任意实际区域识别、填入原文并自动翻译，不自动吸附或整窗截图。桌面/任务栏或不确定目标只保留屏幕框。此次先交付 Windows 预览，macOS 对应提示尚未实现；精确验收和历史初始约定的后续修订见[当前进度](docs/status.md)。
 
 ## 项目入口
-- [Bob 详细调研](docs/bob-research.zh-CN.md)
 - [实现计划](docs/implementation-plan.md)
 - [OCR 与翻译 API 配置设计](docs/api-configuration-design.zh-CN.md)
 - [当前进度和交接](docs/status.md)

@@ -64,6 +64,7 @@
         "type": "downloadBootstrapper",
         "silent": true
       }
-    }
+    },
+    "licenseFile": "../LICENSE"
   }
 }

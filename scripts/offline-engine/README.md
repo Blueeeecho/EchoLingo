@@ -65,8 +65,11 @@ a basic offline translator, not a guarantee of API-model quality.
 ## Upstream and source changes
 
 The Mozilla commit and all source dependencies are pinned in `sources.lock.json`.
-The engine/model license is MPL-2.0; PCRE2, SentencePiece, Ruy, INTGEMM, CPUINFO,
-SIMD utilities and nlohmann JSON have their own retained notices. The package's
+Mozilla inference code and models are covered by MPL-2.0. EchoLingo-owned
+wrapper and build files use the project terms in `../../LICENSE` and
+`../../LICENSING.md`; third-party code keeps its original grants. PCRE2,
+SentencePiece, Ruy, INTGEMM, CPUINFO, SIMD utilities and nlohmann JSON have
+their own retained notices. The package's
 third-party notices and source offer supply the exact license texts.
 
 `build.py` makes four explicit compatibility changes in the supplied upstream

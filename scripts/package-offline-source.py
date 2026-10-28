@@ -140,7 +140,7 @@ def main():
                 ROOT / "scripts/offline-engine/build.py", ROOT / "scripts/offline-engine/sources.lock.json",
                 ROOT / "scripts/prepare-offline-models.py", ROOT / "scripts/test_prepare_offline_models.py",
                 ROOT / "scripts/prepare-offline-notices.py",
-                Path(__file__).resolve(), ROOT / "LICENSE"]
+                Path(__file__).resolve(), ROOT / "LICENSE", ROOT / "LICENSING.md"]
     for path in required:
         if not path.is_file():
             raise ValueError("missing EchoLingo build source: " + path.name)

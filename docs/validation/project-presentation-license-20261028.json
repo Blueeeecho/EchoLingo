@@ -1,0 +1,188 @@
+{
+  "date": "2026-10-28",
+  "ownerConfirmedLicense": "MIT + Commons Clause License Condition v1.0; not blanket noncommercial",
+  "mainContentCommit": "bae7220c56074c2af5097c54a266f1164668cad4",
+  "siteCommit": "d1aa59ad37b30f3d68e1e0bc023dd64626564a04",
+  "project": {
+    "ok": true,
+    "mainCommit": "bae7220c56074c2af5097c54a266f1164668cad4",
+    "changedPublicFiles": [
+      {
+        "path": "LICENSING.md",
+        "url": "https://raw.githubusercontent.com/Blueeeecho/EchoLingo/main/LICENSING.md?revision=bae7220c56074c2af5097c54a266f1164668cad4",
+        "anonymous": true,
+        "httpStatus": 200,
+        "bytes": 1984,
+        "sha256": "5fcb4a150f42581ac6bdf3bb008eff847fd22c30ea019b076d38a0c4f62cd513"
+      },
+      {
+        "path": "LICENSE",
+        "url": "https://raw.githubusercontent.com/Blueeeecho/EchoLingo/main/LICENSE?revision=bae7220c56074c2af5097c54a266f1164668cad4",
+        "anonymous": true,
+        "httpStatus": 200,
+        "bytes": 1991,
+        "sha256": "20ce870fd3c179bf06c2d28e32264a30e2a7b34e5d317d7aafe2ee0176849e71"
+      },
+      {
+        "path": "PROJECT.md",
+        "url": "https://raw.githubusercontent.com/Blueeeecho/EchoLingo/main/PROJECT.md?revision=bae7220c56074c2af5097c54a266f1164668cad4",
+        "anonymous": true,
+        "httpStatus": 200,
+        "bytes": 2138,
+        "sha256": "82df43c3a11406b5bfd418d4b1a851266b66e8b9b8e0863d2f0b43af7c018b96"
+      },
+      {
+        "path": "README.md",
+        "url": "https://raw.githubusercontent.com/Blueeeecho/EchoLingo/main/README.md?revision=bae7220c56074c2af5097c54a266f1164668cad4",
+        "anonymous": true,
+        "httpStatus": 200,
+        "bytes": 3363,
+        "sha256": "33aad91cd8fee4ffc0e547558bc5e92423e9e94bd35d43ca388e7a2ad3277a79"
+      },
+      {
+        "path": "package-lock.json",
+        "url": "https://raw.githubusercontent.com/Blueeeecho/EchoLingo/main/package-lock.json?revision=bae7220c56074c2af5097c54a266f1164668cad4",
+        "anonymous": true,
+        "httpStatus": 200,
+        "bytes": 54670,
+        "sha256": "5663304bb5a73bc949267ec6e492075bcc6991d843c538743badc91f41b8abfb"
+      },
+      {
+        "path": "package.json",
+        "url": "https://raw.githubusercontent.com/Blueeeecho/EchoLingo/main/package.json?revision=bae7220c56074c2af5097c54a266f1164668cad4",
+        "anonymous": true,
+        "httpStatus": 200,
+        "bytes": 738,
+        "sha256": "f348bab0539fba4cddcaed12ec592f032a791285bb812d972fc2e92fd5e2fc7c"
+      },
+      {
+        "path": "src-tauri/Cargo.toml",
+        "url": "https://raw.githubusercontent.com/Blueeeecho/EchoLingo/main/src-tauri/Cargo.toml?revision=bae7220c56074c2af5097c54a266f1164668cad4",
+        "anonymous": true,
+        "httpStatus": 200,
+        "bytes": 1135,
+        "sha256": "38cde47b1cfc18eb504a96e141c3a9a008ab68a5afc5faf8ab6590e38c59bdbf"
+      },
+      {
+        "path": "src-tauri/tauri.conf.json",
+        "url": "https://raw.githubusercontent.com/Blueeeecho/EchoLingo/main/src-tauri/tauri.conf.json?revision=bae7220c56074c2af5097c54a266f1164668cad4",
+        "anonymous": true,
+        "httpStatus": 200,
+        "bytes": 1907,
+        "sha256": "dcdad98eefd2ce4a46f9d13b54097a249e37ba9119f5ad56dce889407cae3413"
+      }
+    ],
+    "repositoryDescription": "回声译｜轻量桌面翻译工具：选词快捷翻译、无感 OCR、中英离线翻译与自定义服务。让理解跟上思路。",
+    "homepage": "https://blueeeecho.github.io/EchoLingo/",
+    "detectedGithubLicense": {
+      "key": "other",
+      "name": "Other",
+      "spdx_id": "NOASSERTION",
+      "url": null,
+      "node_id": "MDc6TGljZW5zZTA="
+    },
+    "oldBetaReleaseAssetsUnchanged": true,
+    "oldBetaMitLicenseUnchanged": true,
+    "bobOnlyFinalAcknowledgement": true,
+    "sourceAvailableLicenseConfirmedByOwner": true
+  },
+  "website": {
+    "ok": true,
+    "website": "https://blueeeecho.github.io/EchoLingo/",
+    "pagesCommit": "d1aa59ad37b30f3d68e1e0bc023dd64626564a04",
+    "checks": [
+      {
+        "path": "index.html",
+        "url": "https://blueeeecho.github.io/EchoLingo/?revision=d1aa59ad37b30f3d68e1e0bc023dd64626564a04",
+        "httpStatus": 200,
+        "bytes": 24086,
+        "sha256": "af52bb07e86d9ddf2fd36c907de3a794dd2a80bb098d9461a96331bf082b052f",
+        "matchesLocal": true
+      },
+      {
+        "path": "styles.css",
+        "url": "https://blueeeecho.github.io/EchoLingo/styles.css?revision=d1aa59ad37b30f3d68e1e0bc023dd64626564a04",
+        "httpStatus": 200,
+        "bytes": 52744,
+        "sha256": "b069cbd3b429c8f275dd9fbbb95590773ae4a374f03fa53e593e6a0ea237ff80",
+        "matchesLocal": true
+      },
+      {
+        "path": "app.js",
+        "url": "https://blueeeecho.github.io/EchoLingo/app.js?revision=d1aa59ad37b30f3d68e1e0bc023dd64626564a04",
+        "httpStatus": 200,
+        "bytes": 14228,
+        "sha256": "49c3ce6f7f40e9c691deaa8baa22142abfc6b9a96a1f9575f31482107a15f91b",
+        "matchesLocal": true
+      },
+      {
+        "path": "privacy.html",
+        "url": "https://blueeeecho.github.io/EchoLingo/privacy.html?revision=d1aa59ad37b30f3d68e1e0bc023dd64626564a04",
+        "httpStatus": 200,
+        "bytes": 5682,
+        "sha256": "5ba4ce7585943a9f8221484d2154a4965805597d167f5f9263333b4d5f54b132",
+        "matchesLocal": true
+      },
+      {
+        "path": "assets/favicon.png",
+        "url": "https://blueeeecho.github.io/EchoLingo/assets/favicon.png?revision=d1aa59ad37b30f3d68e1e0bc023dd64626564a04",
+        "httpStatus": 200,
+        "bytes": 14165,
+        "sha256": "b618f3f6e5009654e70cc4e1a1502b42329b353df7323a9032482b4abb9a6d78",
+        "matchesLocal": true
+      },
+      {
+        "path": "assets/echolingo-icon.png",
+        "url": "https://blueeeecho.github.io/EchoLingo/assets/echolingo-icon.png?revision=d1aa59ad37b30f3d68e1e0bc023dd64626564a04",
+        "httpStatus": 200,
+        "bytes": 47781,
+        "sha256": "d4d38cc8b28a9b09fbc3b04d79f726f2236969f749e754176b41bba71a89ab4b",
+        "matchesLocal": true
+      }
+    ],
+    "starButtonText": "给回声译点个 Star",
+    "starButtonUrl": "https://github.com/Blueeeecho/EchoLingo",
+    "correctBetaDownloadPreserved": true,
+    "licensePolicyLink": "https://github.com/Blueeeecho/EchoLingo/blob/main/LICENSING.md"
+  },
+  "license": {
+    "officialUrl": "https://commonsclause.com/",
+    "officialHtmlSha256": "cbe974904942fc88a9445c25adb00166d9cb585b99e8023ab2419fcc16ec2e54",
+    "officialConditionParagraphsMatch": true,
+    "originalMitBytesPreserved": true,
+    "cargoLicense": null,
+    "cargoLicenseFile": "../LICENSE",
+    "thirdPartyOriginalLicensesChanged": false,
+    "historicalBetaReleaseChanged": false
+  },
+  "localChecks": {
+    "ok": true,
+    "checks": [
+      {
+        "target": "owner-working-checkout",
+        "completeOriginalMitRetained": true,
+        "rootMetadataOnlyChanged": true,
+        "oneQuietBobThanks": true
+      },
+      {
+        "target": "managed-development-checkout",
+        "completeOriginalMitRetained": true,
+        "rootMetadataOnlyChanged": true,
+        "oneQuietBobThanks": true
+      },
+      {
+        "target": "public-main-payload",
+        "completeOriginalMitRetained": true,
+        "rootMetadataOnlyChanged": true,
+        "oneQuietBobThanks": true
+      }
+    ],
+    "sourcePackagerSyntaxValid": true,
+    "siteStarAndBetaLinkValid": true
+  },
+  "independentReadOnlyReviewPassed": true,
+  "readmeBobMentionCount": 1,
+  "readmeBobMentionPosition": "final subscript acknowledgement",
+  "newCommercialLicenseReplacesPriorMitGrants": false,
+  "appBinaryRebuilt": false
+}

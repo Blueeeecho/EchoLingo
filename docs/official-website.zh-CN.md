@@ -45,3 +45,5 @@ python3 -m http.server 4173 --bind 127.0.0.1 --directory website
 首次发布于2026-10-28：gh-pages提交a3e923fc539de675cf94e9fbbefc25bb2c7363cf，Pages构建40657109025成功。公开HTML/JS/CSS/隐私页/PNG与本地精确匹配；内置浏览器自动切换线上URL超时，不计作线上UI验收。
 
 2026-10-28: Beta1 published; gh-pages209861d863f1b3303678c10da39f5aea34b6ad26 built; six anonymous public file bodies verified byte-for-byte. See docs/validation/beta1-release-20261028.json.
+
+2026-10-28: Added a natural Star invitation and current licensing link. gh-pages d1aa59ad37b30f3d68e1e0bc023dd64626564a04 built; six public file bodies verified exact. See validation/project-presentation-license-20261028.json.
