@@ -28,3 +28,7 @@ Commit only this directory's deployable files to the website branch. Verify the 
 - Update `index.html` platform/release status, FAQ and visible verification date when real downloads are available. Update `sitemap.xml` after substantive page changes.
 - `privacy.html` distinguishes local OCR, cloud text/images, OS credentials, local history and GitHub hosting access logs.
 - No external fonts/scripts, analytics, account UI, API-key fields or network requests belong in the browser demo.
+
+## Community and licensing
+
+The closing section invites visitors who find EchoLingo useful to give the repository a Star. The footer links to the current source-available MIT + Commons Clause v1.0 policy; previously published releases keep their original licenses.

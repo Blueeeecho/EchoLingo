@@ -260,6 +260,7 @@ kbd { display: inline-flex; align-items: center; justify-content: center; paddin
 .closing-section .section-kicker { font-size: 10px; margin-bottom: 19px; }
 .closing-section h2 { font-size: 36px; font-weight: 600; line-height: 1.5; letter-spacing: -.05em; }
 .closing-section .button { font-size: 11px; gap: 11px; }
+.closing-section .support-note { margin-top: 16px; max-width: 42em; color: var(--muted); font-size: 13px; line-height: 1.85; }
 .site-footer { border-top: 1px solid var(--line); background: #f2f4f8; }
 .footer-inner { display: flex; align-items: center; justify-content: space-between; gap: 24px; padding-block: 29px; }
 .site-footer .brand { font-size: 13px; }
