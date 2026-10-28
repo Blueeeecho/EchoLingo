@@ -70,11 +70,13 @@ pub fn validate_provider(p: &OcrProvider) -> Result<(), String> {
     {
         return Err("OCR 服务名称、模型或提示词长度不合法".into());
     }
-    if !["openai-vision", "http-json", "baidu", "tencent"].contains(&p.kind.as_str()) {
+    if !["openai-vision", "http-json"].contains(&p.kind.as_str())
+        && !crate::ocr_native::is_native(&p.kind)
+    {
         return Err("不支持的 OCR 服务类型".into());
     }
     validate_url(&p.base_url)?;
-    if matches!(p.kind.as_str(), "baidu" | "tencent") {
+    if crate::ocr_native::is_native(&p.kind) {
         return crate::ocr_native::validate_provider(p);
     }
     if p.auth_header.is_empty() || p.auth_header.len() > 200 {
@@ -293,7 +295,7 @@ pub async fn recognize(
     if key.len() > 8192 {
         return Err("OCR API 凭据超过长度上限".into());
     }
-    if matches!(p.kind.as_str(), "baidu" | "tencent") {
+    if crate::ocr_native::is_native(&p.kind) {
         return crate::ocr_native::recognize(client, p, &key, image_base64).await;
     }
     if key.contains(['\r', '\n']) {

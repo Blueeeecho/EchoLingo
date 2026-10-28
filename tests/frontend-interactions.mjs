@@ -27,7 +27,7 @@ try {
     Object.assign(fixture, { systemStatus: { platform: 'macos', supported: true, ready: false, requiresSetup: true, status: 'downloadRequired', message: 'QA 语言包尚未准备', minimumVersion: '26.0' }, systemStatusCalls: [], systemPrepareCalls: [], keyDeleteCalls: 0 });
     Object.assign(fixture, { shortcutLeases: [], nextShortcutLease: 0, holdShortcutBegin: false, releaseShortcutBegin: () => {}, holdShortcutEnd: false, shortcutEndWaits: 0, releaseShortcutEnd: () => {} });
     Object.assign(fixture, { copies: [], spoken: [], permissionOverride: null, managementShows: [] });
-    Object.assign(fixture, { credentialStates: {}, credentialReadCalls: 0, translationTestCalls: 0, settingsReads: 0 });
+    Object.assign(fixture, { credentialStates: {}, credentialReadCalls: 0, translationTestCalls: 0, settingsReads: 0, translationCredentialWrites: [], serviceLinks: [] });
     Object.assign(fixture, { resizeRequests: [], nativeResizeRequests: [], holdResize: false, releaseResize: () => {} });
     Object.assign(fixture, { pinned: false, nativeVisible: true, popupReveals: 0, nativeHideTransitions: 0 });
     Object.assign(fixture, { holdPopupAck: false, popupAckWaits: 0, releasePopupAck: () => {}, sourceFocusCalls: 0 });
@@ -146,7 +146,8 @@ try {
           for (const provider of fixture.settings.providers) provider.hasKey = translationKeys.has(scope(provider));
           return;
         }
-        if (command === 'set_api_key') { fixture.keyCalls++; const provider = fixture.settings.providers.find(item => item.id === args.providerId); if (provider) translationKeys.set(scope(provider), args.key); return; }
+        if (command === 'set_api_key') { fixture.keyCalls++; const provider = fixture.settings.providers.find(item => item.id === args.providerId); if (provider) { translationKeys.set(scope(provider), args.key); fixture.translationCredentialWrites.push({ kind: provider.kind, key: args.key }); } return; }
+        if (command === 'open_service_link') { fixture.serviceLinks.push(args.url); return; }
         if (command === 'delete_api_key') { fixture.keyDeleteCalls++; const provider = fixture.settings.providers.find(item => item.id === args.providerId); if (provider) translationKeys.delete(scope(provider)); return; }
         if (command === 'set_ocr_api_key') { fixture.ocrKeyCalls++; const provider = fixture.settings.ocrProviders.find(item => item.id === args.providerId); if (provider) { provider.hasKey = true; ocrKeys.set(scope(provider), args.key); fixture.credentialWrites.push({ providerId: provider.id, kind: provider.kind, key: args.key }); } return; }
         if (command === 'delete_ocr_api_key') { fixture.ocrDeleteCalls++; const provider = fixture.settings.ocrProviders.find(item => item.id === args.providerId); if (provider) { ocrKeys.delete(scope(provider)); provider.hasKey = false; } return; }
@@ -931,6 +932,8 @@ try {
 
   // Presets populate the documented protocol/base while model names remain editable.
   await page.locator('#add-provider').click();
+  assert.equal(await page.locator('#provider-preset').inputValue(), 'baidu');
+  assert.equal(await page.locator('#provider-baidu-credentials').isVisible(), true);
   for (const [preset, base] of [['deepseek', 'https://api.deepseek.com'], ['zhipu', 'https://open.bigmodel.cn/api/paas/v4'], ['siliconflow', 'https://api.siliconflow.cn/v1']]) {
     await page.locator('#provider-preset').selectOption(preset);
     assert.equal(await page.locator('#provider-url').inputValue(), base);
@@ -943,6 +946,68 @@ try {
   await page.locator('#provider-qwen-workspace').dispatchEvent('change');
   assert.equal(await page.locator('#provider-url').inputValue(), 'https://ws-qa.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1');
   await page.locator('#cancel-provider-dialog').click();
+
+  // Official MT uses separate masked bundles, while only region enters Settings.
+  const officialSecrets = [];
+  for (const [kind, fields, expected] of [
+    ['baidu', [['provider-baidu-app-id', 'qa-mt-baidu-app'], ['provider-baidu-secret-key', 'qa-mt-baidu-secret']], { appId: 'qa-mt-baidu-app', secretKey: 'qa-mt-baidu-secret' }],
+    ['youdao', [['provider-youdao-app-key', 'qa-mt-youdao-app'], ['provider-youdao-app-secret', 'qa-mt-youdao-secret']], { appKey: 'qa-mt-youdao-app', appSecret: 'qa-mt-youdao-secret' }],
+    ['microsoft', [['provider-microsoft-subscription-key', 'qa-mt-microsoft-secret']], { subscriptionKey: 'qa-mt-microsoft-secret' }],
+  ]) {
+    await page.locator('#add-provider').click();
+    await page.locator('#provider-preset').selectOption(kind);
+    assert.equal(await page.locator(`#provider-preset option[value="${kind}"]`).evaluate(element => element.parentElement.label), '官方机器翻译');
+    assert.equal(await page.locator('#provider-url-field').isHidden(), true);
+    assert.equal(await page.locator('#provider-model-field').isHidden(), true);
+    assert.equal(await page.locator('#provider-prompt-field').isHidden(), true);
+    assert.equal(await page.locator('#provider-key-field').isHidden(), true);
+    assert.equal(await page.locator('#provider-microsoft-region-field').isVisible(), kind === 'microsoft');
+    await page.locator('#provider-service-guide a').first().click();
+    assert.equal(await page.evaluate(() => window.__qa.serviceLinks.at(-1).startsWith('https://')), true);
+    if (kind === 'baidu') {
+      const originalTheme = await page.evaluate(() => document.documentElement.dataset.theme);
+      await page.evaluate(() => { document.documentElement.dataset.theme = 'light'; });
+      await page.screenshot({ path: 'test-results/official-translation-800-light.png' });
+      await page.setViewportSize({ width: 420, height: 700 });
+      assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true);
+      await page.evaluate(() => { document.documentElement.dataset.theme = 'dark'; });
+      await page.screenshot({ path: 'test-results/official-translation-420-dark.png' });
+      await page.evaluate(theme => { document.documentElement.dataset.theme = theme; }, originalTheme);
+      await page.setViewportSize({ width: 800, height: 820 });
+    }
+    await page.locator('#provider-name').fill(`QA MT ${kind}`);
+    await page.locator(`#${fields[0][0]}`).fill(fields[0][1]);
+    if (fields.length === 2) {
+      const saves = await page.evaluate(() => window.__qa.saveCalls);
+      await page.locator('#save-provider').click();
+      await page.locator('#provider-error').getByText('需要同时填写', { exact: false }).waitFor();
+      assert.equal(await page.evaluate(() => window.__qa.saveCalls), saves);
+      await page.locator(`#${fields[1][0]}`).fill(fields[1][1]);
+    } else await page.locator('#provider-microsoft-region').fill('eastasia');
+    for (const [, secret] of fields) officialSecrets.push(secret);
+    await page.locator('#save-provider').click();
+    await page.locator('#provider-dialog').waitFor({ state: 'hidden' });
+    assert.deepEqual(JSON.parse(await page.evaluate(() => window.__qa.translationCredentialWrites.at(-1).key)), expected);
+    const nativeRow = page.locator('#provider-list .provider-row').filter({ hasText: `QA MT ${kind}` });
+    await nativeRow.getByRole('button', { name: '编辑', exact: true }).click();
+    for (const [field] of fields) assert.equal(await page.locator(`#${field}`).inputValue(), '');
+    const writes = await page.evaluate(() => window.__qa.translationCredentialWrites.length);
+    await page.locator('#save-provider').click();
+    await page.locator('#provider-dialog').waitFor({ state: 'hidden' });
+    assert.equal(await page.evaluate(() => window.__qa.translationCredentialWrites.length), writes);
+    if (kind === 'microsoft') assert.equal(await page.evaluate(() => window.__qa.settings.providers.find(item => item.kind === 'microsoft').region), 'eastasia');
+    await nativeRow.getByRole('button', { name: '编辑', exact: true }).click();
+    await page.locator(`#${fields[0][0]}`).fill('qa-discard-mt-scope');
+    await page.locator('#provider-preset').selectOption('openai');
+    assert.equal(await page.locator(`#${fields[0][0]}`).inputValue(), '');
+    await page.locator('#provider-key').fill('qa-discard-mt-close');
+    await page.locator('#cancel-provider-dialog').click();
+    assert.equal(await page.locator('#provider-key').inputValue(), '');
+    await page.getByRole('button', { name: `删除 QA MT ${kind}`, exact: true }).click();
+    await page.locator('#confirm-accept').click();
+    await page.waitForFunction(kind => !window.__qa.settings.providers.some(item => item.name === `QA MT ${kind}`), kind);
+  }
+  for (const secret of [...officialSecrets, 'qa-discard-mt-scope', 'qa-discard-mt-close']) assert.equal(await page.evaluate(secret => JSON.stringify(window.__qa.settingsWrites).includes(secret), secret), false);
 
   // Same-origin edits preserve the saved-key indication; a cross-vendor preset
   // clears typed secrets and cannot claim that the original origin's key is valid.
@@ -1021,6 +1086,50 @@ try {
   await page.getByRole('button', { name: '删除 OCR QA unconfigured', exact: true }).click();
   await page.locator('#confirm-accept').click();
   await page.waitForFunction(() => window.__qa.settings.ocrProviders.length === 0);
+
+  for (const kind of ['youdao', 'google']) {
+    await page.locator('#add-ocr-provider').click();
+    await page.locator('#ocr-provider-kind').selectOption(kind);
+    await page.locator('#ocr-provider-name').fill(`QA OCR ${kind}`);
+    for (const id of ['ocr-provider-url-field', 'ocr-provider-auth-header-field', 'ocr-provider-auth-prefix-field', 'ocr-provider-template-field', 'ocr-provider-response-field', 'ocr-provider-region-field']) assert.equal(await page.locator(`#${id}`).isHidden(), true);
+    assert.equal(await page.locator('#ocr-service-guide a').count() >= 3, true);
+    const originalTheme = await page.evaluate(() => document.documentElement.dataset.theme);
+    await page.evaluate(() => { document.documentElement.dataset.theme = 'light'; });
+    await page.screenshot({ path: `test-results/official-ocr-${kind}-800-light.png` });
+    await page.evaluate(theme => { document.documentElement.dataset.theme = theme; }, originalTheme);
+    if (kind === 'youdao') {
+      await page.locator('#ocr-youdao-app-key').fill('qa-ocr-youdao-app');
+      const saves = await page.evaluate(() => window.__qa.saveCalls);
+      await page.locator('#save-ocr-provider').click();
+      await page.locator('#ocr-provider-error').getByText('有道 OCR 需要同时填写', { exact: false }).waitFor();
+      assert.equal(await page.evaluate(() => window.__qa.saveCalls), saves);
+      await page.locator('#ocr-youdao-app-secret').fill('qa-ocr-youdao-secret');
+    } else {
+      assert.equal(await page.locator('#ocr-provider-native-action').inputValue(), 'DOCUMENT_TEXT_DETECTION');
+      await page.locator('#ocr-provider-native-action').selectOption('TEXT_DETECTION');
+      await page.locator('#ocr-provider-key').fill('qa-ocr-google-secret');
+    }
+    await page.locator('#save-ocr-provider').click();
+    await page.locator('#ocr-provider-dialog').waitFor({ state: 'hidden' });
+    const credential = await page.evaluate(() => window.__qa.credentialWrites.at(-1));
+    assert.equal(credential.kind, kind);
+    if (kind === 'youdao') assert.deepEqual(JSON.parse(credential.key), { appKey: 'qa-ocr-youdao-app', appSecret: 'qa-ocr-youdao-secret' });
+    else assert.equal(credential.key, 'qa-ocr-google-secret');
+    assert.equal(await page.evaluate(() => window.__qa.settings.activeOcrProviderId), null);
+    await page.getByRole('button', { name: `编辑 OCR QA OCR ${kind}`, exact: true }).click();
+    const secretField = kind === 'youdao' ? '#ocr-youdao-app-secret' : '#ocr-provider-key';
+    assert.equal(await page.locator(secretField).inputValue(), '');
+    await page.locator(secretField).fill('qa-discard-ocr-scope');
+    await page.locator('#ocr-provider-kind').selectOption('baidu');
+    assert.equal(await page.locator(secretField).inputValue(), '');
+    await page.locator('#ocr-baidu-api-key').fill('qa-discard-ocr-close');
+    await page.locator('#cancel-ocr-provider-dialog').click();
+    assert.equal(await page.locator('#ocr-baidu-api-key').inputValue(), '');
+    await page.getByRole('button', { name: `删除 OCR QA OCR ${kind}`, exact: true }).click();
+    await page.locator('#confirm-accept').click();
+    await page.waitForFunction(() => window.__qa.settings.ocrProviders.length === 0);
+  }
+  for (const secret of ['qa-ocr-youdao-app', 'qa-ocr-youdao-secret', 'qa-ocr-google-secret', 'qa-discard-ocr-scope', 'qa-discard-ocr-close']) assert.equal(await page.evaluate(secret => JSON.stringify(window.__qa.settingsWrites).includes(secret), secret), false);
 
   // OCR is independent of translation services and remains local until selected.
   await page.locator('#add-ocr-provider').click();

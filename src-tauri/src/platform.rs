@@ -498,6 +498,7 @@ pub fn diagnostics() -> Value {
             .lock()
             .map(|v| v.clone())
             .unwrap_or(Value::Null);
+        value["lastSelectionHealth"] = selection_diagnostics().unwrap_or(Value::Null);
         value
     }
     #[cfg(not(target_os = "windows"))]
@@ -508,6 +509,63 @@ pub fn diagnostics() -> Value {
 fn windows_capture_health() -> &'static std::sync::Mutex<Value> {
     static HEALTH: std::sync::OnceLock<std::sync::Mutex<Value>> = std::sync::OnceLock::new();
     HEALTH.get_or_init(|| std::sync::Mutex::new(Value::Null))
+}
+
+#[cfg(target_os = "windows")]
+fn windows_selection_health() -> &'static std::sync::Mutex<Value> {
+    static HEALTH: std::sync::OnceLock<std::sync::Mutex<Value>> = std::sync::OnceLock::new();
+    HEALTH.get_or_init(|| std::sync::Mutex::new(Value::Null))
+}
+
+#[cfg(any(target_os = "windows", test))]
+const SELECTION_HEALTH_MAX: u64 = 10_000_000;
+
+#[cfg(any(target_os = "windows", test))]
+fn bounded_selection_health(value: &Value) -> Value {
+    const SUFFIXES: &[&str] = &[
+        "Stage",
+        "Depth",
+        "IdentityCompared",
+        "IdentityEqual",
+        "RootWalkReason",
+        "ExceptionKind",
+        "Milliseconds",
+    ];
+    let mut safe = serde_json::Map::new();
+    let mut retain = |field: &str| {
+        if let Some(number) = value
+            .get(field)
+            .and_then(Value::as_u64)
+            .filter(|number| *number <= SELECTION_HEALTH_MAX)
+        {
+            safe.insert(field.to_owned(), json!(number));
+        }
+    };
+    retain("selectionQueryCount");
+    for index in 1..=16 {
+        for suffix in SUFFIXES {
+            retain(&format!("selectionQuery{index}{suffix}"));
+        }
+    }
+    Value::Object(safe)
+}
+
+#[cfg(any(target_os = "windows", test))]
+fn selection_health_from_reply(
+    reply: &Value,
+    elapsed_milliseconds: u64,
+    cancellation_requested: bool,
+    cancellation_signalled: bool,
+    cancellation_signal_failed: bool,
+) -> Value {
+    let mut safe = bounded_selection_health(&reply["captureHealth"]);
+    // These fields describe our process boundary, never untrusted helper data.
+    safe["helperResponseReceived"] = json!(u64::from(reply.is_object()));
+    safe["helperElapsedMilliseconds"] = json!(elapsed_milliseconds.min(SELECTION_HEALTH_MAX));
+    safe["cancellationRequested"] = json!(u64::from(cancellation_requested));
+    safe["cancellationSignalled"] = json!(u64::from(cancellation_signalled));
+    safe["cancellationSignalFailed"] = json!(u64::from(cancellation_signal_failed));
+    safe
 }
 
 #[cfg(any(target_os = "windows", test))]
@@ -568,6 +626,14 @@ pub fn selection_diagnostics() -> Result<Value, String> {
         .filter(|value| value.is_object())
         .cloned()
         .ok_or_else(|| "NATIVE_PROTOCOL: Missing selection diagnostics.".into())
+}
+
+#[cfg(target_os = "windows")]
+pub fn selection_diagnostics() -> Result<Value, String> {
+    Ok(windows_selection_health()
+        .lock()
+        .map(|value| value.clone())
+        .unwrap_or(Value::Null))
 }
 
 /// A read-only preflight. This never requests a permission or opens Settings.
@@ -816,6 +882,12 @@ fn run_windows(
     use std::time::{Duration, Instant};
 
     let capture = matches!(mode, "capture-ocr" | "capture-image");
+    let selection = mode == "selected-text";
+    if selection {
+        if let Ok(mut health) = windows_selection_health().lock() {
+            *health = json!({"helperResponseReceived": 0});
+        }
+    }
     if capture {
         if let Ok(mut health) = windows_capture_health().lock() {
             *health = json!({"helperResponseReceived": 0});
@@ -995,6 +1067,22 @@ fn run_windows(
             if let Ok(mut health) = windows_capture_health().lock() {
                 *health = safe;
             }
+        }
+    }
+    if selection {
+        let reply = serde_json::from_slice::<Value>(&output).unwrap_or(Value::Null);
+        let safe = selection_health_from_reply(
+            &reply,
+            helper_started
+                .elapsed()
+                .as_millis()
+                .min(u128::from(SELECTION_HEALTH_MAX)) as u64,
+            cancellation_requested,
+            cancellation_signalled,
+            cancellation_signal_failed,
+        );
+        if let Ok(mut health) = windows_selection_health().lock() {
+            *health = safe;
         }
     }
     let result = parse_response(&output, status.success());
@@ -1367,6 +1455,8 @@ fn materialize(
 
 #[cfg(test)]
 mod tests {
+    use serde_json::{json, Value};
+
     #[test]
     fn forced_selection_stop_never_claims_clipboard_cleanup_or_hides_its_warning() {
         assert!(
@@ -1451,6 +1541,108 @@ mod tests {
             serde_json::json!({})
         );
     }
+
+    #[test]
+    fn selection_health_rejects_content_unknown_fields_and_invalid_numeric_types() {
+        let safe = super::bounded_selection_health(&json!({
+            "selectionQueryCount": 7,
+            "selectionQuery1Stage": 11,
+            "selectionQuery1IdentityCompared": 1,
+            "selectionQuery1IdentityEqual": 0,
+            "selectionQuery1Depth": -1,
+            "selectionQuery2Stage": "selected source text",
+            "selectionQuery2Depth": [4],
+            "selectionQuery2IdentityEqual": true,
+            "selectionQuery2RootWalkReason": {"text":"private"},
+            "selectionQuery2ExceptionKind": 1.0,
+            "selectionQuery3Milliseconds": 10_000_001_u64,
+            "selectionQuery16Milliseconds": 10_000_000,
+            "selectionQuery0Stage": 1,
+            "selectionQuery01Stage": 1,
+            "selectionQuery17Stage": 1,
+            "selectionQuery1InitialRoleId": 50033,
+            "selectionQuery1SelectionLength": 20,
+            "helperElapsedMilliseconds": 9,
+            "source": "private", "title":"private", "clipboard":"private",
+            "pid": 234, "hwnd": 567, "credentials":{"key":"dummy"}
+        }));
+        assert_eq!(
+            safe,
+            json!({
+                "selectionQueryCount":7,"selectionQuery1Stage":11,
+                "selectionQuery1IdentityCompared":1,"selectionQuery1IdentityEqual":0,
+                "selectionQuery16Milliseconds":10_000_000
+            })
+        );
+    }
+
+    #[test]
+    fn selection_health_bounds_all_query_slots_and_rejects_malformed_health() {
+        let mut input = serde_json::Map::new();
+        for index in 1..=17 {
+            for suffix in [
+                "Stage",
+                "Depth",
+                "IdentityCompared",
+                "IdentityEqual",
+                "RootWalkReason",
+                "ExceptionKind",
+                "Milliseconds",
+            ] {
+                input.insert(format!("selectionQuery{index}{suffix}"), json!(0));
+            }
+        }
+        input.insert("selectionQueryCount".into(), json!(10_000_000));
+        let safe = super::bounded_selection_health(&Value::Object(input));
+        assert_eq!(safe.as_object().unwrap().len(), 16 * 7 + 1);
+        assert_eq!(safe["selectionQueryCount"], 10_000_000);
+        assert_eq!(safe["selectionQuery16ExceptionKind"], 0);
+        assert!(safe.get("selectionQuery17Stage").is_none());
+        for malformed in [
+            Value::Null,
+            json!([]),
+            json!("private"),
+            json!(42),
+            json!(false),
+            json!({}),
+        ] {
+            assert_eq!(super::bounded_selection_health(&malformed), json!({}));
+        }
+    }
+
+    #[test]
+    fn selection_health_process_metadata_comes_only_from_our_boundary() {
+        let reply = json!({
+            "ok":false, "error":"private source must not be retained",
+            "text":"private", "captureHealth":{
+                "selectionQueryCount":1, "selectionQuery1ExceptionKind":5,
+                "helperResponseReceived":0, "helperElapsedMilliseconds":1,
+                "cancellationRequested":0, "cancellationSignalled":99,
+                "cancellationSignalFailed":"private"
+            }
+        });
+        let safe = super::selection_health_from_reply(&reply, u64::MAX, true, false, true);
+        assert_eq!(
+            safe,
+            json!({
+                "selectionQueryCount":1,"selectionQuery1ExceptionKind":5,
+                "helperResponseReceived":1,"helperElapsedMilliseconds":10_000_000,
+                "cancellationRequested":1,"cancellationSignalled":0,"cancellationSignalFailed":1
+            })
+        );
+        let invalid_json = serde_json::from_slice::<Value>(b"{not-json").unwrap_or(Value::Null);
+        for malformed in [invalid_json, json!([]), json!("private"), json!(false)] {
+            let empty = super::selection_health_from_reply(&malformed, 0, false, false, false);
+            assert_eq!(
+                empty,
+                json!({
+                    "helperResponseReceived":0,"helperElapsedMilliseconds":0,
+                    "cancellationRequested":0,"cancellationSignalled":0,"cancellationSignalFailed":0
+                })
+            );
+        }
+    }
+
     #[test]
     fn hide_confirms_native_state_when_runtime_hide_was_a_cached_noop() {
         let visible = std::cell::Cell::new(true);

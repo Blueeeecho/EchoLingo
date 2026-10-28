@@ -674,7 +674,7 @@ public static class EchoLingoPopupVisibilitySmoke {
                             IntPtr foreground = GetForegroundWindow();
                             if (foreground == form.Handle || (app != null && foreground == MainWindow(app.Id))) {
                                 INPUT release = new INPUT(); release.type = 0; release.data.mouse.flags = 4;
-                                SendInput(4, new INPUT[] { Key(0x12, true), Key(0x44, true), Key(0x41, true), release }, Marshal.SizeOf(typeof(INPUT)));
+                                SendInput(5, new INPUT[] { Key(0x12, true), Key(0x44, true), Key(0x41, true), Key(0x53, true), release }, Marshal.SizeOf(typeof(INPUT)));
                             }
                             if (app != null) {
                                 try { if (!app.HasExited) { app.Kill(); app.WaitForExit(5000); } Require(app.HasExited, "Own app did not stop during cleanup."); report["ownApplicationStopped"] = true; }

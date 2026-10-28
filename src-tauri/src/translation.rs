@@ -3,6 +3,9 @@ use futures_util::StreamExt;
 use serde_json::{json, Value};
 use std::time::{Duration, Instant};
 
+#[path = "translation_native.rs"]
+pub mod native;
+
 #[path = "translation_stream.rs"]
 mod streaming;
 use streaming::{OpenAiStream, MAX_RESPONSE};
@@ -12,6 +15,9 @@ use streaming::{OpenAiStream, MAX_RESPONSE};
 mod stream_tests;
 
 pub fn endpoint(p: &Provider) -> Result<String, String> {
+    if native::is_native(&p.kind) {
+        return native::endpoint(p).map(str::to_owned);
+    }
     validate_url(&p.base_url)?;
     let base = p.base_url.trim_end_matches('/');
     let parsed = validate_url(base)?;
@@ -177,6 +183,9 @@ async fn translate_one_inner(
             return Err("请使用包含离线模型的 EchoLingo 安装包执行本机翻译".into());
         }
         let key = key?;
+        if native::is_native(&p.kind) {
+            return native::translate(client, p, &key, text, source, target).await;
+        }
         let url = endpoint(p)?;
         let body = if want_stream {
             streaming_request_body(p, text, source, target, &key)

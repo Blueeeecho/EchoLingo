@@ -1,5 +1,21 @@
 # 0.1.0 预览版验证报告
 
+<!-- selection-services-20261028:start -->
+## 2026-10-28 同页鼠标取词、同源点击与官方服务候选
+
+| 检查 | 结果与边界 |
+|---|---|
+| 候选本机 |268 Rust passed/1资源专用ignored；84前端单位、类型/构建、完整隔离假IPC UI passed；新官方协议为dummy/loopback，没有真实厂商账号 |
+| 候选原生源码 |首次核验+初读共用MTA对象，保留后置身份核验；直接路径完整query3→2、fallback8→7；C#5/net48/PS AST0，109纯策略断言passed。没有生产settle/retry |
+| released295/e5adb8f |40622643576实际86次Alt+D、85完整链；1次newmock/history精确但自有UIA输入框观察失败。不是已观察到空string；75次同浏览器外点击隐藏，12轮cleanup确认。其余未发热键的鼠标准备失败另列 |
+| released295/5f4dbba |40626825246 Edge冷首2/2；40626825226 Edge+Chrome各1/1实际AltS/左拖/WinRT/自动译文+历史/同源click隐藏，ROI底层mousedown/up0/0；不是新候选或物理Win11验收 |
+| 非浏览器/清理 |40623644694和40626825523均WPF3/3、WinForms16/16及真实记事本核心1/1，但记事本mock退出失败，整体仍failure；新BeginAccept+stopEvent/MTA补丁21项本机exactMock测试passed，未抹去旧红 |
+| 新源码Windows |完整构建/15门禁尚未运行，新增48项真实Edge/Chrome同页选文、记事本/WPF、浏览器OCR同源点击；原快捷键CLI/真实设置UI/重启/新键实际链保持 |
+| 新增服务 |Baidu/Youdao/Microsoft文本翻译、Youdao/Google OCR；协议/凭据/超限/重定向/错误脱敏/取消单测及专用表单、45固定URL精确对照passed；系统浏览器实际打开、新Windows诊断CLI和真实云账户未验收 |
+
+原95/96冷Edge失败、同PID后台剪贴板发布反例未关闭；同源点击在生成窗口和实际Edge/Chrome受控场景可通过，不据此断言所有应用已经修好。OS物理Win10/11/WPS、IME/多屏/全屏仍需机主复现。Mac规范程序未签名/安装/修改权限；没有新安装包或stable发布。[完整分层记录](validation/windows-selection-services-20261028.json)。
+<!-- selection-services-20261028:end -->
+
 <!-- shortcut-reconfiguration-20261028:start -->
 ## 2026-10-28 快捷键更改补验与新版完整回归
 

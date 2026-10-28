@@ -1,4 +1,5 @@
 import type { HistoryEntry, Provider, Settings } from './types';
+import { isNativeTranslation, TRANSLATION_NATIVE_URLS } from './translation-credentials';
 
 export const MAX_TEXT_LENGTH = 20_000;
 export const LANGUAGES: ReadonlyArray<readonly [string, string]> = [
@@ -34,7 +35,7 @@ export function isLocalProvider(kind: string): boolean { return kind === 'system
 export function validateProvider(provider: Provider): string | null {
   if (!provider.name.trim()) return '请输入服务名称。';
   if (isLocalProvider(provider.kind)) {
-    if (provider.baseUrl || provider.model || provider.prompt || provider.hasKey) return '本机翻译不使用 API 地址、模型、提示词或密钥。';
+    if (provider.baseUrl || provider.model || provider.prompt || provider.region || provider.hasKey) return '本机翻译不使用 API 地址、模型、提示词或密钥。';
     return null;
   }
   let url: URL;
@@ -43,6 +44,11 @@ export function validateProvider(provider: Provider): string | null {
   if (url.protocol !== 'https:' && !(url.protocol === 'http:' && local)) return '远程 API 必须使用 HTTPS；本机 localhost 服务可使用 HTTP。';
   if (url.username || url.password) return '请将密钥填写在 API 密钥字段中，不要放入 URL。';
   if (url.search || url.hash) return 'API Base URL 不能包含查询参数或片段。';
+  if (isNativeTranslation(provider.kind)) {
+    if (provider.baseUrl.replace(/\/+$/, '') !== TRANSLATION_NATIVE_URLS[provider.kind]) return '官方机器翻译服务使用固定 API 地址。';
+    if (provider.model || provider.prompt) return '官方机器翻译服务不使用模型名称或提示词。';
+  }
+  if (provider.region && (provider.kind !== 'microsoft' || !/^[a-z0-9-]{1,64}$/.test(provider.region))) return '仅微软翻译可填写资源地域，请使用控制台中的地域标识。';
   if (provider.kind === 'openai' && !provider.model.trim()) return 'OpenAI 兼容服务需要填写模型名称。';
   return null;
 }

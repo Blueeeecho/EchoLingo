@@ -1,0 +1,144 @@
+{
+  "schemaVersion": 1,
+  "date": "2026-10-28",
+  "stage": "new-source-awaiting-full-Windows-build",
+  "productBaseline": "295a0ce45296d4310ee1b6a7c8e536b5911e1625",
+  "fixtureHead": "5f4dbba",
+  "host": {
+    "rustPassed": 268,
+    "rustIgnored": 1,
+    "frontendUnitPassed": 84,
+    "frontendTypeAndBuildPassed": true,
+    "isolatedFakeIpcUiPassed": true,
+    "csharpPolicyAssertions": 109,
+    "realVendorCredentialsUsed": false
+  },
+  "baselineRuns": [
+    {
+      "fixtureCommit": "b7fccaa",
+      "summaryFile": "/Users/wwq/Documents/Codex/2026-10-24/ni-ne/work/selection-dismiss-official-apis-20261028/ci-b7fccaa/summary.json",
+      "summaryBytes": 18162,
+      "summarySha256": "6049d0a3e61dd1ae3095d29675d71f41d1ad5b5df351dc8441cd5bfa0d227341",
+      "actualProduct": "295a0ce",
+      "newSourceTested": false
+    },
+    {
+      "fixtureCommit": "4c69008",
+      "summaryFile": "/Users/wwq/Documents/Codex/2026-10-24/ni-ne/work/selection-dismiss-official-apis-20261028/ci-4c69008/summary.json",
+      "summaryBytes": 14493,
+      "summarySha256": "92bf5da6bb81bc77e6129a58fa5e93afea5e8dcf534a32c54eda894e94177e9f",
+      "actualProduct": "295a0ce",
+      "newSourceTested": false
+    },
+    {
+      "fixtureCommit": "e5adb8f",
+      "summaryFile": "/Users/wwq/Documents/Codex/2026-10-24/ni-ne/work/selection-dismiss-official-apis-20261028/ci-e5adb8f/summary.json",
+      "summaryBytes": 18255,
+      "summarySha256": "201c63cad3f2753197610feb01a509c756271df70903328d18335f4b528f3b5d",
+      "actualProduct": "295a0ce",
+      "newSourceTested": false
+    },
+    {
+      "fixtureCommit": "77898b1",
+      "summaryFile": "/Users/wwq/Documents/Codex/2026-10-24/ni-ne/work/selection-dismiss-official-apis-20261028/ci-77898b1/summary.json",
+      "summaryBytes": 13210,
+      "summarySha256": "b9ce77a053c988fd85e7756e3d19ee6cc21278c2fbbedddb46e2549e506f46b6",
+      "actualProduct": "295a0ce",
+      "newSourceTested": false
+    },
+    {
+      "fixtureCommit": "b169ccb",
+      "summaryFile": "/Users/wwq/Documents/Codex/2026-10-24/ni-ne/work/selection-dismiss-official-apis-20261028/ci-b169ccb/summary.json",
+      "summaryBytes": 7538,
+      "summarySha256": "d6e0d04aa03be04e30ee001f8594975ec3188097ebdedd2c36e08a517e1acf7d",
+      "actualProduct": "295a0ce",
+      "newSourceTested": false
+    },
+    {
+      "fixtureCommit": "5f4dbba",
+      "summaryFile": "/Users/wwq/Documents/Codex/2026-10-24/ni-ne/work/selection-dismiss-official-apis-20261028/ci-5f4dbba/summary.json",
+      "summaryBytes": 2530,
+      "summarySha256": "bc65e3a69fd4660e59cfa458667bff92fb7d349fda51c663040ef6e063ed4aea",
+      "actualProduct": "295a0ce",
+      "newSourceTested": false
+    }
+  ],
+  "newWindowsAcceptance": {
+    "runId": null,
+    "status": "not_dispatched",
+    "rawGates": 15,
+    "browserMouseCasesPlanned": 48,
+    "nonBrowserSources": [
+      "System32 Notepad",
+      "generated WPF",
+      "generated WinForms in existing rigorous matrix"
+    ],
+    "browserOcr": [
+      "Edge",
+      "Chrome"
+    ],
+    "shortcutRegressionRetained": true
+  },
+  "limitations": [
+    "Hosted Windows Server is not physical Windows 10/11 acceptance.",
+    "Original95/96 cold Edge failure and same-PID background clipboard publication counterexample remain open.",
+    "No real vendor account/API test; fixed guide URLs compared locally, not all opened online.",
+    "No new Mac signature/install/TCC/Keychain-rule/credential action and no stopped local VM restart."
+  ],
+  "files": {
+    "src-tauri/native/windows.ps1": {
+      "bytes": 184509,
+      "sha256": "32bca1c7b05f9b661193f874a223354ee4685439dc63787fb9518a76e7af4577"
+    },
+    "src-tauri/src/platform.rs": {
+      "bytes": 71980,
+      "sha256": "d25470fd81c1d105987f3c049f9100e22ee6adc1b70979ae359a633147d97b27"
+    },
+    "tests/windows-selection-notepad-fixture.cs": {
+      "bytes": 35081,
+      "sha256": "ed5ff4fdafa62d321877c39b056050010843306bf35e63b644125b1986d956e4"
+    },
+    "tests/windows-selection-policy-fixture.cs": {
+      "bytes": 24979,
+      "sha256": "89f5807017ecef0a269f12efad767e3ee837a60ef2379af2184df7e1ff189db3"
+    },
+    "src-tauri/src/translation_native.rs": {
+      "bytes": 17885,
+      "sha256": "c84f5e7f75b5c51c737eb5473c346da7ccad1c372a7e5927ff9e3ff36cab5649"
+    },
+    "src-tauri/src/translation_native_tests.rs": {
+      "bytes": 20979,
+      "sha256": "24b607675376179ca2903680415c291d9a33e932afec887325634b4ada1a7a66"
+    },
+    "src-tauri/src/ocr_additional.rs": {
+      "bytes": 12154,
+      "sha256": "01edc9883cb3ad53515663a6b7cbe6656c9fdbb5ea4430e57dea1d52ba076118"
+    },
+    "src-tauri/src/ocr_additional_tests.rs": {
+      "bytes": 20029,
+      "sha256": "55178f1ab4bcf2a272776c76c9c5c7336be8d26b4df0e9a5691d62d6fbd0c13e"
+    },
+    "src-tauri/src/service_links.rs": {
+      "bytes": 5730,
+      "sha256": "2405c244d7634c2ed04ab0c2f25dec9392ac5737138dfd1dbfa4b76b1e5c1de1"
+    },
+    "src/service-guides.ts": {
+      "bytes": 8515,
+      "sha256": "6784fec29d0624504b137dd278b8bf21a73c22d32cc3345b8d391e4d80f7c611"
+    },
+    "src-tauri/src/main.rs": {
+      "bytes": 153197,
+      "sha256": "96691788123a0f928a53ebfb529c9f6078d0ca4a9dd4a59c3dc62e907e007be1"
+    },
+    "docs/official-services.zh-CN.md": {
+      "bytes": 5713,
+      "sha256": "b992f3d6b8917e249dbc5957e8a93731483e68234ac3360804177e0b982fe718"
+    }
+  },
+  "credentialReview": {
+    "found": "New Youdao translation/OCR could collide for valid IDs with the legacy account/same-origin scope rules.",
+    "fixed": "New adapters use colon-separated translation/OCR namespaces and explicit domain scopes; existing seven protocols retain exact old accounts/scopes.",
+    "tests": "Four additional dummy-only tests cover collision/cache/metadata/delete isolation, all new adapter names, legacy compatibility, and kind-change invalidation.",
+    "rootReview": "Reviewed all load/cache/display/save/delete/invalidate call sites and frontend delete-before-settings order; no blocking finding."
+  }
+}

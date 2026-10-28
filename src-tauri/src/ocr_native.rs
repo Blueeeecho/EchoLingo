@@ -1,5 +1,6 @@
-//! Native Baidu OAuth and Tencent TC3 OCR. Credentials are supplied from the
-//! system credential store as one JSON object, never from provider settings.
+//! Native Baidu OAuth, Tencent TC3, Youdao v3 and Google Vision OCR. Credentials
+//! come from the system store (vendor pairs as JSON, Google as a raw API key),
+//! never from provider settings.
 //! The caller MUST provide its shared Client with redirects disabled. Native
 //! production destinations are fixed; only private test helpers accept URLs.
 
@@ -11,6 +12,13 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+#[path = "ocr_additional.rs"]
+mod additional;
+
+pub fn is_native(kind: &str) -> bool {
+    matches!(kind, "baidu" | "tencent" | "youdao" | "google")
+}
 
 const BAIDU_ROOT: &str = "https://aip.baidubce.com/";
 const TENCENT_ROOT: &str = "https://ocr.tencentcloudapi.com/";
@@ -36,6 +44,9 @@ struct TencentCredentials {
 }
 
 pub fn validate_provider(p: &OcrProvider) -> Result<(), String> {
+    if matches!(p.kind.as_str(), "youdao" | "google") {
+        return additional::validate_provider(p);
+    }
     let (root, actions): (&str, &[&str]) = match p.kind.as_str() {
         "baidu" => (BAIDU_ROOT, &["general_basic", "accurate_basic"]),
         "tencent" => (TENCENT_ROOT, &["GeneralBasicOCR", "GeneralAccurateOCR"]),
@@ -120,6 +131,7 @@ pub fn validate_credentials(kind: &str, secret: &str) -> Result<(), String> {
     match kind {
         "baidu" => baidu_credentials(secret).map(|_| ()),
         "tencent" => tencent_credentials(secret).map(|_| ()),
+        "youdao" | "google" => additional::validate_credentials(kind, secret),
         _ => Err("不支持的原生 OCR 服务类型".into()),
     }
 }
@@ -420,6 +432,7 @@ pub async fn recognize(
     validate_provider(p)?;
     validate_image(&p.kind, image)?;
     match p.kind.as_str() {
+        "youdao" | "google" => additional::recognize(client, p, secret, image).await,
         "baidu" => {
             baidu_at(
                 client,

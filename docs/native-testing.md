@@ -153,3 +153,18 @@ Record OS build, application version, permissions, installed OCR languages, disp
 - [Apple: CGEvent location](https://developer.apple.com/documentation/coregraphics/cgevent/location)
 - [Apple: Aggregate event counters](https://developer.apple.com/documentation/coregraphics/cgeventsource/counterforeventtype%28_%3Aeventtype%3A%29)
 - [Apple: Ordering a window without making it key](https://developer.apple.com/documentation/appkit/nswindow/orderfrontregardless%28%29)
+
+
+## Windows last-selection diagnostic export (2026-10-28 source)
+
+The new source keeps only the latest selected-text attempt's bounded numeric stage, identity-check outcome, elapsed time, cancellation and helper-response metadata in process memory. It does not retain the selected text, UIA values, window titles, clipboard payloads, screenshots or API keys. Normal shortcuts do not write a diagnostic file or enable the slower performance-trace mode.
+
+After reproducing an empty Alt+D popup, keep that same EchoLingo process running. From PowerShell, run the actual installed executable with the exact flag (adjust only the executable path if installed elsewhere):
+
+```powershell
+& "C:\你的实际安装目录\echolingo.exe" --selection-diagnostics
+```
+
+The existing single-instance route asks the resident process to export its cached result to `%APPDATA%\io.github.blueeeecho.echolingo\selection-diagnostics.json`. Do not restart first: a fresh process has no previous attempt and exports null/partial metadata. The JSON additionally contains application version, process ID, executable path and export time for binary identification. It does not start the helper, query selection or clipboard again, or request permissions. Another selected-text operation replaces the memory record; OCR/status checks do not.
+
+This exact Windows CLI route still needs runtime acceptance on the newly built executable. Host allowlist/filter tests and single-instance source review are not a Windows export pass. The equivalent macOS route already existed; this change does not install or sign the Mac app.

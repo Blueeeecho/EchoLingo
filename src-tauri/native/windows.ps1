@@ -119,6 +119,12 @@ public static class CaptureHealth {
     public static void Duration(string name,string start){long began;if(values.TryGetValue(start,out began))values[name]=Math.Max(0,clock.ElapsedMilliseconds-began);}
     public static void Set(string name, long value) { values[name] = value; }
     public static void Increment(string name) { long value;values.TryGetValue(name,out value);values[name]=value+1; }
+    public static void ResetSelection() {
+        List<string> old = new List<string>();
+        foreach (string key in values.Keys) if (key.StartsWith("selectionQuery", StringComparison.Ordinal)) old.Add(key);
+        foreach (string key in old) values.Remove(key);
+        values["selectionQueryCount"] = 0;
+    }
     public static Dictionary<string, long> Snapshot() { return new Dictionary<string, long>(values); }
 }
 
@@ -317,9 +323,12 @@ public static class SelectionCopyPolicy {
     // UIA again immediately before input so a newly focused password/confirmed
     // empty control cannot inherit the earlier unavailable-provider decision.
     public static string RevalidateAndCopy(Func<string> selection, Action requireContext, Func<string> copy) {
-        requireContext();
+        return RevalidateAndCopy(selection, requireContext, requireContext, copy);
+    }
+    public static string RevalidateAndCopy(Func<string> selection, Action beforeRead, Action afterRead, Func<string> copy) {
+        beforeRead();
         string direct = selection();
-        requireContext();
+        afterRead();
         return !String.IsNullOrWhiteSpace(direct) ? direct : copy();
     }
 
@@ -439,6 +448,10 @@ public static class EchoLingoNative {
         public int[] FocusIdentity;
         public int InitialRoleId;
         public readonly HashSet<int> SourceProcesses = new HashSet<int>();
+    }
+    sealed class InitialSelection {
+        public SelectionContext Context;
+        public string Text;
     }
     sealed class SelectionBudgetExceededException : InvalidOperationException {
         public SelectionBudgetExceededException() : base("SELECTION: The selected-text accessibility budget was exhausted; no further copy input was sent.") { }
@@ -609,6 +622,20 @@ public static class EchoLingoNative {
             throw;
         }
         finally {
+            // Retain only existing scalar trace observations for explicit
+            // field diagnostics. This never queries UIA or enables the
+            // opt-in deadline drain/performance path below.
+            CaptureHealth.Set("selectionQueryCount", Math.Min(10000000, index));
+            if (index <= 16) {
+                string healthPrefix = "selectionQuery" + index;
+                CaptureHealth.Set(healthPrefix + "Milliseconds", (long)Math.Max(0, Math.Min(10000000, outcomeMilliseconds < 0 ? elapsed.Elapsed.TotalMilliseconds : outcomeMilliseconds)));
+                CaptureHealth.Set(healthPrefix + "Stage", outcomeStage < 0 ? trace.Stage : outcomeStage);
+                CaptureHealth.Set(healthPrefix + "Depth", outcomeStage < 0 ? trace.Depth : outcomeDepth);
+                CaptureHealth.Set(healthPrefix + "IdentityCompared", trace.IdentityCompared);
+                CaptureHealth.Set(healthPrefix + "IdentityEqual", trace.IdentityEqual);
+                CaptureHealth.Set(healthPrefix + "RootWalkReason", trace.RootWalkReason);
+                CaptureHealth.Set(healthPrefix + "ExceptionKind", outcomeStage < 0 ? trace.ExceptionKind : outcomeExceptionKind);
+            }
             // Numeric diagnostics are opt-in. Only this calling thread writes
             // CapturePerformance, even when a timed-out provider is still busy.
             if (CapturePerformance.Enabled && index <= 16) {
@@ -735,18 +762,27 @@ public static class EchoLingoNative {
     static AutomationElement CurrentSelectionFocus(SelectionContext context) {
         List<AutomationElement> ancestors; return CurrentSelectionFocus(context, out ancestors);
     }
-    static SelectionContext CaptureSelectionContext() {
+    static SelectionContext NewSelectionContext() {
+        SelectionContext context = new SelectionContext();
+        context.Foreground = GetForegroundWindow();
+        uint nativePid; GetWindowThreadProcessId(context.Foreground, out nativePid);
+        if (nativePid != 0 && nativePid == ExcludedSourceProcessId)
+            throw new InvalidOperationException("NO_SELECTION: EchoLingo is the foreground application.");
+        if (nativePid != 0) context.SourceProcesses.Add(unchecked((int)nativePid));
+        return context;
+    }
+    static InitialSelection CaptureInitialSelection() {
         try {
-            SelectionContext context = new SelectionContext();
-            context.Foreground = GetForegroundWindow();
-            uint nativePid; GetWindowThreadProcessId(context.Foreground, out nativePid);
-            if (nativePid != 0 && nativePid == ExcludedSourceProcessId)
-                throw new InvalidOperationException("NO_SELECTION: EchoLingo is the foreground application.");
-            if (nativePid != 0) context.SourceProcesses.Add(unchecked((int)nativePid));
-            AutomationElement focused = CurrentSelectionFocus(context);
+            SelectionContext context = NewSelectionContext();
+            List<AutomationElement> ancestors;
+            AutomationElement focused = CurrentSelectionFocus(context, out ancestors);
             int process = focused.Cached.ProcessId;
             if (process != 0) context.SourceProcesses.Add(process);
-            return context;
+            // Read A from this exact, fully validated first focus/ancestor
+            // snapshot. A second FocusedElement call must never supply the
+            // initial selection after a provider rebuild or focus change.
+            string text = ReadValidatedSelection(context, focused, ancestors);
+            return new InitialSelection { Context = context, Text = text };
         } catch (ElementNotAvailableException error) {
             SelectionException(error);
             throw new InvalidOperationException("SELECTION: The source control is no longer available; select text and retry.");
@@ -763,6 +799,14 @@ public static class EchoLingoNative {
         try {
             List<AutomationElement> ancestors;
             AutomationElement focused = CurrentSelectionFocus(context, out ancestors);
+            return ReadValidatedSelection(context, focused, ancestors);
+        } catch (ElementNotAvailableException error) {
+            SelectionException(error);
+            throw new InvalidOperationException("SELECTION: The source control is no longer available; select text and retry.");
+        }
+    }
+    static string ReadValidatedSelection(SelectionContext context, AutomationElement focused, List<AutomationElement> ancestors) {
+        try {
             string focusedRole = focused.Cached.ControlType.ProgrammaticName;
             bool focusedEmpty = false, document = false;
             // Validate the complete bounded ancestor chain before reading any
@@ -851,6 +895,7 @@ public static class EchoLingoNative {
         return input;
     }
     public static string SelectedText() {
+        selectionQueryCount = 0; CaptureHealth.ResetSelection();
         using (SelectionSession session = new SelectionSession()) {
             string result = SelectedTextCore();
             // Cleanup/restore exceptions from the core take precedence. The
@@ -861,8 +906,9 @@ public static class EchoLingoNative {
     }
     static string SelectedTextCore() {
         NativeCancellation.ThrowIfRequested();
-        SelectionContext context = SelectionQuery(CaptureSelectionContext);
-        string direct = SelectionQuery(delegate { return AutomationSelection(context); });
+        InitialSelection initialSelection = SelectionQuery(CaptureInitialSelection);
+        SelectionContext context = initialSelection.Context;
+        string direct = initialSelection.Text;
         RequireSelectionContext(context);
         if (!String.IsNullOrWhiteSpace(direct)) return direct;
         DateTime deadline = DateTime.UtcNow.AddMilliseconds(1500);
@@ -890,6 +936,16 @@ public static class EchoLingoNative {
         }
         try {
             return SelectionCopyPolicy.RevalidateAndCopy(delegate { return SelectionQuery(delegate { return AutomationSelection(context); }); },
+                delegate {
+                    // AutomationSelection itself obtains and fully validates
+                    // the fresh focus before reading. Do not duplicate that
+                    // provider walk; keep the local preconditions here.
+                    NativeCancellation.ThrowIfRequested();
+                    RequireSelectionBudget();
+                    if (ModifiersDown())
+                        throw new InvalidOperationException("SELECTION: Foreground application or shortcut modifiers changed before copy; retry.");
+                    SelectionCopyPolicy.RequireCurrentSequence(initial, GetClipboardSequenceNumber());
+                },
                 delegate {
                     NativeCancellation.ThrowIfRequested();
                     RequireSelectionContext(context);

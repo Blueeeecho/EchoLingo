@@ -289,6 +289,66 @@ jobs:
           $output | Out-File "$env:RUNNER_TEMP/echolingo-selection-rigorous.log" -Encoding utf8
           $output | Write-Output
           exit $fixtureExit
+      - name: Windows real Notepad and generated WPF mouse selection
+        id: windows_nonbrowser_selection
+        if: runner.os == 'Windows'
+        continue-on-error: true
+        timeout-minutes: 5
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Continue'
+          $candidate = (Resolve-Path src-tauri/target/release/echolingo.exe).Path
+          $hash = (Get-FileHash -LiteralPath $candidate -Algorithm SHA256).Hash.ToLowerInvariant()
+          $bytes = (Get-Item -LiteralPath $candidate).Length
+          $global:LASTEXITCODE = 1
+          $notepad = @(& powershell.exe -NoProfile -STA -ExecutionPolicy Bypass -File tests/windows-selection-notepad-smoke.ps1 -ApplicationPath $candidate -ExpectedApplicationSha256 $hash -ExpectedApplicationBytes $bytes -IsolatedTestSession 2>&1)
+          $notepadExit = $LASTEXITCODE
+          $notepad | Out-File "$env:RUNNER_TEMP/echolingo-selection-notepad-mouse.log" -Encoding utf8
+          $notepad | Write-Output
+          $global:LASTEXITCODE = 1
+          $wpf = @(& powershell.exe -NoProfile -STA -ExecutionPolicy Bypass -File tests/windows-selection-wpf-smoke.ps1 -ApplicationPath $candidate -ExpectedApplicationSha256 $hash -ExpectedApplicationBytes $bytes -IsolatedTestSession 2>&1)
+          $wpfExit = $LASTEXITCODE
+          $wpf | Out-File "$env:RUNNER_TEMP/echolingo-selection-wpf.log" -Encoding utf8
+          $wpf | Write-Output
+          if ($notepadExit -ne 0 -or $wpfExit -ne 0) { throw 'Non-browser mouse selection failed or inconclusive.' }
+      - name: Windows Edge and Chrome same-page mouse selections with paced Alt+D
+        id: windows_browser_selection
+        if: runner.os == 'Windows'
+        continue-on-error: true
+        timeout-minutes: 12
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Continue'
+          $candidate = (Resolve-Path src-tauri/target/release/echolingo.exe).Path
+          $hash = (Get-FileHash -LiteralPath $candidate -Algorithm SHA256).Hash.ToLowerInvariant()
+          $bytes = (Get-Item -LiteralPath $candidate).Length
+          $global:LASTEXITCODE = 1
+          $output = @(& node tests/windows-browser-selection-smoke.mjs --application $candidate --expected-application-sha256 $hash --expected-application-bytes $bytes --selection-suite same-page-mouse --browser-order edge-first --shortcut-gesture paced 2>&1)
+          $code = $LASTEXITCODE
+          $output | Out-File "$env:RUNNER_TEMP/echolingo-browser-app-selection.log" -Encoding utf8
+          $output | Write-Output
+          exit $code
+      - name: Windows actual browser OCR and same-source outside click
+        id: windows_browser_ocr
+        if: runner.os == 'Windows'
+        continue-on-error: true
+        timeout-minutes: 6
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Continue'
+          $candidate = (Resolve-Path src-tauri/target/release/echolingo.exe).Path
+          $hash = (Get-FileHash -LiteralPath $candidate -Algorithm SHA256).Hash.ToLowerInvariant()
+          $bytes = (Get-Item -LiteralPath $candidate).Length
+          $outcomes = @{}
+          foreach ($browserKind in @('edge','chrome')) {
+            $global:LASTEXITCODE = 1
+            $output = @(& node tests/windows-browser-ocr-visibility-smoke.mjs --browser $browserKind --application $candidate --expected-application-sha256 $hash --expected-application-bytes $bytes 2>&1)
+            $outcomes[$browserKind] = $LASTEXITCODE
+            $output | Out-File "$env:RUNNER_TEMP/echolingo-browser-ocr-$browserKind.log" -Encoding utf8
+            $output | Write-Output
+          }
+          $outcomes | ConvertTo-Json -Compress
+          if (@($outcomes.Values | Where-Object { $_ -ne 0 }).Count -gt 0) { throw 'Actual browser OCR/outside click failed or inconclusive.' }
       - name: Windows exact query-worker, copy-ticket and shared-budget regressions
         id: windows_selection_internals
         if: runner.os == 'Windows'
@@ -342,6 +402,11 @@ jobs:
             ${{ runner.temp }}/echolingo-selection-budget.log
             ${{ runner.temp }}/echolingo-selection-query.log
             ${{ runner.temp }}/echolingo-selection-copy-ticket.log
+            ${{ runner.temp }}/echolingo-selection-notepad-mouse.log
+            ${{ runner.temp }}/echolingo-selection-wpf.log
+            ${{ runner.temp }}/echolingo-browser-app-selection.log
+            ${{ runner.temp }}/echolingo-browser-ocr-*.log
+            ${{ runner.temp }}/echolingo-browser-app-diagnostics-*/*
             ${{ runner.temp }}/EchoLingo-offline-engine-source.zip
             resources/offline-translation/manifest.json
             src-tauri/target/release/echolingo.exe
@@ -376,6 +441,9 @@ jobs:
             selectionDocument = '${{ steps.windows_selection_document.outcome }}'
             rigorousSelection = '${{ steps.windows_selection_rigorous.outcome }}'
             selectionInternals = '${{ steps.windows_selection_internals.outcome }}'
+            nonbrowserSelection = '${{ steps.windows_nonbrowser_selection.outcome }}'
+            actualBrowserSelection = '${{ steps.windows_browser_selection.outcome }}'
+            actualBrowserOcr = '${{ steps.windows_browser_ocr.outcome }}'
           }
           $taskOutcomes | ConvertTo-Json -Compress
           if (@($taskOutcomes.Values | Where-Object { $_ -ne 'success' }).Count -gt 0) {

@@ -1,4 +1,4 @@
-export type ProviderKind = 'system' | 'offline' | 'openai' | 'deepl' | 'libretranslate';
+export type ProviderKind = 'system' | 'offline' | 'baidu' | 'youdao' | 'microsoft' | 'openai' | 'deepl' | 'libretranslate';
 export type CredentialState = 'ready' | 'missing' | 'blocked' | 'unloaded';
 export interface SystemTranslationStatus {
   supported: boolean;
@@ -18,11 +18,12 @@ export interface Provider {
   model: string;
   enabled: boolean;
   prompt?: string;
+  region?: string;
   hasKey?: boolean;
   credentialState?: CredentialState;
 }
 export interface OcrProvider {
-  id: string; name: string; kind: 'baidu' | 'tencent' | 'openai-vision' | 'http-json'; baseUrl: string; model: string; prompt: string;
+  id: string; name: string; kind: 'baidu' | 'tencent' | 'youdao' | 'google' | 'openai-vision' | 'http-json'; baseUrl: string; model: string; prompt: string;
   authHeader: string; authPrefix: string; requestTemplate: string; responsePath: string; region?: string; hasKey?: boolean; credentialState?: CredentialState;
 }
 export type Action = 'selection' | 'capture' | 'ocr' | 'silentOcr' | 'input' | 'clipboard';

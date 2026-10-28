@@ -160,6 +160,54 @@ public static class WindowsSelectionPolicyFixture {
             Error(delegate { SelectionCopyPolicy.RevalidateAndCopy(delegate { return null; }, delegate { if (++changedContextChecks == 2) throw new InvalidOperationException("CLIPBOARD_CHANGED: synthetic race"); }, copy); }, "CLIPBOARD_CHANGED:");
             Assert(copyCalls == 1, "A context change during UIA revalidation blocks input");
 
+            int splitReads = 0, splitAfterChecks = 0, splitCopies = 0;
+            List<string> splitOrder = new List<string>();
+            Func<string> splitCopy = delegate { splitCopies++; splitOrder.Add("copy"); return "split fallback"; };
+            Error(delegate {
+                SelectionCopyPolicy.RevalidateAndCopy(
+                    delegate { splitReads++; return null; },
+                    delegate { throw new InvalidOperationException("CLIPBOARD_CHANGED: synthetic local precondition"); },
+                    delegate { splitAfterChecks++; }, splitCopy);
+            }, "CLIPBOARD_CHANGED:");
+            Assert(splitReads == 0 && splitAfterChecks == 0 && splitCopies == 0,
+                "A failed local before-read guard prevents provider reads, after-read checks and copy");
+            foreach (string blocked in new string[] { "PROTECTED:", "SELECTION:" }) {
+                splitReads = 0; splitAfterChecks = 0; splitCopies = 0; splitOrder.Clear();
+                Error(delegate {
+                    SelectionCopyPolicy.RevalidateAndCopy(
+                        delegate { splitReads++; splitOrder.Add("validated-read"); throw new InvalidOperationException(blocked + " synthetic fresh-focus validation"); },
+                        delegate { splitOrder.Add("before"); },
+                        delegate { splitAfterChecks++; splitOrder.Add("after"); }, splitCopy);
+                }, blocked);
+                Assert(splitReads == 1 && splitAfterChecks == 0 && splitCopies == 0
+                    && String.Join(",", splitOrder) == "before,validated-read",
+                    "A protected or unavailable validated selection stops before after-read checks and copy");
+            }
+            foreach (string freshSelection in new string[] { "current direct selection", null }) {
+                splitReads = 0; splitAfterChecks = 0; splitCopies = 0; splitOrder.Clear();
+                Error(delegate {
+                    SelectionCopyPolicy.RevalidateAndCopy(
+                        delegate { splitReads++; splitOrder.Add("validated-read"); return freshSelection; },
+                        delegate { splitOrder.Add("before"); },
+                        delegate { splitAfterChecks++; splitOrder.Add("after"); throw new InvalidOperationException("SELECTION: synthetic focus changed during read"); }, splitCopy);
+                }, "SELECTION:");
+                Assert(splitReads == 1 && splitAfterChecks == 1 && splitCopies == 0
+                    && String.Join(",", splitOrder) == "before,validated-read,after",
+                    "A failed after-read focus guard rejects both direct text and unavailable-provider copy");
+            }
+            foreach (string freshSelection in new string[] { "current direct selection", null }) {
+                splitReads = 0; splitAfterChecks = 0; splitCopies = 0; splitOrder.Clear();
+                string splitResult = SelectionCopyPolicy.RevalidateAndCopy(
+                    delegate { splitReads++; splitOrder.Add("validated-read"); return freshSelection; },
+                    delegate { splitOrder.Add("before"); },
+                    delegate { splitAfterChecks++; splitOrder.Add("after"); }, splitCopy);
+                bool fallback = freshSelection == null;
+                Assert(splitResult == (fallback ? "split fallback" : freshSelection)
+                    && splitReads == 1 && splitAfterChecks == 1 && splitCopies == (fallback ? 1 : 0)
+                    && String.Join(",", splitOrder) == (fallback ? "before,validated-read,after,copy" : "before,validated-read,after"),
+                    "Split guards retain exactly one validated read, one post-read check and at most one copy");
+            }
+
             CopyFixture normal = Stable();
             Assert(normal.Run(4) == "synthetic selected text 中文" && normal.Index == 2, "Clear then first coherent source-owned Unicode publication completes without a fixed stability sleep");
             Assert(normal.RestoreCount == 1 && normal.Clipboard == "original-rich-fixture", "Completed copy restores original data once");

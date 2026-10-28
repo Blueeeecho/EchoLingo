@@ -9,6 +9,8 @@ import { credentialScope } from './credential-scope';
 import { credentialMayExist, credentialStateOf, credentialStatusLabel } from './credential-state';
 import { inferProviderPreset, PROVIDER_PRESETS, qwenBaseUrl, qwenSettingsFromUrl } from './provider-presets';
 import type { ProviderPresetId, QwenRegion } from './provider-presets';
+import { buildTranslationCredential, isNativeTranslation, TRANSLATION_NATIVE_URLS } from './translation-credentials';
+import { renderServiceGuide, TRANSLATION_GUIDES } from './service-guides';
 import { invoke, isTauri } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 import { defaultSettings, errorMessage, userFacingError, filterHistory, LANGUAGES, languageName, MAX_TEXT_LENGTH, normalizeTimestamp, validateProvider, isLocalProvider } from './model';
@@ -641,13 +643,13 @@ function renderHistory(): void {
     item.append(reopen); list.append(item);
   }
 }
-function providerKindLabel(kind: ProviderKind): string { return { offline: '本机离线翻译', system: '系统翻译', openai: 'OpenAI 兼容', deepl: 'DeepL', libretranslate: 'LibreTranslate' }[kind]; }
+function providerKindLabel(kind: ProviderKind): string { return { offline: '本机离线翻译', system: '系统翻译', baidu: '百度翻译', youdao: '有道翻译', microsoft: '微软翻译', openai: 'OpenAI 兼容', deepl: 'DeepL', libretranslate: 'LibreTranslate' }[kind]; }
 function renderProviders(): void {
   const list = $('#provider-list'); list.replaceChildren();
   $<HTMLButtonElement>('#add-provider').disabled = !settingsReady || settings.providers.length >= 12;
   if (settings.providers.length === 0) {
     const empty = node('div', 'provider-empty');
-    empty.append(node('div', '', '还没有翻译服务。可检查系统翻译是否可用，或添加 OpenAI 兼容接口、DeepL 与 LibreTranslate。'), node('div', '', '你可以使用自己的服务商、模型和 API 地址。'));
+    empty.append(node('div', '', '还没有翻译服务。可使用本机翻译，或添加百度、有道、微软、DeepL 等官方机器翻译。'), node('div', '', '也保留大模型兼容接口与自托管服务。'));
     list.append(empty); return;
   }
   for (const provider of settings.providers) {
@@ -783,28 +785,37 @@ function renderSettings(): void {
   $<HTMLInputElement>('#save-history').checked = settings.saveHistory;
   $<HTMLInputElement>('#max-history').value = String(settings.maxHistory);
 }
+const providerSecretIds = ['provider-key', 'provider-baidu-app-id', 'provider-baidu-secret-key', 'provider-youdao-app-key', 'provider-youdao-app-secret', 'provider-microsoft-subscription-key'];
+const providerMissingPlaceholders: Record<string, string> = {
+  'provider-baidu-app-id': '控制台中的 APP ID', 'provider-baidu-secret-key': '与 APP ID 对应的密钥',
+  'provider-youdao-app-key': '应用 ID（AppKey）', 'provider-youdao-app-secret': '应用密钥（AppSecret）',
+  'provider-microsoft-subscription-key': 'Azure 资源密钥（Subscription Key）',
+};
+function clearProviderSecrets(): void { for (const id of providerSecretIds) $<HTMLInputElement>(`#${id}`).value = ''; }
 function updateProviderCredentialState(clearOnScopeChange = true): void {
   if (isLocalProvider($<HTMLSelectElement>('#provider-kind').value)) {
-    $<HTMLInputElement>('#provider-key').value = '';
+    clearProviderSecrets();
     providerLastInputScope = null;
     $('#remove-provider-key').hidden = true;
     return;
   }
   const scope = credentialScope($<HTMLSelectElement>('#provider-kind').value, $<HTMLInputElement>('#provider-url').value);
-  if (clearOnScopeChange && scope !== providerLastInputScope) $<HTMLInputElement>('#provider-key').value = '';
+  if (clearOnScopeChange && scope !== providerLastInputScope) clearProviderSecrets();
   providerLastInputScope = scope;
   const changed = providerScopeAtOpen !== null && scope !== providerScopeAtOpen;
   const state = changed ? 'missing' : providerCredentialStateAtOpen;
-  $<HTMLInputElement>('#provider-key').placeholder = {
+  const placeholder = {
     ready: '已保存匹配此服务的密钥；留空保持不变',
     missing: '输入当前服务的 API 密钥',
     blocked: '凭据读取受阻；留空保留已有凭据',
     unloaded: '凭据尚未读取；留空保留已有凭据',
   }[state];
+  for (const id of providerSecretIds) $<HTMLInputElement>(`#${id}`).placeholder = state === 'missing' ? providerMissingPlaceholders[id] ?? placeholder : placeholder;
   $('#provider-key-help').textContent = changed ? '服务协议或地址来源已改变，原密钥不会复用。请为当前服务配置新密钥；留空只保存未配置凭据的服务。'
     : state === 'ready' ? '留空保留匹配当前协议及地址来源的密钥。修改模型或同源路径无需重新填写。'
     : state === 'blocked' ? '此前未能读取凭据。可在服务列表中点击“测试连接”重试；留空保存不会删除已有凭据，也可填写新密钥替换。'
     : state === 'unloaded' ? '打开设置不会读取系统凭据。首次使用服务时再读取；留空保存不会删除已有凭据，也可填写新密钥替换。'
+    : isNativeTranslation($<HTMLSelectElement>('#provider-kind').value) ? '凭据单独写入系统凭据库。修改时请完整填写对应字段；保留已有凭据时请全部留空。'
     : 'API 密钥单独写入系统凭据库。LibreTranslate 按实例要求可不填。';
   $('#remove-provider-key').hidden = !credentialMayExist({ credentialState: state });
 }
@@ -812,6 +823,7 @@ function renderProviderPreset(applyValues = false): void {
   const preset = PROVIDER_PRESETS.find((item) => item.id === $<HTMLSelectElement>('#provider-preset').value) ?? PROVIDER_PRESETS.find((item) => item.id === 'openai')!;
   const qwen = preset.id === 'qwen';
   $('#provider-preset-help').textContent = preset.help;
+  renderServiceGuide($('#provider-service-guide'), TRANSLATION_GUIDES[preset.id]);
   $('#provider-qwen-region-field').hidden = !qwen;
   $('#provider-qwen-workspace-field').hidden = !qwen;
   if (!applyValues) return;
@@ -821,7 +833,7 @@ function renderProviderPreset(applyValues = false): void {
   $<HTMLInputElement>('#provider-url').value = qwen ? qwenBaseUrl($<HTMLSelectElement>('#provider-qwen-region').value as QwenRegion, $<HTMLInputElement>('#provider-qwen-workspace').value) : preset.baseUrl;
   $<HTMLInputElement>('#provider-model').value = preset.exampleModel;
   if (isLocalProvider(preset.kind)) $<HTMLTextAreaElement>('#provider-prompt').value = '';
-  $<HTMLInputElement>('#provider-key').value = '';
+  clearProviderSecrets();
   providerKindChanged(); updateProviderCredentialState();
 }
 function updateQwenBaseUrl(): void {
@@ -834,22 +846,31 @@ function providerKindChanged(useDefaults = false): void {
   const kind = $<HTMLSelectElement>('#provider-kind').value as ProviderKind;
   const openai = kind === 'openai';
   const system = isLocalProvider(kind);
-  $('#provider-url-field').hidden = system;
-  $('#provider-key-field').hidden = system;
+  const native = isNativeTranslation(kind);
+  $('#provider-url-field').hidden = system || native;
+  $('#provider-key-field').hidden = system || native;
+  $('#provider-baidu-credentials').hidden = kind !== 'baidu';
+  $('#provider-youdao-credentials').hidden = kind !== 'youdao';
+  $('#provider-microsoft-credentials').hidden = kind !== 'microsoft';
+  $('#provider-microsoft-region-field').hidden = kind !== 'microsoft';
+  $('#provider-key-help').hidden = system;
   $('#provider-model-field').hidden = !openai;
   $('#provider-prompt-field').hidden = !openai;
   $<HTMLInputElement>('#provider-model').required = openai;
   const url = $<HTMLInputElement>('#provider-url');
-  const defaults = { offline: '', system: '', openai: 'https://api.openai.com/v1', deepl: 'https://api-free.deepl.com/v2', libretranslate: 'http://127.0.0.1:5000' };
-  url.required = !system;
+  const defaults = { offline: '', system: '', ...TRANSLATION_NATIVE_URLS, openai: 'https://api.openai.com/v1', deepl: 'https://api-free.deepl.com/v2', libretranslate: 'http://127.0.0.1:5000' };
+  url.required = !system && !native;
   url.placeholder = defaults[kind];
   if (useDefaults) url.value = defaults[kind];
+  if (native) { url.value = TRANSLATION_NATIVE_URLS[kind]; $<HTMLInputElement>('#provider-model').value = ''; $<HTMLTextAreaElement>('#provider-prompt').value = ''; }
+  if (kind !== 'microsoft') $<HTMLInputElement>('#provider-microsoft-region').value = '';
   if (system) {
-    url.value = ''; $<HTMLInputElement>('#provider-model').value = ''; $<HTMLTextAreaElement>('#provider-prompt').value = ''; $<HTMLInputElement>('#provider-key').value = '';
+    url.value = ''; $<HTMLInputElement>('#provider-model').value = ''; $<HTMLTextAreaElement>('#provider-prompt').value = ''; clearProviderSecrets();
   }
   $('#provider-url-help').textContent = {
     offline: '内置离线翻译无需 API 地址。',
     system: '系统翻译无需 API 地址。',
+    baidu: '使用百度翻译官方固定端点。', youdao: '使用有道文本翻译官方固定端点。', microsoft: '使用 Azure Translator 全球固定端点。',
     openai: '填写 API 基础地址，无需包含 /chat/completions。DeepSeek、Ollama 等请填写对应地址。',
     deepl: '免费账户通常使用 api-free.deepl.com，付费账户使用 api.deepl.com。无需包含 /v2/translate。',
     libretranslate: '填写你使用的 LibreTranslate 服务地址，无需包含 /translate。',
@@ -912,17 +933,18 @@ function openProviderDialog(provider?: Provider): void {
   providerCredentialStateAtOpen = credentialStateOf(provider);
   providerHadKeyAtOpen = !isLocalProvider(provider?.kind ?? '') && providerCredentialStateAtOpen === 'ready'; providerLastInputScope = providerScopeAtOpen;
   $<HTMLFormElement>('#provider-form').reset();
-  $<HTMLSelectElement>('#provider-preset').value = provider ? inferProviderPreset(provider) : 'openai';
+  $<HTMLSelectElement>('#provider-preset').value = provider ? inferProviderPreset(provider) : 'baidu';
   const qwenSettings = qwenSettingsFromUrl(provider?.baseUrl ?? '');
   $<HTMLSelectElement>('#provider-qwen-region').value = qwenSettings.region;
   $<HTMLInputElement>('#provider-qwen-workspace').value = qwenSettings.workspaceId;
   $('#provider-dialog-title').textContent = provider ? '编辑翻译服务' : '添加翻译服务';
-  $<HTMLInputElement>('#provider-name').value = provider?.name ?? 'OpenAI 兼容服务';
-  $<HTMLSelectElement>('#provider-kind').value = provider?.kind ?? 'openai';
-  $<HTMLInputElement>('#provider-url').value = provider?.baseUrl ?? 'https://api.openai.com/v1';
-  $<HTMLInputElement>('#provider-model').value = provider?.model ?? 'gpt-4o-mini';
+  $<HTMLInputElement>('#provider-name').value = provider?.name ?? '百度翻译';
+  $<HTMLSelectElement>('#provider-kind').value = provider?.kind ?? 'baidu';
+  $<HTMLInputElement>('#provider-url').value = provider?.baseUrl ?? TRANSLATION_NATIVE_URLS.baidu;
+  $<HTMLInputElement>('#provider-model').value = provider?.model ?? '';
   $<HTMLTextAreaElement>('#provider-prompt').value = provider?.prompt ?? '';
-  $<HTMLInputElement>('#provider-key').value = '';
+  $<HTMLInputElement>('#provider-microsoft-region').value = provider?.region ?? '';
+  clearProviderSecrets();
   $<HTMLInputElement>('#provider-enabled').checked = provider?.enabled ?? true;
   $('#provider-error').hidden = true;
   providerKindChanged(); renderProviderPreset(); updateProviderCredentialState(false);
@@ -930,7 +952,7 @@ function openProviderDialog(provider?: Provider): void {
 }
 function closeProviderDialog(): void {
   if (providerSaving) { toast('正在保存服务，请稍候。'); return; }
-  $<HTMLInputElement>('#provider-key').value = '';
+  clearProviderSecrets();
   closeModal(providerDialog);
   editingProviderId = null; providerScopeAtOpen = null; providerLastInputScope = null; providerHadKeyAtOpen = false; providerCredentialStateAtOpen = 'missing';
 }
@@ -945,13 +967,16 @@ async function saveProvider(event: SubmitEvent): Promise<void> {
   event.preventDefault();
   if (providerSaving) return;
   if (!desktop) { toast('浏览器预览不保存 API 密钥。请在桌面应用中配置真实服务。'); return; }
+  const kind = $<HTMLSelectElement>('#provider-kind').value as ProviderKind;
+  const native = isNativeTranslation(kind);
   const provider: Provider = {
     id: editingProviderId ?? crypto.randomUUID(), name: $<HTMLInputElement>('#provider-name').value.trim(),
-    kind: $<HTMLSelectElement>('#provider-kind').value as ProviderKind,
-    baseUrl: $<HTMLInputElement>('#provider-url').value.trim().replace(/\/+$/, ''),
-    model: $<HTMLInputElement>('#provider-model').value.trim(),
+    kind,
+    baseUrl: native ? TRANSLATION_NATIVE_URLS[kind] : $<HTMLInputElement>('#provider-url').value.trim().replace(/\/+$/, ''),
+    model: native ? '' : $<HTMLInputElement>('#provider-model').value.trim(),
     enabled: $<HTMLInputElement>('#provider-enabled').checked,
-    prompt: $<HTMLTextAreaElement>('#provider-prompt').value.trim(),
+    prompt: native ? '' : $<HTMLTextAreaElement>('#provider-prompt').value.trim(),
+    region: kind === 'microsoft' ? $<HTMLInputElement>('#provider-microsoft-region').value.trim() : '',
     hasKey: !isLocalProvider($<HTMLSelectElement>('#provider-kind').value) && providerHadKeyAtOpen && credentialScope($<HTMLSelectElement>('#provider-kind').value, $<HTMLInputElement>('#provider-url').value) === providerScopeAtOpen,
   };
   let validation = validateProvider(provider);
@@ -962,9 +987,14 @@ async function saveProvider(event: SubmitEvent): Promise<void> {
   }
   const errorOutput = $('#provider-error');
   if (validation) { errorOutput.textContent = validation; errorOutput.hidden = false; return; }
+  const credential = buildTranslationCredential(kind, {
+    appId: $<HTMLInputElement>('#provider-baidu-app-id').value, secretKey: $<HTMLInputElement>('#provider-baidu-secret-key').value,
+    appKey: $<HTMLInputElement>('#provider-youdao-app-key').value, appSecret: $<HTMLInputElement>('#provider-youdao-app-secret').value,
+    subscriptionKey: $<HTMLInputElement>('#provider-microsoft-subscription-key').value, genericKey: $<HTMLInputElement>('#provider-key').value,
+  });
+  if (credential.error) { errorOutput.textContent = credential.error; errorOutput.hidden = false; return; }
   setProviderSaving(true);
-  const keyInput = $<HTMLInputElement>('#provider-key');
-  const key = keyInput.value.trim();
+  const key = credential.key;
   try {
     await updateSettings((next) => {
       const index = next.providers.findIndex((item) => item.id === provider.id);
@@ -975,7 +1005,7 @@ async function saveProvider(event: SubmitEvent): Promise<void> {
       try { await invoke('set_api_key', { providerId: provider.id, key }); }
       catch (error) { throw new Error(`服务已保存，但密钥未能存入系统凭据库：${errorMessage(error)}`); }
     }
-    keyInput.value = '';
+    clearProviderSecrets();
     settings = await invoke<Settings>('get_settings');
     renderSettings(); setProviderSaving(false); closeProviderDialog(); toast('翻译服务已保存。');
   } catch (error) { errorOutput.textContent = errorMessage(error); errorOutput.hidden = false; }
@@ -1208,6 +1238,12 @@ $('#add-provider').addEventListener('click', () => openProviderDialog());
 $('#provider-kind').addEventListener('change', () => { providerKindChanged(true); updateProviderCredentialState(); });
 $('#provider-url').addEventListener('input', () => updateProviderCredentialState());
 $('#provider-preset').addEventListener('change', () => renderProviderPreset(true));
+document.addEventListener('click', (event) => {
+  const link = event.target instanceof Element ? event.target.closest<HTMLAnchorElement>('a[data-service-link]') : null;
+  if (!desktop || !link) return;
+  event.preventDefault();
+  run(() => invoke('open_service_link', { url: link.href }));
+});
 $('#provider-qwen-region').addEventListener('change', updateQwenBaseUrl);
 $('#provider-qwen-workspace').addEventListener('change', updateQwenBaseUrl);
 $('#close-provider-dialog').addEventListener('click', closeProviderDialog);
@@ -1221,7 +1257,7 @@ $('#remove-provider-key').addEventListener('click', () => run(async () => {
   try {
     await invoke('delete_api_key', { providerId });
     settings = await invoke<Settings>('get_settings'); renderProviders();
-    providerHadKeyAtOpen = false; providerCredentialStateAtOpen = 'missing'; updateProviderCredentialState(false);
+    clearProviderSecrets(); providerHadKeyAtOpen = false; providerCredentialStateAtOpen = 'missing'; updateProviderCredentialState(false);
     toast('已从系统凭据库移除密钥。');
   } finally { setProviderSaving(false); }
 }));
@@ -1291,7 +1327,11 @@ window.addEventListener('beforeunload', () => { shortcutEditor.dispose(); cancel
 
 async function initialize(): Promise<void> {
   const presetSelect = $<HTMLSelectElement>('#provider-preset');
-  for (const preset of PROVIDER_PRESETS) { const option = node('option', '', preset.label); option.value = preset.id as ProviderPresetId; presetSelect.append(option); }
+  for (const [label, kinds] of [['本机翻译', ['system', 'offline']], ['官方机器翻译', ['baidu', 'youdao', 'microsoft', 'deepl', 'libretranslate']], ['大模型 · 兼容接口', ['openai']]] as const) {
+    const group = node('optgroup'); group.label = label;
+    for (const preset of PROVIDER_PRESETS.filter((item) => (kinds as readonly string[]).includes(item.kind))) { const option = node('option', '', preset.label); option.value = preset.id as ProviderPresetId; group.append(option); }
+    presetSelect.append(group);
+  }
   if (!desktop) {
     $('#preview-banner').hidden = false;
     status('界面预览 · 桌面能力未连接');

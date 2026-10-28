@@ -9,6 +9,7 @@ mod ocr;
 mod ocr_native;
 mod offline_translation;
 mod platform;
+mod service_links;
 mod shortcut_bindings;
 mod shortcut_control;
 mod shortcut_probe;
@@ -168,17 +169,17 @@ fn configure_shortcuts_requested(args: &[String]) -> bool {
 }
 
 const PERMISSION_DIAGNOSTICS_FLAG: &str = "--permission-diagnostics";
-#[cfg(any(target_os = "macos", test))]
+#[cfg(any(target_os = "macos", target_os = "windows", test))]
 const SELECTION_DIAGNOSTICS_FLAG: &str = "--selection-diagnostics";
 
-#[cfg(any(target_os = "macos", test))]
+#[cfg(any(target_os = "macos", target_os = "windows", test))]
 fn selection_diagnostics_requested(args: &[String]) -> bool {
     args.iter()
         .skip(1)
         .any(|argument| argument == SELECTION_DIAGNOSTICS_FLAG)
 }
 
-#[cfg(any(target_os = "macos", test))]
+#[cfg(any(target_os = "macos", target_os = "windows", test))]
 fn selection_diagnostic_payload(diagnostics: serde_json::Value) -> serde_json::Value {
     serde_json::json!({
         "diagnostic": "last-selection-attempt",
@@ -190,9 +191,9 @@ fn selection_diagnostic_payload(diagnostics: serde_json::Value) -> serde_json::V
     })
 }
 
-// An explicit support read, not hotkey logging: only Swift's bounded metadata
-// is copied to this fixed destination; never source text or clipboard contents.
-#[cfg(target_os = "macos")]
+// Explicitly export only the process's bounded native metadata to this fixed
+// destination. No source/clipboard content and no new selection operation.
+#[cfg(any(target_os = "macos", target_os = "windows"))]
 fn write_selection_diagnostics(app: &tauri::AppHandle) -> Result<(), String> {
     static WRITE: Mutex<()> = Mutex::new(());
     let _write = locked(&WRITE)?;
@@ -241,7 +242,7 @@ fn explicit_launch(app: &tauri::AppHandle, args: &[String]) {
         request_shortcut_settings(app);
         return;
     }
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
     if selection_diagnostics_requested(args) {
         let _ = write_selection_diagnostics(app);
         return;
@@ -316,6 +317,34 @@ fn credential_scope(kind: &str, base_url: &str) -> Result<String, String> {
         validate_url(base_url)?.origin().ascii_serialization()
     ))
 }
+fn translation_secret_id(p: &Provider) -> String {
+    if translation::native::is_native(&p.kind) {
+        // Colons are forbidden in provider IDs, so new accounts cannot collide
+        // with any released translation ID or legacy OCR account spelling.
+        format!("translation:{}:{}", p.kind, p.id)
+    } else {
+        p.id.clone()
+    }
+}
+fn translation_credential_scope(p: &Provider) -> Result<String, String> {
+    let scope = credential_scope(&p.kind, &p.base_url)?;
+    Ok(if translation::native::is_native(&p.kind) {
+        format!("translation|{scope}")
+    } else {
+        scope
+    })
+}
+fn new_ocr_credential_namespace(kind: &str) -> bool {
+    matches!(kind, "youdao" | "google")
+}
+fn ocr_credential_scope(p: &ocr::OcrProvider) -> Result<String, String> {
+    let scope = credential_scope(&p.kind, &p.base_url)?;
+    Ok(if new_ocr_credential_namespace(&p.kind) {
+        format!("ocr|{scope}")
+    } else {
+        scope
+    })
+}
 fn decode_credential(stored: &str, scope: &str) -> Result<String, String> {
     let envelope: CredentialEnvelope = serde_json::from_str(stored)
         .map_err(|_| "凭据格式已更新，请在服务设置中重新填写密钥".to_string())?;
@@ -333,14 +362,14 @@ fn encode_credential(scope: String, secret: String) -> Result<String, String> {
 }
 fn translation_credential_key(p: &Provider) -> Result<credential_cache::CredentialKey, String> {
     Ok(credential_cache::CredentialKey::new(
-        &p.id,
-        credential_scope(&p.kind, &p.base_url)?,
+        translation_secret_id(p),
+        translation_credential_scope(p)?,
     ))
 }
 fn ocr_credential_key(p: &ocr::OcrProvider) -> Result<credential_cache::CredentialKey, String> {
     Ok(credential_cache::CredentialKey::new(
         ocr_secret_id(p),
-        credential_scope(&p.kind, &p.base_url)?,
+        ocr_credential_scope(p)?,
     ))
 }
 fn load_key(
@@ -352,10 +381,10 @@ fn load_key(
     }
     cached_credential(
         cache,
-        &p.id,
-        &credential_scope(&p.kind, &p.base_url)?,
+        &translation_secret_id(p),
+        &translation_credential_scope(p)?,
         || {
-            match secret_entry(&p.id)?.get_password() {
+            match secret_entry(&translation_secret_id(p))?.get_password() {
         Ok(key) => Ok(Some(key)),
         Err(keyring::Error::NoEntry) => Ok(None),
         Err(_) => Err("API 密钥读取未完成，本次运行不会反复申请。请在设置中点击“测试连接”主动重试，或重新保存密钥".into()),
@@ -368,18 +397,13 @@ fn load_ocr_key(
     cache: &credential_cache::CredentialCache<String>,
     p: &ocr::OcrProvider,
 ) -> Result<String, String> {
-    cached_credential(
-        cache,
-        &ocr_secret_id(p),
-        &credential_scope(&p.kind, &p.base_url)?,
-        || {
-            match secret_entry(&ocr_secret_id(p))?.get_password() {
+    cached_credential(cache, &ocr_secret_id(p), &ocr_credential_scope(p)?, || {
+        match secret_entry(&ocr_secret_id(p))?.get_password() {
         Ok(key) => Ok(Some(key)),
         Err(keyring::Error::NoEntry) => Ok(None),
         Err(_) => Err("OCR 凭据读取未完成，本次运行不会反复申请。请在设置中点击“测试连接”主动重试，或重新保存凭据".into()),
     }
-        },
-    )
+    })
 }
 
 fn cached_credential(
@@ -506,7 +530,24 @@ async fn load_ocr_key_async(
 fn ocr_secret_id(p: &ocr::OcrProvider) -> String {
     // Credentials for a different protocol must never be sent to a new service
     // just because the user edited an existing service entry.
-    format!("ocr-{}-{}", p.id, p.kind)
+    if new_ocr_credential_namespace(&p.kind) {
+        format!("ocr:{}:{}", p.kind, p.id)
+    } else {
+        format!("ocr-{}-{}", p.id, p.kind)
+    }
+}
+fn ocr_deletion_accounts(p: &ocr::OcrProvider) -> Vec<String> {
+    if new_ocr_credential_namespace(&p.kind) {
+        return vec![ocr_secret_id(p)];
+    }
+    // Preserve released protocol cleanup, without guessing any new namespace
+    // or removing a colliding legacy account on behalf of a new OCR service.
+    let mut accounts: Vec<_> = ["openai-vision", "http-json", "baidu", "tencent"]
+        .iter()
+        .map(|kind| format!("ocr-{}-{kind}", p.id))
+        .collect();
+    accounts.push(format!("ocr-{}", p.id));
+    accounts
 }
 #[tauri::command]
 fn set_ocr_api_key(state: State<AppState>, provider_id: String, key: String) -> Result<(), String> {
@@ -519,16 +560,13 @@ fn set_ocr_api_key(state: State<AppState>, provider_id: String, key: String) -> 
     if key.is_empty() || key.len() > 8192 {
         return Err("OCR API 凭据为空或超过长度上限".into());
     }
-    if matches!(provider.kind.as_str(), "baidu" | "tencent") {
+    if ocr_native::is_native(&provider.kind) {
         ocr_native::validate_credentials(&provider.kind, &key)?;
     } else if key.contains(['\r', '\n']) {
         return Err("OCR API 密钥不能包含换行".into());
     }
     let cache_key = ocr_credential_key(&provider)?;
-    let stored = encode_credential(
-        credential_scope(&provider.kind, &provider.base_url)?,
-        key.clone(),
-    )?;
+    let stored = encode_credential(ocr_credential_scope(&provider)?, key.clone())?;
     secret_entry(&ocr_secret_id(&provider))?
         .set_password(&stored)
         .map_err(|_| "无法将 OCR 密钥保存到系统凭据库".to_string())?;
@@ -536,11 +574,16 @@ fn set_ocr_api_key(state: State<AppState>, provider_id: String, key: String) -> 
 }
 #[tauri::command]
 fn delete_ocr_api_key(state: State<AppState>, provider_id: String) -> Result<(), String> {
-    for kind in ["openai-vision", "http-json", "baidu", "tencent"] {
-        delete_stored_key(&state.credentials, &format!("ocr-{provider_id}-{kind}"))?;
+    let provider = locked(&state.settings)?
+        .ocr_providers
+        .iter()
+        .find(|p| p.id == provider_id)
+        .cloned()
+        .ok_or("OCR 服务不存在")?;
+    for account in ocr_deletion_accounts(&provider) {
+        delete_stored_key(&state.credentials, &account)?;
     }
-    // Remove the unscoped entry used by development builds as well.
-    delete_stored_key(&state.credentials, &format!("ocr-{provider_id}"))
+    Ok(())
 }
 #[tauri::command]
 async fn test_ocr_provider(
@@ -881,17 +924,16 @@ fn changed_credential_accounts(old: &Settings, next: &Settings) -> Vec<String> {
         }
         if !next.providers.iter().any(|candidate| {
             candidate.id == provider.id
-                && credential_scope(&candidate.kind, &candidate.base_url).ok()
-                    == credential_scope(&provider.kind, &provider.base_url).ok()
+                && translation_credential_scope(candidate).ok()
+                    == translation_credential_scope(provider).ok()
         }) {
-            changed.insert(provider.id.clone());
+            changed.insert(translation_secret_id(provider));
         }
     }
     for provider in &old.ocr_providers {
         if !next.ocr_providers.iter().any(|candidate| {
             candidate.id == provider.id
-                && credential_scope(&candidate.kind, &candidate.base_url).ok()
-                    == credential_scope(&provider.kind, &provider.base_url).ok()
+                && ocr_credential_scope(candidate).ok() == ocr_credential_scope(provider).ok()
         }) {
             changed.insert(ocr_secret_id(provider));
         }
@@ -943,26 +985,28 @@ fn set_api_key(state: State<AppState>, provider_id: String, key: String) -> Resu
     if key.is_empty() || key.len() > 8192 || key.contains(['\r', '\n']) {
         return Err("API 密钥为空、过长或包含换行".into());
     }
+    if translation::native::is_native(&provider.kind) {
+        translation::native::validate_credentials(&provider.kind, &key)?;
+    }
     let cache_key = translation_credential_key(&provider)?;
-    let stored = encode_credential(
-        credential_scope(&provider.kind, &provider.base_url)?,
-        key.clone(),
-    )?;
-    secret_entry(&provider_id)?
+    let stored = encode_credential(translation_credential_scope(&provider)?, key.clone())?;
+    secret_entry(&translation_secret_id(&provider))?
         .set_password(&stored)
         .map_err(|_| "无法保存到系统凭据库；密钥没有保存到文件".to_string())?;
     state.credentials.store(&cache_key, Ok(key))
 }
 #[tauri::command]
 fn delete_api_key(state: State<AppState>, provider_id: String) -> Result<(), String> {
-    if locked(&state.settings)?
+    let provider = locked(&state.settings)?
         .providers
         .iter()
-        .any(|p| p.id == provider_id && local_translation_provider(&p.kind))
-    {
+        .find(|p| p.id == provider_id)
+        .cloned()
+        .ok_or("翻译服务不存在")?;
+    if local_translation_provider(&provider.kind) {
         return Err("本机翻译不使用 API 密钥".into());
     }
-    delete_stored_key(&state.credentials, &provider_id)
+    delete_stored_key(&state.credentials, &translation_secret_id(&provider))
 }
 fn delete_stored_key(
     cache: &credential_cache::CredentialCache<String>,
@@ -2412,6 +2456,13 @@ async fn open_permission_settings(kind: String) -> Result<(), String> {
         .map_err(|_| "无法打开系统权限设置".to_string())?
 }
 
+#[tauri::command]
+async fn open_service_link(url: String) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || service_links::open(&url))
+        .await
+        .map_err(|_| "无法打开服务配置文档".to_string())?
+}
+
 fn tray(app: &tauri::AppHandle) -> tauri::Result<()> {
     use tauri::menu::{Menu, MenuItem, PredefinedMenuItem};
     let definitions = [
@@ -2589,7 +2640,7 @@ fn main() {
             if permission_diagnostics_requested(&std::env::args().collect::<Vec<_>>()) {
                 let _ = write_permission_diagnostics(app.handle());
             }
-            #[cfg(target_os = "macos")]
+            #[cfg(any(target_os = "macos", target_os = "windows"))]
             if selection_diagnostics_requested(&std::env::args().collect::<Vec<_>>()) {
                 let _ = write_selection_diagnostics(app.handle());
             }
@@ -2651,7 +2702,8 @@ fn main() {
             get_system_translation_status,
             prepare_system_translation,
             request_permission,
-            open_permission_settings
+            open_permission_settings,
+            open_service_link
         ])
         .build(tauri::generate_context!())
         .expect("EchoLingo could not start");
@@ -3565,6 +3617,197 @@ mod tests {
         }
         // Unscoped development credentials must be re-entered, never guessed.
         assert!(decode_credential("old-unscoped-secret", &scope).is_err());
+    }
+    #[test]
+    fn new_official_credentials_separate_translation_and_ocr_legacy_id_collisions() {
+        let mt: Provider = serde_json::from_value(serde_json::json!({"id":"ocr-x-youdao","name":"MT fixture","kind":"youdao","baseUrl":"https://openapi.youdao.com/api","enabled":true})).unwrap();
+        let image: ocr::OcrProvider = serde_json::from_value(serde_json::json!({"id":"x","name":"OCR fixture","kind":"youdao","baseUrl":"https://openapi.youdao.com/ocrapi","model":"general"})).unwrap();
+        let mut settings = Settings {
+            providers: vec![mt.clone()],
+            ocr_providers: vec![image.clone()],
+            ..Settings::default()
+        };
+        assert!(validate_settings(&settings).is_ok());
+        // This valid pair collided under the former account and scope rules.
+        assert_eq!(mt.id, format!("ocr-{}-{}", image.id, image.kind));
+        assert_eq!(
+            credential_scope(&mt.kind, &mt.base_url).unwrap(),
+            credential_scope(&image.kind, &image.base_url).unwrap()
+        );
+        assert_eq!(
+            translation_secret_id(&mt),
+            "translation:youdao:ocr-x-youdao"
+        );
+        assert_eq!(ocr_secret_id(&image), "ocr:youdao:x");
+        let mt_scope = translation_credential_scope(&mt).unwrap();
+        let image_scope = ocr_credential_scope(&image).unwrap();
+        assert_ne!(mt_scope, image_scope);
+        let stored = encode_credential(mt_scope, "dummy-translation-secret".into()).unwrap();
+        assert!(decode_credential(&stored, &image_scope).unwrap().is_empty());
+
+        let cache = credential_cache::CredentialCache::default();
+        let mt_key = translation_credential_key(&mt).unwrap();
+        let image_key = ocr_credential_key(&image).unwrap();
+        cache
+            .store(&mt_key, Ok("dummy-translation-secret".into()))
+            .unwrap();
+        assert_eq!(
+            credential_display_state(&cache, &image_key),
+            (false, "unloaded")
+        );
+        cache
+            .store(&image_key, Ok("dummy-ocr-secret".into()))
+            .unwrap();
+        let snapshot = settings_snapshot(&settings, &cache).unwrap();
+        assert_eq!(snapshot["providers"][0]["credentialState"], "ready");
+        assert_eq!(snapshot["ocrProviders"][0]["credentialState"], "ready");
+        assert!(!snapshot.to_string().contains("dummy-"));
+        let deletion = ocr_deletion_accounts(&image);
+        assert_eq!(deletion, vec!["ocr:youdao:x"]);
+        for account in deletion {
+            cache.delete_account(&account, String::new()).unwrap();
+        }
+        assert_eq!(credential_display_state(&cache, &mt_key), (true, "ready"));
+        assert_eq!(
+            credential_display_state(&cache, &image_key),
+            (false, "missing")
+        );
+        settings.providers[0].id = "translation:youdao:x".into();
+        assert!(validate_settings(&settings).is_err());
+    }
+    #[test]
+    fn new_official_credential_namespaces_cover_all_added_adapters() {
+        for (kind, url) in [
+            (
+                "baidu",
+                "https://fanyi-api.baidu.com/api/trans/vip/translate",
+            ),
+            ("youdao", "https://openapi.youdao.com/api"),
+            (
+                "microsoft",
+                "https://api.cognitive.microsofttranslator.com/",
+            ),
+        ] {
+            let p: Provider = serde_json::from_value(serde_json::json!({"id":"qa-id","name":"Fixture","kind":kind,"baseUrl":url,"enabled":false})).unwrap();
+            assert_eq!(
+                translation_secret_id(&p),
+                format!("translation:{kind}:qa-id")
+            );
+            assert_eq!(
+                translation_credential_scope(&p).unwrap(),
+                format!("translation|{}", credential_scope(kind, url).unwrap())
+            );
+            assert!(
+                translation_credential_key(&p).unwrap()
+                    == credential_cache::CredentialKey::new(
+                        translation_secret_id(&p),
+                        translation_credential_scope(&p).unwrap()
+                    )
+            );
+        }
+        for (kind, url) in [
+            ("youdao", "https://openapi.youdao.com/ocrapi"),
+            ("google", "https://vision.googleapis.com/v1/images:annotate"),
+        ] {
+            let p: ocr::OcrProvider = serde_json::from_value(
+                serde_json::json!({"id":"qa-id","name":"Fixture","kind":kind,"baseUrl":url}),
+            )
+            .unwrap();
+            let account = format!("ocr:{kind}:qa-id");
+            assert_eq!(ocr_secret_id(&p), account);
+            assert_eq!(
+                ocr_credential_scope(&p).unwrap(),
+                format!("ocr|{}", credential_scope(kind, url).unwrap())
+            );
+            assert_eq!(ocr_deletion_accounts(&p), vec![account]);
+            assert!(
+                ocr_credential_key(&p).unwrap()
+                    == credential_cache::CredentialKey::new(
+                        ocr_secret_id(&p),
+                        ocr_credential_scope(&p).unwrap()
+                    )
+            );
+        }
+    }
+    #[test]
+    fn released_credential_accounts_and_scopes_keep_exact_compatibility() {
+        for kind in ["openai", "deepl", "libretranslate"] {
+            let p: Provider = serde_json::from_value(serde_json::json!({"id":"legacy-id","name":"Fixture","kind":kind,"baseUrl":"https://example.invalid/v1","enabled":false})).unwrap();
+            assert_eq!(translation_secret_id(&p), "legacy-id");
+            assert_eq!(
+                translation_credential_scope(&p).unwrap(),
+                format!("{kind}|https://example.invalid")
+            );
+        }
+        for kind in ["openai-vision", "http-json", "baidu", "tencent"] {
+            let p: ocr::OcrProvider = serde_json::from_value(serde_json::json!({"id":"legacy-id","name":"Fixture","kind":kind,"baseUrl":"https://example.invalid/v1"})).unwrap();
+            assert_eq!(ocr_secret_id(&p), format!("ocr-legacy-id-{kind}"));
+            assert_eq!(
+                ocr_credential_scope(&p).unwrap(),
+                format!("{kind}|https://example.invalid")
+            );
+            assert_eq!(
+                ocr_deletion_accounts(&p),
+                vec![
+                    "ocr-legacy-id-openai-vision",
+                    "ocr-legacy-id-http-json",
+                    "ocr-legacy-id-baidu",
+                    "ocr-legacy-id-tencent",
+                    "ocr-legacy-id"
+                ]
+            );
+        }
+    }
+    #[test]
+    fn official_kind_changes_invalidate_the_previous_namespaced_accounts() {
+        let mt: Provider = serde_json::from_value(serde_json::json!({"id":"qa","name":"MT fixture","kind":"youdao","baseUrl":"https://openapi.youdao.com/api","enabled":false})).unwrap();
+        let image: ocr::OcrProvider = serde_json::from_value(serde_json::json!({"id":"qa","name":"OCR fixture","kind":"youdao","baseUrl":"https://openapi.youdao.com/ocrapi","model":"general"})).unwrap();
+        let old = Settings {
+            providers: vec![mt.clone()],
+            ocr_providers: vec![image.clone()],
+            ..Settings::default()
+        };
+        let mut next = old.clone();
+        next.providers[0].name = "renamed".into();
+        next.ocr_providers[0].name = "renamed".into();
+        assert!(changed_credential_accounts(&old, &next).is_empty());
+        next.providers[0].kind = "microsoft".into();
+        next.providers[0].base_url = "https://api.cognitive.microsofttranslator.com/".into();
+        next.ocr_providers[0].kind = "google".into();
+        next.ocr_providers[0].base_url = "https://vision.googleapis.com/v1/images:annotate".into();
+        next.ocr_providers[0].model = "TEXT_DETECTION".into();
+        assert!(validate_settings(&next).is_ok());
+        let accounts: std::collections::BTreeSet<_> = changed_credential_accounts(&old, &next)
+            .into_iter()
+            .collect();
+        assert_eq!(
+            accounts,
+            std::collections::BTreeSet::from([
+                "translation:youdao:qa".to_owned(),
+                "ocr:youdao:qa".to_owned()
+            ])
+        );
+        let cache = credential_cache::CredentialCache::default();
+        let mt_key = translation_credential_key(&mt).unwrap();
+        let image_key = ocr_credential_key(&image).unwrap();
+        cache.store(&mt_key, Ok("dummy-mt".into())).unwrap();
+        cache.store(&image_key, Ok("dummy-ocr".into())).unwrap();
+        for account in accounts {
+            cache.invalidate_account(&account).unwrap();
+        }
+        assert!(cache.peek(&mt_key).unwrap().is_none());
+        assert!(cache.peek(&image_key).unwrap().is_none());
+        assert_eq!(
+            credential_display_state(
+                &cache,
+                &translation_credential_key(&next.providers[0]).unwrap()
+            ),
+            (false, "unloaded")
+        );
+        assert_eq!(
+            credential_display_state(&cache, &ocr_credential_key(&next.ocr_providers[0]).unwrap()),
+            (false, "unloaded")
+        );
     }
     #[test]
     fn duplicate_shortcuts_are_rejected() {

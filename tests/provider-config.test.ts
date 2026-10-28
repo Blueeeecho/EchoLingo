@@ -64,7 +64,7 @@ describe('native OCR credential bundles', () => {
     expect(buildOcrCredential('tencent', { secretId: 'qa-id', secretKey: 'qa-secret' }, true).error).toBeNull();
   });
   it('keeps native endpoints and actions separate from generic gateway configuration', () => {
-    expect(OCR_NATIVE_URLS).toEqual({ baidu: 'https://aip.baidubce.com', tencent: 'https://ocr.tencentcloudapi.com' });
+    expect(OCR_NATIVE_URLS).toMatchObject({ baidu: 'https://aip.baidubce.com', tencent: 'https://ocr.tencentcloudapi.com' });
     expect(OCR_NATIVE_ACTIONS.baidu.map(([action]) => action)).toEqual(['general_basic', 'accurate_basic']);
     expect(OCR_NATIVE_ACTIONS.tencent.map(([action]) => action)).toEqual(['GeneralBasicOCR', 'GeneralAccurateOCR']);
   });

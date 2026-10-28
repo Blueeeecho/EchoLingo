@@ -304,3 +304,8 @@ body[data-view="translate"] .result-provider { font-size: 10px; }
 .shortcut-feedback:empty { display: none; }
 .shortcut-feedback[data-error="true"] { color: var(--danger, #b42318); }
 @media (max-width: 560px) { .shortcut-binding { grid-template-columns: 1fr; gap: 5px; } }
+.service-guide { border: 1px solid var(--border); border-radius: 10px; padding: 10px 12px; font-size: 12px; line-height: 1.6; }
+.service-guide ol { margin: 0; padding-left: 18px; }
+.service-guide-links { display: flex; flex-wrap: wrap; gap: 6px 14px; margin-top: 8px; }
+.service-guide-links a { color: var(--accent); text-decoration: none; overflow-wrap: anywhere; }
+.service-guide-links a:hover { text-decoration: underline; }

@@ -11,6 +11,8 @@ pub struct Provider {
     pub base_url: String,
     #[serde(default)]
     pub model: String,
+    #[serde(default)]
+    pub region: String,
     pub enabled: bool,
     #[serde(default = "default_prompt")]
     pub prompt: String,
@@ -28,6 +30,7 @@ pub fn system_translation_provider(enabled: bool) -> Provider {
         kind: "system".into(),
         base_url: String::new(),
         model: String::new(),
+        region: String::new(),
         enabled,
         prompt: String::new(),
         has_key: false,
@@ -41,6 +44,7 @@ pub fn offline_translation_provider(enabled: bool) -> Provider {
         kind: "offline".into(),
         base_url: String::new(),
         model: String::new(),
+        region: String::new(),
         enabled,
         prompt: String::new(),
         has_key: false,
@@ -58,6 +62,7 @@ fn default_providers() -> Vec<Provider> {
         kind: "openai".into(),
         base_url: "https://api.openai.com/v1".into(),
         model: "gpt-4o-mini".into(),
+        region: String::new(),
         enabled: false,
         prompt: default_prompt(),
         has_key: false,
@@ -250,14 +255,23 @@ pub fn validate_settings(s: &Settings) -> Result<(), String> {
         if p.name.trim().is_empty()
             || p.name.len() > 200
             || p.model.len() > 200
+            || p.region.len() > 64
             || p.prompt.len() > 16000
         {
-            return Err("服务名称、模型或提示词长度不合法".into());
+            return Err("服务名称、模型、地域或提示词长度不合法".into());
         }
         if local_translation_provider(&p.kind) {
-            if !p.base_url.is_empty() || !p.model.is_empty() || !p.prompt.is_empty() {
-                return Err("本机翻译不接受 API 地址、模型或提示词".into());
+            if !p.base_url.is_empty()
+                || !p.model.is_empty()
+                || !p.prompt.is_empty()
+                || !p.region.is_empty()
+            {
+                return Err("本机翻译不接受 API 地址、模型、地域或提示词".into());
             }
+            continue;
+        }
+        if crate::translation::native::is_native(&p.kind) {
+            crate::translation::native::validate_provider(p)?;
             continue;
         }
         if !["openai", "deepl", "libretranslate"].contains(&p.kind.as_str()) {
@@ -556,5 +570,43 @@ mod tests {
     fn incoming_json_cannot_claim_a_saved_key() {
         let p: Provider = serde_json::from_value(serde_json::json!({"id":"a","name":"a","kind":"openai","baseUrl":"https://example.com","model":"a","enabled":true,"hasKey":true})).unwrap();
         assert!(!p.has_key);
+        assert!(p.region.is_empty());
+    }
+    #[test]
+    fn official_translation_settings_validate_endpoints_and_keep_region_non_secret() {
+        for (kind, url) in [
+            (
+                "baidu",
+                "https://fanyi-api.baidu.com/api/trans/vip/translate",
+            ),
+            ("youdao", "https://openapi.youdao.com/api"),
+            (
+                "microsoft",
+                "https://api.cognitive.microsofttranslator.com/",
+            ),
+        ] {
+            let provider: Provider = serde_json::from_value(serde_json::json!({"id":"official-fixture","name":"Fixture","kind":kind,"baseUrl":url,"model":"","region":if kind=="microsoft" {"eastasia"} else {""},"enabled":true})).unwrap();
+            let mut settings = Settings {
+                providers: vec![provider],
+                ..Settings::default()
+            };
+            assert!(validate_settings(&settings).is_ok());
+            let encoded = serde_json::to_value(&settings.providers[0]).unwrap();
+            assert_eq!(
+                encoded["region"],
+                if kind == "microsoft" { "eastasia" } else { "" }
+            );
+            for field in [
+                "appId",
+                "secretKey",
+                "appKey",
+                "appSecret",
+                "subscriptionKey",
+            ] {
+                assert!(encoded.get(field).is_none());
+            }
+            settings.providers[0].base_url = "https://proxy.invalid/translate".into();
+            assert!(validate_settings(&settings).is_err());
+        }
     }
 }
