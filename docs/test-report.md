@@ -1,5 +1,16 @@
 # 0.1.0 验证报告
 
+<!-- project-presentation-license-20261028:start -->
+## 2026-10-28 项目介绍、Star 邀请与许可更新
+
+机主要求产品介绍围绕回声译自身，不将 Bob 调研作为宣传内容；README 已移除调研导航，仅文末保留一行低调致谢。项目说明入口同步收敛，README 与官网末尾均加入自然的 Star 邀请。仓库简介和官网地址已更新。[项目首页](https://github.com/Blueeeecho/EchoLingo) · [官网](https://blueeeecho.github.io/EchoLingo/)。
+
+机主核对范围后明确选择标准 MIT + Commons Clause v1.0，而非禁止所有商业用途。已保留完整官方条件与原 MIT 全文，新增 [授权说明](../LICENSING.md)，说明定义中的 Sell、源码可见、旧版本原授权及第三方许可。Cargo/npm 元数据和未来分发的许可文件配置同步；未来离线引擎源码包包含授权说明，第三方许可原件未修改。
+
+公开介绍/许可补丁 main bae7220c56074c2af5097c54a266f1164668cad4 仅8个必要文件，未带入其他生产改动；官网 d1aa59ad37b30f3d68e1e0bc023dd64626564a04 已 built，仅3个静态文件变化。8份公开项目文件与6份官网文件逐字节核验通过；GitHub许可识别为Other/NOASSERTION，未误标纯MIT。官方条件逐段核对、Cargo metadata、JSON依赖不变检查、脚本语法与差异检查通过。Beta1的3项资产、tag和MIT原文均保持原样。[精确记录](validation/project-presentation-license-20261028.json)。
+<!-- project-presentation-license-20261028:end -->
+
+
 更新时间：2026-10-25。此报告分别记录本地测试、CI 和真实桌面边界；未完成项不视为通过。
 
 | 验证项 | 结果 | 证据或限制 |
