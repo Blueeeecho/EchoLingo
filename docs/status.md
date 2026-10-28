@@ -3,15 +3,19 @@
 Updated: 2026-10-28, Asia/Shanghai. Stage: v0.1.0 preview hardening and acceptance.
 
 <!-- windows-copy-compatibility-20261028:start -->
-## 2026-10-28 默认复制兼容取词：已实现，Windows 新回归进行中
+## 2026-10-28 默认复制兼容版已打包：完整 Windows 16/16 通过
 
-机主再次确认 WPS/Google 等内容手动 Ctrl+C 正常、Alt+D 仍空，并选择“复制兼容模式优先”。新源码96b4f9a新增独立 copy 路径：后台一次 Ctrl+C 不再以完整 UIA 选区树/RuntimeId 成功为前提，读到文字后仍被动展示并自动翻译；不增加用户步骤或启动权限提示。严格 auto 路径保留且本轮逐字节未改。Windows 新设置和旧配置缺字段均默认 copy，用户显式 auto 保留，其他 API/快捷键/主题/历史设置保留。只有已确认原生密码/密码元数据拒绝；自定义未知控件的无选区复制整行边界已在设置中说明。
+[Windows x64新预览安装包](/Users/wwq/Documents/Codex/2026-10-24/ni-ne/outputs/EchoLingo-installers/windows-preview-20261028-copy-compatibility/EchoLingo_0.1.0_preview_20261028_copy-compatibility_x64-setup.exe)：75,336,176B，SHA256 `dc62a0dd6ca3de5953212a7dd0473a917677898449471de790e5fa974705607b`。源码936e5cf/[完整构建40657452802](https://github.com/Blueeeecho/EchoLingo/actions/runs/40657452802)三个作业成功，原始Windows16/16门禁全success。六文件目录含安装器、对应引擎源码、校验与分层结果；unsigned preview，未发布stable。
 
-原生前台/根窗口/焦点/线程/进程、单次输入票据、剪贴板来源/序列及全格式恢复守卫继续保留。复杂剪贴板格式和独立 broker 发布仍可能拒绝，不能承诺“凡手动复制均必然成功”。新增18项有界数值 copy 诊断及每次 Alt+D 开始即重置的 attempt：旧任务不能覆盖新诊断，原文/标题/凭据不进入记录。未新增固定准备等待；密码元数据 RPC 有250ms完成上限，完成即继续。
+按机主“复制兼容优先”选择新增独立copy路径：后台一次Ctrl+C不再以完整UIA树/RuntimeId成功为前提，读到文字后被动展示并自动翻译。Windows新配置与旧配置缺字段均默认copy，显式auto保留；设置中可切换“严格识别”，其他API/快捷键/主题/历史设置保留。原native auto入口/完整UIA/CompleteCopy逐字节保持；取词前不激活EchoLingo，不新增固定准备等待。密码元数据探针仅有250ms完成上限，完成即继续；这次运行没有触发超时场景。
 
-本机完整 native C#5/net48/PowerShell AST 与168纯策略断言通过；Rust273通过/1资源专用ignored、前端84及完整隔离UI通过。新增12场景真实 Windows copy 夹具（UIA无pattern/故障/动态ID、原生Edit/RichEdit、密码/空框、无复制响应及明确整行反例）已提交等待执行，旧auto15与严格应用矩阵必须显式auto，不冒充默认copy验收。
+验证范围分开：同包DLL原生auto15/15、copy12/12（含无TextPattern/故障/动态ID、密码、原生Edit/RichEdit与明确整行反例）；实际app严格auto16/16；默认copy真实Edge/Chrome48次单次取词、记事本1、WPF3、latest-intent4均通过。浏览器42次同源外点隐藏、快捷键设置UI6/自定义键3链、真实NSIS安装后离线模型6输入/3应用链通过。Windows277/Mac273Rust，各1资源专用ignored，前端各84及完整隔离UI通过。strict快速A/B原预算不变，B原文/历史约1.11s达成才释放A；旧61ea的14/15根因仍未解释，不倒认本次通过解释旧失败。
 
-空 Alt+D 外部不隐藏的现场报告尚未复现：旧不可变61ea/abaa92fd的定向[40655607791](https://github.com/Blueeeecho/EchoLingo/actions/runs/40655607791)原始popupVisibility=success，新增空框同源单击隐藏26.67ms、固定保留、取消固定同源已前台再次单击隐藏26.61ms均通过。没有据此宣称现场已修复，也未盲增新的原生前台观察器。本轮尚无新安装包；Mac规范应用/签名/权限/钥匙串/真实API凭据与停止的本地VM均未操作。[设计和验证边界](windows-selection-copy-compatibility.zh-CN.md)。
+保留native来源/单次输入票据/剪贴板owner、序列和全格式恢复守卫；新增18项有界copy数值诊断，Alt+D开始即重置attempt，旧任务不能覆盖新日志。无原文/窗口标题/凭据。未知自定义编辑器空选区可复制整行；复杂剪贴板、独立broker或native焦点改变仍可能安全拒绝；同PID后台发布来源边界仍开放。
+
+机主空Alt+D外点不隐藏仍未复现：旧不可变61ea定向40655607791新增三场景均通过，未盲改生产observer。另独审确认既有恢复告知缺口：从隐藏状态发生clipboard恢复失败时，只有8秒窗口内toast，可能不可见；本包未修正，不能声称所有恢复失败均已在屏幕可见。上述两项、实体WPS/Google网页及Win10/11仍待后续验收/修正。
+
+API ZIP摘要/大小/CRC、完整efc225…7546 helper与本次DLL唯一嵌入、NSIS解出程序与stage仅UNK→NSS三字节差异、真实安装报告及66ce对应引擎源码均核对。Mac规范应用/签名/权限/钥匙串、真实API凭据及停止的本地VM均未操作。初始96b/run40656966282因测试字段CS0649和非法测试取消事件前缀失败，原红保留；只修夹具构造，未放宽native校验。[精确证据](validation/windows-copy-compatibility-20261028.json)、[取词说明](windows-selection-copy-compatibility.zh-CN.md)。
 <!-- windows-copy-compatibility-20261028:end -->
 
 <!-- selection-ancestor-package-20261028:start -->
