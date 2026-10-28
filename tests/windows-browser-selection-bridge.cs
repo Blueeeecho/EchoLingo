@@ -2,6 +2,7 @@
 // clipboard reads occur until the spawned browser HWND and focused root match.
 using System;
 using System.Collections.Generic;
+using System.Collections;
 using System.Diagnostics;
 using System.IO;
 using System.Runtime.InteropServices;
@@ -25,15 +26,29 @@ public static class WindowsBrowserSelectionBridge {
     [DllImport("user32.dll",EntryPoint="GetWindowLongPtrW")] static extern IntPtr GetWindowLongPtr(IntPtr window,int index);
     [StructLayout(LayoutKind.Sequential)] struct RECT {public int Left,Top,Right,Bottom;}
     [DllImport("user32.dll")] static extern bool IsWindowVisible(IntPtr window);
+    [DllImport("user32.dll")] static extern IntPtr WindowFromPoint(POINT point);
+    [DllImport("user32.dll")] static extern bool SetCursorPos(int x,int y);
+    [DllImport("user32.dll")] static extern bool SetProcessDpiAwarenessContext(IntPtr context);
+    [DllImport("user32.dll")] static extern IntPtr SetThreadDpiAwarenessContext(IntPtr context);
     [DllImport("user32.dll",CharSet=CharSet.Unicode)] static extern int GetClassName(IntPtr window,StringBuilder name,int capacity);
     [DllImport("user32.dll")] static extern uint GetClipboardSequenceNumber();
     [DllImport("user32.dll")] static extern short GetAsyncKeyState(int key);
+    [DllImport("user32.dll",SetLastError=true)] static extern uint SendInput(uint count,INPUT[] input,int size);
+    [DllImport("shell32.dll")] static extern int SHGetKnownFolderPath(ref Guid id,uint flags,IntPtr token,out IntPtr path);
+    [DllImport("ole32.dll")] static extern void CoTaskMemFree(IntPtr memory);
+    [DllImport("kernel32.dll",CharSet=CharSet.Unicode,SetLastError=true)] static extern bool CreateDirectory(string path,IntPtr security);
+    [StructLayout(LayoutKind.Sequential)] struct KEY {public ushort key,scan;public uint flags,time;public UIntPtr extra;}
+    [StructLayout(LayoutKind.Sequential)] struct MOUSE {public int x,y;public uint data,flags,time;public UIntPtr extra;}
+    [StructLayout(LayoutKind.Explicit)] struct INPUTDATA {[FieldOffset(0)]public KEY key;[FieldOffset(0)]public MOUSE mouse;}
+    [StructLayout(LayoutKind.Sequential)] struct INPUT {public uint type;public INPUTDATA data;}
+    [StructLayout(LayoutKind.Sequential)] struct POINT {public int x,y;}
     [DllImport("user32.dll")] static extern IntPtr GetClipboardOwner();
     static readonly JavaScriptSerializer Json=new JavaScriptSerializer { MaxJsonLength=1048576 };
     static string Helper,Assembly,Browser;
     static uint ownedClipboard;
     static bool seeded;
     static string Stage="setup";static Dictionary<string,object> LastMetadata;
+    static AppSession HostedApplication;
     static IntPtr boundMain,boundOwner;static int boundPid;static uint boundThread;static long boundStyleKind;
     static List<Dictionary<string,object>> windowInventory=new List<Dictionary<string,object>>();
     static void Need(bool value,string error){if(!value)throw new InvalidOperationException(error);}
@@ -116,6 +131,7 @@ public static class WindowsBrowserSelectionBridge {
         object requireReleased;if(command.TryGetValue("requireMouseReleased",out requireReleased)&&Convert.ToBoolean(requireReleased)){
             bool released=(GetAsyncKeyState(1)&0x8000)==0;metadata["mouseLeftReleasedBeforeHelper"]=released;Need(released,"BROWSER_MOUSE_LEFT_NOT_RELEASED_BEFORE_HELPER");
         }
+        if(HostedApplication!=null)return RunApplicationCase(command,main,metadata);
         // No accessibility query precedes the helper: the first case measures
         // the real production client's cold UIA path, without a warm-up probe.
         Stage="clipboard-seed";DataObject seed=Seed();uint initial=ownedClipboard;string cancelName="Local\\EchoLingo-cancel-"+Guid.NewGuid().ToString("N");
@@ -159,17 +175,105 @@ public static class WindowsBrowserSelectionBridge {
         if(!seeded)return true;bool owned=GetClipboardSequenceNumber()==ownedClipboard;seeded=false;
         if(!owned)return false;Clipboard.Clear();return true;
     }
-    public static void Run(string helper,string assembly,string browser){
-        Helper=Path.GetFullPath(helper);Assembly=Path.GetFullPath(assembly);Browser=Path.GetFullPath(browser);Need(!Helper.Contains("\"")&&!Assembly.Contains("\""),"INVALID_FIXTURE_PATH");
+    static Dictionary<string,object> GuardMouseStart(Dictionary<string,object> command){
+        IntPtr root=BrowserMain(Convert.ToInt32(command["browserPid"]));Need(GetForegroundWindow()==root,"MOUSE_SOURCE_BROWSER_NOT_FOREGROUND");
+        int x=(int)Math.Round(Convert.ToDouble(command["x"])),y=(int)Math.Round(Convert.ToDouble(command["y"]));Need(x>=-32768&&x<=32767&&y>=-32768&&y<=32767,"MOUSE_SOURCE_COORDINATE_BOUND");
+        POINT p=new POINT();p.x=x;p.y=y;IntPtr hit=WindowFromPoint(p);uint pid;GetWindowThreadProcessId(hit,out pid);bool same=GetAncestor(hit,2)==root;
+        Need(same,"NATIVE_MOUSE_START_HIT_NOT_OWN_BROWSER");POINT nearby=p;nearby.x++;Need(GetAncestor(WindowFromPoint(nearby),2)==root,"NATIVE_MOUSE_PROBE_NOT_OWN_BROWSER");Need(SetCursorPos(x+1,y)&&SetCursorPos(x,y),"NATIVE_MOUSE_POSITION_FAILED");
+        return new Dictionary<string,object>{{"ok",same},{"mouseStartHitsBoundBrowserRoot",same},{"hitProcessId",pid},{"hitHwnd",WindowId(hit)},{"expectedBrowserRoot",WindowId(root)},{"preHelperUiaCalls",0}};
+    }
+    static Dictionary<string,object> DragMouseOnce(Dictionary<string,object> command){
+        IntPtr root=BrowserMain(Convert.ToInt32(command["browserPid"]));Need(GetForegroundWindow()==root,"NATIVE_DRAG_BROWSER_NOT_FOREGROUND");
+        int x=Convert.ToInt32(command["x"]),y=Convert.ToInt32(command["y"]),endX=Convert.ToInt32(command["endX"]),endY=Convert.ToInt32(command["endY"]);POINT p=new POINT();p.x=x;p.y=y;
+        Need(GetAncestor(WindowFromPoint(p),2)==root&&(GetAsyncKeyState(1)&0x8000)==0,"NATIVE_DRAG_START_UNVERIFIED_OR_HELD");Need(Math.Abs(endX)<=32767&&Math.Abs(endY)<=32767,"NATIVE_DRAG_END_BOUND");
+        INPUT down=new INPUT();down.type=0;down.data.mouse.flags=2;INPUT up=down;up.data.mouse.flags=4;uint sent=0;
+        try{Need(SetCursorPos(x,y),"NATIVE_DRAG_POSITION_FAILED");sent=SendInput(1,new INPUT[]{down},Marshal.SizeOf(typeof(INPUT)));Need(sent==1,"NATIVE_DRAG_DOWN_REJECTED");for(int step=1;step<=8;step++){Need(GetForegroundWindow()==root,"NATIVE_DRAG_SOURCE_FOREGROUND_CHANGED");Need(SetCursorPos(x+(endX-x)*step/8,y+(endY-y)*step/8),"NATIVE_DRAG_MOVE_FAILED");Thread.Sleep(15);}Need(SendInput(1,new INPUT[]{up},Marshal.SizeOf(typeof(INPUT)))==1,"NATIVE_DRAG_UP_REJECTED");sent=0;}
+        finally{if(sent!=0)SendInput(1,new INPUT[]{up},Marshal.SizeOf(typeof(INPUT)));}
+        Stopwatch release=Stopwatch.StartNew();while((GetAsyncKeyState(1)&0x8000)!=0&&release.ElapsedMilliseconds<1000)Thread.Sleep(2);Need((GetAsyncKeyState(1)&0x8000)==0,"NATIVE_DRAG_LEFT_RELEASE_NOT_OBSERVED");
+        return new Dictionary<string,object>{{"ok",true},{"nativeMouseDragPairsSent",1},{"nativeMouseLeftReleased",true},{"mouseInputBackend","Win32 SendInput down/up + SetCursorPos moves"},{"preHelperUiaCalls",0}};
+    }
+    sealed class AppSession {
+        const string Identifier="io.github.blueeeecho.echolingo",Marker=".echolingo-browser-app-owned";
+        readonly string token=Guid.NewGuid().ToString("N"),provider;readonly List<string> owned=new List<string>();
+        readonly AutoResetEvent wake=new AutoResetEvent(false);readonly object uiGate=new object();Thread uiThread;Action pending;volatile bool uiStop,uiPoisoned;bool closed;
+        Process app;IntPtr main;string history;Dictionary<string,object> cleanup;
+        public readonly Dictionary<string,object> Identity;
+        static string Folder(string id){Guid guid=new Guid(id);IntPtr p;Need(SHGetKnownFolderPath(ref guid,0,IntPtr.Zero,out p)==0,"APP_KNOWN_FOLDER_FAILED");try{return Marshal.PtrToStringUni(p);}finally{CoTaskMemFree(p);}}
+        void Claim(string p){Need(CreateDirectory(p,IntPtr.Zero),"EXISTING_APP_DATA_REFUSED");owned.Add(p);File.WriteAllText(Path.Combine(p,Marker),token,new UTF8Encoding(false));}
+        void CheckRoot(string p){Need(Directory.Exists(p)&&(File.GetAttributes(p)&FileAttributes.ReparsePoint)==0&&File.ReadAllText(Path.Combine(p,Marker))==token,"APP_DIRECTORY_OWNERSHIP_CHANGED");}
+        void NoLinks(string p){Need((File.GetAttributes(p)&FileAttributes.ReparsePoint)==0,"APP_DATA_REPARSE_POINT");foreach(string child in Directory.GetFileSystemEntries(p)){try{Need((File.GetAttributes(child)&FileAttributes.ReparsePoint)==0,"APP_DATA_REPARSE_POINT");if(Directory.Exists(child))NoLinks(child);}catch(FileNotFoundException){if(File.Exists(child)||Directory.Exists(child))throw;}catch(DirectoryNotFoundException){if(File.Exists(child)||Directory.Exists(child))throw;}}}
+        void DeleteOwn(string p){if(!Directory.Exists(p))return;CheckRoot(p);Stopwatch elapsed=Stopwatch.StartNew();bool deleting=false;while(true){try{Need((File.GetAttributes(p)&FileAttributes.ReparsePoint)==0,"APP_ROOT_REPARSE_POINT");NoLinks(p);deleting=true;Directory.Delete(p,true);return;}catch(IOException){if(!Directory.Exists(p))return;if(elapsed.ElapsedMilliseconds>=5000)throw;}catch(UnauthorizedAccessException){if(elapsed.ElapsedMilliseconds>=5000)throw;}if(!deleting)CheckRoot(p);Thread.Sleep((int)Math.Min(20,Math.Max(1,5000-elapsed.ElapsedMilliseconds)));}}
+        IntPtr OwnMain(){List<IntPtr> found=new List<IntPtr>();EnumWindows(delegate(IntPtr w,IntPtr ignored){uint pid;GetWindowThreadProcessId(w,out pid);if(pid==app.Id&&GetAncestor(w,2)==w){StringBuilder c=new StringBuilder(128);GetClassName(w,c,c.Capacity);if(c.ToString()=="Tauri Window")found.Add(w);}return true;},IntPtr.Zero);Need(found.Count<=1,"APP_MAIN_NOT_UNIQUE");return found.Count==1?found[0]:IntPtr.Zero;}
+        bool NativeReady(){int hotkeys=0,trays=0;EnumWindows(delegate(IntPtr w,IntPtr ignored){uint pid;GetWindowThreadProcessId(w,out pid);if(pid==app.Id){StringBuilder c=new StringBuilder(128);GetClassName(w,c,c.Capacity);if(c.ToString()=="global_hotkey_app")hotkeys++;if(c.ToString()=="tray_icon_app")trays++;}return true;},IntPtr.Zero);return hotkeys>0&&trays>0;}
+        static void WaitNative(Func<bool> condition,int ms,string error){Stopwatch s=Stopwatch.StartNew();while(s.ElapsedMilliseconds<ms){if(condition())return;Thread.Sleep(10);}throw new InvalidOperationException(error);}
+        public AppSession(string executable,string mockUrl,string providerId,string hash,long bytes){
+            provider=providerId;Need(provider.StartsWith("generated-browser-",StringComparison.Ordinal)&&provider.Length<=100,"APP_PROVIDER_NOT_GENERATED");Uri endpoint;Need(Uri.TryCreate(mockUrl,UriKind.Absolute,out endpoint)&&endpoint.Scheme=="http"&&endpoint.Host=="127.0.0.1"&&endpoint.Port>1024&&endpoint.AbsolutePath=="/","APP_MOCK_NOT_LOOPBACK");
+            Identity=new Dictionary<string,object>{{"applicationSha256",hash},{"applicationBytes",bytes},{"actualApplicationTested",true},{"actualRegisteredAltD",true},{"fakeIpcUsed",false},{"translationBackend","generated-loopback-mock"},{"credentialScope","One random absent provider ID only; no existing credential account"},{"nativeReadinessIsOsRegistrationProof",false},{"fixedFrontendWarmupMilliseconds",0},{"preHotkeyAppUiaCalls",0}};
+            try{
+                foreach(Process p in Process.GetProcessesByName(Path.GetFileNameWithoutExtension(executable)))using(p)Need(p.HasExited,"EXISTING_APP_PROCESS_REFUSED");
+                string roaming=Path.Combine(Folder("3EB685DB-65F9-4CF6-A03A-E3EF65729F3D"),Identifier),local=Path.Combine(Folder("F1B32785-6FBA-4FCF-9D55-7B8E7F157091"),Identifier),root=Path.Combine(Path.GetTempPath(),"echolingo-browser-app-"+token);
+                Claim(roaming);Claim(local);Claim(root);history=Path.Combine(roaming,"history.json");
+                var settings=new Dictionary<string,object>{{"providers",new object[]{new Dictionary<string,object>{{"id",provider},{"name","Generated browser loopback mock"},{"kind","libretranslate"},{"baseUrl",mockUrl},{"requiresApiKey",false},{"enabled",true},{"model",""},{"prompt",""}}}},{"ocrProviders",new object[0]},{"sourceLanguage","auto"},{"targetLanguage","auto"},{"languageDirectionVersion",1},{"shortcutDefaultsVersion",1},{"saveHistory",true},{"maxHistory",100},{"theme","light"},{"autoHideSeconds",0},{"shortcuts",new Dictionary<string,object>{{"selection","Alt+D"},{"silentOcr",""},{"ocr",""},{"capture",""},{"input",""}}}};
+                File.WriteAllText(Path.Combine(roaming,"settings.json"),Json.Serialize(settings),new UTF8Encoding(false));
+                ProcessStartInfo start=new ProcessStartInfo(executable);start.UseShellExecute=false;start.CreateNoWindow=true;string temp=Path.Combine(root,"Temp");Directory.CreateDirectory(temp);start.EnvironmentVariables["TEMP"]=temp;start.EnvironmentVariables["TMP"]=temp;start.EnvironmentVariables["LOCALAPPDATA"]=local;start.EnvironmentVariables["WEBVIEW2_USER_DATA_FOLDER"]=Path.Combine(local,"webview-browser-fixture");app=Process.Start(start);Need(app.WaitForInputIdle(15000),"APP_NATIVE_INPUT_IDLE_DEADLINE");
+                WaitNative(delegate{Need(!app.HasExited,"APP_EXITED_BEFORE_NATIVE_MAIN");main=OwnMain();return main!=IntPtr.Zero;},20000,"APP_NATIVE_MAIN_DEADLINE");WaitNative(NativeReady,15000,"APP_HOTKEY_HOST_AND_TRAY_DEADLINE");Need(!IsWindowVisible(main),"APP_DID_NOT_START_SILENTLY");Identity["applicationProcessId"]=app.Id;Identity["mainHwnd"]=WindowId(main);
+                uiThread=new Thread(delegate(){while(true){wake.WaitOne();Action next;lock(uiGate){next=pending;pending=null;}if(next!=null)next();if(uiStop)return;}});uiThread.IsBackground=true;uiThread.SetApartmentState(ApartmentState.MTA);uiThread.Start();
+            }catch{Close();throw;}
+        }
+        public bool Visible {get{return IsWindowVisible(main);}}
+        public int Pid {get{return app.Id;}}
+        public Dictionary<string,object> ReadSource(int remainingMilliseconds){
+            Need(!uiPoisoned&&!closed,"APP_UIA_WORKER_UNAVAILABLE");TaskCompletionSource<Dictionary<string,object>> done=new TaskCompletionSource<Dictionary<string,object>>();
+            lock(uiGate){Need(pending==null,"APP_UIA_WORKER_BUSY");pending=delegate{try{
+                Need(!uiPoisoned&&!uiStop,"APP_UIA_WORKER_ABANDONED");Need(OwnMain()==main,"APP_MAIN_IDENTITY_CHANGED");AutomationElement root=AutomationElement.FromHandle(main);Need(root.Current.ProcessId==app.Id,"APP_UIA_ROOT_PID_CHANGED");
+                AutomationElementCollection edits=root.FindAll(TreeScope.Descendants,new AndCondition(new PropertyCondition(AutomationElement.ControlTypeProperty,ControlType.Edit),new OrCondition(new PropertyCondition(AutomationElement.AutomationIdProperty,"source-text"),new PropertyCondition(AutomationElement.NameProperty,"\u539f\u6587"))));
+                string value=null;int visible=0;foreach(AutomationElement e in edits){if(e.Current.IsOffscreen)continue;visible++;object p;Need(e.TryGetCurrentPattern(ValuePattern.Pattern,out p),"APP_SOURCE_VALUE_PATTERN_MISSING");value=((ValuePattern)p).Current.Value;}
+                Need(visible<=1,"APP_SOURCE_EDITOR_NOT_UNIQUE");Need(value==null||value.Length<=65536,"APP_SOURCE_VALUE_BOUND");done.SetResult(new Dictionary<string,object>{{"value",value},{"sourceEditorVisibleCount",visible},{"nativeVisible",IsWindowVisible(main)}});
+            }catch(Exception e){done.SetException(e);}};}
+            wake.Set();Stopwatch clock=Stopwatch.StartNew();int limit=Math.Max(1,Math.Min(5000,remainingMilliseconds));while(!done.Task.IsCompleted&&clock.ElapsedMilliseconds<limit){Application.DoEvents();Thread.Sleep(2);}if(!done.Task.IsCompleted){uiPoisoned=true;throw new InvalidOperationException("APP_SOURCE_UIA_CALL_DEADLINE");}if(done.Task.IsFaulted)throw done.Task.Exception.InnerException;return done.Task.Result;
+        }
+        public int HistoryCount(string expected,string translation){CheckRoot(Path.GetDirectoryName(history));if(!File.Exists(history))return 0;Need(new FileInfo(history).Length<=1048576,"APP_HISTORY_BOUND");try{object[] rows=Json.Deserialize<object[]>(File.ReadAllText(history));Need(rows.Length<=100,"APP_HISTORY_COUNT_BOUND");int count=0;foreach(object item in rows){var row=(Dictionary<string,object>)item;if(Convert.ToString(row["text"])!=expected)continue;foreach(object raw in (IEnumerable)row["results"]){var r=(Dictionary<string,object>)raw;if(Convert.ToString(r["providerId"])==provider&&!r.ContainsKey("error")&&Convert.ToString(r["text"])==translation){count++;break;}}}return count;}catch(IOException){return 0;}catch(ArgumentException){return 0;}}
+        public Dictionary<string,object> Close(){
+            if(closed)return cleanup;closed=true;cleanup=new Dictionary<string,object>{{"ok",false},{"method","owned-process-tree-termination"},{"completeDescendantEnumeration",false}};List<string> errors=new List<string>();
+            try{if(app!=null){if(!app.HasExited){ProcessStartInfo start=new ProcessStartInfo("taskkill.exe","/PID "+app.Id+" /T /F");start.UseShellExecute=false;start.CreateNoWindow=true;start.RedirectStandardOutput=true;start.RedirectStandardError=true;using(Process p=Process.Start(start)){Task<string> o=p.StandardOutput.ReadToEndAsync(),e=p.StandardError.ReadToEndAsync();Need(p.WaitForExit(5000),"OWN_APP_TREE_KILL_DEADLINE");Need(Task.WaitAll(new Task[]{o,e},1000),"OWN_APP_KILL_PIPE_DEADLINE");}}Need(app.WaitForExit(5000),"OWN_APP_NOT_EXITED");cleanup["ownAppExited"]=true;app.Dispose();}}catch(Exception e){errors.Add(e.GetType().Name+":"+e.Message);}
+            try{uiStop=true;wake.Set();if(uiThread!=null)Need(uiThread.Join(2000),"OWN_APP_UIA_WORKER_NOT_STOPPED");}catch(Exception e){errors.Add(e.GetType().Name+":"+e.Message);}
+            for(int i=owned.Count-1;i>=0;i--)try{DeleteOwn(owned[i]);}catch(Exception e){errors.Add(e.GetType().Name+":"+e.Message);}
+            cleanup["errors"]=errors;cleanup["ownedDirectoriesRemoved"]=errors.Count==0;cleanup["ok"]=errors.Count==0;return cleanup;
+        }
+    }
+    static INPUT AppKey(ushort code,bool up){INPUT i=new INPUT();i.type=1;i.data.key.key=code;i.data.key.flags=up?2U:0U;return i;}
+    static Dictionary<string,object> RunApplicationCase(Dictionary<string,object> command,IntPtr main,Dictionary<string,object> metadata){
+        string expected=Convert.ToString(command["expected"]),translation=Convert.ToString(command["expectedTranslation"]);Need(Convert.ToString(command["outcome"])=="selection"&&expected.Length>0&&translation.Length<=512,"APP_GENERATED_SELECTION_REQUIRED");
+        metadata["actualApplicationTested"]=true;metadata["actualRegisteredAltD"]=true;metadata["helperInvocations"]=0;metadata["actualShortcutPresses"]=0;metadata["preHotkeyAppUiaCalls"]=0;metadata["safeToContinue"]=false;
+        Stage="app-clipboard-seed";DataObject seed=Seed();int before=HostedApplication.HistoryCount(expected,translation);metadata["historyExactCountBefore"]=before;metadata["popupVisibleBeforeHotkey"]=HostedApplication.Visible;
+        Need(GetForegroundWindow()==main&&(GetAsyncKeyState(1)&0x8000)==0,"APP_SOURCE_OR_MOUSE_CHANGED_BEFORE_HOTKEY");foreach(int key in new int[]{0x10,0x11,0x12,0x5B,0x5C})Need((GetAsyncKeyState(key)&0x8000)==0,"APP_SHORTCUT_MODIFIER_ALREADY_HELD");
+        INPUT[] keys=new INPUT[]{AppKey(0x12,false),AppKey(0x44,false),AppKey(0x44,true),AppKey(0x12,true)};Stopwatch clock=Stopwatch.StartNew();Stage="actual-alt-d-once";uint sent=SendInput(4,keys,Marshal.SizeOf(typeof(INPUT)));metadata["actualShortcutPresses"]=1;metadata["insertedInputEvents"]=sent;if(sent!=4){SendInput(2,new INPUT[]{AppKey(0x44,true),AppKey(0x12,true)},Marshal.SizeOf(typeof(INPUT)));throw new InvalidOperationException("APP_ALT_D_INPUT_REJECTED_NO_RETRY");}
+        Stage="actual-app-source-and-new-history";bool exact=false,foregroundAlways=true;int staleReads=0;while(clock.ElapsedMilliseconds<30000){
+            metadata["popupNativeVisible"]=HostedApplication.Visible;bool sourceForeground=GetForegroundWindow()==main;foregroundAlways=foregroundAlways&&sourceForeground;metadata["sourceForegroundPreserved"]=sourceForeground;metadata["sourceForegroundPreservedThroughoutObservation"]=foregroundAlways;
+            // Wait only for native presentation before the first app UIA read:
+            // do not prime UIA while the first cold helper is acquiring text.
+            if(HostedApplication.Visible){try{Dictionary<string,object> source=HostedApplication.ReadSource((int)Math.Max(1,30000-clock.ElapsedMilliseconds));string value=source["value"] as string;metadata["sourceEditorVisibleCount"]=source["sourceEditorVisibleCount"];metadata["actualSourceLength"]=value==null?-1:value.Length;metadata["actualSourceEmpty"]=value!=null&&value.Length==0;metadata["exactSelectedTextMatched"]=value==expected;metadata["historyExactCountAfter"]=HostedApplication.HistoryCount(expected,translation);exact=value==expected&&Convert.ToInt32(metadata["historyExactCountAfter"])==before+1;if(exact)break;}catch(ElementNotAvailableException){staleReads++;metadata["staleAppSourceReadObservations"]=staleReads;}}
+            Application.DoEvents();Thread.Sleep(10);
+        }
+        metadata["hotkeyToExactSourceAndHistoryMilliseconds"]=clock.Elapsed.TotalMilliseconds;metadata["shortcutKeysReleasedAfterAction"]=(GetAsyncKeyState(0x12)&0x8000)==0&&(GetAsyncKeyState(0x44)&0x8000)==0;Stage="app-clipboard-and-foreground-check";metadata["richClipboardRestored"]=Restored(seed);if(Convert.ToBoolean(metadata["richClipboardRestored"]))ownedClipboard=GetClipboardSequenceNumber();
+        metadata["sourceForegroundPreserved"]=GetForegroundWindow()==main;metadata["browserBoundRootPreserved"]=BrowserMain(Convert.ToInt32(command["browserPid"]))==main;metadata["safeToContinue"]=Convert.ToBoolean(metadata["richClipboardRestored"])&&Convert.ToBoolean(metadata["sourceForegroundPreserved"]);
+        metadata["ok"]=exact&&foregroundAlways&&Convert.ToBoolean(metadata["richClipboardRestored"])&&Convert.ToBoolean(metadata["sourceForegroundPreserved"])&&Convert.ToBoolean(metadata["browserBoundRootPreserved"])&&Convert.ToBoolean(metadata["shortcutKeysReleasedAfterAction"]);metadata["safeToContinue"]=metadata["ok"];metadata["acquisitionExpectationPassed"]=metadata["ok"];metadata["failureClassification"]=Convert.ToBoolean(metadata["ok"])?null:"actual-app-hotkey-acquisition";if(!Convert.ToBoolean(metadata["ok"]))metadata["error"]="ACTUAL_APP_EXACT_SOURCE_NEW_HISTORY_OR_FOREGROUND_FAILED";return metadata;
+    }
+    public static void Run(string helper,string assembly,string browser,string application,string mockUrl,string provider,string hash,long bytes){
+        Helper=String.IsNullOrEmpty(helper)?null:Path.GetFullPath(helper);Assembly=String.IsNullOrEmpty(assembly)?null:Path.GetFullPath(assembly);Browser=Path.GetFullPath(browser);Need(Helper==null||!Helper.Contains("\"")&&!Assembly.Contains("\""),"INVALID_FIXTURE_PATH");
         IDataObject existing=Clipboard.GetDataObject();Need(existing==null||existing.GetFormats(false).Length==0,"FRESH_EMPTY_CLIPBOARD_REQUIRED");
-        Reply(new Dictionary<string,object>{{"ready",true},{"bridgeProcessId",Process.GetCurrentProcess().Id},{"clipboardContentRead",false}});
         try{
+            if(!String.IsNullOrEmpty(application))HostedApplication=new AppSession(application,mockUrl,provider,hash,bytes);
+            if(HostedApplication!=null){SetProcessDpiAwarenessContext(new IntPtr(-4));Need(SetThreadDpiAwarenessContext(new IntPtr(-4))!=IntPtr.Zero,"NATIVE_MOUSE_PHYSICAL_COORDINATES_REQUIRED");}
+            Reply(new Dictionary<string,object>{{"ready",true},{"bridgeProcessId",Process.GetCurrentProcess().Id},{"clipboardContentRead",false},{"application",HostedApplication==null?null:HostedApplication.Identity}});
             string line;while((line=Console.ReadLine())!=null){
                 Need(line.Length<=4096,"BRIDGE_COMMAND_BOUND");Dictionary<string,object> command=Json.Deserialize<Dictionary<string,object>>(line.TrimStart('\ufeff'));string op=Convert.ToString(command["op"]);
-                if(op=="close"){bool cleared=ClearOwnedClipboard();Reply(new Dictionary<string,object>{{"ok",cleared},{"closing",true},{"clipboardCleanupComplete",cleared}});return;}
+                if(op=="close"){bool cleared=ClearOwnedClipboard();Dictionary<string,object> cleanup=HostedApplication==null?null:HostedApplication.Close();Reply(new Dictionary<string,object>{{"ok",cleared&&(cleanup==null||Convert.ToBoolean(cleanup["ok"]))},{"closing",true},{"clipboardCleanupComplete",cleared},{"applicationCleanup",cleanup}});return;}
+                if(op=="mouse-point"){Reply(GuardMouseStart(command));continue;}
+                if(op=="mouse-drag"){Reply(DragMouseOnce(command));continue;}
                 try{Need(op=="case","BRIDGE_UNSUPPORTED_COMMAND");Reply(RunCase(command));}
                 catch(Exception error){while(error.InnerException!=null)error=error.InnerException;Dictionary<string,object> failure=LastMetadata??new Dictionary<string,object>();failure["ok"]=false;failure["error"]=error.Message;failure["errorType"]=error.GetType().Name;failure["stage"]=Stage;failure["setupInconclusive"]=Stage=="native-identity";failure["browserRootCandidates"]=windowInventory;failure["boundBrowserRootHwnd"]=WindowId(boundMain);Reply(failure);}
             }
-        }finally{ClearOwnedClipboard();}
+        }finally{try{if(HostedApplication!=null)HostedApplication.Close();}finally{ClearOwnedClipboard();}}
     }
 }
