@@ -19,6 +19,17 @@ interface Session { id: number; action: ShortcutAction; held: Set<string>; modif
 const core = [['selection', '选词翻译', '在其他应用中选中文字后翻译。'], ['silentOcr', '无感 OCR', '拖选屏幕区域，识别后自动翻译。']] as const;
 const extra = [['capture', '截图翻译'], ['ocr', '截图识别'], ['input', '输入翻译']] as const;
 
+// A registered main key can consume DOM events. Reconcile only modifier
+// entries whose released state is known; unrelated held keys remain strict.
+function clearReleasedModifiers(held: Set<string>, mask: number) {
+  for (const [bit, keys] of [
+    [1, ['Control', 'ControlLeft', 'ControlRight']],
+    [2, ['Alt', 'AltLeft', 'AltRight', 'AltGraph']],
+    [4, ['Shift', 'ShiftLeft', 'ShiftRight']],
+    [8, ['Meta', 'MetaLeft', 'MetaRight', 'OS', 'OSLeft', 'OSRight']],
+  ] as const) if (!(mask & bit)) for (const key of keys) held.delete(key);
+}
+
 export function createShortcutEditor(context: Context) {
   const { form, saveButton, mac } = context;
   let revision = 0, starting = false, ending = false, saving = false, ready = false;
@@ -102,6 +113,7 @@ export function createShortcutEditor(context: Context) {
     if (!session) return;
     session.held.delete(event.code || event.key);
     session.modifiers = event.ctrlKey || event.altKey || event.shiftKey || event.metaKey;
+    clearReleasedModifiers(session.held, (event.ctrlKey ? 1 : 0) | (event.altKey ? 2 : 0) | (event.shiftKey ? 4 : 0) | (event.metaKey ? 8 : 0));
     session.modifierEvidence = true; session.releasedEvidence = !session.modifiers;
     if ((session.candidate || session.cancelled) && session.held.size === 0 && !session.modifiers) void finish(session.cancelled);
   };
@@ -114,12 +126,17 @@ export function createShortcutEditor(context: Context) {
     if (!candidate || (session.candidate !== null && session.candidate !== candidate)) return;
     session.candidate = candidate;
     // RegisterHotKey can consume the main key's DOM down/up. Its native
-    // release is authoritative for that key only; modifiers must also be up.
+    // release supplies that key; a non-null physical modifier snapshot can
+    // also clear stale DOM modifier downs. Later DOM release evidence wins
+    // over an older native snapshot which still said a modifier was held.
     const key = candidate.split('+').at(-1)!;
     session.held.delete(key); session.held.delete(key.length === 1 ? (/^[A-Z]$/.test(key) ? `Key${key}` : `Digit${key}`) : key);
     if (!session.releasedEvidence) {
-      if (value.modifiersDown !== null) { session.modifiers ||= value.modifiersDown !== 0; session.modifierEvidence = true; }
-    }
+      if (value.modifiersDown !== null) {
+        session.modifiers = value.modifiersDown !== 0; session.modifierEvidence = true;
+        clearReleasedModifiers(session.held, value.modifiersDown);
+      }
+    } else clearReleasedModifiers(session.held, 0);
     status(`已记录 ${displayShortcut(candidate, mac)}，请松开所有按键。`);
     if (session.modifierEvidence && !session.modifiers && session.held.size === 0) void finish(false);
   };

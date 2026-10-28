@@ -21,6 +21,10 @@
 
 6d74806/full40635398888新完整构建已结束，原始15门禁13success/2failure：新APP浏览器48/48、单AltD矩阵16/16及显式诊断CLI、记事本1/WPF3、自定义键3、两浏览器实际OCR→同源点击隐藏、NSIS两方向模型6次推理/3应用链通过；UI快捷键6项只完成2项，第二次F9录制未观察到完成；A/B候选第8hover返回B时输入planecomposition失败，非时延阈值。失败时缺完整终态元数据，正在只加只读诊断、复用精确6d stage复核，不先认定产品或夹具原因。此前阶段通报误把continue-on-error步骤conclusion当raw success，现已明确更正，以最终.outcome和完整JSON为准。安装器已下载/SHA/大小/CRC核对，尚不标为全通过修复版；75,334,873B/SHA2566fd34c8c…20503e，stage80d6e92a…480e7/5,923,840B。实际新CLI一次导出966B/20数值项/原primary身份，约64.84ms，前台/原文/历史/剪贴板/窗口状态保留。
 
+571af1f/run40638396638精确复用上述6d stage80d6与完整DLL e857，未重编应用；三项原始.outcomes均success：设置UI6/6（3次启动/退出）、自定义键3/3，A/B的baseline/hybrid/planeOnly各8项及crosspeer通过，planeOnly确认为鼠标hook=0且plane down/up/move实际发生。失败观测字段未触发，所以原UI2/6和hover-return-B的具体根因仍未知；6d原full13/15保持failure，不能改写为完整回归全绿。
+
+已另行用新页面的隔离DOM/原生事件mock确认录制反例：修饰键DOM down到达、对应up缺失、匹配native全松开通知0到达后，录制5秒仍停在请松开。它不是前述Windows红例根因证明。源码现按DOM flag/native非null物理mask仅清理已释放修饰键，保留普通held键/null等待/更新DOM release优先、lease/取消/350ms cooldown及保存动作；未加新IPC/重按/固定等待。原红用例和普通KeyX保持/partial Ctrl保持/DOM后到all-up三项边界、84单位、类型/构建及完整隔离UI现通过，独审无阻断。此后续源码尚未包含于已交付6d候选包；需要新完整构建验证。
+
 <!-- selection-services-20261028:end -->
 
 <!-- shortcut-reconfiguration-20261028:start -->

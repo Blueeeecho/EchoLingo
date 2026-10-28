@@ -2072,6 +2072,137 @@ try {
   assert.equal(await page.evaluate(() => window.__qa.ocrTestCalls), credentialBaseline.ocrTests + 1);
   assert.equal(await page.evaluate(() => window.__qa.translationRequests.length), credentialBaseline.translations);
   assert.deepEqual(errors, []);
+  // A registered main key can be consumed by the OS, and its DOM modifier
+  // keyups can be absent too. Observe this handoff separately from the
+  // held/null/stale/releasedEvidence cases above: a matching native release
+  // explicitly says all modifiers are up. This is fake IPC evidence only,
+  // not proof of the cause of any particular Windows runtime failure.
+  // A fresh page reruns the existing mock bootstrap and isolates this probe
+  // from the earlier clock override and intentionally delayed IPC replies.
+  await page.goto(process.env.ECHOLINGO_TEST_URL ?? 'http://127.0.0.1:1420/');
+  await page.waitForFunction(() => document.querySelector('#footer-status')?.textContent === '准备就绪');
+  await goView('settings');
+  // Use the existing Settings save mock to configure this exact native combo,
+  // then leave a different draft so completing the recording must change it.
+  await page.locator('#shortcut-selection').fill('Ctrl+Alt+Shift+F9');
+  await page.locator('#save-shortcuts').click();
+  await page.waitForFunction(() => window.__qa.settings.shortcuts.selection === 'Ctrl+Alt+Shift+F9');
+  await page.locator('#shortcut-selection').fill('Ctrl+Alt+Shift+F8');
+  await page.locator('[data-shortcut-record="selection"]').click();
+  const releaseProbeReady = await page.waitForFunction(() =>
+    window.__qa.shortcutLeases.at(-1)?.active === true
+    && document.querySelector('#shortcut-feedback').textContent.startsWith('请按快捷键'),
+    null, { timeout: 5000 }).then(() => true, error => {
+      if (error.name !== 'TimeoutError') throw error;
+      return false;
+    });
+  const releaseProbeReadyState = await page.evaluate(() => ({
+    value: document.querySelector('#shortcut-selection').value,
+    feedback: document.querySelector('#shortcut-feedback').textContent,
+    lease: { ...window.__qa.shortcutLeases.at(-1) },
+    recordButtonPressed: document.querySelector('[data-shortcut-record="selection"]').getAttribute('aria-pressed'),
+    inputReadOnly: document.querySelector('#shortcut-selection').readOnly,
+    focusedId: document.activeElement?.id,
+    heldBegin: window.__qa.holdShortcutBegin,
+    heldEnd: window.__qa.holdShortcutEnd,
+  }));
+  console.log(`SHORTCUT_RELEASE_PRECONDITION ${JSON.stringify({ ready: releaseProbeReady, observed: releaseProbeReadyState })}`);
+  assert.equal(releaseProbeReady, true, `Regression probe requires an active ready lease: ${JSON.stringify(releaseProbeReadyState)}`);
+  for (const value of [
+    { key: 'Control', code: 'ControlLeft', ctrlKey: true },
+    { key: 'Alt', code: 'AltLeft', ctrlKey: true, altKey: true },
+    { key: 'Shift', code: 'ShiftLeft', ctrlKey: true, altKey: true, shiftKey: true },
+  ]) await page.locator('#shortcut-selection').dispatchEvent('keydown', value);
+  await page.evaluate(() => {
+    const leaseId = window.__qa.shortcutLeases.at(-1).id;
+    window.__qa.emit('shortcut-recorded', { leaseId, shortcut: 'Ctrl+Alt+Shift+F9', modifiersDown: 0 });
+  });
+  let releaseProbeCompleted = false;
+  try {
+    // Same five-second completion expectation as the actual Windows recorder
+    // fixture, before its existing fourteen-second cancellation deadline.
+    await page.waitForFunction(() => document.querySelector('#shortcut-selection').value === 'Ctrl+Alt+Shift+F9'
+      && document.querySelector('#shortcut-feedback').textContent.startsWith('已录入，点击')
+      && window.__qa.shortcutLeases.at(-1)?.active === false, null, { timeout: 5000 });
+    releaseProbeCompleted = true;
+  } catch (error) { if (error.name !== 'TimeoutError') throw error; }
+  const releaseProbeObserved = await page.evaluate(() => ({
+    value: document.querySelector('#shortcut-selection').value,
+    feedback: document.querySelector('#shortcut-feedback').textContent,
+    lease: { ...window.__qa.shortcutLeases.at(-1) },
+    recordButtonPressed: document.querySelector('[data-shortcut-record="selection"]').getAttribute('aria-pressed'),
+    inputReadOnly: document.querySelector('#shortcut-selection').readOnly,
+  }));
+  console.log(`SHORTCUT_RELEASE_REGRESSION ${JSON.stringify({ scope: 'isolated DOM and matching native-event mock; not a Windows root-cause claim', expectationMilliseconds: 5000, completed: releaseProbeCompleted, observed: releaseProbeObserved })}`);
+  assert.equal(releaseProbeCompleted, true, `A matching native all-up release must complete without DOM keyups: ${JSON.stringify(releaseProbeObserved)}`);
+  // Native modifier evidence clears only modifier bookkeeping. An unrelated
+  // ordinary key still needs its own DOM release before the candidate commits.
+  const beginReleaseBoundary = async () => {
+    await page.locator('#shortcut-selection').fill('Ctrl+Alt+Shift+F8');
+    await page.locator('[data-shortcut-record="selection"]').click();
+    await page.waitForFunction(() => window.__qa.shortcutLeases.at(-1)?.active === true
+      && document.querySelector('#shortcut-feedback').textContent.startsWith('请按快捷键'), null, { timeout: 5000 });
+  };
+  const emitReleaseSnapshot = async (modifiersDown) => page.evaluate((mask) => {
+    const leaseId = window.__qa.shortcutLeases.at(-1).id;
+    window.__qa.emit('shortcut-recorded', { leaseId, shortcut: 'Ctrl+Alt+Shift+F9', modifiersDown: mask });
+  }, modifiersDown);
+  const releaseBoundaryState = async () => page.evaluate(() => ({
+    value: document.querySelector('#shortcut-selection').value,
+    feedback: document.querySelector('#shortcut-feedback').textContent,
+    lease: { ...window.__qa.shortcutLeases.at(-1) },
+    inputReadOnly: document.querySelector('#shortcut-selection').readOnly,
+  }));
+  const requireReleaseCompletion = async () => {
+    await page.waitForFunction(() => document.querySelector('#shortcut-selection').value === 'Ctrl+Alt+Shift+F9'
+      && document.querySelector('#shortcut-feedback').textContent.startsWith('已录入，点击')
+      && window.__qa.shortcutLeases.at(-1)?.active === false, null, { timeout: 5000 });
+    return releaseBoundaryState();
+  };
+  const releaseBoundaryResults = [];
+  await beginReleaseBoundary();
+  // A plain X is invalid as a candidate, but remains a real held ordinary key.
+  await page.locator('#shortcut-selection').dispatchEvent('keydown', { key: 'x', code: 'KeyX' });
+  for (const value of [
+    { key: 'Control', code: 'ControlLeft', ctrlKey: true },
+    { key: 'Alt', code: 'AltLeft', ctrlKey: true, altKey: true },
+    { key: 'Shift', code: 'ShiftLeft', ctrlKey: true, altKey: true, shiftKey: true },
+  ]) await page.locator('#shortcut-selection').dispatchEvent('keydown', value);
+  await emitReleaseSnapshot(0);
+  const unrelatedHeld = await releaseBoundaryState();
+  assert.equal(unrelatedHeld.value, 'Ctrl+Alt+Shift+F8');
+  assert.equal(unrelatedHeld.lease.active, true);
+  assert.equal(unrelatedHeld.inputReadOnly, true);
+  assert.match(unrelatedHeld.feedback, /^已记录 Ctrl\+Alt\+Shift\+F9/);
+  await page.locator('#shortcut-selection').dispatchEvent('keyup', { key: 'x', code: 'KeyX' });
+  releaseBoundaryResults.push({ case: 'unrelated ordinary key stays held until its own up', pending: unrelatedHeld, completed: await requireReleaseCompletion() });
+
+  // A partial native snapshot reports Ctrl still down and Alt already up;
+  // missing Alt DOM keyup must not block the later actual Ctrl release.
+  await beginReleaseBoundary();
+  await page.locator('#shortcut-selection').dispatchEvent('keydown', { key: 'Control', code: 'ControlLeft', ctrlKey: true });
+  await page.locator('#shortcut-selection').dispatchEvent('keydown', { key: 'Alt', code: 'AltLeft', ctrlKey: true, altKey: true });
+  await emitReleaseSnapshot(1);
+  const controlHeld = await releaseBoundaryState();
+  assert.equal(controlHeld.value, 'Ctrl+Alt+Shift+F8');
+  assert.equal(controlHeld.lease.active, true);
+  assert.equal(controlHeld.inputReadOnly, true);
+  await page.locator('#shortcut-selection').dispatchEvent('keyup', { key: 'Control', code: 'ControlLeft' });
+  releaseBoundaryResults.push({ case: 'partial native Ctrl mask waits for Ctrl up', pending: controlHeld, completed: await requireReleaseCompletion() });
+
+  // The later Alt keyup says every modifier is up even though Ctrl's DOM up
+  // was lost. That newer DOM evidence wins a delayed native Ctrl-held snapshot.
+  await beginReleaseBoundary();
+  await page.locator('#shortcut-selection').dispatchEvent('keydown', { key: 'Control', code: 'ControlLeft', ctrlKey: true });
+  await page.locator('#shortcut-selection').dispatchEvent('keydown', { key: 'Alt', code: 'AltLeft', ctrlKey: true, altKey: true });
+  await page.locator('#shortcut-selection').dispatchEvent('keyup', { key: 'Alt', code: 'AltLeft' });
+  const domReleased = await releaseBoundaryState();
+  assert.equal(domReleased.value, 'Ctrl+Alt+Shift+F8');
+  assert.equal(domReleased.lease.active, true);
+  await emitReleaseSnapshot(1);
+  releaseBoundaryResults.push({ case: 'newer DOM all-up beats stale native Ctrl-held snapshot', pending: domReleased, completed: await requireReleaseCompletion() });
+  console.log(`SHORTCUT_RELEASE_BOUNDARIES ${JSON.stringify({ scope: 'isolated DOM and existing fake IPC only', cases: releaseBoundaryResults })}`);
+  assert.deepEqual(errors, []);
   console.log('PASS: native input focus events require exact backend-verified presentation metadata; an observed epoch keeps its original intent baseline across duplicate announcements, edits and navigation; fresh explicit input works while visible or in management; stale complete events, missing/malformed/future payloads and delayed verification cannot rebind focus; hidden Alt+A works with either presentation-event order. Fake IPC only.');
   console.log('PASS: accepted popup acknowledgments, explicit input animation frames and modal queues cannot revive focus after a newer selection epoch, edit or management-view roundtrip; current empty-selection typing and current input focus remain available. Isolated DOM/IPC only, not a native WPS root-cause claim.');
   console.log('PASS: repeated pinned capture epochs keep completed source/result DOM visible through cancel/no-text/OCR/permission errors; successful OCR replaces source and auto-translates without a modeled hide/reveal; pin remains active; stale source/presentation/progress cannot overwrite; in-flight partial results are cancelled and removed. Fake IPC only, no real capture or native visibility pass.');

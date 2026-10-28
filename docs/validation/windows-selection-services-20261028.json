@@ -369,5 +369,45 @@
     "packageLocalAudit": "/Users/wwq/Documents/Codex/2026-10-24/ni-ne/work/selection-dismiss-official-apis-20261028/ci-6d74806-full/package-local-audit.json",
     "sameBinaryReadonlyDiagnosticsPending": true,
     "notFullGreen": true
+  },
+  "sameBinaryFullFailureSupplement": {
+    "fixtureCommit": "571af1fc98eb043a2ced100e4faa549bba6014bc",
+    "sourceRun": 40635398888,
+    "run": 40638396638,
+    "applicationSource": "6d748062298bc2f4dd396eb7ac3a09a9a4766c35",
+    "stageSha256": "80d6e92a010df988ee51e5b41b48032d553af588c1fa624681ba9fdd7fc480e7",
+    "summary": "/Users/wwq/Documents/Codex/2026-10-24/ni-ne/work/selection-dismiss-official-apis-20261028/ci-571af1f-immutable6d/summary.json",
+    "summarySha256": "634d6fe79d9dd5b7302bc5469ad94d446d6144f0d623846fe24d57e39613aa60",
+    "rawRequiredGatesSuccess": 3,
+    "uiPassed": 6,
+    "customWorkflowPassed": 3,
+    "performanceVariants": 3,
+    "casesPerVariant": 8,
+    "crossPeerPerVariant": 1,
+    "failureObservationsTriggered": false,
+    "oldFailureRootCausesResolved": false,
+    "oldFull13of15RedPreserved": true
+  },
+  "recorderModifierReconciliation": {
+    "redProbeReport": "/Users/wwq/Documents/Codex/2026-10-24/ni-ne/work/selection-dismiss-official-apis-20261028/shortcut-release-regression/report.json",
+    "redProbeReportSha256": "1fdfcd1bc675bcdd32c73749a411ccb87bae1b1919667163ac98874a2f7791d5",
+    "fixedProbeReport": "/Users/wwq/Documents/Codex/2026-10-24/ni-ne/work/selection-dismiss-official-apis-20261028/shortcut-release-reconciliation/report.json",
+    "fixedProbeReportSha256": "49704aac9bc4ade971db389b92d77699153e952faf179f7fe6c1eaf467038c65",
+    "review": "/Users/wwq/Documents/Codex/2026-10-24/ni-ne/work/selection-dismiss-official-apis-20261028/shortcut-modifier-reconciliation-review.json",
+    "editorSha256": "1b948b5ecc5618c894fe509b99d7ff20a1740b11504cec7a4eca41beb5871e81",
+    "uiTestSha256": "15c3dbc3cbee2906db0e58480ef30956660bcaf8cd61e000d6d3c9a761336957",
+    "hostCheckUnit84BuildFullUiPassed": true,
+    "notProofOfWindowsOriginalFailureCause": true,
+    "actualNewWindowsBuildPending": true,
+    "includedInInterim6dPacket": false
+  },
+  "interimPacket": {
+    "path": "/Users/wwq/Documents/Codex/2026-10-24/ni-ne/outputs/EchoLingo-installers/windows-preview-20261028-selection-services",
+    "source": "6d748062298bc2f4dd396eb7ac3a09a9a4766c35",
+    "sourceRun": 40635398888,
+    "installerSha256": "6fd34c8cd9cbcf42c4e2fd31d699452bbd15807bbea192cbb1a6bfb57320503e",
+    "independentAudit": "/Users/wwq/Documents/Codex/2026-10-24/ni-ne/work/selection-dismiss-official-apis-20261028/packet-final-independent-audit.json",
+    "knownRecorderCounterexampleDocumented": true,
+    "full13of15RedDocumented": true
   }
 }
