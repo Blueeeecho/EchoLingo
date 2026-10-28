@@ -1,29 +1,25 @@
 # 0.1.0 预览版验证报告
 
 <!-- selection-services-20261028:start -->
-## 2026-10-28 同页鼠标取词、同源点击与官方服务候选
+## 2026-10-28 Windows新取词/API/录制包完整验收
 
-| 检查 | 结果与边界 |
+源码21b5a49，[full40640121781](https://github.com/Blueeeecho/EchoLingo/actions/runs/40640121781)三个作业success；Windows最终原始.outcomes为15/15success，以原始JSON判断，不依赖continue-on-error步骤conclusion。
+
+| 检查 | 结果与实际边界 |
 |---|---|
-| 候选本机 |268 Rust passed/1资源专用ignored；84前端单位、类型/构建、完整隔离假IPC UI passed；新官方协议为dummy/loopback，没有真实厂商账号 |
-| 候选原生源码 |首次核验+初读共用MTA对象，保留后置身份核验；直接路径完整query3→2、fallback8→7；C#5/net48/PS AST0，109纯策略断言passed。没有生产settle/retry |
-| released295/e5adb8f |40622643576实际86次Alt+D、85完整链；1次newmock/history精确但自有UIA输入框观察失败。不是已观察到空string；75次同浏览器外点击隐藏，12轮cleanup确认。其余未发热键的鼠标准备失败另列 |
-| released295/5f4dbba |40626825246 Edge冷首2/2；40626825226 Edge+Chrome各1/1实际AltS/左拖/WinRT/自动译文+历史/同源click隐藏，ROI底层mousedown/up0/0；不是新候选或物理Win11验收 |
-| 非浏览器/清理 |40623644694和40626825523均WPF3/3、WinForms16/16及真实记事本核心1/1，但记事本mock退出失败，整体仍failure；新BeginAccept+stopEvent/MTA补丁21项本机exactMock测试passed，未抹去旧红 |
-| 新源码Windows |78794/full40629457450：Windows272 Rust/1ignored、Mac268/1ignored、两端84前端及隔离UI通过；15gate14success/1failure。实际APP44次AltD全链通过，另1鼠标前置前缀失败/3未执行，48项整项仍红。记事本cleanup实际通过，WPF3/WinForms16、UI6/customkeys3、真实NSIS两方向模型的6次推理+3应用链通过 |
-| 新native旧红回归 |7982/source与787产品相同，40630899181 original-suite仍95/96且0setup失败：冷Edge Q1 Stage6返回，Q2 Stage11 Pane→Group identity不等，2.84s未到5s。不能用新full其他绿覆盖；focus HWND prime候选cf6/run40632178982仍95/96，已精确撤回；非合并鼠标的85次实际APP全链通过，2映射前置失败/9未执行仍红 |
-| 新增服务 |Baidu/Youdao/Microsoft文本翻译、Youdao/Google OCR；协议/凭据/超限/重定向/错误脱敏/取消单测及专用表单、45固定URL精确对照passed；系统浏览器实际打开、新Windows诊断CLI和真实云账户未验收 |
+| 单位/界面 | Windows272Rust、Mac268Rust，各1资源专用ignored；各84前端单位/7文件；28Python、完整隔离DOM/mockIPC UI及类型/构建passed。新录制红例+普通KeyX/partial Ctrl/较新DOM释放三边界全部passed，隔离事件不是实际Windows红例根因证明 |
+| 单次选文 | 新APP Edge/Chrome48/48，每次1drag/1release/1AltD，原文/newmock/history精确，端点CSS误差≤0.5px/物理0，42同浏览器blankclick隐藏、6cleanup。非浏览器记事本1/WPF3/WinForms16通过；不是实体WPS/WeGame验收 |
+| 改键 | 实际设置UI6/6，冲突回滚后第二F9录制、重启/禁用/恢复及3次启动退出通过；自定义键3链为独立生成配置启动，保留原4秒测试预热，不能冒充同一UI保存会话立即翻译/OCR |
+| OCR/浮窗 | 两浏览器真实AltS左拖→WinRT OCR→自动译文/历史→同源click隐藏、固定连续更新、普通peer长拖及输入plane/无hook后端门禁通过；全屏/物理多屏/securedesktop及消费Win11性能仍待验收 |
+| 诊断CLI | 同一真实程序一次显式导出，primaryPID/exe/当次时间、严格数值无原文schema验证，源/前台/窗口/历史/mock/剪贴板保留；不发新取词或读密钥 |
+| 实际安装/离线 | 本轮NSIS真实安装后两方向模型6个推理输入case、3条实际离线应用链通过，无mock翻译；48运行资源allowlist及原许可证通过。不是6个不同模型，也不是任意文本翻译质量保证 |
+| 原生冷首次补测 | dcb/run40634789697同PS8220 original双order96/96：72非空/12空/12密码及12cleanup通过，0copy/timeout，唯一旧Edge首case实际一次Q3，Q4严格稳定，总2.565s<5s预算；不是Tauri注册快捷键96次 |
+| 包身份 | 新NSIS75,351,499B/90c3a252…4a554；stage5,923,840B/84e8c47c…515a5；本轮完整DLL105984B/e2406706…048db9@4616932及完整PS8220LF→1aa2CRLF单次嵌入匹配。实际安装EXE仅唯一UNK→NSS三字节差异；对应引擎源码ZIP66ce…8fd3c与已审2104文件清单归档完全相同 |
+| 新官方协议 | Baidu/Youdao/Microsoft文本及Youdao/Google OCR专属认证/格式/取消/超限/脱敏/固定origin与凭据隔离、45固定文档URL检查passed；dummy和loopback，无真实厂商账户验收 |
 
-原95/96冷Edge红结果保留；下方dcb新原生首次通过，但新APP完整构建仍待验收，同PID后台剪贴板发布反例未关闭；同源点击在生成窗口和实际Edge/Chrome受控场景可通过，不据此断言所有应用已经修好。OS物理Win10/11/WPS、IME/多屏/全屏仍需机主复现。Mac规范程序未签名/安装/修改权限；新安装包已生成但尚非全通过修复版，未发布stable。[完整分层记录](validation/windows-selection-services-20261028.json)。
+原787 full14/15、7982/cf6 native95/96、6d full13/15失败保留；6d的UI2/6与hover return-B composition失败未被571同binary三项green解释，未回写成fullgreen。21b是随后独立新完整构建15/15；录制漏keyup另有隔离红→绿和保护反例证明，不能据此确认旧Windows那次失败根因。
 
-最新夹具41e/run40633781813复用精确787程序，实测双order共96次单拖选/单AltD全链通过、0准备失败，84次同浏览器空白点击隐藏、12轮清理通过；不含下述新native修复。新候选只在初始现有selection策略候选全正常不支持TextPattern、未读到range/原文且未碰剪贴板时，对初次后置已知RuntimeId变化允许一次当前选区重采；源native窗口/焦点/线程/进程和鼠标释放状态必须保持，新context仍完整密码/root和post身份核验，无第二次/新listener/固定等待/预算重置。未知RID、有效空pattern、读取错误或已有A均不重采。它取得第一次实际可读的当前选文，不能冻结此前从未读到的A；同native焦点脚本改为B时可能读当前B。149纯策略断言/C#5/AST通过，双重源审无剩余阻断。dcb8f60/run40634789697原native双order96/96通过：非空72/72、空12/12、密码12/12及12轮清理通过，0copy/timeout；旧失败Edge首case实际经Q1无pattern→Q2已知ID变化/native一致→Q3一次当前读取→Q4严格post一致，在2.565秒内通过。仅此1case发生重采。它验证新原生代码，尚待同源码新完整APP构建，不能把此前787应用96/96移算给它。
-
-
-6d74806/full40635398888新完整构建已结束，原始15门禁13success/2failure：新APP浏览器48/48、单AltD矩阵16/16及显式诊断CLI、记事本1/WPF3、自定义键3、两浏览器实际OCR→同源点击隐藏、NSIS两方向模型6次推理/3应用链通过；UI快捷键6项只完成2项，第二次F9录制未观察到完成；A/B候选第8hover返回B时输入planecomposition失败，非时延阈值。失败时缺完整终态元数据，正在只加只读诊断、复用精确6d stage复核，不先认定产品或夹具原因。此前阶段通报误把continue-on-error步骤conclusion当raw success，现已明确更正，以最终.outcome和完整JSON为准。安装器已下载/SHA/大小/CRC核对，尚不标为全通过修复版；75,334,873B/SHA2566fd34c8c…20503e，stage80d6e92a…480e7/5,923,840B。实际新CLI一次导出966B/20数值项/原primary身份，约64.84ms，前台/原文/历史/剪贴板/窗口状态保留。
-
-571af1f/run40638396638精确复用上述6d stage80d6与完整DLL e857，未重编应用；三项原始.outcomes均success：设置UI6/6（3次启动/退出）、自定义键3/3，A/B的baseline/hybrid/planeOnly各8项及crosspeer通过，planeOnly确认为鼠标hook=0且plane down/up/move实际发生。失败观测字段未触发，所以原UI2/6和hover-return-B的具体根因仍未知；6d原full13/15保持failure，不能改写为完整回归全绿。
-
-已另行用新页面的隔离DOM/原生事件mock确认录制反例：修饰键DOM down到达、对应up缺失、匹配native全松开通知0到达后，录制5秒仍停在请松开。它不是前述Windows红例根因证明。源码现按DOM flag/native非null物理mask仅清理已释放修饰键，保留普通held键/null等待/更新DOM release优先、lease/取消/350ms cooldown及保存动作；未加新IPC/重按/固定等待。原红用例和普通KeyX保持/partial Ctrl保持/DOM后到all-up三项边界、84单位、类型/构建及完整隔离UI现通过，独审无阻断。此后续源码尚未包含于已交付6d候选包；需要新完整构建验证。
+仍开放：同PID后台剪贴板发布可能被错误恢复覆盖；实体Win10/11、WPS/WeGame/IME、全屏多屏/混合DPI、干净WebView2安装及真实vendor账号。新接口不自动切换OCR或上传；本地未执行Windows安装器、签名/替换Mac或改TCC/钥匙串/启动停止的VM。预览，不发布stable。[最新六文件包](/Users/wwq/Documents/Codex/2026-10-24/ni-ne/outputs/EchoLingo-installers/windows-preview-20261028-selection-recording)、[精确JSON记录](validation/windows-selection-services-20261028.json)。
 
 <!-- selection-services-20261028:end -->
 

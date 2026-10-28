@@ -1,7 +1,7 @@
 {
   "schemaVersion": 1,
   "date": "2026-10-28",
-  "stage": "candidate-built-full-has-one-fixture-failure-and-original-native-cold-defect-remains",
+  "stage": "final21b-built-raw15of15passed;unsignedpreview-owner-field-acceptance-pending",
   "productBaseline": "295a0ce45296d4310ee1b6a7c8e536b5911e1625",
   "fixtureHead": "5f4dbba",
   "host": {
@@ -126,11 +126,12 @@
     "realInstalledOfflineModelsPassed": 6,
     "realInstalledAppOfflineChainsPassed": 3,
     "summaryFile": "/Users/wwq/Documents/Codex/2026-10-24/ni-ne/work/selection-dismiss-official-apis-20261028/ci-78794c4/summary.json",
-    "summarySha256": "08a46769034c847faf708887e9d121607275b32d42fbfefbc6b7b8b3f9a0a55e"
+    "summarySha256": "08a46769034c847faf708887e9d121607275b32d42fbfefbc6b7b8b3f9a0a55e",
+    "historicalScope": "Firstcombined787full14/15 preserved; seefinalBuildforcurrent21b"
   },
   "limitations": [
     "Hosted Windows Server is not physical Windows 10/11 acceptance.",
-    "Original95/96 cold Edge failure and same-PID background clipboard publication counterexample remain open.",
+    "Old95/96 cold Edge failures preserved; same-source native8220 original96 and final21b application48 now pass controlled acceptance. Same-PID background clipboard publication counterexample remains unresolved.",
     "No real vendor account/API test; fixed guide URLs compared locally, not all opened online.",
     "No new Mac signature/install/TCC/Keychain-rule/credential action and no stopped local VM restart."
   ],
@@ -398,8 +399,10 @@
     "uiTestSha256": "15c3dbc3cbee2906db0e58480ef30956660bcaf8cd61e000d6d3c9a761336957",
     "hostCheckUnit84BuildFullUiPassed": true,
     "notProofOfWindowsOriginalFailureCause": true,
-    "actualNewWindowsBuildPending": true,
-    "includedInInterim6dPacket": false
+    "actualNewWindowsBuildPending": false,
+    "includedInInterim6dPacket": false,
+    "finalRun": 40640121781,
+    "actualWindowsSettingsCasesPassed": 6
   },
   "interimPacket": {
     "path": "/Users/wwq/Documents/Codex/2026-10-24/ni-ne/outputs/EchoLingo-installers/windows-preview-20261028-selection-services",
@@ -409,5 +412,48 @@
     "independentAudit": "/Users/wwq/Documents/Codex/2026-10-24/ni-ne/work/selection-dismiss-official-apis-20261028/packet-final-independent-audit.json",
     "knownRecorderCounterexampleDocumented": true,
     "full13of15RedDocumented": true
+  },
+  "finalBuild": {
+    "source": "21b5a49b95111d2b0c5bc69db2461a17e4824e3b",
+    "run": 40640121781,
+    "outcome": "success",
+    "rawWindowsGates": {
+      "nonbrowserSelection": "success",
+      "selectionInternals": "success",
+      "shortcutsUi": "success",
+      "installedOffline": "success",
+      "applicationCore": "success",
+      "actualBrowserOcr": "success",
+      "popupVisibility": "success",
+      "selectionDocument": "success",
+      "liveCapture": "success",
+      "helperPerformance": "success",
+      "customShortcuts": "success",
+      "delegatedCapture": "success",
+      "actualBrowserSelection": "success",
+      "shortcutInstall": "success",
+      "rigorousSelection": "success"
+    },
+    "rawGateCount": 15,
+    "summary": "/Users/wwq/Documents/Codex/2026-10-24/ni-ne/work/selection-dismiss-official-apis-20261028/ci-21b5a49-full/summary.json",
+    "summaryBytes": 51086,
+    "summarySha256": "a8a8e935346dbff69c86e34b95a8de234359cf45d5eb11bdd716e4a9c7eccaf7",
+    "package": "/Users/wwq/Documents/Codex/2026-10-24/ni-ne/outputs/EchoLingo-installers/windows-preview-20261028-selection-recording",
+    "installerSha256": "90c3a252bf239065314b199ff2fb24d0b28753caffa6538ed23f2b4897b4a554",
+    "installerBytes": 75351499,
+    "stageSha256": "84e8c47c26ab955c2b0b2613f72bf877928089d935e89123a98b164bfc6515a5",
+    "stageBytes": 5923840,
+    "completeDllSha256": "e2406706ad09b6d0689560ef1dbae762d7a44aeb74ef9756b80449f0b6048db9",
+    "completeDllBytes": 105984,
+    "completeDllOffset": 4616932,
+    "sourceLfSha256": "8220b4112453e8be1bda87c5480e1fae70b960599d2abe7dee0de69e6ae8bd0d",
+    "rootPackageAudit": "/Users/wwq/Documents/Codex/2026-10-24/ni-ne/work/selection-dismiss-official-apis-20261028/ci-21b5a49-full/package-local-audit.json",
+    "rootPackageAuditSha256": "70b36685dd0b601add39c8120594acb263a390c11c20ed51344c91bc032b6741",
+    "ownerFieldAcceptancePending": true,
+    "packetIndependentAuditPending": false,
+    "packetIndependentAudit": "/Users/wwq/Documents/Codex/2026-10-24/ni-ne/work/selection-dismiss-official-apis-20261028/packet-21b-final-independent-audit.json",
+    "packetIndependentAuditSha256": "b6bab86b406b6afbc22ea7aaed89d9c0a8d27414ab8e3fabbae252a50634a5c5",
+    "sourceSync21bInventory": "/Users/wwq/Documents/Codex/2026-10-24/ni-ne/work/selection-dismiss-official-apis-20261028/source-sync-21b5a49-inventory.json",
+    "sourceSync21bIndependentAudit": "/Users/wwq/Documents/Codex/2026-10-24/ni-ne/work/selection-dismiss-official-apis-20261028/source-sync-21b5a49-independent-audit.json"
   }
 }
