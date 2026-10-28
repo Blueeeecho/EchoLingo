@@ -39,7 +39,7 @@
 
 ## 许可与商业授权
 
-当前项目自有代码采用 **MIT + Commons Clause v1.0**，源码可查看、学习、修改和按条款分发。Commons Clause 限制其定义的“Sell”，并不禁止一切商业使用；涉及该限制的销售或收费服务，需要另行取得授权。详见 [LICENSE](LICENSE) 和[授权说明](LICENSING.md)。
+当前项目自有代码采用 **MIT + Commons Clause v1.0**，源码可查看、学习、修改和按条款分发。详见 [LICENSE](LICENSE) 和[授权说明](LICENSING.md)。
 
 第三方组件与模型保留各自许可。已按 MIT 发布的旧版本继续适用其原有授权。
 
