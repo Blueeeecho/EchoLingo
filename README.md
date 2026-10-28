@@ -1,34 +1,17 @@
-# EchoLingo official website
+# EchoLingo website
 
-Public URL: https://blueeeecho.github.io/EchoLingo/
+The static product website for [EchoLingo · 回声译](https://blueeeecho.github.io/EchoLingo/).
 
-This is the independent static desktop product website. It uses buildless HTML/CSS/JavaScript, system fonts and the owner's approved app icon. It does not load the desktop app, collect credentials or call translation services.
+This branch contains HTML, CSS, JavaScript and public image assets. GitHub Pages publishes from the branch root without a build step.
 
-## Local preview
+## Preview locally
 
-Run from the EchoLingo project root:
+From this branch checkout, run:
 
 ```sh
-python3 -m http.server 4173 --bind 127.0.0.1 --directory website
+python3 -m http.server 4173 --bind 127.0.0.1
 ```
 
-The site has no installation or build step. The product is desktop-only. Validate ordinary desktop windows and browser zoom; narrower CSS widths may stack content for desktop accessibility without implying a mobile app.
+Open `http://127.0.0.1:4173/`. The workflow illustration uses sample text and does not call a translation service. The site has no API-key inputs, analytics or third-party scripts.
 
-## Publishing
-
-The public repository's dedicated `gh-pages` branch stores these static files at its root. GitHub Pages publishes from that branch `/`, using `.nojekyll` to skip Jekyll. Main application branches, binaries, credentials, local app signing and release workflows are independent of this website deployment.
-
-Commit only this directory's deployable files to the website branch. Verify the actual public HTML/assets after publishing and record the deployment commit in `docs/validation/official-website-20261028.json`. Do not overwrite a changed remote branch or publish unrelated local app modifications.
-
-## Updating product content
-
-- Keep the three primary selling points: unobtrusive translation, lightweight design and configurable services.
-- The workflow illustration uses labeled fixed samples. It is not a live translation service or a screenshot of acceptance testing.
-- Windows Beta 1 is available from the public release `https://github.com/Blueeeecho/EchoLingo/releases/tag/0.1.0-beta.1`. Link its exact installer asset from the Windows platform card. Keep beta wording and concise installation instructions.
-- Update `index.html` platform/release status, FAQ and visible verification date when real downloads are available. Update `sitemap.xml` after substantive page changes.
-- `privacy.html` distinguishes local OCR, cloud text/images, OS credentials, local history and GitHub hosting access logs.
-- No external fonts/scripts, analytics, account UI, API-key fields or network requests belong in the browser demo.
-
-## Community and licensing
-
-The closing section invites visitors who find EchoLingo useful to give the repository a Star. The footer links to the current source-available MIT + Commons Clause v1.0 policy; previously published releases keep their original licenses.
+Application source and licensing are maintained on [main](https://github.com/Blueeeecho/EchoLingo). Download installers from [Releases](https://github.com/Blueeeecho/EchoLingo/releases).
