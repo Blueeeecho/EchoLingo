@@ -700,6 +700,26 @@ mod tests {
     }
 
     #[test]
+    fn focused_input_dismissal_survives_early_blur_then_completed_foreground_change() {
+        let gate = Gate::default();
+        gate.arm(18, true); // Empty Alt+D's native input presentation.
+        let input = gate.token().unwrap();
+        // WM_NCACTIVATE/WM_KILLFOCUS is not a completed external-foreground
+        // observation. A later native foreground notification must still be
+        // allowed to resolve the same input presentation, without a new click
+        // or a second application focus-loss event.
+        assert!(!gate.may_dismiss_blur(input, false));
+        gate.arm(18, false); // An intervening ordinary layout fit.
+        assert!(gate.may_dismiss_blur(input, true));
+        // Pinning/management invalidates even an already queued transition.
+        gate.disarm();
+        assert!(!gate.may_dismiss_blur(input, true));
+        gate.arm(19, true);
+        assert!(!gate.may_dismiss_blur(input, true));
+        assert!(gate.may_dismiss_blur(gate.token().unwrap(), true));
+    }
+
+    #[test]
     fn physical_rectangles_handle_negative_displays_boundaries_and_large_sizes() {
         let gate = Gate::default();
         gate.arm(1, false);

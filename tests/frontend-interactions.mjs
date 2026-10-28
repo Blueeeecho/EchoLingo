@@ -11,7 +11,7 @@ try {
   page.on('pageerror', (error) => errors.push(error.message));
   await page.addInitScript(() => {
     window.isTauri = true;
-    Object.defineProperty(navigator, 'platform', { configurable: true, get: () => 'MacIntel' });
+    Object.defineProperty(navigator, 'platform', { configurable: true, get: () => new URL(location.href).searchParams.has('windowsSelectionFixture') ? 'Win32' : 'MacIntel' });
     const state = {
       providers: [{ id: 'qa-service', name: 'QA IPC fixture', kind: 'openai', baseUrl: 'https://example.invalid/v1', model: 'test-model', enabled: true, prompt: '', hasKey: true }],
       sourceLanguage: 'auto', targetLanguage: 'zh-Hans',
@@ -2209,6 +2209,34 @@ try {
   console.log('PASS: marked visible-popup OCR updates cannot navigate away from settings/history, overwrite newer edits or Alt+A typing, or cancel a newer manual translation; accepted marked capture still auto-translates; ordinary unmarked source workflows remain covered.');
   console.log('PASS: show_popup IPC explicitly requests reuseVisiblePopup=false for ordinary blank/input/selection, including an already visible pinned popup; only marked pinned OCR sends true. Payload dispatch only; no native physical raise/z-order acceptance is claimed.');
   console.log('PASS: popup left/right pointer-captured width requests; native Windows resize dispatch fixture; pin/input/toolbar drag isolation; bounded actual viewport width participates in same-height680→850 layout fits; later height fits retain850; coalesced pending resize invalidated by hide/epoch; management edges hidden/inert;680px light/dark long-prose screenshots inspected separately.');
+  // Windows-only choice: legacy payload defaults to compatibility, saves only
+  // the chosen field, survives management navigation, and rolls back failed saves.
+  const windowsSelectionUrl = new URL(process.env.ECHOLINGO_TEST_URL ?? 'http://127.0.0.1:1420/');
+  windowsSelectionUrl.searchParams.set('windowsSelectionFixture', '1');
+  await page.goto(windowsSelectionUrl.toString());
+  await page.waitForFunction(() => document.querySelector('#footer-status')?.textContent === '准备就绪');
+  await goView('settings');
+  assert.equal(await page.locator('#windows-selection-settings').isVisible(), true);
+  assert.equal(await page.locator('#windows-selection-strategy').inputValue(), 'copy');
+  const beforeStrategySave = await page.evaluate(() => structuredClone(window.__qa.settings));
+  await page.locator('#windows-selection-strategy').selectOption('auto');
+  await page.waitForFunction(() => window.__qa.settings.windowsSelectionStrategy === 'auto');
+  assert.deepEqual(await page.evaluate(() => { const value = structuredClone(window.__qa.settings); delete value.windowsSelectionStrategy; return value; }), beforeStrategySave);
+  await goView('translate'); await goView('settings');
+  assert.equal(await page.locator('#windows-selection-strategy').inputValue(), 'auto');
+  await page.evaluate(() => { window.__qa.failSave = true; });
+  const failedStrategySaves = await page.evaluate(() => window.__qa.saveCalls);
+  await page.locator('#windows-selection-strategy').selectOption('copy');
+  await page.waitForFunction((count) => window.__qa.saveCalls > count && document.querySelector('#windows-selection-strategy').value === 'auto', failedStrategySaves);
+  assert.equal(await page.evaluate(() => window.__qa.settings.windowsSelectionStrategy), 'auto');
+  await page.evaluate(() => { window.__qa.failSave = false; });
+  await page.locator('#windows-selection-strategy').selectOption('copy');
+  await page.waitForFunction(() => window.__qa.settings.windowsSelectionStrategy === 'copy');
+  await page.goto(process.env.ECHOLINGO_TEST_URL ?? 'http://127.0.0.1:1420/');
+  await page.waitForFunction(() => document.querySelector('#footer-status')?.textContent === '准备就绪');
+  await goView('settings');
+  assert.equal(await page.locator('#windows-selection-settings').isHidden(), true);
+  console.log('PASS: isolated Windows strategy settings default compatibility for old payloads; strict and copy save without changing providers/shortcuts/theme, navigation retains strict, failed save rolls back, and macOS hides the setting. Fake IPC only.');
   console.log('PASS: persistent screenshot permission guidance prepared before presentation; click-only correct pane without authorization; retained sanitized link failure and manual path; first-use pending-open help navigation/focus; 800 px light and 420 px narrow/dark screenshots; dismiss/input/quiet Alt+D/Alt+A/stale-epoch recovery; deferred-modal permission payload and granted-status clearing; backend cancellation tickets on edit/clear/stop/Escape/close/native hide; native presentation epochs cover unallocated tickets, omitted/stale hide events, reopen overtaking pending begin and stale delayed popup fitting; backend-only cancellation clears old result state; late-ticket and replacement ordering; pending-save close/reentry guard; failure unlock; blank shortcuts; duplicate rejection; no countdown; theme/favorites and history bounds; OCR dual-key bundles/protocol isolation/no plaintext settings; documented vendor presets; origin-bound saved-key indications; minimal popup/menu/automatic source height; OCR configuration/privacy; empty-selection immediate typing; persistent source copy/speech; pin edge/icon/keyboard hit areas and drag isolation; captured source editing after completion and pending cancellation/retranslation; narrow-wrap source presentation; inconsistent permission feedback; automatic/fixed targets; Enter/ShiftEnter/IME/repeat; passive permissions; real capture and translation error preservation.');
 } finally {
   await browser.close();

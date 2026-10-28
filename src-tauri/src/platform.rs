@@ -19,6 +19,18 @@ fn cancelled(cancel: Option<&NativeCancel>) -> bool {
 pub fn selected_text_cancelable(cancel: NativeCancel) -> Result<String, String> {
     cancellable_text("selected-text", cancel)
 }
+#[cfg(target_os = "windows")]
+pub fn selected_text_with_strategy_cancelable(
+    cancel: NativeCancel,
+    strategy: crate::model::WindowsSelectionStrategy,
+    attempt: SelectionAttempt,
+) -> Result<String, String> {
+    run_windows_selection("selected-text", None, Some(cancel), strategy, Some(attempt))?
+        .get("text")
+        .and_then(Value::as_str)
+        .map(str::to_owned)
+        .ok_or_else(|| "NATIVE_PROTOCOL: Native helper returned no text field.".into())
+}
 pub fn capture_ocr_cancelable(cancel: NativeCancel) -> Result<String, String> {
     cancellable_text("capture-ocr", cancel)
 }
@@ -511,10 +523,66 @@ fn windows_capture_health() -> &'static std::sync::Mutex<Value> {
     HEALTH.get_or_init(|| std::sync::Mutex::new(Value::Null))
 }
 
+#[cfg(any(target_os = "windows", test))]
+#[derive(Clone, Copy)]
+pub struct SelectionAttempt(u64);
+
+#[cfg(any(target_os = "windows", test))]
+#[derive(Default)]
+struct SelectionHealth {
+    generation: u64,
+    value: Value,
+}
+#[cfg(any(target_os = "windows", test))]
+impl SelectionHealth {
+    fn begin(&mut self, strategy: crate::model::WindowsSelectionStrategy) -> SelectionAttempt {
+        self.generation = self.generation.wrapping_add(1);
+        self.value = json!({
+            "attemptId": self.generation, "attemptPhase": 1,
+            "configuredCopyStrategy": u64::from(strategy == crate::model::WindowsSelectionStrategy::Copy),
+            "helperResponseReceived": 0
+        });
+        SelectionAttempt(self.generation)
+    }
+    fn update(&mut self, attempt: SelectionAttempt, fields: Value) {
+        if attempt.0 == self.generation {
+            if let (Some(current), Some(fields)) = (self.value.as_object_mut(), fields.as_object())
+            {
+                current.extend(fields.clone());
+            }
+        }
+    }
+}
 #[cfg(target_os = "windows")]
-fn windows_selection_health() -> &'static std::sync::Mutex<Value> {
-    static HEALTH: std::sync::OnceLock<std::sync::Mutex<Value>> = std::sync::OnceLock::new();
-    HEALTH.get_or_init(|| std::sync::Mutex::new(Value::Null))
+fn windows_selection_health() -> &'static std::sync::Mutex<SelectionHealth> {
+    static HEALTH: std::sync::OnceLock<std::sync::Mutex<SelectionHealth>> =
+        std::sync::OnceLock::new();
+    HEALTH.get_or_init(|| std::sync::Mutex::new(SelectionHealth::default()))
+}
+#[cfg(target_os = "windows")]
+pub fn begin_selection_attempt(
+    strategy: crate::model::WindowsSelectionStrategy,
+) -> SelectionAttempt {
+    windows_selection_health()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .begin(strategy)
+}
+#[cfg(target_os = "windows")]
+pub fn update_selection_attempt(attempt: SelectionAttempt, phase: u64, ok: bool, nonempty: bool) {
+    update_selection_health(
+        attempt,
+        json!({
+            "attemptPhase": phase, "actionResultOk": u64::from(ok),
+            "actionResultNonempty": u64::from(nonempty)
+        }),
+    );
+}
+#[cfg(target_os = "windows")]
+fn update_selection_health(attempt: SelectionAttempt, fields: Value) {
+    if let Ok(mut health) = windows_selection_health().lock() {
+        health.update(attempt, fields);
+    }
 }
 
 #[cfg(any(target_os = "windows", test))]
@@ -542,6 +610,28 @@ fn bounded_selection_health(value: &Value) -> Value {
         }
     };
     retain("selectionQueryCount");
+    for field in [
+        "copyStrategy",
+        "copyPhase",
+        "copyNativeContextValid",
+        "copyNativeContextChecks",
+        "copyNativeGuardReason",
+        "copyNativeEditable",
+        "copyNativeProtection",
+        "copyNativeSelectionKnown",
+        "copyNativeSelectionNonempty",
+        "copyProtectionProbe",
+        "copyProtectionProbeMilliseconds",
+        "copyProtectionUnknown",
+        "copySnapshotOutcome",
+        "copyDispatchInserted",
+        "copyOwnInputObserved",
+        "copyOwnerOutcome",
+        "copyClipboardRestored",
+        "copyTerminalReason",
+    ] {
+        retain(field);
+    }
     for index in 1..=16 {
         for suffix in SUFFIXES {
             retain(&format!("selectionQuery{index}{suffix}"));
@@ -632,7 +722,7 @@ pub fn selection_diagnostics() -> Result<Value, String> {
 pub fn selection_diagnostics() -> Result<Value, String> {
     Ok(windows_selection_health()
         .lock()
-        .map(|value| value.clone())
+        .map(|health| health.value.clone())
         .unwrap_or(Value::Null))
 }
 
@@ -877,17 +967,29 @@ fn run_windows(
     input: Option<&str>,
     cancel: Option<NativeCancel>,
 ) -> Result<Value, String> {
+    run_windows_selection(
+        mode,
+        input,
+        cancel,
+        crate::model::WindowsSelectionStrategy::Auto,
+        None,
+    )
+}
+#[cfg(target_os = "windows")]
+fn run_windows_selection(
+    mode: &str,
+    input: Option<&str>,
+    cancel: Option<NativeCancel>,
+    strategy: crate::model::WindowsSelectionStrategy,
+    attempt: Option<SelectionAttempt>,
+) -> Result<Value, String> {
     use std::io::{Read, Write};
     use std::process::Stdio;
     use std::time::{Duration, Instant};
 
     let capture = matches!(mode, "capture-ocr" | "capture-image");
     let selection = mode == "selected-text";
-    if selection {
-        if let Ok(mut health) = windows_selection_health().lock() {
-            *health = json!({"helperResponseReceived": 0});
-        }
-    }
+    let attempt = selection.then(|| attempt.unwrap_or_else(|| begin_selection_attempt(strategy)));
     if capture {
         if let Ok(mut health) = windows_capture_health().lock() {
             *health = json!({"helperResponseReceived": 0});
@@ -906,6 +1008,9 @@ fn run_windows(
         crate::windows_capture_input::wait_available(|| cancelled(cancel.as_ref()))?;
     }
     let mut command = native_command(mode)?;
+    if selection {
+        command.args(["-SelectionStrategy", strategy.native_argument()]);
+    }
     let mut cancellation = if cancel.is_some() {
         Some(native_process::CancellationEvent::new()?)
     } else {
@@ -945,6 +1050,9 @@ fn run_windows(
         );
     }
     let helper_started = Instant::now();
+    if let Some(attempt) = attempt {
+        update_selection_health(attempt, json!({"attemptPhase": 2}));
+    }
     let mut child = command
         .spawn()
         .map_err(|error| format!("NATIVE_START: Could not start the system helper: {error}"))?;
@@ -1071,7 +1179,7 @@ fn run_windows(
     }
     if selection {
         let reply = serde_json::from_slice::<Value>(&output).unwrap_or(Value::Null);
-        let safe = selection_health_from_reply(
+        let mut safe = selection_health_from_reply(
             &reply,
             helper_started
                 .elapsed()
@@ -1081,8 +1189,15 @@ fn run_windows(
             cancellation_signalled,
             cancellation_signal_failed,
         );
-        if let Ok(mut health) = windows_selection_health().lock() {
-            *health = safe;
+        safe["attemptPhase"] = json!(3);
+        safe["helperResultNonempty"] = json!(u64::from(
+            reply
+                .get("text")
+                .and_then(Value::as_str)
+                .is_some_and(|text| !text.trim().is_empty())
+        ));
+        if let Some(attempt) = attempt {
+            update_selection_health(attempt, safe);
         }
     }
     let result = parse_response(&output, status.success());
@@ -1574,6 +1689,55 @@ mod tests {
                 "selectionQuery16Milliseconds":10_000_000
             })
         );
+    }
+
+    #[test]
+    fn copy_diagnostics_allow_only_bounded_scalar_metadata() {
+        let safe = super::bounded_selection_health(&json!({
+            "copyStrategy": 1, "copyPhase": 4, "copyNativeContextValid": 1,
+            "copyNativeContextChecks": 6, "copyNativeGuardReason": 0,
+            "copyNativeEditable": 2, "copyNativeProtection": 0,
+            "copyNativeSelectionKnown": 1, "copyNativeSelectionNonempty": 1,
+            "copyProtectionProbe": 2, "copyProtectionProbeMilliseconds": 250,
+            "copyProtectionUnknown": 1, "copySnapshotOutcome": 1,
+            "copyDispatchInserted": 4, "copyOwnInputObserved": 1,
+            "copyOwnerOutcome": 1, "copyClipboardRestored": 1, "copyTerminalReason": 0,
+            "copyText": "private", "copyTitle": "private", "attemptId": 1,
+            "actionResultNonempty": 1
+        }));
+        assert_eq!(safe.as_object().unwrap().len(), 18);
+        assert_eq!(safe["copyDispatchInserted"], 4);
+        for invalid in [
+            json!(-1),
+            json!(10_000_001),
+            json!(1.5),
+            json!(true),
+            json!("private"),
+            json!([1]),
+        ] {
+            assert_eq!(
+                super::bounded_selection_health(&json!({"copyTerminalReason": invalid})),
+                json!({})
+            );
+        }
+    }
+
+    #[test]
+    fn selection_attempt_reset_precedes_helper_and_rejects_late_previous_diagnostics() {
+        use crate::model::WindowsSelectionStrategy;
+        let mut health = super::SelectionHealth::default();
+        let old = health.begin(WindowsSelectionStrategy::Auto);
+        health.update(old, json!({"helperResponseReceived": 1, "copyPhase": 7}));
+        let new = health.begin(WindowsSelectionStrategy::Copy);
+        assert_eq!(health.value["helperResponseReceived"], 0);
+        assert_eq!(health.value["configuredCopyStrategy"], 1);
+        assert!(health.value.get("copyPhase").is_none());
+        health.update(old, json!({"helperResponseReceived": 1, "copyPhase": 8}));
+        assert_eq!(health.value["helperResponseReceived"], 0);
+        health.update(new, json!({"attemptPhase": 4, "actionResultOk": 0}));
+        assert_eq!(health.value["attemptPhase"], 4);
+        assert_eq!(health.value["helperResponseReceived"], 0);
+        assert_eq!(health.value["actionResultOk"], 0);
     }
 
     #[test]

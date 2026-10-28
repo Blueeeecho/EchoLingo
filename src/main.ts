@@ -781,6 +781,9 @@ function renderSettings(): void {
   renderSystemTranslationSetup();
   ocrUi.render();
   shortcutEditor.render(settings.shortcuts, settingsReady);
+  $('#windows-selection-settings').hidden = document.documentElement.dataset.platform !== 'windows';
+  $<HTMLSelectElement>('#windows-selection-strategy').value = settings.windowsSelectionStrategy ?? 'copy';
+  $<HTMLSelectElement>('#windows-selection-strategy').disabled = !settingsReady;
   $<HTMLSelectElement>('#theme-select').value = settings.theme;
   $<HTMLInputElement>('#save-history').checked = settings.saveHistory;
   $<HTMLInputElement>('#max-history').value = String(settings.maxHistory);
@@ -1216,6 +1219,10 @@ $('#theme-cycle').addEventListener('click', () => run(async () => {
   await updateSettings((next) => { next.theme = order[(order.indexOf(next.theme) + 1) % order.length]!; });
 }));
 prefersDark.addEventListener('change', applyTheme);
+$<HTMLSelectElement>('#windows-selection-strategy').addEventListener('change', (event) => {
+  const choice = (event.target as HTMLSelectElement).value === 'auto' ? 'auto' : 'copy';
+  run(async () => { try { await updateSettings((next) => { next.windowsSelectionStrategy = choice; }); } finally { renderSettings(); } });
+});
 $<HTMLSelectElement>('#theme-select').addEventListener('change', (event) => run(() => updateSettings((next) => { next.theme = (event.target as HTMLSelectElement).value as Settings['theme']; })));
 $<HTMLInputElement>('#save-history').addEventListener('change', (event) => {
   const value = (event.target as HTMLInputElement).checked;

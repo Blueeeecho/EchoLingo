@@ -143,6 +143,29 @@ public static class WindowsSelectionPolicyFixture {
         Assert(typed.Message == "SELECTION: The focused control changed or is outside the source window; select text and retry.", "Typed RuntimeId failure preserves the public error text");
         Assert(!(new InvalidOperationException("PROTECTED: generated") is SelectionCopyPolicy.SelectionRuntimeIdChangedException), "Protection and generic selection errors are not restart control flow");
     }
+    static void CompatibilityCopyChecks() {
+        int copies = 0;
+        Action<bool, bool, bool, uint, uint> capture = delegate(bool password, bool native, bool known, uint start, uint end) {
+            SelectionCopyPolicy.RequireCompatibilitySelection(password, native, known, start, end);
+            copies++;
+        };
+        foreach (bool native in new bool[] { false, true }) {
+            Error(delegate { capture(true, native, false, 0, 0); }, "PROTECTED:");
+            Assert(copies == 0, "Known password metadata stops explicit compatibility before copy, even when selection availability is unknown");
+        }
+        Error(delegate { capture(false, true, false, 0, 0); }, "SELECTION:");
+        Assert(copies == 0, "A recognized native editor with unavailable selection metadata never receives blind copy");
+        foreach (uint caret in new uint[] { 0, 12, 65535, 65536, UInt32.MaxValue }) {
+            Error(delegate { capture(false, true, true, caret, caret); }, "NO_SELECTION:");
+            Assert(copies == 0, "A native empty selection is rejected, including full 32-bit caret positions");
+        }
+        capture(false, true, true, 65536, 65540);
+        Assert(copies == 1, "A verified native selection above the packed 16-bit range remains available");
+        capture(false, true, true, 10, 5);
+        Assert(copies == 2, "Selection presence uses unequal endpoints rather than truncating or assuming drag direction");
+        capture(false, false, false, 0, 0);
+        Assert(copies == 3, "Only the explicitly invoked compatibility policy permits unknown custom selection; this does not prove that Ctrl+C will not copy a whole line");
+    }
     public static int Main() {
         try {
             Assert(SelectionCopyPolicy.AutomationText<string>(null, delegate(string text) { return text; }) == null,
@@ -363,6 +386,7 @@ public static class WindowsSelectionPolicyFixture {
             Error(delegate {SelectionCopyPolicy.ReadAutomation(false,true,true,delegate{return new string[]{"range"};},delegate(string x){throw new InvalidOperationException("SELECTION: stale range");},true);},"SELECTION:");
             Assert(normal.OwnerChecks==2,"Owner validated after coherent read and again immediately before restore");
             UnreadRestartChecks();
+            CompatibilityCopyChecks();
             Console.WriteLine("{\"ok\":true,\"selectionPolicyFixturePassed\":true,\"assertions\":" + assertions + ",\"windowsInteractiveTested\":false,\"clipboardAccessed\":false,\"inputSent\":false,\"screenCaptured\":false}");
             return 0;
         } catch (Exception error) { Console.Error.WriteLine(error); return 1; }

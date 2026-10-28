@@ -1770,6 +1770,13 @@ fn start_action(app: tauri::AppHandle, action: String) {
     // Capture source identity at the user's request, before waiting for the old
     // picker to finish its owned release drain. Never read a later source app.
     #[cfg(target_os = "windows")]
+    let selection_attempt = (action == "selection").then(|| {
+        let strategy = locked(&state.settings)
+            .map(|settings| settings.windows_selection_strategy)
+            .unwrap_or_default();
+        (strategy, platform::begin_selection_attempt(strategy))
+    });
+    #[cfg(target_os = "windows")]
     let source_snapshot = if action == "selection" {
         platform::native_source_snapshot().map(Some)
     } else {
@@ -1874,7 +1881,15 @@ fn start_action(app: tauri::AppHandle, action: String) {
             }
             let cancel = worker_request.cancellation();
             let text = match worker_action.as_str() {
-                "selection" => platform::selected_text_cancelable(cancel),
+                "selection" => {
+                    #[cfg(target_os = "windows")]
+                    {
+                        let (strategy, attempt) = selection_attempt.ok_or("缺少取词任务")?;
+                        platform::selected_text_with_strategy_cancelable(cancel, strategy, attempt)
+                    }
+                    #[cfg(not(target_os = "windows"))]
+                    platform::selected_text_cancelable(cancel)
+                }
                 "clipboard" => platform::clipboard_text(),
                 "capture" | "ocr" | "silentOcr" if cloud_ocr.is_some() => {
                     platform::capture_image_cancelable(cancel)
@@ -1899,6 +1914,17 @@ fn start_action(app: tauri::AppHandle, action: String) {
         .await
         .map_err(|_| "系统操作异常".to_string())
         .and_then(|result| result);
+        #[cfg(target_os = "windows")]
+        if let Some((_, attempt)) = selection_attempt {
+            platform::update_selection_attempt(
+                attempt,
+                4,
+                result.is_ok(),
+                result
+                    .as_ref()
+                    .is_ok_and(|(text, _)| !text.trim().is_empty()),
+            );
+        }
         if let Err(error) = &result {
             if let Some(message) = clipboard_restoration_notice(error) {
                 // No source, epoch, activation or visibility mutation: an old
@@ -1936,6 +1962,15 @@ fn start_action(app: tauri::AppHandle, action: String) {
             return;
         }
         publish_native_result(&app, &request, presentation, keep_popup, || {
+            #[cfg(target_os = "windows")]
+            if let Some((_, attempt)) = selection_attempt {
+                platform::update_selection_attempt(
+                    attempt,
+                    5,
+                    result.is_ok(),
+                    result.as_ref().is_ok_and(|text| !text.trim().is_empty()),
+                );
+            }
             match result {
                 Ok(text) if !text.trim().is_empty() => {
                     emit_source_text(

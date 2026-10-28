@@ -140,6 +140,22 @@ impl Default for Shortcuts {
         }
     }
 }
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum WindowsSelectionStrategy {
+    Auto,
+    #[default]
+    Copy,
+}
+impl WindowsSelectionStrategy {
+    pub fn native_argument(self) -> &'static str {
+        match self {
+            Self::Auto => "auto",
+            Self::Copy => "copy",
+        }
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct Settings {
@@ -155,6 +171,7 @@ pub struct Settings {
     #[serde(default)]
     pub shortcut_defaults_version: u8,
     pub shortcuts: Shortcuts,
+    pub windows_selection_strategy: WindowsSelectionStrategy,
     pub save_history: bool,
     pub max_history: usize,
     pub theme: String,
@@ -171,6 +188,7 @@ impl Default for Settings {
             language_direction_version: 1,
             shortcut_defaults_version: 1,
             shortcuts: Shortcuts::default(),
+            windows_selection_strategy: WindowsSelectionStrategy::Copy,
             save_history: true,
             max_history: 20,
             theme: "system".into(),
@@ -349,6 +367,62 @@ mod tests {
         assert_eq!(Settings::default().max_history, 20);
         assert!(Shortcuts::default().capture.is_empty());
         assert_eq!(Shortcuts::default().silent_ocr, "Alt+S");
+        assert_eq!(
+            Settings::default().windows_selection_strategy,
+            WindowsSelectionStrategy::Copy
+        );
+    }
+    #[test]
+    fn legacy_selection_settings_default_to_copy_without_changing_other_preferences() {
+        let mut original = Settings::default();
+        original.theme = "dark".into();
+        original.shortcuts.selection = "Control+Shift+D".into();
+        original.max_history = 37;
+        let mut saved = serde_json::to_value(&original).unwrap();
+        saved
+            .as_object_mut()
+            .unwrap()
+            .remove("windowsSelectionStrategy");
+        let loaded: Settings = serde_json::from_value(saved.clone()).unwrap();
+        assert_eq!(
+            loaded.windows_selection_strategy,
+            WindowsSelectionStrategy::Copy
+        );
+        let mut roundtrip = serde_json::to_value(loaded).unwrap();
+        assert_eq!(
+            roundtrip
+                .as_object_mut()
+                .unwrap()
+                .remove("windowsSelectionStrategy"),
+            Some(serde_json::json!("copy"))
+        );
+        assert_eq!(roundtrip, saved);
+    }
+    #[test]
+    fn selection_strategy_roundtrip_preserves_explicit_strict_choice_and_rejects_invalid_values() {
+        for (choice, argument) in [
+            (WindowsSelectionStrategy::Auto, "auto"),
+            (WindowsSelectionStrategy::Copy, "copy"),
+        ] {
+            let original = Settings {
+                windows_selection_strategy: choice,
+                ..Settings::default()
+            };
+            let saved = serde_json::to_value(&original).unwrap();
+            assert_eq!(saved["windowsSelectionStrategy"], argument);
+            assert_eq!(choice.native_argument(), argument);
+            let loaded: Settings = serde_json::from_value(saved).unwrap();
+            assert_eq!(loaded.windows_selection_strategy, choice);
+        }
+        for invalid in [
+            serde_json::json!("unknown"),
+            serde_json::json!(true),
+            serde_json::json!(null),
+        ] {
+            let mut saved = serde_json::to_value(Settings::default()).unwrap();
+            saved["windowsSelectionStrategy"] = invalid;
+            assert!(serde_json::from_value::<Settings>(saved).is_err());
+        }
     }
     #[test]
     fn bundled_offline_provider_is_local_and_existing_choices_survive_migration() {

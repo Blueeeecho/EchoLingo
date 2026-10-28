@@ -35,6 +35,7 @@ export interface Settings {
   languageDirectionVersion?: number;
   shortcutDefaultsVersion?: number;
   shortcuts: Record<ShortcutAction, string>;
+  windowsSelectionStrategy?: 'copy' | 'auto';
   saveHistory: boolean;
   theme: 'system' | 'light' | 'dark';
   maxHistory: number;

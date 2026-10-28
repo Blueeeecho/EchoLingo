@@ -4,6 +4,9 @@
 param(
     [ValidateSet('selected-text', 'capture-ocr', 'capture-image', 'clipboard', 'copy', 'diagnostics', 'self-test', 'capture-state-self-test')]
     [string]$Mode = $env:ECHOLINGO_NATIVE_MODE,
+    # Explicit compatibility mode. Auto retains the existing UIA-first policy.
+    [ValidateSet('auto', 'copy')]
+    [string]$SelectionStrategy = 'auto',
     # Production always supplies its embedded, content-addressed DLL. Omission
     # is the standalone source-development/fixture path, never a load fallback.
     [string]$NativeAssemblyPath = '',
@@ -46,6 +49,9 @@ function Write-Result($Value) {
 }
 
 try {
+    if ($SelectionStrategy -eq 'copy' -and $Mode -ne 'selected-text') {
+        throw 'SELECTION_ARGUMENT: Copy compatibility is available only for selected-text.'
+    }
     if (($CaptureHostThreadId -eq 0) -ne ($CaptureHostToken -eq 0) -or $CaptureHostToken -lt 0 -or
         ($CaptureHostThreadId -ne 0 -and ($Mode -notin 'capture-ocr','capture-image' -or $InputBackend -ne 'hybrid'))) {
         throw 'CAPTURE_ARGUMENT: Native input session parameters are invalid.'
@@ -278,6 +284,16 @@ public static class SelectionCopyPolicy {
         return before.Foreground == current.Foreground && before.Root == current.Root && before.Focus == current.Focus
             && before.Process == current.Process && before.ForegroundThread == current.ForegroundThread && before.FocusThread == current.FocusThread;
     }
+    // Only the explicit compatibility entry uses this policy. A generic custom
+    // provider has no universal native selection bit: unknown is permitted in
+    // that mode, not represented as proof of a real selection or safe ancestry.
+    public static void RequireCompatibilitySelection(bool protectedControl, bool nativeEditable,
+                                                      bool nativeSelectionKnown, uint start, uint end) {
+        if (protectedControl) throw new InvalidOperationException("PROTECTED: Selected text is inside a password control.");
+        if (!nativeEditable) return;
+        if (!nativeSelectionKnown) throw new InvalidOperationException("SELECTION: The native editable selection could not be verified; no copy input was sent.");
+        if (start == end) throw new InvalidOperationException("NO_SELECTION: No text is selected in the native editable control.");
+    }
     public const string InputBlocked = "SELECTION: Windows blocked copy input. Elevated or protected apps may not allow selection capture; try screenshot OCR.";
     public static T RequireFocus<T>(T focused) where T : class {
         if (focused == null) throw new InvalidOperationException("SELECTION: The focused control is unavailable; select text and retry.");
@@ -443,6 +459,10 @@ public static class EchoLingoNative {
     [DllImport("user32.dll")] static extern bool CloseClipboard();
     [DllImport("user32.dll")] static extern uint GetWindowThreadProcessId(IntPtr window, out uint process);
     [DllImport("user32.dll")] static extern bool GetGUIThreadInfo(uint thread, ref GUITHREADINFO info);
+    [DllImport("user32.dll", EntryPoint="GetClassNameW", CharSet=CharSet.Unicode)] static extern int CopyWindowClass(IntPtr window, StringBuilder name, int length);
+    [DllImport("user32.dll", EntryPoint="GetWindowLongPtrW", SetLastError=true)] static extern IntPtr CopyWindowStyle64(IntPtr window, int index);
+    [DllImport("user32.dll", EntryPoint="GetWindowLongW", SetLastError=true)] static extern int CopyWindowStyle32(IntPtr window, int index);
+    [DllImport("user32.dll", EntryPoint="SendMessageTimeoutW", SetLastError=true)] static extern IntPtr CopyNativeMessage(IntPtr window, uint message, IntPtr word, IntPtr parameter, uint flags, uint timeout, out UIntPtr result);
     [StructLayout(LayoutKind.Sequential)] struct GUITHREADINFO {
         public uint cbSize, flags;
         public IntPtr active, focus, capture, menuOwner, moveSize, caret;
@@ -997,6 +1017,219 @@ public static class EchoLingoNative {
         input.data.keyboard.vk = code; input.data.keyboard.flags = up ? 2u : 0u;
         input.data.keyboard.extra = marker;
         return input;
+    }
+    sealed class CopyProtectionProbe {
+        public int Outcome, Completed;
+        public volatile bool Stop;
+    }
+    // A best-effort denial probe, never a text/provider/RuntimeId prerequisite.
+    // Even a completed false result is not a guarantee about custom passwords.
+    // If a provider stalls, stop at the next RPC boundary and leave it read-only.
+    static int ProbeCopyProtection() {
+        CopyProtectionProbe probe = new CopyProtectionProbe();
+        Thread worker = new Thread(delegate() {
+            try {
+                AutomationElement current = AutomationElement.FocusedElement;
+                if (probe.Stop) return;
+                if (current == null) { probe.Outcome = 3; return; }
+                for (int depth = 0; depth < 8; depth++) {
+                    if (probe.Stop) return;
+                    object value = current.GetCurrentPropertyValue(AutomationElement.IsPasswordProperty, true);
+                    if (probe.Stop) return;
+                    if (!(value is bool)) { probe.Outcome = 4; return; }
+                    if ((bool)value) { probe.Outcome = 1; return; }
+                    if (depth == 7) { probe.Outcome = 6; return; }
+                    current = TreeWalker.RawViewWalker.GetParent(current);
+                    if (probe.Stop) return;
+                    if (current == null) { probe.Outcome = 2; return; }
+                }
+            } catch { probe.Outcome = 4; }
+            finally { Interlocked.Exchange(ref probe.Completed, 1); }
+        });
+        worker.IsBackground = true; worker.Name = "EchoLingo copy protection";
+        worker.SetApartmentState(ApartmentState.MTA);
+        Stopwatch elapsed = Stopwatch.StartNew();
+        try {
+            worker.Start();
+            while (Interlocked.CompareExchange(ref probe.Completed, 0, 0) == 0) {
+                NativeCancellation.ThrowIfRequested(); RequireSelectionBudget();
+                if (elapsed.ElapsedMilliseconds >= 250) return 5;
+                Thread.Sleep(1); // Await completion only; a ready probe returns immediately.
+            }
+            NativeCancellation.ThrowIfRequested(); return probe.Outcome;
+        } finally {
+            probe.Stop = true;
+            CaptureHealth.Set("copyProtectionProbeMilliseconds", Math.Min(10000000, elapsed.ElapsedMilliseconds));
+        }
+    }
+    static bool IsNativeCopyEdit(IntPtr focus) {
+        StringBuilder name = new StringBuilder(128);
+        if (CopyWindowClass(focus, name, name.Capacity) == 0) return false;
+        string kind = name.ToString();
+        return String.Equals(kind, "Edit", StringComparison.OrdinalIgnoreCase)
+            || String.Equals(kind, "RICHEDIT", StringComparison.OrdinalIgnoreCase)
+            || String.Equals(kind, "RichEdit20A", StringComparison.OrdinalIgnoreCase)
+            || String.Equals(kind, "RichEdit20W", StringComparison.OrdinalIgnoreCase)
+            || String.Equals(kind, "RICHEDIT50A", StringComparison.OrdinalIgnoreCase)
+            || String.Equals(kind, "RICHEDIT50W", StringComparison.OrdinalIgnoreCase)
+            || String.Equals(kind, "RichEditD2DPT", StringComparison.OrdinalIgnoreCase)
+            || kind.StartsWith("WindowsForms10.EDIT.", StringComparison.OrdinalIgnoreCase)
+            || kind.StartsWith("WindowsForms10.RichEdit20W.", StringComparison.OrdinalIgnoreCase)
+            || kind.StartsWith("WindowsForms10.RichEdit50W.", StringComparison.OrdinalIgnoreCase);
+    }
+    static uint CopyMessageBudget() {
+        RequireSelectionBudget();
+        SelectionSession session = currentSelectionSession;
+        return (uint)Math.Max(1, Math.Min(250, session == null ? 250 : session.Budget.RemainingMilliseconds));
+    }
+    static void RequireNativeCopyEdit(IntPtr focus) {
+        CaptureHealth.Set("copyNativeEditable", 1);
+        long style = IntPtr.Size == 8 ? CopyWindowStyle64(focus, -16).ToInt64() : CopyWindowStyle32(focus, -16);
+        if ((style & 0x20) != 0) {
+            CaptureHealth.Set("copyNativeProtection", 2);
+            CaptureHealth.Set("copyProtectionUnknown", 0);
+            SelectionCopyPolicy.RequireCompatibilitySelection(true, true, false, 0, 0);
+        }
+        UIntPtr password;
+        if (style == 0 || CopyNativeMessage(focus, 0xD2, IntPtr.Zero, IntPtr.Zero, 0x23, CopyMessageBudget(), out password) == IntPtr.Zero) {
+            CaptureHealth.Set("copyNativeProtection", 3);
+            throw new InvalidOperationException("SELECTION: Native editable protection could not be checked; no copy input was sent.");
+        }
+        if (password != UIntPtr.Zero) {
+            CaptureHealth.Set("copyNativeProtection", 2);
+            CaptureHealth.Set("copyProtectionUnknown", 0);
+            SelectionCopyPolicy.RequireCompatibilitySelection(true, true, false, 0, 0);
+        }
+        CaptureHealth.Set("copyNativeProtection", 1);
+        IntPtr start = Marshal.AllocHGlobal(4), end = IntPtr.Zero;
+        try {
+            end = Marshal.AllocHGlobal(4); Marshal.WriteInt32(start, 0); Marshal.WriteInt32(end, 0);
+            UIntPtr packed; // EM_GETSEL full DWORD outputs avoid its 16-bit packed limit.
+            bool available = CopyNativeMessage(focus, 0xB0, start, end, 0x23, CopyMessageBudget(), out packed) != IntPtr.Zero;
+            uint a = available ? unchecked((uint)Marshal.ReadInt32(start)) : 0;
+            uint b = available ? unchecked((uint)Marshal.ReadInt32(end)) : 0;
+            CaptureHealth.Set("copyNativeSelectionKnown", available ? 1 : 0);
+            CaptureHealth.Set("copyNativeSelectionNonempty", available && a != b ? 1 : 0);
+            SelectionCopyPolicy.RequireCompatibilitySelection(false, true, available, a, b);
+        } finally { Marshal.FreeHGlobal(start); if (end != IntPtr.Zero) Marshal.FreeHGlobal(end); }
+    }
+    static void RequireNativeCopyContext(SelectionCopyPolicy.NativeContext expected, int phase) {
+        CaptureHealth.Set("copyPhase", phase); NativeCancellation.ThrowIfRequested(); RequireSelectionBudget();
+        CaptureHealth.Increment("copyNativeContextChecks");
+        SelectionCopyPolicy.NativeContext current = NativeSelectionContext(new IntPtr(expected.Foreground));
+        if (!SelectionCopyPolicy.CanRestartUnreadSelection(true, null, false, expected, current)) {
+            CaptureHealth.Set("copyNativeGuardReason", !current.Valid ? 1 : !current.MouseReleased ? 2 : 3);
+            throw new OperationCanceledException("CANCELLED: The source window or focused control changed before copy completed.");
+        }
+    }
+    public static string SelectedTextCopy() {
+        selectionQueryCount = 0; CaptureHealth.ResetSelection();
+        foreach (string name in new string[] { "copyStrategy", "copyPhase", "copyNativeContextValid", "copyNativeContextChecks",
+            "copyNativeGuardReason", "copyNativeEditable", "copyNativeProtection", "copyNativeSelectionKnown", "copyNativeSelectionNonempty",
+            "copyProtectionProbe", "copyProtectionProbeMilliseconds", "copyProtectionUnknown", "copySnapshotOutcome", "copyDispatchInserted",
+            "copyOwnInputObserved", "copyOwnerOutcome", "copyClipboardRestored", "copyTerminalReason" }) CaptureHealth.Set(name, 0);
+        CaptureHealth.Set("copyStrategy", 1); CaptureHealth.Set("copyProtectionUnknown", 1);
+        using (SelectionSession session = new SelectionSession()) {
+            try {
+                string text = SelectedTextCopyCore(); RequireSelectionBudget();
+                CaptureHealth.Set("copyTerminalReason", 1); return text;
+            } catch (Exception error) {
+                string message = error.Message;
+                int reason = error is SelectionBudgetExceededException ? 13
+                    : message.StartsWith("PROTECTED:", StringComparison.Ordinal) ? 2
+                    : message.StartsWith("NO_SELECTION:", StringComparison.Ordinal) ? 3
+                    : message.StartsWith("CANCELLED:", StringComparison.Ordinal) ? 6
+                    : message.StartsWith("CLIPBOARD_RESTORE_", StringComparison.Ordinal) ? 9
+                    : message.StartsWith("CLIPBOARD_CHANGED:", StringComparison.Ordinal) ? 10
+                    : message.StartsWith("CLIPBOARD:", StringComparison.Ordinal) ? 7
+                    : message == SelectionCopyPolicy.InputBlocked ? 8 : 12;
+                CaptureHealth.Set("copyTerminalReason", reason); throw;
+            }
+        }
+    }
+    static string SelectedTextCopyCore() {
+        CaptureHealth.Set("copyPhase", 1); NativeCancellation.ThrowIfRequested();
+        SelectionContext context = NewSelectionContext();
+        SelectionCopyPolicy.NativeContext expected = NativeSelectionContext(context.Foreground);
+        CaptureHealth.Set("copyNativeContextValid", expected.Valid ? 1 : 0);
+        if (!expected.Valid || !expected.MouseReleased) {
+            CaptureHealth.Set("copyNativeGuardReason", !expected.Valid ? 1 : 2);
+            throw new InvalidOperationException("SELECTION: Release the mouse in the source window before copying the selection.");
+        }
+        DateTime deadline = DateTime.UtcNow.AddMilliseconds(1500);
+        while (ModifiersDown()) {
+            NativeCancellation.ThrowIfRequested(); RequireSelectionBudget();
+            if (DateTime.UtcNow >= deadline) throw new InvalidOperationException("SELECTION: Release the shortcut keys and retry.");
+            Thread.Sleep(20);
+        }
+        RequireNativeCopyContext(expected, 2);
+        bool nativeEditable = IsNativeCopyEdit(new IntPtr(expected.Focus));
+        if (nativeEditable) RequireNativeCopyEdit(new IntPtr(expected.Focus));
+        int protection = ProbeCopyProtection(); CaptureHealth.Set("copyProtectionProbe", protection);
+        RequireNativeCopyContext(expected, 3);
+        // False/unavailable/incomplete metadata remains UNKNOWN. Explicit copy
+        // compatibility may copy a custom editor's whole line with no selection.
+        // It never claims the strict auto path's complete ancestor guarantee.
+        if (protection == 1) CaptureHealth.Set("copyProtectionUnknown", 0);
+        SelectionCopyPolicy.RequireCompatibilitySelection(protection == 1, false, false, 0, 0);
+        List<IDisposable> resources = new List<IDisposable>(); DataObject saved;
+        uint initial = GetClipboardSequenceNumber();
+        try {
+            NativeCancellation.ThrowIfRequested(); saved = SnapshotClipboard(resources);
+            SelectionCopyPolicy.RequireCurrentSequence(initial, GetClipboardSequenceNumber());
+            CaptureHealth.Set("copySnapshotOutcome", 1);
+        } catch (OperationCanceledException) { foreach (IDisposable resource in resources) resource.Dispose(); throw; }
+        catch (Exception error) {
+            CaptureHealth.Set("copySnapshotOutcome", 2); foreach (IDisposable resource in resources) resource.Dispose();
+            throw new InvalidOperationException("CLIPBOARD: Cannot preserve all clipboard formats. Selection capture was stopped before changing the clipboard. " + error.Message);
+        }
+        try { return CopyCompatiblePreservedClipboard(context, expected, nativeEditable, saved, initial); }
+        finally { foreach (IDisposable resource in resources) resource.Dispose(); }
+    }
+    static string CopyCompatiblePreservedClipboard(SelectionContext context, SelectionCopyPolicy.NativeContext expected, bool nativeEditable, DataObject saved, uint initial) {
+        RequireNativeCopyContext(expected, 4);
+        if (ModifiersDown()) throw new InvalidOperationException("SELECTION: Shortcut modifiers changed before copy; retry.");
+        SelectionCopyPolicy.RequireCurrentSequence(initial, GetClipboardSequenceNumber());
+        using (SelectionCopyObserver observer = new SelectionCopyObserver()) {
+            RequireNativeCopyContext(expected, 5); observer.RequireCurrent();
+            if (nativeEditable) RequireNativeCopyEdit(new IntPtr(expected.Focus));
+            RequireNativeCopyContext(expected, 5);
+            if (ModifiersDown()) throw new InvalidOperationException("SELECTION: Shortcut modifiers changed before copy; retry.");
+            SelectionCopyPolicy.RequireCurrentSequence(initial, GetClipboardSequenceNumber());
+            INPUT[] keys = new INPUT[] { Key(0x11, false, observer.Marker), Key(0x43, false, observer.Marker), Key(0x43, true, observer.Marker), Key(0x11, true, observer.Marker) };
+            Stopwatch clock = Stopwatch.StartNew(); observer.Issued(); RequireSelectionBudget();
+            uint inserted = SendInput((uint)keys.Length, keys, Marshal.SizeOf(typeof(INPUT)));
+            CaptureHealth.Set("copyDispatchInserted", inserted);
+            if (inserted != keys.Length) {
+                INPUT[] release = new INPUT[] { Key(0x43, true, observer.Marker), Key(0x11, true, observer.Marker) };
+                SendInput((uint)release.Length, release, Marshal.SizeOf(typeof(INPUT)));
+            }
+            if (inserted >= 2) { observer.AwaitOwnInput(delegate { return clock.ElapsedMilliseconds; }); CaptureHealth.Set("copyOwnInputObserved", 1); }
+            string text = SelectionCopyPolicy.CompleteCopy(initial, inserted, GetClipboardSequenceNumber,
+                delegate { return Clipboard.ContainsText() ? Clipboard.GetText(TextDataFormat.UnicodeText) : null; },
+                delegate(uint copied) {
+                    SelectionCopyPolicy.RequireCurrentSequence(copied, GetClipboardSequenceNumber()); observer.RequireCurrent();
+                    try {
+                        if (saved.GetFormats(false).Length == 0) {
+                            if (!OpenClipboard(IntPtr.Zero)) throw new InvalidOperationException("Clipboard is busy.");
+                            try {
+                                SelectionCopyPolicy.RequireCurrentSequence(copied, GetClipboardSequenceNumber()); observer.RequireCurrent();
+                                if (!EmptyClipboard()) throw new InvalidOperationException("Cannot restore an empty clipboard.");
+                            } finally { CloseClipboard(); }
+                        } else { observer.RequireCurrent(); Clipboard.SetDataObject(saved, true, 0, 0); }
+                    } catch (Exception error) {
+                        if (error.Message.StartsWith("CANCELLED:", StringComparison.Ordinal) || error.Message.StartsWith("CLIPBOARD_RESTORE_SKIPPED:", StringComparison.Ordinal)) throw;
+                        throw new InvalidOperationException("CLIPBOARD_RESTORE_FAILED: Could not restore original clipboard formats. " + error.Message);
+                    }
+                    CaptureHealth.Set("copyClipboardRestored", 1);
+                }, delegate { return clock.ElapsedMilliseconds; }, delegate { Thread.Sleep(5); }, null,
+                delegate { RequireNativeCopyContext(expected, 6); },
+                delegate {
+                    try { RequireCopiedSourceOwner(context); CaptureHealth.Set("copyOwnerOutcome", 1); }
+                    catch { CaptureHealth.Set("copyOwnerOutcome", 2); throw; }
+                }, observer.RequireCurrent);
+            observer.Finish(); return text;
+        }
     }
     public static string SelectedText() {
         selectionQueryCount = 0; CaptureHealth.ResetSelection();
@@ -2797,7 +3030,10 @@ sealed class RegionPicker : ApplicationContext {
     }
 
     switch ($Mode) {
-        'selected-text' { Write-Result @{ ok = $true; text = [EchoLingoNative]::SelectedText() } }
+        'selected-text' {
+            $text = if ($SelectionStrategy -eq 'copy') { [EchoLingoNative]::SelectedTextCopy() } else { [EchoLingoNative]::SelectedText() }
+            Write-Result @{ ok = $true; text = $text }
+        }
         'clipboard' { Write-Result @{ ok = $true; text = [EchoLingoNative]::ClipboardText() } }
         'copy' {
             # PowerShell may initialize Console.In before InputEncoding changes.

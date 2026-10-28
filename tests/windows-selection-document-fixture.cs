@@ -27,6 +27,12 @@ public static class WindowsSelectionDocumentFixture {
     internal enum TestMode { LinkDocument, EmptyLeafDocument, EmptyDocumentCopy250, EmptyEdit, EmptyEditEmptyDocument, EmptyEditNoDocument, EmptyEditPasswordDocument, SelectedEdit, PasswordLeaf, PasswordDocument, PasswordAncestorSelectedLeaf, NonTextNoDocument, StaleRange, CancelAfterCopy250, ExcludedSource }
     internal sealed class Source : Form {
         public TestMode Mode;public int Copies,SelectionQueries,LeafSelectionQueries,DocumentSelectionQueries,DocumentRangeQueries,ProviderFocusCalls;public Bridge Root,Document,Leaf;public IntPtr Native;
+        // Opt-in fault controls used only by the separate explicit-copy fixture.
+        // The existing automatic-selection modes and their fifteen expectations stay unchanged.
+        public bool CompatibilityNoTextPatterns,CompatibilityFocusFailure,CompatibilityChangingRuntimeId,CompatibilityCopyNoOp;
+        public int CompatibilityFocusFailures,CompatibilityRuntimeIdCalls;public string CompatibilityCopyText;
+        public int NextCompatibilityRuntimeId(){return Interlocked.Increment(ref CompatibilityRuntimeIdCalls);}
+        public void RecordCompatibilityFocusFailure(){Interlocked.Increment(ref CompatibilityFocusFailures);}
         public Rect Physical;public System.Windows.Forms.Timer Publication;public EventWaitHandle Cancel;
         public void RecordSelection(int node){Interlocked.Increment(ref SelectionQueries);if(node==1)Interlocked.Increment(ref DocumentSelectionQueries);if(node==2)Interlocked.Increment(ref LeafSelectionQueries);}
         public void RecordDocumentRange(){Interlocked.Increment(ref DocumentRangeQueries);}
@@ -39,8 +45,8 @@ public static class WindowsSelectionDocumentFixture {
         }
         protected override bool ProcessCmdKey(ref Message message,Keys key){
             if(key==(Keys.Control|Keys.C)){
-                Copies++;Clipboard.Clear();if(Mode==TestMode.CancelAfterCopy250)Cancel.Set();
-                Publication=new System.Windows.Forms.Timer();Publication.Interval=250;Publication.Tick+=delegate {Publication.Stop();Publication.Dispose();Publication=null;Clipboard.SetText(Selected,TextDataFormat.UnicodeText);};Publication.Start();return true;
+                Copies++;if(CompatibilityCopyNoOp)return true;Clipboard.Clear();if(Mode==TestMode.CancelAfterCopy250)Cancel.Set();
+                Publication=new System.Windows.Forms.Timer();Publication.Interval=250;Publication.Tick+=delegate {Publication.Stop();Publication.Dispose();Publication=null;Clipboard.SetText(CompatibilityCopyText??Selected,TextDataFormat.UnicodeText);};Publication.Start();return true;
             }return base.ProcessCmdKey(ref message,key);
         }
         public void SelectMode(TestMode mode){Mode=mode;Native=Handle;Rectangle r=Bounds;Physical=new Rect(r.X,r.Y,r.Width,r.Height);Activate();SetForegroundWindow(Handle);SetFocus(Handle);AutomationInteropProvider.RaiseAutomationEvent(AutomationElementIdentifiers.AutomationFocusChangedEvent,Leaf,new AutomationEventArgs(AutomationElementIdentifiers.AutomationFocusChangedEvent));}
@@ -53,8 +59,9 @@ public static class WindowsSelectionDocumentFixture {
         bool LeafText {get{return owner.Mode==TestMode.EmptyLeafDocument||owner.EditLeaf||owner.Mode==TestMode.PasswordAncestorSelectedLeaf;}}
         public ProviderOptions ProviderOptions {get{return ProviderOptions.ServerSideProvider;}}
         public IRawElementProviderSimple HostRawElementProvider {get{return kind==0?AutomationInteropProvider.HostProviderFromHandle(owner.Native):null;}}
-        public object GetPatternProvider(int id){return id==TextPatternIdentifiers.Pattern.Id&&(kind==1||kind==2&&LeafText)?this:null;}
+        public object GetPatternProvider(int id){return !owner.CompatibilityNoTextPatterns&&id==TextPatternIdentifiers.Pattern.Id&&(kind==1||kind==2&&LeafText)?this:null;}
         public object GetPropertyValue(int id){
+            if(id==AutomationElementIdentifiers.IsPasswordProperty.Id&&kind==2&&owner.CompatibilityFocusFailure){owner.RecordCompatibilityFocusFailure();throw new InvalidOperationException("Generated focus protection metadata failure");}
             if(id==AutomationElementIdentifiers.ControlTypeProperty.Id)return kind==0?ControlType.Window.Id:kind==1?ControlType.Document.Id:owner.EditLeaf?ControlType.Edit.Id:owner.Mode==TestMode.EmptyLeafDocument?ControlType.Custom.Id:owner.NoDocument?ControlType.Button.Id:ControlType.Hyperlink.Id;
             if(id==AutomationElementIdentifiers.NativeWindowHandleProperty.Id){IntPtr native=owner.Native;return kind==0?native.ToInt32():0;}
             if(id==AutomationElementIdentifiers.ProcessIdProperty.Id)return Process.GetCurrentProcess().Id;
@@ -65,7 +72,7 @@ public static class WindowsSelectionDocumentFixture {
             if(id==AutomationElementIdentifiers.IsKeyboardFocusableProperty.Id)return kind==2;
             if(id==AutomationElementIdentifiers.IsEnabledProperty.Id||id==AutomationElementIdentifiers.IsControlElementProperty.Id||id==AutomationElementIdentifiers.IsContentElementProperty.Id)return true;
             if(id==AutomationElementIdentifiers.IsOffscreenProperty.Id)return false;
-            if(id==AutomationElementIdentifiers.IsTextPatternAvailableProperty.Id)return kind==1||kind==2&&LeafText;
+            if(id==AutomationElementIdentifiers.IsTextPatternAvailableProperty.Id)return !owner.CompatibilityNoTextPatterns&&(kind==1||kind==2&&LeafText);
             return null;
         }
         public IRawElementProviderFragment Navigate(NavigateDirection direction){
@@ -73,13 +80,13 @@ public static class WindowsSelectionDocumentFixture {
             if(direction==NavigateDirection.FirstChild||direction==NavigateDirection.LastChild)return kind==0?(owner.NoDocument?owner.Leaf:owner.Document):kind==1&&!owner.NoDocument?owner.Leaf:null;
             return null;
         }
-        public int[] GetRuntimeId(){return kind==0?null:new int[]{AutomationInteropProvider.AppendRuntimeId,kind+100};}
+        public int[] GetRuntimeId(){return kind==0?null:owner.CompatibilityChangingRuntimeId?new int[]{AutomationInteropProvider.AppendRuntimeId,kind+100,owner.NextCompatibilityRuntimeId()}:new int[]{AutomationInteropProvider.AppendRuntimeId,kind+100};}
         public Rect BoundingRectangle {get{return owner.Physical;}}
         public IRawElementProviderSimple[] GetEmbeddedFragmentRoots(){return null;}
         public void SetFocus(){owner.RecordFocus();throw new InvalidOperationException("Fixture provider focus must not be changed by acquisition.");}
         public IRawElementProviderFragmentRoot FragmentRoot {get{return owner.Root;}}
         public IRawElementProviderFragment ElementProviderFromPoint(double x,double y){return owner.Leaf;}
-        public IRawElementProviderFragment GetFocus(){return owner.Leaf;}
+        public IRawElementProviderFragment GetFocus(){if(owner.CompatibilityFocusFailure){owner.RecordCompatibilityFocusFailure();throw new InvalidOperationException("Generated focus metadata failure");}return owner.Leaf;}
         public ITextRangeProvider DocumentRange {get{owner.RecordDocumentRange();return new Range(this,"WHOLE DOCUMENT MUST NEVER BE READ",false);}}
         public SupportedTextSelection SupportedTextSelection {get{return SupportedTextSelection.Single;}}
         public ITextRangeProvider[] GetSelection(){
@@ -104,7 +111,7 @@ public static class WindowsSelectionDocumentFixture {
     }
     static Dictionary<string,object> Call(string helper,string assembly,string cancelName,EventWaitHandle cancel,bool excluded){
         ProcessStartInfo start=new ProcessStartInfo(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.System),"WindowsPowerShell/v1.0/powershell.exe"));
-        start.Arguments="-NoProfile -STA -ExecutionPolicy Bypass -File \""+helper+"\" -Mode selected-text -NativeAssemblyPath \""+assembly+"\" -NativeCancellationEvent \""+cancelName+"\""+(excluded?" -ExcludedSourceProcessId "+Process.GetCurrentProcess().Id:"");
+        start.Arguments="-NoProfile -STA -ExecutionPolicy Bypass -File \""+helper+"\" -Mode selected-text -SelectionStrategy auto -NativeAssemblyPath \""+assembly+"\" -NativeCancellationEvent \""+cancelName+"\""+(excluded?" -ExcludedSourceProcessId "+Process.GetCurrentProcess().Id:"");
         start.UseShellExecute=false;start.CreateNoWindow=true;start.RedirectStandardOutput=true;start.RedirectStandardError=true;start.StandardOutputEncoding=new UTF8Encoding(false);
         using(Process process=Process.Start(start)){
             Task<string> stdout=process.StandardOutput.ReadToEndAsync(),stderr=process.StandardError.ReadToEndAsync();
