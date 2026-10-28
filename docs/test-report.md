@@ -2,15 +2,17 @@
 
 
 <!-- selection-resize-field-20261028:start -->
-## 2026-10-28 取词现场已缩到复制前校验；跨进程合法焦点反例已复现
+## 2026-10-28 取词修复候选已交付准备；WPS交由机主实测，性能优化后置
 
-机主936e包仍失败：Ctrl+Shift+D对照后浏览器正常，WPS严格/复制兼容均空。实际Copy attempt29为phase1/nativeContextValid0/dispatch0/queryCount0、helper445ms，表明本程序复制前拒绝，非WPS未响应已发送的Ctrl+C；旧字段不能区分具体invalid子条件。
+本轮主目标是Windows划词取词。机主Copy attempt29证实本程序在复制前拒绝（phase1/nativeContextValid0/dispatch0），不是已经发出Ctrl+C而WPS没有响应；旧字段不能确定WPS具体invalid子分支。依据Win32官方跨进程父子窗口契约及MIT selection-hook调研，原helper对同一GA_ROOT的跨PID编辑控件误判；真实Windows先证明手动Ctrl+C成功、旧helper reason10拒绝，再完成Copy-only最小修复。只把已验证焦点PID加入允许来源，保留非零FocusProcess及前后上下文/剪贴板来源/完整格式恢复/取消门禁，Strict Auto策略保留。177纯策略断言通过。[调研](windows-selection-native-context-research.zh-CN.md)。
 
-官方Win32及MIT selection-hook源码调研后，真实Windows [62a81b7/run40681500777](https://github.com/Blueeeecho/EchoLingo/actions/runs/40681500777)已证明一个通用代码缺口：同一GA_ROOT的跨进程编辑控件手动Ctrl+C精确成功，旧helper却因PID不同在phase1/reason10拒绝，2/2反例对照通过、源焦点/富剪贴板保持。先前18d/ddf两轮夹具手动复制失败原红保留，未倒认产品成功。该缺口不是已证WPS全部根因。
+生产源952d6096（实际生产修复f1bff11e）；[完整run40683453999](https://github.com/Blueeeecho/EchoLingo/actions/runs/40683453999)为failure、Windows原门禁16/18，不能称全绿。取词相关逐case全部通过：显式Strict Auto16/16、Document15/15、Copy12/12、跨线程/同根跨PID焦点2/2、实际Edge/Chrome生成页Alt+D48/48；快捷键设置UI6/6与自定义实际取词/输入/OCR3/3。浏览器使用测试用paced手势，不代表最早冷启动/任意物理按键速度或真实WPS已验收。原18d/ddf/f1夹具准备失败及62a基线/952正对照原证据全部保留。
 
-Copy-only最小修正已写，绑定非零FocusProcess并前后核对，仅把已验证焦点PID加入来源；任意broker/NULL owner仍拒绝，Strict Auto原门禁保留。177纯策略断言通过，同一真实Windows夹具ExpectSuccess待执行；尚未宣称WPS修复或新包交付。
+两处未完成验收：applicationCore在固定后第二次OCR枚举截图层时失败；popupResize最初停在单次Alt+A启动。原full及[第一补验40686565017](https://github.com/Blueeeecho/EchoLingo/actions/runs/40686565017)原红保留。仅测试改动的d09d2de、[同一EXE第二补验40687786573](https://github.com/Blueeeecho/EchoLingo/actions/runs/40687786573)仍failure：应用自己托盘/热键注册就绪后，基础三流程及两次固定Alt+D通过，固定观测205次/隐藏0次；读取旧已销毁HWND样式0、IsWindow=false，确认为测试生命周期误报，完整latest4项仍仅执行3/通过2，不能算全过。resize已成功一次Alt+A并进入真实右边缘native sizing，但某步1500ms期望宽度未达，局部失败样本未保存；具体是布局、坐标还是约束尚未确定，左右拖边/持久化完整验收未完成。没有据此继续扩展性能修复。
 
-合并缩放修正：native拖动期间暂停自动回写，结束按实际宽度记录偏好；消除重复textarea测量/约束更新；权威oneshot确认防丢end卡住显式展示。TimesNewRoman仅译文Latin字形，中文/界面保留fallback。Rust277passed/1引擎资源ignored、前端84/完整隔离UI、独立layout10项通过，Windows cfg仅抽取类型检查；真实app双边拖动新夹具已写/审，待完整构建。Mac规范安装/签名/TCC/钥匙串、运行凭据与停止的本地VM未变。[调研](windows-selection-native-context-research.zh-CN.md)。
+新6文件现场候选：`../EchoLingo-installers/windows-preview-20261028-selection-focus-candidate/`，安装器`EchoLingo_0.1.0_preview_20261028_selection-focus_x64-setup.exe`，75,296,280B，SHA256 `1d18a4fb2fd39da4503d1650f213e591c54f9a3804a587838cbb3d200160f0c9`。仅供机主WPS取词现场验证，明确`fullDesktopAcceptancePassed=false`，不是全功能验收版或stable。完整证据及未验项写入test-results.json/package-verification.json；实际NSIS安装与离线6模型/3工作链原run通过、安装EXE只有3B Tauri标记差异，嵌入完整helper/DLL及对应离线源码SHA66ce2962均核对。
+
+机主明确WPS由其安装测试，已停止WPS下载/安装/重跑；此前WPS run40683305507超时且无阶段结果，不能记WPS helper失败或成功。流畅性agent只留审查草稿，未合入新的性能优化。已合入的宽度/Times New Roman变更保留，缩放体验不承诺修复。宿主Rust277passed/1资源ignored、前端84/type/build/隔离UI/layout10通过；Windows真实构建通过不等同物理Win10/11/WPS验收。Mac安装/签名/TCC/钥匙串、真实API密钥与停用本地VM均未操作。
 <!-- selection-resize-field-20261028:end -->
 <!-- windows-copy-compatibility-20261028:start -->
 ## 2026-10-28 默认复制兼容版已打包：完整 Windows 16/16 通过
