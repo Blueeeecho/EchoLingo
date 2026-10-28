@@ -29,8 +29,8 @@ public static class WindowsSelectionDocumentFixture {
         public TestMode Mode;public int Copies,SelectionQueries,LeafSelectionQueries,DocumentSelectionQueries,DocumentRangeQueries,ProviderFocusCalls;public Bridge Root,Document,Leaf;public IntPtr Native;
         // Opt-in fault controls used only by the separate explicit-copy fixture.
         // The existing automatic-selection modes and their fifteen expectations stay unchanged.
-        public bool CompatibilityNoTextPatterns,CompatibilityFocusFailure,CompatibilityChangingRuntimeId,CompatibilityCopyNoOp;
-        public int CompatibilityFocusFailures,CompatibilityRuntimeIdCalls;public string CompatibilityCopyText;
+        public bool CompatibilityNoTextPatterns=false,CompatibilityFocusFailure=false,CompatibilityChangingRuntimeId=false,CompatibilityCopyNoOp=false;
+        public int CompatibilityFocusFailures=0,CompatibilityRuntimeIdCalls=0;public string CompatibilityCopyText=null;
         public int NextCompatibilityRuntimeId(){return Interlocked.Increment(ref CompatibilityRuntimeIdCalls);}
         public void RecordCompatibilityFocusFailure(){Interlocked.Increment(ref CompatibilityFocusFailures);}
         public Rect Physical;public System.Windows.Forms.Timer Publication;public EventWaitHandle Cancel;

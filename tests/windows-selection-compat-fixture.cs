@@ -117,7 +117,7 @@ public static class WindowsSelectionCompatibilityFixture {
                         foreach(Mode mode in (Mode[])Enum.GetValues(typeof(Mode))) {
                             Dictionary<string,object> test=new Dictionary<string,object>{{"name",mode.ToString()},{"ok",false}};cases.Add(test);
                             TextBoxBase editor=null;DataObject seed=null;
-                            string eventName="Local\\EchoLingo-copycompat-cancel-"+Guid.NewGuid().ToString("N");
+                            string eventName="Local\\EchoLingo-cancel-"+Guid.NewGuid().ToString("N");
                             using(EventWaitHandle cancel=new EventWaitHandle(false,EventResetMode.ManualReset,eventName)) {
                                 source.Invoke((Action)delegate { source.Cancel=cancel;Prepare(source,mode,out editor);seed=Seed();ownedSequence=GetClipboardSequenceNumber(); });
                                 bool knownPassword=mode==Mode.KnownPasswordLeaf||mode==Mode.KnownPasswordAncestor;

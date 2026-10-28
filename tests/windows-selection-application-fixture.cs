@@ -212,7 +212,11 @@ public static class WindowsSelectionApplicationFixture {
             snapshot["foregroundIsSource"]=GetForegroundWindow()==source.Handle?1:0;snapshot["foregroundIsApp"]=App!=null&&ForegroundPid()==App.Id?1:0;
             snapshot["A"]=Server.Snapshot(a);snapshot["B"]=Server.Snapshot(b);
             snapshot["historyHasA"]=HistoryHas(a)?1:0;snapshot["historyHasB"]=HistoryHas(b)?1:0;snapshot["activeNativeHelperCount"]=Helpers().Count;
-            Thread reader=new Thread(delegate(){try{string value=SourceValue();editor.Available=value==null?0:1;editor.Empty=value==""?1:0;editor.MatchesB=value==b?1:0;}catch{editor.Failed=1;}finally{Interlocked.Exchange(ref editor.Complete,1);}});
+            Thread reader=new Thread(delegate(){try{
+                Need(App!=null&&!App.HasExited,"FAILURE_SOURCE_PRIMARY_UNAVAILABLE");AutomationElement ownRoot=AutomationElement.FromHandle(Main);Need(ownRoot!=null&&ownRoot.Current.ProcessId==App.Id&&!App.HasExited,"FAILURE_SOURCE_ROOT_NOT_OWNED");
+                AutomationElement input=ownRoot.FindFirst(TreeScope.Descendants,new AndCondition(new PropertyCondition(AutomationElement.ControlTypeProperty,ControlType.Edit),new OrCondition(new PropertyCondition(AutomationElement.AutomationIdProperty,"source-text"),new PropertyCondition(AutomationElement.NameProperty,"\u539f\u6587"))));object raw;
+                string value=input!=null&&!input.Current.IsOffscreen&&input.TryGetCurrentPattern(ValuePattern.Pattern,out raw)?((ValuePattern)raw).Current.Value:null;editor.Available=value==null?0:1;editor.Empty=value==""?1:0;editor.MatchesB=value==b?1:0;
+            }catch{editor.Failed=1;}finally{Interlocked.Exchange(ref editor.Complete,1);}});
             reader.IsBackground=true;reader.Name="EchoLingo failed-case source observation";reader.SetApartmentState(ApartmentState.MTA);reader.Start();
             string file=Path.Combine(DiagnosticRoaming,"selection-diagnostics.json");
             Need(DiagnosticPrimaryStart!=null&&App!=null&&!App.HasExited,"FAILURE_DIAGNOSTIC_PRIMARY_UNAVAILABLE");
