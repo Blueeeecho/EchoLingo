@@ -13,11 +13,25 @@ public static class WindowsSelectionNativeFocusChild {
     [DllImport("user32.dll")] static extern bool SetProcessDpiAwarenessContext(IntPtr context);
     [DllImport("user32.dll")] static extern IntPtr SetThreadDpiAwarenessContext(IntPtr context);
     [DllImport("user32.dll")] static extern bool SetWindowPos(IntPtr window,IntPtr after,int x,int y,int width,int height,uint flags);
+    [DllImport("user32.dll")] static extern short GetKeyState(int key);
+    [DllImport("user32.dll")] static extern IntPtr GetFocus();
+    public const int DiagnosticMessage=0x8501;
     public sealed class ChildBox:TextBox {
         readonly IntPtr host;
+        int keyDowns,keyUps,cDowns,cUps,copyMessages,copyCharacters,controlAtCDown,focusAtCDown,preprocessCalls,commandCopyCalls,focusGained,focusLost;
         public ChildBox(IntPtr parent) {host=parent;Multiline=true;Text="Prefix "+Selected+" suffix";Font=new Font("Consolas",12);}
         protected override CreateParams CreateParams {get{CreateParams cp=base.CreateParams;cp.Parent=host;cp.Style|=0x40000000|0x10000000;cp.Style&=unchecked((int)~0x80000000U);return cp;}}
-        protected override void WndProc(ref Message message) {if(message.Msg==0x10){Dispose();Application.ExitThread();return;}base.WndProc(ref message);}
+        public override bool PreProcessMessage(ref Message message){preprocessCalls++;return base.PreProcessMessage(ref message);}
+        protected override bool ProcessCmdKey(ref Message message,Keys key){if(key==(Keys.Control|Keys.C))commandCopyCalls++;return base.ProcessCmdKey(ref message,key);}
+        protected override void WndProc(ref Message message) {
+            if(message.Msg==DiagnosticMessage){int[] values={keyDowns,keyUps,cDowns,cUps,copyMessages,copyCharacters,controlAtCDown,focusAtCDown,preprocessCalls,commandCopyCalls,focusGained,focusLost,TextLength};int index=message.WParam.ToInt32();message.Result=new IntPtr(index>=0&&index<values.Length?values[index]:-1);return;}
+            if(message.Msg==0x100||message.Msg==0x104){keyDowns++;if(message.WParam.ToInt32()==0x43){cDowns++;controlAtCDown=(GetKeyState(0x11)&0x8000)!=0?1:0;focusAtCDown=GetFocus()==Handle?1:0;}}
+            if(message.Msg==0x101||message.Msg==0x105){keyUps++;if(message.WParam.ToInt32()==0x43)cUps++;}
+            if(message.Msg==0x301)copyMessages++;
+            if(message.Msg==0x102&&message.WParam.ToInt32()==3)copyCharacters++;
+            if(message.Msg==7)focusGained++;if(message.Msg==8)focusLost++;
+            if(message.Msg==0x10){Dispose();Application.ExitThread();return;}base.WndProc(ref message);
+        }
     }
     public static void Run(IntPtr host,uint parentProcess,Action<IntPtr> ready) {
         uint owner;GetWindowThreadProcessId(host,out owner);if(host==IntPtr.Zero||owner==0||owner!=parentProcess)throw new InvalidOperationException("GENERATED_HOST_OWNERSHIP_MISMATCH");
