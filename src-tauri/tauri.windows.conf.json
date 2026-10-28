@@ -1,0 +1,17 @@
+{
+  "bundle": {
+    "resources": {
+      "../resources/offline-translation/manifest.json": "offline-translation/manifest.json",
+      "../resources/offline-translation/license-files.json": "offline-translation/license-files.json",
+      "../resources/offline-translation/bin/echolingo-offline-engine.exe": "offline-translation/bin/echolingo-offline-engine.exe",
+      "../resources/offline-translation/models/en-zh/lex.50.50.enzh.s2t.bin": "offline-translation/models/en-zh/lex.50.50.enzh.s2t.bin",
+      "../resources/offline-translation/models/en-zh/model.enzh.intgemm.alphas.bin": "offline-translation/models/en-zh/model.enzh.intgemm.alphas.bin",
+      "../resources/offline-translation/models/en-zh/srcvocab.enzh.spm": "offline-translation/models/en-zh/srcvocab.enzh.spm",
+      "../resources/offline-translation/models/en-zh/trgvocab.enzh.spm": "offline-translation/models/en-zh/trgvocab.enzh.spm",
+      "../resources/offline-translation/models/zh-en/lex.50.50.zhen.s2t.bin": "offline-translation/models/zh-en/lex.50.50.zhen.s2t.bin",
+      "../resources/offline-translation/models/zh-en/model.zhen.intgemm.alphas.bin": "offline-translation/models/zh-en/model.zhen.intgemm.alphas.bin",
+      "../resources/offline-translation/models/zh-en/vocab.zhen.spm": "offline-translation/models/zh-en/vocab.zhen.spm",
+      "../resources/offline-translation/licenses/": "offline-translation/licenses/"
+    }
+  }
+}

@@ -4,6 +4,108 @@
 
 use serde_json::{json, Value};
 
+#[cfg(any(target_os = "windows", test))]
+#[path = "capture_exclusion.rs"]
+mod capture_exclusion;
+#[cfg(target_os = "windows")]
+pub use capture_exclusion::CaptureWindowExclusion;
+
+const NATIVE_CANCELLED: &str = "CANCELLED: Native task was superseded.";
+type NativeCancel = std::sync::Arc<std::sync::atomic::AtomicBool>;
+fn cancelled(cancel: Option<&NativeCancel>) -> bool {
+    cancel.is_some_and(|c| c.load(std::sync::atomic::Ordering::SeqCst))
+}
+
+pub fn selected_text_cancelable(cancel: NativeCancel) -> Result<String, String> {
+    cancellable_text("selected-text", cancel)
+}
+#[cfg(target_os = "windows")]
+pub fn selected_text_with_strategy_cancelable(
+    cancel: NativeCancel,
+    strategy: crate::model::WindowsSelectionStrategy,
+    attempt: SelectionAttempt,
+) -> Result<String, String> {
+    run_windows_selection("selected-text", None, Some(cancel), strategy, Some(attempt))?
+        .get("text")
+        .and_then(Value::as_str)
+        .map(str::to_owned)
+        .ok_or_else(|| "NATIVE_PROTOCOL: Native helper returned no text field.".into())
+}
+pub fn capture_ocr_cancelable(cancel: NativeCancel) -> Result<String, String> {
+    cancellable_text("capture-ocr", cancel)
+}
+pub fn capture_image_cancelable(cancel: NativeCancel) -> Result<String, String> {
+    image_response(run_cancelable("capture-image", cancel)?)
+}
+fn cancellable_text(mode: &str, cancel: NativeCancel) -> Result<String, String> {
+    run_cancelable(mode, cancel)?
+        .get("text")
+        .and_then(Value::as_str)
+        .map(str::to_owned)
+        .ok_or_else(|| "NATIVE_PROTOCOL: Native helper returned no text field.".into())
+}
+fn run_cancelable(mode: &str, cancel: NativeCancel) -> Result<Value, String> {
+    if cancelled(Some(&cancel)) {
+        return Err(NATIVE_CANCELLED.into());
+    }
+    #[cfg(target_os = "windows")]
+    {
+        run_windows(mode, None, Some(cancel))
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let result = run(mode, None);
+        if cancelled(Some(&cancel)) {
+            Err(NATIVE_CANCELLED.into())
+        } else {
+            result
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+pub struct NativeSourceSnapshot {
+    #[cfg(target_os = "windows")]
+    window: isize,
+    #[cfg(target_os = "windows")]
+    process: u32,
+    #[cfg(target_os = "windows")]
+    thread: u32,
+    #[cfg(target_os = "windows")]
+    focus: isize,
+}
+impl NativeSourceSnapshot {
+    pub fn is_current(&self) -> bool {
+        native_source_is_current(self)
+    }
+}
+pub fn native_source_snapshot() -> Result<NativeSourceSnapshot, String> {
+    #[cfg(target_os = "windows")]
+    {
+        native_process::source_snapshot()
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        Ok(NativeSourceSnapshot {})
+    }
+}
+pub fn native_source_is_current(expected: &NativeSourceSnapshot) -> bool {
+    #[cfg(target_os = "windows")]
+    {
+        native_process::source_snapshot().is_ok_and(|now| {
+            now.window == expected.window
+                && now.process == expected.process
+                && now.thread == expected.thread
+                && now.focus == expected.focus
+        })
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = expected;
+        true
+    }
+}
+
 pub fn selected_text() -> Result<String, String> {
     run_text("selected-text", None)
 }
@@ -15,7 +117,9 @@ pub fn capture_ocr() -> Result<String, String> {
 /// Capture only. The caller chooses whether to submit this PNG to a configured
 /// third-party OCR API; the native helper performs no upload or network request.
 pub fn capture_image() -> Result<String, String> {
-    let result = run("capture-image", None)?;
+    image_response(run("capture-image", None)?)
+}
+fn image_response(result: Value) -> Result<String, String> {
     result
         .get("imageBase64")
         .and_then(Value::as_str)
@@ -29,6 +133,23 @@ pub fn capture_image() -> Result<String, String> {
 
 pub fn clipboard_text() -> Result<String, String> {
     run_text("clipboard", None)
+}
+
+pub async fn detect_language(text: &str) -> Result<String, String> {
+    if text.trim().is_empty() || text.chars().count() > 20_000 {
+        return Err("语言检测的文本无效".into());
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let text = text.to_owned();
+        tauri::async_runtime::spawn_blocking(move || run_text("detect-language", Some(&text)))
+            .await
+            .map_err(|_| "本机语言检测未能完成".to_string())?
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        crate::language_detection::fallback_language(text).ok_or_else(|| "无法确认原文语言".into())
+    }
 }
 
 pub fn copy_text(text: &str) -> Result<(), String> {
@@ -136,6 +257,96 @@ pub fn pointer_state() -> Result<(bool, f64, f64), String> {
     Err("UNSUPPORTED_PLATFORM: Pointer state supports Windows and macOS.".into())
 }
 
+/// Restore popup stacking/space behavior without showing, ordering, activating,
+/// focusing or moving the window. macOS callers must use the app main thread.
+#[cfg(target_os = "windows")]
+pub fn popup_has_native_foreground(window: &tauri::WebviewWindow) -> bool {
+    window.hwnd().ok().is_some_and(|native| {
+        !native.0.is_null() && crate::windows_visibility::foreground_is_owned(native.0 as isize)
+    })
+}
+
+#[cfg(target_os = "windows")]
+pub fn popup_foreground_is_external(window: &tauri::WebviewWindow) -> bool {
+    window.hwnd().ok().is_some_and(|native| {
+        !native.0.is_null() && crate::windows_visibility::foreground_is_external(native.0 as isize)
+    })
+}
+
+#[cfg(target_os = "macos")]
+pub fn ensure_popup_behavior(window: &tauri::WebviewWindow) -> Result<(), String> {
+    use std::ffi::c_void;
+    unsafe extern "C" {
+        fn pthread_main_np() -> i32;
+        fn echolingo_ensure_popup_behavior(window: *mut c_void) -> i32;
+    }
+    // SAFETY: This only checks the current thread, before obtaining AppKit's
+    // borrowed NSWindow. The linked Swift ABI checks the thread again.
+    if unsafe { pthread_main_np() } == 0 {
+        return Err("WINDOW_THREAD: Popup behavior requires the application main thread.".into());
+    }
+    let native = window
+        .ns_window()
+        .map_err(|_| "WINDOW_HANDLE: Native macOS window is unavailable.")?;
+    if native.is_null() {
+        return Err("WINDOW_HANDLE: Native macOS window is unavailable.".into());
+    }
+    // SAFETY: Tauri owns this valid NSWindow and the main thread was verified.
+    match unsafe { echolingo_ensure_popup_behavior(native) } {
+        0 => Ok(()),
+        -1 => Err("WINDOW_THREAD: Popup behavior requires the application main thread.".into()),
+        -2 => Err("WINDOW_HANDLE: Native macOS window is unavailable.".into()),
+        _ => Err("WINDOW_BEHAVIOR: Cannot restore floating popup behavior.".into()),
+    }
+}
+
+#[cfg(target_os = "windows")]
+pub fn ensure_popup_behavior(window: &tauri::WebviewWindow) -> Result<(), String> {
+    use std::ffi::c_void;
+    #[link(name = "user32")]
+    unsafe extern "system" {
+        fn SetWindowPos(
+            window: *mut c_void,
+            insert_after: *mut c_void,
+            x: i32,
+            y: i32,
+            width: i32,
+            height: i32,
+            flags: u32,
+        ) -> i32;
+    }
+    let native = window
+        .hwnd()
+        .map_err(|_| "WINDOW_HANDLE: Native Windows window is unavailable.")?
+        .0;
+    if native.is_null() {
+        return Err("WINDOW_HANDLE: Native Windows window is unavailable.".into());
+    }
+    // SAFETY: Tauri owns the HWND. TOPMOST changes stacking only; NOMOVE,
+    // NOSIZE and NOACTIVATE preserve geometry and the foreground application.
+    // In particular, SHOWWINDOW is absent so hidden windows remain hidden.
+    if unsafe {
+        SetWindowPos(
+            native,
+            -1isize as *mut c_void,
+            0,
+            0,
+            0,
+            0,
+            0x01 | 0x02 | 0x10,
+        )
+    } == 0
+    {
+        return Err("WINDOW_BEHAVIOR: Cannot restore floating popup behavior.".into());
+    }
+    Ok(())
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+pub fn ensure_popup_behavior(_window: &tauri::WebviewWindow) -> Result<(), String> {
+    Err("UNSUPPORTED_PLATFORM: Popup behavior supports Windows and macOS.".into())
+}
+
 /// Show a floating window while keeping the source application active. The
 /// caller MUST invoke this on Tauri's main thread. Do not call `window.show()`
 /// first: Tao's macOS implementation makes that window key when showing it.
@@ -219,18 +430,308 @@ pub fn show_without_activation(window: &tauri::WebviewWindow) -> Result<(), Stri
     Ok(())
 }
 
+/// Keep Tao's visibility bookkeeping and the actual native window in sync.
+/// A passive Windows show bypasses Tao's VISIBLE flag, so its hide alone can
+/// return successfully without changing the HWND. Never show or focus here.
+#[cfg(target_os = "windows")]
+pub fn hide_window(window: &tauri::Window) -> Result<(), String> {
+    use std::ffi::c_void;
+    #[link(name = "user32")]
+    unsafe extern "system" {
+        fn ShowWindow(window: *mut c_void, command: i32) -> i32;
+        fn IsWindowVisible(window: *mut c_void) -> i32;
+    }
+    // Update the runtime's cache first, even if the native window was shown by
+    // SW_SHOWNOACTIVATE while Tao still considered it hidden.
+    let cached_hide = window.hide().map_err(|_| "无法隐藏窗口".to_owned());
+    let native = window
+        .hwnd()
+        .map_err(|_| "WINDOW_HANDLE: Native Windows window is unavailable.".to_owned())?
+        .0;
+    if native.is_null() {
+        return Err("WINDOW_HANDLE: Native Windows window is unavailable.".into());
+    }
+    finish_window_hide(
+        cached_hide,
+        || {
+            // SAFETY: Tauri owns the HWND. SW_HIDE only hides it. ShowWindow's
+            // return value reports previous visibility, not operation success.
+            unsafe {
+                ShowWindow(native, 0);
+            }
+        },
+        || unsafe { IsWindowVisible(native) != 0 },
+    )
+}
+
+#[cfg(not(target_os = "windows"))]
+pub fn hide_window(window: &tauri::Window) -> Result<(), String> {
+    window.hide().map_err(|_| "无法隐藏窗口".to_owned())
+}
+
+/// WebviewWindow exposes its owning Window through AsRef<Webview>. Keep one
+/// actual hide implementation for this adapter and CloseRequested's Window.
+pub fn hide_webview_window(window: &tauri::WebviewWindow) -> Result<(), String> {
+    let webview: &tauri::Webview = window.as_ref();
+    hide_window(&webview.window())
+}
+
+#[cfg(any(target_os = "windows", test))]
+fn finish_window_hide(
+    cached_hide: Result<(), String>,
+    native_hide: impl FnOnce(),
+    native_visible: impl FnOnce() -> bool,
+) -> Result<(), String> {
+    // A cached no-op or dispatch error must not skip the native hide attempt.
+    native_hide();
+    if native_visible() {
+        return Err("WINDOW_HIDE: 隐藏后窗口仍然可见，请重试。".into());
+    }
+    cached_hide
+}
+
 #[cfg(not(any(target_os = "macos", target_os = "windows")))]
 pub fn show_without_activation(_window: &tauri::WebviewWindow) -> Result<(), String> {
     Err("UNSUPPORTED_PLATFORM: Nonactivating windows support Windows and macOS.".into())
 }
 
 pub fn diagnostics() -> Value {
-    match run("diagnostics", None) {
+    let value = match run("diagnostics", None) {
         Ok(result) => result.get("diagnostics").cloned().unwrap_or(result),
         Err(error) => {
             json!({ "platform": std::env::consts::OS, "available": false, "error": error })
         }
+    };
+    #[cfg(target_os = "windows")]
+    {
+        let mut value = value;
+        value["captureExclusion"] = capture_exclusion::last_diagnostics();
+        value["lastCaptureHealth"] = windows_capture_health()
+            .lock()
+            .map(|v| v.clone())
+            .unwrap_or(Value::Null);
+        value["lastSelectionHealth"] = selection_diagnostics().unwrap_or(Value::Null);
+        value
     }
+    #[cfg(not(target_os = "windows"))]
+    value
+}
+
+#[cfg(target_os = "windows")]
+fn windows_capture_health() -> &'static std::sync::Mutex<Value> {
+    static HEALTH: std::sync::OnceLock<std::sync::Mutex<Value>> = std::sync::OnceLock::new();
+    HEALTH.get_or_init(|| std::sync::Mutex::new(Value::Null))
+}
+
+#[cfg(any(target_os = "windows", test))]
+#[derive(Clone, Copy)]
+pub struct SelectionAttempt(u64);
+
+#[cfg(any(target_os = "windows", test))]
+#[derive(Default)]
+struct SelectionHealth {
+    generation: u64,
+    value: Value,
+}
+#[cfg(any(target_os = "windows", test))]
+impl SelectionHealth {
+    fn begin(&mut self, strategy: crate::model::WindowsSelectionStrategy) -> SelectionAttempt {
+        self.generation = self.generation.wrapping_add(1);
+        self.value = json!({
+            "attemptId": self.generation, "attemptPhase": 1,
+            "configuredCopyStrategy": u64::from(strategy == crate::model::WindowsSelectionStrategy::Copy),
+            "helperResponseReceived": 0
+        });
+        SelectionAttempt(self.generation)
+    }
+    fn update(&mut self, attempt: SelectionAttempt, fields: Value) {
+        if attempt.0 == self.generation {
+            if let (Some(current), Some(fields)) = (self.value.as_object_mut(), fields.as_object())
+            {
+                current.extend(fields.clone());
+            }
+        }
+    }
+}
+#[cfg(target_os = "windows")]
+fn windows_selection_health() -> &'static std::sync::Mutex<SelectionHealth> {
+    static HEALTH: std::sync::OnceLock<std::sync::Mutex<SelectionHealth>> =
+        std::sync::OnceLock::new();
+    HEALTH.get_or_init(|| std::sync::Mutex::new(SelectionHealth::default()))
+}
+#[cfg(target_os = "windows")]
+pub fn begin_selection_attempt(
+    strategy: crate::model::WindowsSelectionStrategy,
+) -> SelectionAttempt {
+    windows_selection_health()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .begin(strategy)
+}
+#[cfg(target_os = "windows")]
+pub fn update_selection_attempt(attempt: SelectionAttempt, phase: u64, ok: bool, nonempty: bool) {
+    update_selection_health(
+        attempt,
+        json!({
+            "attemptPhase": phase, "actionResultOk": u64::from(ok),
+            "actionResultNonempty": u64::from(nonempty)
+        }),
+    );
+}
+#[cfg(target_os = "windows")]
+fn update_selection_health(attempt: SelectionAttempt, fields: Value) {
+    if let Ok(mut health) = windows_selection_health().lock() {
+        health.update(attempt, fields);
+    }
+}
+
+#[cfg(any(target_os = "windows", test))]
+const SELECTION_HEALTH_MAX: u64 = 10_000_000;
+
+#[cfg(any(target_os = "windows", test))]
+fn bounded_selection_health(value: &Value) -> Value {
+    const SUFFIXES: &[&str] = &[
+        "Stage",
+        "Depth",
+        "IdentityCompared",
+        "IdentityEqual",
+        "RootWalkReason",
+        "ExceptionKind",
+        "Milliseconds",
+    ];
+    let mut safe = serde_json::Map::new();
+    let mut retain = |field: &str| {
+        if let Some(number) = value
+            .get(field)
+            .and_then(Value::as_u64)
+            .filter(|number| *number <= SELECTION_HEALTH_MAX)
+        {
+            safe.insert(field.to_owned(), json!(number));
+        }
+    };
+    retain("selectionQueryCount");
+    for field in [
+        "copyStrategy",
+        "copyPhase",
+        "copyNativeContextValid",
+        "copyNativeContextChecks",
+        "copyNativeGuardReason",
+        "copyNativeInvalidReason",
+        "copyNativeGtiSucceeded",
+        "copyNativeGtiFlags",
+        "copyNativeFocusPresent",
+        "copyNativeFocusProcessMatchesForeground",
+        "copyNativeFocusRootMatchesForeground",
+        "copyNativeActivePresent",
+        "copyNativeActiveRootMatchesForeground",
+        "copyNativeEditable",
+        "copyNativeProtection",
+        "copyNativeSelectionKnown",
+        "copyNativeSelectionNonempty",
+        "copyProtectionProbe",
+        "copyProtectionProbeMilliseconds",
+        "copyProtectionUnknown",
+        "copySnapshotOutcome",
+        "copyDispatchInserted",
+        "copyOwnInputObserved",
+        "copyOwnerOutcome",
+        "copyClipboardRestored",
+        "copyTerminalReason",
+    ] {
+        retain(field);
+    }
+    for index in 1..=16 {
+        for suffix in SUFFIXES {
+            retain(&format!("selectionQuery{index}{suffix}"));
+        }
+    }
+    Value::Object(safe)
+}
+
+#[cfg(any(target_os = "windows", test))]
+fn selection_health_from_reply(
+    reply: &Value,
+    elapsed_milliseconds: u64,
+    cancellation_requested: bool,
+    cancellation_signalled: bool,
+    cancellation_signal_failed: bool,
+) -> Value {
+    let mut safe = bounded_selection_health(&reply["captureHealth"]);
+    // These fields describe our process boundary, never untrusted helper data.
+    safe["helperResponseReceived"] = json!(u64::from(reply.is_object()));
+    safe["helperElapsedMilliseconds"] = json!(elapsed_milliseconds.min(SELECTION_HEALTH_MAX));
+    safe["cancellationRequested"] = json!(u64::from(cancellation_requested));
+    safe["cancellationSignalled"] = json!(u64::from(cancellation_signalled));
+    safe["cancellationSignalFailed"] = json!(u64::from(cancellation_signal_failed));
+    safe
+}
+
+#[cfg(any(target_os = "windows", test))]
+fn bounded_capture_health(value: &Value) -> Value {
+    const FIELDS: &[&str] = &[
+        "hookMouseDowns",
+        "hookMouseUps",
+        "hookMouseMoves",
+        "hookEscapeDowns",
+        "hookEscapeUps",
+        "moveWakesPosted",
+        "movePostFailures",
+        "uiPhase",
+        "inputArmed",
+        "leftSwallowed",
+        "physicalLeftDown",
+        "dragging",
+        "knownPointer",
+        "desktopMatched",
+        "mismatchKind",
+        "hookRunningAfterStop",
+        "inputBackend",
+        "mouseHookInstalled",
+        "inputPlaneDowns",
+        "inputPlaneUps",
+        "inputPlaneMoves",
+        "inputPlaneCount",
+        "inputPlaneVisibleCount",
+        "inputPlaneRemainingAfterCleanup",
+        "inputPlaneFallbackUsed",
+        "releaseToPngMilliseconds",
+        "releaseToCleanupMilliseconds",
+        "releaseToReplyMilliseconds",
+        "ocrDurationMilliseconds",
+        "nativeHostReady",
+        "nativeHostArmed",
+        "nativeHostDowns",
+        "nativeHostUps",
+        "nativeHostMoves",
+        "nativeHostStopped",
+        "nativeHostFailed",
+    ];
+    let mut safe = serde_json::Map::new();
+    for field in FIELDS {
+        if let Some(number) = value.get(field).and_then(Value::as_u64) {
+            safe.insert((*field).to_owned(), json!(number));
+        }
+    }
+    Value::Object(safe)
+}
+
+/// Read the bounded metadata of the last selected-text attempt in this process.
+/// This does not capture text, query other applications or request permissions.
+#[cfg(target_os = "macos")]
+pub fn selection_diagnostics() -> Result<Value, String> {
+    run("selection-diagnostics", None)?
+        .get("diagnostics")
+        .filter(|value| value.is_object())
+        .cloned()
+        .ok_or_else(|| "NATIVE_PROTOCOL: Missing selection diagnostics.".into())
+}
+
+#[cfg(target_os = "windows")]
+pub fn selection_diagnostics() -> Result<Value, String> {
+    Ok(windows_selection_health()
+        .lock()
+        .map(|health| health.value.clone())
+        .unwrap_or(Value::Null))
 }
 
 /// A read-only preflight. This never requests a permission or opens Settings.
@@ -292,6 +793,147 @@ pub fn open_permission_settings(kind: &str) -> Result<(), String> {
     Err("PERMISSION_UNSUPPORTED: 此平台不需要 macOS 隐私授权。".into())
 }
 
+fn system_translation_input(
+    source: &str,
+    target: &str,
+    text: Option<&str>,
+) -> Result<String, String> {
+    let language = |value: &str| {
+        !value.is_empty()
+            && value.len() <= 40
+            && value
+                .bytes()
+                .all(|c| c.is_ascii_alphanumeric() || c == b'-')
+    };
+    if !language(source) || !language(target) || target == "auto" {
+        return Err("系统翻译的语言参数无效".into());
+    }
+    if text.is_some_and(|text| text.trim().is_empty() || text.chars().count() > 20_000) {
+        return Err("系统翻译需要 1–20,000 字符的文本".into());
+    }
+    serde_json::to_string(&json!({"source":source,"target":target,"text":text}))
+        .map_err(|_| "无法准备系统翻译参数".into())
+}
+
+pub fn system_translation_status(source: &str, target: &str) -> Result<Value, String> {
+    let input = system_translation_input(source, target, None)?;
+    #[cfg(target_os = "macos")]
+    {
+        let result = run("system-translation-status", Some(&input))?;
+        let mut status = result
+            .get("systemTranslation")
+            .filter(|v| v.is_object())
+            .cloned()
+            .ok_or_else(|| "NATIVE_PROTOCOL: 系统翻译状态不可用。".to_string())?;
+        status["ready"] = json!(status
+            .get("available")
+            .and_then(Value::as_bool)
+            .unwrap_or(false));
+        Ok(status)
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = input;
+        Ok(json!({
+            "platform":std::env::consts::OS,"supported":false,"ready":false,
+            "requiresSetup":false,"status":"unsupported",
+            "message":"此系统暂无通用系统翻译接口。Windows 安装包可使用“本机离线翻译”进行中英互译，也可配置自己的 API。"
+        }))
+    }
+}
+
+/// Explicit Settings action only. This may show Apple's language-download UI;
+/// translation/hotkeys/status checks never invoke it.
+pub fn prepare_system_translation(source: &str, target: &str) -> Result<Value, String> {
+    let input = system_translation_input(source, target, None)?;
+    #[cfg(target_os = "macos")]
+    {
+        run("prepare-system-translation", Some(&input))?;
+        system_translation_status(source, target)
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = input;
+        Err("此平台尚不支持系统文本翻译，请配置翻译 API".into())
+    }
+}
+
+pub async fn system_translate(text: &str, source: &str, target: &str) -> Result<String, String> {
+    let input = system_translation_input(source, target, Some(text))?;
+    #[cfg(target_os = "macos")]
+    {
+        use std::sync::{
+            atomic::{AtomicBool, AtomicU64, Ordering},
+            Arc, OnceLock,
+        };
+        static SERIAL: OnceLock<Arc<tokio::sync::Semaphore>> = OnceLock::new();
+        static NEXT: AtomicU64 = AtomicU64::new(0);
+        // Keep capacity in the blocking worker even if its JoinHandle is dropped.
+        let permit = SERIAL
+            .get_or_init(|| Arc::new(tokio::sync::Semaphore::new(1)))
+            .clone()
+            .try_acquire_owned()
+            .map_err(|_| "上一次系统翻译正在结束，请稍后重试".to_string())?;
+        let operation_id = format!(
+            "rust-{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        );
+        let mut input: Value = serde_json::from_str(&input).map_err(|_| "系统翻译参数无效")?;
+        input["operationId"] = json!(operation_id);
+        let input = input.to_string();
+        let mut cancellation = SystemTranslationCancellation {
+            operation_id,
+            cancelled: Arc::new(AtomicBool::new(false)),
+            finished: false,
+        };
+        let cancelled = cancellation.cancelled.clone();
+        let result = tauri::async_runtime::spawn_blocking(move || {
+            let _permit = permit;
+            if cancelled.load(Ordering::Acquire) {
+                return Err("SYSTEM_TRANSLATION_CANCELLED: 已取消系统翻译。".into());
+            }
+            run_text("system-translate", Some(&input))
+        })
+        .await
+        .map_err(|_| "系统翻译任务未能完成".to_string())?;
+        cancellation.finished = true;
+        result.and_then(|result| {
+            if result.trim().is_empty() || result.len() > 2 * 1024 * 1024 {
+                Err("系统翻译返回的译文为空或超过大小上限".into())
+            } else {
+                Ok(result)
+            }
+        })
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = input;
+        Err("此平台尚不支持系统文本翻译，请在设置中配置翻译 API".into())
+    }
+}
+
+#[cfg(target_os = "macos")]
+struct SystemTranslationCancellation {
+    operation_id: String,
+    cancelled: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    finished: bool,
+}
+
+#[cfg(target_os = "macos")]
+impl Drop for SystemTranslationCancellation {
+    fn drop(&mut self) {
+        if !self.finished {
+            self.cancelled
+                .store(true, std::sync::atomic::Ordering::Release);
+            // Fast C ABI cancellation of this Swift Task only; no source text,
+            // AppKit dispatch, prompt, keychain access or waiting.
+            let input = json!({"operationId":self.operation_id}).to_string();
+            let _ = run("cancel-system-translation", Some(&input));
+        }
+    }
+}
+
 fn run_text(mode: &str, input: Option<&str>) -> Result<String, String> {
     let result = run(mode, input)?;
     result
@@ -314,13 +956,90 @@ fn parse_response(bytes: &[u8], successful: bool) -> Result<Value, String> {
         .to_owned())
 }
 
+#[cfg(any(target_os = "windows", test))]
+fn native_forced_stop_error(mode: &str, reason: &str) -> String {
+    if mode == "selected-text" {
+        format!("CLIPBOARD_RESTORE_SKIPPED: Selection helper was forcibly stopped before its cleanup could be confirmed. Current clipboard contents were preserved; restoration is uncertain. {reason}")
+    } else {
+        reason.to_owned()
+    }
+}
+
 #[cfg(target_os = "windows")]
 fn run(mode: &str, input: Option<&str>) -> Result<Value, String> {
+    run_windows(mode, input, None)
+}
+#[cfg(target_os = "windows")]
+fn run_windows(
+    mode: &str,
+    input: Option<&str>,
+    cancel: Option<NativeCancel>,
+) -> Result<Value, String> {
+    run_windows_selection(
+        mode,
+        input,
+        cancel,
+        crate::model::WindowsSelectionStrategy::Auto,
+        None,
+    )
+}
+#[cfg(target_os = "windows")]
+fn run_windows_selection(
+    mode: &str,
+    input: Option<&str>,
+    cancel: Option<NativeCancel>,
+    strategy: crate::model::WindowsSelectionStrategy,
+    attempt: Option<SelectionAttempt>,
+) -> Result<Value, String> {
     use std::io::{Read, Write};
     use std::process::Stdio;
     use std::time::{Duration, Instant};
 
+    let capture = matches!(mode, "capture-ocr" | "capture-image");
+    let selection = mode == "selected-text";
+    let attempt = selection.then(|| attempt.unwrap_or_else(|| begin_selection_attempt(strategy)));
+    if capture {
+        if let Ok(mut health) = windows_capture_health().lock() {
+            *health = json!({"helperResponseReceived": 0});
+        }
+    }
+
+    if cancelled(cancel.as_ref()) {
+        return Err(NATIVE_CANCELLED.into());
+    }
+    let source = if mode == "selected-text" {
+        Some(native_source_snapshot()?)
+    } else {
+        None
+    };
+    if capture || mode == "selected-text" {
+        crate::windows_capture_input::wait_available(|| cancelled(cancel.as_ref()))?;
+    }
     let mut command = native_command(mode)?;
+    if selection {
+        command.args(["-SelectionStrategy", strategy.native_argument()]);
+    }
+    let mut cancellation = if cancel.is_some() {
+        Some(native_process::CancellationEvent::new()?)
+    } else {
+        None
+    };
+    if let Some(event) = &cancellation {
+        command.args(["-NativeCancellationEvent", event.name()]);
+    }
+    let mut capture_session = if capture {
+        Some(crate::windows_capture_input::Session::begin()?)
+    } else {
+        None
+    };
+    if let Some(session) = &capture_session {
+        command.args([
+            "-CaptureHostThreadId",
+            &session.thread().to_string(),
+            "-CaptureHostToken",
+            &session.token().to_string(),
+        ]);
+    }
     command
         .stdin(if input.is_some() {
             Stdio::piped()
@@ -329,9 +1048,25 @@ fn run(mode: &str, input: Option<&str>) -> Result<Value, String> {
         })
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
+    if cancelled(cancel.as_ref()) {
+        return Err(NATIVE_CANCELLED.into());
+    }
+    if source.is_some_and(|expected| !expected.is_current()) {
+        return Err(
+            "CANCELLED: The source application changed while the previous native task was ending."
+                .into(),
+        );
+    }
+    let helper_started = Instant::now();
+    if let Some(attempt) = attempt {
+        update_selection_health(attempt, json!({"attemptPhase": 2}));
+    }
     let mut child = command
         .spawn()
         .map_err(|error| format!("NATIVE_START: Could not start the system helper: {error}"))?;
+    if let Some(session) = &capture_session {
+        session.bind_child(child.id());
+    }
     // Drain both pipes concurrently so a long OCR result cannot deadlock wait().
     let stdout = child.stdout.take().ok_or("NATIVE: Missing output pipe.")?;
     let stderr = child.stderr.take().ok_or("NATIVE: Missing error pipe.")?;
@@ -360,24 +1095,53 @@ fn run(mode: &str, input: Option<&str>) -> Result<Value, String> {
         60
     };
     let deadline = Instant::now() + Duration::from_secs(limit);
+    let mut cancellation_requested = false;
+    let mut cancellation_signalled = false;
+    let mut cancellation_signal_failed = false;
     let status = loop {
-        match child.try_wait() {
+        if !cancellation_requested && cancelled(cancel.as_ref()) {
+            cancellation_requested = true;
+            if let Some(event) = &mut cancellation {
+                cancellation_signalled = event.signal();
+                cancellation_signal_failed = !cancellation_signalled;
+            }
+            if cancellation_signal_failed && capture {
+                if let Ok(mut health) = windows_capture_health().lock() {
+                    health["cancellationSignalFailed"] = json!(1);
+                }
+            }
+        }
+        let wait_result = native_process::wait_child(&child, 30);
+        match wait_result.and_then(|_| child.try_wait()) {
             Ok(Some(status)) => break status,
-            Ok(None) if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(30)),
+            Ok(None) if Instant::now() < deadline => {}
             Ok(None) => {
+                if let Some(session) = &mut capture_session {
+                    session.close();
+                }
                 let _ = child.kill();
                 let _ = child.wait();
-                return Err("NATIVE_TIMEOUT: The system helper stopped responding. Retry; if this persists, check system permissions and OCR language installation.".into());
+                return Err(native_forced_stop_error(
+                    mode,
+                    "NATIVE_TIMEOUT: The system helper stopped responding.",
+                ));
             }
             Err(error) => {
+                if let Some(session) = &mut capture_session {
+                    session.close();
+                }
                 let _ = child.kill();
                 let _ = child.wait();
-                return Err(format!(
-                    "NATIVE_WAIT: Could not wait for the system helper: {error}"
+                return Err(native_forced_stop_error(
+                    mode,
+                    &format!("NATIVE_WAIT: Could not wait for the system helper: {error}"),
                 ));
             }
         }
     };
+    if let Some(session) = &mut capture_session {
+        session.close();
+    }
     let output = output_thread
         .join()
         .map_err(|_| "NATIVE: Output reader failed.".to_string())?
@@ -404,7 +1168,73 @@ fn run(mode: &str, input: Option<&str>) -> Result<Value, String> {
             "NATIVE_START: System helper exited with {status}. {detail}"
         ));
     }
-    parse_response(&output, status.success())
+    if capture {
+        if let Ok(reply) = serde_json::from_slice::<Value>(&output) {
+            let mut safe = bounded_capture_health(&reply["captureHealth"]);
+            safe["helperResponseReceived"] = json!(1);
+            safe["helperElapsedMilliseconds"] = json!(helper_started
+                .elapsed()
+                .as_millis()
+                .min(u128::from(u64::MAX))
+                as u64);
+            safe["cancellationRequested"] = json!(u64::from(cancellation_requested));
+            safe["cancellationSignalled"] = json!(u64::from(cancellation_signalled));
+            safe["cancellationSignalFailed"] = json!(u64::from(cancellation_signal_failed));
+            if let Ok(mut health) = windows_capture_health().lock() {
+                *health = safe;
+            }
+        }
+    }
+    if selection {
+        let reply = serde_json::from_slice::<Value>(&output).unwrap_or(Value::Null);
+        let mut safe = selection_health_from_reply(
+            &reply,
+            helper_started
+                .elapsed()
+                .as_millis()
+                .min(u128::from(SELECTION_HEALTH_MAX)) as u64,
+            cancellation_requested,
+            cancellation_signalled,
+            cancellation_signal_failed,
+        );
+        safe["attemptPhase"] = json!(3);
+        safe["helperResultNonempty"] = json!(u64::from(
+            reply
+                .get("text")
+                .and_then(Value::as_str)
+                .is_some_and(|text| !text.trim().is_empty())
+        ));
+        if let Some(attempt) = attempt {
+            update_selection_health(attempt, safe);
+        }
+    }
+    let result = parse_response(&output, status.success());
+    // Clipboard restoration errors remain visible even when a task was replaced.
+    if cancellation_signal_failed
+        && result
+            .as_ref()
+            .err()
+            .is_none_or(|error| !error.starts_with("CLIPBOARD_"))
+    {
+        return Err("NATIVE_CANCEL_SIGNAL: Windows could not signal task cancellation; the previous helper was allowed to clean up safely.".into());
+    }
+    if cancelled(cancel.as_ref())
+        && result
+            .as_ref()
+            .err()
+            .is_none_or(|error| !error.starts_with("CLIPBOARD_"))
+    {
+        return Err(NATIVE_CANCELLED.into());
+    }
+    if source.is_some_and(|expected| !expected.is_current())
+        && result
+            .as_ref()
+            .err()
+            .is_none_or(|error| !error.starts_with("CLIPBOARD_"))
+    {
+        return Err("CANCELLED: The source focus changed during selection capture.".into());
+    }
+    result
 }
 
 #[cfg(not(any(target_os = "macos", target_os = "windows")))]
@@ -476,12 +1306,44 @@ fn run(mode: &str, input: Option<&str>) -> Result<Value, String> {
     result
 }
 
+// Cached paths are an optimization, not proof of the file's current contents.
+// Bound every read to the embedded DLL's exact size and never load a changed
+// (even otherwise valid) assembly or silently repair it during a shortcut.
+#[cfg(any(target_os = "windows", test))]
+fn verify_native_assembly(path: &std::path::Path, expected: &[u8]) -> Result<(), String> {
+    use std::io::Read;
+    let check = (|| -> std::io::Result<bool> {
+        let metadata = std::fs::symlink_metadata(path)?;
+        if !metadata.is_file()
+            || metadata.file_type().is_symlink()
+            || metadata.len() != expected.len() as u64
+        {
+            return Ok(false);
+        }
+        let file = std::fs::File::open(path)?;
+        if file.metadata()?.len() != expected.len() as u64 {
+            return Ok(false);
+        }
+        let mut actual = Vec::with_capacity(expected.len());
+        file.take(expected.len() as u64 + 1)
+            .read_to_end(&mut actual)?;
+        Ok(actual == expected)
+    })();
+    if check.unwrap_or(false) {
+        Ok(())
+    } else {
+        Err("NATIVE_ASSEMBLY: The packaged Windows native DLL changed or is unavailable. Restart or reinstall EchoLingo.".into())
+    }
+}
+
 #[cfg(target_os = "windows")]
 fn native_command(mode: &str) -> Result<std::process::Command, String> {
+    use sha2::{Digest, Sha256};
     use std::os::windows::process::CommandExt;
     use std::sync::OnceLock;
-    static SCRIPT: OnceLock<Result<std::path::PathBuf, String>> = OnceLock::new();
-    let path = SCRIPT
+    static HELPER: OnceLock<Result<(std::path::PathBuf, std::path::PathBuf), String>> =
+        OnceLock::new();
+    let (path, assembly) = HELPER
         .get_or_init(|| {
             let local =
                 std::env::var_os("LOCALAPPDATA").ok_or("NATIVE: LOCALAPPDATA is unavailable.")?;
@@ -490,10 +1352,18 @@ fn native_command(mode: &str) -> Result<std::process::Command, String> {
             // Windows PowerShell 5.1 needs a BOM to decode non-ASCII source reliably.
             let mut bytes = vec![0xef, 0xbb, 0xbf];
             bytes.extend_from_slice(include_bytes!("../native/windows.ps1"));
-            materialize(&folder, "echolingo-native-helper.ps1", &bytes)
+            let script = materialize(&folder, "echolingo-native-helper.ps1", &bytes)?;
+            let dll = include_bytes!(concat!(env!("OUT_DIR"), "/echolingo-windows-native.dll"));
+            let digest = format!("{:x}", Sha256::digest(dll));
+            let assembly = materialize(&folder, &format!("echolingo-native-{digest}.dll"), dll)?;
+            Ok((script, assembly))
         })
         .as_ref()
         .map_err(Clone::clone)?;
+    verify_native_assembly(
+        assembly,
+        include_bytes!(concat!(env!("OUT_DIR"), "/echolingo-windows-native.dll")),
+    )?;
     let system_root = std::env::var_os("SystemRoot").ok_or("NATIVE: SystemRoot is unavailable.")?;
     let powershell = std::path::PathBuf::from(system_root)
         .join("System32/WindowsPowerShell/v1.0/powershell.exe");
@@ -509,11 +1379,143 @@ fn native_command(mode: &str) -> Result<std::process::Command, String> {
             "-File",
         ])
         .arg(path)
-        .args(["-Mode", mode]);
+        .args(["-Mode", mode, "-NativeAssemblyPath"])
+        .arg(assembly);
     // No command shell, interpolation, user-supplied code, execution-policy change
     // to the machine, or visible console window. Copy text travels through stdin.
+    if mode == "selected-text" {
+        command.args(["-ExcludedSourceProcessId", &std::process::id().to_string()]);
+    }
     command.creation_flags(0x08000000); // CREATE_NO_WINDOW
     Ok(command)
+}
+
+#[cfg(target_os = "windows")]
+mod native_process {
+    use super::NativeSourceSnapshot;
+    use std::ffi::c_void;
+    use std::os::windows::io::AsRawHandle;
+    #[repr(C)]
+    struct GuiThreadInfo {
+        size: u32,
+        flags: u32,
+        active: *mut c_void,
+        focus: *mut c_void,
+        capture: *mut c_void,
+        menu_owner: *mut c_void,
+        move_size: *mut c_void,
+        caret: *mut c_void,
+        caret_rect: [i32; 4],
+    }
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        fn CreateEventW(
+            attributes: *const c_void,
+            manual: i32,
+            initial: i32,
+            name: *const u16,
+        ) -> *mut c_void;
+        fn SetEvent(event: *mut c_void) -> i32;
+        fn CloseHandle(handle: *mut c_void) -> i32;
+        fn WaitForSingleObject(handle: *mut c_void, milliseconds: u32) -> u32;
+        fn GetLastError() -> u32;
+    }
+    #[link(name = "user32")]
+    unsafe extern "system" {
+        fn GetForegroundWindow() -> *mut c_void;
+        fn GetWindowThreadProcessId(window: *mut c_void, pid: *mut u32) -> u32;
+        fn GetGUIThreadInfo(thread: u32, info: *mut GuiThreadInfo) -> i32;
+        fn GetAncestor(window: *mut c_void, flags: u32) -> *mut c_void;
+    }
+    #[link(name = "bcrypt")]
+    unsafe extern "system" {
+        fn BCryptGenRandom(algorithm: *mut c_void, buffer: *mut u8, length: u32, flags: u32)
+            -> i32;
+    }
+    pub fn source_snapshot() -> Result<NativeSourceSnapshot, String> {
+        let window = unsafe { GetForegroundWindow() };
+        let mut process = 0;
+        let thread = unsafe { GetWindowThreadProcessId(window, &mut process) };
+        if window.is_null() || thread == 0 || process == 0 {
+            return Err("SELECTION_SOURCE_CHANGED: The source application is unavailable.".into());
+        }
+        // Record native focus at the shortcut, before helper startup. Root
+        // HWND/PID alone cannot distinguish two editors in the same window.
+        // This is bounded Win32 metadata, never a UIA query on the UI thread.
+        let mut info: GuiThreadInfo = unsafe { std::mem::zeroed() };
+        info.size = std::mem::size_of::<GuiThreadInfo>() as u32;
+        if unsafe { GetGUIThreadInfo(thread, &mut info) } == 0
+            || unsafe { GetForegroundWindow() } != window
+            || (!info.focus.is_null()
+                && unsafe { GetAncestor(info.focus, 2) } != unsafe { GetAncestor(window, 2) })
+        {
+            return Err("SELECTION_SOURCE_CHANGED: The source focus is unavailable.".into());
+        }
+        Ok(NativeSourceSnapshot {
+            window: window as isize,
+            process,
+            thread,
+            focus: info.focus as isize,
+        })
+    }
+    pub struct CancellationEvent {
+        handle: *mut c_void,
+        name: String,
+        signalled: bool,
+    }
+    impl CancellationEvent {
+        pub fn new() -> Result<Self, String> {
+            let mut bytes = [0u8; 16];
+            if unsafe { BCryptGenRandom(std::ptr::null_mut(), bytes.as_mut_ptr(), 16, 2) } < 0 {
+                return Err("NATIVE_CANCEL: Windows could not prepare task cancellation.".into());
+            }
+            let suffix: String = bytes.iter().map(|b| format!("{b:02x}")).collect();
+            let name = format!("Local\\EchoLingo-cancel-{}-{suffix}", std::process::id());
+            let wide: Vec<u16> = name.encode_utf16().chain(Some(0)).collect();
+            let handle = unsafe { CreateEventW(std::ptr::null(), 1, 0, wide.as_ptr()) };
+            let error = unsafe { GetLastError() };
+            if handle.is_null() {
+                return Err("NATIVE_CANCEL: Windows could not create task cancellation.".into());
+            }
+            if error == 183 {
+                unsafe {
+                    CloseHandle(handle);
+                };
+                return Err(
+                    "NATIVE_CANCEL: Windows returned an existing cancellation session.".into(),
+                );
+            }
+            Ok(Self {
+                handle,
+                name,
+                signalled: false,
+            })
+        }
+        pub fn name(&self) -> &str {
+            &self.name
+        }
+        pub fn signal(&mut self) -> bool {
+            if !self.signalled {
+                self.signalled = unsafe { SetEvent(self.handle) } != 0;
+            }
+            self.signalled
+        }
+    }
+    impl Drop for CancellationEvent {
+        fn drop(&mut self) {
+            unsafe {
+                CloseHandle(self.handle);
+            }
+        }
+    }
+    pub fn wait_child(child: &std::process::Child, milliseconds: u32) -> std::io::Result<()> {
+        // This worker owns no HWND and waits on actual process completion;
+        // completion wakes immediately, with only cancellation polling bounded.
+        match unsafe { WaitForSingleObject(child.as_raw_handle(), milliseconds) } {
+            0 | 258 => Ok(()),
+            _ => Err(std::io::Error::last_os_error()),
+        }
+    }
 }
 
 #[cfg(target_os = "windows")]
@@ -576,6 +1578,328 @@ fn materialize(
 
 #[cfg(test)]
 mod tests {
+    use serde_json::{json, Value};
+
+    #[test]
+    fn forced_selection_stop_never_claims_clipboard_cleanup_or_hides_its_warning() {
+        assert!(
+            super::native_forced_stop_error("selected-text", "NATIVE_WAIT")
+                .starts_with("CLIPBOARD_RESTORE_SKIPPED:")
+        );
+        assert_eq!(
+            super::native_forced_stop_error("capture-ocr", "NATIVE_WAIT"),
+            "NATIVE_WAIT"
+        );
+    }
+    #[test]
+    fn superseded_requests_return_before_any_native_helper_or_image_is_started() {
+        use std::sync::{atomic::AtomicBool, Arc};
+        for result in [
+            super::selected_text_cancelable(Arc::new(AtomicBool::new(true))),
+            super::capture_ocr_cancelable(Arc::new(AtomicBool::new(true))),
+            super::capture_image_cancelable(Arc::new(AtomicBool::new(true))),
+        ] {
+            assert_eq!(result.unwrap_err(), super::NATIVE_CANCELLED);
+        }
+    }
+    #[test]
+    fn capture_image_validation_is_shared_by_ordinary_and_cancelable_paths() {
+        assert_eq!(
+            super::image_response(serde_json::json!({"imageBase64":"fixture-only"})).unwrap(),
+            "fixture-only"
+        );
+        assert!(super::image_response(serde_json::json!({"imageBase64":""})).is_err());
+        assert!(super::image_response(serde_json::json!({"text":"not-an-image"})).is_err());
+    }
+    #[test]
+    fn native_assembly_cache_rechecks_mutation_after_initial_success_without_repair() {
+        let directory = std::env::temp_dir().join(format!(
+            "echolingo-assembly-integrity-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir(&directory).unwrap();
+        let path = directory.join("generated.dll");
+        let expected = b"MZ-generated-assembly-identity-A";
+        std::fs::write(&path, expected).unwrap();
+        assert!(super::verify_native_assembly(&path, expected).is_ok());
+        // A same-length replacement, not only corrupt/missing DLL loading,
+        // must be rejected after the path has already passed its first check.
+        let changed = b"MZ-generated-assembly-identity-B";
+        std::fs::write(&path, changed).unwrap();
+        let error = super::verify_native_assembly(&path, expected).unwrap_err();
+        assert!(error.starts_with("NATIVE_ASSEMBLY:"));
+        assert_eq!(std::fs::read(&path).unwrap(), changed);
+        std::fs::write(&path, b"MZ-oversized-generated-assembly-identity-B-extra").unwrap();
+        assert!(super::verify_native_assembly(&path, expected).is_err());
+        std::fs::remove_file(&path).unwrap();
+        assert!(super::verify_native_assembly(&path, expected).is_err());
+        std::fs::remove_dir(directory).unwrap();
+    }
+
+    #[test]
+    fn capture_health_keeps_only_bounded_unsigned_metadata_even_on_failure() {
+        let safe = super::bounded_capture_health(&serde_json::json!({
+            "hookMouseDowns": 0, "hookMouseUps": 7, "hookMouseMoves": 42,
+            "knownPointer": 1, "desktopMatched": 1, "mismatchKind": 1,
+            "inputBackend": 2, "mouseHookInstalled": 0,
+            "inputPlaneDowns": 1, "inputPlaneUps": 1, "inputPlaneMoves": 18,
+            "inputPlaneCount": 2, "inputPlaneVisibleCount": 0,
+            "inputPlaneRemainingAfterCleanup": 0, "inputPlaneFallbackUsed": 1,
+            "uiPhase": "original text", "dragging": -1,
+            "source": "never retain", "title": "never retain", "imageBase64": "never retain",
+            "trajectory": [1, 2, 3], "credentials": {"value": "never retain"}
+        }));
+        assert_eq!(
+            safe,
+            serde_json::json!({"hookMouseDowns":0,"hookMouseUps":7,"hookMouseMoves":42,"knownPointer":1,"desktopMatched":1,"mismatchKind":1,
+                "inputBackend":2,"mouseHookInstalled":0,"inputPlaneDowns":1,"inputPlaneUps":1,"inputPlaneMoves":18,
+                "inputPlaneCount":2,"inputPlaneVisibleCount":0,"inputPlaneRemainingAfterCleanup":0,"inputPlaneFallbackUsed":1})
+        );
+        assert_eq!(
+            super::bounded_capture_health(&serde_json::json!(null)),
+            serde_json::json!({})
+        );
+    }
+
+    #[test]
+    fn selection_health_rejects_content_unknown_fields_and_invalid_numeric_types() {
+        let safe = super::bounded_selection_health(&json!({
+            "selectionQueryCount": 7,
+            "selectionQuery1Stage": 11,
+            "selectionQuery1IdentityCompared": 1,
+            "selectionQuery1IdentityEqual": 0,
+            "selectionQuery1Depth": -1,
+            "selectionQuery2Stage": "selected source text",
+            "selectionQuery2Depth": [4],
+            "selectionQuery2IdentityEqual": true,
+            "selectionQuery2RootWalkReason": {"text":"private"},
+            "selectionQuery2ExceptionKind": 1.0,
+            "selectionQuery3Milliseconds": 10_000_001_u64,
+            "selectionQuery16Milliseconds": 10_000_000,
+            "selectionQuery0Stage": 1,
+            "selectionQuery01Stage": 1,
+            "selectionQuery17Stage": 1,
+            "selectionQuery1InitialRoleId": 50033,
+            "selectionQuery1SelectionLength": 20,
+            "helperElapsedMilliseconds": 9,
+            "source": "private", "title":"private", "clipboard":"private",
+            "pid": 234, "hwnd": 567, "credentials":{"key":"dummy"}
+        }));
+        assert_eq!(
+            safe,
+            json!({
+                "selectionQueryCount":7,"selectionQuery1Stage":11,
+                "selectionQuery1IdentityCompared":1,"selectionQuery1IdentityEqual":0,
+                "selectionQuery16Milliseconds":10_000_000
+            })
+        );
+    }
+
+    #[test]
+    fn copy_diagnostics_allow_only_bounded_scalar_metadata() {
+        let safe = super::bounded_selection_health(&json!({
+            "copyStrategy": 1, "copyPhase": 4, "copyNativeContextValid": 1,
+            "copyNativeContextChecks": 6, "copyNativeGuardReason": 0,
+            "copyNativeInvalidReason": 10, "copyNativeGtiSucceeded": 1,
+            "copyNativeGtiFlags": 0, "copyNativeFocusPresent": 1,
+            "copyNativeFocusProcessMatchesForeground": 0, "copyNativeFocusRootMatchesForeground": 1,
+            "copyNativeActivePresent": 1, "copyNativeActiveRootMatchesForeground": 1,
+            "copyNativeEditable": 2, "copyNativeProtection": 0,
+            "copyNativeSelectionKnown": 1, "copyNativeSelectionNonempty": 1,
+            "copyProtectionProbe": 2, "copyProtectionProbeMilliseconds": 250,
+            "copyProtectionUnknown": 1, "copySnapshotOutcome": 1,
+            "copyDispatchInserted": 4, "copyOwnInputObserved": 1,
+            "copyOwnerOutcome": 1, "copyClipboardRestored": 1, "copyTerminalReason": 0,
+            "copyText": "private", "copyTitle": "private", "attemptId": 1,
+            "copyNativeFocusProcess": 2468, "copyNativeForeground": 1234,
+            "actionResultNonempty": 1
+        }));
+        assert_eq!(safe.as_object().unwrap().len(), 26);
+        assert_eq!(safe["copyDispatchInserted"], 4);
+        for invalid in [
+            json!(-1),
+            json!(10_000_001),
+            json!(1.5),
+            json!(true),
+            json!("private"),
+            json!([1]),
+        ] {
+            assert_eq!(
+                super::bounded_selection_health(&json!({"copyTerminalReason": invalid})),
+                json!({})
+            );
+        }
+    }
+
+    #[test]
+    fn selection_attempt_reset_precedes_helper_and_rejects_late_previous_diagnostics() {
+        use crate::model::WindowsSelectionStrategy;
+        let mut health = super::SelectionHealth::default();
+        let old = health.begin(WindowsSelectionStrategy::Auto);
+        health.update(old, json!({"helperResponseReceived": 1, "copyPhase": 7}));
+        let new = health.begin(WindowsSelectionStrategy::Copy);
+        assert_eq!(health.value["helperResponseReceived"], 0);
+        assert_eq!(health.value["configuredCopyStrategy"], 1);
+        assert!(health.value.get("copyPhase").is_none());
+        health.update(old, json!({"helperResponseReceived": 1, "copyPhase": 8}));
+        assert_eq!(health.value["helperResponseReceived"], 0);
+        health.update(new, json!({"attemptPhase": 4, "actionResultOk": 0}));
+        assert_eq!(health.value["attemptPhase"], 4);
+        assert_eq!(health.value["helperResponseReceived"], 0);
+        assert_eq!(health.value["actionResultOk"], 0);
+    }
+
+    #[test]
+    fn selection_health_bounds_all_query_slots_and_rejects_malformed_health() {
+        let mut input = serde_json::Map::new();
+        for index in 1..=17 {
+            for suffix in [
+                "Stage",
+                "Depth",
+                "IdentityCompared",
+                "IdentityEqual",
+                "RootWalkReason",
+                "ExceptionKind",
+                "Milliseconds",
+            ] {
+                input.insert(format!("selectionQuery{index}{suffix}"), json!(0));
+            }
+        }
+        input.insert("selectionQueryCount".into(), json!(10_000_000));
+        let safe = super::bounded_selection_health(&Value::Object(input));
+        assert_eq!(safe.as_object().unwrap().len(), 16 * 7 + 1);
+        assert_eq!(safe["selectionQueryCount"], 10_000_000);
+        assert_eq!(safe["selectionQuery16ExceptionKind"], 0);
+        assert!(safe.get("selectionQuery17Stage").is_none());
+        for malformed in [
+            Value::Null,
+            json!([]),
+            json!("private"),
+            json!(42),
+            json!(false),
+            json!({}),
+        ] {
+            assert_eq!(super::bounded_selection_health(&malformed), json!({}));
+        }
+    }
+
+    #[test]
+    fn selection_health_process_metadata_comes_only_from_our_boundary() {
+        let reply = json!({
+            "ok":false, "error":"private source must not be retained",
+            "text":"private", "captureHealth":{
+                "selectionQueryCount":1, "selectionQuery1ExceptionKind":5,
+                "helperResponseReceived":0, "helperElapsedMilliseconds":1,
+                "cancellationRequested":0, "cancellationSignalled":99,
+                "cancellationSignalFailed":"private"
+            }
+        });
+        let safe = super::selection_health_from_reply(&reply, u64::MAX, true, false, true);
+        assert_eq!(
+            safe,
+            json!({
+                "selectionQueryCount":1,"selectionQuery1ExceptionKind":5,
+                "helperResponseReceived":1,"helperElapsedMilliseconds":10_000_000,
+                "cancellationRequested":1,"cancellationSignalled":0,"cancellationSignalFailed":1
+            })
+        );
+        let invalid_json = serde_json::from_slice::<Value>(b"{not-json").unwrap_or(Value::Null);
+        for malformed in [invalid_json, json!([]), json!("private"), json!(false)] {
+            let empty = super::selection_health_from_reply(&malformed, 0, false, false, false);
+            assert_eq!(
+                empty,
+                json!({
+                    "helperResponseReceived":0,"helperElapsedMilliseconds":0,
+                    "cancellationRequested":0,"cancellationSignalled":0,"cancellationSignalFailed":0
+                })
+            );
+        }
+    }
+
+    #[test]
+    fn hide_confirms_native_state_when_runtime_hide_was_a_cached_noop() {
+        let visible = std::cell::Cell::new(true);
+        // Runtime returns Ok with its VISIBLE flag already false, although
+        // passive native presentation left the real window on screen.
+        let result = super::finish_window_hide(Ok(()), || visible.set(false), || visible.get());
+        assert!(result.is_ok());
+        assert!(!visible.get());
+    }
+
+    #[test]
+    fn hide_reports_a_still_visible_native_window_after_successful_dispatch() {
+        let attempted = std::cell::Cell::new(false);
+        let result = super::finish_window_hide(Ok(()), || attempted.set(true), || true);
+        assert!(attempted.get());
+        assert!(result.unwrap_err().starts_with("WINDOW_HIDE:"));
+    }
+
+    #[test]
+    fn runtime_hide_failure_does_not_skip_native_hide_or_hide_its_error() {
+        let visible = std::cell::Cell::new(true);
+        let result = super::finish_window_hide(
+            Err("runtime dispatch failed".into()),
+            || visible.set(false),
+            || visible.get(),
+        );
+        assert!(!visible.get());
+        assert_eq!(result.unwrap_err(), "runtime dispatch failed");
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn mac_popup_behavior_mask_uses_production_abi_without_window_or_permission_operations() {
+        unsafe extern "C" {
+            fn echolingo_popup_behavior_mask_for_version(current: u64, modern: i32) -> u64;
+        }
+        let join_all_spaces = 1;
+        let move_to_active_space = 1 << 1;
+        let primary = 1 << 7;
+        let auxiliary = 1 << 8;
+        let none = 1 << 9;
+        let modern_roles = (1 << 16) | (1 << 17) | (1 << 18);
+        let conflicting = move_to_active_space | primary | none | modern_roles;
+        let unrelated = (1 << 4) | (1 << 6) | (1 << 12) | (1 << 40);
+        for modern in [0, 1] {
+            let required = join_all_spaces | auxiliary | if modern != 0 { 1 << 18 } else { 0 };
+            for mask in [0, conflicting, required, unrelated, unrelated | conflicting] {
+                // SAFETY: This ABI only transforms an integer mask. It does not
+                // instantiate NSApplication, touch windows or request permissions.
+                let result = unsafe { echolingo_popup_behavior_mask_for_version(mask, modern) };
+                assert_eq!(result, (mask & !conflicting) | required);
+                assert_eq!(
+                    unsafe { echolingo_popup_behavior_mask_for_version(result, modern) },
+                    result
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn system_translation_input_rejects_invalid_languages_and_unbounded_text() {
+        for (source, target) in [
+            ("", "en"),
+            ("en", "auto"),
+            ("en;open", "zh-Hans"),
+            ("auto", ""),
+        ] {
+            assert!(super::system_translation_input(source, target, Some("fixture")).is_err());
+        }
+        assert!(super::system_translation_input("auto", "zh-Hans", Some(" ")).is_err());
+        assert!(
+            super::system_translation_input("en", "zh-Hans", Some(&"a".repeat(20_001))).is_err()
+        );
+        let encoded =
+            super::system_translation_input("auto", "zh-Hant", Some("段落一。\n\nparagraph two\0"))
+                .unwrap();
+        let value: serde_json::Value = serde_json::from_str(&encoded).unwrap();
+        assert_eq!(value["text"], "段落一。\n\nparagraph two\0");
+        assert_eq!(value["target"], "zh-Hant");
+    }
     use super::parse_response;
 
     #[cfg(any(target_os = "macos", target_os = "windows"))]
@@ -622,12 +1946,57 @@ mod tests {
 
     #[cfg(target_os = "macos")]
     #[test]
+    fn mac_capture_selector_fixture_checks_geometry_without_capturing_the_desktop() {
+        let result = super::run("capture-selection-self-test", None).unwrap();
+        assert_eq!(result["diagnostics"]["captureSelectionFixturePassed"], true);
+        assert_eq!(result["diagnostics"]["screenCaptured"], false);
+        assert_eq!(result["diagnostics"]["permissionRequested"], false);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn mac_system_translation_policy_and_cancellation_use_the_production_abi_without_models() {
+        let result = super::run("system-translation-self-test", None).unwrap();
+        let diagnostic = &result["diagnostics"];
+        assert_eq!(diagnostic["systemTranslationPolicyFixturePassed"], true);
+        assert_eq!(diagnostic["systemTranslationOutputFixturePassed"], true);
+        assert_eq!(diagnostic["systemTranslationOutputFixtureCount"], 19);
+        assert_eq!(diagnostic["translationEngineCalled"], false);
+        assert_eq!(diagnostic["languageDownloadRequested"], false);
+        assert!(
+            diagnostic["systemTranslationCancellationFixturePassed"] == true
+                || diagnostic["systemTranslationCancellationFixtureSkipped"] == true
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn mac_screen_permission_policy_never_caches_authority_or_opens_concurrent_requests() {
+        let result = super::run("permission-policy-self-test", None).unwrap();
+        let diagnostic = &result["diagnostics"];
+        assert_eq!(diagnostic["permissionPolicyFixturePassed"], true);
+        assert_eq!(diagnostic["permissionRequested"], false);
+        assert_eq!(diagnostic["screenCaptured"], false);
+        assert_eq!(diagnostic["passiveStatusUsesPreflightOnly"], true);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
     fn mac_permission_preflight_uses_this_process_without_requesting_access() {
         let status = super::permission_status().unwrap();
         assert_eq!(status["identity"], "application-process");
         assert_eq!(status["processId"], std::process::id());
         assert!(status["accessibilityGranted"].is_boolean());
         assert!(status["screenCaptureGranted"].is_boolean());
+        assert_eq!(
+            status["screenCapturePreflightGranted"],
+            status["screenCaptureGranted"]
+        );
+        assert!(matches!(
+            status["screenCaptureState"].as_str(),
+            Some("granted" | "unconfirmed")
+        ));
+        assert!(status.get("screenCaptureRequestState").is_none());
         assert!(status["runningBundledApp"].is_boolean());
     }
 

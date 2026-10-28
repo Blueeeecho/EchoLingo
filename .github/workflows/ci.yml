@@ -4,10 +4,17 @@ on:
     branches: [main]
   pull_request:
   workflow_dispatch:
+    inputs:
+      mode:
+        description: Full regression or exact-binary desktop diagnostics
+        type: choice
+        default: full
+        options: [full, windows-popup-diagnostics, windows-popup-current-diagnostics, windows-application-diagnostics, windows-input-plane-experiment, windows-native-diagnostics, windows-shortcuts-ui-diagnostics, windows-shortcuts-ui-medium-diagnostics, windows-shortcuts-current-diagnostics, windows-shortcuts-workflows-diagnostics, windows-delegated-diagnostics, windows-browser-diagnostics, windows-selection-same-page-diagnostics, windows-selection-browser-app-diagnostics, windows-browser-ocr-visibility-diagnostics, windows-selection-cold-edge-diagnostics, windows-selection-paced-edge-diagnostics, windows-selection-nonbrowser-app-diagnostics, windows-latest-intent-diagnostics, windows-selection-application-diagnostics, windows-selection-clipboard-diagnostics, windows-selection-notepad-diagnostics, windows-selection-budget-diagnostics, windows-selection-context-diagnostics, windows-wps-selection-diagnostics, windows-focus-resize-current-diagnostics]
 permissions:
   contents: read
 jobs:
   desktop:
+    if: github.event.inputs.mode != 'windows-popup-diagnostics' && github.event.inputs.mode != 'windows-popup-current-diagnostics' && github.event.inputs.mode != 'windows-application-diagnostics' && github.event.inputs.mode != 'windows-input-plane-experiment' && github.event.inputs.mode != 'windows-native-diagnostics' && github.event.inputs.mode != 'windows-shortcuts-ui-diagnostics' && github.event.inputs.mode != 'windows-shortcuts-ui-medium-diagnostics' && github.event.inputs.mode != 'windows-shortcuts-current-diagnostics' && github.event.inputs.mode != 'windows-shortcuts-workflows-diagnostics' && github.event.inputs.mode != 'windows-delegated-diagnostics' && github.event.inputs.mode != 'windows-browser-diagnostics' && github.event.inputs.mode != 'windows-selection-same-page-diagnostics' && github.event.inputs.mode != 'windows-selection-browser-app-diagnostics' && github.event.inputs.mode != 'windows-browser-ocr-visibility-diagnostics' && github.event.inputs.mode != 'windows-selection-cold-edge-diagnostics' && github.event.inputs.mode != 'windows-selection-paced-edge-diagnostics' && github.event.inputs.mode != 'windows-selection-nonbrowser-app-diagnostics' && github.event.inputs.mode != 'windows-latest-intent-diagnostics' && github.event.inputs.mode != 'windows-selection-application-diagnostics' && github.event.inputs.mode != 'windows-selection-clipboard-diagnostics' && github.event.inputs.mode != 'windows-selection-notepad-diagnostics' && github.event.inputs.mode != 'windows-selection-budget-diagnostics' && github.event.inputs.mode != 'windows-selection-context-diagnostics' && github.event.inputs.mode != 'windows-wps-selection-diagnostics' && github.event.inputs.mode != 'windows-focus-resize-current-diagnostics'
     strategy:
       fail-fast: false
       matrix:
@@ -23,6 +30,65 @@ jobs:
       - uses: swatinem/rust-cache@v2
         with:
           workspaces: src-tauri -> target
+      - uses: actions/setup-python@v5
+        if: runner.os == 'Windows'
+        with:
+          python-version: '3.12'
+      - name: Offline model staging integrity fixtures
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: python scripts/test_prepare_offline_models.py
+      - name: Windows native C++ compiler environment
+        if: runner.os == 'Windows'
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+      - name: Windows offline model download cache
+        if: runner.os == 'Windows'
+        uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/echolingo-offline-model-cache
+          key: ${{ runner.os }}-offline-models-${{ hashFiles('resources/offline-translation/manifest.json') }}
+      - name: Windows offline isolation prerequisites (read-only)
+        if: runner.os == 'Windows'
+        shell: powershell
+        run: |
+          $state = [ordered]@{ readOnly = $true }
+          try {
+            $state.firewallServiceStatus = [string](Get-Service MpsSvc -ErrorAction Stop).Status
+            $state.connections = @(Get-NetConnectionProfile -ErrorAction Stop | Select-Object NetworkCategory, IPv4Connectivity, IPv6Connectivity)
+            $state.effectiveProfiles = @(Get-NetFirewallProfile -PolicyStore ActiveStore -ErrorAction Stop | Select-Object Name, Enabled)
+          } catch { $state.readError = $_.Exception.Message }
+          $state | ConvertTo-Json -Depth 5 -Compress
+      - name: Prepare verified offline English-Chinese models
+        if: runner.os == 'Windows'
+        timeout-minutes: 10
+        shell: pwsh
+        run: |
+          python scripts/prepare-offline-models.py --cache "$env:RUNNER_TEMP/echolingo-offline-model-cache"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          python scripts/prepare-offline-models.py --verify-only
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Build pinned native offline translation engine
+        if: runner.os == 'Windows'
+        timeout-minutes: 30
+        shell: pwsh
+        run: |
+          python -m pip install --disable-pip-version-check cmake==3.31.6
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cmake --version
+          ninja --version
+          python scripts/offline-engine/build.py --work-dir "$env:RUNNER_TEMP/echolingo-offline-engine-build" --output-dir resources/offline-translation/bin --jobs 4 --generator Ninja
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Package corresponding offline inference source
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          python scripts/package-offline-source.py --engine-work-dir "$env:RUNNER_TEMP/echolingo-offline-engine-build" --output "$env:RUNNER_TEMP/EchoLingo-offline-engine-source.zip"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Audit exact Windows runtime resource allowlist
+        if: runner.os == 'Windows'
+        run: python scripts/audit-windows-resources.py --staged
       - run: npm ci
       - run: npm run check
       - run: npm test
@@ -32,6 +98,20 @@ jobs:
         if: runner.os == 'Windows'
         shell: powershell
         run: powershell.exe -NoProfile -STA -ExecutionPolicy Bypass -File src-tauri/native/windows.ps1 -Mode self-test
+      - name: Windows transparent selector state regression
+        if: runner.os == 'Windows'
+        shell: powershell
+        run: powershell.exe -NoProfile -STA -ExecutionPolicy Bypass -File tests/windows-native-smoke.ps1 -CaptureStateOnly
+      - name: macOS native toolchain versions
+        if: runner.os == 'macOS'
+        run: |
+          sw_vers
+          xcodebuild -version
+          swiftc --version
+          xcrun --show-sdk-version
+      - name: Native macOS OCR and private pasteboard self-test
+        if: runner.os == 'macOS'
+        run: bash tests/macos-native-self-test.sh
       - name: Windows selected-text and clipboard desktop smoke
         if: runner.os == 'Windows'
         shell: powershell
@@ -42,15 +122,378 @@ jobs:
         run: cargo fmt --manifest-path src-tauri/Cargo.toml --check
       - name: Build desktop installer
         run: npm run tauri build -- --bundles ${{ runner.os == 'Windows' && 'nsis' || 'dmg' }}
+      - name: Identify the actual embedded precompiled Windows helper
+        id: windows_native_candidate
+        if: runner.os == 'Windows'
+        shell: powershell
+        run: |
+          $dll = Get-ChildItem src-tauri/target/release/build -Recurse -File -Filter echolingo-windows-native.dll | Sort-Object LastWriteTimeUtc -Descending | Select-Object -First 1
+          if ($null -eq $dll) { throw 'The production Windows native DLL was not built.' }
+          $appBytes = [IO.File]::ReadAllBytes((Resolve-Path src-tauri/target/release/echolingo.exe))
+          $dllBytes = [IO.File]::ReadAllBytes($dll.FullName)
+          Add-Type -TypeDefinition @'
+          public static class EchoLingoExactPayload {
+            public static int Find(byte[] binary, byte[] payload) {
+              if (payload.Length == 0) return -1;
+              for (int i = 0; i <= binary.Length - payload.Length; i++) {
+                if (binary[i] != payload[0]) continue;
+                int j = 1; while (j < payload.Length && binary[i+j] == payload[j]) j++;
+                if (j == payload.Length) return i;
+              }
+              return -1;
+            }
+          }
+          '@
+          $payloadOffset = [EchoLingoExactPayload]::Find($appBytes, $dllBytes)
+          if ($payloadOffset -lt 0) { throw 'The selected complete DLL is not embedded byte-for-byte in the actual application.' }
+          "path=$($dll.FullName)" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+          [ordered]@{ dllBytes = $dllBytes.Length; dllSha256 = (Get-FileHash $dll.FullName -Algorithm SHA256).Hash.ToLowerInvariant(); completePayloadEmbedded = $true; exactPayloadOffset = $payloadOffset } | ConvertTo-Json -Compress
+      - name: Windows real shortcut conflict CLI probe
+        id: windows_shortcut_install
+        if: runner.os == 'Windows'
+        continue-on-error: true
+        timeout-minutes: 3
+        shell: powershell
+        run: |
+          $output = @(& powershell.exe -NoProfile -STA -ExecutionPolicy Bypass -File tests/windows-shortcut-install-smoke.ps1 -ApplicationPath src-tauri/target/release/echolingo.exe -IsolatedTestSession 2>&1)
+          $fixtureExit = $LASTEXITCODE
+          $output | Out-File "$env:RUNNER_TEMP/echolingo-shortcut-install.log" -Encoding utf8
+          $output | Write-Output
+          exit $fixtureExit
+      - name: Windows native assembly load and fail-closed checks
+        if: runner.os == 'Windows'
+        shell: powershell
+        run: powershell.exe -NoProfile -STA -ExecutionPolicy Bypass -File tests/windows-native-assembly-smoke.ps1 -NativeAssemblyPath '${{ steps.windows_native_candidate.outputs.path }}'
+      - name: Windows generated document selection and cooperative clipboard cancellation
+        id: windows_selection_document
+        if: runner.os == 'Windows'
+        continue-on-error: true
+        timeout-minutes: 4
+        shell: powershell
+        run: |
+          $output = @(& powershell.exe -NoProfile -STA -ExecutionPolicy Bypass -File tests/windows-selection-document-smoke.ps1 -NativeAssemblyPath '${{ steps.windows_native_candidate.outputs.path }}' -IsolatedTestSession 2>&1)
+          $fixtureExit = $LASTEXITCODE
+          $output | Out-File "$env:RUNNER_TEMP/echolingo-selection-document.log" -Encoding utf8
+          $output | Write-Output
+          exit $fixtureExit
+      - name: Windows copy compatibility without a readable UIA selection
+        id: windows_selection_compat
+        if: runner.os == 'Windows'
+        continue-on-error: true
+        timeout-minutes: 4
+        shell: powershell
+        run: |
+          $output = @(& powershell.exe -NoProfile -STA -ExecutionPolicy Bypass -File tests/windows-selection-compat-smoke.ps1 -NativeAssemblyPath '${{ steps.windows_native_candidate.outputs.path }}' -IsolatedTestSession 2>&1)
+          $fixtureExit = $LASTEXITCODE
+          $output | Out-File "$env:RUNNER_TEMP/echolingo-selection-compat.log" -Encoding utf8
+          $output | Write-Output
+          exit $fixtureExit
+      - name: Windows same-root cross-process selected text and clipboard preservation
+        id: windows_selection_native_focus
+        if: runner.os == 'Windows'
+        continue-on-error: true
+        timeout-minutes: 4
+        shell: powershell
+        run: |
+          $output = @(& powershell.exe -NoProfile -STA -ExecutionPolicy Bypass -File tests/windows-selection-native-focus-smoke.ps1 -NativeAssemblyPath '${{ steps.windows_native_candidate.outputs.path }}' -OutputDirectory "$env:RUNNER_TEMP/echolingo-stage-native-focus" -ExpectCrossProcessSuccess -IsolatedTestSession 2>&1)
+          $fixtureExit = $LASTEXITCODE
+          $output | Out-File "$env:RUNNER_TEMP/echolingo-selection-native-focus.log" -Encoding utf8
+          $output | Write-Output
+          exit $fixtureExit
+      - name: Windows exact native host delegated input ownership
+        id: windows_delegated_capture
+        if: runner.os == 'Windows'
+        continue-on-error: true
+        timeout-minutes: 8
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          & rustc --edition=2021 tests/windows-delegated-capture-harness.rs -O -o "$env:RUNNER_TEMP/echolingo-capture-input-harness.exe"
+          if ($LASTEXITCODE -ne 0) { throw 'The exact production input modules did not compile for Windows.' }
+          $ErrorActionPreference = 'Continue'
+          $global:LASTEXITCODE = 1
+          $output = @(& powershell.exe -NoProfile -STA -ExecutionPolicy Bypass -File tests/windows-delegated-capture-smoke.ps1 -HelperPath src-tauri/native/windows.ps1 -NativeAssemblyPath '${{ steps.windows_native_candidate.outputs.path }}' -HarnessPath "$env:RUNNER_TEMP/echolingo-capture-input-harness.exe" -IsolatedTestSession 2>&1)
+          $fixtureExit = $LASTEXITCODE
+          $output | Out-File "$env:RUNNER_TEMP/echolingo-native-delegated-capture.log" -Encoding utf8
+          $output | Write-Output
+          exit $fixtureExit
+      - name: Actual packaged Windows shortcut settings and registered-key recording
+        id: windows_shortcuts_ui
+        if: runner.os == 'Windows'
+        continue-on-error: true
+        timeout-minutes: 4
+        shell: powershell
+        run: |
+          # Drive the real packaged settings through UIA and Win32 input.
+          # Preserve raw failures; no remote-debugging or restricted-token setup.
+          $ErrorActionPreference = 'Continue'
+          $output = @(); $fixtureExit = 1
+          $global:LASTEXITCODE = 1 # A missing/unlaunchable node must never reuse a null/success exit code.
+          try {
+            $candidate = (Resolve-Path src-tauri/target/release/echolingo.exe).Path
+            $hash = (Get-FileHash -LiteralPath $candidate -Algorithm SHA256).Hash.ToLowerInvariant()
+            $bytes = (Get-Item -LiteralPath $candidate).Length
+            $output = @(& powershell.exe -NoProfile -STA -ExecutionPolicy Bypass -File tests/windows-shortcuts-uia-smoke.ps1 -ApplicationPath $candidate -ExpectedApplicationSha256 $hash -ExpectedApplicationBytes $bytes -IsolatedTestSession 2>&1)
+            $fixtureExit = $LASTEXITCODE
+          } finally {
+            $output | Out-File "$env:RUNNER_TEMP/echolingo-shortcuts-ui.log" -Encoding utf8
+            $output | Write-Output
+          }
+          exit $fixtureExit
+      - name: Actual custom selected-text and OCR shortcut workflows
+        id: windows_custom_shortcuts
+        if: runner.os == 'Windows'
+        continue-on-error: true
+        timeout-minutes: 3
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Continue'
+          $global:LASTEXITCODE = 1
+          $output = @(& powershell.exe -NoProfile -STA -ExecutionPolicy Bypass -File tests/windows-application-smoke.ps1 -ApplicationPath src-tauri/target/release/echolingo.exe -CustomShortcutsTests 2>&1)
+          $fixtureExit = $LASTEXITCODE
+          $output | Out-File "$env:RUNNER_TEMP/echolingo-custom-shortcuts.log" -Encoding utf8
+          $output | Write-Output
+          exit $fixtureExit
+      - name: Windows live transparent region selector desktop smoke
+        id: windows_live_capture
+        if: runner.os == 'Windows'
+        continue-on-error: true
+        timeout-minutes: 3
+        shell: powershell
+        run: powershell.exe -NoProfile -STA -ExecutionPolicy Bypass -File tests/windows-live-capture-smoke.ps1 -NativeAssemblyPath '${{ steps.windows_native_candidate.outputs.path }}'
+      - name: Same-runner actual helper startup and drag A-B measurements
+        id: windows_helper_performance
+        if: runner.os == 'Windows'
+        continue-on-error: true
+        timeout-minutes: 6
+        shell: powershell
+        run: |
+          git fetch --no-tags --depth=1 origin ab4405cc15e2ca204459b2fd40389924aa994695
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          [Console]::OutputEncoding = [Text.UTF8Encoding]::new($false)
+          $baseline = "$env:RUNNER_TEMP/echolingo-ab4405c-windows.ps1"
+          git show ab4405cc15e2ca204459b2fd40389924aa994695:src-tauri/native/windows.ps1 | Out-File $baseline -Encoding utf8
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $output = @(& powershell.exe -NoProfile -STA -ExecutionPolicy Bypass -File tests/windows-helper-performance-smoke.ps1 -BaselineHelperPath $baseline -NativeAssemblyPath '${{ steps.windows_native_candidate.outputs.path }}' 2>&1)
+          $fixtureExit = $LASTEXITCODE
+          $output | Out-File "$env:RUNNER_TEMP/echolingo-helper-performance.log" -Encoding utf8
+          $output | Write-Output
+          exit $fixtureExit
+      - name: Windows application shortcut and OCR integration smoke
+        id: windows_application_core
+        if: runner.os == 'Windows'
+        continue-on-error: true
+        timeout-minutes: 5
+        shell: powershell
+        run: |
+          $output = @(& powershell.exe -NoProfile -STA -ExecutionPolicy Bypass -File tests/windows-application-smoke.ps1 -ApplicationPath src-tauri/target/release/echolingo.exe -LatestIntentTests 2>&1)
+          $fixtureExit = $LASTEXITCODE
+          $output | Out-File "$env:RUNNER_TEMP/echolingo-application-latest-intent.log" -Encoding utf8
+          $output | Write-Output
+          exit $fixtureExit
+      - name: Windows popup outside-click and focus integration smoke
+        id: windows_popup_visibility
+        if: runner.os == 'Windows'
+        continue-on-error: true
+        timeout-minutes: 5
+        shell: powershell
+        run: powershell.exe -NoProfile -STA -ExecutionPolicy Bypass -File tests/windows-popup-visibility-smoke.ps1 -ApplicationPath src-tauri/target/release/echolingo.exe -IsolatedTestSession
+      - name: Windows actual popup edge resizing and width retention
+        id: windows_popup_resize
+        if: runner.os == 'Windows'
+        continue-on-error: true
+        timeout-minutes: 5
+        shell: powershell
+        run: |
+          $output = @(& powershell.exe -NoProfile -STA -ExecutionPolicy Bypass -File tests/windows-popup-resize-smoke.ps1 -ApplicationPath src-tauri/target/release/echolingo.exe -IsolatedTestSession 2>&1)
+          $fixtureExit = $LASTEXITCODE
+          $output | Out-File "$env:RUNNER_TEMP/echolingo-popup-resize.log" -Encoding utf8
+          $output | Write-Output
+          exit $fixtureExit
+      - name: Windows rigorous single-press selection application matrix
+        id: windows_selection_rigorous
+        if: runner.os == 'Windows'
+        continue-on-error: true
+        timeout-minutes: 5
+        shell: powershell
+        run: |
+          $candidate = (Resolve-Path src-tauri/target/release/echolingo.exe).Path
+          $hash = (Get-FileHash -LiteralPath $candidate -Algorithm SHA256).Hash.ToLowerInvariant()
+          $bytes = (Get-Item -LiteralPath $candidate).Length
+          $output = @(& powershell.exe -NoProfile -STA -ExecutionPolicy Bypass -File tests/windows-selection-application-smoke.ps1 -ApplicationPath $candidate -ExpectedApplicationSha256 $hash -ExpectedApplicationBytes $bytes -IsolatedTestSession 2>&1)
+          $fixtureExit = $LASTEXITCODE
+          $output | Out-File "$env:RUNNER_TEMP/echolingo-selection-rigorous.log" -Encoding utf8
+          $output | Write-Output
+          exit $fixtureExit
+      - name: Windows real Notepad and generated WPF mouse selection
+        id: windows_nonbrowser_selection
+        if: runner.os == 'Windows'
+        continue-on-error: true
+        timeout-minutes: 5
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Continue'
+          $candidate = (Resolve-Path src-tauri/target/release/echolingo.exe).Path
+          $hash = (Get-FileHash -LiteralPath $candidate -Algorithm SHA256).Hash.ToLowerInvariant()
+          $bytes = (Get-Item -LiteralPath $candidate).Length
+          $global:LASTEXITCODE = 1
+          $notepad = @(& powershell.exe -NoProfile -STA -ExecutionPolicy Bypass -File tests/windows-selection-notepad-smoke.ps1 -ApplicationPath $candidate -ExpectedApplicationSha256 $hash -ExpectedApplicationBytes $bytes -IsolatedTestSession 2>&1)
+          $notepadExit = $LASTEXITCODE
+          $notepad | Out-File "$env:RUNNER_TEMP/echolingo-selection-notepad-mouse.log" -Encoding utf8
+          $notepad | Write-Output
+          $global:LASTEXITCODE = 1
+          $wpf = @(& powershell.exe -NoProfile -STA -ExecutionPolicy Bypass -File tests/windows-selection-wpf-smoke.ps1 -ApplicationPath $candidate -ExpectedApplicationSha256 $hash -ExpectedApplicationBytes $bytes -IsolatedTestSession 2>&1)
+          $wpfExit = $LASTEXITCODE
+          $wpf | Out-File "$env:RUNNER_TEMP/echolingo-selection-wpf.log" -Encoding utf8
+          $wpf | Write-Output
+          if ($notepadExit -ne 0 -or $wpfExit -ne 0) { throw 'Non-browser mouse selection failed or inconclusive.' }
+      - name: Windows Edge and Chrome same-page mouse selections with paced Alt+D
+        id: windows_browser_selection
+        if: runner.os == 'Windows'
+        continue-on-error: true
+        timeout-minutes: 12
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Continue'
+          $candidate = (Resolve-Path src-tauri/target/release/echolingo.exe).Path
+          $hash = (Get-FileHash -LiteralPath $candidate -Algorithm SHA256).Hash.ToLowerInvariant()
+          $bytes = (Get-Item -LiteralPath $candidate).Length
+          $global:LASTEXITCODE = 1
+          $output = @(& node tests/windows-browser-selection-smoke.mjs --application $candidate --expected-application-sha256 $hash --expected-application-bytes $bytes --selection-suite same-page-mouse --browser-order edge-first --shortcut-gesture paced 2>&1)
+          $code = $LASTEXITCODE
+          $output | Out-File "$env:RUNNER_TEMP/echolingo-browser-app-selection.log" -Encoding utf8
+          $output | Write-Output
+          exit $code
+      - name: Windows actual browser OCR and same-source outside click
+        id: windows_browser_ocr
+        if: runner.os == 'Windows'
+        continue-on-error: true
+        timeout-minutes: 6
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Continue'
+          $candidate = (Resolve-Path src-tauri/target/release/echolingo.exe).Path
+          $hash = (Get-FileHash -LiteralPath $candidate -Algorithm SHA256).Hash.ToLowerInvariant()
+          $bytes = (Get-Item -LiteralPath $candidate).Length
+          $outcomes = @{}
+          foreach ($browserKind in @('edge','chrome')) {
+            $global:LASTEXITCODE = 1
+            $output = @(& node tests/windows-browser-ocr-visibility-smoke.mjs --browser $browserKind --application $candidate --expected-application-sha256 $hash --expected-application-bytes $bytes 2>&1)
+            $outcomes[$browserKind] = $LASTEXITCODE
+            $output | Out-File "$env:RUNNER_TEMP/echolingo-browser-ocr-$browserKind.log" -Encoding utf8
+            $output | Write-Output
+          }
+          $outcomes | ConvertTo-Json -Compress
+          if (@($outcomes.Values | Where-Object { $_ -ne 0 }).Count -gt 0) { throw 'Actual browser OCR/outside click failed or inconclusive.' }
+      - name: Windows exact query-worker, copy-ticket and shared-budget regressions
+        id: windows_selection_internals
+        if: runner.os == 'Windows'
+        continue-on-error: true
+        timeout-minutes: 2
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Continue'
+          # Every fixture gets a fresh process; a deliberately poisoned worker
+          # must never carry over into another independent regression.
+          $global:LASTEXITCODE = 1
+          $budgetOutput = @(& powershell.exe -NoProfile -STA -ExecutionPolicy Bypass -File tests/windows-selection-budget-smoke.ps1 -NativeAssemblyPath '${{ steps.windows_native_candidate.outputs.path }}' 2>&1)
+          $budgetExit = $LASTEXITCODE
+          $budgetOutput | Out-File "$env:RUNNER_TEMP/echolingo-selection-budget.log" -Encoding utf8
+          $budgetOutput | Write-Output
+          $global:LASTEXITCODE = 1
+          $queryOutput = @(& powershell.exe -NoProfile -STA -ExecutionPolicy Bypass -File tests/windows-selection-query-smoke.ps1 -NativeAssemblyPath '${{ steps.windows_native_candidate.outputs.path }}' -IsolatedTestSession 2>&1)
+          $queryExit = $LASTEXITCODE
+          $queryOutput | Out-File "$env:RUNNER_TEMP/echolingo-selection-query.log" -Encoding utf8
+          $queryOutput | Write-Output
+          $global:LASTEXITCODE = 1
+          $ticketOutput = @(& powershell.exe -NoProfile -STA -ExecutionPolicy Bypass -File tests/windows-selection-copy-ticket-smoke.ps1 2>&1)
+          $ticketExit = $LASTEXITCODE
+          $ticketOutput | Out-File "$env:RUNNER_TEMP/echolingo-selection-copy-ticket.log" -Encoding utf8
+          $ticketOutput | Write-Output
+          [ordered]@{ selectionBudgetExit = $budgetExit; selectionQueryExit = $queryExit; copyTicketExit = $ticketExit; expectedBudgetCases = 8 } | ConvertTo-Json -Compress
+          if ($budgetExit -ne 0 -or $queryExit -ne 0 -or $ticketExit -ne 0) { throw 'Windows selection internal regressions failed or were incomplete.' }
+      - name: Windows installed NSIS real offline-model acceptance
+        id: windows_installed_offline
+        if: runner.os == 'Windows'
+        continue-on-error: true
+        timeout-minutes: 25
+        shell: powershell
+        run: powershell.exe -NoProfile -STA -ExecutionPolicy Bypass -File scripts/windows-offline-translation-test.ps1
+      - name: Preserve offline acceptance and corresponding source evidence
+        if: always() && runner.os == 'Windows'
+        uses: actions/upload-artifact@v4
+        with:
+          name: EchoLingo-Windows-offline-evidence
+          if-no-files-found: warn
+          path: |
+            ${{ runner.temp }}/echolingo-offline-validation.json
+            ${{ runner.temp }}/echolingo-shortcut-install.log
+            ${{ runner.temp }}/echolingo-shortcuts-ui.log
+            ${{ runner.temp }}/echolingo-custom-shortcuts.log
+            ${{ runner.temp }}/echolingo-native-delegated-capture.log
+            ${{ runner.temp }}/echolingo-helper-performance.log
+            ${{ runner.temp }}/echolingo-popup-resize.log
+            ${{ runner.temp }}/echolingo-selection-document.log
+            ${{ runner.temp }}/echolingo-selection-compat.log
+            ${{ runner.temp }}/echolingo-selection-native-focus.log
+            ${{ runner.temp }}/echolingo-application-latest-intent.log
+            ${{ runner.temp }}/echolingo-selection-rigorous.log
+            ${{ runner.temp }}/echolingo-selection-budget.log
+            ${{ runner.temp }}/echolingo-selection-query.log
+            ${{ runner.temp }}/echolingo-selection-copy-ticket.log
+            ${{ runner.temp }}/echolingo-selection-notepad-mouse.log
+            ${{ runner.temp }}/echolingo-selection-wpf.log
+            ${{ runner.temp }}/echolingo-browser-app-selection.log
+            ${{ runner.temp }}/echolingo-browser-ocr-*.log
+            ${{ runner.temp }}/echolingo-browser-app-diagnostics-*/*
+            ${{ runner.temp }}/EchoLingo-offline-engine-source.zip
+            resources/offline-translation/manifest.json
+            src-tauri/target/release/echolingo.exe
+            ${{ runner.temp }}/echolingo-offline-engine-build/build-windows/CMakeCache.txt
+            ${{ runner.temp }}/echolingo-offline-engine-build/build-windows/build.ninja
+      # Preserve built candidates even when a later acceptance fixture fails.
+      # An uploaded bundle does not change the job's acceptance/release status.
       - uses: actions/upload-artifact@v4
+        if: always()
         with:
           name: EchoLingo-${{ runner.os }}
-          if-no-files-found: error
+          if-no-files-found: warn
           path: |
             src-tauri/target/release/bundle/nsis/*.exe
             src-tauri/target/release/bundle/dmg/*.dmg
+      # Collect independent desktop results and preserve the candidate even if
+      # one fixture fails; the job still fails unless every acceptance passes.
+      - name: Gate Windows desktop acceptance
+        if: always() && runner.os == 'Windows'
+        shell: powershell
+        run: |
+          $taskOutcomes = @{
+            liveCapture = '${{ steps.windows_live_capture.outcome }}'
+            applicationCore = '${{ steps.windows_application_core.outcome }}'
+            popupVisibility = '${{ steps.windows_popup_visibility.outcome }}'
+            popupResize = '${{ steps.windows_popup_resize.outcome }}'
+            installedOffline = '${{ steps.windows_installed_offline.outcome }}'
+            shortcutInstall = '${{ steps.windows_shortcut_install.outcome }}'
+            shortcutsUi = '${{ steps.windows_shortcuts_ui.outcome }}'
+            customShortcuts = '${{ steps.windows_custom_shortcuts.outcome }}'
+            helperPerformance = '${{ steps.windows_helper_performance.outcome }}'
+            delegatedCapture = '${{ steps.windows_delegated_capture.outcome }}'
+            selectionDocument = '${{ steps.windows_selection_document.outcome }}'
+            selectionCompatibility = '${{ steps.windows_selection_compat.outcome }}'
+            selectionNativeFocus = '${{ steps.windows_selection_native_focus.outcome }}'
+            rigorousSelection = '${{ steps.windows_selection_rigorous.outcome }}'
+            selectionInternals = '${{ steps.windows_selection_internals.outcome }}'
+            nonbrowserSelection = '${{ steps.windows_nonbrowser_selection.outcome }}'
+            actualBrowserSelection = '${{ steps.windows_browser_selection.outcome }}'
+            actualBrowserOcr = '${{ steps.windows_browser_ocr.outcome }}'
+          }
+          $taskOutcomes | ConvertTo-Json -Compress
+          if (@($taskOutcomes.Values | Where-Object { $_ -ne 'success' }).Count -gt 0) {
+            throw 'Windows desktop acceptance incomplete or failed; preview artifacts are not a passing release.'
+          }
 
   frontend-interactions:
+    if: github.event.inputs.mode != 'windows-popup-diagnostics' && github.event.inputs.mode != 'windows-popup-current-diagnostics' && github.event.inputs.mode != 'windows-application-diagnostics' && github.event.inputs.mode != 'windows-input-plane-experiment' && github.event.inputs.mode != 'windows-native-diagnostics' && github.event.inputs.mode != 'windows-shortcuts-ui-diagnostics' && github.event.inputs.mode != 'windows-shortcuts-ui-medium-diagnostics' && github.event.inputs.mode != 'windows-shortcuts-current-diagnostics' && github.event.inputs.mode != 'windows-shortcuts-workflows-diagnostics' && github.event.inputs.mode != 'windows-delegated-diagnostics' && github.event.inputs.mode != 'windows-browser-diagnostics' && github.event.inputs.mode != 'windows-selection-same-page-diagnostics' && github.event.inputs.mode != 'windows-selection-browser-app-diagnostics' && github.event.inputs.mode != 'windows-browser-ocr-visibility-diagnostics' && github.event.inputs.mode != 'windows-selection-cold-edge-diagnostics' && github.event.inputs.mode != 'windows-selection-paced-edge-diagnostics' && github.event.inputs.mode != 'windows-selection-nonbrowser-app-diagnostics' && github.event.inputs.mode != 'windows-latest-intent-diagnostics' && github.event.inputs.mode != 'windows-selection-application-diagnostics' && github.event.inputs.mode != 'windows-selection-clipboard-diagnostics' && github.event.inputs.mode != 'windows-selection-notepad-diagnostics' && github.event.inputs.mode != 'windows-selection-budget-diagnostics' && github.event.inputs.mode != 'windows-selection-context-diagnostics' && github.event.inputs.mode != 'windows-wps-selection-diagnostics' && github.event.inputs.mode != 'windows-focus-resize-current-diagnostics'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -58,10 +501,1171 @@ jobs:
         with:
           node-version: '24'
           cache: npm
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Preview installer safety and rollback fixtures
+        run: python -m unittest discover -s scripts -p 'test_*.py' -v
       - run: npm ci
-      - run: npx playwright install --with-deps chromium
+      - name: Reuse the runner browser, download Chromium only if absent
+        timeout-minutes: 10
+        run: |
+          task_browser=$(command -v google-chrome || command -v chromium || true)
+          if [ -n "$task_browser" ]; then
+            echo "ECHOLINGO_TEST_CHROMIUM=$task_browser" >> "$GITHUB_ENV"
+            "$task_browser" --version
+          else
+            npx playwright install --with-deps chromium
+          fi
       - name: Isolated UI / IPC regression tests
         run: |
           npm run dev > "$RUNNER_TEMP/echolingo-vite.log" 2>&1 &
           curl --retry 20 --retry-connrefused --retry-delay 1 -s http://127.0.0.1:1420/ > /dev/null
           npm run test:ui
+          node tests/panel-layout-performance.mjs
+
+  windows-popup-diagnostics:
+    name: Targeted popup diagnostics (verified immutable candidate)
+    if: github.event_name == 'workflow_dispatch' && (github.event.inputs.mode == 'windows-popup-diagnostics' || github.event.inputs.mode == 'windows-popup-current-diagnostics')
+    runs-on: windows-latest
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Require unchanged application source
+        shell: powershell
+        run: |
+          $source = if ('${{ github.event.inputs.mode }}' -eq 'windows-popup-current-diagnostics') { '61ea258e71551f56091bb0f03a6887911a0d3dd8' } else { 'c1338ba5a6f557b5f9245d7316775c5dd20310f0' }
+          git diff --quiet $source HEAD -- src src-tauri index.html package.json package-lock.json resources assets scripts .cargo
+          if ($LASTEXITCODE -ne 0) { throw 'Application changed; use the full build instead of the reused binary.' }
+      - uses: actions/download-artifact@v4
+        with:
+          name: EchoLingo-Windows-offline-evidence
+          run-id: ${{ github.event.inputs.mode == 'windows-popup-current-diagnostics' && '40649280066' || '40475539423' }}
+          github-token: ${{ github.token }}
+          path: popup-candidate-evidence
+      - name: Verify exact previously built application
+        id: candidate
+        shell: powershell
+        run: |
+          $candidateFiles = @(Get-ChildItem popup-candidate-evidence -Recurse -File -Filter echolingo.exe)
+          if ($candidateFiles.Count -ne 1) { throw 'Expected exactly one staged candidate executable.' }
+          $candidatePath = $candidateFiles[0].FullName
+          $candidateHash = (Get-FileHash -LiteralPath $candidatePath -Algorithm SHA256).Hash.ToLowerInvariant()
+          $current = '${{ github.event.inputs.mode }}' -eq 'windows-popup-current-diagnostics'
+          $expectedHash = if ($current) { 'abaa92fd159a5372138464dc2aad04bb3b91668e6d0548dd1cfcddfa33db3594' } else { '97d461e75a83fb3e71dcde3feddfb1dbc2ea5f27ff63dc572bfc7292fedc667e' }
+          if ($candidateHash -ne $expectedHash -or ($current -and $candidateFiles[0].Length -ne 5923840)) { throw 'Candidate identity mismatch.' }
+          # Windows checkout can convert LF to CRLF. Preserve the exact file
+          # digest and an explicit LF digest for comparison with Git snapshots.
+          $fixtureText = [IO.File]::ReadAllText((Resolve-Path tests/windows-popup-visibility-smoke.ps1)).Replace("`r`n", "`n")
+          $fixtureDigest = [Security.Cryptography.SHA256]::Create()
+          try {
+            $fixtureLfHash = [BitConverter]::ToString($fixtureDigest.ComputeHash([Text.UTF8Encoding]::new($false).GetBytes($fixtureText))).Replace('-', '').ToLowerInvariant()
+          } finally { $fixtureDigest.Dispose() }
+          [ordered]@{
+            scope = 'Targeted popup diagnostics only; not a full build or release acceptance'
+            sourceRun = if ($current) { 40649280066 } else { 40475539423 }
+            applicationSource = if ($current) { '61ea258e71551f56091bb0f03a6887911a0d3dd8' } else { 'c1338ba5a6f557b5f9245d7316775c5dd20310f0' }
+            stagedSha256 = $candidateHash
+            checkoutFixtureSha256 = (Get-FileHash tests/windows-popup-visibility-smoke.ps1 -Algorithm SHA256).Hash.ToLowerInvariant()
+            canonicalLfFixtureSha256 = $fixtureLfHash
+          } | ConvertTo-Json -Compress
+          "path=$candidatePath" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+      - name: Run actual popup interactions against verified candidate
+        id: popup
+        continue-on-error: true
+        timeout-minutes: 5
+        shell: powershell
+        env:
+          ECHOLINGO_POPUP_CANDIDATE: ${{ steps.candidate.outputs.path }}
+        run: |
+          $fixtureOutput = @(& powershell.exe -NoProfile -STA -ExecutionPolicy Bypass -File tests/windows-popup-visibility-smoke.ps1 -ApplicationPath $env:ECHOLINGO_POPUP_CANDIDATE -IsolatedTestSession 2>&1)
+          $fixtureExit = $LASTEXITCODE
+          $fixtureOutput | Out-File -FilePath "$env:RUNNER_TEMP/echolingo-popup-diagnostics.log" -Encoding utf8
+          $fixtureOutput | Write-Output
+          exit $fixtureExit
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: EchoLingo-Windows-popup-diagnostics
+          if-no-files-found: warn
+          path: ${{ runner.temp }}/echolingo-popup-diagnostics.log
+      - name: Gate targeted popup diagnostics
+        if: always()
+        shell: powershell
+        run: |
+          $popupOutcome = '${{ steps.popup.outcome }}'
+          [ordered]@{ scope = 'targeted-popup-only'; popupVisibility = $popupOutcome } | ConvertTo-Json -Compress
+          if ($popupOutcome -ne 'success') { throw 'Targeted popup diagnostics incomplete or failed.' }
+
+  windows-application-diagnostics:
+    name: Targeted application diagnostics (reused ab4405c binary)
+    if: github.event_name == 'workflow_dispatch' && github.event.inputs.mode == 'windows-application-diagnostics'
+    runs-on: windows-latest
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Require unchanged hover candidate application source
+        shell: powershell
+        run: |
+          git diff --quiet ab4405cc15e2ca204459b2fd40389924aa994695 HEAD -- src src-tauri index.html package.json package-lock.json resources
+          if ($LASTEXITCODE -ne 0) { throw 'Application changed; use the full build instead of the reused binary.' }
+      - uses: actions/download-artifact@v4
+        with:
+          name: EchoLingo-Windows-offline-evidence
+          run-id: 40481264703
+          github-token: ${{ github.token }}
+          path: application-candidate-evidence
+      - name: Verify exact previously built hover application
+        id: candidate
+        shell: powershell
+        run: |
+          $candidateFiles = @(Get-ChildItem application-candidate-evidence -Recurse -File -Filter echolingo.exe)
+          if ($candidateFiles.Count -ne 1) { throw 'Expected exactly one staged candidate executable.' }
+          $candidatePath = $candidateFiles[0].FullName
+          $candidateHash = (Get-FileHash -LiteralPath $candidatePath -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($candidateHash -ne '199d3f29c2d44fb64fa4960a6b62d61ade4bff5cec685828a6602be19c070007') { throw 'Candidate identity mismatch.' }
+          $fixtureText = [IO.File]::ReadAllText((Resolve-Path tests/windows-application-smoke.ps1)).Replace("`r`n", "`n")
+          $fixtureDigest = [Security.Cryptography.SHA256]::Create()
+          try {
+            $fixtureLfHash = [BitConverter]::ToString($fixtureDigest.ComputeHash([Text.UTF8Encoding]::new($false).GetBytes($fixtureText))).Replace('-', '').ToLowerInvariant()
+          } finally { $fixtureDigest.Dispose() }
+          [ordered]@{
+            scope = 'Targeted actual application workflows only; no rebuild or full-run success claim'
+            sourceRun = 40481264703
+            applicationSource = 'ab4405cc15e2ca204459b2fd40389924aa994695'
+            stagedSha256 = $candidateHash
+            checkoutFixtureSha256 = (Get-FileHash tests/windows-application-smoke.ps1 -Algorithm SHA256).Hash.ToLowerInvariant()
+            canonicalLfFixtureSha256 = $fixtureLfHash
+          } | ConvertTo-Json -Compress
+          "path=$candidatePath" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+      - name: Run actual selection input and OCR workflows against verified candidate
+        id: application
+        continue-on-error: true
+        timeout-minutes: 5
+        shell: powershell
+        env:
+          ECHOLINGO_APPLICATION_CANDIDATE: ${{ steps.candidate.outputs.path }}
+        run: |
+          $fixtureOutput = @(& powershell.exe -NoProfile -STA -ExecutionPolicy Bypass -File tests/windows-application-smoke.ps1 -ApplicationPath $env:ECHOLINGO_APPLICATION_CANDIDATE 2>&1)
+          $fixtureExit = $LASTEXITCODE
+          $fixtureOutput | Out-File -FilePath "$env:RUNNER_TEMP/echolingo-application-diagnostics.log" -Encoding utf8
+          $fixtureOutput | Write-Output
+          exit $fixtureExit
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: EchoLingo-Windows-application-diagnostics
+          if-no-files-found: warn
+          path: ${{ runner.temp }}/echolingo-application-diagnostics.log
+      - name: Gate targeted application diagnostics
+        if: always()
+        shell: powershell
+        run: |
+          $applicationOutcome = '${{ steps.application.outcome }}'
+          [ordered]@{ scope = 'targeted-application-only'; applicationCore = $applicationOutcome } | ConvertTo-Json -Compress
+          if ($applicationOutcome -ne 'success') { throw 'Targeted application diagnostics incomplete or failed.' }
+
+  windows-input-plane-experiment:
+    if: github.event_name == 'workflow_dispatch' && github.event.inputs.mode == 'windows-input-plane-experiment'
+    runs-on: windows-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - name: Generated ordinary-window transparent input ownership experiment
+        id: experiment
+        continue-on-error: true
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Continue'
+          $output = @(& powershell.exe -NoProfile -STA -ExecutionPolicy Bypass -File tests/windows-input-plane-experiment.ps1 -IsolatedTestSession 2>&1)
+          $fixtureExit = $LASTEXITCODE
+          $output | Out-File "$env:RUNNER_TEMP/echolingo-input-plane-experiment.log" -Encoding utf8
+          $output | Write-Output
+          exit $fixtureExit
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: EchoLingo-Windows-input-plane-experiment
+          if-no-files-found: warn
+          path: ${{ runner.temp }}/echolingo-input-plane-experiment.log
+      - name: Gate experiment outcome without declaring product acceptance
+        if: always()
+        shell: powershell
+        run: |
+          $outcome = '${{ steps.experiment.outcome }}'
+          [ordered]@{ scope = 'Standalone input-plane feasibility only; no production app acceptance'; outcome = $outcome } | ConvertTo-Json -Compress
+          if ($outcome -ne 'success') { throw 'Transparent input-plane experiment did not pass.' }
+
+  windows-native-diagnostics:
+    name: Windows native helper diagnostics (fresh Framework DLL)
+    if: github.event_name == 'workflow_dispatch' && (github.event.inputs.mode == 'windows-native-diagnostics' || github.event.inputs.mode == 'windows-delegated-diagnostics')
+    runs-on: windows-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Compile exact native helper without the app or offline engine
+        shell: powershell
+        run: powershell.exe -NoProfile -STA -ExecutionPolicy Bypass -File scripts/build-windows-native-helper.ps1 -HelperPath src-tauri/native/windows.ps1 -OutputPath "$env:RUNNER_TEMP/echolingo-native-diagnostics.dll"
+      - name: Fresh-process OCR stage timing before other OCR fixtures
+        id: ocr_timing
+        continue-on-error: true
+        timeout-minutes: 3
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Continue'
+          $fixtureExit = 0
+          foreach ($sample in 1..3) {
+            $output = @(& powershell.exe -NoProfile -STA -ExecutionPolicy Bypass -File src-tauri/native/windows.ps1 -Mode self-test -NativeAssemblyPath "$env:RUNNER_TEMP/echolingo-native-diagnostics.dll" -PerformanceDiagnostics 2>&1)
+            $sampleExit = $LASTEXITCODE
+            $output | Out-File "$env:RUNNER_TEMP/echolingo-ocr-stage-$sample.log" -Encoding utf8
+            $output | Write-Output
+            if ($sampleExit -ne 0) { $fixtureExit = $sampleExit; break }
+          }
+          exit $fixtureExit
+      - name: Actual generated document selection and cancelled clipboard restore
+        id: selection
+        continue-on-error: true
+        timeout-minutes: 4
+        shell: powershell
+        run: |
+          $output = @(& powershell.exe -NoProfile -STA -ExecutionPolicy Bypass -File tests/windows-selection-document-smoke.ps1 -NativeAssemblyPath "$env:RUNNER_TEMP/echolingo-native-diagnostics.dll" -IsolatedTestSession 2>&1)
+          $fixtureExit = $LASTEXITCODE
+          $output | Out-File "$env:RUNNER_TEMP/echolingo-selection-document.log" -Encoding utf8
+          $output | Write-Output
+          exit $fixtureExit
+      - name: Actual copy compatibility without UIA TextPattern
+        id: compatibility
+        continue-on-error: true
+        timeout-minutes: 4
+        shell: powershell
+        run: |
+          $output = @(& powershell.exe -NoProfile -STA -ExecutionPolicy Bypass -File tests/windows-selection-compat-smoke.ps1 -NativeAssemblyPath "$env:RUNNER_TEMP/echolingo-native-diagnostics.dll" -IsolatedTestSession 2>&1)
+          $fixtureExit = $LASTEXITCODE
+          $output | Out-File "$env:RUNNER_TEMP/echolingo-selection-compat.log" -Encoding utf8
+          $output | Write-Output
+          exit $fixtureExit
+      - name: Actual WinRT OCR and paragraph geometry regression
+        id: ocr
+        continue-on-error: true
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Continue'
+          $output = @(& powershell.exe -NoProfile -STA -ExecutionPolicy Bypass -File src-tauri/native/windows.ps1 -Mode self-test -NativeAssemblyPath "$env:RUNNER_TEMP/echolingo-native-diagnostics.dll" 2>&1)
+          $fixtureExit = $LASTEXITCODE
+          $output | Out-File "$env:RUNNER_TEMP/echolingo-native-ocr-diagnostics.log" -Encoding utf8
+          $output | Write-Output
+          exit $fixtureExit
+      - name: Actual DLL load and invalid-assembly failure checks
+        id: assembly
+        continue-on-error: true
+        shell: powershell
+        run: powershell.exe -NoProfile -STA -ExecutionPolicy Bypass -File tests/windows-native-assembly-smoke.ps1 -NativeAssemblyPath "$env:RUNNER_TEMP/echolingo-native-diagnostics.dll"
+      - name: Actual generated-window capture and input ownership
+        if: github.event.inputs.mode == 'windows-native-diagnostics'
+        id: live
+        continue-on-error: true
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Continue'
+          $fixtureExit = 0
+          foreach ($backend in @('hybrid', 'planeOnly')) {
+            $output = @(& powershell.exe -NoProfile -STA -ExecutionPolicy Bypass -File tests/windows-live-capture-smoke.ps1 -NativeAssemblyPath "$env:RUNNER_TEMP/echolingo-native-diagnostics.dll" -InputBackend $backend 2>&1)
+            $backendExit = $LASTEXITCODE
+            $output | Out-File "$env:RUNNER_TEMP/echolingo-native-live-$backend.log" -Encoding utf8
+            $output | Write-Output
+            if ($backendExit -ne 0) { $fixtureExit = $backendExit }
+          }
+          exit $fixtureExit
+      - name: Adversarial ordinary-window input ownership
+        if: github.event.inputs.mode == 'windows-native-diagnostics'
+        id: ownership
+        continue-on-error: true
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Continue'
+          $fixtureExit = 0
+          foreach ($backend in @('hybrid', 'planeOnly')) {
+            $global:LASTEXITCODE = 1
+            $output = @(& powershell.exe -NoProfile -STA -ExecutionPolicy Bypass -File tests/windows-input-ownership-adversarial.ps1 -NativeAssemblyPath "$env:RUNNER_TEMP/echolingo-native-diagnostics.dll" -InputBackend $backend -IsolatedTestSession 2>&1)
+            $backendExit = $LASTEXITCODE
+            $output | Out-File "$env:RUNNER_TEMP/echolingo-native-ownership-$backend.log" -Encoding utf8
+            $output | Write-Output
+            if ($backendExit -ne 0) { $fixtureExit = $backendExit }
+          }
+          exit $fixtureExit
+      - name: Independent active-window and native-capture experiment
+        if: github.event.inputs.mode == 'windows-native-diagnostics'
+        id: active
+        continue-on-error: true
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Continue'
+          $global:LASTEXITCODE = 1
+          $output = @(& powershell.exe -NoProfile -STA -ExecutionPolicy Bypass -File tests/windows-active-capture-experiment.ps1 -IsolatedTestSession 2>&1)
+          $fixtureExit = $LASTEXITCODE
+          $output | Out-File "$env:RUNNER_TEMP/echolingo-native-active-experiment.log" -Encoding utf8
+          $output | Write-Output
+          exit $fixtureExit
+      - name: Same-user medium-helper and high-source input boundary
+        if: github.event.inputs.mode == 'windows-native-diagnostics'
+        id: integrity
+        continue-on-error: true
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Continue'
+          $global:LASTEXITCODE = 1
+          $output = @(& powershell.exe -NoProfile -STA -ExecutionPolicy Bypass -File tests/windows-integrity-boundary-smoke.ps1 -NativeAssemblyPath "$env:RUNNER_TEMP/echolingo-native-diagnostics.dll" -IsolatedTestSession 2>&1)
+          $fixtureExit = $LASTEXITCODE
+          $output | Out-File "$env:RUNNER_TEMP/echolingo-native-integrity-boundary.log" -Encoding utf8
+          $output | Write-Output
+          exit $fixtureExit
+      - name: Exact native Rust host delegated capture and input ownership
+        id: delegated
+        continue-on-error: true
+        timeout-minutes: 8
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          & rustc --edition=2021 tests/windows-delegated-capture-harness.rs -O -o "$env:RUNNER_TEMP/echolingo-capture-input-harness.exe"
+          if ($LASTEXITCODE -ne 0) { throw 'The exact production input modules did not compile for Windows.' }
+          $ErrorActionPreference = 'Continue'
+          $global:LASTEXITCODE = 1
+          $output = @(& powershell.exe -NoProfile -STA -ExecutionPolicy Bypass -File tests/windows-delegated-capture-smoke.ps1 -HelperPath src-tauri/native/windows.ps1 -NativeAssemblyPath "$env:RUNNER_TEMP/echolingo-native-diagnostics.dll" -HarnessPath "$env:RUNNER_TEMP/echolingo-capture-input-harness.exe" -IsolatedTestSession 2>&1)
+          $fixtureExit = $LASTEXITCODE
+          $output | Out-File "$env:RUNNER_TEMP/echolingo-native-delegated-capture.log" -Encoding utf8
+          $output | Write-Output
+          exit $fixtureExit
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: EchoLingo-Windows-native-diagnostics
+          if-no-files-found: warn
+          path: |
+            ${{ runner.temp }}/echolingo-native-ocr-diagnostics.log
+            ${{ runner.temp }}/echolingo-native-live-*.log
+            ${{ runner.temp }}/echolingo-native-ownership-*.log
+            ${{ runner.temp }}/echolingo-native-active-experiment.log
+            ${{ runner.temp }}/echolingo-native-integrity-boundary.log
+            ${{ runner.temp }}/echolingo-native-delegated-capture.log
+            ${{ runner.temp }}/echolingo-selection-document.log
+            ${{ runner.temp }}/echolingo-selection-compat.log
+            ${{ runner.temp }}/echolingo-ocr-stage-*.log
+      - name: Gate raw native outcomes
+        if: always() && github.event.inputs.mode == 'windows-native-diagnostics'
+        shell: powershell
+        run: |
+          $outcomes = @{ selection = '${{ steps.selection.outcome }}'; compatibility = '${{ steps.compatibility.outcome }}'; ocr = '${{ steps.ocr.outcome }}'; assembly = '${{ steps.assembly.outcome }}'; live = '${{ steps.live.outcome }}'; ownership = '${{ steps.ownership.outcome }}'; activeExperiment = '${{ steps.active.outcome }}'; integrityBoundary = '${{ steps.integrity.outcome }}'; delegatedCapture = '${{ steps.delegated.outcome }}' }
+          $outcomes | ConvertTo-Json -Compress
+          if (@($outcomes.Values | Where-Object { $_ -ne 'success' }).Count -gt 0) { throw 'Fresh native Windows checks failed or incomplete; this is not app acceptance.' }
+
+
+      - name: Gate delegated production native outcomes only
+        if: always() && github.event.inputs.mode == 'windows-delegated-diagnostics'
+        shell: powershell
+        run: |
+          $outcomes = @{ selection = '${{ steps.selection.outcome }}'; compatibility = '${{ steps.compatibility.outcome }}'; ocr = '${{ steps.ocr.outcome }}'; assembly = '${{ steps.assembly.outcome }}'; delegatedCapture = '${{ steps.delegated.outcome }}' }
+          $outcomes | ConvertTo-Json -Compress
+          if (@($outcomes.Values | Where-Object { $_ -ne 'success' }).Count -gt 0) { throw 'Delegated native input checks failed or incomplete; this is not full app acceptance.' }
+
+  windows-shortcuts-ui-diagnostics:
+    name: Targeted shortcut UI diagnostics (immutable candidate)
+    if: github.event_name == 'workflow_dispatch' && (github.event.inputs.mode == 'windows-shortcuts-ui-diagnostics' || github.event.inputs.mode == 'windows-shortcuts-ui-medium-diagnostics' || github.event.inputs.mode == 'windows-shortcuts-current-diagnostics' || github.event.inputs.mode == 'windows-shortcuts-workflows-diagnostics')
+    runs-on: windows-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Require unchanged exact packaged application source
+        if: github.event.inputs.mode == 'windows-shortcuts-ui-diagnostics'
+        shell: powershell
+        run: |
+          git diff --quiet 0a08830f8286a2d54aa658c8876b013a8b1696b1 HEAD -- src src-tauri resources assets scripts index.html package.json package-lock.json vite.config.ts tsconfig.json tsconfig.node.json .cargo
+          if ($LASTEXITCODE -ne 0) { throw 'Application source changed; the 0a08830 binary cannot prove this checkout.' }
+      - name: Require production equivalence for immutable current supplement
+        if: github.event.inputs.mode == 'windows-shortcuts-current-diagnostics' || github.event.inputs.mode == 'windows-shortcuts-workflows-diagnostics'
+        shell: powershell
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $latest = '${{ github.event.inputs.mode }}' -eq 'windows-shortcuts-current-diagnostics'
+          $source = if ($latest) { '6d748062298bc2f4dd396eb7ac3a09a9a4766c35' } else { 'f65ab043c7e7a0ad4b5497d1a2651eb490198980' }
+          $sourceRun = if ($latest) { 40635398888 } else { 40556538469 }
+          git diff --quiet $source HEAD -- src src-tauri resources assets scripts index.html package.json package-lock.json vite.config.ts tsconfig.json tsconfig.node.json .cargo
+          if ($LASTEXITCODE -ne 0) { throw 'Production source differs from the immutable stage; no same-binary acceptance.' }
+          $actual = gh run view $sourceRun --repo Blueeeecho/EchoLingo --json headSha --jq .headSha
+          if ($LASTEXITCODE -ne 0 -or $actual.Trim() -ne $source) { throw 'Immutable source-run identity mismatch.' }
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+      - run: npm ci
+      - uses: actions/download-artifact@v4
+        with:
+          artifact-ids: ${{ github.event.inputs.mode == 'windows-shortcuts-current-diagnostics' && '12793114078' || github.event.inputs.mode == 'windows-shortcuts-workflows-diagnostics' && '12758601917' || '12734022372' }}
+          run-id: ${{ github.event.inputs.mode == 'windows-shortcuts-current-diagnostics' && '40635398888' || github.event.inputs.mode == 'windows-shortcuts-workflows-diagnostics' && '40556538469' || '40502410316' }}
+          github-token: ${{ github.token }}
+          path: shortcut-candidate-evidence
+          merge-multiple: true
+      - name: Verify exact previously built stage executable
+        id: candidate
+        shell: powershell
+        run: |
+          $candidateFiles = @(Get-ChildItem shortcut-candidate-evidence -Recurse -File -Filter echolingo.exe)
+          if ($candidateFiles.Count -ne 1) { throw 'Expected exactly one stage executable in the exact source-run artifact.' }
+          $candidatePath = $candidateFiles[0].FullName
+          $candidateHash = (Get-FileHash -LiteralPath $candidatePath -Algorithm SHA256).Hash.ToLowerInvariant()
+          $current = '${{ github.event.inputs.mode }}' -eq 'windows-shortcuts-current-diagnostics' -or '${{ github.event.inputs.mode }}' -eq 'windows-shortcuts-workflows-diagnostics'
+          $latest = '${{ github.event.inputs.mode }}' -eq 'windows-shortcuts-current-diagnostics'
+          $expectedBytes = if ($latest) { 5923840 } elseif ($current) { 5825536 } else { 5717504 }
+          $expectedHash = if ($latest) { '80d6e92a010df988ee51e5b41b48032d553af588c1fa624681ba9fdd7fc480e7' } elseif ($current) { '3e767c7046adcf8ef6b137f5811b0966efc8613f671f1f3d575f185b3c074539' } else { '046a33fd4498e7ef2e14a49f694f0a1fa9e6e2af1805d1538358e8bcfce77090' }
+          if ($candidateFiles[0].Length -ne $expectedBytes -or $candidateHash -ne $expectedHash) { throw 'Exact stage executable identity mismatch.' }
+          $identity = [ordered]@{
+            scope = if ($latest) { 'Exact 6d74806 UI and capture composition diagnostics; original full13/15 failure retained' } elseif ($current) { 'Exact f65 packaged shortcut UI supplement; original full-run failure retained' } else { 'Historical exact 0a08830 shortcut UI only; never current-checkout or full-run acceptance' }
+            diagnosticMode = '${{ github.event.inputs.mode }}'
+            sourceRun = if ($latest) { 40635398888 } elseif ($current) { 40556538469 } else { 40502410316 }
+            sourceArtifactId = if ($latest) { 12793114078 } elseif ($current) { 12758601917 } else { 12734022372 }
+            applicationSource = if ($latest) { '6d748062298bc2f4dd396eb7ac3a09a9a4766c35' } elseif ($current) { 'f65ab043c7e7a0ad4b5497d1a2651eb490198980' } else { '0a08830f8286a2d54aa658c8876b013a8b1696b1' }
+            sourceArtifactApiDigest = if ($latest) { 'sha256:25490ddbd5a747f1931a21483769585fde4a0b6eb9b49f4edc43b6f98ad97fbd' } elseif ($current) { 'sha256:94e355b8d0e9d713ad2d0329ed01f22961252ff5e6c8f05397458ff34bef9a5d' } else { 'sha256:74145ae5b69cb755124cc2e565cc9d287206f435b20b5d830c4c0ffd7c5dd33d' }
+            stagedBytes = $candidateFiles[0].Length
+            stagedSha256 = $candidateHash
+            checkoutFixtureSha256 = if ($current) { (Get-FileHash tests/windows-shortcuts-uia-smoke.ps1 -Algorithm SHA256).Hash.ToLowerInvariant() } else { (Get-FileHash tests/windows-shortcuts-ui.mjs -Algorithm SHA256).Hash.ToLowerInvariant() }
+            checkoutUiaCSharpSha256 = if ($current) { (Get-FileHash tests/windows-shortcuts-uia-fixture.cs -Algorithm SHA256).Hash.ToLowerInvariant() } else { $null }
+            driver = if ($current) { 'real-UIA-and-Win32; normal hosted token' } else { 'historical-CDP-toolchain' }
+          }
+          $identity | ConvertTo-Json -Compress | Tee-Object -FilePath "$env:RUNNER_TEMP/echolingo-shortcuts-ui-identity.json"
+          "path=$candidatePath" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+          if ($latest) {
+            $app = [IO.File]::ReadAllBytes($candidatePath)
+            $native = New-Object byte[] 105984
+            [Array]::Copy($app, 4616932, $native, 0, $native.Length)
+            $nativePath = Join-Path $env:RUNNER_TEMP 'echolingo-exact-6d74806-native.dll'
+            [IO.File]::WriteAllBytes($nativePath, $native)
+            $nativeHash = (Get-FileHash $nativePath -Algorithm SHA256).Hash.ToLowerInvariant()
+            if ($nativeHash -ne 'e857c2e7981a57153a4a5a5b445b28b443ae9e65b0159397b1447ef4e3f3ee41') { throw 'Complete exact stage DLL extraction mismatch.' }
+            "nativePath=$nativePath" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+            [ordered]@{ completeStageDllBytes=$native.Length; sha256=$nativeHash; offset=4616932; stageSha256=$candidateHash } | ConvertTo-Json -Compress | Tee-Object -FilePath "$env:RUNNER_TEMP/echolingo-exact-native-identity.json"
+          }
+      - name: Run original actual shortcut UI interactions with bounded diagnostics
+        id: shortcuts_ui
+        if: github.event.inputs.mode != 'windows-shortcuts-workflows-diagnostics'
+        continue-on-error: true
+        timeout-minutes: 4
+        shell: powershell
+        env:
+          ECHOLINGO_SHORTCUT_UI_CANDIDATE: ${{ steps.candidate.outputs.path }}
+          ECHOLINGO_SHORTCUT_UI_MEDIUM: ${{ github.event.inputs.mode == 'windows-shortcuts-ui-medium-diagnostics' }}
+        run: |
+          $ErrorActionPreference = 'Continue'
+          $output = @(); $fixtureExit = 1
+          $global:LASTEXITCODE = 1 # A missing/unlaunchable node must never reuse a null/success exit code.
+          try {
+            if ('${{ github.event.inputs.mode }}' -eq 'windows-shortcuts-current-diagnostics') {
+              $output = @(& powershell.exe -NoProfile -STA -ExecutionPolicy Bypass -File tests/windows-shortcuts-uia-smoke.ps1 -ApplicationPath $env:ECHOLINGO_SHORTCUT_UI_CANDIDATE -ExpectedApplicationSha256 '80d6e92a010df988ee51e5b41b48032d553af588c1fa624681ba9fdd7fc480e7' -ExpectedApplicationBytes 5923840 -IsolatedTestSession 2>&1)
+            } elseif ($env:ECHOLINGO_SHORTCUT_UI_MEDIUM -eq 'true') {
+              $output = @(& powershell.exe -NoProfile -STA -ExecutionPolicy Bypass -File tests/windows-shortcuts-ui-medium.ps1 -ApplicationPath $env:ECHOLINGO_SHORTCUT_UI_CANDIDATE -IsolatedTestSession 2>&1)
+            } else {
+              $output = @(node tests/windows-shortcuts-ui.mjs $env:ECHOLINGO_SHORTCUT_UI_CANDIDATE --isolated-test-session 2>&1)
+            }
+            $fixtureExit = $LASTEXITCODE
+          } finally {
+            $output | Out-File "$env:RUNNER_TEMP/echolingo-shortcuts-ui.log" -Encoding utf8
+            $output | Write-Output
+          }
+          exit $fixtureExit
+      - name: Exact packaged native capture composition and performance diagnostics
+        if: github.event.inputs.mode == 'windows-shortcuts-current-diagnostics'
+        id: helper_performance
+        continue-on-error: true
+        timeout-minutes: 6
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Continue'
+          $baseline = Join-Path $env:RUNNER_TEMP 'echolingo-ab4405c-windows.ps1'
+          git show ab4405cc15e2ca204459b2fd40389924aa994695:src-tauri/native/windows.ps1 | Out-File $baseline -Encoding utf8
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $global:LASTEXITCODE = 1
+          $output = @(& powershell.exe -NoProfile -STA -ExecutionPolicy Bypass -File tests/windows-helper-performance-smoke.ps1 -BaselineHelperPath $baseline -NativeAssemblyPath '${{ steps.candidate.outputs.nativePath }}' 2>&1)
+          $fixtureExit = $LASTEXITCODE
+          $output | Out-File "$env:RUNNER_TEMP/echolingo-helper-performance.log" -Encoding utf8
+          $output | Write-Output
+          exit $fixtureExit
+      - name: Loaded custom bindings execute selected-text and native OCR
+        if: github.event.inputs.mode == 'windows-shortcuts-current-diagnostics' || github.event.inputs.mode == 'windows-shortcuts-workflows-diagnostics'
+        id: custom
+        continue-on-error: true
+        timeout-minutes: 3
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Continue'
+          $global:LASTEXITCODE = 1
+          $output = @(& powershell.exe -NoProfile -STA -ExecutionPolicy Bypass -File tests/windows-application-smoke.ps1 -ApplicationPath '${{ steps.candidate.outputs.path }}' -CustomShortcutsTests 2>&1)
+          $fixtureExit = $LASTEXITCODE
+          $output | Out-File "$env:RUNNER_TEMP/echolingo-custom-shortcuts.log" -Encoding utf8
+          $output | Write-Output
+          exit $fixtureExit
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: EchoLingo-Windows-shortcuts-ui-diagnostics
+          if-no-files-found: warn
+          path: |
+            ${{ runner.temp }}/echolingo-shortcuts-ui.log
+            ${{ runner.temp }}/echolingo-custom-shortcuts.log
+            ${{ runner.temp }}/echolingo-shortcuts-ui-identity.json
+            ${{ runner.temp }}/echolingo-helper-performance.log
+            ${{ runner.temp }}/echolingo-exact-native-identity.json
+      - name: Gate targeted shortcut UI raw outcome
+        if: always()
+        shell: powershell
+        run: |
+          $outcome = '${{ steps.shortcuts_ui.outcome }}'
+          [ordered]@{ scope = 'targeted-shortcut-ui-only'; shortcutUi = $outcome } | ConvertTo-Json -Compress
+          $custom = '${{ steps.custom.outcome }}'
+          [ordered]@{ scope = 'Configured custom-key real workflows; separate from UI save/restart checks'; customShortcutWorkflows = $custom } | ConvertTo-Json -Compress
+          $workflowOnly = '${{ github.event.inputs.mode }}' -eq 'windows-shortcuts-workflows-diagnostics'
+          $customRequired = $workflowOnly -or '${{ github.event.inputs.mode }}' -eq 'windows-shortcuts-current-diagnostics'
+          $performance = '${{ steps.helper_performance.outcome }}'
+          [ordered]@{ scope = 'Exact packaged 6d native capture diagnostics; original13/15 full red retained'; helperPerformance = $performance } | ConvertTo-Json -Compress
+          $performanceRequired = '${{ github.event.inputs.mode }}' -eq 'windows-shortcuts-current-diagnostics'
+          if ((-not $workflowOnly -and $outcome -ne 'success') -or ($customRequired -and $custom -ne 'success') -or ($performanceRequired -and $performance -ne 'success')) { throw 'Required actual shortcut UI or configured workflows incomplete or failed.' }
+
+  windows-browser-diagnostics:
+    name: Actual installed browser selected-text diagnostics (${{ matrix.browser_order }})
+    if: github.event_name == 'workflow_dispatch' && (github.event.inputs.mode == 'windows-browser-diagnostics' || github.event.inputs.mode == 'windows-selection-same-page-diagnostics')
+    strategy:
+      fail-fast: false
+      matrix:
+        browser_order: [edge-first, chrome-first]
+    runs-on: windows-latest
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+      - run: npm ci
+      - name: Compile exact production native helper
+        shell: powershell
+        run: powershell.exe -NoProfile -STA -ExecutionPolicy Bypass -File scripts/build-windows-native-helper.ps1 -HelperPath src-tauri/native/windows.ps1 -OutputPath "$env:RUNNER_TEMP/echolingo-browser-native.dll"
+      - name: Repeated real Chromium selection cases with generated local pages
+        id: browser
+        continue-on-error: true
+        timeout-minutes: 10
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Continue'
+          $global:LASTEXITCODE = 1
+          $output = @(& node tests/windows-browser-selection-smoke.mjs --helper src-tauri/native/windows.ps1 --native-assembly "$env:RUNNER_TEMP/echolingo-browser-native.dll" --browser-order '${{ matrix.browser_order }}' --selection-suite '${{ github.event.inputs.mode == 'windows-selection-same-page-diagnostics' && 'same-page-mouse' || 'original' }}' 2>&1)
+          $fixtureExit = $LASTEXITCODE
+          $output | Out-File "$env:RUNNER_TEMP/echolingo-browser-selection.log" -Encoding utf8
+          $output | Write-Output
+          exit $fixtureExit
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: EchoLingo-Windows-browser-selection-${{ matrix.browser_order }}
+          if-no-files-found: warn
+          path: |
+            ${{ runner.temp }}/echolingo-browser-selection.log
+      - name: Gate actual browser outcome
+        if: always()
+        shell: powershell
+        run: |
+          $outcome = '${{ steps.browser.outcome }}'
+          [ordered]@{ scope = 'Fresh generated-page installed Chromium native selection; no Tauri/WPS/all-app acceptance'; browserOrder = '${{ matrix.browser_order }}'; suite = '${{ github.event.inputs.mode }}'; browser = $outcome } | ConvertTo-Json -Compress
+          if ($outcome -ne 'success') { throw 'Actual browser selection failed or was inconclusive.' }
+
+  windows-latest-intent-diagnostics:
+    name: Registered-shortcut diagnostics (immutable full-run candidate)
+    if: github.event_name == 'workflow_dispatch' && (github.event.inputs.mode == 'windows-latest-intent-diagnostics' || github.event.inputs.mode == 'windows-selection-application-diagnostics' || github.event.inputs.mode == 'windows-selection-notepad-diagnostics')
+    runs-on: windows-latest
+    timeout-minutes: 6
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - uses: actions/checkout@v4
+      - name: Verify immutable source-run identity and retrieve exact built candidate
+        shell: powershell
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $strict = '${{ github.event.inputs.mode }}' -eq 'windows-selection-application-diagnostics'
+          $source = if ($strict) { '4385e3448d2c56df4575a0a991b0f6a271bfd708' } else { '4cf37d8fb506ee28387f433f86832e91b281468d' }
+          $run = if ($strict) { '40544606324' } else { '40529706953' }
+          $expectedHash = if ($strict) { '6684d75fe79f9e1b327c866d459970ef91c726a296397e2626184e70def41bd6' } else { '86373b0c771b6644b66b6dc0f8a8c50295b6b7da50a8b1227953d11e78b1cf03' }
+          $expectedBytes = if ($strict) { 5809152 } else { 5784064 }
+          $actualSource = gh run view $run --repo Blueeeecho/EchoLingo --json headSha --jq .headSha
+          if ($LASTEXITCODE -ne 0 -or $actualSource.Trim() -ne $source) { throw 'The immutable full-run source identity differs.' }
+          $destination = "$env:RUNNER_TEMP/echolingo-immutable-selection-candidate"
+          gh run download $run --repo Blueeeecho/EchoLingo --name EchoLingo-Windows-offline-evidence --dir $destination
+          if ($LASTEXITCODE -ne 0) { throw 'The exact full-run evidence artifact could not be retrieved.' }
+          $candidates = @(Get-ChildItem -LiteralPath $destination -Recurse -File -Filter echolingo.exe)
+          if ($candidates.Count -ne 1) { throw 'Expected exactly one staged application.' }
+          $candidate = $candidates[0].FullName
+          $hash = (Get-FileHash -LiteralPath $candidate -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($hash -ne $expectedHash -or $candidates[0].Length -ne $expectedBytes) { throw 'Actual application identity differs from the full-run candidate.' }
+          "ECHOLINGO_APPLICATION_CANDIDATE=$candidate" | Out-File $env:GITHUB_ENV -Encoding utf8 -Append
+          [ordered]@{ candidateSourceVerified = $true; candidateSourceCommit = $source; fixtureHeadCommit = (git rev-parse HEAD); candidateIsCurrentHead = $false; reusedRun = $run; applicationSha256 = $hash; applicationBytes = $candidates[0].Length; rebuilt = $false; scope = 'Exact historical candidate; cannot establish acceptance of newer HEAD production changes' } | ConvertTo-Json -Compress
+      - name: Actual registered selection shortcuts and pinned updates
+        id: latest
+        continue-on-error: true
+        timeout-minutes: 5
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Continue'
+          $global:LASTEXITCODE = 1
+          if ('${{ github.event.inputs.mode }}' -eq 'windows-selection-notepad-diagnostics') {
+            $output = @(& powershell.exe -NoProfile -STA -ExecutionPolicy Bypass -File tests/windows-selection-notepad-smoke.ps1 -ApplicationPath $env:ECHOLINGO_APPLICATION_CANDIDATE -IsolatedTestSession 2>&1)
+          } elseif ('${{ github.event.inputs.mode }}' -eq 'windows-selection-application-diagnostics') {
+            $hash = (Get-FileHash -LiteralPath $env:ECHOLINGO_APPLICATION_CANDIDATE -Algorithm SHA256).Hash.ToLowerInvariant()
+            $bytes = (Get-Item -LiteralPath $env:ECHOLINGO_APPLICATION_CANDIDATE).Length
+            $output = @(& powershell.exe -NoProfile -STA -ExecutionPolicy Bypass -File tests/windows-selection-application-smoke.ps1 -ApplicationPath $env:ECHOLINGO_APPLICATION_CANDIDATE -ExpectedApplicationSha256 $hash -ExpectedApplicationBytes $bytes -IsolatedTestSession 2>&1)
+          } else {
+            $output = @(& powershell.exe -NoProfile -STA -ExecutionPolicy Bypass -File tests/windows-application-smoke.ps1 -ApplicationPath $env:ECHOLINGO_APPLICATION_CANDIDATE -LatestIntentTests 2>&1)
+          }
+          $fixtureExit = $LASTEXITCODE
+          $output | Out-File "$env:RUNNER_TEMP/echolingo-application-latest-intent.log" -Encoding utf8
+          $output | Write-Output
+          exit $fixtureExit
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: EchoLingo-Windows-latest-intent
+          if-no-files-found: warn
+          path: ${{ runner.temp }}/echolingo-application-latest-intent.log
+      - name: Gate exact-binary latest-intent outcome
+        if: always()
+        shell: powershell
+        run: |
+          $outcome = '${{ steps.latest.outcome }}'
+          [ordered]@{ scope = 'Immutable full-run candidate supplement; original full gate unchanged; newer HEAD production is not tested by this run'; latestIntent = $outcome } | ConvertTo-Json -Compress
+          if ($outcome -ne 'success') { throw 'Exact-binary latest-intent workflows failed or were incomplete.' }
+
+  windows-selection-clipboard-diagnostics:
+    name: Clipboard publication race diagnostics (generated source)
+    if: github.event_name == 'workflow_dispatch' && github.event.inputs.mode == 'windows-selection-clipboard-diagnostics'
+    runs-on: windows-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - name: Compile exact production native helper
+        shell: powershell
+        run: powershell.exe -NoProfile -STA -ExecutionPolicy Bypass -File scripts/build-windows-native-helper.ps1 -HelperPath src-tauri/native/windows.ps1 -OutputPath "$env:RUNNER_TEMP/echolingo-clipboard-race-native.dll"
+      - name: Delayed copy and distinct same-process publication
+        id: race
+        continue-on-error: true
+        timeout-minutes: 3
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Continue'
+          $global:LASTEXITCODE = 1
+          $output = @(& powershell.exe -NoProfile -STA -ExecutionPolicy Bypass -File tests/windows-selection-clipboard-race.ps1 -HelperPath src-tauri/native/windows.ps1 -NativeAssemblyPath "$env:RUNNER_TEMP/echolingo-clipboard-race-native.dll" -IsolatedTestSession 2>&1)
+          $fixtureExit = $LASTEXITCODE
+          $output | Out-File "$env:RUNNER_TEMP/echolingo-selection-clipboard-race.log" -Encoding utf8
+          $output | Write-Output
+          exit $fixtureExit
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: EchoLingo-Windows-selection-clipboard-race
+          if-no-files-found: warn
+          path: ${{ runner.temp }}/echolingo-selection-clipboard-race.log
+      - name: Gate clipboard race outcome
+        if: always()
+        shell: powershell
+        run: |
+          $outcome = '${{ steps.race.outcome }}'
+          [ordered]@{ scope = 'Actual production helper against generated same-source clipboard publications'; race = $outcome } | ConvertTo-Json -Compress
+          if ($outcome -ne 'success') { throw 'Clipboard race behavior failed or was inconclusive.' }
+
+  windows-selection-budget-diagnostics:
+    name: Windows selection budget internals (exact native DLL)
+    if: github.event_name == 'workflow_dispatch' && github.event.inputs.mode == 'windows-selection-budget-diagnostics'
+    runs-on: windows-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - name: Compile exact production native helper
+        shell: powershell
+        run: powershell.exe -NoProfile -STA -ExecutionPolicy Bypass -File scripts/build-windows-native-helper.ps1 -HelperPath src-tauri/native/windows.ps1 -OutputPath "$env:RUNNER_TEMP/echolingo-selection-budget-native.dll"
+      - name: Shared budget and owned-copy cleanup regressions in a fresh process
+        id: budget
+        continue-on-error: true
+        timeout-minutes: 2
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Continue'
+          $global:LASTEXITCODE = 1
+          $output = @(& powershell.exe -NoProfile -STA -ExecutionPolicy Bypass -File tests/windows-selection-budget-smoke.ps1 -NativeAssemblyPath "$env:RUNNER_TEMP/echolingo-selection-budget-native.dll" 2>&1)
+          $fixtureExit = $LASTEXITCODE
+          $output | Out-File "$env:RUNNER_TEMP/echolingo-selection-budget.log" -Encoding utf8
+          $output | Write-Output
+          exit $fixtureExit
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: EchoLingo-Windows-selection-budget
+          if-no-files-found: warn
+          path: ${{ runner.temp }}/echolingo-selection-budget.log
+      - name: Gate raw selection-budget outcome
+        if: always()
+        shell: powershell
+        run: |
+          $outcome = '${{ steps.budget.outcome }}'
+          [ordered]@{ scope = 'Exact private budget/query and synthetic copy-policy regression; no actual UIA provider, clipboard or application acceptance'; budget = $outcome } | ConvertTo-Json -Compress
+          if ($outcome -ne 'success') { throw 'Selection-budget internals failed or were incomplete.' }
+
+  windows-selection-browser-app-diagnostics:
+    name: Actual browser to registered Alt+D (${{ matrix.browser_order }})
+    if: github.event_name == 'workflow_dispatch' && github.event.inputs.mode == 'windows-selection-browser-app-diagnostics'
+    strategy:
+      fail-fast: false
+      matrix:
+        browser_order: [edge-first, chrome-first]
+    runs-on: windows-latest
+    timeout-minutes: 12
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Require immutable candidate application source
+        shell: powershell
+        run: |
+          git diff --quiet 78794c468c2400318978ebbb728338a0ca11105b HEAD -- src src-tauri index.html package.json package-lock.json resources assets scripts .cargo
+          if ($LASTEXITCODE -ne 0) { throw 'Production changed; rebuild instead of claiming candidate-binary acceptance.' }
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+      - run: npm ci
+      - uses: actions/download-artifact@v4
+        with:
+          name: EchoLingo-Windows-offline-evidence
+          run-id: '40629457450'
+          github-token: ${{ github.token }}
+          path: selection-browser-app-candidate
+      - name: Verify exact candidate stage executable
+        id: candidate
+        shell: powershell
+        run: |
+          $files = @(Get-ChildItem selection-browser-app-candidate -Recurse -File -Filter echolingo.exe)
+          if ($files.Count -ne 1) { throw 'Expected one exact stage executable.' }
+          $hash = (Get-FileHash -LiteralPath $files[0].FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($files[0].Length -ne 5907456 -or $hash -ne '4a95547650bab7b44b567a45804ffcc828bfecb1365662266e001652a6a1e638') { throw 'Candidate application identity mismatch.' }
+          "path=$($files[0].FullName)" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+          [ordered]@{ applicationSource='78794c468c2400318978ebbb728338a0ca11105b'; sourceRun=40629457450; stageBytes=$files[0].Length; stageSha256=$hash; fixtureCommit='${{ github.sha }}'; browserOrder='${{ matrix.browser_order }}' } | ConvertTo-Json -Compress
+      - name: Mouse release then actual single registered Alt+D
+        id: selection
+        continue-on-error: true
+        timeout-minutes: 10
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Continue'
+          $global:LASTEXITCODE = 1
+          $output = @(& node tests/windows-browser-selection-smoke.mjs --selection-suite same-page-mouse --shortcut-gesture paced --browser-order '${{ matrix.browser_order }}' --application '${{ steps.candidate.outputs.path }}' --expected-application-sha256 4a95547650bab7b44b567a45804ffcc828bfecb1365662266e001652a6a1e638 --expected-application-bytes 5907456 2>&1)
+          $code = $LASTEXITCODE
+          $output | Out-File "$env:RUNNER_TEMP/echolingo-browser-app-selection.log" -Encoding utf8
+          $output | Write-Output
+          exit $code
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: EchoLingo-Windows-browser-app-${{ matrix.browser_order }}
+          if-no-files-found: warn
+          path: ${{ runner.temp }}/echolingo-browser-app-selection.log
+      - name: Gate exact application browser chain
+        if: always()
+        shell: powershell
+        run: |
+          $outcome = '${{ steps.selection.outcome }}'
+          [ordered]@{ scope='Candidate78794 application; actual mouse then single Alt+D; generated browser pages only'; selection=$outcome; physicalWindows11Tested=$false; wpsTested=$false } | ConvertTo-Json -Compress
+          if ($outcome -ne 'success') { throw 'Actual browser registered-Alt+D chain incomplete or failed.' }
+
+  windows-selection-nonbrowser-app-diagnostics:
+    name: Mouse selection from non-browser sources (released295)
+    if: github.event_name == 'workflow_dispatch' && github.event.inputs.mode == 'windows-selection-nonbrowser-app-diagnostics'
+    runs-on: windows-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Require immutable released application source
+        shell: powershell
+        run: |
+          git diff --quiet 295a0ce45296d4310ee1b6a7c8e536b5911e1625 HEAD -- src src-tauri index.html package.json package-lock.json resources assets scripts .cargo
+          if ($LASTEXITCODE -ne 0) { throw 'Production changed; rebuild instead of reusing released295.' }
+      - uses: actions/download-artifact@v4
+        with:
+          name: EchoLingo-Windows-offline-evidence
+          run-id: '40572666385'
+          github-token: ${{ github.token }}
+          path: selection-nonbrowser-candidate
+      - name: Verify exact released stage
+        id: candidate
+        shell: powershell
+        run: |
+          $files = @(Get-ChildItem selection-nonbrowser-candidate -Recurse -File -Filter echolingo.exe)
+          if ($files.Count -ne 1) { throw 'Expected one exact stage executable.' }
+          $hash = (Get-FileHash -LiteralPath $files[0].FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($files[0].Length -ne 5825536 -or $hash -ne '8490a973c9e4f4568b851f61524a4ef8f554d8b3a506b12dd19ba34f0dd22a4b') { throw 'Released application identity mismatch.' }
+          "path=$($files[0].FullName)" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+          [ordered]@{ source='295a0ce45296d4310ee1b6a7c8e536b5911e1625'; sourceRun=40572666385; stageBytes=$files[0].Length; stageSha256=$hash; fixtureCommit='${{ github.sha }}' } | ConvertTo-Json -Compress
+      - name: Actual system Notepad mouse then single Alt+D
+        id: notepad
+        continue-on-error: true
+        timeout-minutes: 3
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Continue'
+          $global:LASTEXITCODE = 1
+          $output = @(& powershell.exe -NoProfile -STA -ExecutionPolicy Bypass -File tests/windows-selection-notepad-smoke.ps1 -ApplicationPath '${{ steps.candidate.outputs.path }}' -ExpectedApplicationSha256 8490a973c9e4f4568b851f61524a4ef8f554d8b3a506b12dd19ba34f0dd22a4b -ExpectedApplicationBytes 5825536 -IsolatedTestSession 2>&1)
+          $code = $LASTEXITCODE
+          $output | Out-File "$env:RUNNER_TEMP/echolingo-selection-notepad-mouse.log" -Encoding utf8
+          $output | Write-Output
+          exit $code
+      - name: Generated WPF FlowDocument mouse and pinned new selection
+        id: wpf
+        continue-on-error: true
+        timeout-minutes: 3
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Continue'
+          $global:LASTEXITCODE = 1
+          $output = @(& powershell.exe -NoProfile -STA -ExecutionPolicy Bypass -File tests/windows-selection-wpf-smoke.ps1 -ApplicationPath '${{ steps.candidate.outputs.path }}' -ExpectedApplicationSha256 8490a973c9e4f4568b851f61524a4ef8f554d8b3a506b12dd19ba34f0dd22a4b -ExpectedApplicationBytes 5825536 -IsolatedTestSession 2>&1)
+          $code = $LASTEXITCODE
+          $output | Out-File "$env:RUNNER_TEMP/echolingo-selection-wpf.log" -Encoding utf8
+          $output | Write-Output
+          exit $code
+      - name: Generated WinForms normal and rich editor application chain
+        id: winforms
+        continue-on-error: true
+        timeout-minutes: 3
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Continue'
+          $global:LASTEXITCODE = 1
+          $output = @(& powershell.exe -NoProfile -STA -ExecutionPolicy Bypass -File tests/windows-selection-application-smoke.ps1 -ApplicationPath '${{ steps.candidate.outputs.path }}' -ExpectedApplicationSha256 8490a973c9e4f4568b851f61524a4ef8f554d8b3a506b12dd19ba34f0dd22a4b -ExpectedApplicationBytes 5825536 -IsolatedTestSession 2>&1)
+          $code = $LASTEXITCODE
+          $output | Out-File "$env:RUNNER_TEMP/echolingo-selection-winforms.log" -Encoding utf8
+          $output | Write-Output
+          exit $code
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: EchoLingo-Windows-nonbrowser-mouse
+          if-no-files-found: warn
+          path: ${{ runner.temp }}/echolingo-selection-*.log
+      - name: Gate exact non-browser outcomes without hiding inconclusive cases
+        if: always()
+        shell: powershell
+        run: |
+          $outcomes = @{ notepad='${{ steps.notepad.outcome }}'; generatedWpf='${{ steps.wpf.outcome }}'; generatedWinforms='${{ steps.winforms.outcome }}' }
+          $outcomes | ConvertTo-Json -Compress
+          if (@($outcomes.Values | Where-Object { $_ -ne 'success' }).Count -gt 0) { throw 'Non-browser selection incomplete or failed; read raw setup/product classifications.' }
+
+  windows-selection-cold-edge-diagnostics:
+    name: Two cold Edge first selections with own-popup diagnostics
+    if: github.event_name == 'workflow_dispatch' && (github.event.inputs.mode == 'windows-selection-cold-edge-diagnostics' || github.event.inputs.mode == 'windows-selection-paced-edge-diagnostics')
+    runs-on: windows-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Require immutable released application source
+        shell: powershell
+        run: |
+          git diff --quiet 295a0ce45296d4310ee1b6a7c8e536b5911e1625 HEAD -- src src-tauri index.html package.json package-lock.json resources assets scripts .cargo
+          if ($LASTEXITCODE -ne 0) { throw 'Production changed; rebuild instead of claiming released-binary acceptance.' }
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+      - run: npm ci
+      - uses: actions/download-artifact@v4
+        with:
+          name: EchoLingo-Windows-offline-evidence
+          run-id: '40572666385'
+          github-token: ${{ github.token }}
+          path: selection-browser-app-candidate
+      - name: Verify exact released stage executable
+        id: candidate
+        shell: powershell
+        run: |
+          $files = @(Get-ChildItem selection-browser-app-candidate -Recurse -File -Filter echolingo.exe)
+          if ($files.Count -ne 1) { throw 'Expected one exact stage executable.' }
+          $hash = (Get-FileHash -LiteralPath $files[0].FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($files[0].Length -ne 5825536 -or $hash -ne '8490a973c9e4f4568b851f61524a4ef8f554d8b3a506b12dd19ba34f0dd22a4b') { throw 'Released application identity mismatch.' }
+          "path=$($files[0].FullName)" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+          [ordered]@{ applicationSource='295a0ce45296d4310ee1b6a7c8e536b5911e1625'; sourceRun=40572666385; stageBytes=$files[0].Length; stageSha256=$hash; fixtureCommit='${{ github.sha }}'; browserOrder='edge-first' } | ConvertTo-Json -Compress
+      - name: Mouse release then actual single registered Alt+D
+        id: selection
+        continue-on-error: true
+        timeout-minutes: 3
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Continue'
+          $global:LASTEXITCODE = 1
+          $output = @(& node tests/windows-browser-selection-smoke.mjs --selection-suite same-page-mouse --cold-edge-cases 2 --shortcut-gesture '${{ github.event.inputs.mode == 'windows-selection-paced-edge-diagnostics' && 'paced' || 'instant' }}' --browser-order 'edge-first' --application '${{ steps.candidate.outputs.path }}' --expected-application-sha256 8490a973c9e4f4568b851f61524a4ef8f554d8b3a506b12dd19ba34f0dd22a4b --expected-application-bytes 5825536 2>&1)
+          $code = $LASTEXITCODE
+          $output | Out-File "$env:RUNNER_TEMP/echolingo-browser-app-selection.log" -Encoding utf8
+          $output | Write-Output
+          exit $code
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: EchoLingo-Windows-cold-edge
+          if-no-files-found: warn
+          path: |
+            ${{ runner.temp }}/echolingo-browser-app-selection.log
+            ${{ runner.temp }}/echolingo-browser-app-diagnostics-*/*
+      - name: Gate exact application browser chain
+        if: always()
+        shell: powershell
+        run: |
+          $outcome = '${{ steps.selection.outcome }}'
+          [ordered]@{ scope='Released295 application; actual mouse then single Alt+D; generated browser pages only'; selection=$outcome; physicalWindows11Tested=$false; wpsTested=$false } | ConvertTo-Json -Compress
+          if ($outcome -ne 'success') { throw 'Actual browser registered-Alt+D chain incomplete or failed.' }
+
+  windows-browser-ocr-visibility-diagnostics:
+    name: Actual browser OCR then same-source outside click (${{ matrix.browser }})
+    if: github.event_name == 'workflow_dispatch' && github.event.inputs.mode == 'windows-browser-ocr-visibility-diagnostics'
+    strategy:
+      fail-fast: false
+      matrix:
+        browser: [edge, chrome]
+    runs-on: windows-latest
+    timeout-minutes: 6
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Require immutable released application source
+        shell: powershell
+        run: |
+          git diff --quiet 295a0ce45296d4310ee1b6a7c8e536b5911e1625 HEAD -- src src-tauri index.html package.json package-lock.json resources assets scripts .cargo
+          if ($LASTEXITCODE -ne 0) { throw 'Production changed; rebuild instead of claiming released-binary acceptance.' }
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+      - run: npm ci
+      - uses: actions/download-artifact@v4
+        with:
+          name: EchoLingo-Windows-offline-evidence
+          run-id: '40572666385'
+          github-token: ${{ github.token }}
+          path: selection-browser-app-candidate
+      - name: Verify exact released stage executable
+        id: candidate
+        shell: powershell
+        run: |
+          $files = @(Get-ChildItem selection-browser-app-candidate -Recurse -File -Filter echolingo.exe)
+          if ($files.Count -ne 1) { throw 'Expected one exact stage executable.' }
+          $hash = (Get-FileHash -LiteralPath $files[0].FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($files[0].Length -ne 5825536 -or $hash -ne '8490a973c9e4f4568b851f61524a4ef8f554d8b3a506b12dd19ba34f0dd22a4b') { throw 'Released application identity mismatch.' }
+          "path=$($files[0].FullName)" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+          [ordered]@{ applicationSource='295a0ce45296d4310ee1b6a7c8e536b5911e1625'; sourceRun=40572666385; stageBytes=$files[0].Length; stageSha256=$hash; fixtureCommit='${{ github.sha }}'; browserOrder='${{ matrix.browser }}' } | ConvertTo-Json -Compress
+      - name: One actual Alt+S region OCR then same-source outside click
+        id: selection
+        continue-on-error: true
+        timeout-minutes: 4
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Continue'
+          $global:LASTEXITCODE = 1
+          $output = @(& node tests/windows-browser-ocr-visibility-smoke.mjs --browser '${{ matrix.browser }}' --application '${{ steps.candidate.outputs.path }}' --expected-application-sha256 8490a973c9e4f4568b851f61524a4ef8f554d8b3a506b12dd19ba34f0dd22a4b --expected-application-bytes 5825536 2>&1)
+          $code = $LASTEXITCODE
+          $output | Out-File "$env:RUNNER_TEMP/echolingo-browser-ocr-visibility.log" -Encoding utf8
+          $output | Write-Output
+          exit $code
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: EchoLingo-Windows-browser-ocr-${{ matrix.browser }}
+          if-no-files-found: warn
+          path: ${{ runner.temp }}/echolingo-browser-ocr-visibility.log
+      - name: Gate actual browser OCR and same-source hide
+        if: always()
+        shell: powershell
+        run: |
+          $outcome = '${{ steps.selection.outcome }}'
+          [ordered]@{ scope='Released295 application; real Alt+S and WinRT OCR, same-browser outside click; generated page only'; selection=$outcome; physicalWindows11Tested=$false; wpsTested=$false } | ConvertTo-Json -Compress
+          if ($outcome -ne 'success') { throw 'Actual browser OCR/outside-click incomplete or failed.' }
+
+  windows-selection-context-diagnostics:
+    name: Copy selection native focus counterexample
+    if: github.event_name == 'workflow_dispatch' && github.event.inputs.mode == 'windows-selection-context-diagnostics'
+    runs-on: windows-latest
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@v4
+      - name: Compile exact native helper without an app build
+        shell: powershell
+        run: powershell.exe -NoProfile -STA -ExecutionPolicy Bypass -File scripts/build-windows-native-helper.ps1 -HelperPath src-tauri/native/windows.ps1 -OutputPath "$env:RUNNER_TEMP/echolingo-focus-context.dll"
+      - name: Verify same-root cross-process copy after the minimal fix
+        id: focus
+        continue-on-error: true
+        timeout-minutes: 4
+        shell: powershell
+        run: |
+          $output = @(& powershell.exe -NoProfile -STA -ExecutionPolicy Bypass -File tests/windows-selection-native-focus-smoke.ps1 -NativeAssemblyPath "$env:RUNNER_TEMP/echolingo-focus-context.dll" -OutputDirectory "$env:RUNNER_TEMP/echolingo-generated-focus-fixture" -ExpectCrossProcessSuccess -IsolatedTestSession 2>&1)
+          $code = $LASTEXITCODE
+          $output | Out-File "$env:RUNNER_TEMP/echolingo-focus-context.log" -Encoding utf8
+          $output | Write-Output
+          exit $code
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: EchoLingo-Windows-focus-context-evidence
+          if-no-files-found: error
+          path: |
+            ${{ runner.temp }}/echolingo-focus-context.log
+            ${{ runner.temp }}/echolingo-focus-context.dll
+      - name: Require genuine counterexample execution
+        if: always()
+        shell: powershell
+        run: |
+          $outcome = '${{ steps.focus.outcome }}'
+          [ordered]@{ scope='Generated same-root embedded cross-process Edit; manual copy then production helper'; focus=$outcome; appBuilt=$false; actualWpsTested=$false; physicalWindowsTested=$false } | ConvertTo-Json -Compress
+          if ($outcome -ne 'success') { throw 'Native focus copy verification did not pass.' }
+
+  windows-wps-selection-diagnostics:
+    name: Actual official WPS selected text (generated RTF only)
+    if: github.event_name == 'workflow_dispatch' && github.event.inputs.mode == 'windows-wps-selection-diagnostics'
+    runs-on: windows-latest
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v4
+      - name: Compile exact current native helper
+        shell: powershell
+        run: powershell.exe -NoProfile -STA -ExecutionPolicy Bypass -File scripts/build-windows-native-helper.ps1 -HelperPath src-tauri/native/windows.ps1 -OutputPath "$env:RUNNER_TEMP/echolingo-wps-native.dll"
+      - name: Verify vendor installer and run single-copy WPS comparison
+        id: wps
+        continue-on-error: true
+        timeout-minutes: 10
+        shell: powershell
+        run: |
+          $output = @(& powershell.exe -NoProfile -STA -ExecutionPolicy Bypass -File tests/windows-wps-selection-smoke.ps1 -NativeAssemblyPath "$env:RUNNER_TEMP/echolingo-wps-native.dll" -OutputDirectory "$env:RUNNER_TEMP/echolingo-wps-evidence" -IsolatedTestSession 2>&1)
+          $code = $LASTEXITCODE
+          $output | Out-File "$env:RUNNER_TEMP/echolingo-wps-selection.log" -Encoding utf8
+          $output | Write-Output
+          exit $code
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: EchoLingo-Windows-actual-WPS-evidence
+          if-no-files-found: warn
+          path: |
+            ${{ runner.temp }}/echolingo-wps-selection.log
+            ${{ runner.temp }}/echolingo-wps-evidence/wps-selection-report.json
+            ${{ runner.temp }}/echolingo-wps-native.dll
+      - name: Keep setup failures distinct from passed WPS acceptance
+        if: always()
+        shell: powershell
+        run: |
+          $outcome = '${{ steps.wps.outcome }}'
+          [ordered]@{ scope='Official fixed WPS; generated RTF; manual Ctrl+C then exact helper; no registered app shortcut'; wps=$outcome; physicalOwnerWindowsTested=$false; appInstallerTested=$false } | ConvertTo-Json -Compress
+          if ($outcome -ne 'success') { throw 'Actual WPS selected-text verification did not pass.' }
+
+
+  windows-focus-resize-current-diagnostics:
+    name: Exact 952 candidate acceptance (${{ matrix.fixture }})
+    if: github.event_name == 'workflow_dispatch' && github.event.inputs.mode == 'windows-focus-resize-current-diagnostics'
+    runs-on: windows-latest
+    permissions:
+      contents: read
+      actions: read
+    strategy:
+      fail-fast: false
+      matrix:
+        fixture: [application, resize]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Verify immutable source and artifact identity
+        shell: powershell
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $source = '952d6096e618a5349aaa40d2ea40aed2751e6e34'
+          git diff --quiet $source HEAD -- src src-tauri resources assets scripts index.html package.json package-lock.json vite.config.ts tsconfig.json tsconfig.node.json .cargo
+          if ($LASTEXITCODE -ne 0) { throw 'Production source differs; this stage cannot accept current source.' }
+          $run = gh api repos/Blueeeecho/EchoLingo/actions/runs/40683453999 | ConvertFrom-Json
+          if ($LASTEXITCODE -ne 0 -or $run.head_sha -ne $source -or $run.status -ne 'completed') { throw 'Immutable source-run mismatch.' }
+          $artifact = gh api repos/Blueeeecho/EchoLingo/actions/artifacts/12814238767 | ConvertFrom-Json
+          if ($LASTEXITCODE -ne 0 -or $artifact.workflow_run.id -ne 40683453999 -or $artifact.workflow_run.head_sha -ne $source -or $artifact.expired -or $artifact.size_in_bytes -ne 17909184 -or $artifact.digest -ne 'sha256:33ea5161e95a757d85e75e34e7b7cd6948da91ee61d6373071aa910468f6b5d9') { throw 'Immutable evidence artifact mismatch.' }
+      - uses: actions/download-artifact@v4
+        with:
+          artifact-ids: '12814238767'
+          run-id: '40683453999'
+          github-token: ${{ github.token }}
+          path: exact-952-evidence
+      - name: Verify exact stage executable and unchanged binary inputs
+        id: candidate
+        shell: powershell
+        run: |
+          $files = @(Get-ChildItem exact-952-evidence -Recurse -File -Filter echolingo.exe)
+          if ($files.Count -ne 1) { throw 'Expected one staged candidate.' }
+          $candidateHash = (Get-FileHash -LiteralPath $files[0].FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($candidateHash -ne 'a1b8c111fdd2aa11c959a2cf69692495e42c264f3cfb493096648f67966c836d' -or $files[0].Length -ne 5980160) { throw 'Staged candidate bytes mismatch.' }
+          'path=' + $files[0].FullName | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+          [ordered]@{ sourceRun=40683453999; sourceArtifactId=12814238767; applicationSource='952d6096e618a5349aaa40d2ea40aed2751e6e34'; fixtureSource='${{ github.sha }}'; stageSha256=$candidateHash; stageBytes=$files[0].Length; productionSourceUnchanged=$true; rebuilt=$false; scope='Supplemental actual acceptance; preserves original 16/18 red full run' } | ConvertTo-Json -Compress
+      - name: Actual same-binary desktop fixture
+        id: actual
+        continue-on-error: true
+        timeout-minutes: 5
+        shell: powershell
+        env:
+          ECHOLINGO_CANDIDATE: ${{ steps.candidate.outputs.path }}
+        run: |
+          if ('${{ matrix.fixture }}' -eq 'application') {
+            $output = @(& powershell.exe -NoProfile -STA -ExecutionPolicy Bypass -File tests/windows-application-smoke.ps1 -ApplicationPath $env:ECHOLINGO_CANDIDATE -LatestIntentTests 2>&1)
+          } else {
+            $output = @(& powershell.exe -NoProfile -STA -ExecutionPolicy Bypass -File tests/windows-popup-resize-smoke.ps1 -ApplicationPath $env:ECHOLINGO_CANDIDATE -IsolatedTestSession 2>&1)
+          }
+          $fixtureExit = $LASTEXITCODE
+          $output | Out-File "$env:RUNNER_TEMP/echolingo-exact-952-${{ matrix.fixture }}.log" -Encoding utf8
+          $output | Write-Output
+          if ((Get-FileHash -LiteralPath $env:ECHOLINGO_CANDIDATE -Algorithm SHA256).Hash.ToLowerInvariant() -ne 'a1b8c111fdd2aa11c959a2cf69692495e42c264f3cfb493096648f67966c836d') { throw 'Candidate changed during fixture.' }
+          exit $fixtureExit
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: EchoLingo-Windows-exact-952-${{ matrix.fixture }}
+          if-no-files-found: error
+          path: ${{ runner.temp }}/echolingo-exact-952-${{ matrix.fixture }}.log
+      - name: Gate unchanged candidate supplemental acceptance
+        if: always()
+        shell: powershell
+        run: |
+          [ordered]@{ scope='Supplemental exact 952 same-binary acceptance only'; fixture='${{ matrix.fixture }}'; outcome='${{ steps.actual.outcome }}' } | ConvertTo-Json -Compress
+          if ('${{ steps.actual.outcome }}' -ne 'success') { throw 'Actual same-binary acceptance failed.' }

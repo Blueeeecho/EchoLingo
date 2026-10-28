@@ -1,4 +1,5 @@
 import type { HistoryEntry, Provider, Settings } from './types';
+import { isNativeTranslation, TRANSLATION_NATIVE_URLS } from './translation-credentials';
 
 export const MAX_TEXT_LENGTH = 20_000;
 export const LANGUAGES: ReadonlyArray<readonly [string, string]> = [
@@ -10,8 +11,10 @@ export const SHORTCUT_LABELS = {
   selection: '划词翻译', capture: '截图翻译', ocr: '截图识别', silentOcr: '无感 OCR', input: '输入翻译',
 } as const;
 export const defaultSettings = (): Settings => ({
-  providers: [], sourceLanguage: 'auto', targetLanguage: 'zh-Hans',
-  shortcuts: { selection: 'Alt+D', capture: 'Alt+S', ocr: 'Alt+Shift+S', silentOcr: 'Alt+C', input: 'Alt+A' },
+  providers: [], sourceLanguage: 'auto', targetLanguage: 'auto', languageDirectionVersion: 1,
+  shortcutDefaultsVersion: 1,
+  windowsSelectionStrategy: 'copy',
+  shortcuts: { selection: 'Alt+D', capture: '', ocr: 'Alt+Shift+S', silentOcr: 'Alt+S', input: 'Alt+A' },
   saveHistory: true, theme: 'system', maxHistory: 200, autoHideSeconds: 0, ocrProviders: [], activeOcrProviderId: null,
 });
 export function filterHistory(entries: HistoryEntry[], query: string, favoritesOnly: boolean): HistoryEntry[] {
@@ -26,14 +29,27 @@ export function errorMessage(error: unknown): string {
   if (error instanceof Error) return error.message;
   return '操作失败，请稍后重试。';
 }
+export function userFacingError(error: unknown): string {
+  return errorMessage(error).replace(/^(?:SYSTEM_TRANSLATION_[A-Z_]+|NATIVE_[A-Z_]+|CAPTURE(?:_[A-Z_]+)?):\s*/, '');
+}
+export function isLocalProvider(kind: string): boolean { return kind === 'system' || kind === 'offline'; }
 export function validateProvider(provider: Provider): string | null {
   if (!provider.name.trim()) return '请输入服务名称。';
+  if (isLocalProvider(provider.kind)) {
+    if (provider.baseUrl || provider.model || provider.prompt || provider.region || provider.hasKey) return '本机翻译不使用 API 地址、模型、提示词或密钥。';
+    return null;
+  }
   let url: URL;
   try { url = new URL(provider.baseUrl); } catch { return '请输入完整的 API URL，例如 https://api.openai.com/v1。'; }
   const local = ['localhost', '127.0.0.1', '[::1]', '::1'].includes(url.hostname);
   if (url.protocol !== 'https:' && !(url.protocol === 'http:' && local)) return '远程 API 必须使用 HTTPS；本机 localhost 服务可使用 HTTP。';
   if (url.username || url.password) return '请将密钥填写在 API 密钥字段中，不要放入 URL。';
   if (url.search || url.hash) return 'API Base URL 不能包含查询参数或片段。';
+  if (isNativeTranslation(provider.kind)) {
+    if (provider.baseUrl.replace(/\/+$/, '') !== TRANSLATION_NATIVE_URLS[provider.kind]) return '官方机器翻译服务使用固定 API 地址。';
+    if (provider.model || provider.prompt) return '官方机器翻译服务不使用模型名称或提示词。';
+  }
+  if (provider.region && (provider.kind !== 'microsoft' || !/^[a-z0-9-]{1,64}$/.test(provider.region))) return '仅微软翻译可填写资源地域，请使用控制台中的地域标识。';
   if (provider.kind === 'openai' && !provider.model.trim()) return 'OpenAI 兼容服务需要填写模型名称。';
   return null;
 }

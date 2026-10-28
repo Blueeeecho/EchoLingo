@@ -15,6 +15,7 @@ interface CapturedLine {
   content: string;
   width: number;
   blockWidth: number;
+  blockContinuation: boolean;
   protected: boolean;
   softBreak: boolean;
 }
@@ -39,6 +40,10 @@ function obviousStructure(text: string): boolean {
   if (/(?:https?:\/\/|ftp:\/\/|www\.)|\b[^\s@]+@/iu.test(content)) return true;
   if (/^[^,\s]+(?:,[^,\s]*){2,}$/u.test(content)) return true;
   if (/^(?:[{}[\]]\s*[,;]?|["'][^"']+["']\s*:.*)$/u.test(content)) return true;
+  // Bare YAML/configuration keys and obvious shell commands keep executable
+  // line boundaries even when they are as short as a narrow prose capture.
+  if (/^[\p{L}_][\p{L}\d_.-]*\s*:\s+\S/u.test(content)) return true;
+  if (/^(?:\$\s+\S|(?:git|npm|npx|pnpm|yarn|bun|cargo|rustc|python[\d.]*|pip[\d.]*|node|deno|cmake|bash|zsh|pwsh|powershell|docker|kubectl|curl|wget|ssh|sudo)\s+\S)/u.test(content)) return true;
   if (/^(?:\/\/|\/\*|\*\/?\s|#|--\s|(?:import|from)\s|(?:try|else|finally)\s*[{:]|\}\s*(?:else|catch|finally)\b)/u.test(content)) return true;
   if (/^(?:await\s+)?[\p{L}_$][\p{L}\d_$]*(?:\.[\p{L}_$][\p{L}\d_$]*)*\(/u.test(content)) return true;
   if (/^[\p{L}_$][\p{L}\d_$]*(?:\.[\p{L}_$][\p{L}\d_$]*|\[[^\]]+\])*\s*(?::\s*[\p{L}\d_[\],.| ]+\s*)?(?:[+\-*/%&|^<>?]{0,3}=|:=)/u.test(content)) return true;
@@ -63,7 +68,7 @@ function linesWithStructure(text: string): CapturedLine[] {
       else if (marker[0] === fence.character && marker.length >= fence.length && new RegExp(`^\\s{0,3}${fence.character}{${fence.length},}\\s*$`, 'u').test(text)) fence = null;
     }
     return {
-      text, content, width: displayWidth(content), blockWidth: 0, protected: fenced || obviousStructure(text),
+      text, content, width: displayWidth(content), blockWidth: 0, blockContinuation: false, protected: fenced || obviousStructure(text),
       softBreak: /\p{Script=Latin}\u00ad[ \t]*$/u.test(original),
     };
   });
@@ -76,18 +81,39 @@ function linesWithStructure(text: string): CapturedLine[] {
     while (end < lines.length && !lines[end].protected) {
       width = Math.max(width, lines[end].width); end++;
     }
-    for (let index = start; index < end; index++) lines[index].blockWidth = width;
+    for (let index = start; index < end; index++) {
+      lines[index].blockWidth = width;
+    }
+    // A completed sentence must not lend its continuation evidence to a later
+    // short title or a new paragraph that happens to lack a blank separator.
+    for (let groupStart = start; groupStart < end;) {
+      let groupEnd = groupStart + 1;
+      while (groupEnd < end && !SENTENCE_END.test(lines[groupEnd - 1].content)
+        && !COLON_END.test(lines[groupEnd - 1].content)) groupEnd++;
+      const continuation = lines.slice(groupStart, groupEnd - 1).some((line, offset) =>
+        narrowContinuation(line, lines[groupStart + offset + 1]));
+      for (let index = groupStart; index < groupEnd; index++) lines[index].blockContinuation = continuation;
+      groupStart = groupEnd;
+    }
     start = end;
   }
   return lines;
 }
 
+function narrowContinuation(left: CapturedLine, right: CapturedLine): boolean {
+  if (SENTENCE_END.test(left.content) || COLON_END.test(left.content)) return false;
+  if (left.width < 12 || left.content.split(/\s+/u).length < 2) return false;
+  // A lower-case continuation is useful evidence even in a narrow screenshot.
+  // Tiny one-word rows, capitalized poetry and titles remain ambiguous.
+  return /^\p{Ll}/u.test(right.content);
+}
+
 function longProseLine(line: CapturedLine): boolean {
-  // Roughly 54 Latin columns or 16 CJK glyphs. Short Latin rows are ambiguous
-  // (poetry/titles); consecutive narrow CJK rows are handled separately below.
+  // Roughly 32 Latin columns or 16 CJK glyphs. Narrower prose needs additional
+  // continuation evidence rather than a desktop-sized line-width assumption.
   // A comma/semicolon is additional evidence of an unfinished sentence, useful
   // for somewhat narrower OCR lines without treating tiny fragments as prose.
-  return line.width >= (CJK.test(line.content) ? 32 : 54)
+  return line.width >= 32
     || (line.width >= 24 && /[,，;；]$/u.test(line.content));
 }
 
@@ -102,9 +128,18 @@ function canJoin(left: CapturedLine, right: CapturedLine): boolean {
     let glyphs = 0;
     for (const character of left.content) if (CJK_LETTER.test(character) && ++glyphs >= 3) break;
     if (glyphs < 3 && !longProseLine(left)) return false;
-  } else if (!longProseLine(left)) return false;
+  } else if (!longProseLine(left)) {
+    const continuedBlock = left.blockContinuation && !SENTENCE_END.test(left.content)
+      && (left.width >= 12 && left.content.split(/\s+/u).length >= 2
+        || left.width >= 4 && /^\p{Ll}/u.test(right.content));
+    const danglingWord = left.width >= 8
+      && /\b(?:a|an|the|and|or|to|of|in|at|on|for|with|by|from|your|our|their|its)$/iu.test(left.content);
+    const splitName = left.width >= 12 && /\b(?:in|at|from|to|near)\s+\p{Lu}\p{Ll}+$/u.test(left.content)
+      && /^\p{Lu}\p{Ll}/u.test(right.content);
+    if (!narrowContinuation(left, right) && !continuedBlock && !danglingWord && !splitName) return false;
+  }
   const reference = left.blockWidth;
-  if (reference >= (cjkPair ? 32 : 54) && left.width < reference * 0.68 && right.width >= reference * 0.78) {
+  if (reference >= 32 && left.width < reference * 0.68 && right.width >= reference * 0.78) {
     if (SENTENCE_END.test(left.content) || left.width < reference * 0.5) return false;
   }
   return true;
@@ -140,4 +175,31 @@ export function normalizeCapturedText(text: string): string {
     } else result.push(line.text);
   }
   return result.join('\n');
+}
+
+/** OCR can return a space between every Chinese glyph. Limit this repair to
+ * prose from OCR; spaces in selected/typed text, Latin words, Korean, numbers,
+ * aligned columns and executable text are not evidence of an OCR artifact. */
+export function normalizeOcrCapturedText(text: string): string {
+  let fence: { character: string; length: number } | null = null;
+  const cleaned = text.replace(/\r\n?/gu, '\n').split('\n').map((line) => {
+    const marker = /^\s{0,3}(`{3,}|~{3,})/u.exec(line)?.[1];
+    if (marker) {
+      if (!fence) fence = { character: marker[0], length: marker.length };
+      else if (marker[0] === fence.character && marker.length >= fence.length
+        && new RegExp(`^\\s{0,3}${fence.character}{${fence.length},}\\s*$`, 'u').test(line)) fence = null;
+      return line;
+    }
+    if (fence) return line;
+    // Keep list/heading boundaries while allowing prose within them to repair.
+    // Do not strip indentation before the structural safety check.
+    const prefix = /^(?:#{1,6} |[-+*•▪▫‣⁃◦] |\[[ xX]\] |\d{1,4}[.)、．] ?|[一二三四五六七八九十百]+[、.)．] ?|[（(][\d一二三四五六七八九十]+[）)] ?)/u.exec(line)?.[0] ?? '';
+    const body = line.slice(prefix.length);
+    if (obviousStructure(body)) return line;
+    // A lookahead leaves the right glyph available to repair the next pair.
+    // Only a single ASCII space is eligible; wide spacing can be layout.
+    const repaired = body.replace(/([\p{Script=Han}，。！？；：、（）「」『』【】《》“”‘’]) (?=[\p{Script=Han}，。！？；：、（）「」『』【】《》“”‘’])/gu, '$1');
+    return prefix + repaired;
+  }).join('\n');
+  return normalizeCapturedText(cleaned);
 }

@@ -20,12 +20,15 @@ reqwest = { version = "0.12", default-features = false, features = ["json", "rus
 futures-util = "0.3"
 hmac = "0.12"
 sha2 = "0.10"
-tokio = { version = "1", features = ["time", "sync", "macros", "rt-multi-thread"] }
+md-5 = "0.10"
+getrandom = "0.3"
+tokio = { version = "1", features = ["time", "sync", "macros", "rt-multi-thread", "process", "io-util"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 keyring = { version = "3", features = ["apple-native"] }
 
 [target.'cfg(target_os = "windows")'.dependencies]
+global-hotkey = "=0.8.0"
 keyring = { version = "3", features = ["windows-native"] }
 
 [target.'cfg(not(any(target_os = "macos", target_os = "windows")))'.dependencies]

@@ -895,8 +895,11 @@ name = "echolingo"
 version = "0.1.0"
 dependencies = [
  "futures-util",
+ "getrandom 0.3.4",
+ "global-hotkey",
  "hmac",
  "keyring",
+ "md-5",
  "reqwest 0.12.28",
  "serde",
  "serde_json",
@@ -2143,6 +2146,16 @@ dependencies = [
  "log",
  "tendril",
  "web_atoms",
+]
+
+[[package]]
+name = "md-5"
+version = "0.10.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d89e7ee0cfbedfc4da3340218492196241d89eefb6dab27de5df917a6d2e78cf"
+dependencies = [
+ "cfg-if",
+ "digest",
 ]
 
 [[package]]
@@ -4121,6 +4134,7 @@ dependencies = [
  "libc",
  "mio",
  "pin-project-lite",
+ "signal-hook-registry",
  "socket2",
  "tokio-macros",
  "windows-sys 0.61.2",

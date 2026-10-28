@@ -9,6 +9,7 @@ User-approved name: EchoLingo. Windows first, macOS second. No HarmonyOS SDK req
 - OpenAI-compatible, DeepL, LibreTranslate adapters. API credentials stored in OS Keychain / Credential Manager; endpoint/model/prompt in local JSON.
 - Supplier-specific OCR adapters for Baidu and Tencent, compatible vision models, and an advanced JSON gateway. Authentication protocol and supplier labels remain separate; Ali machine translation is not Qwen.
 - Bounded local history, favorites and clear controls. API requests only on explicit action. No telemetry, no clipboard polling.
+- Windows idle OCR additionally outlines the actual application root beneath the pointer using DWM frame metadata, while retaining the current-display screen border. Desktop/shell, unknown, known-own/known-affinity-excluded or occlusion-mismatched targets show only the screen border. Four more thin HWNDs per display and80ms UI-thread queries keep the hint out of input hooks; left-drag clears it and retains the arbitrary ROI. Mac parity is deferred.
 - Bob is a behavior reference only. No Bob proprietary code, names, icons, or plugin compatibility claimed.
 
 ## First release gates

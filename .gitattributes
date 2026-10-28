@@ -1,0 +1,5 @@
+
+# Preserve upstream license bytes, including original trailing whitespace.
+resources/offline-translation/licenses/** -whitespace
+# Pinned registry and original notices retain identical bytes on Windows.
+resources/offline-translation/** -text

@@ -1,0 +1,195 @@
+{
+  "formatVersion": 1,
+  "mozillaCommit": "69455acaecbe8650cdba988dbcf7c10ca20e7c48",
+  "files": [
+    {
+      "path": "licenses/inference__marian-fork__LICENSE.md",
+      "sourcePath": "inference/marian-fork/LICENSE.md",
+      "sha256": "fb3e48be2f3c9c85f3acf32d4ff115a803208e51ecab694000415c8bf1dd712b"
+    },
+    {
+      "path": "licenses/inference__3rd_party__ssplit-cpp__LICENSE.md",
+      "sourcePath": "inference/3rd_party/ssplit-cpp/LICENSE.md",
+      "sha256": "4ced746a9cab1b6b6762bd6c1999c6d65e2d45de0bab19a3902514147bbff16a"
+    },
+    {
+      "path": "licenses/inference__marian-fork__src__3rd_party__phf__LICENSE",
+      "sourcePath": "inference/marian-fork/src/3rd_party/phf/LICENSE",
+      "sha256": "3f9e948dcc51aab1299dc37a53f9218bf0414c7ea24ee38e310269f74e2eef72"
+    },
+    {
+      "path": "licenses/inference__marian-fork__src__3rd_party__mio__LICENSE",
+      "sourcePath": "inference/marian-fork/src/3rd_party/mio/LICENSE",
+      "sha256": "1a0fe0714e5fc17741dd880bddf445c4b3c579868df1f198f652129a9fa7c3cc"
+    },
+    {
+      "path": "licenses/inference__marian-fork__src__3rd_party__CLI__LICENSE",
+      "sourcePath": "inference/marian-fork/src/3rd_party/CLI/LICENSE",
+      "sha256": "82b1de8bd2cbd894dc9ef05854e9d8c010d0ae9f6f2dc41370bac498f9bebc7d"
+    },
+    {
+      "path": "licenses/inference__marian-fork__src__3rd_party__cnpy__LICENSE",
+      "sourcePath": "inference/marian-fork/src/3rd_party/cnpy/LICENSE",
+      "sha256": "1ff6fa94ad29d941ceb3bdd5ebfb260ddba4c3e962c50fb7a66c899e769de1ff"
+    },
+    {
+      "path": "licenses/inference__marian-fork__src__3rd_party__faiss__LICENSE",
+      "sourcePath": "inference/marian-fork/src/3rd_party/faiss/LICENSE",
+      "sha256": "52412d7bc7ce4157ea628bbaacb8829e0a9cb3c58f57f99176126bc8cf2bfc85"
+    },
+    {
+      "path": "licenses/inference__marian-fork__src__3rd_party__zstr__LICENSE",
+      "sourcePath": "inference/marian-fork/src/3rd_party/zstr/LICENSE",
+      "sha256": "f2b4ae40b0311262960b46f697497994fe35706110ac04f04b3768d9ea7df460"
+    },
+    {
+      "path": "licenses/inference__marian-fork__src__3rd_party__pathie-cpp__LICENSE",
+      "sourcePath": "inference/marian-fork/src/3rd_party/pathie-cpp/LICENSE",
+      "sha256": "8515fc938185ff3edb2c38b60b3a2f4a92b93644502de2b73fc32d54077e2a61"
+    },
+    {
+      "path": "licenses/inference__marian-fork__src__3rd_party__simd_utils__LICENSE",
+      "sourcePath": "inference/marian-fork/src/3rd_party/simd_utils/LICENSE",
+      "sha256": "dfaa54b4188ffa0e6298ce7ea27c865d12edcf73d742e2200ce9812db6268c0f"
+    },
+    {
+      "path": "licenses/inference__marian-fork__src__3rd_party__yaml-cpp__LICENSE",
+      "sourcePath": "inference/marian-fork/src/3rd_party/yaml-cpp/LICENSE",
+      "sha256": "aa6fcc27be034e41e21dd832f9175bfe694a48491d9e14ff0fa278e19ad14f1b"
+    },
+    {
+      "path": "licenses/inference__marian-fork__src__3rd_party__intgemm__LICENSE",
+      "sourcePath": "inference/marian-fork/src/3rd_party/intgemm/LICENSE",
+      "sha256": "887bd367b44f548d743864cb4322d0895a36b1794c6ad5b5e3a0fac53ccd117b"
+    },
+    {
+      "path": "licenses/inference__marian-fork__src__3rd_party__spdlog__LICENSE",
+      "sourcePath": "inference/marian-fork/src/3rd_party/spdlog/LICENSE",
+      "sha256": "9eb46fbd9cbdb0793e496ab744aa2e290b4e39825a2da5cba3ba6fa36bb25683"
+    },
+    {
+      "path": "licenses/inference__marian-fork__src__3rd_party__ruy__LICENSE",
+      "sourcePath": "inference/marian-fork/src/3rd_party/ruy/LICENSE",
+      "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30"
+    },
+    {
+      "path": "licenses/inference__marian-fork__src__3rd_party__sentencepiece__LICENSE",
+      "sourcePath": "inference/marian-fork/src/3rd_party/sentencepiece/LICENSE",
+      "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30"
+    },
+    {
+      "path": "licenses/inference__marian-fork__src__3rd_party__sentencepiece__third_party__esaxx__LICENSE",
+      "sourcePath": "inference/marian-fork/src/3rd_party/sentencepiece/third_party/esaxx/LICENSE",
+      "sha256": "7c28553d1d3312d65fe309f76a22ebaf33a3d76c8c1e3b98a88ee4654ecb53db"
+    },
+    {
+      "path": "licenses/inference__marian-fork__src__3rd_party__sentencepiece__third_party__darts_clone__LICENSE",
+      "sourcePath": "inference/marian-fork/src/3rd_party/sentencepiece/third_party/darts_clone/LICENSE",
+      "sha256": "155f59997298ee336602c49f9c1110f268ac394ca2197eb02647a3555935ad52"
+    },
+    {
+      "path": "licenses/inference__marian-fork__src__3rd_party__sentencepiece__third_party__absl__LICENSE",
+      "sourcePath": "inference/marian-fork/src/3rd_party/sentencepiece/third_party/absl/LICENSE",
+      "sha256": "d3e2f59e1d71176dfdb555ece6a41f7a5aa0f52ff21211010ace314f57695f6b"
+    },
+    {
+      "path": "licenses/inference__marian-fork__src__3rd_party__sentencepiece__third_party__protobuf-lite__LICENSE",
+      "sourcePath": "inference/marian-fork/src/3rd_party/sentencepiece/third_party/protobuf-lite/LICENSE",
+      "sha256": "6e5e117324afd944dcf67f36cf329843bc1a92229a8cd9bb573d7a83130fea7d"
+    },
+    {
+      "path": "licenses/inference__marian-fork__src__3rd_party__ruy__third_party__cpuinfo__LICENSE",
+      "sourcePath": "inference/marian-fork/src/3rd_party/ruy/third_party/cpuinfo/LICENSE",
+      "sha256": "8e7e60636c3aa0cb03571a1a841ce5697f9551ff92b3c426c2561613d15ade70"
+    },
+    {
+      "path": "licenses/inference__marian-fork__src__3rd_party__ruy__third_party__cpuinfo__deps__clog__LICENSE",
+      "sourcePath": "inference/marian-fork/src/3rd_party/ruy/third_party/cpuinfo/deps/clog/LICENSE",
+      "sha256": "68a14c3e79add023eecd83d611e73f05b8bf1d16852efeb7eb4033a96736da9e"
+    },
+    {
+      "path": "licenses/marian-header-notice__half_float__umHalf.h.txt",
+      "sourcePath": "inference/marian-fork/src/3rd_party/half_float/umHalf.h",
+      "note": "Unchanged leading source notice; remaining source is in source archive.",
+      "sha256": "26d2256dfb7c7e244fefcb39c64964a6beb2a551b759e5965f84c387352ac73c"
+    },
+    {
+      "path": "licenses/marian-header-notice__threadpool.h.txt",
+      "sourcePath": "inference/marian-fork/src/3rd_party/threadpool.h",
+      "note": "Unchanged leading source notice; remaining source is in source archive.",
+      "sha256": "462dec5ac043cf9b86b78b0e33c799b52f2cca53f0d022735749ce213b433b3b"
+    },
+    {
+      "path": "licenses/marian-header-notice__avx_mathfun.h.txt",
+      "sourcePath": "inference/marian-fork/src/3rd_party/avx_mathfun.h",
+      "note": "Unchanged leading source notice; remaining source is in source archive.",
+      "sha256": "9579eed9b0c5896a3ff9ee19043e210b713e86793db78c19a97bc6a85bd42725"
+    },
+    {
+      "path": "licenses/marian-header-notice__sse_mathfun.h.txt",
+      "sourcePath": "inference/marian-fork/src/3rd_party/sse_mathfun.h",
+      "note": "Unchanged leading source notice; remaining source is in source archive.",
+      "sha256": "a38f9742c5eddb448afdd45257c9438103ed80adbb585ee90174f0e8319bda01"
+    },
+    {
+      "path": "licenses/marian-header-notice__ExceptionWithCallStack.h.txt",
+      "sourcePath": "inference/marian-fork/src/3rd_party/ExceptionWithCallStack.h",
+      "note": "Unchanged leading source notice; remaining source is in source archive.",
+      "sha256": "e49bdc8e964cf52cb7e76f15c252ba1b98ca3a0bdb1485b2a075c450be288c53"
+    },
+    {
+      "path": "licenses/PCRE2-10.46-LICENCE.md",
+      "sourcePath": "pcre2-10.46/LICENCE.md",
+      "sha256": "9cf7ac6976099a1d856826d3ef1b093bd6b84489dc6100628ac79e740cf9885a"
+    },
+    {
+      "path": "licenses/PCRE2-10.46-COPYING",
+      "sourcePath": "pcre2-10.46/COPYING",
+      "sha256": "99272c55f3dcfa07a8a7e15a5c1a33096e4727de74241d65fa049fccfdd59507"
+    },
+    {
+      "path": "licenses/PCRE2-10.46-AUTHORS.md",
+      "sourcePath": "pcre2-10.46/AUTHORS.md",
+      "sha256": "1bbf636fa9d7e863bd524af8a3d7229d0c8f88ad740b20f866f25cefaca98fb7"
+    },
+    {
+      "path": "licenses/simd-utils-header-notice__avx_mathfun.h.txt",
+      "sourcePath": "inference/marian-fork/src/3rd_party/simd_utils/avx_mathfun.h",
+      "note": "Unchanged leading source notice; complete source is in source archive.",
+      "sha256": "c1abf57705529c6d6b9598944166397b8f5c388cdcb4cb3f7781fd13ab875dcb"
+    },
+    {
+      "path": "licenses/simd-utils-header-notice__sse_mathfun.h.txt",
+      "sourcePath": "inference/marian-fork/src/3rd_party/simd_utils/sse_mathfun.h",
+      "note": "Unchanged leading source notice; complete source is in source archive.",
+      "sha256": "9c5f7b2d1b24839c317ff4d6ebbef0c2567f3bf2ac468b32018518c4a8b6dd6c"
+    },
+    {
+      "path": "licenses/simd-utils-header-notice__neon_mathfun.h.txt",
+      "sourcePath": "inference/marian-fork/src/3rd_party/simd_utils/neon_mathfun.h",
+      "note": "Unchanged leading source notice; complete source is in source archive.",
+      "sha256": "f0cf4ae1f4728a16eb0fb8f5d5ba84303e3d76e57c980e0a30423372bc6295b6"
+    },
+    {
+      "path": "licenses/simd-utils-header-notice__sse2neon.h.txt",
+      "sourcePath": "inference/marian-fork/src/3rd_party/simd_utils/sse2neon.h",
+      "note": "Unchanged leading source notice; complete source is in source archive.",
+      "sha256": "a2a0e60e68471577aed1e97f5bc60d394a574576c537b6f1246a8088c24720b7"
+    },
+    {
+      "path": "licenses/MPL-2.0.txt",
+      "sourcePath": "LICENSE",
+      "sha256": "1f256ecad192880510e84ad60474eab7589218784b9a50bc7ceee34c2b91f1d5"
+    },
+    {
+      "path": "licenses/Mozilla-README.md",
+      "sourcePath": "README.md",
+      "sha256": "be23e8c6b368e8bda21ec6257b8027de1273f85bbca4886edc76bccf176d385a"
+    },
+    {
+      "path": "licenses/nlohmann-json-LICENSE.MIT",
+      "sourcePath": "nlohmann-json/LICENSE.MIT",
+      "sha256": "46a65cffd1ea955132d95a8dd921640714a8d6b537d2e4e482d31145ae95b603"
+    }
+  ]
+}

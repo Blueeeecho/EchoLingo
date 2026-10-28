@@ -1,0 +1,752 @@
+{
+  "updated": "2026-10-28 Asia/Shanghai",
+  "candidate": "f65ab043c7e7a0ad4b5497d1a2651eb490198980",
+  "status": "NOT fully accepted: real registered app16/16 and installed offline6models+3chains passed; browser95/96 failure, copy background publication red, shortcutsUi setup0cases",
+  "environment": "GitHub-hosted Windows Server desktop; not physical Win10/11",
+  "productionFiles": {
+    "src-tauri/native/windows.ps1": "093f5910619dfbed9b8f8b1f60b5066e19e7b751ffa120a2c5c4fcfe8a9796d7",
+    "src-tauri/src/main.rs": "2d90d96b7907f45b2108b8d3bd6c0bc79a50abed14a38b5a87e414f530f20060",
+    "src-tauri/src/platform.rs": "9697e36d255d43b77b5a2c2c323661194119ed126ce369054d99e2e32d54101b",
+    "tests/frontend-interactions.mjs": "94583b8186dbc5512c9caf5abebd837cff44552f6b0a179f79890a8fcf7528da"
+  },
+  "host": {
+    "rustPassed": 224,
+    "rustIgnored": 1,
+    "frontendUnitPassed": 76,
+    "fullFakeIpcUiPassed": true,
+    "typecheckBuildFmtDiffPassed": true,
+    "csharp5net48AndPsAst": "passed; exact specialist freeze reports in work"
+  },
+  "baselineRuns": [
+    {
+      "run": 40541154743,
+      "source": "653df24",
+      "scope": "fresh Edge/Chrome native helper",
+      "required": 48,
+      "caseRows": 30,
+      "actualHelperCalls": 24,
+      "passedHelperCalls": 23,
+      "setupFailures": 6,
+      "unexecuted": 18,
+      "conclusion": "failure; Edge cold first mouse native UIA timeout"
+    },
+    {
+      "run": 40541158106,
+      "source": "653df24",
+      "scope": "real clipboard fallback same-source publication races",
+      "required": 3,
+      "executed": 3,
+      "passed": 1,
+      "conclusion": "failure; both independent writes returned as source and helper restored old clipboard"
+    },
+    {
+      "run": 40542535831,
+      "source": "0e0f7cb",
+      "scope": "actual Tauri one Alt+D per intent",
+      "required": 16,
+      "executed": 15,
+      "rawPassed": 8,
+      "validPassedAtMost": 7,
+      "conclusion": "failure; negative same-window case falsely accepted early, late B import proven by pre-next-hotkey request/history ledger; pinned empty real failure; five mouse setups failed without hotkey; manual input timeout unclassified"
+    },
+    {
+      "run": 40542927823,
+      "source": "8307941",
+      "scope": "Notepad",
+      "actualHotkeys": 0,
+      "conclusion": "inconclusive; primary error initially overwritten by cleanup error"
+    },
+    {
+      "run": 40543536555,
+      "source": "08f5578",
+      "scope": "Notepad",
+      "actualHotkeys": 0,
+      "conclusion": "inconclusive; classic editor not unique; cleanup error retained separately"
+    }
+  ],
+  "candidateRuns": {
+    "initial4385": {
+      "full": 40544606324,
+      "browser": 40544606772,
+      "clipboard": 40544607335
+    },
+    "finalBrowserDualOrder": 40556538688,
+    "finalFull": 40556538469
+  },
+  "limits": [
+    "No physical Windows/WPS acceptance",
+    "New keyboard-copy ticket cannot attribute arbitrary same-PID background clipboard publications",
+    "Native focus HWND is not complete DOM/control logical selection identity",
+    "No Mac signing/install/privacy/Keychain/credential changes",
+    "No stopped VM restarted"
+  ],
+  "package": {
+    "kind": "unsigned preview candidate; known failed and unaccepted gates retained",
+    "folder": "outputs/EchoLingo-installers/windows-candidate-20261028-selection-rigorous",
+    "installer": "EchoLingo_0.1.0_preview_20261028_selection-candidate_x64-setup.exe",
+    "bytes": 75281557,
+    "sha256": "a22b586bfe46230563729b925e64c9d41a1c1427f5f52ff53e8ff8a418fce4c9",
+    "apiArchivesSizeHashCrcVerified": true,
+    "completeEmbeddedDllVerified": true,
+    "sourceArchiveVerified": true,
+    "automaticallyInstalled": false,
+    "stableReleasePublished": false,
+    "independentAudit": "passed:API ZIP size/hash/CRC,uniqueNSIS,wholePS+DLL payload,stage,source ZIP and5checksums; no local execution",
+    "wholeHelperPayload": {
+      "bytesWindowsCrLf": 183580,
+      "sha256": "76968fdff9524e23375c3a6cc823aee9d838e5c832cce3e028a0d264a3f66695",
+      "offset": 4354521,
+      "unique": true
+    }
+  },
+  "candidateOutcomes": {
+    "immutableAppSupplement": {
+      "run": 40549765310,
+      "fixtureSource": "6300dcf",
+      "productSource": "4385e3448d2c56df4575a0a991b0f6a271bfd708",
+      "sha256": "6684d75fe79f9e1b327c866d459970ef91c726a296397e2626184e70def41bd6",
+      "bytes": 5809152,
+      "cases": 16,
+      "passed": 16,
+      "realMouseSelections": 7,
+      "rebuilt": false,
+      "currentHeadAcceptance": false
+    },
+    "browser810": {
+      "run": 40550008786,
+      "actualHelperCalls": 48,
+      "passed": 47,
+      "coldFirstPassed": 5,
+      "coldFirstRequired": 6,
+      "setupFailures": 0,
+      "allClipboardAndForegroundPreserved": true,
+      "allIdentityGuardsRetained": true,
+      "firstQueryMilliseconds": 2297.4643,
+      "failure": "initialPane50033 thenGroup50026 strict RuntimeId mismatch; not timeout",
+      "scope": "native helper on installed Edge/Chrome; not registered Tauri shortcut",
+      "rawLogSha256": "9e577982e3f2bf5b1176f346456ad91cd1fb99db35537613f6851e895c7b12ce"
+    },
+    "clipboard810": {
+      "run": 40550008709,
+      "executed": 3,
+      "passed": 2,
+      "baseline": "passed",
+      "newActualCtrlC": "CANCELLED; independent copy preserved",
+      "samePidBackgroundPublication": "failure; wrongsource and own restoration overwrite"
+    },
+    "browser8eRootContrast": {
+      "run": 40553539117,
+      "source": "8e0184767396ad961f716736b615a2093c01b3ff",
+      "required": 48,
+      "executed": 48,
+      "passed": 47,
+      "coldFirstPassed": 5,
+      "coldFirstRequired": 6,
+      "setupFailures": 0,
+      "preHelperUiaCalls": 0,
+      "clipboardAndForegroundPreserved": true,
+      "rawLogSha256": "a058ca656e7a933c78ac14e3e06f9ca368105dcfb87da25780bfcb40731c9d52",
+      "finding": "source-root UIA FromHandle+sameElementCache did not fix initialPane toGroup mismatch; ineffective prototype reverted",
+      "firstQueryMilliseconds": 2524.881,
+      "firstHelperMilliseconds": 3348.511,
+      "secondQueryMilliseconds": 10.919
+    },
+    "browser93bMsaaContrast": {
+      "run": 40555594514,
+      "source": "93b9ed37979979daefc92f171c958334a5cb4cf1",
+      "required": 48,
+      "executed": 48,
+      "passed": 42,
+      "coldFirstPassed": 0,
+      "coldFirstRequired": 6,
+      "setupFailures": 0,
+      "finding": "all6 first calls initialPane50033 thenGroup50026 strictidentity mismatch; no deadline; root MSAA interface request ineffective and regressed5 previously passing cold calls",
+      "all6MsaaAttempted": true,
+      "all6NativeFocusWasRoot": true,
+      "all6MsaaHResult": 0,
+      "all6MsaaObjectReturned": true,
+      "disposition": "revert exactly to810 PS and bridge; no additional initialization experiment"
+    },
+    "browserFinalDualOrder": {
+      "run": 40556538688,
+      "executed": 96,
+      "passed": 95,
+      "overall": "failure",
+      "edgeFirst": {
+        "job": 122373999470,
+        "required": 48,
+        "executed": 48,
+        "passed": 47,
+        "coldFirstPassed": 5,
+        "coldFirstRequired": 6,
+        "firstQueryMilliseconds": 1084.321,
+        "secondQueryMilliseconds": 11.7571,
+        "failure": "initialPane50033 thenGroup50026 strict RuntimeId mismatch; no deadline"
+      },
+      "chromeFirst": {
+        "job": 122373999227,
+        "required": 48,
+        "executed": 48,
+        "passed": 48,
+        "coldFirstPassed": 6,
+        "coldFirstRequired": 6,
+        "firstQueryMilliseconds": 1475.5467,
+        "finding": "first Chrome Group toGroup identity stable and exactsource succeeds"
+      },
+      "scope": "two independent GitHub-hosted Windows desktop runners,48 native helper calls each; not actual registered Tauri/browser or physicalWindows/WPS acceptance",
+      "freshBrowserFirstCases": 12,
+      "freshBrowserFirstPassed": 11,
+      "firstTestedHelperPerIndependentRunnerPassed": 1,
+      "firstTestedHelperPerIndependentRunnerRequired": 2,
+      "allSingleHelper": true,
+      "allPreHelperUiaZero": true,
+      "allForegroundAndRootPreserved": true,
+      "allRichClipboardRestored": true,
+      "allPostAuditPassed": true,
+      "allOwnCleanupConfirmed": true,
+      "domCopyEvents": 0,
+      "osColdBootTested": false,
+      "firstEverUiaClientProven": false,
+      "independentlyReviewed": true,
+      "rawLogs": {
+        "chromeFirstSha256": "77e1dd63a9addecc697bcab0cf39bebee271c0e53f1f96469402660c73e502c7",
+        "edgeFirstSha256": "aa0e1b7a6481fc49007c46c619da01c1c843ebd121786392e91ecdc930b2f37b"
+      }
+    },
+    "fullFinal": {
+      "runId": 40556538469,
+      "sourceCommit": "f65ab043c7e7a0ad4b5497d1a2651eb490198980",
+      "rawWindowsConclusion": "failure",
+      "frontendConclusion": "success",
+      "macosConclusion": "success",
+      "rawTaskOutcomes": {
+        "shortcutInstall": "success",
+        "helperPerformance": "success",
+        "popupVisibility": "success",
+        "shortcutsUi": "failure",
+        "selectionDocument": "success",
+        "rigorousSelection": "success",
+        "installedOffline": "success",
+        "delegatedCapture": "success",
+        "liveCapture": "success",
+        "applicationCore": "success",
+        "selectionInternals": "success"
+      },
+      "failedGate": {
+        "name": "shortcutsUi",
+        "stage": "owned-fixture-setup",
+        "error": "spawnSync C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe ETIMEDOUT",
+        "executedCases": 0,
+        "nativeKeySends": 0,
+        "causeClassification": "Fixture owned-setup PowerShell command timed out before any actual shortcut-recording case; cannot accept the product shortcut-settings UI or infer a product failure from this result.",
+        "nodeExitCode": 1,
+        "originalFailurePreserved": true
+      },
+      "rust": {
+        "passed": 228,
+        "failed": 0,
+        "ignored": 1
+      },
+      "identity": {
+        "stageSha256": "3e767c7046adcf8ef6b137f5811b0966efc8613f671f1f3d575f185b3c074539",
+        "stageBytes": 5825536,
+        "embeddedDll": {
+          "dllBytes": 100864,
+          "dllSha256": "069b3617a598b14873491a74d4045a475f1bae260c350c9ab4d572cb8dba5f8e",
+          "completePayloadEmbedded": true,
+          "exactPayloadOffset": 4538128
+        },
+        "installerSha256": "a22b586bfe46230563729b925e64c9d41a1c1427f5f52ff53e8ff8a418fce4c9",
+        "installerBytes": 75281557,
+        "installedApplication": {
+          "stageSha256": "3e767c7046adcf8ef6b137f5811b0966efc8613f671f1f3d575f185b3c074539",
+          "installedSha256": "4ebf07f7cb657e9ef798fc7e8cc9aa851242b781ce8ee06903f9a9832103f5af",
+          "expectedNsisSha256": "4ebf07f7cb657e9ef798fc7e8cc9aa851242b781ce8ee06903f9a9832103f5af",
+          "markerOffset": 5263150,
+          "stageMarker": "__TAURI_BUNDLE_TYPE_VAR_UNK",
+          "installedMarker": "__TAURI_BUNDLE_TYPE_VAR_NSS",
+          "changedBytes": 3,
+          "comparedBytes": 5825536,
+          "actualExecutablesModified": false
+        },
+        "engineSha256": "550a66f87db4bc7785435d7a60975dffd0f1555b7712d6262572c8624a365574",
+        "engineBytes": 6479872,
+        "correspondingSource": {
+          "sha256": "66ce29624429bfdcdb4f265815402e9bd2a8b324535bc1d9d13bcfa267d8fd3c",
+          "bytes": 19272655,
+          "files": 2105
+        }
+      },
+      "strictApplication": {
+        "ok": true,
+        "executed": 16,
+        "passed": 16,
+        "required": 16,
+        "translationBackend": "loopback-mock",
+        "actualRegisteredAltD": true,
+        "fakeIpcUsed": false,
+        "sameHotkeyRetries": 0,
+        "actualMouseSelectionCases": 7,
+        "coldFirstHotkeyMilliseconds": 1150.9006000000002,
+        "sourceTextChangedEvents": [
+          {
+            "case": "edit-mouse-round-1",
+            "count": 0
+          },
+          {
+            "case": "same-window-B-explicit-next-shortcut",
+            "count": 0
+          },
+          {
+            "case": "pinned-edit-update",
+            "count": 0
+          },
+          {
+            "case": "edit-mouse-round-2",
+            "count": 0
+          },
+          {
+            "case": "edit-mouse-round-3",
+            "count": 0
+          },
+          {
+            "case": "multiline-explicit-paragraphs",
+            "count": 0
+          },
+          {
+            "case": "rich-mouse-round-1",
+            "count": 0
+          },
+          {
+            "case": "rich-mouse-round-2",
+            "count": 0
+          },
+          {
+            "case": "rich-mouse-round-3",
+            "count": 0
+          },
+          {
+            "case": "pinned-rich-update",
+            "count": 0
+          }
+        ],
+        "sameWindowRace": {
+          "passed": true,
+          "childObservedToFocusSwitchMilliseconds": 3.3214,
+          "modeVerificationAfterFocusSwitch": true,
+          "unrelatedBImported": false,
+          "beforeExplicitBRequests": 0,
+          "beforeExplicitBHistory": 0,
+          "afterOneExplicitBRequests": 1,
+          "afterOneExplicitBHistory": 1
+        },
+        "management": {
+          "passed": true,
+          "phase": "complete",
+          "replyReleasedAfterReady": true,
+          "actualReplyWritten": true,
+          "historyCompleted": true,
+          "visible": true,
+          "visibleSourceNull": true,
+          "focusUnchanged": true,
+          "foregroundUnchanged": true,
+          "explicitReturnForSourceAudit": true,
+          "originalSourcePreserved": true
+        },
+        "ownAppStopped": true,
+        "ownedDirectoriesRemoved": true,
+        "allCases": [
+          {
+            "name": "edit-mouse-round-1",
+            "passed": true,
+            "hotkeysSent": 1
+          },
+          {
+            "name": "same-window-focus-change-after-helper-spawn",
+            "passed": true,
+            "hotkeysSent": 1
+          },
+          {
+            "name": "same-window-B-explicit-next-shortcut",
+            "passed": true,
+            "hotkeysSent": 1
+          },
+          {
+            "name": "pinned-edit-update",
+            "passed": true,
+            "hotkeysSent": 1
+          },
+          {
+            "name": "empty-selection-first-input-enter",
+            "passed": true,
+            "hotkeysSent": 1
+          },
+          {
+            "name": "edit-mouse-round-2",
+            "passed": true,
+            "hotkeysSent": 1
+          },
+          {
+            "name": "edit-mouse-round-3",
+            "passed": true,
+            "hotkeysSent": 1
+          },
+          {
+            "name": "multiline-explicit-paragraphs",
+            "passed": true,
+            "hotkeysSent": 1
+          },
+          {
+            "name": "rich-mouse-round-1",
+            "passed": true,
+            "hotkeysSent": 1
+          },
+          {
+            "name": "rich-mouse-round-2",
+            "passed": true,
+            "hotkeysSent": 1
+          },
+          {
+            "name": "rich-mouse-round-3",
+            "passed": true,
+            "hotkeysSent": 1
+          },
+          {
+            "name": "pinned-rich-update",
+            "passed": true,
+            "hotkeysSent": 1
+          },
+          {
+            "name": "rapid-A-then-new-selection-B",
+            "passed": true,
+            "hotkeysSent": 2
+          },
+          {
+            "name": "intentional-source-window-switch-with-new-AltD",
+            "passed": true,
+            "hotkeysSent": 2
+          },
+          {
+            "name": "manual-editor-input-cancels-old-translation",
+            "passed": true,
+            "hotkeysSent": 1
+          },
+          {
+            "name": "management-navigation-preserves-view-source-and-focus",
+            "passed": true,
+            "hotkeysSent": 1
+          }
+        ]
+      },
+      "otherRuntime": {
+        "generatedDocument": {
+          "passed": 11,
+          "executed": 11,
+          "required": 11,
+          "ok": true
+        },
+        "delegated": {
+          "ok": true,
+          "cases": 8
+        },
+        "live": {
+          "ok": true,
+          "trials": 8,
+          "hover": true
+        },
+        "performance": {
+          "ok": true
+        },
+        "popup": {
+          "ok": true
+        },
+        "applicationCoreLatest": {
+          "ok": true,
+          "latestCases": 4,
+          "latestPassed": 4,
+          "required": 4,
+          "historyCount": 7,
+          "pinnedObservation": {
+            "samples": 403,
+            "hiddenSamples": 0,
+            "maximumSampleGapMilliseconds": 26.1682,
+            "pollMilliseconds": 10
+          }
+        }
+      },
+      "internalRegressions": {
+        "budget": {
+          "ok": true,
+          "executed": 8,
+          "passed": 8,
+          "required": 8,
+          "assertions": 42,
+          "actualUiaProvider": false,
+          "inputSent": false,
+          "clipboardAccessed": false
+        },
+        "query": {
+          "ok": true,
+          "sameMtaThreadCalls": 200,
+          "deadlineMilliseconds": 2000,
+          "observedTimeoutMilliseconds": 2011.4180000000001,
+          "rejectedBeforeAndAfterDrain": true,
+          "forbiddenCallbacksExecuted": 0,
+          "actualUiaProviderTested": false,
+          "desktopInputSent": false,
+          "productionQueryImported": true
+        },
+        "copyTicket": {
+          "ok": true,
+          "selectionCopyTicketPassed": true,
+          "assertions": 21,
+          "nativeHooksInstalled": false,
+          "inputSent": false,
+          "clipboardAccessed": false
+        },
+        "exits": {
+          "selectionBudgetExit": 0,
+          "selectionQueryExit": 0,
+          "copyTicketExit": 0,
+          "expectedBudgetCases": 8
+        }
+      },
+      "installedOffline": {
+        "ok": true,
+        "installerExecuted": true,
+        "realModelExecuted": true,
+        "mockTranslationUsed": false,
+        "realModels": [
+          {
+            "id": "en-zh-sentence",
+            "elapsedMs": 248,
+            "qualityScope": "Basic direction/semantic/format acceptance only; short identifiers require nonempty output and are not rated as high quality"
+          },
+          {
+            "id": "zh-en-sentence",
+            "elapsedMs": 263,
+            "qualityScope": "Basic direction/semantic/format acceptance only; short identifiers require nonempty output and are not rated as high quality"
+          },
+          {
+            "id": "technical-short",
+            "elapsedMs": 20,
+            "qualityScope": "Basic direction/semantic/format acceptance only; short identifiers require nonempty output and are not rated as high quality"
+          },
+          {
+            "id": "technical-underlines",
+            "elapsedMs": 80,
+            "qualityScope": "Basic direction/semantic/format acceptance only; short identifiers require nonempty output and are not rated as high quality"
+          },
+          {
+            "id": "en-zh-paragraphs",
+            "elapsedMs": 24,
+            "qualityScope": "Basic direction/semantic/format acceptance only; short identifiers require nonempty output and are not rated as high quality"
+          },
+          {
+            "id": "zh-en-paragraphs",
+            "elapsedMs": 26,
+            "qualityScope": "Basic direction/semantic/format acceptance only; short identifiers require nonempty output and are not rated as high quality"
+          }
+        ],
+        "installedApplicationOk": true,
+        "installedChains": [
+          "Actual Alt+D -> native source selection -> frontend automatic translation -> real offline en-zh model -> durable synthetic history; source foreground preserved",
+          "Actual empty Alt+D -> focused blank source -> first Unicode SendInput text + Enter -> real offline zh-en model/history",
+          "Actual Alt+S -> production transparent overlays -> left-drag -> WinRT OCR -> frontend source/automatic real offline model translation -> history; foreground preserved"
+        ],
+        "backend": "real-bundled-offline-model",
+        "actualOfflineTranslations": {
+          "selection": {
+            "text": "你好,世界。 这是一个翻译测试。",
+            "sourceLanguage": "en",
+            "targetLanguage": "zh-Hans",
+            "backendElapsedMs": 342
+          },
+          "typed": {
+            "text": "Hello, world. This is a translation test.",
+            "sourceLanguage": "zh-Hans",
+            "targetLanguage": "en",
+            "backendElapsedMs": 260
+          },
+          "ocr": {
+            "text": "Hello 世界 2468",
+            "sourceLanguage": "en",
+            "targetLanguage": "zh-Hans",
+            "backendElapsedMs": 23
+          }
+        },
+        "resourceAllowlist": {
+          "allLicenseFiles": 38,
+          "excludedBuildMetadata": [
+            {
+              "bytes": 24,
+              "path": ".gitignore"
+            },
+            {
+              "bytes": 1575,
+              "path": "README.md"
+            },
+            {
+              "bytes": 2758,
+              "path": "engine-sources.lock.json"
+            },
+            {
+              "bytes": 188342,
+              "path": "mozilla-model-registry-20261026.json"
+            },
+            {
+              "bytes": 2373,
+              "path": "selected-models.json"
+            }
+          ],
+          "excludedUncompressedBytes": 195072,
+          "expectedRuntimeFiles": 48,
+          "installedInventoryChecked": true,
+          "modelBytes": 104470603,
+          "modelFiles": 7,
+          "ok": true,
+          "originalNotices": 36,
+          "sourceArchiveRequiredSeparately": true,
+          "stagedPayloadChecked": true
+        },
+        "modelBytes": 104470603,
+        "modelFiles": 7,
+        "rulesRemoved": true,
+        "ownedInstallRemoved": true
+      },
+      "rawLog": {
+        "bytes": 927262,
+        "sha256": "d10546fa9c5fa8415e579af1d71f422dd98bbb4da8c662cce8378cff78b24408",
+        "lineEndings": "LF-normalized complete Windows job log"
+      }
+    },
+    "browser4385": {
+      "run": 40544606772,
+      "actualHelperCalls": 48,
+      "passed": 42,
+      "setupFailures": 0,
+      "positiveCases": 36,
+      "positivePassed": 30,
+      "emptyPasswordNegatives": 12,
+      "negativePassed": 12,
+      "freshFirstFailures": 6,
+      "firstTimeout": 1,
+      "firstRuntimeIdentityStageQuickFailures": 5,
+      "allClipboardAndForegroundPreserved": true,
+      "reasonForQuickFailure": "Need bounded numeric diagnosis; stage3 does not distinguish GetRuntimeId exception from mismatch."
+    },
+    "clipboard4385": {
+      "run": 40544607335,
+      "executed": 3,
+      "passed": 2,
+      "baseline": "passed",
+      "newRealCtrlC": "passed; CANCELLED, no helper restoration over independent write",
+      "samePidBackgroundPublication": "failure retained; wrong source and helper-owned original restoration"
+    },
+    "full4385": {
+      "run": 40544606324,
+      "status": "failure",
+      "rawGates": 11,
+      "successfulGates": 9,
+      "failedGates": [
+        "shortcutsUi preparation before actual case",
+        "selectionRigorous old fixture11/16"
+      ],
+      "windowsRustPassed": 228,
+      "windowsRustIgnored": 1,
+      "nsisInstalled": true,
+      "realModelCases": 6,
+      "installedAppChains": 3
+    }
+  },
+  "budgetFixture": {
+    "run": 40553539766,
+    "source": "8e0184767396ad961f716736b615a2093c01b3ff",
+    "required": 8,
+    "executed": 8,
+    "passed": 8,
+    "assertions": 42,
+    "scopedQueryMilliseconds": 2213.9305,
+    "cumulativeQueryMilliseconds": 709.6711,
+    "unscopedQueryMilliseconds": 2005.795,
+    "actualUIAProviderTested": false,
+    "clipboardAccessed": false,
+    "inputSent": false,
+    "hooksInstalled": false
+  },
+  "diagnosticTimeline": [
+    {
+      "source": "11b8e3d",
+      "run": 40545865325,
+      "actual": 48,
+      "passed": 42,
+      "finding": "initialDocument vs actualGroup RuntimeId mismatch"
+    },
+    {
+      "source": "cac0167",
+      "run": 40546585120,
+      "actual": 48,
+      "passed": 47,
+      "finding": "ordinaryFocus then sameElementCache; first system call2s cutoff"
+    },
+    {
+      "source": "c74fb19",
+      "run": 40548339120,
+      "actual": 48,
+      "passed": 47,
+      "finding": "original2s failure retained; abandoned system call returned2185.9692ms; nextRPC not started"
+    },
+    {
+      "source": "810563b",
+      "run": 40550008786,
+      "actual": 48,
+      "passed": 47,
+      "finding": "whole selected-text monotonic5000ms budget; first Pane thenGroup identity mismatch retained"
+    }
+  ],
+  "sourceSync": {
+    "inventory": "work/alt-d-strict-20261028/source-sync-selection-rigorous-diagnostic-closure-inventory.json",
+    "cumulativeFiles": 69,
+    "changedPaths": 23,
+    "oldFilesGuarded": 57,
+    "newFilesRequiredAbsent": 12,
+    "historicalDocsPreserved": true,
+    "independentAudit": "initial69file sync passed; final docs refreshed with prior-hash guard and complete69file verification",
+    "initialIndependentAudit": "passed:69/69 hashes,19 non-doc target f65/worktree/original, all historical doc bodies retained",
+    "finalDocsRefresh": "complete; subsequent diagnostic closure refreshes four documentation files only, retaining the exact f65 production code"
+  },
+  "subsequentDiagnostic": {
+    "status": "diagnostic executed; initial Pane has no ancestor Document, so proposed anchor prerequisite is absent",
+    "productionCandidateRemains": "f65ab043c7e7a0ad4b5497d1a2651eb490198980",
+    "diagnosticProbeRetainedInProduction": false,
+    "restoredProductionHelperLfSha256": "093f5910619dfbed9b8f8b1f60b5066e19e7b751ffa120a2c5c4fcfe8a9796d7",
+    "restoredProductionBridgeLfSha256": "6d69d0a1898fecbbe09c2bcbe70ad8a4287afe950a93cd1799212349d5913c43",
+    "diagnosticHelperLfSha256": "82a265d4c435fb68b6906c79fd788dba7aa3c29d735fcecf89d5ec9f3ff6b212",
+    "explicitPerformanceDiagnosticsOnly": true,
+    "retainsStrictFocusIdentity": true,
+    "noTextHashesOrRuntimeIdsLogged": true,
+    "maxRanges": 16,
+    "rawUtf16CharactersStrictlyBelow": 65536,
+    "source": "c9bc277bb6e642ab49ebda424c3f403c39ffe0bd",
+    "run": 40562621965,
+    "executed": 96,
+    "passed": 94,
+    "firstBrowserCasesPassed": "10/12; first tested helper on each independent runner failed",
+    "probesExecuted": 84,
+    "protectedBeforeProbe": 12,
+    "unsupportedInitialRole": 82,
+    "initialPaneWithoutAncestorDocument": 2,
+    "eligibleInitialAnchors": 0,
+    "summary": "work/alt-d-strict-20261028/ci-c9bc277-initial-anchor/summary.json",
+    "edgeFirstRawSha256": "d43ca102328c8cb5e431000536e6eef39d95160bb350a66155c59e005f227c3f",
+    "chromeFirstRawSha256": "06a48ede65a75c3f4d34c98ebb1b54feb5e3c429623c05bc2cb06aa83fabebed",
+    "actualResult": "No initial A from the validated ancestor chain; no anchor acceptance added. Both identity failures remain and neither exhausted the deadline. Probe subsequently removed, PS and bridge exactly restored to f65. Diagnostic timing is not baseline repair; frozen f65 installer unchanged.",
+    "furtherResearchOnly": {
+      "uiaV2": "https://github.com/Descolada/UIA-v2/blob/main/Lib/UIA.ahk#L831-L854",
+      "chromiumHandler": "https://github.com/chromium/chromium/blob/main/content/browser/renderer_host/legacy_render_widget_host_win.cc#L329-L375",
+      "chromiumActivation": "https://github.com/chromium/chromium/blob/main/ui/accessibility/platform/ax_platform.cc#L186-L215",
+      "finding": "Renderer-child notification differs from earlier top-level initialization attempts, but the public tool also uses readiness polling and defaults to global screen-reader activation. Modern Chromium does not enable web content from the honeypot notification alone. No evidence establishes a single notification as a synchronous fix; no implementation added.",
+      "provesPlatformHasNoSolution": false
+    }
+  }
+}

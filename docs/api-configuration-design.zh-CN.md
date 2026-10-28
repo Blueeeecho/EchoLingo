@@ -1,8 +1,18 @@
 # EchoLingo API 与 OCR 配置设计：以 Bob 官方文档为参照
 
-研究及访问日期：2026-10-24。本文只查阅 Bob、供应商官方文档及官方 SDK；未读取本机 Bob 配置或系统钥匙串，未取得、验证或迁移任何用户密钥，未调用真实云 API。供应商页面会更新，端点、模型、价格、额度均须以开户地区和控制台为准。
+2026-10-28 更新：下文保留 10 月 24 日的研究与实现快照。新增百度、有道、Microsoft 文本翻译及有道、Google OCR 的当前协议、凭据与配置入口见[官方服务配置说明](official-services.zh-CN.md)；源码支持不等于真实厂商账户已验收。
+
+原始研究及访问日期：2026-10-24。该轮只查阅 Bob、供应商官方文档及官方 SDK；未读取本机 Bob 配置或系统钥匙串，未取得、验证或迁移任何用户密钥，未调用真实云 API。2026-10-25 经授权进行的 MiniMax 实测另见下节。供应商页面会更新，端点、模型、价格、额度均须以开户地区和控制台为准。
 
 本文区分三类信息：**官方已确认**表示页面或官方 SDK 明示的行为/协议；**设计建议**表示 EchoLingo 应采用的产品方案；**实现快照**表示本次查阅的仓库状态，不能代替实机或真实账户验收。
+
+## MiniMax 中国站：2026-10-25 实测补充
+
+文本翻译可选新增的「MiniMax · 中国站」预设，协议为 OpenAI 兼容，Base URL 为 `https://api.minimax.cn/v1`，模型为 `MiniMax-M3.1-Flash`，模型名称仍可编辑。填写与中国站地域/账号匹配的 Key，正常使用时由 EchoLingo 保存到系统凭据库。订阅 Key 与普通按量 Key 的额度规则不同，按官方账号说明配置。[OpenAI 兼容协议](https://platform.minimax.cn/docs/api-reference/text-openai-api)、[订阅及地域说明](https://platform.minimax.cn/docs/m-plan/faq)。
+
+图片识字使用「OpenAI 兼容 Vision」类型，填写相同 Base URL 和模型，保持认证头 `Authorization`、前缀 `Bearer ` 与默认识字提示词。保存后仍需明确选择该 OCR 服务，截图才会上传；本机 OCR 默认值不会被改动。模型支持原生 `image_url` 图片输入，思考与最终文本分别返回；M3.1 Flash 默认思考深度为 max，不能关闭思考。[官方模型调用](https://platform.minimax.cn/docs/guides/text-generation)。
+
+本次已用生产代码实测七次文本/生成图请求，详细边界和结果见 [测试报告](test-report.md)。凭据仅供本轮内存测试，未预填到任何文件或应用，也未上传 GitHub；这不等于已完成安装版界面验收。
 
 ## 1. 结论与首版边界
 

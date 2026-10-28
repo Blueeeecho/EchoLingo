@@ -2,7 +2,41 @@ import { describe, expect, it } from 'vitest';
 import { credentialScope } from '../src/credential-scope';
 import { buildOcrCredential, OCR_NATIVE_ACTIONS, OCR_NATIVE_URLS } from '../src/ocr-credentials';
 import { inferProviderPreset, PROVIDER_PRESETS, qwenBaseUrl, qwenSettingsFromUrl } from '../src/provider-presets';
+import { validateProvider } from '../src/model';
 import type { Provider } from '../src/types';
+
+describe('system translation configuration', () => {
+  const system: Provider = { id: 'system-translation', name: '系统翻译', kind: 'system', baseUrl: '', model: '', prompt: '', enabled: true, hasKey: false };
+  it('accepts a system provider without a network endpoint or credentials, enabled or disabled', () => {
+    expect(validateProvider(system)).toBeNull();
+    expect(validateProvider({ ...system, enabled: false, prompt: undefined, hasKey: undefined })).toBeNull();
+  });
+  it('rejects API settings and credential claims for a system provider', () => {
+    for (const fields of [{ baseUrl: 'https://api.example.com/v1' }, { model: 'model' }, { prompt: 'Translate this' }, { hasKey: true }]) {
+      expect(validateProvider({ ...system, ...fields })).toMatch(/不使用 API/);
+    }
+    expect(validateProvider({ ...system, name: ' ' })).toMatch(/服务名称/);
+  });
+  it('keeps network protocols subject to URL validation', () => {
+    for (const kind of ['openai', 'deepl', 'libretranslate'] as const) expect(validateProvider({ ...system, kind })).toMatch(/API URL/);
+  });
+  it('offers an explicit system preset without inventing a cloud endpoint or model', () => {
+    expect(PROVIDER_PRESETS.find((preset) => preset.id === 'system')).toMatchObject({ kind: 'system', baseUrl: '', exampleModel: '' });
+    expect(inferProviderPreset(system)).toBe('system');
+    expect(PROVIDER_PRESETS.find((preset) => preset.id === 'system')?.help).toMatch(/macOS 26/);
+    expect(PROVIDER_PRESETS.find((preset) => preset.id === 'system')?.help).toMatch(/首次可能需要/);
+  });
+});
+
+describe('bundled offline translation configuration', () => {
+  const offline: Provider = { id: 'offline-translation', name: '本机离线翻译', kind: 'offline', baseUrl: '', model: '', prompt: '', enabled: true, hasKey: false };
+  it('accepts an offline provider while refusing network or credential fields', () => {
+    expect(validateProvider(offline)).toBeNull();
+    for (const fields of [{ baseUrl: 'https://example.com' }, { model: 'cloud' }, { prompt: 'send' }, { hasKey: true }]) expect(validateProvider({ ...offline, ...fields })).toMatch(/不使用 API/);
+    expect(inferProviderPreset(offline)).toBe('offline');
+    expect(PROVIDER_PRESETS.find(preset => preset.id === 'offline')).toMatchObject({ baseUrl: '', exampleModel: '' });
+  });
+});
 
 describe('native OCR credential bundles', () => {
   it('requires both Baidu credential components whenever either is supplied', () => {
@@ -30,7 +64,7 @@ describe('native OCR credential bundles', () => {
     expect(buildOcrCredential('tencent', { secretId: 'qa-id', secretKey: 'qa-secret' }, true).error).toBeNull();
   });
   it('keeps native endpoints and actions separate from generic gateway configuration', () => {
-    expect(OCR_NATIVE_URLS).toEqual({ baidu: 'https://aip.baidubce.com', tencent: 'https://ocr.tencentcloudapi.com' });
+    expect(OCR_NATIVE_URLS).toMatchObject({ baidu: 'https://aip.baidubce.com', tencent: 'https://ocr.tencentcloudapi.com' });
     expect(OCR_NATIVE_ACTIONS.baidu.map(([action]) => action)).toEqual(['general_basic', 'accurate_basic']);
     expect(OCR_NATIVE_ACTIONS.tencent.map(([action]) => action)).toEqual(['GeneralBasicOCR', 'GeneralAccurateOCR']);
   });
@@ -51,6 +85,20 @@ describe('vendor presets and Qwen regions', () => {
     expect(base).toBe('https://ws-qa.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1');
     expect(qwenSettingsFromUrl(base)).toEqual({ region: 'singapore', workspaceId: 'ws-qa' });
     expect(() => qwenBaseUrl('beijing', 'qa.example.com/path')).toThrow();
+  });
+  it('offers the documented MiniMax China model through the editable OpenAI-compatible preset', () => {
+    expect(PROVIDER_PRESETS.find((preset) => preset.id === 'minimax')).toMatchObject({
+      kind: 'openai', baseUrl: 'https://api.minimax.cn/v1', exampleModel: 'MiniMax-M3.1-Flash',
+      docs: 'https://platform.minimax.cn/docs/api-reference/text-openai-api',
+    });
+  });
+  it('infers MiniMax only for its documented China host', () => {
+    const provider: Provider = { id: 'qa-minimax', name: 'MiniMax', kind: 'openai', baseUrl: 'https://api.minimax.cn/v1', model: 'editable-model', enabled: true };
+    expect(inferProviderPreset(provider)).toBe('minimax');
+    for (const baseUrl of ['https://api.minimax.cn.attacker.invalid/v1', 'https://attacker.invalid/api.minimax.cn', 'https://api.minimax.cn@attacker.invalid/v1', 'https://api.minimax.io/v1', 'invalid URL']) {
+      expect(inferProviderPreset({ ...provider, baseUrl })).toBe('openai');
+    }
+    expect(inferProviderPreset({ ...provider, kind: 'deepl' })).toBe('deepl');
   });
   it('infers presets only from actual protocol and host, not misleading text', () => {
     const provider: Provider = { id: 'qa', name: 'DeepSeek', kind: 'openai', baseUrl: 'https://api.deepseek.com.attacker.invalid', model: 'test', enabled: true };

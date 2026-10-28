@@ -19,6 +19,10 @@ GitHub: https://github.com/Blueeeecho/EchoLingo
 12. 空按 Alt+D 只显示空白输入框，不显示取词失败或权限提示。系统权限在设置中明确授权；快捷键不反复申请。
 13. 输入区 Enter 完成并翻译，Shift+Enter 换行；输入法确认候选词时不触发翻译。
 
+## 2026-10-27 Windows OCR 指引更新
+
+Alt+S 默认实时无感 OCR：当前屏幕保留蓝色细边，悬停应用窗口时增加窗口蓝框；左键拖动后按任意实际区域识别、填入原文并自动翻译，不自动吸附或整窗截图。桌面/任务栏或不确定目标只保留屏幕框。此次先交付 Windows 预览，macOS 对应提示尚未实现；精确验收和历史初始约定的后续修订见[当前进度](docs/status.md)。
+
 ## 项目入口
 - [实现计划](docs/implementation-plan.md)
 - [OCR 与翻译 API 配置设计](docs/api-configuration-design.zh-CN.md)
