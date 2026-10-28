@@ -1,0 +1,3 @@
+User-agent: *
+Allow: /EchoLingo/
+Sitemap: https://blueeeecho.github.io/EchoLingo/sitemap.xml
