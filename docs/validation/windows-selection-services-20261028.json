@@ -338,5 +338,36 @@
       "oldRedResultsPreserved": true,
       "rootIndependentCheck": "/Users/wwq/Documents/Codex/2026-10-24/ni-ne/work/selection-dismiss-official-apis-20261028/ci-dcb8f60-original-native/root-independent-check.json"
     }
+  },
+  "freshFullBuild": {
+    "source": "6d748062298bc2f4dd396eb7ac3a09a9a4766c35",
+    "run": 40635398888,
+    "outcome": "failure",
+    "summary": "/Users/wwq/Documents/Codex/2026-10-24/ni-ne/work/selection-dismiss-official-apis-20261028/ci-6d74806-full/summary.json",
+    "summaryBytes": 28330,
+    "summarySha256": "c46100a0beeaa6f1f192bc8c92f842c5f828c4c854fc15c3ffeb20a6ba1f173b",
+    "rawWindowsGates": {
+      "nonbrowserSelection": "success",
+      "selectionInternals": "success",
+      "shortcutsUi": "failure",
+      "installedOffline": "success",
+      "applicationCore": "success",
+      "actualBrowserOcr": "success",
+      "popupVisibility": "success",
+      "selectionDocument": "success",
+      "liveCapture": "success",
+      "helperPerformance": "failure",
+      "customShortcuts": "success",
+      "delegatedCapture": "success",
+      "actualBrowserSelection": "success",
+      "shortcutInstall": "success",
+      "rigorousSelection": "success"
+    },
+    "rawGateSuccessCount": 13,
+    "rawGateFailureCount": 2,
+    "intermediateProgressCorrection": "Earlier progress messages incorrectly called jobs API continue-on-error conclusion=success a raw outcome. Those stage-level statements are corrected: rawfinal.outcomes and actual JSON are authoritative, UI/performance failures are preserved. No earlier conclusion is used as acceptance proof.",
+    "packageLocalAudit": "/Users/wwq/Documents/Codex/2026-10-24/ni-ne/work/selection-dismiss-official-apis-20261028/ci-6d74806-full/package-local-audit.json",
+    "sameBinaryReadonlyDiagnosticsPending": true,
+    "notFullGreen": true
   }
 }

@@ -824,7 +824,7 @@ jobs:
     name: Targeted shortcut UI diagnostics (immutable candidate)
     if: github.event_name == 'workflow_dispatch' && (github.event.inputs.mode == 'windows-shortcuts-ui-diagnostics' || github.event.inputs.mode == 'windows-shortcuts-ui-medium-diagnostics' || github.event.inputs.mode == 'windows-shortcuts-current-diagnostics' || github.event.inputs.mode == 'windows-shortcuts-workflows-diagnostics')
     runs-on: windows-latest
-    timeout-minutes: 6
+    timeout-minutes: 15
     permissions:
       contents: read
       actions: read
@@ -838,16 +838,19 @@ jobs:
         run: |
           git diff --quiet 0a08830f8286a2d54aa658c8876b013a8b1696b1 HEAD -- src src-tauri resources assets scripts index.html package.json package-lock.json vite.config.ts tsconfig.json tsconfig.node.json .cargo
           if ($LASTEXITCODE -ne 0) { throw 'Application source changed; the 0a08830 binary cannot prove this checkout.' }
-      - name: Require production equivalence for current f65 supplement
+      - name: Require production equivalence for immutable current supplement
         if: github.event.inputs.mode == 'windows-shortcuts-current-diagnostics' || github.event.inputs.mode == 'windows-shortcuts-workflows-diagnostics'
         shell: powershell
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          git diff --quiet f65ab043c7e7a0ad4b5497d1a2651eb490198980 HEAD -- src src-tauri resources assets scripts index.html package.json package-lock.json vite.config.ts tsconfig.json tsconfig.node.json .cargo
-          if ($LASTEXITCODE -ne 0) { throw 'Production source differs from f65; rebuild and do not claim same-binary acceptance.' }
-          $actual = gh run view 40556538469 --repo Blueeeecho/EchoLingo --json headSha --jq .headSha
-          if ($LASTEXITCODE -ne 0 -or $actual.Trim() -ne 'f65ab043c7e7a0ad4b5497d1a2651eb490198980') { throw 'Immutable f65 source-run identity mismatch.' }
+          $latest = '${{ github.event.inputs.mode }}' -eq 'windows-shortcuts-current-diagnostics'
+          $source = if ($latest) { '6d748062298bc2f4dd396eb7ac3a09a9a4766c35' } else { 'f65ab043c7e7a0ad4b5497d1a2651eb490198980' }
+          $sourceRun = if ($latest) { 40635398888 } else { 40556538469 }
+          git diff --quiet $source HEAD -- src src-tauri resources assets scripts index.html package.json package-lock.json vite.config.ts tsconfig.json tsconfig.node.json .cargo
+          if ($LASTEXITCODE -ne 0) { throw 'Production source differs from the immutable stage; no same-binary acceptance.' }
+          $actual = gh run view $sourceRun --repo Blueeeecho/EchoLingo --json headSha --jq .headSha
+          if ($LASTEXITCODE -ne 0 -or $actual.Trim() -ne $source) { throw 'Immutable source-run identity mismatch.' }
       - uses: actions/setup-node@v4
         with:
           node-version: '24'
@@ -855,8 +858,8 @@ jobs:
       - run: npm ci
       - uses: actions/download-artifact@v4
         with:
-          artifact-ids: ${{ (github.event.inputs.mode == 'windows-shortcuts-current-diagnostics' || github.event.inputs.mode == 'windows-shortcuts-workflows-diagnostics') && '12758601917' || '12734022372' }}
-          run-id: ${{ (github.event.inputs.mode == 'windows-shortcuts-current-diagnostics' || github.event.inputs.mode == 'windows-shortcuts-workflows-diagnostics') && '40556538469' || '40502410316' }}
+          artifact-ids: ${{ github.event.inputs.mode == 'windows-shortcuts-current-diagnostics' && '12793114078' || github.event.inputs.mode == 'windows-shortcuts-workflows-diagnostics' && '12758601917' || '12734022372' }}
+          run-id: ${{ github.event.inputs.mode == 'windows-shortcuts-current-diagnostics' && '40635398888' || github.event.inputs.mode == 'windows-shortcuts-workflows-diagnostics' && '40556538469' || '40502410316' }}
           github-token: ${{ github.token }}
           path: shortcut-candidate-evidence
           merge-multiple: true
@@ -869,16 +872,17 @@ jobs:
           $candidatePath = $candidateFiles[0].FullName
           $candidateHash = (Get-FileHash -LiteralPath $candidatePath -Algorithm SHA256).Hash.ToLowerInvariant()
           $current = '${{ github.event.inputs.mode }}' -eq 'windows-shortcuts-current-diagnostics' -or '${{ github.event.inputs.mode }}' -eq 'windows-shortcuts-workflows-diagnostics'
-          $expectedBytes = if ($current) { 5825536 } else { 5717504 }
-          $expectedHash = if ($current) { '3e767c7046adcf8ef6b137f5811b0966efc8613f671f1f3d575f185b3c074539' } else { '046a33fd4498e7ef2e14a49f694f0a1fa9e6e2af1805d1538358e8bcfce77090' }
+          $latest = '${{ github.event.inputs.mode }}' -eq 'windows-shortcuts-current-diagnostics'
+          $expectedBytes = if ($latest) { 5923840 } elseif ($current) { 5825536 } else { 5717504 }
+          $expectedHash = if ($latest) { '80d6e92a010df988ee51e5b41b48032d553af588c1fa624681ba9fdd7fc480e7' } elseif ($current) { '3e767c7046adcf8ef6b137f5811b0966efc8613f671f1f3d575f185b3c074539' } else { '046a33fd4498e7ef2e14a49f694f0a1fa9e6e2af1805d1538358e8bcfce77090' }
           if ($candidateFiles[0].Length -ne $expectedBytes -or $candidateHash -ne $expectedHash) { throw 'Exact stage executable identity mismatch.' }
           $identity = [ordered]@{
-            scope = if ($current) { 'Exact f65 packaged shortcut UI supplement; original full-run failure retained' } else { 'Historical exact 0a08830 shortcut UI only; never current-checkout or full-run acceptance' }
+            scope = if ($latest) { 'Exact 6d74806 UI and capture composition diagnostics; original full13/15 failure retained' } elseif ($current) { 'Exact f65 packaged shortcut UI supplement; original full-run failure retained' } else { 'Historical exact 0a08830 shortcut UI only; never current-checkout or full-run acceptance' }
             diagnosticMode = '${{ github.event.inputs.mode }}'
-            sourceRun = if ($current) { 40556538469 } else { 40502410316 }
-            sourceArtifactId = if ($current) { 12758601917 } else { 12734022372 }
-            applicationSource = if ($current) { 'f65ab043c7e7a0ad4b5497d1a2651eb490198980' } else { '0a08830f8286a2d54aa658c8876b013a8b1696b1' }
-            sourceArtifactApiDigest = if ($current) { 'sha256:94e355b8d0e9d713ad2d0329ed01f22961252ff5e6c8f05397458ff34bef9a5d' } else { 'sha256:74145ae5b69cb755124cc2e565cc9d287206f435b20b5d830c4c0ffd7c5dd33d' }
+            sourceRun = if ($latest) { 40635398888 } elseif ($current) { 40556538469 } else { 40502410316 }
+            sourceArtifactId = if ($latest) { 12793114078 } elseif ($current) { 12758601917 } else { 12734022372 }
+            applicationSource = if ($latest) { '6d748062298bc2f4dd396eb7ac3a09a9a4766c35' } elseif ($current) { 'f65ab043c7e7a0ad4b5497d1a2651eb490198980' } else { '0a08830f8286a2d54aa658c8876b013a8b1696b1' }
+            sourceArtifactApiDigest = if ($latest) { 'sha256:25490ddbd5a747f1931a21483769585fde4a0b6eb9b49f4edc43b6f98ad97fbd' } elseif ($current) { 'sha256:94e355b8d0e9d713ad2d0329ed01f22961252ff5e6c8f05397458ff34bef9a5d' } else { 'sha256:74145ae5b69cb755124cc2e565cc9d287206f435b20b5d830c4c0ffd7c5dd33d' }
             stagedBytes = $candidateFiles[0].Length
             stagedSha256 = $candidateHash
             checkoutFixtureSha256 = if ($current) { (Get-FileHash tests/windows-shortcuts-uia-smoke.ps1 -Algorithm SHA256).Hash.ToLowerInvariant() } else { (Get-FileHash tests/windows-shortcuts-ui.mjs -Algorithm SHA256).Hash.ToLowerInvariant() }
@@ -887,6 +891,17 @@ jobs:
           }
           $identity | ConvertTo-Json -Compress | Tee-Object -FilePath "$env:RUNNER_TEMP/echolingo-shortcuts-ui-identity.json"
           "path=$candidatePath" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+          if ($latest) {
+            $app = [IO.File]::ReadAllBytes($candidatePath)
+            $native = New-Object byte[] 105984
+            [Array]::Copy($app, 4616932, $native, 0, $native.Length)
+            $nativePath = Join-Path $env:RUNNER_TEMP 'echolingo-exact-6d74806-native.dll'
+            [IO.File]::WriteAllBytes($nativePath, $native)
+            $nativeHash = (Get-FileHash $nativePath -Algorithm SHA256).Hash.ToLowerInvariant()
+            if ($nativeHash -ne 'e857c2e7981a57153a4a5a5b445b28b443ae9e65b0159397b1447ef4e3f3ee41') { throw 'Complete exact stage DLL extraction mismatch.' }
+            "nativePath=$nativePath" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+            [ordered]@{ completeStageDllBytes=$native.Length; sha256=$nativeHash; offset=4616932; stageSha256=$candidateHash } | ConvertTo-Json -Compress | Tee-Object -FilePath "$env:RUNNER_TEMP/echolingo-exact-native-identity.json"
+          }
       - name: Run original actual shortcut UI interactions with bounded diagnostics
         id: shortcuts_ui
         if: github.event.inputs.mode != 'windows-shortcuts-workflows-diagnostics'
@@ -902,7 +917,7 @@ jobs:
           $global:LASTEXITCODE = 1 # A missing/unlaunchable node must never reuse a null/success exit code.
           try {
             if ('${{ github.event.inputs.mode }}' -eq 'windows-shortcuts-current-diagnostics') {
-              $output = @(& powershell.exe -NoProfile -STA -ExecutionPolicy Bypass -File tests/windows-shortcuts-uia-smoke.ps1 -ApplicationPath $env:ECHOLINGO_SHORTCUT_UI_CANDIDATE -ExpectedApplicationSha256 '3e767c7046adcf8ef6b137f5811b0966efc8613f671f1f3d575f185b3c074539' -ExpectedApplicationBytes 5825536 -IsolatedTestSession 2>&1)
+              $output = @(& powershell.exe -NoProfile -STA -ExecutionPolicy Bypass -File tests/windows-shortcuts-uia-smoke.ps1 -ApplicationPath $env:ECHOLINGO_SHORTCUT_UI_CANDIDATE -ExpectedApplicationSha256 '80d6e92a010df988ee51e5b41b48032d553af588c1fa624681ba9fdd7fc480e7' -ExpectedApplicationBytes 5923840 -IsolatedTestSession 2>&1)
             } elseif ($env:ECHOLINGO_SHORTCUT_UI_MEDIUM -eq 'true') {
               $output = @(& powershell.exe -NoProfile -STA -ExecutionPolicy Bypass -File tests/windows-shortcuts-ui-medium.ps1 -ApplicationPath $env:ECHOLINGO_SHORTCUT_UI_CANDIDATE -IsolatedTestSession 2>&1)
             } else {
@@ -913,6 +928,23 @@ jobs:
             $output | Out-File "$env:RUNNER_TEMP/echolingo-shortcuts-ui.log" -Encoding utf8
             $output | Write-Output
           }
+          exit $fixtureExit
+      - name: Exact packaged native capture composition and performance diagnostics
+        if: github.event.inputs.mode == 'windows-shortcuts-current-diagnostics'
+        id: helper_performance
+        continue-on-error: true
+        timeout-minutes: 6
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Continue'
+          $baseline = Join-Path $env:RUNNER_TEMP 'echolingo-ab4405c-windows.ps1'
+          git show ab4405cc15e2ca204459b2fd40389924aa994695:src-tauri/native/windows.ps1 | Out-File $baseline -Encoding utf8
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $global:LASTEXITCODE = 1
+          $output = @(& powershell.exe -NoProfile -STA -ExecutionPolicy Bypass -File tests/windows-helper-performance-smoke.ps1 -BaselineHelperPath $baseline -NativeAssemblyPath '${{ steps.candidate.outputs.nativePath }}' 2>&1)
+          $fixtureExit = $LASTEXITCODE
+          $output | Out-File "$env:RUNNER_TEMP/echolingo-helper-performance.log" -Encoding utf8
+          $output | Write-Output
           exit $fixtureExit
       - name: Loaded custom bindings execute selected-text and native OCR
         if: github.event.inputs.mode == 'windows-shortcuts-current-diagnostics' || github.event.inputs.mode == 'windows-shortcuts-workflows-diagnostics'
@@ -937,6 +969,8 @@ jobs:
             ${{ runner.temp }}/echolingo-shortcuts-ui.log
             ${{ runner.temp }}/echolingo-custom-shortcuts.log
             ${{ runner.temp }}/echolingo-shortcuts-ui-identity.json
+            ${{ runner.temp }}/echolingo-helper-performance.log
+            ${{ runner.temp }}/echolingo-exact-native-identity.json
       - name: Gate targeted shortcut UI raw outcome
         if: always()
         shell: powershell
@@ -947,7 +981,10 @@ jobs:
           [ordered]@{ scope = 'Configured custom-key real workflows; separate from UI save/restart checks'; customShortcutWorkflows = $custom } | ConvertTo-Json -Compress
           $workflowOnly = '${{ github.event.inputs.mode }}' -eq 'windows-shortcuts-workflows-diagnostics'
           $customRequired = $workflowOnly -or '${{ github.event.inputs.mode }}' -eq 'windows-shortcuts-current-diagnostics'
-          if ((-not $workflowOnly -and $outcome -ne 'success') -or ($customRequired -and $custom -ne 'success')) { throw 'Required actual shortcut UI or configured workflows incomplete or failed.' }
+          $performance = '${{ steps.helper_performance.outcome }}'
+          [ordered]@{ scope = 'Exact packaged 6d native capture diagnostics; original13/15 full red retained'; helperPerformance = $performance } | ConvertTo-Json -Compress
+          $performanceRequired = '${{ github.event.inputs.mode }}' -eq 'windows-shortcuts-current-diagnostics'
+          if ((-not $workflowOnly -and $outcome -ne 'success') -or ($customRequired -and $custom -ne 'success') -or ($performanceRequired -and $performance -ne 'success')) { throw 'Required actual shortcut UI or configured workflows incomplete or failed.' }
 
   windows-browser-diagnostics:
     name: Actual installed browser selected-text diagnostics (${{ matrix.browser_order }})

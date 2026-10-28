@@ -24,6 +24,7 @@ public static class EchoLingoShortcutsUiaFixture {
     [DllImport("user32.dll",SetLastError=true)] static extern bool RegisterHotKey(IntPtr window, int id, uint modifiers, uint key);
     [DllImport("user32.dll",SetLastError=true)] static extern bool UnregisterHotKey(IntPtr window, int id);
     [DllImport("user32.dll")] static extern short GetAsyncKeyState(int key);
+    [DllImport("user32.dll")] static extern bool GetGUIThreadInfo(uint thread,ref GUITHREADINFO info);
     [DllImport("user32.dll",SetLastError=true)] static extern uint SendInput(uint count, INPUT[] input, int size);
     [DllImport("kernel32.dll",CharSet=CharSet.Unicode,SetLastError=true)] static extern bool CreateDirectory(string path, IntPtr security);
     [DllImport("kernel32.dll",CharSet=CharSet.Unicode,SetLastError=true)] static extern IntPtr CreateJobObject(IntPtr attributes, string name);
@@ -43,6 +44,7 @@ public static class EchoLingoShortcutsUiaFixture {
     [StructLayout(LayoutKind.Sequential)] struct IOCOUNTERS { public ulong a,b,c,d,e,f; }
     [StructLayout(LayoutKind.Sequential)] struct JOBINFO { public JOBLIMIT basic; public IOCOUNTERS io; public UIntPtr processMemory,jobMemory,peakProcess,peakJob; }
     [StructLayout(LayoutKind.Sequential)] struct JOBACCOUNTING { public long totalUser,totalKernel,periodUser,periodKernel; public uint faults,total,active,terminated; }
+    [StructLayout(LayoutKind.Sequential)] struct GUITHREADINFO { public uint cbSize,flags;public IntPtr active,focus,capture,menuOwner,moveSize,caret;public int left,top,right,bottom; }
 
     static void Need(bool value, string error) { if (!value) throw new InvalidOperationException(error); }
     sealed class UiWorker : IDisposable {
@@ -57,6 +59,7 @@ public static class EchoLingoShortcutsUiaFixture {
         public void Check() { active(); Need(Volatile.Read(ref abandoned)==0,"UIA_WORKER_ABANDONED"); }
         public void Rpc(string name) { Check();operation=name; }
         public int ExceptionCount { get { return Volatile.Read(ref exceptionCount); } }
+        public bool Unavailable { get { return Volatile.Read(ref abandoned)!=0; } }
         public object[] Failures { get { lock(gate) return failures.ToArray(); } }
         void Failure(Exception error) {
             Interlocked.Increment(ref exceptionCount);string stack=error.StackTrace??"";if(stack.Length>4096)stack=stack.Substring(0,4096);
@@ -81,6 +84,8 @@ public static class EchoLingoShortcutsUiaFixture {
         readonly Dictionary<string,object> report=new Dictionary<string,object>();
         UiWorker ui; Process app; IntPtr job,main; string settingsPath,local,stage="claim-generated-data"; int keySends,valueWrites,launches,staleReadObservations;
         long observationDeadline=Int64.MaxValue;
+        Dictionary<string,object> recordingObservation;
+        string recordingStatusPrefix;int recordingStatusLength;long recordingStatusAt;
         public Fixture(string path) { executable=path; }
         void Active() { Need(watch.ElapsedMilliseconds<TotalMilliseconds,"FIXTURE_DEADLINE_180000MS"); }
         void Wait(Func<bool> condition, int milliseconds, string error) {
@@ -155,7 +160,26 @@ public static class EchoLingoShortcutsUiaFixture {
             ui.Check();return true;
         }); }
         bool Status(string prefix) {
-            return ui.Call(delegate { ui.Check();OwnMain();ui.Rpc("status-root-from-handle");AutomationElement root=AutomationElement.FromHandle(main);ui.Check();ui.Rpc("find-status-text");AutomationElementCollection text=root.FindAll(TreeScope.Descendants,new PropertyCondition(AutomationElement.ControlTypeProperty,ControlType.Text));ui.Check();Need(text.Count<=512,"UIA_STATIC_TEXT_NOT_BOUNDED");for(int i=0;i<text.Count;i++) { ui.Rpc("read-static-status-name");string value=text[i].Current.Name;ui.Check();if(value.StartsWith(prefix,StringComparison.Ordinal)) { ui.Rpc("read-status-offscreen");bool visible=!text[i].Current.IsOffscreen;ui.Check();if(visible) return true; } }return false; });
+            return ui.Call(delegate { ui.Check();OwnMain();ui.Rpc("status-root-from-handle");AutomationElement root=AutomationElement.FromHandle(main);ui.Check();ui.Rpc("find-status-text");AutomationElementCollection text=root.FindAll(TreeScope.Descendants,new PropertyCondition(AutomationElement.ControlTypeProperty,ControlType.Text));ui.Check();Need(text.Count<=512,"UIA_STATIC_TEXT_NOT_BOUNDED");for(int i=0;i<text.Count;i++) { ui.Rpc("read-static-status-name");string value=text[i].Current.Name;ui.Check();CacheRecordingStatus(value);if(value.StartsWith(prefix,StringComparison.Ordinal)) { ui.Rpc("read-status-offscreen");bool visible=!text[i].Current.IsOffscreen;ui.Check();if(visible) return true; } }return false; });
+        }
+        void CacheRecordingStatus(string value) {
+            if(recordingObservation==null)return;
+            foreach(string known in new string[]{"已录入，点击","已记录 ","请按快捷键并松开所有按键","继续按一个普通按键","录制结束失败：","无法开始录制：","录制已取消，原输入未更改。","已取消，请松开按键。","录制准备已超时","正在准备录制","未完成保存：","快捷键已保存并立即生效"})if(value.StartsWith(known,StringComparison.Ordinal)){Volatile.Write(ref recordingStatusLength,value.Length);Interlocked.Exchange(ref recordingStatusAt,watch.ElapsedMilliseconds);Volatile.Write(ref recordingStatusPrefix,known);return;}
+        }
+        static string GeneratedBinding(string value) { return value==""||value=="Alt+D"||value=="Alt+S"||value=="Ctrl+Alt+Shift+F8"||value=="Ctrl+Alt+Shift+F9"||value=="Ctrl+Alt+Shift+F10"?value:"[unrecognized-test-binding]"; }
+        Dictionary<string,object> RecordingNativeState(ushort key) {
+            Dictionary<string,object> state=new Dictionary<string,object>();IntPtr foreground=GetForegroundWindow();uint pid;uint thread=GetWindowThreadProcessId(foreground,out pid);state["foregroundIsOwnMain"]=app!=null&&pid==app.Id&&GetAncestor(foreground,2)==main;state["foregroundThreadId"]=pid==(app==null?0:app.Id)?thread:0;
+            int mask=0;foreach(int vk in new int[]{0x11,0x12,0x10,0x5B,0x5C})if((GetAsyncKeyState(vk)&0x8000)!=0)mask|=vk==0x11?1:vk==0x12?2:vk==0x10?4:8;state["physicalModifierMask"]=mask;state["recordedMainKeyPhysicallyHeld"]=(GetAsyncKeyState(key)&0x8000)!=0;
+            GUITHREADINFO info=new GUITHREADINFO();info.cbSize=(uint)Marshal.SizeOf(typeof(GUITHREADINFO));bool ok=pid==(app==null?0:app.Id)&&thread!=0&&GetGUIThreadInfo(thread,ref info);state["guiThreadInfoSucceeded"]=ok;
+            if(ok){uint focusPid;uint focusThread=GetWindowThreadProcessId(info.focus,out focusPid);bool own=app!=null&&focusPid==app.Id&&GetAncestor(info.focus,2)==main;state["nativeFocusWithinOwnMain"]=own;state["nativeFocusThreadId"]=own?focusThread:0;if(own){StringBuilder name=new StringBuilder(128);GetClassName(info.focus,name,name.Capacity);state["nativeFocusClass"]=name.ToString();}}
+            state["nativeHotkeyOwnerQueried"]=false;state["newRegistrationProbePerformed"]=false;return state;
+        }
+        void RecordingSnapshot(List<object> snapshots) {
+            Dictionary<string,object> snapshot=new Dictionary<string,object>{{"remainingOriginalObservationMilliseconds",Math.Max(0,Interlocked.Read(ref observationDeadline)-watch.ElapsedMilliseconds)},{"elapsedMilliseconds",watch.ElapsedMilliseconds},{"backendLeaseQueried",false}};snapshots.Add(snapshot);
+            try{Dictionary<string,object> values=ui.Call(delegate {Dictionary<string,object> fields=new Dictionary<string,object>();foreach(string name in new string[]{Selection,Ocr}){AutomationElement e=Find(name,ControlType.Edit);string kind=name==Selection?"selection":"ocr";fields[kind+"Visible"]=e!=null;if(e==null)continue;object raw;ui.Rpc("diagnostic-query-shortcut-value-pattern");if(e.TryGetCurrentPattern(ValuePattern.Pattern,out raw)){ui.Check();ValuePattern p=(ValuePattern)raw;ui.Rpc("diagnostic-read-generated-shortcut-value");fields[kind+"GeneratedValue"]=GeneratedBinding(p.Current.Value);ui.Check();ui.Rpc("diagnostic-read-shortcut-readonly");fields[kind+"ReadOnly"]=p.Current.IsReadOnly;ui.Check();}ui.Rpc("diagnostic-read-shortcut-focus");fields[kind+"HasKeyboardFocus"]=e.Current.HasKeyboardFocus;ui.Check();}
+                AutomationElement record=Find(Record,ControlType.Button);if(record!=null){object toggle;ui.Rpc("diagnostic-query-record-toggle");if(record.TryGetCurrentPattern(TogglePattern.Pattern,out toggle)){ui.Check();ui.Rpc("diagnostic-read-record-toggle");fields["recordToggleState"]=(int)((TogglePattern)toggle).Current.ToggleState;ui.Check();}}
+                AutomationElement save=Find(Save,ControlType.Button);if(save!=null){ui.Rpc("diagnostic-read-save-enabled");fields["saveEnabled"]=save.Current.IsEnabled;ui.Check();}return fields;});foreach(KeyValuePair<string,object> pair in values)snapshot[pair.Key]=pair.Value;}
+            catch(Exception error){snapshot["exceptionType"]=error.GetType().Name;snapshot["hresult"]=error.HResult;snapshot["workerUnavailable"]=ui.Unavailable;}
         }
         void Availability(uint modifiers,uint key,bool available,string phase) {
             Active(); bool registered=RegisterHotKey(IntPtr.Zero,23117,modifiers,key); int error=registered?0:Marshal.GetLastWin32Error();
@@ -168,18 +192,22 @@ public static class EchoLingoShortcutsUiaFixture {
         static INPUT Key(ushort key,bool up) { INPUT v=new INPUT();v.type=1;v.data.key.vk=key;v.data.key.flags=up?2U:0U;return v; }
         void Send(INPUT[] input) { Active(); OwnMain(); Need(GetAncestor(GetForegroundWindow(),2)==main,"INPUT_TARGET_NOT_FOREGROUND"); Need(SendInput((uint)input.Length,input,Marshal.SizeOf(typeof(INPUT)))==input.Length,"NATIVE_KEY_REJECTED"); }
         void RecordKey(uint modifiers,ushort key,string expected) {
+            Dictionary<string,object> observation=new Dictionary<string,object>{{"recordAttempt",keySends+1},{"expectedGeneratedBinding",GeneratedBinding(expected)},{"originalRecordedStatusBudgetMilliseconds",5000},{"backendLeaseQueried",false}};Volatile.Write(ref recordingStatusPrefix,null);Volatile.Write(ref recordingStatusLength,0);Interlocked.Exchange(ref recordingStatusAt,0);recordingObservation=observation;List<object> snapshots=new List<object>();observation["boundedReadonlySnapshots"]=snapshots;
+            try {
             OwnMain(); SetForegroundWindow(main); Wait(delegate { return GetAncestor(GetForegroundWindow(),2)==main; },2000,"OWN_APP_NOT_FOREGROUND");
             Invoke(Record); Wait(delegate { return Status("请按快捷键并松开所有按键"); },5000,"RECORDING_LEASE_NOT_READY");
-            Wait(delegate { return ui.Call(delegate { AutomationElement e=Find(Selection,ControlType.Edit);Need(e!=null,"RECORD_FIELD_MISSING");ui.Rpc("read-recording-field-focus");bool focused=e.Current.HasKeyboardFocus;ui.Check();return focused; }); },5000,"RECORD_FIELD_NOT_FOCUSED");
+            Wait(delegate { return ui.Call(delegate { AutomationElement e=Find(Selection,ControlType.Edit);Need(e!=null,"RECORD_FIELD_MISSING");ui.Rpc("read-recording-field-focus");bool focused=e.Current.HasKeyboardFocus;ui.Check();observation["fieldHadKeyboardFocusBeforeInput"]=focused;return focused; }); },5000,"RECORD_FIELD_NOT_FOCUSED");
             foreach(int vk in new int[]{0x10,0x11,0x12,0x5B,0x5C}) Need((GetAsyncKeyState(vk)&0x8000)==0,"PREHELD_MODIFIER_NO_INPUT");
             List<INPUT> down=new List<INPUT>(),up=new List<INPUT>();
             if((modifiers&2)!=0)down.Add(Key(0x11,false));if((modifiers&1)!=0)down.Add(Key(0x12,false));if((modifiers&4)!=0)down.Add(Key(0x10,false));down.Add(Key(key,false));
             up.Add(Key(key,true));if((modifiers&4)!=0)up.Add(Key(0x10,true));if((modifiers&1)!=0)up.Add(Key(0x12,true));if((modifiers&2)!=0)up.Add(Key(0x11,true));
-            try { Send(down.ToArray()); Thread.Sleep(40); }
-            finally { Need(SendInput((uint)up.Count,up.ToArray(),Marshal.SizeOf(typeof(INPUT)))==up.Count,"OWN_GENERATED_KEY_RELEASE_FAILED"); }
-            keySends++; Wait(delegate { return Status("已录入，点击"); },5000,"REGISTERED_KEY_NOT_RECORDED");
+            observation["nativeBeforeInput"]=RecordingNativeState(key);try { Send(down.ToArray());observation["downInputInserted"]=down.Count;Thread.Sleep(40); }
+            finally { uint inserted=SendInput((uint)up.Count,up.ToArray(),Marshal.SizeOf(typeof(INPUT)));observation["upInputInserted"]=inserted;Need(inserted==up.Count,"OWN_GENERATED_KEY_RELEASE_FAILED"); }
+            keySends++; Wait(delegate { if(ui.Unavailable)return false;bool recorded=Status("已录入，点击");if(!recorded&&snapshots.Count<2&&(snapshots.Count==0||Interlocked.Read(ref observationDeadline)-watch.ElapsedMilliseconds<1000))RecordingSnapshot(snapshots);return recorded; },5000,"REGISTERED_KEY_NOT_RECORDED");
             Wait(delegate { return FieldsVisible()&&Field(Selection)==expected; },5000,"RECORDING_EXECUTED_ACTION_OR_CHANGED_VIEW");
             Need(!File.Exists(Path.Combine(Path.GetDirectoryName(settingsPath),"history.json")),"RECORDING_CREATED_HISTORY");
+            } catch { observation["lastObservedStatusPrefix"]=Volatile.Read(ref recordingStatusPrefix);observation["lastObservedStatusLength"]=Volatile.Read(ref recordingStatusLength);observation["lastStatusObservationMilliseconds"]=Interlocked.Read(ref recordingStatusAt);observation["cachedStatusVisibilityIndependentlyQueried"]=false;observation["nativeAtFailure"]=RecordingNativeState(key);observation["existingProbeCount"]=probes.Count;observation["capturedAfterFailureWithoutNewUiRpc"]=true;report["recordingFailureObservation"]=observation;throw; }
+            finally { recordingObservation=null; }
         }
         byte[] Settings() { CheckRoot(Path.GetDirectoryName(settingsPath)); Need(File.Exists(settingsPath)&&(File.GetAttributes(settingsPath)&FileAttributes.ReparsePoint)==0,"SETTINGS_CHANGED_OR_MISSING"); Need(new FileInfo(settingsPath).Length<=1048576,"SETTINGS_OVERSIZE"); return File.ReadAllBytes(settingsPath); }
         bool Pair(string selection,string ocr) { Dictionary<string,object> root=(Dictionary<string,object>)json.DeserializeObject(Encoding.UTF8.GetString(Settings())); Dictionary<string,object> s=(Dictionary<string,object>)root["shortcuts"]; return (string)s["selection"]==selection&&(string)s["silentOcr"]==ocr; }

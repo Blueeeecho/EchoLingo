@@ -10,13 +10,16 @@
 | released295/e5adb8f |40622643576实际86次Alt+D、85完整链；1次newmock/history精确但自有UIA输入框观察失败。不是已观察到空string；75次同浏览器外点击隐藏，12轮cleanup确认。其余未发热键的鼠标准备失败另列 |
 | released295/5f4dbba |40626825246 Edge冷首2/2；40626825226 Edge+Chrome各1/1实际AltS/左拖/WinRT/自动译文+历史/同源click隐藏，ROI底层mousedown/up0/0；不是新候选或物理Win11验收 |
 | 非浏览器/清理 |40623644694和40626825523均WPF3/3、WinForms16/16及真实记事本核心1/1，但记事本mock退出失败，整体仍failure；新BeginAccept+stopEvent/MTA补丁21项本机exactMock测试passed，未抹去旧红 |
-| 新源码Windows |78794/full40629457450：Windows272 Rust/1ignored、Mac268/1ignored、两端84前端及隔离UI通过；15gate14success/1failure。实际APP44次AltD全链通过，另1鼠标前置前缀失败/3未执行，48项整项仍红。记事本cleanup实际通过，WPF3/WinForms16、UI6/customkeys3、真实NSIS6模型+3链通过 |
+| 新源码Windows |78794/full40629457450：Windows272 Rust/1ignored、Mac268/1ignored、两端84前端及隔离UI通过；15gate14success/1failure。实际APP44次AltD全链通过，另1鼠标前置前缀失败/3未执行，48项整项仍红。记事本cleanup实际通过，WPF3/WinForms16、UI6/customkeys3、真实NSIS两方向模型的6次推理+3应用链通过 |
 | 新native旧红回归 |7982/source与787产品相同，40630899181 original-suite仍95/96且0setup失败：冷Edge Q1 Stage6返回，Q2 Stage11 Pane→Group identity不等，2.84s未到5s。不能用新full其他绿覆盖；focus HWND prime候选cf6/run40632178982仍95/96，已精确撤回；非合并鼠标的85次实际APP全链通过，2映射前置失败/9未执行仍红 |
 | 新增服务 |Baidu/Youdao/Microsoft文本翻译、Youdao/Google OCR；协议/凭据/超限/重定向/错误脱敏/取消单测及专用表单、45固定URL精确对照passed；系统浏览器实际打开、新Windows诊断CLI和真实云账户未验收 |
 
 原95/96冷Edge红结果保留；下方dcb新原生首次通过，但新APP完整构建仍待验收，同PID后台剪贴板发布反例未关闭；同源点击在生成窗口和实际Edge/Chrome受控场景可通过，不据此断言所有应用已经修好。OS物理Win10/11/WPS、IME/多屏/全屏仍需机主复现。Mac规范程序未签名/安装/修改权限；新安装包已生成但尚非全通过修复版，未发布stable。[完整分层记录](validation/windows-selection-services-20261028.json)。
 
 最新夹具41e/run40633781813复用精确787程序，实测双order共96次单拖选/单AltD全链通过、0准备失败，84次同浏览器空白点击隐藏、12轮清理通过；不含下述新native修复。新候选只在初始现有selection策略候选全正常不支持TextPattern、未读到range/原文且未碰剪贴板时，对初次后置已知RuntimeId变化允许一次当前选区重采；源native窗口/焦点/线程/进程和鼠标释放状态必须保持，新context仍完整密码/root和post身份核验，无第二次/新listener/固定等待/预算重置。未知RID、有效空pattern、读取错误或已有A均不重采。它取得第一次实际可读的当前选文，不能冻结此前从未读到的A；同native焦点脚本改为B时可能读当前B。149纯策略断言/C#5/AST通过，双重源审无剩余阻断。dcb8f60/run40634789697原native双order96/96通过：非空72/72、空12/12、密码12/12及12轮清理通过，0copy/timeout；旧失败Edge首case实际经Q1无pattern→Q2已知ID变化/native一致→Q3一次当前读取→Q4严格post一致，在2.565秒内通过。仅此1case发生重采。它验证新原生代码，尚待同源码新完整APP构建，不能把此前787应用96/96移算给它。
+
+
+6d74806/full40635398888新完整构建已结束，原始15门禁13success/2failure：新APP浏览器48/48、单AltD矩阵16/16及显式诊断CLI、记事本1/WPF3、自定义键3、两浏览器实际OCR→同源点击隐藏、NSIS两方向模型6次推理/3应用链通过；UI快捷键6项只完成2项，第二次F9录制未观察到完成；A/B候选第8hover返回B时输入planecomposition失败，非时延阈值。失败时缺完整终态元数据，正在只加只读诊断、复用精确6d stage复核，不先认定产品或夹具原因。此前阶段通报误把continue-on-error步骤conclusion当raw success，现已明确更正，以最终.outcome和完整JSON为准。安装器已下载/SHA/大小/CRC核对，尚不标为全通过修复版；75,334,873B/SHA2566fd34c8c…20503e，stage80d6e92a…480e7/5,923,840B。实际新CLI一次导出966B/20数值项/原primary身份，约64.84ms，前台/原文/历史/剪贴板/窗口状态保留。
 
 <!-- selection-services-20261028:end -->
 

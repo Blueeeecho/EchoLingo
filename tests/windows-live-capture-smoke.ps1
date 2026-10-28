@@ -43,6 +43,7 @@ public static class EchoLingoLiveCaptureSmoke {
     static bool requireInputPlanes = true;
     static string inputBackend = "hybrid";
     static int activeHelperProcessId;
+    static Dictionary<string,object> failedPlaneComposition;
     sealed class PassiveGeneratedLayer : Form {
         public PassiveGeneratedLayer() {
             AutoScaleMode = AutoScaleMode.None; FormBorderStyle = FormBorderStyle.None;
@@ -209,19 +210,22 @@ public static class EchoLingoLiveCaptureSmoke {
         int count = 0; for (IntPtr window = GetWindow(lower,3); window != IntPtr.Zero && count++ < 4096; window = GetWindow(window,3)) if (window == upper) return true;
         return false;
     }
-    static bool PlaneComposition(int processId, List<EdgeWindow> edges, Point pointer, Dictionary<string,object> metadata) {
+    static bool PlaneComposition(int processId, List<EdgeWindow> edges, Point pointer, Dictionary<string,object> metadata, bool failureDetails = false) {
         List<EdgeWindow> all = InputPlanes(processId,false), visible = InputPlanes(processId,true);
         metadata["allocatedInputPlaneCount"] = all.Count; metadata["visibleInputPlaneCount"] = visible.Count;
         metadata["requiredInputPlane"] = requireInputPlanes;
         if (!requireInputPlanes) return all.Count == 0;
         List<Rectangle> displays = new List<Rectangle>(); foreach (Screen screen in Screen.AllScreens) displays.Add(screen.Bounds);
-        bool geometry = all.Count == displays.Count && visible.Count == displays.Count;
+        bool countsMatch = all.Count == displays.Count && visible.Count == displays.Count;
+        bool geometry = countsMatch; int unmatchedPlaneFrames = 0, intersectingEdges = 0, edgeOrderFailures = 0;
         List<Rectangle> remaining = new List<Rectangle>(displays);
         List<Dictionary<string,object>> observed = new List<Dictionary<string,object>>();
         foreach (EdgeWindow plane in visible) {
-            int index = remaining.IndexOf(plane.Bounds); if (index < 0) geometry = false; else remaining.RemoveAt(index);
+            int index = remaining.IndexOf(plane.Bounds); if (index < 0) { geometry = false; unmatchedPlaneFrames++; } else remaining.RemoveAt(index);
             observed.Add(new Dictionary<string,object> { { "hwnd",WindowId(plane.Handle) }, { "physicalBounds",RectValue(plane.Bounds) }, { "noRedirectionBitmap",true } });
-            foreach (EdgeWindow edge in edges) if (!Rectangle.Intersect(edge.Bounds,plane.Bounds).IsEmpty && !Above(edge.Handle,plane.Handle)) geometry = false;
+            foreach (EdgeWindow edge in edges) if (!Rectangle.Intersect(edge.Bounds,plane.Bounds).IsEmpty) {
+                intersectingEdges++; if (!Above(edge.Handle,plane.Handle)) { geometry = false; edgeOrderFailures++; }
+            }
         }
         int allocated = AllocatedThinCount(processId); metadata["allocatedThinWindowCount"] = allocated;
         metadata["observedInputPlanes"] = observed;
@@ -236,11 +240,49 @@ public static class EchoLingoLiveCaptureSmoke {
         metadata["rawPointerRootHwnd"] = WindowId(rawRoot); metadata["transparentSkippingPointerRootHwnd"] = WindowId(through);
         metadata["rawPointerIsExactPlane"] = rawPlane; metadata["rawPointerIsVerifiedThinEdge"] = rawEdge;
         metadata["transparentSkippingHitIsExactPlane"] = actualPlane;
-        return geometry && actualPlane && (rawPlane || rawEdge);
+        bool matched = geometry && actualPlane && (rawPlane || rawEdge);
+        if (failureDetails && !matched) {
+            // Observe only the failing check. No new move, input, capture,
+            // repeated hit test, settling wait or window-order mutation.
+            metadata["planeCountsMatch"] = countsMatch; metadata["planeFramesMatch"] = unmatchedPlaneFrames == 0 && remaining.Count == 0;
+            metadata["thinAllocationMatches"] = allocated == 12 * displays.Count; metadata["geometryMatched"] = geometry;
+            metadata["intersectingEdgePlanePairs"] = intersectingEdges; metadata["edgePlaneOrderFailures"] = edgeOrderFailures;
+            metadata["visibleThinEdgeCount"] = edges.Count; metadata["desktopClientMappingSucceeded"] = mapped;
+            List<Dictionary<string,object>> edgeValues = new List<Dictionary<string,object>>();
+            foreach (EdgeWindow edge in edges) edgeValues.Add(new Dictionary<string,object> { { "hwnd",WindowId(edge.Handle) }, { "bounds",RectValue(edge.Bounds) } });
+            metadata["visibleThinEdges"] = edgeValues;
+            List<Dictionary<string,object>> planeValues = new List<Dictionary<string,object>>();
+            foreach (EdgeWindow plane in all) planeValues.Add(new Dictionary<string,object> { { "hwnd",WindowId(plane.Handle) }, { "bounds",RectValue(plane.Bounds) },
+                { "observedVisible",visible.Exists(delegate(EdgeWindow item) { return item.Handle == plane.Handle; }) } });
+            metadata["allAllocatedInputPlanes"] = planeValues;
+            try { metadata["rawRootMetadata"] = ReadonlyWindowMetadata(rawRoot); metadata["transparentSkippingRootMetadata"] = ReadonlyWindowMetadata(through); }
+            catch { metadata["nativeRootMetadataUnavailable"] = true; }
+        }
+        return matched;
+    }
+    static Dictionary<string,object> ReadonlyWindowMetadata(IntPtr window) {
+        uint process; uint thread = GetWindowThreadProcessId(window,out process); StringBuilder name = new StringBuilder(128);
+        GetClassName(window,name,name.Capacity);
+        return new Dictionary<string,object> { { "hwnd",WindowId(window) }, { "processId",process }, { "threadId",thread }, { "class",name.ToString() },
+            { "exists",IsWindow(window) }, { "visible",IsWindowVisible(window) }, { "enabled",IsWindowEnabled(window) },
+            { "style",GetWindowLongPtr(window,-16).ToInt64() }, { "extendedStyle",GetWindowLongPtr(window,-20).ToInt64() } };
+    }
+    static void SaveFailedPlaneObservation(Dictionary<string,object> observed, Point pointer) {
+        failedPlaneComposition = observed;
+        try {
+            observed["checkedPointerPhysicalXY"] = new int[] { pointer.X,pointer.Y };
+            Point actual; bool known = GetPhysicalCursorPos(out actual); observed["actualPointerKnown"] = known;
+            if (known) observed["actualPointerPhysicalXY"] = new int[] { actual.X,actual.Y };
+            observed["foregroundMetadata"] = ReadonlyWindowMetadata(GetForegroundWindow());
+            observed["observationScope"] = "Same failing check; Win32 enumeration and hit-testing are non-atomic metadata observations.";
+        } catch { observed["additionalObservationUnavailable"] = true; }
     }
     static void RequirePlaneAt(int processId, Point pointer) {
-        Dictionary<string,object> observed = new Dictionary<string,object>();
-        Assert(PlaneComposition(processId,VisibleEdges(processId),pointer,observed), "The actual pointer does not hit the exact required helper input plane composition.");
+        Dictionary<string,object> observed = new Dictionary<string,object>(); bool matched;
+        try { matched = PlaneComposition(processId,VisibleEdges(processId),pointer,observed,true); }
+        catch (Exception error) { observed["compositionObservationExceptionType"] = error.GetType().Name; SaveFailedPlaneObservation(observed,pointer); throw; }
+        if (!matched) SaveFailedPlaneObservation(observed,pointer);
+        Assert(matched, "The actual pointer does not hit the exact required helper input plane composition.");
     }
     static IntPtr UnderlyingRootAt(Point point, int helperId) {
         int count = 0;
@@ -1051,7 +1093,7 @@ public static class EchoLingoLiveCaptureSmoke {
         }
     }
     public static Dictionary<string, object> Run(string helper, string assembly, bool performance, bool legacy, string backend) {
-        requireInputPlanes = !legacy; inputBackend = backend;
+        requireInputPlanes = !legacy; inputBackend = backend; failedPlaneComposition = null;
         Assert(!assembly.Contains("\""), "Invalid native DLL path.");
         nativeArguments = String.IsNullOrEmpty(assembly) ? "" : " -NativeAssemblyPath \"" + assembly + "\"";
         if (performance) nativeArguments += " -PerformanceDiagnostics";
@@ -1117,6 +1159,7 @@ public static class EchoLingoLiveCaptureSmoke {
                         report["error"] = error.Message;
                         report["stack"] = error.ToString();
                         report["failedMode"] = context.Mode; report["failedStage"] = context.Stage;
+                        if (failedPlaneComposition != null) { failedPlaneComposition["stage"] = context.Stage; report["failedPlaneComposition"] = failedPlaneComposition; }
                         report["foregroundAtFailure"] = context.ForegroundFailure ?? ForegroundMetadata(context, GetForegroundWindow());
                         if (context.LastEdges != null) report["lastObservedEdges"] = context.LastEdges;
                         if (context.LastHelperDiagnostics != null) report["lastHelperDiagnostics"] = context.LastHelperDiagnostics;
