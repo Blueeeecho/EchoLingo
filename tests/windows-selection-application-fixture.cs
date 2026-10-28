@@ -151,6 +151,48 @@ public static class WindowsSelectionApplicationFixture {
         }
         string initial="";Ui(form,delegate{initial=source.Text;c["sourceVersionBefore"]=SourceVersions[source];});SeedClipboard();c["mockRequestsBefore"]=requestsBefore;c["historySourceCountBefore"]=HistorySourceCount(expected);Stopwatch time=Stopwatch.StartNew();if(expected==ForbiddenFocusB){FocusRaceLedger();c["BRequestsImmediatelyBeforeExplicitHotkey"]=Server.CountFor(expected);c["BHistoryImmediatelyBeforeExplicitHotkey"]=HistorySourceCount(expected);Interlocked.Exchange(ref ExplicitFocusBAllowed,1);}Hotkey(form);Complete(c,expected,form,source,initial);c["hotkeyToHistoryMilliseconds"]=time.Elapsed.TotalMilliseconds;Need(Convert.ToInt32(c["hotkeysSent"])==1,"FIRST_SHORTCUT_WAS_RETRIED");Need(Server.CountFor(expected)-requestsBefore==1,"DUPLICATE_TRANSLATION_FOR_ONE_DISTINCT_ACTION");c["ok"]=true;
     }
+    static long DiagnosticNumber(object value,long maximum){
+        Need(value is int||value is long,"DIAGNOSTIC_INTEGER_REQUIRED");long number=Convert.ToInt64(value);Need(number>=0&&number<=maximum,"DIAGNOSTIC_NUMBER_BOUND");return number;
+    }
+    static void SelectionDiagnosticsCli(string executable,ProcessStartInfo primaryStart,string roaming,string token,Form form,TextBox source){
+        Dictionary<string,object> result=new Dictionary<string,object>{{"ok",false},{"attempts",1},{"newSelectionRequested",false},{"secondaryProcessExitObserved",false}};Report["selectionDiagnosticsCli"]=result;
+        Need(Cases.Count==1&&Convert.ToBoolean(Cases[0]["ok"]),"DIAGNOSTICS_REQUIRES_FIRST_SUCCESSFUL_SELECTION");
+        Need((File.GetAttributes(roaming)&FileAttributes.ReparsePoint)==0&&File.ReadAllText(Path.Combine(roaming,Marker))==token,"DIAGNOSTIC_DIRECTORY_NOT_OWNED");
+        string file=Path.Combine(roaming,"selection-diagnostics.json");Need(!File.Exists(file)&&!Directory.Exists(file),"DIAGNOSTIC_FILE_ALREADY_EXISTS");
+        Need(String.Equals(Path.GetFullPath(App.MainModule.FileName),Path.GetFullPath(executable),StringComparison.OrdinalIgnoreCase),"DIAGNOSTIC_PRIMARY_EXECUTABLE_MISMATCH");
+        string expected=SourceValue(),sourceText="",selected="";int sourceVersion=0;Ui(form,delegate{sourceText=source.Text;selected=source.SelectedText;sourceVersion=SourceVersions[source];});
+        Need(!String.IsNullOrEmpty(expected)&&GetForegroundWindow()==form.Handle&&Helpers().Count==0,"DIAGNOSTIC_BASELINE_NOT_READY");
+        byte[] history=File.ReadAllBytes(History);int mockCount=Server.CountFor(expected),hotkeys=Hotkeys,primaryPid=App.Id;bool visible=IsWindowVisible(Main);uint clipboard=GetClipboardSequenceNumber();
+        ProcessStartInfo start=new ProcessStartInfo(executable,"--selection-diagnostics");start.UseShellExecute=false;start.CreateNoWindow=true;
+        foreach(string key in new string[]{"LOCALAPPDATA","TEMP","TMP","WEBVIEW2_USER_DATA_FOLDER"})start.EnvironmentVariables[key]=primaryStart.EnvironmentVariables[key];
+        long earliest=(long)(DateTime.UtcNow-new DateTime(1970,1,1,0,0,0,DateTimeKind.Utc)).TotalMilliseconds;Stopwatch clock=Stopwatch.StartNew();Process secondary=null;
+        try{
+            secondary=Process.Start(start);Need(secondary!=null&&secondary.Id!=primaryPid,"DIAGNOSTIC_SECONDARY_NOT_CREATED");
+            while(clock.ElapsedMilliseconds<5000){
+                Need(!App.HasExited&&App.Id==primaryPid&&MainWindow(primaryPid)==Main,"DIAGNOSTIC_PRIMARY_IDENTITY_CHANGED");
+                Need(GetForegroundWindow()==form.Handle&&IsWindowVisible(Main)==visible&&Helpers().Count==0,"DIAGNOSTIC_CHANGED_FOREGROUND_VISIBILITY_OR_HELPERS");
+                Need(Server.Error==null&&Server.CountFor(expected)==mockCount&&Hotkeys==hotkeys,"DIAGNOSTIC_TRIGGERED_TRANSLATION_OR_INPUT");
+                if(secondary.HasExited){result["secondaryProcessExitObserved"]=true;result["secondaryExitCode"]=secondary.ExitCode;Need(secondary.ExitCode==0,"DIAGNOSTIC_SECONDARY_FAILED");if(File.Exists(file))break;}
+                Application.DoEvents();Thread.Sleep((int)Math.Min(20,Math.Max(1,5000-clock.ElapsedMilliseconds)));
+            }
+            Need(secondary.HasExited&&File.Exists(file)&&clock.ElapsedMilliseconds<5000,"DIAGNOSTIC_CLI_OR_FILE_DEADLINE");
+            Need((File.GetAttributes(roaming)&FileAttributes.ReparsePoint)==0&&File.ReadAllText(Path.Combine(roaming,Marker))==token&&(File.GetAttributes(file)&FileAttributes.ReparsePoint)==0,"DIAGNOSTIC_FILE_OWNERSHIP_CHANGED");
+            byte[] bytes=File.ReadAllBytes(file);Need(bytes.Length>0&&bytes.Length<=16384,"DIAGNOSTIC_FILE_BOUND");Dictionary<string,object> payload=Json.Deserialize<Dictionary<string,object>>(Encoding.UTF8.GetString(bytes));
+            HashSet<string> metadata=new HashSet<string>(new string[]{"diagnostic","recordedAtUnixMs","appVersion","processId","executablePath","diagnostics"});Need(payload.Count==metadata.Count,"DIAGNOSTIC_METADATA_SCHEMA");foreach(string key in payload.Keys)Need(metadata.Contains(key),"DIAGNOSTIC_METADATA_FIELD");
+            Need((string)payload["diagnostic"]=="last-selection-attempt"&&(string)payload["appVersion"]=="0.1.0"&&DiagnosticNumber(payload["processId"],Int32.MaxValue)==primaryPid,"DIAGNOSTIC_PRIMARY_METADATA_MISMATCH");
+            Need(String.Equals((string)payload["executablePath"],Path.GetFullPath(executable),StringComparison.OrdinalIgnoreCase),"DIAGNOSTIC_EXPORTED_EXECUTABLE_MISMATCH");
+            long recorded=DiagnosticNumber(payload["recordedAtUnixMs"],Int64.MaxValue),latest=(long)(DateTime.UtcNow-new DateTime(1970,1,1,0,0,0,DateTimeKind.Utc)).TotalMilliseconds;Need(recorded>=earliest&&recorded<=latest,"DIAGNOSTIC_TIMESTAMP_OUTSIDE_EXPLICIT_CALL");
+            Dictionary<string,object> health=payload["diagnostics"] as Dictionary<string,object>;Need(health!=null,"DIAGNOSTIC_LAST_SELECTION_MISSING");
+            HashSet<string> allowed=new HashSet<string>(new string[]{"selectionQueryCount","helperResponseReceived","helperElapsedMilliseconds","cancellationRequested","cancellationSignalled","cancellationSignalFailed"});
+            foreach(string suffix in new string[]{"Stage","Depth","IdentityCompared","IdentityEqual","RootWalkReason","ExceptionKind","Milliseconds"})for(int i=1;i<=16;i++)allowed.Add("selectionQuery"+i+suffix);
+            foreach(KeyValuePair<string,object> pair in health){Need(allowed.Contains(pair.Key),"DIAGNOSTIC_CONTENT_OR_UNKNOWN_FIELD");DiagnosticNumber(pair.Value,10000000);}
+            Need(health.ContainsKey("selectionQueryCount")&&DiagnosticNumber(health["selectionQueryCount"],16)>=2&&health.ContainsKey("helperResponseReceived")&&DiagnosticNumber(health["helperResponseReceived"],1)==1&&health.ContainsKey("selectionQuery1Stage"),"DIAGNOSTIC_COMPLETED_SELECTION_NOT_RETAINED");
+            foreach(string flag in new string[]{"cancellationRequested","cancellationSignalled","cancellationSignalFailed"})Need(health.ContainsKey(flag)&&DiagnosticNumber(health[flag],1)==0,"DIAGNOSTIC_SUCCESS_CANCELLATION_MISMATCH");
+            Need(Convert.ToBase64String(File.ReadAllBytes(History))==Convert.ToBase64String(history)&&Server.CountFor(expected)==mockCount&&SourceValue()==expected&&GetForegroundWindow()==form.Handle&&IsWindowVisible(Main)==visible&&Helpers().Count==0,"DIAGNOSTIC_CHANGED_APPLICATION_STATE");
+            Ui(form,delegate{Need(source.Text==sourceText&&source.SelectedText==selected&&SourceVersions[source]==sourceVersion,"DIAGNOSTIC_CHANGED_SOURCE_CONTROL");});CheckClipboard();Need(GetClipboardSequenceNumber()==clipboard,"DIAGNOSTIC_CHANGED_CLIPBOARD_GENERATION");
+            result["primaryProcessIdentityVerified"]=true;result["exactSecondaryExecutableRequested"]=true;result["fixedOwnedFileVerified"]=true;result["strictNumericNoContentSchema"]=true;result["healthFieldCount"]=health.Count;result["selectionQueryCount"]=DiagnosticNumber(health["selectionQueryCount"],16);result["fileBytes"]=bytes.Length;result["elapsedMilliseconds"]=clock.Elapsed.TotalMilliseconds;result["foregroundSourceHistoryMockClipboardVisibilityPreserved"]=true;result["ok"]=true;
+        }finally{if(secondary!=null){if(!secondary.HasExited)try{secondary.Kill();if(!secondary.WaitForExit((int)Math.Max(0,5000-clock.ElapsedMilliseconds)))result["ownSecondaryCleanupFailed"]=true;}catch{result["ownSecondaryCleanupFailed"]=true;}secondary.Dispose();}}
+    }
     static void BlankCase(Form form,TextBox edit,Control[] controls){
         const string typed="Typed blank popup 55001";Server.Allow(typed,false);PutSource(form,edit,controls,"Unselected source 55000",false);Ui(form,delegate{edit.Select(0,0);});SeedClipboard();Dictionary<string,object> blank=Begin("empty-selection-first-input-enter",typed,"actual-Unicode-SendInput");Hotkey(form);
         try{Wait(delegate{return SourceValue()==""&&ForegroundPid()==App.Id;},15000,"EMPTY_SELECTION_NOT_FOCUSED_BLANK");}
@@ -225,6 +267,7 @@ public static class WindowsSelectionApplicationFixture {
                         // Their existence proves neither successful OS registration nor JS subscriptions.
                         Dictionary<string,object> readiness=null;Wait(delegate{readiness=NativeReadiness();return Convert.ToInt32(readiness["globalHotkeyWindowCount"])>0&&Convert.ToInt32(readiness["trayWindowCount"])>0;},15000,"NATIVE_REGISTRATION_HOST_AND_TRAY");readiness["waitForInputIdleSucceeded"]=true;readiness["fixedFrontendWarmupMilliseconds"]=0;Report["beforeFirstHotkeyReadiness"]=readiness;
                         SelectionCase("edit-mouse-round-1",form,edit,controls,"Selection Edit round 1 token 51001",true);
+                        if(Convert.ToBoolean(Cases[0]["ok"]))SelectionDiagnosticsCli(executable,start,roaming,token,form,edit);
                         SameWindowFocusRace(form,edit,second,controls);
                         Invoke("\u9489\u4f4f\u7a97\u53e3");Wait(delegate{return Element("\u53d6\u6d88\u9489\u4f4f")!=null;},5000,"PIN_NOT_ENGAGED");SelectionCase("pinned-edit-update",form,edit,controls,"Pinned edit exact source 54001",false);
                         BlankCase(form,edit,controls);

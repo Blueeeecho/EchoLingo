@@ -317,6 +317,26 @@
     "hostPolicyAssertions": 149,
     "realScriptMutationFixtureExecuted": false,
     "freezeFile": "/Users/wwq/Documents/Codex/2026-10-24/ni-ne/work/selection-dismiss-official-apis-20261028/current-selection-restart/validation-and-freeze.json",
-    "sourceReviewFile": "/Users/wwq/Documents/Codex/2026-10-24/ni-ne/work/selection-dismiss-official-apis-20261028/unread-context-recapture/final-source-review.json"
+    "sourceReviewFile": "/Users/wwq/Documents/Codex/2026-10-24/ni-ne/work/selection-dismiss-official-apis-20261028/unread-context-recapture/final-source-review.json",
+    "runtimeOriginal96": {
+      "commit": "dcb8f601f0f8d660efdc4450de40fbddd5fd16b5",
+      "run": 40634789697,
+      "summary": "/Users/wwq/Documents/Codex/2026-10-24/ni-ne/work/selection-dismiss-official-apis-20261028/ci-dcb8f60-original-native/summary.json",
+      "summaryBytes": 13682,
+      "summarySha256": "c2b0b92a29e9b138ee34a71915bcea019ed8d5017ceadf4214d219ed763bd572",
+      "required": 96,
+      "passed": 96,
+      "nonemptyPassed": 72,
+      "emptyPassed": 12,
+      "protectedPassed": 12,
+      "freshRoundCleanups": 12,
+      "restartCases": 1,
+      "actualApplicationTested": false,
+      "actualRegisteredHotkeyTested": false,
+      "physicalWindows10Or11Tested": false,
+      "newWholeAppBuildPending": true,
+      "oldRedResultsPreserved": true,
+      "rootIndependentCheck": "/Users/wwq/Documents/Codex/2026-10-24/ni-ne/work/selection-dismiss-official-apis-20261028/ci-dcb8f60-original-native/root-independent-check.json"
+    }
   }
 }
