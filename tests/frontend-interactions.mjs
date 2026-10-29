@@ -35,9 +35,11 @@ try {
     const sourceBoot = new URL(location.href).searchParams.get('sourceDeliveryFixture');
     Object.assign(fixture, { pendingSource: null, sourceAcks: [], sourceAckResults: [], pendingSourceReads: 0, bootSettingsWaits: 0, releaseBootSettings: () => {}, oldSourceAckWaits: 0, newSourceAckWaits: 0, releaseOldSourceAck: () => {}, releaseNewSourceAck: () => {} });
     if (sourceBoot) {
+      const permissionBlocked = sourceBoot === 'accessibility-permission';
       fixture.presentation = { epoch: sourceBoot === 'management' || sourceBoot === 'newtask' ? 2 : 1, presented: false };
       fixture.pendingSource = { deliveryId: sourceBoot === 'newtask' ? 2 : 1, presentationEpoch: fixture.presentation.epoch,
-        text: sourceBoot === 'empty' ? '' : sourceBoot === 'newtask' ? 'Latest generated startup source' : 'Generated startup source', mode: sourceBoot === 'empty' ? 'input' : 'translate', focusInput: sourceBoot === 'empty' };
+        text: sourceBoot === 'empty' || permissionBlocked ? '' : sourceBoot === 'newtask' ? 'Latest generated startup source' : 'Generated startup source', mode: sourceBoot === 'empty' || permissionBlocked ? 'input' : 'translate', focusInput: sourceBoot === 'empty' || permissionBlocked,
+        ...(permissionBlocked ? { permissionRequired: 'accessibility' } : {}) };
       if (sourceBoot === 'management') { fixture.pendingSource = null; fixture.pendingSettings = { presentationEpoch: 2 }; }
     }
     fixture.emitInputFocus = (presentation = fixture.nativeInputShow()) => fixture.emit('focus-input', structuredClone(presentation));
@@ -252,6 +254,20 @@ try {
   await page.goto(sourceFixtureUrl('management'));
   await page.waitForFunction(() => document.body.dataset.view === 'settings' && window.__qa.sourceAcks.length === 1);
   assert.equal(await page.locator('#source-text').inputValue(), '');
+  assert.equal(await page.evaluate(() => window.__qa.translationRequests.length), 0);
+  // A cold-start permission failure uses the same durable source delivery as
+  // selection. Prepare the accessibility guide before the very first show.
+  await page.goto(sourceFixtureUrl('accessibility-permission'));
+  await page.locator('#permission-guidance').waitFor({ state: 'visible' });
+  await page.waitForFunction(() => window.__qa.sourceAcks.length === 1 && window.__qa.showCalls.length === 1);
+  assert.equal(await page.locator('#source-text').inputValue(), '');
+  assert.equal(await page.evaluate(() => window.__qa.permissionAtShow[0].visible), true);
+  assert.match(await page.evaluate(() => window.__qa.permissionAtShow[0].title), /划词.*辅助功能权限/);
+  assert.equal(await page.evaluate(() => window.__qa.permissionAtShow[0].layout.presentation), 'popup');
+  assert.equal(await page.evaluate(() => window.__qa.showPopupAttempts[0].focusInput), true);
+  assert.equal(await page.evaluate(() => document.activeElement.id), 'source-text');
+  assert.deepEqual(await page.evaluate(() => window.__qa.permissionRequests), []);
+  assert.deepEqual(await page.evaluate(() => window.__qa.permissionSettings), []);
   assert.equal(await page.evaluate(() => window.__qa.translationRequests.length), 0);
   console.log('PASS: capture before listener replays once after readiness; event plus pull translates once; old startup payloads cannot overwrite edits, management, or a newer task; empty Alt+D retains first-input focus. Fake IPC only.');
   await page.goto(process.env.ECHOLINGO_TEST_URL ?? 'http://127.0.0.1:1420/');
@@ -755,6 +771,119 @@ try {
   assert.match(await page.locator('#permission-context').textContent(), /不一致.*重新打开/);
   await page.evaluate(() => { window.__qa.permissionOverride = null; });
   await page.locator('#refresh-permissions').click();
+
+  // Missing selection permission is distinct from an ordinary empty selection.
+  // Use production delivery IDs/ACKs and a fresh native epoch for every action.
+  await goView('translate');
+  await page.evaluate(() => { window.__qa.permissionState.accessibilityGranted = false; });
+  await pin.click();
+  await page.waitForFunction(() => document.querySelector('#pin-button').getAttribute('aria-pressed') === 'true');
+  const selectionPermissionBaseline = await page.evaluate(() => ({
+    opens: window.__qa.permissionSettings.length, authorizations: window.__qa.permissionRequests.length,
+    shows: window.__qa.showCalls.length, translations: window.__qa.translationRequests.length,
+  }));
+  const emitSelectionDelivery = (deliveryId, payload) => page.evaluate(({ deliveryId, payload }) => {
+    const fixture = window.__qa;
+    const presentation = fixture.pinned && fixture.nativeVisible && fixture.presentation.presented
+      ? fixture.nativePinnedCaptureStart() : fixture.nativeHide();
+    fixture.pendingSource = { deliveryId, presentationEpoch: presentation.epoch, ...payload };
+    fixture.emit('source-text', structuredClone(fixture.pendingSource));
+  }, { deliveryId, payload });
+  await emitSelectionDelivery(500, { text: '', mode: 'input', focusInput: true, permissionRequired: 'accessibility' });
+  await page.waitForFunction(() => window.__qa.sourceAcks.includes(500));
+  await page.locator('#permission-guidance').waitFor({ state: 'visible' });
+  assert.match(await page.locator('#permission-guidance-title').textContent(), /划词.*辅助功能权限/);
+  assert.match(await page.locator('#permission-guidance-description').textContent(), /系统设置 → 隐私与安全 → 辅助功能/);
+  assert.equal(await page.evaluate(() => window.__qa.permissionAtShow.at(-1).visible), true);
+  assert.match(await page.evaluate(() => window.__qa.permissionAtShow.at(-1).title), /辅助功能权限/);
+  assert.equal(await page.evaluate(() => document.activeElement.id), 'source-text');
+  assert.equal(await pin.getAttribute('aria-pressed'), 'true');
+  assert.equal(await page.locator('#source-text').inputValue(), '');
+  assert.equal(await page.evaluate(() => window.__qa.showCalls.length), selectionPermissionBaseline.shows + 1);
+  assert.equal(await page.evaluate(() => window.__qa.translationRequests.length), selectionPermissionBaseline.translations);
+  assert.equal(await page.evaluate(() => window.__qa.permissionSettings.length), selectionPermissionBaseline.opens);
+  assert.equal(await page.evaluate(() => window.__qa.permissionRequests.length), selectionPermissionBaseline.authorizations);
+  await page.clock.fastForward(8_100);
+  assert.equal(await page.locator('#permission-guidance').isVisible(), true);
+  assert.equal(await page.locator('#toast').isHidden(), true);
+
+  await page.setViewportSize({ width: 420, height: 600 });
+  const accessibilityGuidanceBounds = await page.locator('#permission-guidance').boundingBox();
+  for (const id of ['#permission-guidance-open', '#permission-guidance-help']) {
+    const bounds = await page.locator(id).boundingBox();
+    assert.ok(bounds.x >= accessibilityGuidanceBounds.x
+      && bounds.x + bounds.width <= accessibilityGuidanceBounds.x + accessibilityGuidanceBounds.width + 1);
+  }
+  assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true);
+  await page.locator('.app-shell').screenshot({ path: 'test-results/accessibility-permission-narrow-420.png' });
+  await page.setViewportSize({ width: 800, height: 820 });
+
+  // Only this explicit click opens the accessibility pane; it never invokes
+  // request_permission. The help action stays inside the application's guide.
+  await page.locator('#permission-guidance-open').click();
+  await page.waitForFunction((count) => window.__qa.permissionSettings.length === count + 1, selectionPermissionBaseline.opens);
+  assert.equal(await page.evaluate(() => window.__qa.permissionSettings.at(-1)), 'accessibility');
+  assert.equal(await page.evaluate(() => window.__qa.permissionRequests.length), selectionPermissionBaseline.authorizations);
+  await page.locator('#permission-guidance-help').click();
+  await page.waitForFunction(() => document.activeElement.id === 'mac-permission-card');
+  assert.equal(await page.locator('body').getAttribute('data-view'), 'settings');
+  assert.equal(await page.locator('#permission-setup-steps').getAttribute('open'), '');
+  assert.equal(await page.evaluate(() => window.__qa.permissionSettings.length), selectionPermissionBaseline.opens + 1);
+  await page.evaluate(() => { window.__qa.permissionState.accessibilityGranted = true; });
+  await page.locator('#refresh-permissions').click();
+  await page.locator('#accessibility-permission-state').getByText('已授权').waitFor();
+  assert.equal(await page.locator('#permission-guidance').evaluate(element => element.hidden), true);
+  assert.equal(await page.evaluate(() => window.__qa.permissionRequests.length), selectionPermissionBaseline.authorizations);
+  await goView('translate');
+
+  // A subsequent successful selection removes obsolete guidance and translates
+  // normally, while a late permission failure cannot replace newer user input.
+  await emitSelectionDelivery(501, { text: '', mode: 'input', focusInput: true, permissionRequired: 'accessibility' });
+  await page.waitForFunction(() => window.__qa.sourceAcks.includes(501));
+  await page.locator('#permission-guidance').waitFor({ state: 'visible' });
+  await emitSelectionDelivery(502, { text: 'QA selected source after accessibility recovery', mode: 'translate' });
+  await page.waitForFunction(() => window.__qa.sourceAcks.includes(502));
+  await page.getByText('Isolated test translation fixture', { exact: true }).waitFor();
+  assert.equal(await page.locator('#permission-guidance').isHidden(), true);
+  assert.equal(await page.evaluate(() => window.__qa.translationRequests.at(-1).text), 'QA selected source after accessibility recovery');
+  const staleSelectionPermission = await page.evaluate(() => {
+    const epoch = window.__qa.presentation.epoch;
+    window.__qa.nativeHide(); window.__qa.nativeShow();
+    return { epoch, shows: window.__qa.showCalls.length };
+  });
+  await page.locator('#source-text').fill('QA newer input survives old accessibility failure');
+  await page.evaluate(({ epoch }) => {
+    const payload = { deliveryId: 503, text: '', mode: 'input', focusInput: true, presentationEpoch: epoch, permissionRequired: 'accessibility' };
+    window.__qa.pendingSource = payload; window.__qa.emit('source-text', payload);
+  }, staleSelectionPermission);
+  await page.waitForFunction(() => window.__qa.sourceAcks.includes(503));
+  assert.equal(await page.locator('#permission-guidance').isHidden(), true);
+  assert.equal(await page.locator('#source-text').inputValue(), 'QA newer input survives old accessibility failure');
+  assert.equal(await page.evaluate(() => window.__qa.showCalls.length), staleSelectionPermission.shows);
+  // The same native epoch is also obsolete after an edit. This isolates the
+  // delivery intent guard from the old-epoch rejection above.
+  await page.evaluate(() => {
+    const fixture = window.__qa;
+    const payload = { deliveryId: 504, text: '', mode: 'input', focusInput: true,
+      presentationEpoch: fixture.presentation.epoch, permissionRequired: 'accessibility' };
+    fixture.pendingSource = payload; fixture.emit('source-text', payload);
+  });
+  await page.waitForFunction(() => window.__qa.sourceAcks.includes(504));
+  assert.equal(await page.locator('#permission-guidance').isHidden(), true);
+  assert.equal(await page.locator('#source-text').inputValue(), 'QA newer input survives old accessibility failure');
+  assert.equal(await page.evaluate(() => window.__qa.showCalls.length), staleSelectionPermission.shows);
+  await emitSelectionDelivery(505, { text: '', mode: 'input', focusInput: true });
+  await page.waitForFunction(() => window.__qa.sourceAcks.includes(505) && document.activeElement.id === 'source-text');
+  assert.equal(await page.locator('#permission-guidance').isHidden(), true);
+  assert.equal(await page.locator('#toast').isHidden(), true);
+  assert.equal(await page.locator('#source-text').inputValue(), '');
+  assert.equal(await page.evaluate(() => window.__qa.permissionSettings.length), selectionPermissionBaseline.opens + 1);
+  assert.equal(await page.evaluate(() => window.__qa.permissionRequests.length), selectionPermissionBaseline.authorizations);
+  assert.equal(await pin.getAttribute('aria-pressed'), 'true');
+  await pin.click();
+  await page.waitForFunction(() => document.querySelector('#pin-button').getAttribute('aria-pressed') === 'false');
+  console.log('PASS: missing Accessibility is actionable before first popup, opens only the clicked permission pane, never requests authorization automatically, and clears on refresh/new selection; late failures and ordinary empty selections stay quiet. Fake IPC only.');
+  await goView('settings');
 
   // Saving is atomic from the form's perspective: closing or submitting again
   // while the backend is pending cannot replace or close a different editor.

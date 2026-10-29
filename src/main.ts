@@ -1047,7 +1047,7 @@ function showPermissionGuidance(kind: PermissionKind): void {
   $('#permission-guidance-title').textContent = kind === 'screenCapture' ? '截图需要屏幕录制权限' : '划词需要辅助功能权限';
   $('#permission-guidance-description').textContent = kind === 'screenCapture'
     ? '首次使用请在 macOS 系统设置中允许 EchoLingo 录制屏幕。找不到应用时，请查看授权指引。'
-    : '请在 macOS 系统设置中允许 EchoLingo 使用辅助功能，以读取选中的文字。';
+    : '请在“系统设置 → 隐私与安全 → 辅助功能”中开启 EchoLingo，以读取选中的文字。找不到应用时，请查看首次授权指引。';
   $('#permission-guidance-error').hidden = true;
   $('#permission-guidance').hidden = false;
   notifyLayout();

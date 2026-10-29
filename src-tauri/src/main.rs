@@ -1930,6 +1930,16 @@ fn action_failure_presentation(
     if action == "selection" {
         source["focusInput"] = serde_json::json!(true);
     }
+    #[cfg(target_os = "macos")]
+    if action == "selection" && error.starts_with("PERMISSION:") {
+        // Keep the permission reminder and editable source in one epoch-bound
+        // event. The Settings link is explicit; a hotkey never requests access.
+        source["permissionRequired"] = serde_json::json!("accessibility");
+        return Some(ActionFailurePresentation {
+            source,
+            error: None,
+        });
+    }
     if matches!(action, "capture" | "ocr" | "silentOcr") && error.starts_with("PERMISSION:") {
         // Keep permission guidance and the blank capture view in one event so
         // the frontend can prepare both before presenting the inactive popup.
@@ -3838,7 +3848,11 @@ mod tests {
         let unavailable =
             action_failure_presentation("selection", "PERMISSION: Accessibility is not granted", 7)
                 .unwrap();
-        assert_eq!(unavailable.source, empty_selection_payload(7));
+        let mut expected = empty_selection_payload(7);
+        if cfg!(target_os = "macos") {
+            expected["permissionRequired"] = serde_json::json!("accessibility");
+        }
+        assert_eq!(unavailable.source, expected);
         assert_eq!(unavailable.error, None);
 
         let restoration = action_failure_presentation(
@@ -3867,6 +3881,69 @@ mod tests {
             assert_eq!(failure.source, empty_input_payload(9));
             assert!(failure.error.is_some());
         }
+    }
+    #[test]
+    fn selection_accessibility_guidance_is_mac_only_and_atomic() {
+        let failure = action_failure_presentation(
+            "selection",
+            "PERMISSION: Accessibility is not granted",
+            42,
+        )
+        .unwrap();
+        let mut expected = empty_selection_payload(42);
+        if cfg!(target_os = "macos") {
+            expected["permissionRequired"] = serde_json::json!("accessibility");
+        }
+        assert_eq!(failure.source, expected);
+        assert_eq!(failure.error, None);
+        assert_eq!(failure.source["focusInput"], true);
+        assert_eq!(failure.source["presentationEpoch"], 42);
+    }
+    #[test]
+    fn selection_nonpermission_failures_do_not_show_accessibility_guidance() {
+        for error in [
+            "NO_SELECTION: Nothing selected",
+            "SELECTION: Foreground changed",
+            "CLIPBOARD_CHANGED: A newer copy was preserved",
+            "NATIVE_PROTOCOL: Native response was invalid",
+            "PERMISSION_SETTINGS: Cannot open Settings",
+            "permission: Not a native permission category",
+            "NATIVE: PERMISSION: Embedded text is not a permission error",
+        ] {
+            let failure = action_failure_presentation("selection", error, 43).unwrap();
+            assert_eq!(failure.source, empty_selection_payload(43), "{error}");
+            assert_eq!(failure.error, None, "{error}");
+        }
+        assert!(action_failure_presentation(
+            "selection",
+            "CANCELLED: PERMISSION: A stale request was cancelled",
+            43,
+        )
+        .is_none());
+    }
+    #[test]
+    fn selection_permission_payload_cannot_resume_an_older_presentation() {
+        let requests = translation_requests::TranslationRequests::default();
+        let old = begin_native_action_presentation(&requests, false).unwrap();
+        let failure = action_failure_presentation(
+            "selection",
+            "PERMISSION: Accessibility is not granted",
+            old.epoch,
+        )
+        .unwrap();
+        assert_eq!(failure.source["presentationEpoch"], old.epoch);
+        let current = begin_native_action_presentation(&requests, false).unwrap();
+        assert!(!retained_capture_result_is_current(
+            old,
+            Some(current),
+            false,
+            true,
+        ));
+        assert_eq!(
+            requests.resume(Some(old.epoch)).unwrap_err(),
+            translation_requests::CANCELLED,
+        );
+        assert_eq!(requests.presentation().unwrap(), current);
     }
     #[test]
     fn credentials_do_not_cross_protocols_or_supplier_origins() {
