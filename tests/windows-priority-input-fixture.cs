@@ -19,7 +19,11 @@ public static class WindowsPriorityInputFixture {
         X1DoubleDown=28,X2DoubleDown=29,LateMode=30,LateDown=31,LateUp=32,
         LateSwallowedDown=33,LateSwallowedUp=34,LateActions=35,DecoyWindow=36,
         DecoyEditor=37,DecoyForeground=38,DecoyFocus=39,DecoySelectionStart=40,
-        DecoySelectionLength=41,CommandError=42,LateInstalled=43,Revision=63;
+        DecoySelectionLength=41,CommandError=42,LateInstalled=43,
+        LastSuffixKey=44,LastSuffixFlags=45,LastSuffixScan=46,LastSuffixLeftAlt=47,
+        LastSuffixRightAlt=48,LastSuffixAlt=49,LastSuffixControl=50,LastSuffixShift=51,
+        LastSuffixLeftWin=52,LastSuffixRightWin=53,LastAltKey=54,LastAltFlags=55,
+        LastAltScan=56,LastSuffixGuiSucceeded=57,LastSuffixGuiFlags=58,LastSuffixFocusIsEditor=59,Revision=63;
     const uint RecoverySuccesses=0,RecoveryRequests=1,RecoveryAttempts=2,RecoveryPending=3,
         RecoveryDeferred=4,RecoveryFailures=5,ObservedDown=6,ObservedUp=7,
         AcceptedPairs=8,DiscardedPairs=9,BlockedPairs=10,Enqueued=11,StaleEvents=12;
@@ -224,7 +228,19 @@ public static class WindowsPriorityInputFixture {
             // Installed before the production pump, so a production-consumed
             // suffix cannot reach this passive peer observer. Never suppress.
             if(code==0&&parameter!=IntPtr.Zero){KEYBOARD key=(KEYBOARD)Marshal.PtrToStructure(parameter,typeof(KEYBOARD));int message=word.ToInt32();bool down=message==0x100||message==0x104,up=message==0x101||message==0x105;
-                if(key.key==0x12||key.key==0xa4||key.key==0xa5){if(down)counts[AltDown]++;if(up)counts[AltUp]++;}if(key.key==0x44||key.key==0x53){if(down)counts[SuffixDown]++;if(up)counts[SuffixUp]++;}if(key.key==0xe8){if(down)counts[MaskDown]++;if(up)counts[MaskUp]++;}}
+                if(key.key==0x12||key.key==0xa4||key.key==0xa5){counts[LastAltKey]=key.key;counts[LastAltFlags]=key.flags;counts[LastAltScan]=key.scan;if(down)counts[AltDown]++;if(up)counts[AltUp]++;}
+                if(key.key==0x44||key.key==0x53){
+                    if(down){
+                        counts[SuffixDown]++;counts[LastSuffixKey]=key.key;counts[LastSuffixFlags]=key.flags;counts[LastSuffixScan]=key.scan;
+                        int[] keys=new int[]{0xa4,0xa5,0x12,0x11,0x10,0x5b,0x5c};
+                        for(int i=0;i<keys.Length;i++)counts[LastSuffixLeftAlt+i]=(GetAsyncKeyState(keys[i])&0x8000)!=0?1:0;
+                        uint process;uint thread=GetWindowThreadProcessId(GetForegroundWindow(),out process);GUI gui=new GUI();gui.size=(uint)Marshal.SizeOf(typeof(GUI));
+                        bool known=process==(uint)Process.GetCurrentProcess().Id&&thread!=0&&GetGUIThreadInfo(thread,ref gui);
+                        counts[LastSuffixGuiSucceeded]=known?1:0;counts[LastSuffixGuiFlags]=known?gui.flags:0;counts[LastSuffixFocusIsEditor]=known&&gui.focus==editor.Handle?1:0;
+                    }
+                    if(up)counts[SuffixUp]++;
+                }
+                if(key.key==0xe8){if(down)counts[MaskDown]++;if(up)counts[MaskUp]++;}}
             return CallNextHookEx(hook,code,word,parameter);
         }
         void RemoveLate() {
@@ -300,7 +316,7 @@ public static class WindowsPriorityInputFixture {
                 }
                 stop();nativeStarted=false;Need(current()==0,"STOPPED_NATIVE_EVENT_REMAINED_CURRENT");result["nativeHookStopped"]=true;
                 cases.Add(RunCase("stopping-hook-restores-peer",Chord(0x44),0,1,-1,0,0,0));Need(cases.Count==required,"FIXTURE_CASE_COUNT_CHANGED");result["ok"]=true;
-            }catch(Exception error){result["error"]=error.Message;result["failedCase"]=pendingCase;try{result["failedCasePeerAfter"]=Snapshot();result["keysReleasedAtFailure"]=Released();}catch{result["failedCaseMetadataUnavailable"]=true;}}
+            }catch(Exception error){result["error"]=error.Message;result["failedCase"]=pendingCase;try{long[] failed=Snapshot();result["failedCasePeerAfter"]=failed;result["unconsumedSuffixMetadata"]=new Dictionary<string,object>{{"virtualKey",failed[LastSuffixKey]},{"lowLevelFlags",failed[LastSuffixFlags]},{"scanCode",failed[LastSuffixScan]},{"leftAltAsync",failed[LastSuffixLeftAlt]},{"rightAltAsync",failed[LastSuffixRightAlt]},{"genericAltAsync",failed[LastSuffixAlt]},{"controlAsync",failed[LastSuffixControl]},{"shiftAsync",failed[LastSuffixShift]},{"leftWinAsync",failed[LastSuffixLeftWin]},{"rightWinAsync",failed[LastSuffixRightWin]},{"lastAltVirtualKey",failed[LastAltKey]},{"lastAltFlags",failed[LastAltFlags]},{"lastAltScanCode",failed[LastAltScan]},{"ownGuiMetadataAvailable",failed[LastSuffixGuiSucceeded]},{"ownGuiFlags",failed[LastSuffixGuiFlags]},{"ownFocusWasSourceEditor",failed[LastSuffixFocusIsEditor]}};result["keysReleasedAtFailure"]=Released();}catch{result["failedCaseMetadataUnavailable"]=true;}}
             finally {
                 if(ownedHeldKeys){try{Send(Key(0x44,true),Key(0x53,true),Key(0x12,true),AltKey(false,true),AltKey(true,true));ownedHeldKeys=false;result["ownedHeldInputReleasedDuringCleanup"]=true;}catch{result["ownedHeldInputReleasedDuringCleanup"]=false;}}
                 if(nativeStarted&&stop!=null){stop();nativeStarted=false;result["nativeHookStopped"]=true;}
