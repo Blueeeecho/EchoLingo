@@ -2545,6 +2545,7 @@ sealed class CaptureMagnifier : Form {
     public const string WindowTitle = "EchoLingoCaptureMagnifier";
     const int Sample = 52, Zoom = 3, View = Sample * Zoom, Caption = 18, Gap = 16;
     [DllImport("user32.dll", SetLastError=true)] static extern bool SetWindowPos(IntPtr window, IntPtr after, int x, int y, int width, int height, uint flags);
+    [DllImport("user32.dll")] static extern bool EnableWindow(IntPtr window, bool enable);
     readonly Bitmap canvas = new Bitmap(View, View + Caption);
     bool canvasDisposed;
     public CaptureMagnifier() {
@@ -2554,6 +2555,7 @@ sealed class CaptureMagnifier : Form {
         StartPosition = FormStartPosition.Manual;
         ShowInTaskbar = false;
         TopMost = true;
+        Enabled = false; // WindowFromPoint skips disabled windows; the loupe must not cover the input plane.
         Text = WindowTitle;
         ClientSize = new Size(View, View + Caption);
         BackColor = Color.FromArgb(22, 26, 34);
@@ -2615,6 +2617,7 @@ sealed class CaptureMagnifier : Form {
         }
         if (!Visible) { Bounds = place; Show(); }
         if (!SetWindowPos(Handle, new IntPtr(-1), place.X, place.Y, place.Width, place.Height, 0x0010 | 0x0200)) { Hide(); return; }
+        EnableWindow(Handle, false);
         Refresh();
     }
     protected override void Dispose(bool disposing) {
