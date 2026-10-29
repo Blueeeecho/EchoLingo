@@ -17,15 +17,21 @@ export function buildOcrCredential(kind: OcrProvider['kind'], fields: OcrSecretF
     const appKey = fields.appKey?.trim() ?? '', appSecret = fields.appSecret?.trim() ?? '';
     if (Boolean(appKey) !== Boolean(appSecret)) return { key: null, error: '有道 OCR 需要同时填写应用 ID 和应用密钥；保留已有凭据时请全部留空。' };
     if (appKey && appSecret) key = JSON.stringify({ appKey, appSecret });
-  } else key = fields.genericKey?.trim() || null;
+  } else {
+    key = fields.genericKey?.trim() || null;
+    if (kind === 'ocrspace' && key?.toLowerCase() === 'helloworld') return { key: null, error: '不能使用 OCR.space 的公共示例密钥，请填写你自己的 API Key。' };
+  }
   if (requireNew && !key) return { key: null, error: '切换 OCR 协议或服务地址后必须填写完整的新凭据，原服务的密钥不会复用。' };
   return { key, error: null };
 }
-export const OCR_NATIVE_URLS = { baidu: 'https://aip.baidubce.com', tencent: 'https://ocr.tencentcloudapi.com', youdao: 'https://openapi.youdao.com/ocrapi', google: 'https://vision.googleapis.com/v1/images:annotate' } as const;
-export function isNativeOcr(kind: string): kind is keyof typeof OCR_NATIVE_URLS { return Object.hasOwn(OCR_NATIVE_URLS, kind); }
+export const OCR_NATIVE_URLS = { baidu: 'https://aip.baidubce.com', tencent: 'https://ocr.tencentcloudapi.com', youdao: 'https://openapi.youdao.com/ocrapi', google: 'https://vision.googleapis.com/v1/images:annotate', ocrspace: 'https://api.ocr.space' } as const;
+export type NativeOcrKind = keyof typeof OCR_NATIVE_URLS | 'azure-vision';
+export function isNativeOcr(kind: string): kind is NativeOcrKind { return kind === 'azure-vision' || Object.hasOwn(OCR_NATIVE_URLS, kind); }
 export const OCR_NATIVE_ACTIONS = {
   baidu: [['general_basic', '通用文字识别 · 标准版'], ['accurate_basic', '通用文字识别 · 高精度版']],
   tencent: [['GeneralBasicOCR', '通用印刷体识别'], ['GeneralAccurateOCR', '通用文字识别 · 高精度版']],
   youdao: [['general', '通用文字识别']],
   google: [['DOCUMENT_TEXT_DETECTION', '文档文字识别'], ['TEXT_DETECTION', '图片文字识别']],
+  'azure-vision': [['read', 'Read']],
+  ocrspace: [['2', 'Engine 2'], ['1', 'Engine 1']],
 } as const;

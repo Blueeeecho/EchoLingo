@@ -9,6 +9,7 @@ import { credentialScope } from './credential-scope';
 import { credentialMayExist, credentialStateOf, credentialStatusLabel } from './credential-state';
 import { inferProviderPreset, PROVIDER_PRESETS, qwenBaseUrl, qwenSettingsFromUrl } from './provider-presets';
 import type { QwenRegion } from './provider-presets';
+import { installFreeSetup } from './free-setup-ui';
 import { buildTranslationCredential, isNativeTranslation, TRANSLATION_NATIVE_URLS } from './translation-credentials';
 import { renderServiceGuide, TRANSLATION_GUIDES } from './service-guides';
 import { TRANSLATION_QUOTAS } from './service-quotas';
@@ -651,6 +652,7 @@ function renderResults(results: TranslationResult[]): void {
   });
   const success = results.filter((result) => !result.error).length;
   $('#translation-state').textContent = success === results.length ? '翻译完成' : `${success} / ${results.length} 个服务成功`;
+  if (results.some((result) => result.error || !result.text.trim())) freeSetup.noteWeak(results.some((result) => result.error) ? '翻译失败' : '服务返回错误');
   notifyLayout();
 }
 async function translate(): Promise<void> {
@@ -695,6 +697,7 @@ async function translate(): Promise<void> {
     resultsContainer.append(card); $('.results-column').hidden = false; notifyLayout();
     $('#translation-state').textContent = '翻译失败';
     status('翻译失败');
+    freeSetup.noteWeak('翻译失败');
   } finally {
     if (token === generation) {
       activeTranslationId = null; setLoading(false);
@@ -729,6 +732,7 @@ function renderShortcutHints(): void {
   for (const button of document.querySelectorAll<HTMLElement>('[data-action="capture"]')) button.title = `截图翻译${settings.shortcuts.capture ? ` · ${settings.shortcuts.capture}` : ''}`;
   for (const button of document.querySelectorAll<HTMLElement>('[data-action="silentOcr"]')) button.title = `无感 OCR${settings.shortcuts.silentOcr ? ` · ${settings.shortcuts.silentOcr}，按住左键拖选，Esc 取消` : ''}`;
   renderCoreGuidance();
+  freeSetup.refresh();
 }
 async function retryInactiveShortcuts(actions: ShortcutAction[]): Promise<void> {
   await updateSettings((next) => next, undefined, actions);
@@ -801,7 +805,7 @@ function renderHistory(): void {
     item.append(reopen); list.append(item);
   }
 }
-function providerKindLabel(kind: ProviderKind): string { return { offline: '本机离线翻译', system: '系统翻译', baidu: '百度翻译', youdao: '有道翻译', microsoft: '微软翻译', openai: 'OpenAI 兼容', deepl: 'DeepL', libretranslate: 'LibreTranslate' }[kind]; }
+function providerKindLabel(kind: ProviderKind): string { return { offline: '本机离线翻译', system: '系统翻译', baidu: '百度翻译', youdao: '有道翻译', microsoft: '微软翻译', openai: 'OpenAI 兼容', deepl: 'DeepL', libretranslate: 'LibreTranslate', volcengine: '火山引擎机器翻译', aliyun: '阿里云机器翻译' }[kind]; }
 function renderProviders(): void {
   const list = $('#provider-list'); list.replaceChildren();
   $<HTMLButtonElement>('#add-provider').disabled = !settingsReady || settings.providers.length >= 12;
@@ -1012,7 +1016,10 @@ function providerKindChanged(useDefaults = false): void {
   const native = isNativeTranslation(kind);
   $('#provider-url-field').hidden = system || native;
   $('#provider-key-field').hidden = system || native;
-  $('#provider-baidu-credentials').hidden = kind !== 'baidu';
+  $('#provider-baidu-credentials').hidden = kind !== 'baidu' && kind !== 'volcengine' && kind !== 'aliyun';
+  const baiduLabels = $('#provider-baidu-credentials').querySelectorAll('label');
+  const pairLabels = kind === 'volcengine' ? ['AccessKey ID', 'Secret Access Key'] : kind === 'aliyun' ? ['AccessKey ID', 'AccessKey Secret'] : ['APP ID', '密钥'];
+  baiduLabels.forEach((label, index) => { const text = [...label.childNodes].find((node) => node.nodeType === Node.TEXT_NODE); if (text && pairLabels[index]) text.textContent = pairLabels[index]; });
   $('#provider-youdao-credentials').hidden = kind !== 'youdao';
   $('#provider-microsoft-credentials').hidden = kind !== 'microsoft';
   $('#provider-microsoft-region-field').hidden = kind !== 'microsoft';
@@ -1034,6 +1041,7 @@ function providerKindChanged(useDefaults = false): void {
     offline: '内置离线翻译无需 API 地址。',
     system: '系统翻译无需 API 地址。',
     baidu: '使用百度翻译官方固定端点。', youdao: '使用有道文本翻译官方固定端点。', microsoft: '使用 Azure Translator 全球固定端点。',
+    volcengine: '使用火山引擎机器翻译固定端点。额度说明核对于 2026-10，可能变化。', aliyun: '使用阿里云机器翻译固定端点，不是百炼。免费额度用完后可能按量计费。',
     openai: '填写 API 基础地址，无需包含 /chat/completions。DeepSeek、Ollama 等请填写对应地址。',
     deepl: '免费账户通常使用 api-free.deepl.com，付费账户使用 api.deepl.com。无需包含 /v2/translate。',
     libretranslate: '填写你使用的 LibreTranslate 服务地址，无需包含 /translate。',
@@ -1273,8 +1281,10 @@ function handleActionError(message: string): void {
   if (/^(?:NO_SELECTION|SELECTION_EMPTY|CANCELLED):/i.test(message.trim()) || /^未取得选区/.test(message.trim())) return;
   const guidance = /^PERMISSION:/i.test(message.trim()) ? '\n可在“更多 → 设置 → 系统权限”中检查或授权。' : '';
   toast(`${message}${guidance}`, 'error', 8000);
+  freeSetup.noteWeak(message);
 }
 
+let freeSetup: { refresh: () => void; noteWeak: (text?: string) => void } = { refresh() {}, noteWeak() {} };
 const ocrUi = createOcrUi({
   desktop, settings: () => settings, updateSettings,
   reloadSettings: async () => { settings = await invoke<Settings>('get_settings'); renderSettings(); },
@@ -1581,4 +1591,7 @@ async function initialize(): Promise<void> {
     showDiagnostics(`启动检查失败：${errorMessage(error)}`);
   } finally { resizeSourceEditor(); }
 }
+freeSetup = installFreeSetup({
+  desktop, settings: () => settings, updateSettings, toast, setView, reportError,
+});
 void initialize();

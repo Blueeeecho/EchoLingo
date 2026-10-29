@@ -28,6 +28,12 @@ describe('official translation setup', () => {
       expect(validateProvider({ ...provider, region: 'eastasia' })).toBe(kind === 'microsoft' ? null : '仅微软翻译可填写资源地域，请使用控制台中的地域标识。');
       expect(validateProvider({ ...provider, region: 'eastasia\r\n' })).not.toBeNull();
     }
+    for (const kind of ['volcengine', 'aliyun'] as const) {
+      const provider = { id: 'qa', name: 'QA', kind, baseUrl: TRANSLATION_NATIVE_URLS[kind], model: '', prompt: '', enabled: true };
+      expect(validateProvider(provider)).toBeNull();
+      expect(validateProvider({ ...provider, model: 'qa-model' })).toMatch(/不使用模型/);
+      expect(JSON.parse(buildTranslationCredential(kind, { appId: 'AKID', secretKey: 'secret' }).key!)).toEqual({ accessKeyId: 'AKID', accessKeySecret: 'secret' });
+    }
   });
 });
 describe('official OCR setup', () => {
@@ -36,6 +42,8 @@ describe('official OCR setup', () => {
     expect(buildOcrCredential('youdao', { appSecret: 'qa' }, false).error).toMatch(/同时填写/);
     expect(JSON.parse(buildOcrCredential('youdao', { appKey: 'qa-app', appSecret: 'qa-secret', genericKey: 'ignored' }, false).key!)).toEqual({ appKey: 'qa-app', appSecret: 'qa-secret' });
     expect(buildOcrCredential('google', { genericKey: 'qa-google' }, false).key).toBe('qa-google');
+    expect(buildOcrCredential('ocrspace', { genericKey: 'helloworld' }, false).error).toMatch(/公共示例密钥/);
+    expect(buildOcrCredential('ocrspace', { genericKey: 'user-owned-key' }, false).key).toBe('user-owned-key');
     for (const kind of ['youdao', 'google'] as const) expect(buildOcrCredential(kind, {}, true).error).toMatch(/切换 OCR 协议/);
     expect(OCR_NATIVE_URLS.youdao).toBe('https://openapi.youdao.com/ocrapi');
     expect(OCR_NATIVE_URLS.google).toBe('https://vision.googleapis.com/v1/images:annotate');
@@ -45,7 +53,7 @@ describe('official OCR setup', () => {
 describe('public official setup guides', () => {
   it('covers every preset and OCR kind with short instructions and secure fixed links', () => {
     expect(PROVIDER_PRESETS.every(preset => TRANSLATION_GUIDES[preset.id])).toBe(true);
-    expect(Object.keys(OCR_GUIDES).sort()).toEqual(['baidu', 'google', 'http-json', 'openai-vision', 'tencent', 'youdao']);
+    expect(Object.keys(OCR_GUIDES).sort()).toEqual(['azure-vision', 'baidu', 'google', 'http-json', 'ocrspace', 'openai-vision', 'tencent', 'youdao']);
     for (const guide of [...Object.values(TRANSLATION_GUIDES), ...Object.values(OCR_GUIDES)]) {
       expect(guide.steps.length).toBeGreaterThanOrEqual(2);
       expect(guide.links.length).toBeGreaterThan(0);

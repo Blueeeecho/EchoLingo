@@ -60,8 +60,20 @@ export const TRANSLATION_QUOTAS: Record<ProviderPresetId, ServiceQuota> = {
   openai: quota({ badge: '按量计费', summary: 'API 按模型 Token 计费，无适用于所有账号的固定免费额度。', details: ['自定义兼容服务的价格由实际服务商决定，不能套用 OpenAI 的套餐。', '符合条件的 ChatGPT Pro / Business 订阅可主动关联本人 API 组织领取抵扣金；不是所有订阅或账号都具备该权益，额度在相应订阅周期结束时过期。'], allowances: [], links: [['官方 API 价格', 'https://developers.openai.com/api/docs/pricing'], ['订阅 API 抵扣权益', 'https://developers.openai.com/api/docs/guides/chatgpt-api-credits']] }),
   minimax: quota({ badge: '按量或套餐计费', summary: '普通 API 按量收费；订阅密钥消耗已购套餐额度。', details: ['没有适用于所有 API 账号的固定长期免费 Token 额度。', '免费使用网页/官方应用不代表 API 免费；中国站账号、密钥和套餐需匹配。'], allowances: [], links: [['官方套餐与使用范围', 'https://platform.minimax.cn/subscribe/coding-plan']] }),
   deepseek: quota({ badge: '按量计费', summary: '按模型输入、输出及缓存 Token 计费，无固定长期免费额度。', details: ['赠送余额如有发放，以账户实际到账和有效期为准，不能视作每月免费额度。'], allowances: [], links: [['官方模型与价格', 'https://api-docs.deepseek.com/zh-cn/quick_start/pricing/']] }),
-  zhipu: quota({ badge: '按模型计费', summary: '没有适用于所有模型和账号的固定统一免费额度。', details: ['请按官方模型页核对所选模型的价格；不能仅凭名称包含 Flash 就判断免费。', '新客体验包如有发放，其适用模型与有效期以账户资源包为准；标准 API 与 Coding Plan 分别管理。'], allowances: [], links: [['官方模型说明', 'https://docs.bigmodel.cn/cn/guide/start/model-overview']] }),
+  zhipu: quota({ badge: '部分模型免费', summary: 'GLM-4-Flash 在 2026-10 的模型页被标为免费模型，其他模型另计。', details: ['免费只针对官方列出的免费模型，并有速率和并发限制，政策可能变化。', '不能把所有智谱模型都当成免费。没有适用于全部模型的固定月度额度。', '标准 API 与 Coding Plan 分别管理。'], allowances: [], recommendedModel: 'glm-4-flash', links: [['免费模型说明', 'https://docs.bigmodel.cn/cn/guide/models/free/glm-4-flash-250414'], ['官方模型说明', 'https://docs.bigmodel.cn/cn/guide/start/model-overview']] }),
   siliconflow: quota({ badge: '指定模型免费', summary: 'tencent/Hunyuan-MT-7B 当前输入、输出单价均为 0。', details: ['注册硅基流动中国站、创建 API Key；新服务默认填写 tencent/Hunyuan-MT-7B。', '免费仅限官方价格页标明免费的模型，仍受速率、并发与可用性限制；没有统一月度赠送 Token 量。', '已有服务保留原模型；选择 DeepSeek 等收费模型时按其价格计费。'], allowances: [{ plan: 'tencent/Hunyuan-MT-7B', amount: null, unit: 'tokens', period: 'variable', conditions: ['仅此免费模型，不等于全平台免费。', '受服务速率与并发限制。'] }], recommendedModel: 'tencent/Hunyuan-MT-7B', links: [['官方逐模型价格', 'https://www.siliconflow.cn/pricing']] }),
+  volcengine: quota({
+    badge: '每月免费额度', summary: '文本翻译每月前约 200 万字符。核对于 2026-10，可能变化。',
+    details: ['需要火山引擎账号、实名和已开通的机器翻译。', '这是机器翻译接口，不是火山方舟大模型。', '超出免费层后的价格以控制台为准，不承诺永久免费。'],
+    allowances: [{ plan: '文本翻译', amount: 2_000_000, unit: 'characters', period: 'month', conditions: ['公开计费说明中的每月前 200 万字符。', '以控制台当时的额度为准。'] }],
+    links: [['计费说明', 'https://docs.volcengine.com/docs/machine-translation/product-billing'], ['文本翻译 API', 'https://docs.volcengine.com/docs/machine-translation/text-translation-api']],
+  }),
+  aliyun: quota({
+    badge: '每月免费额度', summary: '通用版约 100 万字符/月。核对于 2026-10，可能变化。',
+    details: ['这是阿里云机器翻译，不是百炼通义千问。', '免费额度用完后可能转为按量计费。建议在控制台关闭后付费或设置用完即停。', '不承诺永久免费。'],
+    allowances: [{ plan: '机器翻译通用版', amount: 1_000_000, unit: 'characters', period: 'month', conditions: ['主账号额度，子账号共享。', '以控制台当时的额度为准。'] }],
+    links: [['计费说明', 'https://help.aliyun.com/zh/machine-translation/product-overview/billing-overview'], ['调用说明', 'https://help.aliyun.com/zh/machine-translation/developer-reference/api-reference-machine-translation-universal-version-call-guide']],
+  }),
   qwen: quota({ badge: '限时新人额度', summary: '北京地域参与活动的模型通常每模型 100 万 Token，一次性、90 天有效。', details: ['仅北京地域且参与新人额度的模型适用；新加坡等地域没有该免费额度。', '模型与快照版本分别计算；具体余量以控制台为准，输入与输出共用同一额度。', '已认证账号在额度用完或过期后可自动转按量计费，建议在百炼控制台开启“免费额度用完即停”。'], allowances: [{ plan: '参与新人额度的模型（通常）', amount: 1_000_000, unit: 'tokens', period: 'once', conditions: ['首次开通百炼；仅北京地域符合条件的模型。', '具体模型额度以控制台显示为准；不跨模型合并。'], expires: '自开通、模型发布或申请通过的较晚日期起 90 天' }], links: [['官方新人额度与用完即停', 'https://help.aliyun.com/zh/model-studio/new-free-quota/']] }),
 };
 
@@ -76,7 +88,21 @@ export const OCR_QUOTAS: Record<OcrProvider['kind'] | 'local', ServiceQuota> = {
   google: quota({ badge: '每月免费额度', summary: 'Text / Document Text Detection：各功能每月前 1000 units 免费。', details: ['需要 Google Cloud 项目、启用 Vision API 和结算，并配置受限 API Key。', '1 个功能处理 1 张图片为 1 unit；多页文件按页计量，不能把 1000 units 当作 1000 个批量 HTTP 请求。', '超出免费层按实际功能计费；其他 Google Cloud 产品费用另计。'], allowances: [{ plan: 'TEXT_DETECTION / DOCUMENT_TEXT_DETECTION 每个功能', amount: 1000, unit: 'units', period: 'month', conditions: ['项目启用 Cloud Vision 与结算。', '每功能、每图计量；多页文件逐页计量。'] }], links: [['Cloud Vision 官方价格', 'https://cloud.google.com/vision/pricing']] }),
   'openai-vision': quota({ badge: '由模型服务商计费', summary: '图片和输出通常按 Token 或所选服务规则计费，无统一免费次数。', details: ['图片会上传到你明确选择的模型服务商；免费额度、模型支持和账号条件按实际服务商核对。', 'OpenAI 官方 API 价格不代表所有 OpenAI 兼容视觉服务的价格。'], allowances: [], links: [['OpenAI 官方 API 价格', 'https://developers.openai.com/api/docs/pricing']] }),
   'http-json': quota({ badge: '由网关运营方决定', summary: '没有统一免费额度，收费与调用限制由所接入的网关决定。', details: ['填写前向运营方确认单次费用、月额度、数据处理方式和认证要求。'], allowances: [], links: [] }),
+  'azure-vision': quota({ badge: '每月免费额度', summary: 'F0 约 5000 次/月。核对于 2026-10，部分区域没有该层。', details: ['创建资源时选择 F0。不要假设付费层也包含同样的免费次数。', '额度用完后的行为以 Azure 资源设置为准。'], allowances: [{ plan: 'Computer Vision F0', amount: 5000, unit: 'calls', period: 'month', conditions: ['资源为 F0。', '以价格页和资源所在区域为准。'] }], links: [['Vision 价格', 'https://azure.microsoft.com/en-us/pricing/details/cognitive-services/computer-vision/']] }),
+  ocrspace: quota({ badge: '每月免费额度', summary: 'Engine 1/2 约 25000 次/月，并且每 IP 约 500 次/日。核对于 2026-10。', details: ['必须使用你自己的 API Key，应用不会内置或默认公共示例密钥。', '免费层文件大约 1 MB。额度可能变化，不承诺永久免费。'], allowances: [{ plan: 'Engine 1 / Engine 2', amount: 25000, unit: 'calls', period: 'month', conditions: ['自有 API Key。', '另有大约每日 500 次的 IP 限制。'] }], links: [['OCR.space API', 'https://ocr.space/ocrapi']] }),
 };
+export const EXTRA_SERVICE_LINKS = {
+  geminiKey: 'https://aistudio.google.com/apikey',
+  geminiPricing: 'https://ai.google.dev/gemini-api/docs/pricing',
+  geminiOpenAI: 'https://ai.google.dev/gemini-api/docs/openai',
+  glmVision: 'https://docs.bigmodel.cn/cn/guide/models/free/glm-4v-flash',
+  freeSetupZh: 'https://github.com/Blueeeecho/EchoLingo/blob/main/docs/free-setup.zh-CN.md',
+  freeSetupEn: 'https://github.com/Blueeeecho/EchoLingo/blob/main/docs/free-setup.md',
+  ocrSpaceHome: 'https://ocr.space/',
+  azureVisionOverview: 'https://learn.microsoft.com/azure/ai-services/computer-vision/overview',
+  volcengineKeys: 'https://console.volcengine.com/iam/keymanage/',
+  aliyunKeys: 'https://ram.console.aliyun.com/manage/ak',
+} as const;
 
 export function recommendedTranslationPresets(platform: string): readonly ProviderPresetId[] {
   const local: ProviderPresetId[] = ['macos', 'darwin'].includes(platform.toLowerCase()) ? ['system']

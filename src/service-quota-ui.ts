@@ -51,7 +51,7 @@ export function populateProviderPresets(select: HTMLSelectElement, platform: str
   };
   select.replaceChildren();
   addGroup('推荐 · 从这些服务开始', recommended, true);
-  for (const [label, kinds] of [['本机翻译', ['system', 'offline']], ['官方机器翻译', ['baidu', 'youdao', 'microsoft', 'deepl', 'libretranslate']], ['大模型 · 兼容接口', ['openai']]] as const) {
+  for (const [label, kinds] of [['本机翻译', ['system', 'offline']], ['官方机器翻译', ['baidu', 'youdao', 'microsoft', 'deepl', 'libretranslate', 'volcengine', 'aliyun']], ['大模型 · 兼容接口', ['openai']]] as const) {
     addGroup(label, PROVIDER_PRESETS.filter(value => (kinds as readonly string[]).includes(value.kind) && !recommended.includes(value.id)).map(value => value.id));
   }
   // Populating recommendations never changes an existing selected service.
