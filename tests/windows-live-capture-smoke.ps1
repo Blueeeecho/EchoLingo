@@ -199,7 +199,8 @@ public static class EchoLingoLiveCaptureSmoke {
             RECT value; if (!GetWindowRect(window, out value)) return true;
             Rectangle candidate = Rectangle.FromLTRB(value.left, value.top, value.right, value.bottom);
             int dx = candidate.Left + candidate.Width / 2 - pointer.X, dy = candidate.Top + candidate.Height / 2 - pointer.Y;
-            bool styleOk = (style & 0x08000000L) != 0 && (style & 0x20L) == 0 && (style & 0x00080000L) == 0;
+            // Click-through so a loupe that has not yet followed the pointer cannot steal the plane hit. Not layered, so it is not a thin edge.
+            bool styleOk = (style & 0x08000000L) != 0 && (style & 0x20L) != 0 && (style & 0x00080000L) == 0;
             bool sizeOk = candidate.Width >= 140 && candidate.Width <= 360 && candidate.Height >= 150 && candidate.Height <= 420;
             bool near = (long)dx * dx + (long)dy * dy <= 500L * 500L && !candidate.Contains(pointer);
             if (styleOk && sizeOk && near) { matched = true; bounds = candidate; }

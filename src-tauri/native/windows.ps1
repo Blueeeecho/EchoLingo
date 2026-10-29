@@ -2563,13 +2563,14 @@ sealed class CaptureMagnifier : Form {
     protected override CreateParams CreateParams {
         get {
             CreateParams value = base.CreateParams;
-            value.ExStyle |= 0x08000000 | 0x00000080 | 0x00000008; // NOACTIVATE/TOOLWINDOW/TOPMOST
+            value.ExStyle |= 0x08000000 | 0x00000080 | 0x00000008 | 0x00000020; // NOACTIVATE/TOOLWINDOW/TOPMOST/TRANSPARENT
             return value;
         }
     }
     protected override void OnPaint(PaintEventArgs e) { e.Graphics.DrawImageUnscaled(canvas, 0, 0); }
     protected override void WndProc(ref Message message) {
         if (message.Msg == 0x0021) { message.Result = new IntPtr(3); return; } // MA_NOACTIVATE
+        if (message.Msg == 0x0084) { message.Result = new IntPtr(-1); return; } // HTTRANSPARENT: clicks and WindowFromPoint pass through to the input plane
         base.WndProc(ref message);
     }
     static Rectangle Place(Point pointer, Rectangle sample) {

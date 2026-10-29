@@ -213,7 +213,7 @@ public static class EchoLingoIntegrityBoundarySmoke {
                 if (!IsWindowVisible(window)) return true;
                 loupes++; Rectangle candidate=Bounds(window);
                 int dx=candidate.Left+candidate.Width/2-point.X, dy=candidate.Top+candidate.Height/2-point.Y;
-                bool styleOk=(style&0x08000000L)!=0 && (style&0x20L)==0 && (style&0x80000L)==0;
+                bool styleOk=(style&0x08000000L)!=0 && (style&0x20L)!=0 && (style&0x80000L)==0;
                 bool sizeOk=candidate.Width>=140 && candidate.Width<=360 && candidate.Height>=150 && candidate.Height<=420;
                 if (styleOk && sizeOk && (long)dx*dx+(long)dy*dy<=500L*500L && !candidate.Contains(point)) loupeNear=true;
                 return true;

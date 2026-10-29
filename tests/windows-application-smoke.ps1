@@ -351,7 +351,7 @@ public static class EchoLingoApplicationSmoke {
                 Rectangle candidate=Rectangle.FromLTRB(value.left,value.top,value.right,value.bottom);
                 long style=GetWindowLongPtr(window,-20).ToInt64();
                 int dx=candidate.Left+candidate.Width/2-pointer.X, dy=candidate.Top+candidate.Height/2-pointer.Y;
-                bool styleOk=(style&0x08000000L)!=0 && (style&0x20L)==0 && (style&0x00080000L)==0;
+                bool styleOk=(style&0x08000000L)!=0 && (style&0x20L)!=0 && (style&0x00080000L)==0;
                 bool sizeOk=candidate.Width>=140 && candidate.Width<=360 && candidate.Height>=150 && candidate.Height<=420;
                 bool near=(long)dx*dx+(long)dy*dy<=500L*500L && !candidate.Contains(pointer);
                 if (styleOk && sizeOk && near) { loupeNear=true; loupeBounds=candidate; }
