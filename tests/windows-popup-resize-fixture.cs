@@ -103,16 +103,26 @@ public static partial class EchoLingoPopupVisibilitySmoke {
             INPUT down = new INPUT(); down.type = 0; down.data.mouse.flags = 2; Send(new INPUT[] { down }); held = true;
             Wait(delegate { Require(IsWindowVisible(main), "Popup hid during edge-down."); return ResizeLoop(main); }, 3000, "Actual native WM move/size loop did not start; resize was not tested.");
             result["nativeSizingLoopObserved"] = true;
+            POINT nativeAnchor; result["nativeLoopPointerKnown"] = GetPhysicalCursorPos(out nativeAnchor); result["nativeLoopPointer"] = new int[] { nativeAnchor.x, nativeAnchor.y };
+            result["motionMethod"] = "SendInput absolute virtual desktop";
             for (int step = 1; step <= 8; step++) {
                 Require(GetForegroundWindow() == main && IsWindowVisible(main), "Foreground changed during generated drag.");
                 int delta = distance * step / 8, expected = startWidth + delta;
-                Require(SetCursorPos(x + (west ? -delta : delta), y), "Could not move the generated resize pointer.");
+                // Use the existing OCR fixture's injected mouse-motion path
+                // for the native modal loop, instead of the pointer-position
+                // preparation API. Keep every width/deadline assertion below.
+                var desktop = System.Windows.Forms.SystemInformation.VirtualScreen;
+                INPUT move = new INPUT(); move.type = 0; move.data.mouse.flags = 0x8000 | 0x4000 | 1;
+                move.data.mouse.x = (int)System.Math.Round((x + (west ? -delta : delta) - desktop.Left) * 65535.0 / (desktop.Width - 1));
+                move.data.mouse.y = (int)System.Math.Round((y - desktop.Top) * 65535.0 / (desktop.Height - 1));
+                Send(new INPUT[] { move });
                 result["lastStep"] = step; result["expectedPhysicalWidth"] = expected;
                 result["expectedPointer"] = new int[] { x + (west ? -delta : delta), y };
                 Wait(delegate {
                     int actual = ResizeWidth(main); result["lastObservedPhysicalWidth"] = actual;
                     POINT pointer; bool pointerKnown = GetPhysicalCursorPos(out pointer);
-                    if (motion.Count < 256) motion.Add(new object[] { step, expected, actual, pointerKnown, pointer.x, pointer.y, ResizeLoop(main), (GetAsyncKeyState(1) & 0x8000) != 0 });
+                    RECT observedBounds = ResizeBounds(main);
+                    if (motion.Count < 256) motion.Add(new object[] { step, expected, actual, pointerKnown, pointer.x, pointer.y, ResizeLoop(main), (GetAsyncKeyState(1) & 0x8000) != 0, observedBounds.left, observedBounds.top, observedBounds.right, observedBounds.bottom });
                     return System.Math.Abs(actual - expected) <= 5;
                 }, 1500, "Native window failed to reach the generated edge position; possible layout fight.");
                 // Test observation only: sample while the physical button is

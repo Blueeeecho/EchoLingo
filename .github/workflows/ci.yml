@@ -1740,7 +1740,20 @@ jobs:
           New-Item src-tauri/target/release/bundle/nsis -ItemType Directory -Force | Out-Null
           Copy-Item $apps[0].FullName src-tauri/target/release/echolingo.exe
           Copy-Item $installers[0].FullName src-tauri/target/release/bundle/nsis/echolingo-priority-setup.exe
-          [ordered]@{ applicationSource='41f873c949b914691aad3bd5af1b8ba6eb327733'; fixtureSource='${{ github.sha }}'; sourceRun=40814191898; rebuilt=$false; productionSourceUnchanged=$true; originalFullGatePassed=$false; scope='Exact-binary supplemental checks; original full run remains 15/18' } | ConvertTo-Json -Compress
+          # This immutable-package job has no newly built staging engine.
+          # Extract the exact original engine and prove its full-run hash before
+          # staging the file required by the installed-vs-stage fixture.
+          $engineStage = Join-Path $env:RUNNER_TEMP 'priority-expected-engine'
+          New-Item $engineStage -ItemType Directory -Force | Out-Null
+          & 7z e $installers[0].FullName '-r' '-y' ("-o" + $engineStage) 'echolingo-offline-engine.exe' | Out-Null
+          if ($LASTEXITCODE -ne 0) { throw 'Could not extract the immutable expected engine.' }
+          $engines = @(Get-ChildItem $engineStage -Recurse -File -Filter echolingo-offline-engine.exe)
+          if ($engines.Count -ne 1 -or $engines[0].Length -ne 6479872 -or (Get-FileHash $engines[0].FullName -Algorithm SHA256).Hash.ToLowerInvariant() -ne '2c30ca6387cfa8967c9d4be3686936654eac86ffd5f37ae1def2336d6a3c0566') { throw 'Original staged-engine identity mismatch.' }
+          if (($engines[0].Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) { throw 'Expected engine must be a regular file.' }
+          New-Item resources/offline-translation/bin -ItemType Directory -Force | Out-Null
+          Copy-Item $engines[0].FullName resources/offline-translation/bin/echolingo-offline-engine.exe
+          if ((Get-FileHash resources/offline-translation/bin/echolingo-offline-engine.exe -Algorithm SHA256).Hash.ToLowerInvariant() -ne '2c30ca6387cfa8967c9d4be3686936654eac86ffd5f37ae1def2336d6a3c0566') { throw 'Expected engine copy changed.' }
+          [ordered]@{ applicationSource='41f873c949b914691aad3bd5af1b8ba6eb327733'; fixtureSource='${{ github.sha }}'; sourceRun=40814191898; rebuilt=$false; expectedEngineOrigin='immutable NSIS and original-build SHA256'; productionSourceUnchanged=$true; originalFullGatePassed=$false; scope='Exact-binary supplemental checks; original full run remains 15/18' } | ConvertTo-Json -Compress
       - name: Actual same-binary supplemental acceptance
         id: actual
         continue-on-error: true

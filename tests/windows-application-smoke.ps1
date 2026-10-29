@@ -214,6 +214,7 @@ public static class EchoLingoApplicationSmoke {
             : base("ASSERTION_FAILED: Actual input plane has incorrect NoRedirection/NoActivate/Topmost/ToolWindow styles.") { ScalarMetadata=metadata; }
     }
     static long hiddenPlaneStyleChecks, hiddenPlaneWithoutTopmostChecks, visiblePlaneStyleChecks;
+    static long destroyedRejectedStyleRowsSkipped, destroyedRejectedRectangleRowsSkipped;
     static List<AppEdge> AppInputPlanes(int appId, bool visibleOnly, uint edgeHelper=0, uint rejectedHelper=0) {
         List<AppEdge> result = new List<AppEdge>();
         Dictionary<uint,int> parents = new Dictionary<uint,int>();
@@ -230,17 +231,26 @@ public static class EchoLingoApplicationSmoke {
             long style=GetWindowLongPtr(window,-20).ToInt64(), required=0x00200000L|0x08000000L|0x80L|(requireTopmost?8L:0L);
             if (requireTopmost) visiblePlaneStyleChecks++; else { hiddenPlaneStyleChecks++; if ((style&8)==0) hiddenPlaneWithoutTopmostChecks++; }
             if ((style&required)!=required || (style&(0x00080000L|0x20L))!=0) {
+                // EnumWindows does not keep a cancelled helper's HWND alive.
+                // Skip only its conclusively destroyed row; every live plane
+                // and every row not owned by the exact rejected helper fails.
+                bool exists=IsWindow(window);
+                if (rejectedHelper!=0 && owner==rejectedHelper && !exists) { destroyedRejectedStyleRowsSkipped++; return true; }
                 throw new InputPlaneStyleException(new Dictionary<string,object> {
                     {"scanPhase",visibleOnly?1:0},{"visibleAtStyleRead",visible},{"topmostRequired",requireTopmost},
                     {"extendedStyle",style},{"requiredExtendedStyle",required},{"noRedirection",(style&0x00200000L)!=0},
                     {"noActivate",(style&0x08000000L)!=0},{"toolWindow",(style&0x80L)!=0},{"topmost",(style&8L)!=0},
                     {"layered",(style&0x00080000L)!=0},{"transparent",(style&0x20L)!=0},
-                    {"windowExistsAfterStyleRead",IsWindow(window)},{"visibleAfterStyleRead",IsWindowVisible(window)},
+                    {"windowExistsAfterStyleRead",exists},{"visibleAfterStyleRead",IsWindowVisible(window)},
                     {"edgeHelperKnown",edgeHelper!=0},{"matchesEdgeHelper",edgeHelper!=0&&owner==edgeHelper},
                     {"rejectedHelperKnown",rejectedHelper!=0},{"matchesRejectedHelper",rejectedHelper!=0&&owner==rejectedHelper}
                 });
             }
-            RECT r; Assert(GetWindowRect(window,out r),"Cannot inspect actual input plane rectangle.");
+            RECT r;
+            if (!GetWindowRect(window,out r)) {
+                if (rejectedHelper!=0 && owner==rejectedHelper && !IsWindow(window)) { destroyedRejectedRectangleRowsSkipped++; return true; }
+                Assert(false,"Cannot inspect actual input plane rectangle.");
+            }
             result.Add(new AppEdge { Handle=window, ProcessId=owner, ParentProcessId=parent, Bounds=Rectangle.FromLTRB(r.left,r.top,r.right,r.bottom) }); return true;
         },IntPtr.Zero); return result;
     }
@@ -828,7 +838,7 @@ public static class EchoLingoApplicationSmoke {
             }
         } catch (Exception error) { report["error"] = error.Message; }
         finally {
-            report["inputPlaneStyleChecks"]=new Dictionary<string,object>{{"hidden",hiddenPlaneStyleChecks},{"hiddenWithoutTopmost",hiddenPlaneWithoutTopmostChecks},{"visibleRequiringTopmost",visiblePlaneStyleChecks},{"visiblePlanesStillRequireTopmost",true},{"hiddenPlanesCannotSatisfyReadiness",true}};
+            report["inputPlaneStyleChecks"]=new Dictionary<string,object>{{"hidden",hiddenPlaneStyleChecks},{"hiddenWithoutTopmost",hiddenPlaneWithoutTopmostChecks},{"visibleRequiringTopmost",visiblePlaneStyleChecks},{"visiblePlanesStillRequireTopmost",true},{"hiddenPlanesCannotSatisfyReadiness",true},{"destroyedRejectedStyleRowsSkipped",destroyedRejectedStyleRowsSkipped},{"destroyedRejectedRectangleRowsSkipped",destroyedRejectedRectangleRowsSkipped},{"destroyedRowsCannotSatisfyReadiness",true}};
             for (int index = owned.Count - 1; index >= 0; index--) {
                 try { CleanDirectory(owned[index], token); }
                 catch (Exception error) { report["ok"] = false; report["directoryCleanupError"] = error.Message; }
