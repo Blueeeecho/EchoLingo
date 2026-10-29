@@ -107,7 +107,7 @@ try {
           return 1;
         }
         if (command === 'plugin:event|unlisten') { listeners.delete(args.event); return; }
-        if (command === 'get_settings') { fixture.settingsReads++; if (sourceBoot === 'edit' && fixture.settingsReads === 1) { fixture.bootSettingsWaits++; await new Promise(resolve => { fixture.releaseBootSettings = resolve; }); } for (const provider of fixture.settings.providers) decorateCredential(provider, translationKeys); for (const provider of fixture.settings.ocrProviders) decorateCredential(provider, ocrKeys); return structuredClone(fixture.settings); }
+        if (command === 'get_settings') { fixture.settingsReads++; if (sourceBoot === 'edit' && fixture.settingsReads === 1) { fixture.bootSettingsWaits++; await new Promise(resolve => { fixture.releaseBootSettings = resolve; }); } for (const provider of fixture.settings.providers) decorateCredential(provider, translationKeys); for (const provider of fixture.settings.ocrProviders) decorateCredential(provider, ocrKeys); const value = structuredClone(fixture.settings); if (fixture.registrationOverride !== undefined) value.shortcutRegistration = structuredClone(fixture.registrationOverride); return value; }
         if (command === 'get_history') return structuredClone(fixture.history ?? []);
         if (command === 'toggle_favorite') { const entry = fixture.history?.find(item => item.id === args.id); if (entry) entry.favorite = !entry.favorite; return; }
         if (command === 'copy_text') { fixture.copies.push(args.text); return; }
@@ -296,6 +296,31 @@ try {
   assert.equal(await page.locator('#view-translate .column-caption, #view-translate .translation-empty, #character-count, #service-counter').count(), 0);
   assert.equal(await page.locator('#translate-button').isDisabled(), true);
   assert.equal(await page.locator('#permission-guidance').isHidden(), true);
+  assert.match(await page.locator('#source-text').getAttribute('placeholder'), /划词 Alt\+D/);
+  assert.match(await page.locator('#source-text').getAttribute('placeholder'), /Esc 取消/);
+  assert.equal(await page.locator('#core-guidance').isHidden(), true);
+  await page.evaluate(() => {
+    window.__qa.registrationOverride = [{ action: 'selection', combo: 'Alt+D', active: false, error: 'AlreadyRegistered' }];
+  });
+  await goView('settings');
+  const historyBeforeGuidance = await page.locator('#save-history').isChecked();
+  const readsBeforeGuidance = await page.evaluate(() => window.__qa.settingsReads);
+  await page.locator('#save-history').click();
+  await page.waitForFunction((reads) => window.__qa.settingsReads > reads, readsBeforeGuidance);
+  await goView('translate');
+  await page.locator('#core-guidance').waitFor({ state: 'visible' });
+  assert.match(await page.locator('#core-guidance-text').textContent(), /划词翻译 Alt\+D/);
+  assert.match(await page.locator('#core-guidance-text').textContent(), /占用/);
+  assert.equal((await page.locator('#core-guidance-apply').textContent()).trim(), '改用 Ctrl+Alt+D');
+  await page.evaluate(() => { window.__qa.registrationOverride = null; });
+  await goView('settings');
+  if ((await page.locator('#save-history').isChecked()) !== historyBeforeGuidance) await page.locator('#save-history').click();
+  await goView('translate');
+  await page.waitForFunction(() => document.querySelector('#core-guidance').hidden);
+  await page.evaluate(() => {
+    const toast = document.querySelector('#toast'); toast.hidden = true; toast.textContent = '';
+    window.__qa.saveCalls = 0; window.__qa.settingsWrites = [];
+  });
   assert.deepEqual(await page.evaluate(() => window.__qa.permissionSettings), []);
   assert.deepEqual(await page.evaluate(() => window.__qa.permissionRequests), []);
   assert.equal(await page.locator('#restore-original-breaks').isHidden(), true);
@@ -327,12 +352,26 @@ try {
   assert.equal(await page.evaluate(() => window.__qa.showPopupAttempts.at(-1).focusInput), true);
   assert.equal(await page.evaluate(() => window.__qa.showPopupAttempts.at(-1).reuseVisiblePopup), false);
   assert.equal(await page.evaluate(() => window.__qa.translationRequests.length), emptyRequestsBefore);
+  // Window activation can move focus to the document after the editor was focused.
+  // The first typed burst, including Enter, must still land in the blank popup.
+  await page.locator('#source-text').fill('');
+  await page.evaluate(() => document.querySelector('#source-text').blur());
+  assert.notEqual(await page.evaluate(() => document.activeElement.id), 'source-text');
+  const stolenRequests = await page.evaluate(() => window.__qa.translationRequests.length);
+  await page.keyboard.type('Typed blank popup 55001');
+  await page.keyboard.press('Enter');
+  assert.equal(await page.locator('#source-text').inputValue(), 'Typed blank popup 55001');
+  await page.waitForFunction((count) => window.__qa.translationRequests.length > count, stolenRequests);
+  assert.equal(await page.evaluate(() => window.__qa.translationRequests.at(-1).text), 'Typed blank popup 55001');
+  await page.locator('#pin-button').focus();
+  await page.keyboard.type('NOPE');
+  assert.equal(await page.locator('#source-text').inputValue(), 'Typed blank popup 55001');
   assert.equal(await page.locator('#speak-source').isVisible(), true);
   assert.equal(await page.locator('#copy-source').isVisible(), true);
   await page.locator('#copy-source').click();
   await page.locator('#speak-source').click();
-  assert.equal(await page.evaluate(() => window.__qa.copies.at(-1)), 'QA immediate keyboard input');
-  assert.equal(await page.evaluate(() => window.__qa.spoken.at(-1).text), 'QA immediate keyboard input');
+  assert.equal(await page.evaluate(() => window.__qa.copies.at(-1)), 'Typed blank popup 55001');
+  assert.equal(await page.evaluate(() => window.__qa.spoken.at(-1).text), 'Typed blank popup 55001');
   await page.locator('.app-shell').screenshot({ path: 'test-results/source-actions.png' });
   await page.evaluate(() => window.__qa.emit('source-text', { text: '', mode: 'input' }));
   await page.waitForFunction(() => document.activeElement.id !== 'source-text');

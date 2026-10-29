@@ -15,7 +15,7 @@ export const defaultSettings = (): Settings => ({
   shortcutDefaultsVersion: 1,
   windowsSelectionStrategy: 'copy',
   shortcuts: { selection: 'Alt+D', capture: '', ocr: 'Alt+Shift+S', silentOcr: 'Alt+S', input: 'Alt+A' },
-  saveHistory: true, theme: 'system', maxHistory: 200, autoHideSeconds: 0, ocrProviders: [], activeOcrProviderId: null,
+  saveHistory: true, theme: 'system', maxHistory: 20, autoHideSeconds: 0, ocrProviders: [], activeOcrProviderId: null,
 });
 export function filterHistory(entries: HistoryEntry[], query: string, favoritesOnly: boolean): HistoryEntry[] {
   const normalized = query.trim().toLocaleLowerCase();

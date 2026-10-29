@@ -29,6 +29,7 @@ describe('provider privacy and validation', () => {
     expect(second.ocrProviders).toEqual([]);
     expect(second.activeOcrProviderId).toBeNull();
     expect(second.autoHideSeconds).toBe(0);
+    expect(second.maxHistory).toBe(20);
     expect(second.targetLanguage).toBe('auto');
     expect(second.shortcuts.silentOcr).toBe('Alt+S');
     expect(second.shortcuts.capture).toBe('');

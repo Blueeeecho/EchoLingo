@@ -1,3 +1,4 @@
+import { recordingAvailabilityNote } from './shortcut-guidance';
 import { displayShortcut, normalizeShortcut, normalizeShortcuts, recordedMouseShortcut, recordedShortcut } from './shortcuts';
 import type { ShortcutAction, ShortcutRegistration } from './types';
 
@@ -49,14 +50,17 @@ export function createShortcutEditor(context: Context) {
   feedback.setAttribute('role', 'status'); feedback.setAttribute('aria-live', 'polite');
   saveButton.textContent = '保存并立即生效';
   const help = form.nextElementSibling;
-  if (help instanceof HTMLElement) help.textContent = '录制后松开所有按键即可自动保存并生效。直接填写的修改请点击保存，留空可禁用。Esc 取消录制。' + (windows
-    ? 'Alt+D、Alt+S 在应用运行时优先处理；退出后恢复原用途。也可录制鼠标侧键：MouseX1（后退）、MouseX2（前进）。其他键盘组合若被占用会保留原绑定，请更换该行。'
-    : '使用 Ctrl、Alt 或 Command 搭配一个按键；F1–F24 可单独使用。系统保留或被占用的组合会拒绝保存，原绑定会保留。');
+  if (help instanceof HTMLElement) help.textContent = '录制后松开按键即保存。Esc 取消。未生效的组合会自动重试，也可一键更换。' + (windows
+    ? 'Alt+D、Alt+S 在本应用运行时优先，退出后交还其他程序。其他组合若被占用会保留原绑定。'
+    : 'macOS 不能强制覆盖其他应用已经注册的全局快捷键。被占用时请更换组合，或退出占用它的应用。');
   const intro = form.closest('.settings-card')?.querySelector('.settings-card-heading p');
   if (intro) intro.textContent = '自定义选词翻译与无感 OCR 的全局快捷键。';
   form.addEventListener('submit', (event) => event.preventDefault());
   const status = (message: string, error = false) => {
-    feedback.textContent = message; feedback.dataset.error = String(error); context.changed();
+    const note = !error && message.startsWith('已记录 ') && session?.candidate
+      ? recordingAvailabilityNote(session.action, session.candidate, draftValues(), windows ? 'windows' : mac ? 'macos' : 'other')
+      : '';
+    feedback.textContent = note ? `${message} ${note}` : message; feedback.dataset.error = String(error); context.changed();
   };
   const updateControls = () => {
     const busy = starting || ending || session !== null || saving;

@@ -16,6 +16,7 @@ import { populateProviderPresets } from './service-quota-ui';
 import { invoke, isTauri } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 import { defaultSettings, errorMessage, userFacingError, filterHistory, LANGUAGES, languageName, MAX_TEXT_LENGTH, normalizeTimestamp, validateProvider, isLocalProvider } from './model';
+import { coreGuidanceMessage, coreShortcutProblems, emptyPopupPlaceholder, type CoreShortcutProblem } from './shortcut-guidance';
 import type { Action, CredentialState, HistoryEntry, PermissionKind, Provider, ProviderKind, Settings, ShortcutAction, SourceTextEvent, SystemTranslationStatus, TranslationProgress, TranslationResult } from './types';
 
 const desktop = isTauri();
@@ -43,6 +44,10 @@ let generation = 0;
 // without invalidating its own delayed, backend-verified input-focus event.
 let focusIntentRevision = 0;
 const startupSourceIntentRevision = focusIntentRevision;
+// Empty Alt+D focuses the editor, but activating the native window can move DOM
+// focus back to the document before the first keystrokes arrive. 0 means no
+// session. A new explicit input request replaces the previous one.
+let sourceInputSession = 0;
 type NativeSourceDelivery = SourceTextEvent & SourceDeliveryIdentity;
 const sourceDeliveryInbox = new SourceDeliveryInbox<NativeSourceDelivery>();
 let sourceDeliveryIntent: { epoch: number; intentRevision: number } | null = null;
@@ -160,6 +165,7 @@ function reportError(error: unknown): void { toast(userFacingError(error), 'erro
 function run(work: () => Promise<unknown>): void { void work().catch(reportError); }
 function setView(view: string, skipSystemStatusRefresh = false): void {
   if (!['translate', 'history', 'settings'].includes(view)) return;
+  if (view !== 'translate') endSourceInputSession();
   if (currentView === 'settings' && view !== 'settings') shortcutEditor.leave();
   if (view !== currentView) focusIntentRevision += 1;
   closeMoreMenu();
@@ -181,6 +187,7 @@ function setView(view: string, skipSystemStatusRefresh = false): void {
   if (view === 'settings' && !skipSystemStatusRefresh) void refreshSystemTranslationStatus();
   window.scrollTo({ top: 0, behavior: 'instant' });
   if (view === 'translate') resizeSourceEditor();
+  renderCoreGuidance();
   notifyLayout();
 }
 function applyTheme(): void {
@@ -283,6 +290,7 @@ function applyTranslationPresentation(presentation: TranslationPresentation, sou
     // A capture may finish while its pinned popup remains usable. Snapshot
     // after cancelling the previous request so later edits/manual work win.
     visiblePopupUpdateBaseline = presentation.presented ? { epoch: presentation.epoch, generation } : null;
+    if (!presentation.presented) endSourceInputSession();
   }
   if (settingsReady && sourceDeliveryInbox.peek()) queueMicrotask(() => run(flushSourceDeliveries));
 }
@@ -356,7 +364,7 @@ async function receiveCapturedText(payload: SourceTextEvent): Promise<void> {
     || visiblePopupUpdateBaseline.generation !== generation)) return;
   // Preserve an unfinished credentials editor rather than displaying it over a
   // captured translation or silently discarding its fields. Latest capture wins.
-  if (allModals.some((modal) => !modal.hidden)) { queuedCapture = { payload, intentRevision: focusIntentRevision }; queuedInputFocus = null; return; }
+  if (allModals.some((modal) => !modal.hidden)) { endSourceInputSession(); queuedCapture = { payload, intentRevision: focusIntentRevision }; queuedInputFocus = null; return; }
   pendingTranslate = false; clearToast();
   setView('translate');
   const normalized = payload.mode === 'input' ? payload.text
@@ -377,11 +385,17 @@ async function receiveCapturedText(payload: SourceTextEvent): Promise<void> {
   const token = generation;
   const intent = focusIntentRevision;
   let presentedEpoch = presentationEpoch;
+  endSourceInputSession();
+  const inputSession = payload.focusInput ? beginSourceInputSession() : 0;
   try {
     const presentation = await panelLayout.presentPopup(presentationEpoch, Boolean(payload.focusInput), Boolean(payload.reuseVisiblePopup ?? payload.updateVisiblePopup));
     if (presentation) { applyTranslationPresentation(presentation); presentedEpoch = presentation.epoch; }
-    else if (desktop) return;
+    else if (desktop) {
+      if (inputSession) endSourceInputSession(inputSession);
+      return;
+    }
   } catch (error) {
+    if (inputSession) endSourceInputSession(inputSession);
     if (errorMessage(error).startsWith('CANCELLED:')) return;
     throw error;
   }
@@ -389,12 +403,74 @@ async function receiveCapturedText(payload: SourceTextEvent): Promise<void> {
   // already advanced the epoch. Resume may itself advance the requested epoch,
   // so compare against the accepted response, not the original capture epoch.
   if (token !== generation || intent !== focusIntentRevision || currentView !== 'translate' || allModals.some((modal) => !modal.hidden)
-    || (desktop && (!translationPresentation.presented || translationPresentation.epoch !== presentedEpoch))) return;
+    || (desktop && (!translationPresentation.presented || translationPresentation.epoch !== presentedEpoch))) {
+    if (inputSession) endSourceInputSession(inputSession);
+    return;
+  }
   if (payload.mode === 'translate') { if (settingsReady) run(translate); else pendingTranslate = true; }
   else if (payload.mode === 'ocr') status('文字识别完成');
   // Empty Alt+D is now an explicit input action. Nonempty selection/OCR stays
   // passive; only the epoch-bound input payload may activate and focus.
-  if (payload.focusInput) source.focus({ preventScroll: true });
+  if (payload.focusInput) {
+    // Refresh after presentation updates so a hide that arrived during show
+    // cannot leave an abandoned session, and a still-valid one survives.
+    beginSourceInputSession();
+    source.focus({ preventScroll: true });
+  }
+}
+function beginSourceInputSession(): number {
+  sourceInputSession = sourceInputSession === Number.MAX_SAFE_INTEGER ? 1 : sourceInputSession + 1;
+  return sourceInputSession;
+}
+function endSourceInputSession(session?: number): void {
+  if (sourceInputSession === 0) return;
+  if (session !== undefined && session !== sourceInputSession) return;
+  sourceInputSession = 0;
+}
+function sourceInputSessionActive(): boolean {
+  return sourceInputSession !== 0 && currentView === 'translate' && !allModals.some((modal) => !modal.hidden);
+}
+function insertIntoSource(text: string): void {
+  const start = source.selectionStart ?? source.value.length;
+  const end = source.selectionEnd ?? start;
+  const room = MAX_TEXT_LENGTH - (source.value.length - (end - start));
+  if (room <= 0 || !text) return;
+  const chunk = text.slice(0, room);
+  source.focus({ preventScroll: true });
+  source.setRangeText(chunk, start, end, 'end');
+}
+function redirectSourceInputKey(event: KeyboardEvent): void {
+  if (!sourceInputSessionActive() || isCompositionKey(event) || document.activeElement === source) return;
+  if (event.ctrlKey || event.metaKey || event.altKey || event.defaultPrevented) return;
+  if (event.key === 'Enter' && event.shiftKey) {
+    event.preventDefault();
+    event.stopPropagation();
+    insertIntoSource('\n');
+    return;
+  }
+  if (event.key === 'Enter') {
+    if (event.repeat) return;
+    event.preventDefault();
+    event.stopPropagation();
+    source.focus({ preventScroll: true });
+    if (source.value.trim() && !translating) run(translate);
+    return;
+  }
+  if (event.key === 'Backspace') {
+    event.preventDefault();
+    event.stopPropagation();
+    const start = source.selectionStart ?? source.value.length;
+    const end = source.selectionEnd ?? start;
+    source.focus({ preventScroll: true });
+    if (start !== end) source.setRangeText('', start, end, 'end');
+    else if (start > 0) source.setRangeText('', start - 1, start, 'end');
+    return;
+  }
+  if (event.key.length === 1) {
+    event.preventDefault();
+    event.stopPropagation();
+    insertIntoSource(event.key);
+  }
 }
 function requestInputFocus(request: InputFocusRequest = { epoch: translationPresentation.epoch, generation, intentRevision: focusIntentRevision }): void {
   if (request.epoch !== translationPresentation.epoch || request.generation !== generation || request.intentRevision !== focusIntentRevision) return;
@@ -403,10 +479,14 @@ function requestInputFocus(request: InputFocusRequest = { epoch: translationPres
   // This request may legitimately navigate from management to the editor.
   // Bind its frame after that navigation; queued requests retain their origin.
   const intent = focusIntentRevision;
+  const session = beginSourceInputSession();
   requestAnimationFrame(() => {
     if (currentView !== 'translate' || intent !== focusIntentRevision || request.epoch !== translationPresentation.epoch || request.generation !== generation
-      || allModals.some((modal) => !modal.hidden) || (desktop && !translationPresentation.presented)) return;
-    source.focus();
+      || allModals.some((modal) => !modal.hidden) || (desktop && !translationPresentation.presented)) {
+      endSourceInputSession(session);
+      return;
+    }
+    source.focus({ preventScroll: true });
   });
 }
 async function receiveInputFocus(payload: unknown): Promise<void> {
@@ -623,12 +703,38 @@ async function translate(): Promise<void> {
     await loadHistory().catch(() => undefined);
   }
 }
+let coreGuidanceProblem: CoreShortcutProblem | null = null;
+function renderCoreGuidance(): void {
+  const guidance = $('#core-guidance');
+  const problems = coreShortcutProblems(settings.shortcuts, settings.shortcutRegistration);
+  const text = $('#core-guidance-text');
+  const apply = $<HTMLButtonElement>('#core-guidance-apply');
+  const retry = $<HTMLButtonElement>('#core-guidance-retry');
+  coreGuidanceProblem = problems[0] ?? null;
+  if (!coreGuidanceProblem || currentView !== 'translate') {
+    guidance.hidden = true;
+    return;
+  }
+  text.textContent = coreGuidanceMessage(problems);
+  apply.hidden = !coreGuidanceProblem.alternative;
+  apply.textContent = coreGuidanceProblem.alternative ? `改用 ${coreGuidanceProblem.alternative}` : '';
+  retry.hidden = false;
+  guidance.hidden = false;
+}
 function renderShortcutHints(): void {
   for (const element of document.querySelectorAll<HTMLElement>('[data-shortcut]')) {
     element.textContent = settings.shortcuts[element.dataset.shortcut as ShortcutAction] || '未设置';
   }
-  source.placeholder = '输入或粘贴文字';
+  source.placeholder = emptyPopupPlaceholder(settings.shortcuts);
   for (const button of document.querySelectorAll<HTMLElement>('[data-action="capture"]')) button.title = `截图翻译${settings.shortcuts.capture ? ` · ${settings.shortcuts.capture}` : ''}`;
+  for (const button of document.querySelectorAll<HTMLElement>('[data-action="silentOcr"]')) button.title = `无感 OCR${settings.shortcuts.silentOcr ? ` · ${settings.shortcuts.silentOcr}，按住左键拖选，Esc 取消` : ''}`;
+  renderCoreGuidance();
+}
+async function retryInactiveShortcuts(actions: ShortcutAction[]): Promise<void> {
+  await updateSettings((next) => next, undefined, actions);
+  const still = coreShortcutProblems(settings.shortcuts, settings.shortcutRegistration);
+  if (still.length === 0) toast('快捷键已重新生效。');
+  else toast(still.map((problem) => problem.reason).join('\n'), 'error', 7000);
 }
 async function updateSettings(mutator: (next: Settings) => void, canCommit?: () => boolean, retryShortcutActions?: ShortcutAction[]): Promise<void> {
   const operation = saveQueue.then(async () => {
@@ -941,6 +1047,7 @@ function modalFocusable(modal: HTMLElement): HTMLElement[] {
     .filter((element) => element.getClientRects().length > 0 && !element.closest('[hidden]'));
 }
 function showModal(modal: HTMLElement): void {
+  endSourceInputSession();
   modalReturnFocus.set(modal, document.activeElement instanceof HTMLElement ? document.activeElement : null);
   modal.hidden = false;
   const panel = modal.querySelector<HTMLElement>('.modal-panel');
@@ -1257,8 +1364,42 @@ $('#popup-more-menu').addEventListener('click', (event) => {
   if ((event.target as HTMLElement).closest('button[role="menuitem"]')) closeMoreMenu();
 });
 document.addEventListener('pointerdown', (event) => {
+  if (sourceInputSessionActive() && event.target instanceof Node && !source.contains(event.target)) endSourceInputSession();
   if (!$('#popup-more-menu').hidden && !(event.target as HTMLElement).closest('.popup-toolbar')) closeMoreMenu();
 });
+document.addEventListener('focusin', (event) => {
+  if (!sourceInputSessionActive()) return;
+  const target = event.target;
+  if (target === source || target === document.body || target === document.documentElement) return;
+  endSourceInputSession();
+});
+document.addEventListener('keydown', redirectSourceInputKey, true);
+document.addEventListener('paste', (event) => {
+  if (!sourceInputSessionActive() || document.activeElement === source) return;
+  const text = event.clipboardData?.getData('text');
+  if (!text) return;
+  event.preventDefault();
+  insertIntoSource(text);
+});
+$('#core-guidance-settings').addEventListener('click', () => {
+  setView('settings');
+  const input = document.querySelector<HTMLInputElement>('#shortcut-selection');
+  input?.scrollIntoView({ block: 'center' });
+  input?.focus({ preventScroll: true });
+});
+$('#core-guidance-retry').addEventListener('click', () => run(async () => {
+  const actions = coreShortcutProblems(settings.shortcuts, settings.shortcutRegistration).map((problem) => problem.action);
+  if (actions.length > 0) await retryInactiveShortcuts(actions);
+}));
+$('#core-guidance-apply').addEventListener('click', () => run(async () => {
+  const problem = coreGuidanceProblem;
+  if (!problem?.alternative) return;
+  const alternative = problem.alternative;
+  await updateSettings((next) => { next.shortcuts[problem.action] = alternative; }, undefined, [problem.action]);
+  const still = coreShortcutProblems(settings.shortcuts, settings.shortcutRegistration).find((item) => item.action === problem.action);
+  if (still) toast(`${alternative} 仍未生效：${still.reason}`, 'error', 7000);
+  else toast(`已改用 ${alternative}。`);
+}));
 $('#pin-button').addEventListener('click', () => run(async () => {
   if (!requireDesktop()) return;
   const next = !pinned; await invoke('set_pinned', { pinned: next }); pinned = next;
@@ -1385,7 +1526,7 @@ document.addEventListener('keydown', (event) => {
     event.preventDefault(); if (!event.repeat && !translating && source.value.trim()) { setView('translate'); run(translate); }
   }
   if (event.key === 'Escape') {
-    if (desktop) { event.preventDefault(); stopPendingTranslation(); run(() => invoke('hide_window')); }
+    if (desktop) { endSourceInputSession(); event.preventDefault(); stopPendingTranslation(); run(() => invoke('hide_window')); }
     else if (currentView !== 'translate') setView('translate');
   }
 });
@@ -1412,6 +1553,13 @@ async function initialize(): Promise<void> {
     cleanupListeners.push(await listen<TranslationProgress>('translation-progress', (event) => receiveTranslationProgress(event.payload)));
     cleanupListeners.push(await listen<string>('action-error', (event) => handleActionError(event.payload)));
     cleanupListeners.push(await listen<string>('shortcut-error', (event) => toast(event.payload, 'error', 8000)));
+    cleanupListeners.push(await listen('shortcut-registration-changed', () => run(async () => {
+      settings = await invoke<Settings>('get_settings');
+      renderSettings();
+      renderShortcutHints();
+      const problems = coreShortcutProblems(settings.shortcuts, settings.shortcutRegistration);
+      if (problems.length === 0) status('快捷键已生效');
+    })));
     cleanupListeners.push(await listen<NativeRecordedShortcut>('shortcut-recorded', (event) => shortcutEditor.receiveNative(event.payload)));
     applyTranslationPresentation(await invoke<TranslationPresentation>('get_translation_presentation'), startupSourceIntentRevision);
     const startupSettings = await invoke<NativeSettingsRequest | null>('get_pending_settings');
