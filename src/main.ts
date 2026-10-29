@@ -8,9 +8,11 @@ import { SourceDeliveryInbox, type SourceDeliveryIdentity } from './source-deliv
 import { credentialScope } from './credential-scope';
 import { credentialMayExist, credentialStateOf, credentialStatusLabel } from './credential-state';
 import { inferProviderPreset, PROVIDER_PRESETS, qwenBaseUrl, qwenSettingsFromUrl } from './provider-presets';
-import type { ProviderPresetId, QwenRegion } from './provider-presets';
+import type { QwenRegion } from './provider-presets';
 import { buildTranslationCredential, isNativeTranslation, TRANSLATION_NATIVE_URLS } from './translation-credentials';
 import { renderServiceGuide, TRANSLATION_GUIDES } from './service-guides';
+import { TRANSLATION_QUOTAS } from './service-quotas';
+import { populateProviderPresets } from './service-quota-ui';
 import { invoke, isTauri } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 import { defaultSettings, errorMessage, userFacingError, filterHistory, LANGUAGES, languageName, MAX_TEXT_LENGTH, normalizeTimestamp, validateProvider, isLocalProvider } from './model';
@@ -71,7 +73,7 @@ let saveQueue: Promise<void> = Promise.resolve();
 let settingsReady = !desktop;
 let currentView = 'translate';
 let currentResults: TranslationResult[] = [];
-interface ResultView { card: HTMLElement; body: HTMLElement; actions: HTMLButtonElement[]; result: TranslationResult; done: boolean; sequence: number }
+interface ResultView { card: HTMLElement; body: HTMLElement; actions: HTMLButtonElement[]; result: TranslationResult; done: boolean; sequence: number; providerKind?: ProviderKind }
 const progressViews = new Map<string, ResultView>();
 let progressEpoch: number | null = null;
 let resultSource = '';
@@ -156,7 +158,7 @@ function requireDesktop(): boolean {
 }
 function reportError(error: unknown): void { toast(userFacingError(error), 'error', 6500); }
 function run(work: () => Promise<unknown>): void { void work().catch(reportError); }
-function setView(view: string): void {
+function setView(view: string, skipSystemStatusRefresh = false): void {
   if (!['translate', 'history', 'settings'].includes(view)) return;
   if (currentView === 'settings' && view !== 'settings') shortcutEditor.leave();
   if (view !== currentView) focusIntentRevision += 1;
@@ -176,7 +178,7 @@ function setView(view: string): void {
     $('#mac-permission-card').hidden = false;
     void refreshPermissionStatus();
   }
-  if (view === 'settings') void refreshSystemTranslationStatus();
+  if (view === 'settings' && !skipSystemStatusRefresh) void refreshSystemTranslationStatus();
   window.scrollTo({ top: 0, behavior: 'instant' });
   if (view === 'translate') resizeSourceEditor();
   notifyLayout();
@@ -455,6 +457,12 @@ async function copyText(text: string): Promise<void> {
   else throw new Error('当前浏览器不支持写入剪贴板，请手动选择并复制文字。');
   toast('已复制到剪贴板。');
 }
+function showDiagnostics(text: string, complete = true): void {
+  const output = $('#diagnostics-output');
+  output.hidden = false; output.textContent = text;
+  $<HTMLButtonElement>('#copy-diagnostics').disabled = !complete || !text;
+  notifyLayout();
+}
 function speak(text: string, language: string): void {
   if (!('speechSynthesis' in window) || !('SpeechSynthesisUtterance' in window)) {
     toast('当前系统没有可用的语音合成能力。'); return;
@@ -479,8 +487,43 @@ function updateResultView(view: ResultView, result: TranslationResult, done: boo
   if (!done && !result.text) view.body.append(node('span', 'spinner'), node('span', 'sr-only', '正在翻译'));
   for (const button of view.actions.slice(0, 2)) button.disabled = !!result.error || !result.text.trim();
   view.actions[2].disabled = translating;
+  const setup = view.actions[3];
+  setup.hidden = !done || !result.error;
+  setup.textContent = needsSystemTranslationSetup(view) ? '准备系统翻译' : '打开翻译设置';
 }
-function createResultView(result: TranslationResult, done: boolean): ResultView {
+function needsSystemTranslationSetup(view: ResultView): boolean {
+  return macDesktop && view.providerKind === 'system'
+    && view.result.error?.startsWith('SYSTEM_TRANSLATION_DOWNLOAD_REQUIRED:') === true;
+}
+function openResultSettings(view: ResultView): void {
+  if (!view.done || !view.result.error) return;
+  const systemSetup = needsSystemTranslationSetup(view);
+  setView('settings', systemSetup);
+  if (systemSetup) {
+    if (systemTranslationPreparing) {
+      toast('系统翻译正在准备，请完成或取消后再选择该语言对。');
+    } else {
+      const pair = view.result.resolvedLanguages;
+      const supportedOption = (value: unknown): value is string => typeof value === 'string'
+        && value !== 'auto' && LANGUAGES.some(([option]) => option === value);
+      if (supportedOption(pair?.sourceLanguage) && supportedOption(pair?.targetLanguage)
+          && pair.sourceLanguage !== pair.targetLanguage) {
+        renderSystemTranslationSetup();
+        $<HTMLSelectElement>('#system-translation-source').value = pair.sourceLanguage;
+        $<HTMLSelectElement>('#system-translation-target').value = pair.targetLanguage;
+        systemTranslationStatus = null;
+      }
+      void refreshSystemTranslationStatus();
+    }
+    $<HTMLDetailsElement>('#system-translation-setup').open = true;
+    $('#system-translation-setup').scrollIntoView({ block: 'center' });
+    $('#system-translation-setup summary').focus({ preventScroll: true });
+  } else {
+    $('#add-provider').scrollIntoView({ block: 'center' });
+    $('#add-provider').focus({ preventScroll: true });
+  }
+}
+function createResultView(result: TranslationResult, done: boolean, providerKind?: ProviderKind): ResultView {
   const card = node('article', 'result-card'); card.tabIndex = 0; card.dataset.providerId = result.providerId;
   const header = node('div', 'result-card-header');
   const name = node('span', 'result-provider');
@@ -488,11 +531,13 @@ function createResultView(result: TranslationResult, done: boolean): ResultView 
   header.append(name);
   const body = node('p');
   const actions = node('div', 'result-actions'); actions.setAttribute('role', 'group'); actions.setAttribute('aria-label', `${result.providerName}译文操作`);
-  const view: ResultView = { card, body, actions: [], result, done, sequence: 0 };
+  const view: ResultView = { card, body, actions: [], result, done, sequence: 0, providerKind };
   const read = actionButton('朗读译文', 'audio', () => speak(view.result.text, targetLanguage.value));
   const copy = actionButton('复制译文', 'copy', () => run(() => copyText(view.result.text)));
   const retry = actionButton('重新翻译', 'history', () => run(translate)); retry.classList.add('result-retry');
-  view.actions = [read, copy, retry]; actions.append(...view.actions);
+  const setup = node('button', 'text-button result-setup'); setup.type = 'button'; setup.hidden = true;
+  setup.addEventListener('click', () => openResultSettings(view));
+  view.actions = [read, copy, retry, setup]; actions.append(...view.actions);
   card.append(header, body, actions); updateResultView(view, result, done);
   return view;
 }
@@ -553,7 +598,7 @@ async function translate(): Promise<void> {
     if (token !== generation) { await invoke('cancel_translation', { requestId }); return; }
     activeTranslationId = requestId;
     for (const provider of settings.providers.filter((item) => item.enabled)) {
-      progressViews.set(provider.id, createResultView({ providerId: provider.id, providerName: provider.name, text: '', elapsedMs: 0 }, false));
+      progressViews.set(provider.id, createResultView({ providerId: provider.id, providerName: provider.name, text: '', elapsedMs: 0 }, false, provider.kind));
     }
     const results = await invoke<TranslationResult[]>('translate', { requestId, text, sourceLanguage: from, targetLanguage: to });
     if (token !== generation) return;
@@ -743,7 +788,7 @@ function renderSystemTranslationSetup(): void {
   $<HTMLButtonElement>('#refresh-system-translation').disabled = !settingsReady || systemTranslationBusy;
   const prepare = $<HTMLButtonElement>('#prepare-system-translation');
   prepare.disabled = !settingsReady || systemTranslationBusy || !systemTranslationStatus?.supported || systemTranslationStatus.ready || systemTranslationStatus.requiresSetup !== true;
-  prepare.textContent = systemTranslationPreparing ? '正在准备语言包…' : '准备语言包';
+  prepare.textContent = systemTranslationPreparing ? '正在准备语言包…' : '准备系统翻译';
   const systemProvider = settings.providers.find((provider) => provider.kind === 'system');
   const enable = $<HTMLButtonElement>('#enable-system-translation');
   enable.hidden = !systemTranslationStatus?.supported || Boolean(systemProvider?.enabled);
@@ -784,6 +829,8 @@ const shortcutEditor = createShortcutEditor({
   error: userFacingError, changed: notifyLayout,
 });
 function renderSettings(): void {
+  $('#app-version').textContent = settings.appVersion ? 'EchoLingo ' + settings.appVersion : '';
+  $('#app-version').hidden = !settings.appVersion;
   renderProviders(); renderPopupServices();
   renderSystemTranslationSetup();
   ocrUi.render();
@@ -833,7 +880,7 @@ function renderProviderPreset(applyValues = false): void {
   const preset = PROVIDER_PRESETS.find((item) => item.id === $<HTMLSelectElement>('#provider-preset').value) ?? PROVIDER_PRESETS.find((item) => item.id === 'openai')!;
   const qwen = preset.id === 'qwen';
   $('#provider-preset-help').textContent = preset.help;
-  renderServiceGuide($('#provider-service-guide'), TRANSLATION_GUIDES[preset.id]);
+  renderServiceGuide($('#provider-service-guide'), TRANSLATION_GUIDES[preset.id], TRANSLATION_QUOTAS[preset.id], applyValues ? preset.exampleModel : $<HTMLInputElement>('#provider-model').value);
   $('#provider-qwen-region-field').hidden = !qwen;
   $('#provider-qwen-workspace-field').hidden = !qwen;
   if (!applyValues) return;
@@ -1251,6 +1298,7 @@ $('#add-provider').addEventListener('click', () => openProviderDialog());
 $('#provider-kind').addEventListener('change', () => { providerKindChanged(true); updateProviderCredentialState(); });
 $('#provider-url').addEventListener('input', () => updateProviderCredentialState());
 $('#provider-preset').addEventListener('change', () => renderProviderPreset(true));
+$('#provider-model').addEventListener('input', () => renderProviderPreset());
 document.addEventListener('click', (event) => {
   const link = event.target instanceof Element ? event.target.closest<HTMLAnchorElement>('a[data-service-link]') : null;
   if (!desktop || !link) return;
@@ -1275,16 +1323,21 @@ $('#remove-provider-key').addEventListener('click', () => run(async () => {
   } finally { setProviderSaving(false); }
 }));
 $('#run-diagnostics').addEventListener('click', () => run(async () => {
-  const button = $<HTMLButtonElement>('#run-diagnostics'); const output = $('#diagnostics-output');
-  button.disabled = true; output.hidden = false; output.textContent = '正在检查…';
+  const button = $<HTMLButtonElement>('#run-diagnostics');
+  button.disabled = true; showDiagnostics('正在检查…', false);
   try {
     const diagnostic = desktop ? await invoke<unknown>('diagnostics') : {
       environment: '浏览器预览', desktopFeatures: '不可用，请启动桌面应用',
       clipboard: Boolean(navigator.clipboard), speechSynthesis: 'speechSynthesis' in window,
       screenshot: '需要桌面权限', ocr: '需要桌面应用', credentials: '预览不读取或保存密钥',
     };
-    output.textContent = typeof diagnostic === 'string' ? diagnostic : JSON.stringify(diagnostic, null, 2);
-  } catch (error) { output.textContent = errorMessage(error); } finally { button.disabled = false; }
+    showDiagnostics(typeof diagnostic === 'string' ? diagnostic : JSON.stringify(diagnostic, null, 2));
+  } catch (error) { showDiagnostics(errorMessage(error)); } finally { button.disabled = false; }
+}));
+$('#copy-diagnostics').addEventListener('click', () => run(async () => {
+  const output = $('#diagnostics-output');
+  if ($<HTMLButtonElement>('#copy-diagnostics').disabled || output.hidden || !output.textContent) return;
+  await copyText(output.textContent);
 }));
 $('#history-search').addEventListener('input', renderHistory);
 for (const [id, value] of [['#filter-all', false], ['#filter-favorites', true]] as const) $(id).addEventListener('click', () => {
@@ -1339,12 +1392,7 @@ document.addEventListener('keydown', (event) => {
 window.addEventListener('beforeunload', () => { shortcutEditor.dispose(); cancelActiveTranslation(); panelLayout.dispose(); for (const unlisten of cleanupListeners) unlisten(); if ('speechSynthesis' in window) window.speechSynthesis.cancel(); });
 
 async function initialize(): Promise<void> {
-  const presetSelect = $<HTMLSelectElement>('#provider-preset');
-  for (const [label, kinds] of [['本机翻译', ['system', 'offline']], ['官方机器翻译', ['baidu', 'youdao', 'microsoft', 'deepl', 'libretranslate']], ['大模型 · 兼容接口', ['openai']]] as const) {
-    const group = node('optgroup'); group.label = label;
-    for (const preset of PROVIDER_PRESETS.filter((item) => (kinds as readonly string[]).includes(item.kind))) { const option = node('option', '', preset.label); option.value = preset.id as ProviderPresetId; group.append(option); }
-    presetSelect.append(group);
-  }
+  populateProviderPresets($<HTMLSelectElement>('#provider-preset'), document.documentElement.dataset.platform ?? 'other');
   if (!desktop) {
     $('#preview-banner').hidden = false;
     status('界面预览 · 桌面能力未连接');
@@ -1382,7 +1430,7 @@ async function initialize(): Promise<void> {
     if (Array.isArray(diagnostic?.warnings) && diagnostic.warnings.length > 0) toast(diagnostic.warnings.filter((warning): warning is string => typeof warning === 'string').join('\n'), 'error', 10_000);
   } catch (error) {
     status('启动检查失败'); reportError(error);
-    const output = $('#diagnostics-output'); output.hidden = false; output.textContent = `启动检查失败：${errorMessage(error)}`;
+    showDiagnostics(`启动检查失败：${errorMessage(error)}`);
   } finally { resizeSourceEditor(); }
 }
 void initialize();

@@ -17,6 +17,10 @@ type Handle = *mut c_void;
 const MASK_MARKER: usize = 0x4543484f;
 const CONTROL_MESSAGE: u32 = 0x83d0;
 const REFRESH_MESSAGE: u32 = 0x83d1;
+const RECOVER_MESSAGE: u32 = 0x83d2;
+const RECOVER_CONFIG: u8 = 1;
+const RECOVER_FOREGROUND: u8 = 2;
+const RECOVER_EXPLICIT: u8 = 4;
 enum Control {
     EnsureMouse(SyncSender<Result<(), String>>),
 }
@@ -40,6 +44,33 @@ struct Shared {
     thread: AtomicU32,
     events: SyncSender<Event>,
     controls: mpsc::Sender<Control>,
+    recovery_pending: AtomicU8,
+    recovery_queued: AtomicBool,
+    recovery_foreground: AtomicIsize,
+    release_hints: AtomicU32,
+    health: Health,
+}
+#[derive(Default)]
+struct Health {
+    keyboard_installed: AtomicU64,
+    foreground_installed: AtomicU64,
+    recovery_requests: AtomicU64,
+    recovery_attempts: AtomicU64,
+    recovery_successes: AtomicU64,
+    recovery_failures: AtomicU64,
+    recovery_deferred: AtomicU64,
+    recovery_last_error: AtomicU64,
+    recovery_last_reason: AtomicU64,
+    recovery_retire_failures: AtomicU64,
+    recovery_owned_pairs_blocked: AtomicU64,
+    foreground_events: AtomicU64,
+    priority_down: AtomicU64,
+    priority_up: AtomicU64,
+    priority_pairs_accepted: AtomicU64,
+    priority_pairs_discarded: AtomicU64,
+    events_enqueued: AtomicU64,
+    events_queue_full: AtomicU64,
+    events_stale_context: AtomicU64,
 }
 static SHARED: OnceLock<Shared> = OnceLock::new();
 static THREAD: Mutex<Option<JoinHandle<()>>> = Mutex::new(None);
@@ -118,6 +149,7 @@ struct Input {
     data: InputData,
 }
 type Hook = unsafe extern "system" fn(i32, usize, isize) -> isize;
+type WinEvent = unsafe extern "system" fn(Handle, u32, Handle, i32, i32, u32, u32);
 #[link(name = "user32")]
 unsafe extern "system" {
     fn SetWindowsHookExW(kind: i32, callback: Option<Hook>, module: Handle, thread: u32) -> Handle;
@@ -131,12 +163,23 @@ unsafe extern "system" {
     fn GetWindowThreadProcessId(window: Handle, process: *mut u32) -> u32;
     fn GetGUIThreadInfo(thread: u32, info: *mut GuiThreadInfo) -> i32;
     fn SendInput(count: u32, values: *const Input, size: i32) -> u32;
+    fn SetWinEventHook(
+        minimum: u32,
+        maximum: u32,
+        module: Handle,
+        callback: Option<WinEvent>,
+        process: u32,
+        thread: u32,
+        flags: u32,
+    ) -> Handle;
+    fn UnhookWinEvent(hook: Handle) -> i32;
 }
 #[link(name = "kernel32")]
 unsafe extern "system" {
     fn GetModuleHandleW(name: *const u16) -> Handle;
     fn GetCurrentThreadId() -> u32;
     fn GetTickCount64() -> u64;
+    fn GetLastError() -> u32;
 }
 fn context(s: &Shared) -> Context {
     let recording = s.recording.load(Ordering::SeqCst);
@@ -177,7 +220,65 @@ fn modifiers(alt: bool) -> bool {
         .all(|key| unsafe { GetAsyncKeyState(key) } >= 0)
 }
 fn queue(s: &Shared, id: u32, c: Context) {
-    let _ = s.events.try_send(Event { id, context: c });
+    if s.events.try_send(Event { id, context: c }).is_ok() {
+        s.health.events_enqueued.fetch_add(1, Ordering::Relaxed);
+    } else {
+        s.health.events_queue_full.fetch_add(1, Ordering::Relaxed);
+    }
+}
+fn post_recovery(s: &Shared) -> bool {
+    if s.recovery_pending.load(Ordering::SeqCst) == 0
+        || s.recovery_queued.swap(true, Ordering::SeqCst)
+    {
+        return true;
+    }
+    if unsafe { PostThreadMessageW(s.thread.load(Ordering::SeqCst), RECOVER_MESSAGE, 0, 0) } == 0 {
+        s.recovery_queued.store(false, Ordering::SeqCst);
+        s.health
+            .recovery_last_error
+            .store(unsafe { GetLastError() } as u64, Ordering::Relaxed);
+        return false;
+    }
+    true
+}
+fn request_recovery(s: &Shared, reason: u8) -> bool {
+    s.health.recovery_requests.fetch_add(1, Ordering::Relaxed);
+    s.recovery_pending.fetch_or(reason, Ordering::SeqCst);
+    post_recovery(s)
+}
+unsafe extern "system" fn foreground_event(
+    _: Handle,
+    event: u32,
+    window: Handle,
+    _: i32,
+    _: i32,
+    _: u32,
+    _: u32,
+) {
+    // WINEVENT_SKIPOWNPROCESS excludes our popup and capture overlays. The
+    // callback records only scalar metadata and wakes the dedicated pump.
+    if event == 3 && !window.is_null() {
+        if let Some(s) = SHARED
+            .get()
+            .filter(|s| s.alive.load(Ordering::SeqCst) && !s.stopping.load(Ordering::SeqCst))
+        {
+            s.health.foreground_events.fetch_add(1, Ordering::Relaxed);
+            s.recovery_foreground
+                .store(window as isize, Ordering::SeqCst);
+            let _ = request_recovery(s, RECOVER_FOREGROUND);
+        }
+    }
+}
+fn physical_recovery_keys() -> u16 {
+    [0x44, 0x53, 0xa4, 0xa5, 0xa2, 0xa3, 0xa0, 0xa1, 0x5b, 0x5c]
+        .into_iter()
+        .fold(0, |held, key| {
+            held | if unsafe { GetAsyncKeyState(key as i32) } < 0 {
+                policy::recovery_key_bit(key, 0, false)
+            } else {
+                0
+            }
+        })
 }
 fn mask_alt() {
     let key = |flags| Input {
@@ -211,9 +312,25 @@ unsafe extern "system" fn keyboard(code: i32, word: usize, param: isize) -> isiz
                 let down = matches!(word, 0x100 | 0x104);
                 let up = matches!(word, 0x101 | 0x105);
                 if down || up {
+                    let recovery_key =
+                        policy::recovery_key_bit(k.key, k.scan, k.flags & 1 != 0) as u32;
+                    if down && recovery_key != 0 {
+                        s.release_hints.fetch_and(!recovery_key, Ordering::SeqCst);
+                    } else if recovery_key != 0 && s.recovery_pending.load(Ordering::SeqCst) != 0 {
+                        s.release_hints.fetch_or(recovery_key, Ordering::SeqCst);
+                        let _ = post_recovery(s);
+                    }
                     let alt = matches!(k.key, 0x12 | 0xa4 | 0xa5);
-                    if alt && up {
-                        if PAIRS.with(|p| p.borrow_mut().alt_release()) {
+                    if alt {
+                        let side = if recovery_key == 8 {
+                            policy::Alt::Right
+                        } else {
+                            policy::Alt::Left
+                        };
+                        if down {
+                            let c = context(s);
+                            PAIRS.with(|p| p.borrow_mut().alt_down(side, c));
+                        } else if PAIRS.with(|p| p.borrow_mut().alt_up(side)) {
                             mask_alt();
                         }
                     } else if let Some((slot, bit, id)) = match k.key {
@@ -221,19 +338,44 @@ unsafe extern "system" fn keyboard(code: i32, word: usize, param: isize) -> isiz
                         0x53 => Some((1, policy::PRIORITY_S, s.priority_ids[1])),
                         _ => None,
                     } {
+                        // Releasing one Alt can clear the OS context flag even
+                        // while the other side remains down. Require that same
+                        // side's observed down and current physical state; never
+                        // trust an observed bit or aggregate Alt state alone.
                         let exact = s.enabled.load(Ordering::SeqCst) & bit != 0
-                            && modifiers(k.flags & 0x20 != 0);
+                            && modifiers(
+                                k.flags & 0x20 != 0
+                                    || PAIRS.with(|p| {
+                                        p.borrow().tracked_alt_down(
+                                            unsafe { GetAsyncKeyState(0xa4) } < 0,
+                                            unsafe { GetAsyncKeyState(0xa5) } < 0,
+                                        )
+                                    }),
+                            );
                         if !exact && !PAIRS.with(|p| p.borrow().owns(slot)) {
                             return unsafe {
                                 CallNextHookEx(std::ptr::null_mut(), code, word, param)
                             };
+                        }
+                        if down {
+                            s.health.priority_down.fetch_add(1, Ordering::Relaxed);
+                        }
+                        if up {
+                            s.health.priority_up.fetch_add(1, Ordering::Relaxed);
                         }
                         let mut c = context(s);
                         c.capture = 0;
                         let enabled = exact;
                         let d = PAIRS.with(|p| p.borrow_mut().pair(slot, down, enabled, c));
                         if d.release {
+                            s.health
+                                .priority_pairs_accepted
+                                .fetch_add(1, Ordering::Relaxed);
                             queue(s, id, d.context);
+                        } else if up && d.consume {
+                            s.health
+                                .priority_pairs_discarded
+                                .fetch_add(1, Ordering::Relaxed);
                         }
                         if d.consume {
                             return 1;
@@ -303,6 +445,86 @@ unsafe extern "system" fn mouse(code: i32, word: usize, param: isize) -> isize {
     }
     unsafe { CallNextHookEx(std::ptr::null_mut(), code, word, param) }
 }
+fn recover_keyboard(s: &Shared, keyboard: &mut Handle, orphan: &mut Option<Handle>) {
+    s.recovery_queued.store(false, Ordering::SeqCst);
+    let reason = s.recovery_pending.swap(0, Ordering::SeqCst);
+    if reason == 0
+        || s.enabled.load(Ordering::SeqCst) & (policy::PRIORITY_D | policy::PRIORITY_S) == 0
+    {
+        s.release_hints.store(0, Ordering::SeqCst);
+        return;
+    }
+    // Query outside the low-level callback: that callback precedes Windows'
+    // async-state update. Its observed ups only bridge that specific delivery
+    // gap; a subsequent down clears the corresponding hint.
+    let physical = physical_recovery_keys();
+    let released = s.release_hints.swap(0, Ordering::SeqCst) as u16;
+    let held = physical & !released;
+    let (ready, owned) = PAIRS.with(|pairs| {
+        let pairs = pairs.borrow();
+        (pairs.can_recover_keyboard(held), pairs.keyboard_owned())
+    });
+    if !ready {
+        if owned {
+            s.health
+                .recovery_owned_pairs_blocked
+                .fetch_add(1, Ordering::Relaxed);
+        }
+        s.recovery_pending.fetch_or(reason, Ordering::SeqCst);
+        s.health.recovery_deferred.fetch_add(1, Ordering::Relaxed);
+        return;
+    }
+    if reason == RECOVER_FOREGROUND
+        && s.recovery_foreground.load(Ordering::SeqCst) != unsafe { GetForegroundWindow() } as isize
+    {
+        return;
+    }
+    s.health
+        .recovery_last_reason
+        .store(reason as u64, Ordering::Relaxed);
+    s.health.recovery_attempts.fetch_add(1, Ordering::Relaxed);
+    if orphan.is_some() {
+        s.health.recovery_last_error.store(170, Ordering::Relaxed);
+        s.health.recovery_failures.fetch_add(1, Ordering::Relaxed);
+        return; // A failed rollback is bounded to one handle until shutdown.
+    }
+    let replacement = unsafe {
+        SetWindowsHookExW(
+            13,
+            Some(self::keyboard),
+            GetModuleHandleW(std::ptr::null()),
+            0,
+        )
+    };
+    if replacement.is_null() {
+        s.health
+            .recovery_last_error
+            .store(unsafe { GetLastError() } as u64, Ordering::Relaxed);
+        s.health.recovery_failures.fetch_add(1, Ordering::Relaxed);
+        return; // Keep the old handle; only a new explicit/event request retries.
+    }
+    if unsafe { UnhookWindowsHookEx(*keyboard) } == 0 {
+        let error = unsafe { GetLastError() };
+        if !matches!(error, 6 | 1404) {
+            s.health
+                .recovery_last_error
+                .store(error as u64, Ordering::Relaxed);
+            s.health.recovery_failures.fetch_add(1, Ordering::Relaxed);
+            if unsafe { UnhookWindowsHookEx(replacement) } == 0 {
+                *orphan = Some(replacement);
+                s.health
+                    .recovery_retire_failures
+                    .fetch_add(1, Ordering::Relaxed);
+            }
+            return; // The original hook and pair ownership remain intact.
+        }
+    } else {
+        s.health.recovery_last_error.store(0, Ordering::Relaxed);
+    }
+    *keyboard = replacement;
+    PAIRS.with(|p| p.borrow_mut().reset_alt_anchor());
+    s.health.recovery_successes.fetch_add(1, Ordering::Relaxed);
+}
 pub fn start(priority_ids: [u32; 2]) -> Result<Receiver<Event>, String> {
     let mut runtime = THREAD.lock().map_err(|_| "输入监听状态异常")?;
     if SHARED.get().is_some() {
@@ -327,6 +549,11 @@ pub fn start(priority_ids: [u32; 2]) -> Result<Receiver<Event>, String> {
             thread: AtomicU32::new(0),
             events: sender,
             controls,
+            recovery_pending: AtomicU8::new(0),
+            recovery_queued: AtomicBool::new(false),
+            recovery_foreground: AtomicIsize::new(0),
+            release_hints: AtomicU32::new(0),
+            health: Health::default(),
         })
         .map_err(|_| "输入监听重复初始化")?;
     let handle = std::thread::Builder::new()
@@ -337,7 +564,7 @@ pub fn start(priority_ids: [u32; 2]) -> Result<Receiver<Event>, String> {
             unsafe { PeekMessageW(&mut msg, std::ptr::null_mut(), 0, 0, 0) };
             s.thread
                 .store(unsafe { GetCurrentThreadId() }, Ordering::SeqCst);
-            let keyboard = unsafe {
+            let mut keyboard = unsafe {
                 SetWindowsHookExW(13, Some(keyboard), GetModuleHandleW(std::ptr::null()), 0)
             };
             let mut mouse: Handle = std::ptr::null_mut();
@@ -347,11 +574,31 @@ pub fn start(priority_ids: [u32; 2]) -> Result<Receiver<Event>, String> {
                 s.thread.store(0, Ordering::SeqCst);
                 return;
             }
+            s.health.keyboard_installed.store(1, Ordering::Relaxed);
+            let foreground = unsafe {
+                SetWinEventHook(3, 3, std::ptr::null_mut(), Some(foreground_event), 0, 0, 2)
+            };
+            if foreground.is_null() {
+                let error = std::io::Error::last_os_error();
+                unsafe { UnhookWindowsHookEx(keyboard) };
+                s.health.keyboard_installed.store(0, Ordering::Relaxed);
+                s.health
+                    .recovery_last_error
+                    .store(error.raw_os_error().unwrap_or(0) as u64, Ordering::Relaxed);
+                s.thread.store(0, Ordering::SeqCst);
+                let _ = ready.send(Err(format!("Windows 前台事件监听安装失败：{error}")));
+                return;
+            }
+            s.health.foreground_installed.store(1, Ordering::Relaxed);
+            let mut orphan = None;
             if s.stopping.load(Ordering::SeqCst) {
                 unsafe {
                     UnhookWindowsHookEx(mouse);
                     UnhookWindowsHookEx(keyboard);
+                    UnhookWinEvent(foreground);
                 }
+                s.health.keyboard_installed.store(0, Ordering::Relaxed);
+                s.health.foreground_installed.store(0, Ordering::Relaxed);
                 s.thread.store(0, Ordering::SeqCst);
                 let _ = ready.send(Err("输入监听已停止".into()));
                 return;
@@ -382,6 +629,8 @@ pub fn start(priority_ids: [u32; 2]) -> Result<Receiver<Event>, String> {
                         };
                         let _ = reply.send(result);
                     }
+                } else if msg.message == RECOVER_MESSAGE {
+                    recover_keyboard(s, &mut keyboard, &mut orphan);
                 } else if msg.message == REFRESH_MESSAGE
                     && !mouse_needed(s)
                     && !PAIRS.with(|pairs| pairs.borrow().mouse_owned())
@@ -396,7 +645,13 @@ pub fn start(priority_ids: [u32; 2]) -> Result<Receiver<Event>, String> {
             unsafe {
                 UnhookWindowsHookEx(mouse);
                 UnhookWindowsHookEx(keyboard);
+                UnhookWinEvent(foreground);
+                if let Some(hook) = orphan {
+                    UnhookWindowsHookEx(hook);
+                }
             }
+            s.health.keyboard_installed.store(0, Ordering::Relaxed);
+            s.health.foreground_installed.store(0, Ordering::Relaxed);
             s.mouse_installed.store(false, Ordering::SeqCst);
             s.alive.store(false, Ordering::SeqCst);
             s.thread.store(0, Ordering::SeqCst);
@@ -482,8 +737,18 @@ pub fn register(bit: u8) -> Result<(), String> {
     } else {
         None
     };
-    s.enabled.fetch_or(bit, Ordering::SeqCst);
+    let previous = s.enabled.fetch_or(bit, Ordering::SeqCst);
     invalidate();
+    if bit & (policy::PRIORITY_D | policy::PRIORITY_S) != 0 && !request_recovery(s, RECOVER_CONFIG)
+    {
+        s.enabled.store(previous, Ordering::SeqCst);
+        invalidate();
+        // Match the registration transaction's all-or-rollback contract.
+        return Err(format!(
+            "键盘监听恢复通知失败：{}",
+            s.health.recovery_last_error.load(Ordering::Relaxed)
+        ));
+    }
     Ok(())
 }
 pub fn unregister(bit: u8) -> Result<(), String> {
@@ -548,7 +813,7 @@ pub fn end_recording(lease: u64) {
     }
 }
 pub fn current(event: Event) -> bool {
-    SHARED.get().is_some_and(|s| {
+    let current = SHARED.get().is_some_and(|s| {
         !s.stopping.load(Ordering::SeqCst) && s.alive.load(Ordering::SeqCst) && {
             let mut c = context(s);
             if s.priority_ids.contains(&event.id) {
@@ -556,7 +821,73 @@ pub fn current(event: Event) -> bool {
             }
             c.matches(event.context)
         }
-    })
+    });
+    if !current {
+        if let Some(s) = SHARED.get() {
+            s.health
+                .events_stale_context
+                .fetch_add(1, Ordering::Relaxed);
+        }
+    }
+    current
+}
+/// Request one coalesced, event-driven recovery. Acceptance is not completion;
+/// held keys defer it, and diagnostics report the actual attempt and result.
+pub fn request_keyboard_recovery() -> Result<(), String> {
+    let s = SHARED
+        .get()
+        .filter(|s| s.alive.load(Ordering::SeqCst) && !s.stopping.load(Ordering::SeqCst))
+        .ok_or("Windows 输入监听不可用")?;
+    if request_recovery(s, RECOVER_EXPLICIT) {
+        Ok(())
+    } else {
+        Err(format!(
+            "键盘监听恢复通知失败：{}",
+            s.health.recovery_last_error.load(Ordering::Relaxed)
+        ))
+    }
+}
+/// Numeric metadata only. No titles, key log, clipboard or source text.
+pub fn diagnostics() -> Vec<(&'static str, u64)> {
+    let shared = SHARED.get();
+    macro_rules! counter {
+        ($name:literal, $field:ident) => {
+            (
+                $name,
+                shared
+                    .map(|s| s.health.$field.load(Ordering::Relaxed))
+                    .unwrap_or(0),
+            )
+        };
+    }
+    vec![
+        ("hookRunning", u64::from(running())),
+        (
+            "recoveryPending",
+            shared
+                .map(|s| s.recovery_pending.load(Ordering::SeqCst) as u64)
+                .unwrap_or(0),
+        ),
+        counter!("keyboardHookInstalled", keyboard_installed),
+        counter!("foregroundHookInstalled", foreground_installed),
+        counter!("recoveryRequests", recovery_requests),
+        counter!("recoveryAttempts", recovery_attempts),
+        counter!("recoverySuccesses", recovery_successes),
+        counter!("recoveryFailures", recovery_failures),
+        counter!("recoveryDeferred", recovery_deferred),
+        counter!("recoveryLastError", recovery_last_error),
+        counter!("recoveryLastReason", recovery_last_reason),
+        counter!("recoveryRetireFailures", recovery_retire_failures),
+        counter!("recoveryOwnedPairsBlocked", recovery_owned_pairs_blocked),
+        counter!("foregroundEvents", foreground_events),
+        counter!("priorityKeyDownObserved", priority_down),
+        counter!("priorityKeyUpObserved", priority_up),
+        counter!("priorityPairsAccepted", priority_pairs_accepted),
+        counter!("priorityPairsDiscarded", priority_pairs_discarded),
+        counter!("eventsEnqueued", events_enqueued),
+        counter!("eventsQueueFull", events_queue_full),
+        counter!("eventsStaleContext", events_stale_context),
+    ]
 }
 pub fn stop() {
     if let Some(s) = SHARED.get() {

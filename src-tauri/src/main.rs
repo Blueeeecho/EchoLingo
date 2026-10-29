@@ -625,6 +625,7 @@ async fn test_ocr_provider(
 fn get_settings(state: State<AppState>) -> Result<serde_json::Value, String> {
     let settings = locked(&state.settings)?;
     let mut value = settings_snapshot(&settings, &state.credentials)?;
+    value["appVersion"] = serde_json::json!(env!("CARGO_PKG_VERSION"));
     let registered = locked(&state.registered_shortcuts)?;
     let failures = locked(&state.shortcut_failures)?;
     value["shortcutRegistration"] = serde_json::Value::Array(parsed_shortcuts(&settings.shortcuts)?.into_iter().map(|(action, binding)| {
@@ -1356,6 +1357,7 @@ async fn translate(
                                         text: partial.to_owned(),
                                         error: None,
                                         elapsed_ms: started.elapsed().as_millis() as u64,
+                                        resolved_languages: None,
                                     },
                                 );
                             },
@@ -1416,7 +1418,15 @@ fn finish_translation(
                 text,
                 source_language,
                 target_language,
-                results: results.to_vec(),
+                // Setup guidance belongs only to this result's live request.
+                results: results
+                    .iter()
+                    .cloned()
+                    .map(|mut result| {
+                        result.resolved_languages = None;
+                        result
+                    })
+                    .collect(),
                 created_at,
                 favorite: false,
             };
@@ -2015,6 +2025,10 @@ fn start_action(app: tauri::AppHandle, action: String) {
     } else {
         Ok(None)
     };
+    #[cfg(target_os = "windows")]
+    if let Some((_, attempt)) = selection_attempt {
+        platform::record_selection_source(attempt, source_snapshot.is_ok(), None);
+    }
     let presentation = match begin_native_request_presentation(
         &state.native_tasks,
         &request,
@@ -2069,7 +2083,11 @@ fn start_action(app: tauri::AppHandle, action: String) {
             let expected_source = source_snapshot?;
             #[cfg(target_os = "windows")]
             if let Some(source) = &expected_source {
-                if !source.is_current() {
+                let current = source.is_current();
+                if let Some((_, attempt)) = selection_attempt {
+                    platform::record_selection_source(attempt, true, Some(current));
+                }
+                if !current {
                     return Err("CANCELLED: 原选词窗口已改变，请重新选词".into());
                 }
             }
@@ -2156,6 +2174,7 @@ fn start_action(app: tauri::AppHandle, action: String) {
                 result
                     .as_ref()
                     .is_ok_and(|(text, _)| !text.trim().is_empty()),
+                result.as_ref().err().map(String::as_str),
             );
         }
         if let Err(error) = &result {
@@ -2202,6 +2221,7 @@ fn start_action(app: tauri::AppHandle, action: String) {
                     5,
                     result.is_ok(),
                     result.as_ref().is_ok_and(|text| !text.trim().is_empty()),
+                    result.as_ref().err().map(String::as_str),
                 );
             }
             match result {
@@ -2671,6 +2691,16 @@ async fn diagnostics(
     value["warnings"] = serde_json::json!(warnings);
     value["dataDirectory"] = serde_json::json!(state.data_dir.display().to_string());
     value["ocrUpload"] = serde_json::json!(false);
+    value["processId"] = serde_json::json!(std::process::id());
+    #[cfg(target_os = "windows")]
+    {
+        value["shortcutInput"] = serde_json::Value::Object(
+            windows_mouse_shortcuts::diagnostics()
+                .into_iter()
+                .map(|(key, value)| (key.to_owned(), serde_json::json!(value)))
+                .collect(),
+        );
+    }
     #[cfg(target_os = "macos")]
     {
         let policy_diagnostics = app.state::<ApplicationPolicyDiagnostics>();
@@ -2950,6 +2980,7 @@ fn main() {
             window_layout::start_window_drag,
             window_layout::start_window_resize,
             window_layout::resize_popup_width,
+            window_layout::resize_management_window,
             show_popup,
             show_management,
             get_pending_settings,
@@ -3751,13 +3782,27 @@ mod tests {
             source_deliveries: Mutex::new(source_delivery::SourceDeliveries::default()),
             pending_shortcut_settings: AtomicBool::new(false),
         };
-        let result = vec![TranslationResult {
-            provider_id: "fixture".into(),
-            provider_name: "fixture".into(),
-            text: "fixture translation".into(),
-            error: None,
-            elapsed_ms: 1,
-        }];
+        let result = vec![
+            TranslationResult {
+                provider_id: "fixture".into(),
+                provider_name: "fixture".into(),
+                text: "fixture translation".into(),
+                error: None,
+                elapsed_ms: 1,
+                resolved_languages: None,
+            },
+            TranslationResult {
+                provider_id: "system-fixture".into(),
+                provider_name: "System fixture".into(),
+                text: String::new(),
+                error: Some("SYSTEM_TRANSLATION_DOWNLOAD_REQUIRED: fixture".into()),
+                elapsed_ms: 1,
+                resolved_languages: Some(ResolvedLanguages {
+                    source_language: "zh-Hant".into(),
+                    target_language: "en".into(),
+                }),
+            },
+        ];
         let finish = |id| {
             finish_translation(
                 &state,
@@ -3785,6 +3830,12 @@ mod tests {
         let saved: Vec<HistoryEntry> =
             serde_json::from_slice(&fs::read(directory.join("history.json")).unwrap()).unwrap();
         assert_eq!(saved[0].text, "fixture source");
+        assert_eq!(saved[0].results.len(), 2);
+        assert!(saved[0].results[1].resolved_languages.is_none());
+        assert!(result[1].resolved_languages.is_some());
+        assert!(!fs::read_to_string(directory.join("history.json"))
+            .unwrap()
+            .contains("resolvedLanguages"));
         fs::remove_dir_all(directory).unwrap();
     }
     #[test]

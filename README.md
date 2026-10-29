@@ -3,15 +3,15 @@
 <h1 align="center">EchoLingo · 回声译</h1>
 <p align="center"><strong>让陌生的语言，有熟悉的回声。</strong></p>
 <p align="center">轻量的桌面选词翻译与无感 OCR 工具，让理解跟上思路。</p>
-<p align="center"><a href="https://blueeeecho.github.io/EchoLingo/">官方网站</a> · <a href="https://github.com/Blueeeecho/EchoLingo/releases/tag/0.1.0-beta.2.1">下载 Beta 2</a> · <a href="https://github.com/Blueeeecho/EchoLingo/issues">反馈与建议</a></p>
+<p align="center"><a href="https://blueeeecho.github.io/EchoLingo/">官方网站</a> · <a href="https://github.com/Blueeeecho/EchoLingo/releases/tag/0.1.0-beta.2.2">下载 Beta 2.2</a> · <a href="https://github.com/Blueeeecho/EchoLingo/issues">反馈与建议</a></p>
 
 ## 下载与安装
 
-**[下载 Windows Beta 2（x64）](https://github.com/Blueeeecho/EchoLingo/releases/download/0.1.0-beta.2/EchoLingo_0.1.0-beta.2_windows_x64-setup.exe)** · **[下载 macOS Beta 2 修订版（Apple 芯片）](https://github.com/Blueeeecho/EchoLingo/releases/download/0.1.0-beta.2.1/EchoLingo_0.1.0-beta.2.1_macos_arm64.dmg)**
+**[下载 Windows Beta 2.2（x64）](https://github.com/Blueeeecho/EchoLingo/releases/download/0.1.0-beta.2.2/EchoLingo_0.1.0-beta.2.2_windows_x64-setup.exe)** · **[下载 macOS Beta 2.2（Apple 芯片）](https://github.com/Blueeeecho/EchoLingo/releases/download/0.1.0-beta.2.2/EchoLingo_0.1.0-beta.2.2_macos_arm64.dmg)**
 
 Windows 适用于 Windows 10 1809+ / Windows 11；macOS 安装包适用于 Apple 芯片 Mac、macOS 12+，Apple 系统翻译需要 macOS 26+。安装后打开回声译，应用会驻留托盘或菜单栏；升级前先完整退出旧版。
 
-[Windows 版本与校验](https://github.com/Blueeeecho/EchoLingo/releases/tag/0.1.0-beta.2) · [macOS 版本与校验](https://github.com/Blueeeecho/EchoLingo/releases/tag/0.1.0-beta.2.1) · [macOS 首次安装说明](docs/macos-install.zh-CN.md) · [源码构建](docs/build.md)
+[Windows 版本与校验](https://github.com/Blueeeecho/EchoLingo/releases/tag/0.1.0-beta.2) · [macOS 版本与校验](https://github.com/Blueeeecho/EchoLingo/releases/tag/0.1.0-beta.2.2) · [macOS 首次安装说明](docs/macos-install.zh-CN.md) · [源码构建](docs/build.md)
 
 ## 两个快捷动作
 

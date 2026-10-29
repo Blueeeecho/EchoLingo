@@ -30,6 +30,8 @@ export type Action = 'selection' | 'capture' | 'ocr' | 'silentOcr' | 'input' | '
 export type ShortcutAction = Exclude<Action, 'clipboard'>;
 export interface ShortcutRegistration { action: ShortcutAction; combo?: string; active: boolean; error?: string | null }
 export interface Settings {
+  /** Read-only runtime metadata; the native settings serializer does not persist it. */
+  appVersion?: string;
   providers: Provider[];
   targetLanguage: string;
   sourceLanguage: string;
@@ -50,6 +52,7 @@ export interface TranslationResult {
   providerName: string;
   text: string;
   error?: string;
+  resolvedLanguages?: { sourceLanguage: string; targetLanguage: string };
   elapsedMs: number;
 }
 export interface TranslationProgress {

@@ -1,7 +1,7 @@
 # Actual stage application + native pointer resizing on an ephemeral desktop.
 # Reuses the visibility fixture's isolation/UIA helpers without running its cases.
 [CmdletBinding()]
-param([Parameter(Mandatory=$true)][string]$ApplicationPath, [switch]$IsolatedTestSession)
+param([Parameter(Mandatory=$true)][string]$ApplicationPath, [switch]$IsolatedTestSession, [switch]$ReadOnlyGeometryProbe)
 $ErrorActionPreference = 'Stop'
 [Console]::OutputEncoding = [Text.UTF8Encoding]::new($false)
 try {
@@ -13,7 +13,7 @@ try {
     $ApplicationPath = (Resolve-Path -LiteralPath $ApplicationPath).Path
     $applicationHash = (Get-FileHash -LiteralPath $ApplicationPath -Algorithm SHA256).Hash.ToLowerInvariant()
     $applicationBytes = (Get-Item -LiteralPath $ApplicationPath).Length
-    Add-Type -AssemblyName System.Windows.Forms,System.Drawing,System.Web.Extensions,System.Management,UIAutomationClient,UIAutomationTypes
+    Add-Type -AssemblyName System.Windows.Forms,System.Drawing,System.Web.Extensions,System.Management,UIAutomationClient,UIAutomationTypes,WindowsBase
     $harnessText = [IO.File]::ReadAllText((Join-Path $PSScriptRoot 'windows-popup-visibility-smoke.ps1')).Replace("`r`n", "`n")
     $prefix = '$source = @' + "'`n"
     $start = $harnessText.IndexOf($prefix, [StringComparison]::Ordinal)
@@ -28,9 +28,14 @@ try {
     $extra = [IO.File]::ReadAllText((Join-Path $PSScriptRoot 'windows-popup-resize-fixture.cs'))
     $references = @([Windows.Forms.Form].Assembly.Location,[Drawing.Bitmap].Assembly.Location,
         [Web.Script.Serialization.JavaScriptSerializer].Assembly.Location,[Management.ManagementObject].Assembly.Location,
-        [Windows.Automation.AutomationElement].Assembly.Location,[Windows.Automation.ControlType].Assembly.Location) | Select-Object -Unique
+        [Windows.Automation.AutomationElement].Assembly.Location,[Windows.Automation.ControlType].Assembly.Location,
+        [Windows.Rect].Assembly.Location) | Select-Object -Unique
     Add-Type -TypeDefinition ($harness + "`n" + $extra) -ReferencedAssemblies $references -Language CSharp
-    $result = [EchoLingoPopupVisibilitySmoke]::RunResize($ApplicationPath)
+    if ($ReadOnlyGeometryProbe) {
+        $probeScript = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot 'windows-webview-geometry-probe.ps1')).Path
+        $result = [EchoLingoPopupVisibilitySmoke]::RunResize($ApplicationPath, [bool]$IsolatedTestSession, $probeScript, $applicationHash)
+        $result['geometryProbeScriptSha256'] = (Get-FileHash -LiteralPath $probeScript -Algorithm SHA256).Hash.ToLowerInvariant()
+    } else { $result = [EchoLingoPopupVisibilitySmoke]::RunResize($ApplicationPath, [bool]$IsolatedTestSession) }
     $result['applicationSha256'] = $applicationHash
     $result['applicationBytes'] = $applicationBytes
     $result['resizeFixtureSha256'] = (Get-FileHash -LiteralPath (Join-Path $PSScriptRoot 'windows-popup-resize-fixture.cs') -Algorithm SHA256).Hash.ToLowerInvariant()

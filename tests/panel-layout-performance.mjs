@@ -145,6 +145,20 @@ try {
   });
   assert.equal(await page.evaluate(() => window.__layoutQA.commands.filter((name) => name === 'show_management').length), 3);
 
+  // Management content may become much taller than its viewport (expanded
+  // service editors/permission help). It must scroll without negotiating a new
+  // HWND height; an actual viewport resize is measured independently.
+  await page.evaluate(async () => {
+    const q = window.__layoutQA; q.fits.length = 0;
+    document.querySelector('.view').style.height = '2200px';
+    window.dispatchEvent(new Event('echolingo:layout')); await q.frames();
+  });
+  assert.equal(await page.evaluate(() => window.__layoutQA.fits.length), 0, 'Growing settings content must not trigger a native size change.');
+  await page.setViewportSize({ width: 940, height: 820 });
+  await page.evaluate(() => window.__layoutQA.frames());
+  assert.deepEqual(await page.evaluate(() => window.__layoutQA.fits), [{ presentation: 'management', contentHeight: 820, contentWidth: 940 }]);
+  assert.equal(await page.evaluate(() => window.__layoutQA.commands.filter((name) => name === 'show_management').length), 3, 'Resizing settings must not show or activate a window.');
+
   await page.evaluate(async () => {
     const q = window.__layoutQA;
     document.body.dataset.view = 'translate';
@@ -174,5 +188,5 @@ try {
   assert.equal(await page.evaluate(() => window.__layoutQA.fits.length), 0);
   assert.equal(await page.evaluate(() => window.__layoutQA.listenerCount()), 0);
   assert.deepEqual(errors, []);
-  console.log(JSON.stringify({ ok: true, scope: 'isolated browser DOM + mocked IPC; no Windows/DWM claim', cases: 10 }));
+  console.log(JSON.stringify({ ok: true, scope: 'isolated browser DOM + mocked IPC; no Windows/DWM claim', cases: 12 }));
 } finally { await browser.close(); }

@@ -166,6 +166,7 @@ fn history_byte_limit_evicts_oldest_nonfavorite_and_preserves_order() {
         text: "y".repeat(3 * 1024 * 1024),
         error: None,
         elapsed_ms: 0,
+        resolved_languages: None,
     });
     let mut favorite = entry("older-favorite", true);
     favorite.text = "中".repeat(1024 * 1024);

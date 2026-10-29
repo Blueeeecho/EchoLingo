@@ -229,6 +229,7 @@ impl OfflineTranslation {
             text: result.as_ref().cloned().unwrap_or_default(),
             error: result.err(),
             elapsed_ms: started.elapsed().as_millis() as u64,
+            resolved_languages: None,
         }
     }
 }

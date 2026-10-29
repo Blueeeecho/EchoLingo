@@ -298,9 +298,39 @@ fn content_size(management: bool, height: f64, width: f64, available: (f64, f64)
     let min_height = (if management { 480.0_f64 } else { 160.0_f64 }).min(max_height);
     (
         width.clamp(min_width, max_width),
-        (if management { 720.0 } else { height.ceil() })
-            .clamp(min_height, max_height.min(760.0).max(min_height)),
+        height.ceil().clamp(
+            min_height,
+            (if management {
+                max_height
+            } else {
+                max_height.min(760.0)
+            })
+            .max(min_height),
+        ),
     )
+}
+
+fn presentation_size(
+    previous_management: bool,
+    management: bool,
+    measured_height: f64,
+    current: (f64, f64),
+    popup_width: f64,
+    available: (f64, f64),
+) -> (f64, f64) {
+    let (width, height) = if management {
+        // Entering settings needs its own initial geometry, not the previous
+        // popup's height. Later fits preserve the user's native resize instead
+        // of replacing it with that initial size after every content reflow.
+        if previous_management {
+            current
+        } else {
+            (640.0, 720.0)
+        }
+    } else {
+        (popup_width, measured_height)
+    };
+    content_size(management, height, width, available)
 }
 fn window_geometry(window: &WebviewWindow) -> Result<(f64, Bounds), String> {
     let scale = window.scale_factor().map_err(|_| "无法读取窗口比例")?;
@@ -599,17 +629,15 @@ fn fit_inner(
         .to_logical::<f64>(scale);
     let mut popup = state.popup.lock().map_err(|_| "窗口布局状态异常")?;
     let changed = popup.observe_user_width(!previous, old_size.width, content_width, scale, area);
-    let desired_width = if management {
-        if previous {
-            old_size.width
-        } else {
-            640.0
-        }
-    } else {
-        popup.preferred
-    };
     let available = available_size(area, scale, management);
-    let (width, height) = content_size(management, height, desired_width, available);
+    let (width, height) = presentation_size(
+        previous,
+        management,
+        height,
+        (old_size.width, old_size.height),
+        popup.preferred,
+        available,
+    );
     let next_constraints = Constraints {
         management,
         scale,
@@ -778,27 +806,27 @@ pub fn start_window_resize(
     state: State<LayoutState>,
     direction: String,
     presentation_epoch: u64,
+    management: Option<bool>,
 ) -> Result<(), String> {
+    let management = management.unwrap_or(false);
     let presentation = window
         .state::<crate::AppState>()
         .translation_requests
         .presentation()?;
     if window.label() != "main"
-        || !resize_allowed(
+        || !resize_presentation_allowed(
             presentation_epoch,
             presentation,
             state.is_popup(),
             window.is_visible().unwrap_or(false),
+            management,
         )
     {
         return Err("窗口不可用".into());
     }
-    // Tauri exposes this operation on Window, not WebviewWindow. Its runtime
-    // enum is not publicly re-exported; deserialize only our whitelisted pair.
-    let direction = match resize_direction(&direction)? {
-        HorizontalResize::West => "West",
-        HorizontalResize::East => "East",
-    };
+    // Tauri exposes this operation on Window, not WebviewWindow. Deserialize
+    // only a direction valid for the exact current presentation.
+    let direction = native_resize_direction(&direction, management)?;
     let direction =
         serde_json::from_value(serde_json::json!(direction)).map_err(|_| "窗口调整方向无效")?;
     let webview: &tauri::Webview = window.as_ref();
@@ -807,13 +835,51 @@ pub fn start_window_resize(
         .start_resize_dragging(direction)
         .map_err(|_| "无法拖动调整窗口大小".into())
 }
+fn resize_edges(direction: &str) -> Result<(i8, i8), String> {
+    match direction {
+        "west" => Ok((-1, 0)),
+        "east" => Ok((1, 0)),
+        "north" => Ok((0, -1)),
+        "south" => Ok((0, 1)),
+        "north-west" => Ok((-1, -1)),
+        "north-east" => Ok((1, -1)),
+        "south-west" => Ok((-1, 1)),
+        "south-east" => Ok((1, 1)),
+        _ => Err("窗口调整方向无效".into()),
+    }
+}
+fn native_resize_direction(direction: &str, management: bool) -> Result<&'static str, String> {
+    if !management {
+        resize_direction(direction)?;
+    }
+    match resize_edges(direction)? {
+        (-1, 0) => Ok("West"),
+        (1, 0) => Ok("East"),
+        (0, -1) => Ok("North"),
+        (0, 1) => Ok("South"),
+        (-1, -1) => Ok("NorthWest"),
+        (1, -1) => Ok("NorthEast"),
+        (-1, 1) => Ok("SouthWest"),
+        (1, 1) => Ok("SouthEast"),
+        _ => unreachable!(),
+    }
+}
+fn resize_presentation_allowed(
+    epoch: u64,
+    presentation: crate::translation_requests::Presentation,
+    popup: bool,
+    visible: bool,
+    management: bool,
+) -> bool {
+    popup != management && visible && presentation.presented && presentation.epoch == epoch
+}
 fn resize_allowed(
     epoch: u64,
     presentation: crate::translation_requests::Presentation,
     popup: bool,
     visible: bool,
 ) -> bool {
-    popup && visible && presentation.presented && presentation.epoch == epoch
+    resize_presentation_allowed(epoch, presentation, popup, visible, false)
 }
 
 fn resize_position(
@@ -922,6 +988,129 @@ pub async fn resize_popup_width(
     result.await.map_err(|_| "无法调整窗口大小".to_string())?
 }
 
+// Management resizing has no persistence side effect. It is separate from
+// popup width so a settings corner can never overwrite the saved popup width.
+fn management_resize_geometry(
+    direction: (i8, i8),
+    old: (f64, f64),
+    requested: (f64, f64),
+    position: (i32, i32),
+    frame: (f64, f64),
+    area: Bounds,
+    scale: f64,
+) -> ((f64, f64), (i32, i32)) {
+    let size = content_size(
+        true,
+        if direction.1 == 0 { old.1 } else { requested.1 },
+        if direction.0 == 0 { old.0 } else { requested.0 },
+        available_size(area, scale, true),
+    );
+    let x = f64::from(position.0)
+        + if direction.0 < 0 {
+            (old.0 - size.0) * scale
+        } else {
+            0.0
+        };
+    let y = f64::from(position.1)
+        + if direction.1 < 0 {
+            (old.1 - size.1) * scale
+        } else {
+            0.0
+        };
+    let next = anchor_in_work_area(
+        area,
+        x,
+        y,
+        (size.0 + frame.0) * scale,
+        (size.1 + frame.1) * scale,
+    );
+    (size, next)
+}
+
+#[tauri::command]
+pub async fn resize_management_window(
+    window: WebviewWindow,
+    width: f64,
+    height: f64,
+    direction: String,
+    presentation_epoch: u64,
+) -> Result<(), String> {
+    if !cfg!(target_os = "macos")
+        || window.label() != "main"
+        || ![width, height]
+            .iter()
+            .all(|value| value.is_finite() && (1.0..=MAX_INPUT_DIMENSION).contains(value))
+    {
+        return Err("窗口大小无效".into());
+    }
+    let direction = resize_edges(&direction)?;
+    let app = window.app_handle().clone();
+    let (reply, result) = tokio::sync::oneshot::channel();
+    app.run_on_main_thread(move || {
+        let operation = (|| {
+            let app_state = window.state::<crate::AppState>();
+            let state = window.state::<LayoutState>();
+            let current = app_state.translation_requests.presentation()?;
+            let valid = || -> bool {
+                app_state.translation_requests.presentation().ok() == Some(current)
+                    && resize_presentation_allowed(
+                        presentation_epoch,
+                        current,
+                        state.is_popup(),
+                        window.is_visible().unwrap_or(false),
+                        true,
+                    )
+            };
+            if !valid() {
+                return Err(crate::translation_requests::CANCELLED.into());
+            }
+            let (scale, area) = window_geometry(&window)?;
+            let old = window
+                .inner_size()
+                .map_err(|_| "无法读取窗口大小")?
+                .to_logical::<f64>(scale);
+            let outer = window
+                .outer_size()
+                .map_err(|_| "无法读取窗口大小")?
+                .to_logical::<f64>(scale);
+            let position = window.outer_position().map_err(|_| "无法读取窗口位置")?;
+            let (size, next) = management_resize_geometry(
+                direction,
+                (old.width, old.height),
+                (width, height),
+                (position.x, position.y),
+                (
+                    (outer.width - old.width).max(0.0),
+                    (outer.height - old.height).max(0.0),
+                ),
+                area,
+                scale,
+            );
+            if !valid() {
+                return Err(crate::translation_requests::CANCELLED.into());
+            }
+            window
+                .set_size(LogicalSize::new(size.0, size.1))
+                .map_err(|_| "无法调整窗口大小")?;
+            if !valid() {
+                return Err(crate::translation_requests::CANCELLED.into());
+            }
+            if (position.x, position.y) != next {
+                window
+                    .set_position(PhysicalPosition::new(next.0, next.1))
+                    .map_err(|_| "无法调整窗口位置")?;
+            }
+            if !valid() {
+                return Err(crate::translation_requests::CANCELLED.into());
+            }
+            Ok(())
+        })();
+        let _ = reply.send(operation);
+    })
+    .map_err(|_| "无法调整窗口大小")?;
+    result.await.map_err(|_| "无法调整窗口大小".to_string())?
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -947,12 +1136,46 @@ mod tests {
             (1500.0, 760.0)
         );
         assert_eq!(
-            content_size(true, 190.0, 640.0, (1200.0, 900.0)),
+            presentation_size(false, true, 190.0, (680.0, 240.0), 680.0, (1200.0, 900.0)),
             (640.0, 720.0)
         );
         assert_eq!(
             content_size(false, 300.0, 680.0, (380.0, 140.0)),
             (380.0, 140.0)
+        );
+    }
+
+    #[test]
+    fn management_initial_size_is_separate_from_later_native_resizes() {
+        assert_eq!(
+            presentation_size(false, true, 4000.0, (680.0, 240.0), 850.0, (1200.0, 1000.0)),
+            (640.0, 720.0)
+        );
+        for height in [620.0, 920.0] {
+            assert_eq!(
+                content_size(true, height, 910.0, (1200.0, 1000.0)),
+                (910.0, height)
+            );
+            assert_eq!(
+                presentation_size(true, true, 4000.0, (910.0, height), 850.0, (1200.0, 1000.0)),
+                (910.0, height)
+            );
+        }
+        // A monitor/DPI work-area change may clamp the native management size,
+        // but content growth must not substitute a popup or default dimension.
+        assert_eq!(
+            presentation_size(true, true, 4000.0, (1400.0, 1100.0), 850.0, (800.0, 650.0)),
+            (800.0, 650.0)
+        );
+        assert_eq!(
+            presentation_size(false, true, 190.0, (680.0, 240.0), 850.0, (380.0, 430.0)),
+            (380.0, 430.0)
+        );
+        // Returning to translation still restores the independent popup width
+        // and sizes height from its current source/results.
+        assert_eq!(
+            presentation_size(true, false, 230.0, (910.0, 920.0), 850.0, (1200.0, 1000.0)),
+            (850.0, 230.0)
         );
     }
 
@@ -1144,6 +1367,102 @@ mod tests {
         assert!(resize_direction("west").is_ok());
         assert!(resize_direction("east").is_ok());
         assert!(resize_direction("north").is_err());
+    }
+
+    #[test]
+    fn management_resize_requires_exact_presentation_and_limits_popup_to_horizontal() {
+        let shown = crate::translation_requests::Presentation {
+            epoch: 9,
+            presented: true,
+        };
+        assert!(resize_presentation_allowed(9, shown, false, true, true));
+        assert!(!resize_presentation_allowed(9, shown, true, true, true));
+        assert!(!resize_presentation_allowed(9, shown, false, false, true));
+        assert!(!resize_presentation_allowed(8, shown, false, true, true));
+        assert!(!resize_presentation_allowed(
+            9,
+            crate::translation_requests::Presentation {
+                presented: false,
+                ..shown
+            },
+            false,
+            true,
+            true
+        ));
+        for name in [
+            "west",
+            "east",
+            "north",
+            "south",
+            "north-west",
+            "north-east",
+            "south-west",
+            "south-east",
+        ] {
+            assert!(native_resize_direction(name, true).is_ok());
+            assert_eq!(
+                native_resize_direction(name, false).is_ok(),
+                name == "west" || name == "east"
+            );
+        }
+        for name in ["", "North", "move", "south east"] {
+            assert!(resize_edges(name).is_err());
+        }
+    }
+
+    #[test]
+    fn management_edges_keep_opposite_anchor_and_do_not_change_the_other_axis() {
+        let area = Bounds {
+            x: -1920.0,
+            y: -200.0,
+            width: 3840.0,
+            height: 2400.0,
+        };
+        let old = (640.0, 720.0);
+        let position = (-1000, 0);
+        let frame = (0.0, 28.0);
+        for name in [
+            "west",
+            "east",
+            "north",
+            "south",
+            "north-west",
+            "north-east",
+            "south-west",
+            "south-east",
+        ] {
+            let edges = resize_edges(name).unwrap();
+            let (size, next) =
+                management_resize_geometry(edges, old, (700.0, 760.0), position, frame, area, 2.0);
+            assert_eq!(size.0, if edges.0 == 0 { 640.0 } else { 700.0 });
+            assert_eq!(size.1, if edges.1 == 0 { 720.0 } else { 760.0 });
+            assert_eq!(next.0, if edges.0 < 0 { -1120 } else { -1000 });
+            assert_eq!(next.1, if edges.1 < 0 { -80 } else { 0 });
+        }
+        let small = Bounds {
+            x: -800.0,
+            y: -100.0,
+            width: 800.0,
+            height: 650.0,
+        };
+        let (size, next) = management_resize_geometry(
+            (1, 1),
+            old,
+            (4000.0, 4000.0),
+            (-600, 0),
+            (16.0, 44.0),
+            small,
+            1.0,
+        );
+        assert_eq!(size, (768.0, 582.0));
+        assert!(
+            f64::from(next.0) >= small.x
+                && f64::from(next.0) + size.0 + 16.0 <= small.x + small.width
+        );
+        assert!(
+            f64::from(next.1) >= small.y
+                && f64::from(next.1) + size.1 + 44.0 <= small.y + small.height
+        );
     }
 
     #[test]

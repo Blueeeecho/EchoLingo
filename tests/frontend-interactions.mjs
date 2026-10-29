@@ -13,11 +13,14 @@ try {
     window.isTauri = true;
     Object.defineProperty(navigator, 'platform', { configurable: true, get: () => new URL(location.href).searchParams.has('windowsSelectionFixture') ? 'Win32' : 'MacIntel' });
     const state = {
+      appVersion: '9.8.7-beta.6',
       providers: [{ id: 'qa-service', name: 'QA IPC fixture', kind: 'openai', baseUrl: 'https://example.invalid/v1', model: 'test-model', enabled: true, prompt: '', hasKey: true }],
       sourceLanguage: 'auto', targetLanguage: 'zh-Hans',
       shortcuts: { selection: 'Alt+D', capture: 'Alt+S', ocr: 'Alt+Shift+S', silentOcr: 'Alt+C', input: 'Alt+A' },
       saveHistory: true, theme: 'light', maxHistory: 20, autoHideSeconds: 0, ocrProviders: [], activeOcrProviderId: null,
     };
+    const setupKind = new URL(location.href).searchParams.get('translationSetupFixture');
+    if (['system', 'offline', 'openai'].includes(setupKind)) state.providers[0].kind = setupKind;
     const callbacks = new Map(), listeners = new Map(), ocrKeys = new Map(), translationKeys = new Map(); let callbackId = 0;
     window.__TAURI_EVENT_PLUGIN_INTERNALS__ = { unregisterListener: (event) => listeners.delete(event) };
     const scope = (provider) => ['system', 'offline'].includes(provider.kind) ? `${provider.id}:${provider.kind}` : `${provider.id}:${provider.kind}:${new URL(provider.baseUrl).origin}`;
@@ -27,6 +30,7 @@ try {
     Object.assign(fixture, { systemStatus: { platform: 'macos', supported: true, ready: false, requiresSetup: true, status: 'downloadRequired', message: 'QA 语言包尚未准备', minimumVersion: '26.0' }, systemStatusCalls: [], systemPrepareCalls: [], keyDeleteCalls: 0 });
     Object.assign(fixture, { shortcutLeases: [], nextShortcutLease: 0, holdShortcutBegin: false, releaseShortcutBegin: () => {}, holdShortcutEnd: false, shortcutEndWaits: 0, releaseShortcutEnd: () => {} });
     Object.assign(fixture, { copies: [], spoken: [], permissionOverride: null, managementShows: [] });
+    Object.assign(fixture, { diagnosticCalls: [], diagnosticReport: { warnings: [] }, holdDiagnostics: false, releaseDiagnostics: () => {} });
     Object.assign(fixture, { credentialStates: {}, credentialReadCalls: 0, translationTestCalls: 0, settingsReads: 0, translationCredentialWrites: [], serviceLinks: [] });
     Object.assign(fixture, { resizeRequests: [], nativeResizeRequests: [], holdResize: false, releaseResize: () => {} });
     Object.assign(fixture, { pinned: false, nativeVisible: true, popupReveals: 0, nativeHideTransitions: 0 });
@@ -125,7 +129,7 @@ try {
           fixture.sourceAckResults.push({ deliveryId: args.deliveryId, cleared }); return cleared;
         }
         if (command === 'get_system_translation_status') { fixture.systemStatusCalls.push(structuredClone(args)); return structuredClone(fixture.systemStatus); }
-        if (command === 'prepare_system_translation') { fixture.systemPrepareCalls.push(structuredClone(args)); fixture.systemStatus = { ...fixture.systemStatus, ready: true, requiresSetup: false, status: 'installed', message: 'QA 本机语言包已就绪' }; return structuredClone(fixture.systemStatus); }
+        if (command === 'prepare_system_translation') { fixture.systemPrepareCalls.push(structuredClone(args)); if (fixture.holdSystemPreparation) await new Promise(resolve => { fixture.releaseSystemPreparation = resolve; }); fixture.systemStatus = { ...fixture.systemStatus, ready: true, requiresSetup: false, status: 'installed', message: 'QA 本机语言包已就绪' }; return structuredClone(fixture.systemStatus); }
         if (command === 'permission_status') { fixture.permissionReads++; return structuredClone(fixture.permissionState); }
         if (command === 'request_permission') { fixture.permissionRequests.push(args.kind); if (fixture.permissionOverride) return structuredClone(fixture.permissionOverride); if (args.kind === 'accessibility') fixture.permissionState.accessibilityGranted = true; else fixture.permissionState.screenCaptureGranted = true; return structuredClone(fixture.permissionState); }
         if (command === 'open_permission_settings') {
@@ -138,7 +142,11 @@ try {
           if (args.active) { const id = ++fixture.nextShortcutLease; fixture.shortcutLeases.push({ active: true, id }); if (fixture.holdShortcutBegin) await new Promise(resolve => { fixture.releaseShortcutBegin = resolve; }); return id; }
           fixture.shortcutLeases.push({ active: false, id: args.leaseId }); if (fixture.holdShortcutEnd) { fixture.shortcutEndWaits++; await new Promise(resolve => { fixture.releaseShortcutEnd = resolve; }); } return args.leaseId;
         }
-        if (command === 'diagnostics') return { warnings: [] };
+        if (command === 'diagnostics') {
+          fixture.diagnosticCalls.push(structuredClone(args));
+          if (fixture.holdDiagnostics) await new Promise(resolve => { fixture.releaseDiagnostics = resolve; });
+          return structuredClone(fixture.diagnosticReport);
+        }
         if (command === 'save_settings') {
           fixture.saveCalls++; fixture.settingsWrites.push(structuredClone(args.settings));
           (fixture.shortcutRetryActions ??= []).push(structuredClone(args.retryShortcutActions ?? []));
@@ -200,7 +208,7 @@ try {
           });
           if (fixture.translationError) throw new Error(fixture.translationError);
           activeTranslationId = null;
-          return [{ providerId: 'qa-service', providerName: 'QA IPC fixture', text: fixture.translationResultText ?? 'Isolated test translation fixture', elapsedMs: 50 }];
+          return [{ providerId: 'qa-service', providerName: 'QA IPC fixture', text: fixture.translationResultError ? '' : fixture.translationResultText ?? 'Isolated test translation fixture', ...(fixture.translationResultError ? { error: fixture.translationResultError } : {}), ...(fixture.translationResultLanguages !== undefined ? { resolvedLanguages: structuredClone(fixture.translationResultLanguages) } : {}), elapsedMs: 50 }];
         }
         throw new Error(`Unimplemented QA command: ${command}`);
       },
@@ -570,8 +578,13 @@ try {
     assert.equal(await edge.getAttribute('tabindex'), null);
     assert.equal(await edge.getAttribute('title'), '拖动调整窗口宽度');
     assert.equal(await edge.evaluate((element) => getComputedStyle(element).cursor), 'ew-resize');
-    assert.equal((await edge.boundingBox()).width, 4);
+    assert.equal((await edge.boundingBox()).width, 10);
   }
+  assert.deepEqual(await page.evaluate(() => ['pin-button', 'more-toggle', 'close-popup'].map(id => {
+    const button = document.getElementById(id), bounds = button.getBoundingClientRect();
+    const hit = document.elementFromPoint(bounds.left + bounds.width / 2, bounds.top + bounds.height / 2);
+    return { id, buttonReceivesCenter: hit?.closest('button') === button, coveredByResizeEdge: Boolean(hit?.closest('[data-window-resize]')) };
+  })), ['pin-button', 'more-toggle', 'close-popup'].map(id => ({ id, buttonReceivesCenter: true, coveredByResizeEdge: false })));
   for (const [edge, movement, expected, direction] of [[eastEdge, -80, 600, 'east'], [westEdge, 75, 605, 'west']]) {
     const bounds = await edge.boundingBox(), count = await page.evaluate(() => window.__qa.resizeRequests.length);
     await page.mouse.move(bounds.x + 2, 45); await page.mouse.down();
@@ -732,8 +745,8 @@ try {
   await goView('history');
   assert.equal(await page.locator('.management-header').isVisible(), true);
   await goView('settings');
-  assert.equal(await westEdge.isVisible(), false);
-  assert.equal(await eastEdge.isVisible(), false);
+  assert.equal(await westEdge.isVisible(), true);
+  assert.equal(await eastEdge.isVisible(), true);
   const managementResizeCount = await page.evaluate(() => window.__qa.resizeRequests.length);
   await eastEdge.dispatchEvent('pointerdown', { button: 0, pointerId: 110, screenX: 798 });
   await eastEdge.dispatchEvent('pointermove', { pointerId: 110, screenX: 700 });
@@ -896,7 +909,17 @@ try {
   assert.equal(await page.locator('#close-provider-dialog').isDisabled(), true);
   assert.equal(await page.locator('#provider-name').isDisabled(), true);
   await page.keyboard.press('Escape');
-  await page.locator('#provider-dialog').click({ position: { x: 2, y: 2 } });
+  // The outer 10px corners are resize handles even while a settings modal
+  // is open. Click the actual backdrop padding, with an explicit hit test.
+  assert.equal(await page.locator('#provider-dialog').evaluate(element => {
+    const bounds = element.getBoundingClientRect();
+    return document.elementFromPoint(bounds.left + 2, bounds.top + 2)?.closest('[data-window-resize]')?.getAttribute('data-window-resize');
+  }), 'north-west');
+  assert.equal(await page.locator('#provider-dialog').evaluate(element => {
+    const bounds = element.getBoundingClientRect();
+    return document.elementFromPoint(bounds.left + 16, bounds.top + 16) === element;
+  }), true, 'The atomic-save dismissal check must target the real backdrop, not a resize handle or form control.');
+  await page.locator('#provider-dialog').click({ position: { x: 16, y: 16 } });
   await page.locator('#provider-form').dispatchEvent('submit');
   assert.equal(await page.locator('#provider-dialog').isVisible(), true);
   assert.equal(await page.evaluate(() => window.__qa.saveCalls), 1);
@@ -1222,7 +1245,7 @@ try {
   ]) {
     await page.locator('#add-provider').click();
     await page.locator('#provider-preset').selectOption(kind);
-    assert.equal(await page.locator(`#provider-preset option[value="${kind}"]`).evaluate(element => element.parentElement.label), '官方机器翻译');
+    assert.equal(await page.locator(`#provider-preset option[value="${kind}"]`).evaluate(element => element.parentElement.label), ['baidu', 'microsoft'].includes(kind) ? '推荐 · 从这些服务开始' : '官方机器翻译');
     assert.equal(await page.locator('#provider-url-field').isHidden(), true);
     assert.equal(await page.locator('#provider-model-field').isHidden(), true);
     assert.equal(await page.locator('#provider-prompt-field').isHidden(), true);
@@ -2343,6 +2366,101 @@ try {
   assert.equal(await page.evaluate(() => window.__qa.ocrTestCalls), credentialBaseline.ocrTests + 1);
   assert.equal(await page.evaluate(() => window.__qa.translationRequests.length), credentialBaseline.translations);
   assert.deepEqual(errors, []);
+  // Result setup actions only navigate. They never authorize, download, read
+  // credentials or silently retry; preparation remains a separate explicit act.
+  for (const [platform, kind, appleAction] of [
+    ['mac', 'system', true], ['windows', 'offline', false],
+    ['windows', 'system', false], ['mac', 'openai', false],
+  ]) {
+    const url = new URL(process.env.ECHOLINGO_TEST_URL ?? 'http://127.0.0.1:1420/');
+    url.searchParams.set('translationSetupFixture', kind);
+    if (platform === 'windows') url.searchParams.set('windowsSelectionFixture', '1');
+    await page.goto(url.href);
+    await page.waitForFunction(() => document.querySelector('#footer-status')?.textContent === '准备就绪');
+    await page.evaluate((kind) => {
+      window.__qa.translationResultError = kind === 'offline'
+        ? 'Synthetic offline resources unavailable'
+        : 'SYSTEM_TRANSLATION_DOWNLOAD_REQUIRED: Synthetic language packs not installed';
+      window.__qa.translationResultLanguages = { sourceLanguage: 'zh-Hant', targetLanguage: 'en' };
+    }, kind);
+    await page.locator('#source-text').fill('Generated translation setup fixture');
+    await page.locator('#source-text').press('Enter');
+    const setup = page.locator('.result-setup');
+    await setup.waitFor({ state: 'visible' });
+    assert.equal(await setup.textContent(), appleAction ? '准备系统翻译' : '打开翻译设置');
+    assert.deepEqual(await page.evaluate(() => window.__qa.systemPrepareCalls), []);
+    const reads = await page.evaluate(() => ({ translation: window.__qa.credentialReadCalls, ocr: window.__qa.ocrKeyCalls, requests: window.__qa.translationRequests.length }));
+    const preferences = await page.evaluate(() => ({ source: window.__qa.settings.sourceLanguage, target: window.__qa.settings.targetLanguage, writes: window.__qa.saveCalls }));
+    await page.evaluate(() => { window.__qa.systemStatusCalls = []; });
+    await setup.click();
+    await page.waitForFunction(() => document.body.dataset.view === 'settings');
+    assert.equal(await page.locator('#app-version').textContent(), 'EchoLingo 9.8.7-beta.6');
+    assert.deepEqual(await page.evaluate(() => window.__qa.systemPrepareCalls), []);
+    assert.deepEqual(await page.evaluate(() => ({ translation: window.__qa.credentialReadCalls, ocr: window.__qa.ocrKeyCalls, requests: window.__qa.translationRequests.length })), reads);
+    assert.deepEqual(await page.evaluate(() => ({ source: window.__qa.settings.sourceLanguage, target: window.__qa.settings.targetLanguage, writes: window.__qa.saveCalls })), preferences);
+    assert.deepEqual(await page.evaluate(() => window.__qa.systemStatusCalls), [appleAction ? { sourceLanguage: 'zh-Hant', targetLanguage: 'en' } : { sourceLanguage: 'en', targetLanguage: 'zh-Hans' }]);
+    assert.equal(await page.locator('#system-translation-source').inputValue(), appleAction ? 'zh-Hant' : 'en');
+    assert.equal(await page.locator('#system-translation-target').inputValue(), appleAction ? 'en' : 'zh-Hans');
+    if (appleAction) {
+      assert.equal(await page.locator('#system-translation-setup').getAttribute('open'), '');
+      await page.waitForFunction(() => !document.querySelector('#prepare-system-translation').disabled);
+      await page.locator('#prepare-system-translation').click();
+      await page.waitForFunction(() => window.__qa.systemPrepareCalls.length === 1);
+      assert.deepEqual(await page.evaluate(() => window.__qa.systemPrepareCalls), [{ sourceLanguage: 'zh-Hant', targetLanguage: 'en' }]);
+    }
+  }
+  for (const pair of [null, { sourceLanguage: 'auto', targetLanguage: 'en' }, { sourceLanguage: 'xx-unknown', targetLanguage: 'en' }, { sourceLanguage: 'en', targetLanguage: 'en' }, { sourceLanguage: 7, targetLanguage: 'en' }]) {
+    const url = new URL(process.env.ECHOLINGO_TEST_URL ?? 'http://127.0.0.1:1420/');
+    url.searchParams.set('translationSetupFixture', 'system');
+    await page.goto(url.href);
+    await page.waitForFunction(() => document.querySelector('#footer-status')?.textContent === '准备就绪');
+    await goView('settings');
+    await page.locator('#system-translation-source').selectOption('fr');
+    await page.locator('#system-translation-target').selectOption('de');
+    await goView('translate');
+    await page.evaluate((pair) => { window.__qa.translationResultError = 'SYSTEM_TRANSLATION_DOWNLOAD_REQUIRED: fixture'; window.__qa.translationResultLanguages = pair; }, pair);
+    await page.locator('#source-text').fill('Generated invalid setup metadata');
+    await page.locator('#source-text').press('Enter');
+    await page.locator('.result-setup').waitFor({ state: 'visible' });
+    const baseline = await page.evaluate(() => ({ translations: window.__qa.translationRequests.length, keys: window.__qa.credentialReadCalls, writes: window.__qa.saveCalls }));
+    await page.evaluate(() => { window.__qa.systemStatusCalls = []; });
+    await page.locator('.result-setup').click();
+    assert.equal(await page.locator('#system-translation-source').inputValue(), 'fr');
+    assert.equal(await page.locator('#system-translation-target').inputValue(), 'de');
+    assert.deepEqual(await page.evaluate(() => window.__qa.systemStatusCalls), [{ sourceLanguage: 'fr', targetLanguage: 'de' }]);
+    assert.deepEqual(await page.evaluate(() => window.__qa.systemPrepareCalls), []);
+    assert.deepEqual(await page.evaluate(() => ({ translations: window.__qa.translationRequests.length, keys: window.__qa.credentialReadCalls, writes: window.__qa.saveCalls })), baseline);
+  }
+  {
+    const url = new URL(process.env.ECHOLINGO_TEST_URL ?? 'http://127.0.0.1:1420/');
+    url.searchParams.set('translationSetupFixture', 'system');
+    await page.goto(url.href);
+    await page.waitForFunction(() => document.querySelector('#footer-status')?.textContent === '准备就绪');
+    await goView('settings');
+    await page.locator('#system-translation-source').selectOption('fr');
+    await page.locator('#system-translation-target').selectOption('de');
+    await page.waitForFunction(() => !document.querySelector('#prepare-system-translation').disabled);
+    await page.evaluate(() => { window.__qa.holdSystemPreparation = true; });
+    await page.locator('#prepare-system-translation').click();
+    await page.waitForFunction(() => window.__qa.systemPrepareCalls.length === 1);
+    await goView('translate');
+    await page.evaluate(() => { window.__qa.translationResultError = 'SYSTEM_TRANSLATION_DOWNLOAD_REQUIRED: fixture'; window.__qa.translationResultLanguages = { sourceLanguage: 'zh-Hant', targetLanguage: 'en' }; });
+    await page.locator('#source-text').fill('Generated pending preparation');
+    await page.locator('#source-text').press('Enter');
+    await page.locator('.result-setup').waitFor({ state: 'visible' });
+    const statusReads = await page.evaluate(() => window.__qa.systemStatusCalls.length);
+    await page.locator('.result-setup').click();
+    await page.getByText('系统翻译正在准备，请完成或取消后再选择该语言对。', { exact: true }).waitFor();
+    assert.equal(await page.locator('#system-translation-source').inputValue(), 'fr');
+    assert.equal(await page.locator('#system-translation-target').inputValue(), 'de');
+    assert.equal(await page.locator('#system-translation-source').isDisabled(), true);
+    assert.equal(await page.evaluate(() => window.__qa.systemStatusCalls.length), statusReads);
+    assert.deepEqual(await page.evaluate(() => window.__qa.systemPrepareCalls), [{ sourceLanguage: 'fr', targetLanguage: 'de' }]);
+    await page.evaluate(() => { window.__qa.releaseSystemPreparation(); });
+    await page.waitForFunction(() => document.querySelector('#system-translation-status').textContent === 'QA 本机语言包已就绪');
+  }
+  assert.deepEqual(errors, []);
+  console.log('PASS: full runtime version visible; result error settings actions use request provider kind plus platform, navigate without preparation/credentials/retry, and only explicit Apple preparation downloads the selected pair. Fake IPC only.');
   // A registered main key can be consumed by the OS, and its DOM modifier
   // keyups can be absent too. Observe this handoff separately from the
   // held/null/stale/releasedEvidence cases above: a matching native release
@@ -2580,6 +2698,77 @@ try {
   assert.match(readingFonts.source, /^SimSun,/);
   assert.doesNotMatch(readingFonts.action, /Times New Roman/);
   console.log('PASS: translated Latin font prefers installed Times New Roman; Windows retains SimSun CJK fallback/source and UI action typography. Computed CSS only, not physical font rendering.');
+  for (const platform of ['mac', 'windows']) {
+    const url = new URL(process.env.ECHOLINGO_TEST_URL ?? 'http://127.0.0.1:1420/');
+    if (platform === 'windows') url.searchParams.set('windowsSelectionFixture', '1');
+    await page.goto(url.href);
+    await page.waitForFunction(() => document.querySelector('#footer-status')?.textContent === '准备就绪' && window.__qa.diagnosticCalls.length >= 1);
+    await goView('settings');
+    await page.locator('.diagnostics-details > summary').click();
+    const diagnosticCopy = page.locator('#copy-diagnostics');
+    assert.equal(await diagnosticCopy.isDisabled(), true);
+    assert.equal(await page.locator('#diagnostics-output').isHidden(), true);
+    const diagnosticText = `平台：${platform === 'mac' ? 'macOS' : 'Windows'}\n权限检查：完成\n\n快捷键：Alt+D / Alt+S\n状态：仅测试元数据，不含原文或密钥。`;
+    const diagnosticBefore = await page.evaluate((report) => {
+      window.__qa.diagnosticReport = report; window.__qa.holdDiagnostics = true;
+      return { calls: window.__qa.diagnosticCalls.length, copies: window.__qa.copies.length,
+        credentialReads: window.__qa.credentialReadCalls, keyWrites: window.__qa.keyCalls,
+        ocrKeyWrites: window.__qa.ocrKeyCalls, translations: window.__qa.translationRequests.length };
+    }, diagnosticText);
+    await page.locator('#run-diagnostics').click();
+    await page.waitForFunction((count) => window.__qa.diagnosticCalls.length === count + 1, diagnosticBefore.calls);
+    assert.equal(await page.locator('#diagnostics-output').textContent(), '正在检查…');
+    assert.equal(await diagnosticCopy.isDisabled(), true);
+    await diagnosticCopy.dispatchEvent('click');
+    assert.equal(await page.evaluate(() => window.__qa.copies.length), diagnosticBefore.copies);
+    await page.evaluate(() => { window.__qa.holdDiagnostics = false; window.__qa.releaseDiagnostics(); });
+    await page.waitForFunction(() => !document.querySelector('#copy-diagnostics').disabled);
+    assert.equal(await page.locator('#diagnostics-output').textContent(), diagnosticText);
+    await page.evaluate(() => { window.__qa.diagnosticReport = '尚未运行的下一份诊断'; });
+    await diagnosticCopy.click();
+    assert.equal(await page.evaluate(() => window.__qa.copies.at(-1)), diagnosticText);
+    await diagnosticCopy.click();
+    assert.deepEqual(await page.evaluate(() => window.__qa.copies.slice(-2)), [diagnosticText, diagnosticText]);
+    assert.deepEqual(await page.evaluate(() => ({ calls: window.__qa.diagnosticCalls.length,
+      credentialReads: window.__qa.credentialReadCalls, keyWrites: window.__qa.keyCalls,
+      ocrKeyWrites: window.__qa.ocrKeyCalls, translations: window.__qa.translationRequests.length })),
+      { calls: diagnosticBefore.calls + 1, credentialReads: diagnosticBefore.credentialReads,
+        keyWrites: diagnosticBefore.keyWrites, ocrKeyWrites: diagnosticBefore.ocrKeyWrites, translations: diagnosticBefore.translations });
+    await page.evaluate(() => { window.__qa.diagnosticReport = ''; });
+    await page.locator('#run-diagnostics').click();
+    await page.waitForFunction(() => !document.querySelector('#run-diagnostics').disabled);
+    assert.equal(await page.locator('#diagnostics-output').textContent(), '');
+    assert.equal(await diagnosticCopy.isDisabled(), true);
+    await diagnosticCopy.dispatchEvent('click');
+    assert.equal(await page.evaluate(() => window.__qa.copies.length), diagnosticBefore.copies + 2);
+    await goView('translate');
+    const preservedText = '中文段落保留原有换行，输入和译文使用相同的阅读对齐方式。\n\nconst values = [1, 2, 3];\n  return values.map(value => value + 1);\nhttps://example.invalid/' + 'LongEnglishIdentifier'.repeat(16);
+    await page.evaluate((text) => { window.__qa.translationResultText = text; }, preservedText);
+    await page.locator('#source-text').fill(preservedText);
+    await page.locator('#source-text').press('Enter');
+    await page.waitForFunction((text) => document.querySelector('.result-text')?.textContent === text, preservedText);
+    assert.equal(await page.locator('#source-text').inputValue(), preservedText);
+    const alignment = await page.evaluate(() => {
+      const read = (element) => {
+        const style = getComputedStyle(element);
+        return { align: style.textAlign, last: style.textAlignLast, whitespace: style.whiteSpace,
+          wordBreak: style.wordBreak, wrap: style.overflowWrap, horizontalOverflow: element.scrollWidth > element.clientWidth + 1 };
+      };
+      return { source: read(document.querySelector('#source-text')), result: read(document.querySelector('.result-text')),
+        actions: [...document.querySelectorAll('.result-actions button, .source-actions button')].map(element => getComputedStyle(element).textAlign) };
+    });
+    for (const textStyle of [alignment.source, alignment.result]) {
+      assert.equal(textStyle.align, 'justify'); assert.equal(textStyle.last, 'left');
+      assert.equal(textStyle.whitespace, 'pre-wrap'); assert.equal(textStyle.wordBreak, 'normal');
+      assert.equal(textStyle.wrap, 'anywhere'); assert.equal(textStyle.horizontalOverflow, false);
+    }
+    assert.equal(alignment.actions.includes('justify'), false);
+    await page.locator('#copy-source').click();
+    await page.getByRole('button', { name: '复制译文', exact: true }).click();
+    assert.deepEqual(await page.evaluate(() => window.__qa.copies.slice(-2)), [preservedText, preservedText]);
+  }
+  assert.deepEqual(errors, []);
+  console.log('PASS: macOS/Windows shared UI copies only the displayed Chinese multiline diagnostics without rerunning checks/credentials/translation; absent, pending and empty reports stay disabled. Source/result justify with left final lines, preserved code/URL/long-token text and independent action styling. Mock IPC and computed CSS only.');
   await page.goto(process.env.ECHOLINGO_TEST_URL ?? 'http://127.0.0.1:1420/');
   await page.waitForFunction(() => document.querySelector('#footer-status')?.textContent === '准备就绪');
   await goView('settings');

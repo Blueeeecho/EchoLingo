@@ -2,11 +2,15 @@
 //! The frontend cannot navigate the app WebView or pass arbitrary shell input.
 
 const ALLOWED: &[&str] = &[
+    "https://ai.baidu.com/ai-doc/OCR/fk3h7xu7h",
     "https://ai.youdao.com/",
     "https://ai.youdao.com/DOCSIRMA/html/ocr/api/tyocr/index.html",
     "https://ai.youdao.com/DOCSIRMA/html/trans/api/wbfy/index.html",
     "https://ai.youdao.com/console/",
+    "https://ai.youdao.com/new/price-center.s",
     "https://api-docs.deepseek.com/",
+    "https://api-docs.deepseek.com/zh-cn/quick_start/pricing/",
+    "https://azure.microsoft.com/en-us/pricing/details/translator/",
     "https://azure.microsoft.com/products/ai-services/ai-translator",
     "https://bailian.console.aliyun.com/",
     "https://cloud.baidu.com/doc/OCR/s/zk3h7xz52",
@@ -14,8 +18,10 @@ const ALLOWED: &[&str] = &[
     "https://cloud.google.com/docs/authentication/api-keys-use",
     "https://cloud.google.com/vision",
     "https://cloud.google.com/vision/docs/ocr",
+    "https://cloud.google.com/vision/pricing",
     "https://cloud.siliconflow.cn/",
     "https://cloud.tencent.com/document/product/866/33526",
+    "https://cloud.tencent.com/document/product/866/35945",
     "https://cloud.tencent.com/product/ocr",
     "https://console.bce.baidu.com/ai/#/ai/ocr/overview/index",
     "https://console.cloud.google.com/apis/credentials",
@@ -24,7 +30,11 @@ const ALLOWED: &[&str] = &[
     "https://developer.apple.com/documentation/translation/translationsession/init(installedsource:target:)",
     "https://developers.deepl.com/api-reference/translate/request-translation",
     "https://developers.openai.com/api/reference/overview",
+    "https://developers.openai.com/api/docs/pricing",
+    "https://developers.openai.com/api/docs/guides/chatgpt-api-credits",
     "https://docs.bigmodel.cn/cn/guide/develop/openai/introduction",
+    "https://docs.bigmodel.cn/cn/guide/start/model-overview",
+    "https://docs.libretranslate.com/",
     "https://docs.libretranslate.com/guides/api_usage/",
     "https://docs.siliconflow.cn/docs/api/chat-completions-post",
     "https://fanyi-api.baidu.com/access/0/1",
@@ -33,6 +43,7 @@ const ALLOWED: &[&str] = &[
     "https://github.com/mozilla/translations",
     "https://help.aliyun.com/zh/model-studio/compatibility-of-openai-with-dashscope",
     "https://help.aliyun.com/zh/model-studio/get-api-key",
+    "https://help.aliyun.com/zh/model-studio/new-free-quota/",
     "https://learn.microsoft.com/azure/ai-services/translator/text-translation/reference/authentication",
     "https://learn.microsoft.com/azure/ai-services/translator/text-translation/reference/v3/translate",
     "https://libretranslate.com/",
@@ -41,11 +52,14 @@ const ALLOWED: &[&str] = &[
     "https://platform.deepseek.com/api_keys",
     "https://platform.minimax.cn/",
     "https://platform.minimax.cn/docs/api-reference/text-openai-api",
+    "https://platform.minimax.cn/subscribe/coding-plan",
     "https://platform.openai.com/",
     "https://platform.openai.com/api-keys",
     "https://portal.azure.com/",
     "https://www.deepl.com/pro-api",
     "https://www.deepl.com/your-account/keys",
+    "https://support.deepl.com/hc/en-us/articles/360021200939-DeepL-API-plans",
+    "https://www.siliconflow.cn/pricing",
     "https://www.rfc-editor.org/rfc/rfc6901",
 ];
 
@@ -114,11 +128,14 @@ mod tests {
     use super::*;
 
     #[test]
-    fn all_frontend_guides_are_exactly_allowlisted() {
-        let source = include_str!("../../src/service-guides.ts");
-        let urls: std::collections::BTreeSet<_> = source
-            .split("'https://")
-            .skip(1)
+    fn all_bundled_guides_and_quotas_are_exactly_allowlisted() {
+        let sources = [
+            include_str!("../../src/service-guides.ts"),
+            include_str!("../../src/service-quotas.ts"),
+        ];
+        let urls: std::collections::BTreeSet<_> = sources
+            .iter()
+            .flat_map(|source| source.split("'https://").skip(1))
             .map(|tail| format!("https://{}", tail.split('\'').next().unwrap()))
             .collect();
         let expected: std::collections::BTreeSet<_> =

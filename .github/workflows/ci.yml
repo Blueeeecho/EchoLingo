@@ -9,7 +9,7 @@ on:
         description: Full regression or exact-binary desktop diagnostics
         type: choice
         default: full
-        options: [full, macos-preview, windows-popup-diagnostics, windows-popup-current-diagnostics, windows-application-diagnostics, windows-input-plane-experiment, windows-native-diagnostics, windows-shortcuts-ui-diagnostics, windows-shortcuts-ui-medium-diagnostics, windows-shortcuts-current-diagnostics, windows-shortcuts-workflows-diagnostics, windows-delegated-diagnostics, windows-browser-diagnostics, windows-selection-same-page-diagnostics, windows-selection-browser-app-diagnostics, windows-browser-ocr-visibility-diagnostics, windows-selection-cold-edge-diagnostics, windows-selection-paced-edge-diagnostics, windows-selection-nonbrowser-app-diagnostics, windows-latest-intent-diagnostics, windows-selection-application-diagnostics, windows-selection-clipboard-diagnostics, windows-selection-notepad-diagnostics, windows-selection-budget-diagnostics, windows-selection-context-diagnostics, windows-wps-selection-diagnostics, windows-focus-resize-current-diagnostics, windows-priority-input-diagnostics, windows-priority-candidate-diagnostics]
+        options: [full, macos-preview, windows-preview, windows-popup-diagnostics, windows-popup-current-diagnostics, windows-application-diagnostics, windows-input-plane-experiment, windows-native-diagnostics, windows-shortcuts-ui-diagnostics, windows-shortcuts-ui-medium-diagnostics, windows-shortcuts-current-diagnostics, windows-shortcuts-workflows-diagnostics, windows-delegated-diagnostics, windows-browser-diagnostics, windows-selection-same-page-diagnostics, windows-selection-browser-app-diagnostics, windows-browser-ocr-visibility-diagnostics, windows-selection-cold-edge-diagnostics, windows-selection-paced-edge-diagnostics, windows-selection-nonbrowser-app-diagnostics, windows-latest-intent-diagnostics, windows-selection-application-diagnostics, windows-selection-clipboard-diagnostics, windows-selection-notepad-diagnostics, windows-selection-budget-diagnostics, windows-selection-context-diagnostics, windows-wps-selection-diagnostics, windows-focus-resize-current-diagnostics, windows-priority-input-diagnostics, windows-priority-candidate-diagnostics]
 permissions:
   contents: read
 jobs:
@@ -18,7 +18,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: ${{ fromJSON(github.event.inputs.mode == 'macos-preview' && '["macos-latest"]' || '["windows-latest","macos-latest"]') }}
+        os: ${{ fromJSON(github.event.inputs.mode == 'macos-preview' && '["macos-latest"]' || github.event.inputs.mode == 'windows-preview' && '["windows-latest"]' || '["windows-latest","macos-latest"]') }}
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -527,6 +527,9 @@ jobs:
           curl --retry 20 --retry-connrefused --retry-delay 1 -s http://127.0.0.1:1420/ > /dev/null
           npm run test:ui
           node tests/panel-layout-performance.mjs
+          node tests/window-resize-edges.mjs
+          node tests/windows-management-scroll-container.mjs
+          node tests/service-quota-ui.mjs
 
   windows-popup-diagnostics:
     name: Targeted popup diagnostics (verified immutable candidate)
@@ -1601,7 +1604,7 @@ jobs:
 
 
   windows-focus-resize-current-diagnostics:
-    name: Exact 952 candidate acceptance (${{ matrix.fixture }})
+    name: Exact 57 rigorous selection acceptance (${{ matrix.fixture }})
     if: github.event_name == 'workflow_dispatch' && github.event.inputs.mode == 'windows-focus-resize-current-diagnostics'
     runs-on: windows-latest
     permissions:
@@ -1610,7 +1613,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        fixture: [application, resize]
+        fixture: [rigorous]
     steps:
       - uses: actions/checkout@v4
         with:
@@ -1620,29 +1623,29 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          $source = '952d6096e618a5349aaa40d2ea40aed2751e6e34'
+          $source = '57d5f18336881bf8fe00559200edad7284c3cae6'
           git diff --quiet $source HEAD -- src src-tauri resources assets scripts index.html package.json package-lock.json vite.config.ts tsconfig.json tsconfig.node.json .cargo
           if ($LASTEXITCODE -ne 0) { throw 'Production source differs; this stage cannot accept current source.' }
-          $run = gh api repos/Blueeeecho/EchoLingo/actions/runs/40683453999 | ConvertFrom-Json
+          $run = gh api repos/Blueeeecho/EchoLingo/actions/runs/40863042526 | ConvertFrom-Json
           if ($LASTEXITCODE -ne 0 -or $run.head_sha -ne $source -or $run.status -ne 'completed') { throw 'Immutable source-run mismatch.' }
-          $artifact = gh api repos/Blueeeecho/EchoLingo/actions/artifacts/12814238767 | ConvertFrom-Json
-          if ($LASTEXITCODE -ne 0 -or $artifact.workflow_run.id -ne 40683453999 -or $artifact.workflow_run.head_sha -ne $source -or $artifact.expired -or $artifact.size_in_bytes -ne 17909184 -or $artifact.digest -ne 'sha256:33ea5161e95a757d85e75e34e7b7cd6948da91ee61d6373071aa910468f6b5d9') { throw 'Immutable evidence artifact mismatch.' }
+          $artifact = gh api repos/Blueeeecho/EchoLingo/actions/artifacts/12892644752 | ConvertFrom-Json
+          if ($LASTEXITCODE -ne 0 -or $artifact.workflow_run.id -ne 40863042526 -or $artifact.workflow_run.head_sha -ne $source -or $artifact.expired -or $artifact.size_in_bytes -ne 17955491 -or $artifact.digest -ne 'sha256:3611ebeac387c904eab8ed9c03dea78936ac17a84b4dbea813186e5bc3d144ba') { throw 'Immutable evidence artifact mismatch.' }
       - uses: actions/download-artifact@v4
         with:
-          artifact-ids: '12814238767'
-          run-id: '40683453999'
+          artifact-ids: '12892644752'
+          run-id: '40863042526'
           github-token: ${{ github.token }}
-          path: exact-952-evidence
+          path: exact-57-evidence
       - name: Verify exact stage executable and unchanged binary inputs
         id: candidate
         shell: powershell
         run: |
-          $files = @(Get-ChildItem exact-952-evidence -Recurse -File -Filter echolingo.exe)
+          $files = @(Get-ChildItem exact-57-evidence -Recurse -File -Filter echolingo.exe)
           if ($files.Count -ne 1) { throw 'Expected one staged candidate.' }
           $candidateHash = (Get-FileHash -LiteralPath $files[0].FullName -Algorithm SHA256).Hash.ToLowerInvariant()
-          if ($candidateHash -ne 'a1b8c111fdd2aa11c959a2cf69692495e42c264f3cfb493096648f67966c836d' -or $files[0].Length -ne 5980160) { throw 'Staged candidate bytes mismatch.' }
+          if ($candidateHash -ne '3e04dacdea0a3b23795fc408e2bbfec8f4904c50ca770abb932a5918e9233e42' -or $files[0].Length -ne 6073344) { throw 'Staged candidate bytes mismatch.' }
           'path=' + $files[0].FullName | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
-          [ordered]@{ sourceRun=40683453999; sourceArtifactId=12814238767; applicationSource='952d6096e618a5349aaa40d2ea40aed2751e6e34'; fixtureSource='${{ github.sha }}'; stageSha256=$candidateHash; stageBytes=$files[0].Length; productionSourceUnchanged=$true; rebuilt=$false; scope='Supplemental actual acceptance; preserves original 16/18 red full run' } | ConvertTo-Json -Compress
+          [ordered]@{ sourceRun=40863042526; sourceArtifactId=12892644752; applicationSource='57d5f18336881bf8fe00559200edad7284c3cae6'; fixtureSource='${{ github.sha }}'; stageSha256=$candidateHash; stageBytes=$files[0].Length; productionSourceUnchanged=$true; rebuilt=$false; scope='Supplemental actual acceptance; preserves original 17/18 red full run' } | ConvertTo-Json -Compress
       - name: Actual same-binary desktop fixture
         id: actual
         continue-on-error: true
@@ -1651,27 +1654,26 @@ jobs:
         env:
           ECHOLINGO_CANDIDATE: ${{ steps.candidate.outputs.path }}
         run: |
-          if ('${{ matrix.fixture }}' -eq 'application') {
-            $output = @(& powershell.exe -NoProfile -STA -ExecutionPolicy Bypass -File tests/windows-application-smoke.ps1 -ApplicationPath $env:ECHOLINGO_CANDIDATE -LatestIntentTests 2>&1)
-          } else {
-            $output = @(& powershell.exe -NoProfile -STA -ExecutionPolicy Bypass -File tests/windows-popup-resize-smoke.ps1 -ApplicationPath $env:ECHOLINGO_CANDIDATE -IsolatedTestSession 2>&1)
-          }
+          $candidate = $env:ECHOLINGO_CANDIDATE
+          $hash = (Get-FileHash -LiteralPath $candidate -Algorithm SHA256).Hash.ToLowerInvariant()
+          $bytes = (Get-Item -LiteralPath $candidate).Length
+          $output = @(& powershell.exe -NoProfile -STA -ExecutionPolicy Bypass -File tests/windows-selection-application-smoke.ps1 -ApplicationPath $candidate -ExpectedApplicationSha256 $hash -ExpectedApplicationBytes $bytes -IsolatedTestSession 2>&1)
           $fixtureExit = $LASTEXITCODE
-          $output | Out-File "$env:RUNNER_TEMP/echolingo-exact-952-${{ matrix.fixture }}.log" -Encoding utf8
+          $output | Out-File "$env:RUNNER_TEMP/echolingo-exact-57-${{ matrix.fixture }}.log" -Encoding utf8
           $output | Write-Output
-          if ((Get-FileHash -LiteralPath $env:ECHOLINGO_CANDIDATE -Algorithm SHA256).Hash.ToLowerInvariant() -ne 'a1b8c111fdd2aa11c959a2cf69692495e42c264f3cfb493096648f67966c836d') { throw 'Candidate changed during fixture.' }
+          if ((Get-FileHash -LiteralPath $env:ECHOLINGO_CANDIDATE -Algorithm SHA256).Hash.ToLowerInvariant() -ne '3e04dacdea0a3b23795fc408e2bbfec8f4904c50ca770abb932a5918e9233e42') { throw 'Candidate changed during fixture.' }
           exit $fixtureExit
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: EchoLingo-Windows-exact-952-${{ matrix.fixture }}
+          name: EchoLingo-Windows-exact-57-${{ matrix.fixture }}
           if-no-files-found: error
-          path: ${{ runner.temp }}/echolingo-exact-952-${{ matrix.fixture }}.log
+          path: ${{ runner.temp }}/echolingo-exact-57-${{ matrix.fixture }}.log
       - name: Gate unchanged candidate supplemental acceptance
         if: always()
         shell: powershell
         run: |
-          [ordered]@{ scope='Supplemental exact 952 same-binary acceptance only'; fixture='${{ matrix.fixture }}'; outcome='${{ steps.actual.outcome }}' } | ConvertTo-Json -Compress
+          [ordered]@{ scope='Supplemental exact 57 same-binary acceptance only'; fixture='${{ matrix.fixture }}'; outcome='${{ steps.actual.outcome }}' } | ConvertTo-Json -Compress
           if ('${{ steps.actual.outcome }}' -ne 'success') { throw 'Actual same-binary acceptance failed.' }
 
   windows-priority-input:

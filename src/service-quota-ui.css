@@ -1,0 +1,12 @@
+.service-quota { padding: 0 0 12px; margin: 0 0 12px; border-bottom: 1px solid var(--border); overflow-wrap: anywhere; }
+.service-quota-badge { display: inline-block; padding: 3px 8px; border-radius: 5px; font-size: 11px; font-weight: 600; color: var(--accent); background: var(--accent-soft); }
+.service-quota-summary { margin: 7px 0; font-size: 12px; line-height: 1.7; color: var(--text); }
+.service-quota-model-note { margin: 8px 0; font-size: 12px; line-height: 1.7; color: var(--danger); }
+.service-quota-details { margin-top: 7px; font-size: 11px; line-height: 1.7; color: var(--secondary); }
+.service-quota-details summary { cursor: pointer; }
+.service-quota-allowances { padding-left: 18px; margin: 8px 0; }
+.service-quota-allowances li + li { margin-top: 7px; }
+.service-quota-allowances p { margin: 2px 0; }
+.service-quota-date { display: block; margin-top: 8px; color: var(--muted); font-size: 10px; }
+.ocr-quota-card { margin-bottom: 15px; padding: 11px 13px; border: 1px solid var(--border); border-radius: 8px; }
+.ocr-quota-card .service-quota { margin: 0; padding: 0; border-bottom: 0; }
