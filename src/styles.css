@@ -305,6 +305,11 @@ body[data-view="translate"] .result-provider { font-size: 10px; }
 @media (max-width: 460px) { .permission-row { gap: 9px; }.permission-row > div:first-child { gap: 9px; }.permission-actions { gap: 9px; }.permission-actions .secondary-button { font-size: 9px; padding: 6px 8px; }.permission-actions .text-button { font-size: 9px; } }
 
 /* Permission setup appears only after a blocked, user-triggered action. */
+.core-guidance { margin: 2px 4px 8px; padding: 8px 10px; background: var(--accent-soft); border: 1px solid var(--border); border-radius: 8px; }
+.core-guidance p { margin: 0 0 8px; font-size: 12px; line-height: 1.6; white-space: pre-line; }
+.core-guidance-actions { display: flex; flex-wrap: wrap; gap: 8px 12px; align-items: center; }
+.core-guidance-actions .primary-button { padding: 6px 10px; font-size: 11px; }
+.core-guidance-actions .text-button { font-size: 11px; }
 .permission-guidance { margin: 2px 0 10px; padding: 12px 14px; background: var(--accent-soft); border: 1px solid var(--border); border-radius: 8px; }
 .permission-guidance-heading { display: flex; align-items: center; gap: 10px; }
 .permission-guidance h2 { flex: 1; margin: 0; font-size: 12px; font-weight: 600; }

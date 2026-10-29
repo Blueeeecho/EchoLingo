@@ -52,6 +52,7 @@ struct AppState {
     shortcut_gate: Mutex<shortcut_control::ShortcutGate>,
     shortcut_routes: shortcut_control::ShortcutRoutes,
     shortcut_updating: AtomicBool,
+    shortcut_maintenance: AtomicBool,
     registered_shortcuts: Mutex<Vec<Binding>>,
     shortcut_failures: Mutex<std::collections::BTreeMap<String, String>>,
     translation_busy: tokio::sync::Semaphore,
@@ -630,7 +631,7 @@ fn get_settings(state: State<AppState>) -> Result<serde_json::Value, String> {
     let failures = locked(&state.shortcut_failures)?;
     value["shortcutRegistration"] = serde_json::Value::Array(parsed_shortcuts(&settings.shortcuts)?.into_iter().map(|(action, binding)| {
         let active = registered.iter().any(|actual| actual.id() == binding.id()) && native_binding_active(binding);
-        serde_json::json!({"action":action,"active":active,"combo":settings.shortcuts.pairs().into_iter().find(|(name,_)| *name==action).map(|(_,combo)|combo).unwrap_or(""),"error":if active { None } else { failures.get(&action).cloned() }})
+        serde_json::json!({"action":action,"active":active,"combo":settings.shortcuts.pairs().into_iter().find(|(name,_)| *name==action).map(|(_,combo)|combo).unwrap_or(""),"error":shortcut_registration_message(active, failures.get(&action).map(String::as_str))})
     }).collect());
     Ok(value)
 }
@@ -913,6 +914,52 @@ fn shortcut_registry<'a>(
         registered,
     }
 }
+fn retry_inactive_shortcuts(app: &tauri::AppHandle) -> Result<bool, String> {
+    let state = app.state::<AppState>();
+    if state.shortcut_maintenance.load(Ordering::SeqCst) {
+        return Ok(false);
+    }
+    let settings = locked(&state.settings)?.clone();
+    let registered = locked(&state.registered_shortcuts)?
+        .iter()
+        .map(Binding::id)
+        .collect::<Vec<_>>();
+    let failures = locked(&state.shortcut_failures)?.clone();
+    let actions = inactive_retry_actions(&settings, &registered, &failures, |binding| {
+        native_binding_active(*binding)
+    })?;
+    if actions.is_empty() {
+        return Ok(false);
+    }
+    let mut recovered = false;
+    for action in actions {
+        // Drop the settings lock before save_settings acquires it again.
+        let latest = locked(&app.state::<AppState>().settings)?.clone();
+        if save_settings(
+            app.clone(),
+            app.state::<AppState>(),
+            latest,
+            Some(vec![action]),
+        )
+        .is_ok()
+        {
+            recovered = true;
+        }
+    }
+    Ok(recovered)
+}
+
+fn schedule_shortcut_retries(app: tauri::AppHandle) {
+    tauri::async_runtime::spawn(async move {
+        loop {
+            tokio::time::sleep(Duration::from_secs(20)).await;
+            if retry_inactive_shortcuts(&app).unwrap_or(false) {
+                let _ = app.emit("shortcut-registration-changed", ());
+            }
+        }
+    });
+}
+
 fn install_shortcuts(app: &tauri::AppHandle, s: &Shortcuts) -> Result<(), String> {
     let next = parsed_shortcuts(s)?;
     let state = app.state::<AppState>();
@@ -1027,6 +1074,68 @@ fn set_shortcut_recording(
         Ok(id)
     }
 }
+fn shortcut_failure_can_retry(error: &str) -> bool {
+    !error.contains("保留") && !error.contains("仅支持") && !error.contains("无效")
+}
+
+fn friendly_shortcut_error(error: &str) -> String {
+    let text = error.trim();
+    if text.contains("保留") || text.contains("仅支持") || text.contains("无效") {
+        return text.to_owned();
+    }
+    if text.contains("AlreadyRegistered")
+        || text.contains("HotKey")
+        || text.contains("1409")
+        || text.contains("占用")
+    {
+        return "被其他程序占用。可一键更换，或等对方退出后自动重试。".into();
+    }
+    if text.contains("监听") {
+        return "系统键盘监听没有就绪。请重启应用，或改用其他快捷键。".into();
+    }
+    text.to_owned()
+}
+
+fn shortcut_registration_message(active: bool, stored: Option<&str>) -> Option<String> {
+    if active {
+        return None;
+    }
+    Some(match stored {
+        Some(error) => friendly_shortcut_error(error),
+        None => "快捷键没有注册成功，可能被其他程序占用。".into(),
+    })
+}
+
+fn inactive_retry_actions(
+    settings: &Settings,
+    registered_ids: &[u32],
+    failures: &std::collections::BTreeMap<String, String>,
+    native_active: impl Fn(&Binding) -> bool,
+) -> Result<Vec<String>, String> {
+    let mut actions = Vec::new();
+    for (action, binding) in parsed_shortcuts(&settings.shortcuts)? {
+        let active = registered_ids.contains(&binding.id()) && native_active(&binding);
+        if active {
+            continue;
+        }
+        if failures
+            .get(&action)
+            .is_some_and(|error| !shortcut_failure_can_retry(error))
+        {
+            continue;
+        }
+        actions.push(action);
+    }
+    Ok(actions)
+}
+
+struct ShortcutMaintenanceGuard<'a>(&'a AtomicBool);
+impl Drop for ShortcutMaintenanceGuard<'_> {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::SeqCst);
+    }
+}
+
 #[tauri::command]
 fn save_settings(
     app: tauri::AppHandle,
@@ -1034,6 +1143,14 @@ fn save_settings(
     mut settings: Settings,
     retry_shortcut_actions: Option<Vec<String>>,
 ) -> Result<(), String> {
+    if state
+        .shortcut_maintenance
+        .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+        .is_err()
+    {
+        return Err("快捷键正在更新，请稍后再保存。".into());
+    }
+    let _maintenance = ShortcutMaintenanceGuard(&state.shortcut_maintenance);
     validate_settings(&settings)?;
     settings.shortcuts = shortcut_bindings::normalized(&settings.shortcuts)?;
     let next = parsed_shortcuts(&settings.shortcuts)?;
@@ -1587,6 +1704,13 @@ fn show(app: &tauri::AppHandle) -> Result<translation_requests::Presentation, St
                 let _ = handle.emit("action-error", "无法显示输入窗口");
                 return;
             }
+            // HWND focus does not deliver KEYEVENTF_UNICODE into the editor.
+            // WebView2 only accepts that input after controller MoveFocus.
+            let webview: &tauri::Webview = window.as_ref();
+            if webview.set_focus().is_err() {
+                let _ = handle.emit("action-error", "无法显示输入窗口");
+                return;
+            }
             // Only a still-current native input presentation grants DOM focus.
             // The frontend verifies this exact epoch again after IPC delivery.
             if handle
@@ -1780,7 +1904,10 @@ fn show_prepared_popup(
             if focus_input {
                 let _ = window.show();
                 let _ = window.unminimize();
-                let _ = window.set_focus();
+                if window.set_focus().is_ok() {
+                    let webview: &tauri::Webview = window.as_ref();
+                    let _ = webview.set_focus();
+                }
             } else if popup_needs_native_show(
                 reuse_visible_popup,
                 window.is_visible().unwrap_or(false),
@@ -1874,7 +2001,25 @@ fn empty_selection_payload(presentation_epoch: u64) -> serde_json::Value {
     payload["focusInput"] = serde_json::json!(true);
     payload
 }
+fn actionable_capture_hint(action: &str, error: &str) -> Option<String> {
+    if !matches!(action, "capture" | "ocr" | "silentOcr") || !error.starts_with("CANCELLED") {
+        return None;
+    }
+    let body = error
+        .split_once(':')
+        .map(|(_, rest)| rest.trim())
+        .unwrap_or("");
+    if body.contains("太小") || body.contains("拖动") || body.contains("超时，已取消") {
+        Some("请按住左键拖选要识别的区域。Esc 或右键取消。".into())
+    } else {
+        None
+    }
+}
+
 fn visible_action_error(action: &str, error: &str) -> Option<String> {
+    if let Some(hint) = actionable_capture_hint(action, error) {
+        return Some(hint);
+    }
     if error.starts_with("CANCELLED") {
         return None;
     }
@@ -1933,6 +2078,12 @@ fn action_failure_presentation(
     error: &str,
     presentation_epoch: u64,
 ) -> Option<ActionFailurePresentation> {
+    if let Some(message) = actionable_capture_hint(action, error) {
+        return Some(ActionFailurePresentation {
+            source: empty_input_payload(presentation_epoch),
+            error: Some(message),
+        });
+    }
     if error.starts_with("CANCELLED") {
         return None;
     }
@@ -2895,6 +3046,7 @@ fn main() {
                 shortcut_gate: Mutex::new(shortcut_control::ShortcutGate::default()),
                 shortcut_routes: shortcut_control::ShortcutRoutes::default(),
                 shortcut_updating: AtomicBool::new(false),
+                shortcut_maintenance: AtomicBool::new(false),
                 registered_shortcuts: Mutex::new(Vec::new()),
                 shortcut_failures: Mutex::new(std::collections::BTreeMap::new()),
                 translation_busy: tokio::sync::Semaphore::new(2),
@@ -2941,6 +3093,7 @@ fn main() {
                     .unwrap()
                     .push(e);
             }
+            schedule_shortcut_retries(app.handle().clone());
             tray(app.handle())?;
             #[cfg(target_os = "macos")]
             management_menu(app.handle())?;
@@ -3767,6 +3920,7 @@ mod tests {
             shortcut_gate: Mutex::new(shortcut_control::ShortcutGate::default()),
             shortcut_routes: shortcut_control::ShortcutRoutes::default(),
             shortcut_updating: AtomicBool::new(false),
+            shortcut_maintenance: AtomicBool::new(false),
             registered_shortcuts: Mutex::new(Vec::new()),
             shortcut_failures: Mutex::new(std::collections::BTreeMap::new()),
             translation_busy: tokio::sync::Semaphore::new(2),
@@ -3837,6 +3991,63 @@ mod tests {
             .unwrap()
             .contains("resolvedLanguages"));
         fs::remove_dir_all(directory).unwrap();
+    }
+    #[test]
+    fn shortcut_failures_explain_conflicts_and_only_permanent_errors_skip_retry() {
+        assert_eq!(
+            friendly_shortcut_error("selection（Alt+D）：系统注册失败：AlreadyRegistered"),
+            "被其他程序占用。可一键更换，或等对方退出后自动重试。"
+        );
+        assert!(
+            friendly_shortcut_error("Windows 为调试器保留 F12，请选择其他按键").contains("保留")
+        );
+        assert_eq!(
+            shortcut_registration_message(false, None).as_deref(),
+            Some("快捷键没有注册成功，可能被其他程序占用。")
+        );
+        assert_eq!(shortcut_registration_message(true, Some("占用")), None);
+        let settings = Settings::default();
+        let mut failures = std::collections::BTreeMap::new();
+        failures.insert("selection".into(), "AlreadyRegistered".into());
+        failures.insert("input".into(), "Windows 为调试器保留 F12".into());
+        let actions = inactive_retry_actions(&settings, &[], &failures, |_| true).unwrap();
+        assert!(actions.contains(&"selection".to_string()));
+        assert!(actions.contains(&"silentOcr".to_string()));
+        assert!(!actions.contains(&"input".to_string()));
+        assert!(inactive_retry_actions(&settings, &[], &failures, |_| false)
+            .unwrap()
+            .iter()
+            .any(|action| action == "silentOcr"));
+    }
+    #[test]
+    fn tiny_or_timed_out_region_capture_tells_the_user_how_to_drag() {
+        assert_eq!(
+            visible_action_error(
+                "silentOcr",
+                "CANCELLED: 框选区域太小；请按住左键拖动选择区域。"
+            )
+            .as_deref(),
+            Some("请按住左键拖选要识别的区域。Esc 或右键取消。")
+        );
+        assert_eq!(
+            visible_action_error("capture", "CANCELLED: 截图操作超时，已取消。").as_deref(),
+            Some("请按住左键拖选要识别的区域。Esc 或右键取消。")
+        );
+        assert_eq!(
+            visible_action_error(
+                "silentOcr",
+                "CANCELLED: Screenshot selection was cancelled (Escape, right click, display change, or 120-second timeout)."
+            ),
+            None
+        );
+        let hint = action_failure_presentation(
+            "silentOcr",
+            "CANCELLED: 框选区域太小；请按住左键拖动选择区域。",
+            3,
+        )
+        .unwrap();
+        assert_eq!(hint.source["mode"], "input");
+        assert!(hint.error.unwrap().contains("拖选"));
     }
     #[test]
     fn empty_selection_is_quiet_but_other_actions_keep_actionable_errors() {

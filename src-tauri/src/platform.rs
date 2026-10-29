@@ -342,6 +342,28 @@ pub fn ensure_popup_behavior(window: &tauri::WebviewWindow) -> Result<(), String
     Ok(())
 }
 
+/// Walk the first-child chain and stop before a cycle. Kept as a pure policy
+/// test; production input focus uses WebView2 MoveFocus instead of SetFocus
+/// on an arbitrary descendant, which drops Unicode keystrokes.
+#[cfg(test)]
+pub(crate) fn keyboard_focus_target<T: Copy + Eq>(
+    root: T,
+    mut first_child: impl FnMut(T) -> Option<T>,
+) -> T {
+    let mut current = root;
+    let mut previous = None;
+    for _ in 0..8 {
+        match first_child(current) {
+            Some(child) if Some(child) != previous && child != current => {
+                previous = Some(current);
+                current = child;
+            }
+            _ => break,
+        }
+    }
+    current
+}
+
 #[cfg(not(any(target_os = "macos", target_os = "windows")))]
 pub fn ensure_popup_behavior(_window: &tauri::WebviewWindow) -> Result<(), String> {
     Err("UNSUPPORTED_PLATFORM: Popup behavior supports Windows and macOS.".into())
@@ -1643,6 +1665,33 @@ fn materialize(
 mod tests {
     use serde_json::{json, Value};
 
+    #[test]
+    fn keyboard_focus_follows_the_first_child_chain_and_stops_on_a_cycle() {
+        assert_eq!(
+            super::keyboard_focus_target("top", |value| (value == "top").then_some("webview")),
+            "webview"
+        );
+        assert_eq!(
+            super::keyboard_focus_target("top", |value| match value {
+                "top" => Some("host"),
+                "host" => Some("render"),
+                _ => None,
+            }),
+            "render"
+        );
+        assert_eq!(
+            super::keyboard_focus_target("a", |value| match value {
+                "a" => Some("b"),
+                "b" => Some("a"),
+                _ => None,
+            }),
+            "b"
+        );
+        assert_eq!(
+            super::keyboard_focus_target("only", |_| None::<&str>),
+            "only"
+        );
+    }
     #[test]
     fn forced_selection_stop_never_claims_clipboard_cleanup_or_hides_its_warning() {
         assert!(
