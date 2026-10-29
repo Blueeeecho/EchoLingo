@@ -5,6 +5,8 @@ import type { TranslationPresentation } from './panel-layout';
 import { normalizeCapturedText, normalizeOcrCapturedText } from './text-normalization';
 import { createShortcutEditor, type NativeRecordedShortcut } from './shortcut-editor';
 import { SourceDeliveryInbox, type SourceDeliveryIdentity } from './source-delivery';
+import { HistoryCache } from './history-cache';
+import { mergeProviderRetry, sameTranslationSnapshot, type TranslationSnapshot } from './translation-retry';
 import { credentialScope } from './credential-scope';
 import { credentialMayExist, credentialStateOf, credentialStatusLabel } from './credential-state';
 import { inferProviderPreset, PROVIDER_PRESETS, qwenBaseUrl, qwenSettingsFromUrl } from './provider-presets';
@@ -36,7 +38,11 @@ const ocrDialog = $('#ocr-provider-dialog');
 const allModals = [providerDialog, confirmDialog, ocrDialog];
 const modalReturnFocus = new Map<HTMLElement, HTMLElement | null>();
 let settings = defaultSettings();
-let history: HistoryEntry[] = [];
+const historyCache = new HistoryCache(
+  () => desktop ? invoke<HistoryEntry[]>('get_history') : Promise.resolve([]),
+  () => currentView === 'history',
+  renderHistory,
+);
 let favoritesOnly = false;
 let pinned = false;
 let generation = 0;
@@ -82,6 +88,7 @@ interface ResultView { card: HTMLElement; body: HTMLElement; actions: HTMLButton
 const progressViews = new Map<string, ResultView>();
 let progressEpoch: number | null = null;
 let resultSource = '';
+let resultSnapshot: TranslationSnapshot | null = null;
 let pendingTranslate = false;
 let originalCapture: SourceTextEvent | null = null;
 let queuedCapture: { payload: SourceTextEvent; intentRevision: number } | null = null;
@@ -177,7 +184,7 @@ function setView(view: string, skipSystemStatusRefresh = false): void {
     button.classList.toggle('active', selected);
     if (selected) button.setAttribute('aria-current', 'page'); else button.removeAttribute('aria-current');
   }
-  if (view === 'history') { run(loadHistory); renderHistory(); }
+  if (view === 'history') run(loadHistory);
   if (view === 'settings' && macDesktop) {
     // The first visit must still expose setup instructions while another
     // explicit permission action is in flight and status refresh is busy.
@@ -261,6 +268,7 @@ function invalidateResults(preserveFocusIntent = false): void {
   setLoading(false);
   currentResults = [];
   resultSource = '';
+  resultSnapshot = null;
   emptyResults();
 }
 function cancelActiveTranslation(): void {
@@ -302,12 +310,15 @@ function beginTranslation(presentationEpoch: number): Promise<number> {
   return ticket;
 }
 function setSourceText(text: string): void {
+  source.value = text.slice(0, MAX_TEXT_LENGTH);
+  sourceEdited();
+  if (text.length > MAX_TEXT_LENGTH) toast('文字超过 20,000 字符，已截取前 20,000 字符。', 'error');
+}
+function sourceEdited(): void {
   clearPermissionGuidance();
   clearOriginalCapture();
-  source.value = text.slice(0, MAX_TEXT_LENGTH);
   resizeSourceEditor();
   invalidateResults();
-  if (text.length > MAX_TEXT_LENGTH) toast('文字超过 20,000 字符，已截取前 20,000 字符。', 'error');
 }
 function clearOriginalCapture(): void {
   originalCapture = null;
@@ -438,6 +449,9 @@ function insertIntoSource(text: string): void {
   const chunk = text.slice(0, room);
   source.focus({ preventScroll: true });
   source.setRangeText(chunk, start, end, 'end');
+  // setRangeText does not emit input. Keep fallback typing/paste on the same
+  // cancellation, action-state and layout path as native textarea edits.
+  sourceEdited();
 }
 function redirectSourceInputKey(event: KeyboardEvent): void {
   if (!sourceInputSessionActive() || isCompositionKey(event) || document.activeElement === source) return;
@@ -462,8 +476,10 @@ function redirectSourceInputKey(event: KeyboardEvent): void {
     const start = source.selectionStart ?? source.value.length;
     const end = source.selectionEnd ?? start;
     source.focus({ preventScroll: true });
-    if (start !== end) source.setRangeText('', start, end, 'end');
-    else if (start > 0) source.setRangeText('', start - 1, start, 'end');
+    if (start !== end || start > 0) {
+      source.setRangeText('', start !== end ? start : start - 1, end, 'end');
+      sourceEdited();
+    }
     return;
   }
   if (event.key.length === 1) {
@@ -614,7 +630,9 @@ function createResultView(result: TranslationResult, done: boolean, providerKind
   const view: ResultView = { card, body, actions: [], result, done, sequence: 0, providerKind };
   const read = actionButton('朗读译文', 'audio', () => speak(view.result.text, targetLanguage.value));
   const copy = actionButton('复制译文', 'copy', () => run(() => copyText(view.result.text)));
-  const retry = actionButton('重新翻译', 'history', () => run(translate)); retry.classList.add('result-retry');
+  const retry = actionButton('重试此服务', 'history', () => {
+    if (view.card.isConnected) run(() => translate(view.result.providerId));
+  }); retry.classList.add('result-retry');
   const setup = node('button', 'text-button result-setup'); setup.type = 'button'; setup.hidden = true;
   setup.addEventListener('click', () => openResultSettings(view));
   view.actions = [read, copy, retry, setup]; actions.append(...view.actions);
@@ -643,6 +661,7 @@ function renderResults(results: TranslationResult[]): void {
   const cards = results.map((result) => {
     const view = existing.get(result.providerId) ?? createResultView(result, true);
     if (existing.has(result.providerId)) updateResultView(view, result, true);
+    progressViews.set(result.providerId, view);
     return view.card;
   });
   for (const child of [...resultsContainer.children]) if (!cards.includes(child as HTMLElement)) child.remove();
@@ -653,42 +672,77 @@ function renderResults(results: TranslationResult[]): void {
   $('#translation-state').textContent = success === results.length ? '翻译完成' : `${success} / ${results.length} 个服务成功`;
   notifyLayout();
 }
-async function translate(): Promise<void> {
+function restoreHistoryResults(entry: HistoryEntry): void {
+  setSourceText(entry.text);
+  for (const [select, value] of [[sourceLanguage, entry.sourceLanguage], [targetLanguage, entry.targetLanguage]] as const) {
+    if (![...select.options].some((option) => option.value === value)) {
+      const option = node('option', '', languageName(value)); option.value = value; select.append(option);
+    }
+    select.value = value;
+  }
+  currentResults = entry.results; resultSource = entry.text.trim();
+  resultSnapshot = { text: resultSource, sourceLanguage: entry.sourceLanguage, targetLanguage: entry.targetLanguage };
+  renderResults(entry.results);
+}
+async function translate(providerId?: string): Promise<void> {
   const text = source.value.trim();
   if (!text || translating) return;
   if (!settingsReady) throw new Error('设置正在加载，请稍候。');
   if (text.length > MAX_TEXT_LENGTH) throw new Error('每次最多翻译 20,000 字符。');
   if (!requireDesktop()) return;
+  const from = sourceLanguage.value, to = targetLanguage.value;
+  const snapshot = { text, sourceLanguage: from, targetLanguage: to };
+  const retrying = providerId !== undefined;
+  if (retrying && (!sameTranslationSnapshot(resultSnapshot, snapshot)
+      || !currentResults.some((result) => result.providerId === providerId))) {
+    toast('原文或语言已改变，请重新翻译。'); return;
+  }
+  const providers = settings.providers.filter((provider) => provider.enabled && (!retrying || provider.id === providerId));
+  if (retrying && providers.length === 0) { toast('翻译服务已停用或删除，请检查设置。'); return; }
   if (!settings.providers.some((provider) => provider.enabled)) { setView('settings'); toast('请先添加并启用一个翻译服务。'); return; }
   focusIntentRevision += 1;
   const token = ++generation;
   const presentationEpoch = translationPresentation.epoch;
-  const from = sourceLanguage.value, to = targetLanguage.value;
-  currentResults = []; resultSource = '';
-  progressViews.clear(); progressEpoch = presentationEpoch;
+  const previousResults = currentResults;
+  if (!retrying) { currentResults = []; resultSource = ''; resultSnapshot = null; progressViews.clear(); }
+  progressEpoch = presentationEpoch;
   setLoading(true);
-  resultsContainer.replaceChildren();
+  if (!retrying) resultsContainer.replaceChildren();
   $('.results-column').hidden = false;
-  const loading = node('div', 'result-loading'); loading.append(node('span', 'spinner'), node('span', 'sr-only', '正在翻译'));
-  resultsContainer.append(loading); notifyLayout();
+  if (!retrying) {
+    const loading = node('div', 'result-loading'); loading.append(node('span', 'spinner'), node('span', 'sr-only', '正在翻译'));
+    resultsContainer.append(loading);
+  }
+  for (const view of progressViews.values()) view.actions[2].disabled = true;
+  notifyLayout();
   $('#translation-state').textContent = '正在翻译';
   status('正在翻译…');
   try {
     const requestId = await beginTranslation(presentationEpoch);
     if (token !== generation) { await invoke('cancel_translation', { requestId }); return; }
     activeTranslationId = requestId;
-    for (const provider of settings.providers.filter((item) => item.enabled)) {
-      progressViews.set(provider.id, createResultView({ providerId: provider.id, providerName: provider.name, text: '', elapsedMs: 0 }, false, provider.kind));
+    for (const provider of providers) {
+      const pending = { providerId: provider.id, providerName: provider.name, text: '', elapsedMs: 0 };
+      const view = progressViews.get(provider.id) ?? createResultView(pending, false, provider.kind);
+      view.sequence = 0;
+      updateResultView(view, pending, false);
+      progressViews.set(provider.id, view);
     }
-    const results = await invoke<TranslationResult[]>('translate', { requestId, text, sourceLanguage: from, targetLanguage: to });
+    const results = await invoke<TranslationResult[]>('translate', { requestId, text, sourceLanguage: from, targetLanguage: to, ...(retrying ? { providerId } : {}) });
     if (token !== generation) return;
-    currentResults = results;
+    currentResults = retrying ? mergeProviderRetry(previousResults, providerId, results) : results;
     resultSource = text;
-    renderResults(results);
+    resultSnapshot = snapshot;
+    renderResults(currentResults);
     status(results.some((result) => !result.error) ? '翻译完成' : '服务返回错误');
   } catch (error) {
     if (token !== generation) return;
     if (errorMessage(error).startsWith('CANCELLED:')) { invalidateResults(true); status('翻译已取消'); return; }
+    if (retrying) {
+      const previous = previousResults.find((result) => result.providerId === providerId)!;
+      currentResults = mergeProviderRetry(previousResults, providerId, [{ ...previous, text: '', error: errorMessage(error), elapsedMs: 0 }]);
+      renderResults(currentResults); status('服务返回错误'); return;
+    }
     resultsContainer.replaceChildren();
     const card = node('article', 'result-card');
     card.append(node('p', 'result-error', userFacingError(error)));
@@ -700,7 +754,7 @@ async function translate(): Promise<void> {
       activeTranslationId = null; setLoading(false);
       for (const retry of resultsContainer.querySelectorAll<HTMLButtonElement>('.result-retry')) retry.disabled = false;
     }
-    await loadHistory().catch(() => undefined);
+    await refreshHistory().catch(() => undefined);
   }
 }
 let coreGuidanceProblem: CoreShortcutProblem | null = null;
@@ -755,14 +809,20 @@ async function updateSettings(mutator: (next: Settings) => void, canCommit?: () 
   return operation;
 }
 async function loadHistory(): Promise<void> {
-  if (desktop) history = await invoke<HistoryEntry[]>('get_history');
-  renderHistory();
+  await historyCache.load();
+}
+async function refreshHistory(): Promise<void> {
+  // Translation and settings changes stay off the popup's critical path.
+  // Fetch and build history cards only when the user is looking at history.
+  await historyCache.refresh();
 }
 function historyDate(value: number): string {
   const date = new Date(normalizeTimestamp(value));
   return Number.isNaN(date.getTime()) ? '时间未知' : new Intl.DateTimeFormat('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' }).format(date);
 }
 function renderHistory(): void {
+  if (currentView !== 'history') return;
+  const history = historyCache.entries;
   const query = $<HTMLInputElement>('#history-search').value;
   const filtered = filterHistory(history, query, favoritesOnly);
   const list = $('#history-list'); list.replaceChildren();
@@ -781,12 +841,12 @@ function renderHistory(): void {
     const actions = node('div', 'history-item-actions');
     const favorite = actionButton(entry.favorite ? '取消收藏' : '收藏翻译', 'star', () => run(async () => {
       if (!requireDesktop()) return;
-      await invoke('toggle_favorite', { id: entry.id }); await loadHistory();
+      await invoke('toggle_favorite', { id: entry.id }); await refreshHistory();
     }));
     favorite.setAttribute('aria-pressed', String(entry.favorite));
     actions.append(favorite, actionButton('复制原文', 'copy', () => run(() => copyText(entry.text))), actionButton('删除记录', 'trash', () => run(async () => {
       if (!requireDesktop()) return;
-      await invoke('delete_history', { id: entry.id }); await loadHistory();
+      await invoke('delete_history', { id: entry.id }); await refreshHistory();
     })));
     header.append(meta, actions);
     item.append(header, node('p', 'history-original', entry.text));
@@ -796,7 +856,7 @@ function renderHistory(): void {
     const reopen = node('button', 'text-button accent history-open', '在翻译窗口打开 ↗');
     reopen.addEventListener('click', () => {
       sourceLanguage.value = entry.sourceLanguage; targetLanguage.value = entry.targetLanguage;
-      setSourceText(entry.text); currentResults = entry.results; resultSource = entry.text; renderResults(entry.results); setView('translate');
+      restoreHistoryResults(entry); setView('translate');
     });
     item.append(reopen); list.append(item);
   }
@@ -1333,7 +1393,7 @@ for (const button of document.querySelectorAll<HTMLButtonElement>('[data-open-pe
 });
 window.addEventListener('focus', () => { if (currentView === 'settings') void refreshPermissionStatus(); });
 translateButton.addEventListener('click', () => { if (translating) stopPendingTranslation(); else run(translate); });
-source.addEventListener('input', () => { clearPermissionGuidance(); clearOriginalCapture(); resizeSourceEditor(); invalidateResults(); });
+source.addEventListener('input', sourceEdited);
 window.addEventListener('resize', scheduleSourceEditorResize);
 $('#restore-original-breaks').addEventListener('click', () => {
   const original = originalCapture;
@@ -1431,7 +1491,7 @@ $<HTMLInputElement>('#max-history').addEventListener('change', (event) => {
     return;
   }
   run(async () => {
-    try { await updateSettings((next) => { next.maxHistory = value; }); await loadHistory(); }
+    try { await updateSettings((next) => { next.maxHistory = value; }); await refreshHistory(); }
     finally { renderSettings(); }
   });
 });
@@ -1489,7 +1549,7 @@ for (const [id, value] of [['#filter-all', false], ['#filter-favorites', true]] 
 $('#clear-history').addEventListener('click', () => run(async () => {
   if (!requireDesktop()) return;
   if (!await confirmAction('清空全部翻译历史？', '原文、译文和收藏记录都会从本机删除，此操作无法撤销。')) return;
-  await invoke('delete_history'); await loadHistory(); toast('翻译历史已清空。');
+  await invoke('delete_history'); await refreshHistory(); toast('翻译历史已清空。');
 }));
 $('#confirm-cancel').addEventListener('click', () => settleConfirm(false));
 $('#confirm-accept').addEventListener('click', () => settleConfirm(true));
@@ -1540,7 +1600,7 @@ async function initialize(): Promise<void> {
   }
   setView('translate');
   $('#speak-source').hidden = !('speechSynthesis' in window);
-  applyTheme(); renderLanguages(); renderSettings(); renderShortcutHints(); renderHistory(); emptyResults();
+  applyTheme(); renderLanguages(); renderSettings(); renderShortcutHints(); emptyResults();
   setLoading(false);
   if (!desktop) return;
   status('正在加载设置…');
@@ -1568,7 +1628,7 @@ async function initialize(): Promise<void> {
     settingsReady = true;
     applyTheme(); renderLanguages(); renderSettings(); renderShortcutHints();
     if (!translating) emptyResults();
-    await loadHistory(); status('准备就绪');
+    status('准备就绪');
     if (pendingSettingsOpen) { const request = pendingSettingsOpen; pendingSettingsOpen = null; await openSettingsFromNative(request); }
     const pendingSource = await invoke<SourceTextEvent | null>('get_pending_source');
     if (pendingSource) await receiveNativeSource(pendingSource, true);
