@@ -4,6 +4,8 @@ The static product website for [EchoLingo · 回声译](https://blueeeecho.githu
 
 This branch contains HTML, CSS, JavaScript and public image assets. GitHub Pages publishes from the branch root without a build step.
 
+The homepage is available in Chinese and English. The 中文 / English control follows the browser’s preferred language on the first visit, then stores the choice in `localStorage` under `echolingo-locale`. Nothing is sent to a server.
+
 ## Preview locally
 
 From this branch checkout, run:
