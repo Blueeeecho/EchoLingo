@@ -370,7 +370,77 @@ public static partial class EchoLingoPopupVisibilitySmoke {
         var value = new JavaScriptSerializer().Deserialize<System.Collections.Generic.Dictionary<string, object>>(File.ReadAllText(file));
         return System.Convert.ToDouble(value["popupWidth"], System.Globalization.CultureInfo.InvariantCulture);
     }
+    [System.Runtime.InteropServices.StructLayout(System.Runtime.InteropServices.LayoutKind.Sequential, CharSet=System.Runtime.InteropServices.CharSet.Unicode)]
+    struct ResizeProcessEntry {
+        public uint size, usage, process; public System.UIntPtr heap; public uint module, threads, parent; public int priority; public uint flags;
+        [System.Runtime.InteropServices.MarshalAs(System.Runtime.InteropServices.UnmanagedType.ByValTStr, SizeConst=260)] public string executable;
+    }
+    [System.Runtime.InteropServices.DllImport("kernel32.dll", SetLastError=true)] static extern System.IntPtr CreateToolhelp32Snapshot(uint flags, uint process);
+    [System.Runtime.InteropServices.DllImport("kernel32.dll", EntryPoint="Process32FirstW", CharSet=System.Runtime.InteropServices.CharSet.Unicode)] static extern bool ResizeProcessFirst(System.IntPtr snapshot, ref ResizeProcessEntry entry);
+    [System.Runtime.InteropServices.DllImport("kernel32.dll", EntryPoint="Process32NextW", CharSet=System.Runtime.InteropServices.CharSet.Unicode)] static extern bool ResizeProcessNext(System.IntPtr snapshot, ref ResizeProcessEntry entry);
+    [System.Runtime.InteropServices.DllImport("kernel32.dll")] static extern bool CloseHandle(System.IntPtr handle);
+    static System.Collections.Generic.List<long[]> ResizeOwnedProcessSnapshot(Process app) {
+        var rows = new System.Collections.Generic.List<int[]>(); System.IntPtr snapshot = CreateToolhelp32Snapshot(2, 0);
+        Require(snapshot != System.IntPtr.Zero && snapshot != new System.IntPtr(-1), "Own process cleanup snapshot is unavailable.");
+        try {
+            ResizeProcessEntry entry = new ResizeProcessEntry(); entry.size = (uint)System.Runtime.InteropServices.Marshal.SizeOf(typeof(ResizeProcessEntry));
+            bool next = ResizeProcessFirst(snapshot, ref entry);
+            while (next) { Require(rows.Count < 4096, "Process metadata snapshot exceeded its bound."); rows.Add(new int[] { (int)entry.process, (int)entry.parent }); next = ResizeProcessNext(snapshot, ref entry); }
+        } finally { CloseHandle(snapshot); }
+        var own = new System.Collections.Generic.List<int>(); own.Add(app.Id);
+        for (int depth = 0; depth < 16; depth++) {
+            int before = own.Count;
+            foreach (int[] row in rows) if (own.Contains(row[1]) && !own.Contains(row[0])) { Require(own.Count < 64, "Own process tree exceeded its bound."); own.Add(row[0]); }
+            if (before == own.Count) break;
+        }
+        var result = new System.Collections.Generic.List<long[]>(); long started = app.StartTime.ToUniversalTime().Ticks;
+        foreach (int process in own) if (process != app.Id) try { using (Process child = Process.GetProcessById(process)) { long time = child.StartTime.ToUniversalTime().Ticks; if (time >= started) result.Add(new long[] { process, time }); } } catch (System.ArgumentException) { }
+        return result;
+    }
+    static string ResizeProbeQuote(string value) {
+        Require(value.IndexOf('"') < 0 && value.IndexOf('\r') < 0 && value.IndexOf('\n') < 0, "Unexpected diagnostic argument."); return "\"" + value + "\"";
+    }
+    static System.Collections.Generic.Dictionary<string, object> ResizeFailureGeometryProbe(Process app, System.IntPtr main, string executable, string expectedHash, string script, int port) {
+        Require((GetAsyncKeyState(1) & 0x8000) == 0, "Geometry observation refused while the generated mouse button is held.");
+        Require(activeResizeObservation != null && activeResizeObservation.ContainsKey("targetProbes"), "Failed resize has no owned target metadata.");
+        var targets = (System.Collections.Generic.List<object>)activeResizeObservation["targetProbes"];
+        var target = (System.Collections.Generic.Dictionary<string, object>)targets[targets.Count - 1]; int[] point = (int[])target["targetPhysicalXY"];
+        string powershell = Path.Combine(System.Environment.SystemDirectory, "WindowsPowerShell", "v1.0", "powershell.exe");
+        var start = new ProcessStartInfo(powershell); start.UseShellExecute = false; start.CreateNoWindow = true; start.RedirectStandardOutput = true; start.RedirectStandardError = true;
+        start.Arguments = "-NoLogo -NoProfile -NonInteractive -STA -ExecutionPolicy Bypass -File " + ResizeProbeQuote(script) +
+            " -ApplicationProcessId " + app.Id + " -ApplicationStartTimeUtcTicks " + app.StartTime.ToUniversalTime().Ticks.ToString(System.Globalization.CultureInfo.InvariantCulture) +
+            " -ApplicationPath " + ResizeProbeQuote(executable) + " -ApplicationSha256 " + expectedHash +
+            " -MainHwnd " + main.ToInt64().ToString(System.Globalization.CultureInfo.InvariantCulture) + " -DebugPort " + port +
+            " -TargetPhysicalX " + point[0] + " -TargetPhysicalY " + point[1] + " -IsolatedTestSession";
+        using (Process helper = Process.Start(start)) {
+            var output = helper.StandardOutput.ReadToEndAsync(); var error = helper.StandardError.ReadToEndAsync();
+            if (!helper.WaitForExit(20000)) { helper.Kill(); helper.WaitForExit(5000); return new System.Collections.Generic.Dictionary<string, object> { { "ok", false }, { "failedPhase", "whole-helper-deadline" }, { "deadlineMilliseconds", 20000 }, { "ownHelperStopped", helper.HasExited } }; }
+            Require(output.Wait(2000) && error.Wait(2000), "Diagnostic output pipes did not close.");
+            Require(output.Result.Length <= 131072 && error.Result.Length <= 8192, "Diagnostic output exceeded its bound.");
+            var result = new JavaScriptSerializer().Deserialize<System.Collections.Generic.Dictionary<string, object>>(output.Result.Trim());
+            result["helperExitCode"] = helper.ExitCode; result["helperDeadlineMilliseconds"] = 20000; result["stderrCharacters"] = error.Result.Length; result["ownHelperStopped"] = helper.HasExited; return result;
+        }
+    }
+    static void ResizeFinishProbeCleanup(System.Collections.Generic.List<long[]> children, int port, System.Collections.Generic.Dictionary<string, object> report) {
+        var result = new System.Collections.Generic.Dictionary<string, object>(); report["geometryProbeCleanup"] = result;
+        bool clean = !report.ContainsKey("geometryCleanupSnapshotExceptionType");
+        var stopped = new System.Collections.Generic.List<object>(); result["verifiedOwnProcesses"] = stopped;
+        for (int index = children.Count - 1; index >= 0; index--) {
+            long[] row = children[index]; var item = new System.Collections.Generic.Dictionary<string, object> { { "processId", row[0] }, { "startTimeUtcTicks", row[1] } }; stopped.Add(item);
+            try { using (Process child = Process.GetProcessById((int)row[0])) { bool same = child.StartTime.ToUniversalTime().Ticks == row[1]; item["startTimeMatches"] = same; if (same && !child.HasExited) { child.Kill(); child.WaitForExit(3000); } item["originalProcessGone"] = !same || child.HasExited; } }
+            catch (System.ArgumentException) { item["originalProcessGone"] = true; }
+            catch (System.Exception error) { item["cleanupExceptionType"] = error.GetType().FullName; }
+            if (!item.ContainsKey("originalProcessGone") || !(bool)item["originalProcessGone"]) clean = false;
+        }
+        bool closed = false; Stopwatch clock = Stopwatch.StartNew();
+        do { closed = true; foreach (var endpoint in System.Net.NetworkInformation.IPGlobalProperties.GetIPGlobalProperties().GetActiveTcpListeners()) if (endpoint.Port == port) closed = false; if (!closed) System.Threading.Thread.Sleep(25); } while (!closed && clock.ElapsedMilliseconds < 3000);
+        result["port"] = port; result["portClosed"] = closed; result["noUnknownProcessKilled"] = true; result["ok"] = clean && closed;
+        if (!clean || !closed) report["ok"] = false;
+    }
     public static System.Collections.Generic.Dictionary<string, object> RunResize(string executable, bool isolatedTestSession) {
+        return RunResize(executable, isolatedTestSession, null, null);
+    }
+    public static System.Collections.Generic.Dictionary<string, object> RunResize(string executable, bool isolatedTestSession, string geometryProbeScript, string expectedApplicationHash) {
         Require(isolatedTestSession && System.Environment.OSVersion.Platform == System.PlatformID.Win32NT &&
             System.Environment.GetEnvironmentVariable("GITHUB_ACTIONS") == "true" &&
             System.Environment.GetEnvironmentVariable("RUNNER_ENVIRONMENT") == "github-hosted" && System.Environment.UserInteractive,
@@ -384,6 +454,14 @@ public static partial class EchoLingoPopupVisibilitySmoke {
             { "clipboardRead", false }, { "externalApiUsed", false }, { "physicalWindows10Tested", false }, { "dwmFrameRateMeasured", false }
         };
         activeResizeObservation = null;
+        int geometryPort = 0;
+        if (geometryProbeScript != null) {
+            Require(File.Exists(geometryProbeScript) && Path.GetFileName(geometryProbeScript) == "windows-webview-geometry-probe.ps1", "Exact geometry helper path is unavailable.");
+            Require(expectedApplicationHash != null && System.Text.RegularExpressions.Regex.IsMatch(expectedApplicationHash, "^[a-f0-9]{64}$"), "Geometry probe requires the exact application hash.");
+            var listener = new System.Net.Sockets.TcpListener(System.Net.IPAddress.Loopback, 0);
+            try { listener.Start(); geometryPort = ((System.Net.IPEndPoint)listener.LocalEndpoint).Port; } finally { listener.Stop(); }
+            report["geometryProbeConfiguration"] = new System.Collections.Generic.Dictionary<string, object> { { "requested", true }, { "port", geometryPort }, { "scope", "own-child-process-environment-only" }, { "noOriginalAcceptanceChanges", true } };
+        }
         var fullWindowDrag = new System.Collections.Generic.Dictionary<string, object> {
             { "scope", "ephemeral-github-hosted-interactive-session" }, { "getAction", 0x0026 }, { "setAction", 0x0025 },
             { "flags", 0 }, { "profileUpdated", false }, { "settingChangeBroadcast", false },
@@ -423,6 +501,7 @@ public static partial class EchoLingoPopupVisibilitySmoke {
                 form.Shown += delegate {
                     System.IntPtr sourceHandle = form.Handle, editorHandle = editor.Handle;
                     var worker = new System.Threading.Thread(delegate() {
+                        System.IntPtr main = System.IntPtr.Zero;
                         try {
                             Require(SetThreadDpiAwarenessContext(new System.IntPtr(-4)) != System.IntPtr.Zero, "Physical test coordinates are unavailable.");
                             stage = "launch-real-stage-app";
@@ -430,6 +509,10 @@ public static partial class EchoLingoPopupVisibilitySmoke {
                             string temp = Path.Combine(root, "Temp"); Directory.CreateDirectory(temp);
                             start.EnvironmentVariables["TEMP"] = temp; start.EnvironmentVariables["TMP"] = temp;
                             start.EnvironmentVariables["WEBVIEW2_USER_DATA_FOLDER"] = Path.Combine(local, "fixture-webview");
+                            if (geometryPort != 0) {
+                                Require(string.IsNullOrEmpty(start.EnvironmentVariables["WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS"]), "Unexpected inherited WebView arguments; refused to change the diagnostic baseline.");
+                                start.EnvironmentVariables["WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS"] = "--remote-debugging-address=127.0.0.1 --remote-debugging-port=" + geometryPort;
+                            }
                             var startup = new System.Collections.Generic.Dictionary<string, object> {
                                 { "readinessDeadlineMilliseconds", 20000 }, { "trayPolls", 0 }, { "mainFirstObservedMilliseconds", -1.0 },
                                 { "trayFirstObservedMilliseconds", -1.0 }, { "earliestColdStartKeyTested", false }, { "nativePreparationShowRequests", 0 }
@@ -444,7 +527,7 @@ public static partial class EchoLingoPopupVisibilitySmoke {
                             app = Process.Start(start); report["applicationProcessId"] = app.Id;
                             Require(app.WaitForInputIdle(15000), "New app native message loop did not become input-idle.");
                             startup["nativeInputIdleObservedMilliseconds"] = startupObservation.Elapsed.TotalMilliseconds;
-                            System.IntPtr main = System.IntPtr.Zero;
+                            main = System.IntPtr.Zero;
                             stage = "wait-own-native-setup-milestone";
                             Wait(delegate {
                                 Require(!app.HasExited, "New app exited before its HWND became ready."); main = MainWindow(app.Id);
@@ -551,12 +634,21 @@ public static partial class EchoLingoPopupVisibilitySmoke {
                             Stopwatch hiddenObservation = Stopwatch.StartNew();
                             while (hiddenObservation.ElapsedMilliseconds < 500) { Require(!IsWindowVisible(main), "Resize/reflow showed the hidden popup."); System.Threading.Thread.Sleep(8); }
                             report["hiddenResizeStayedHidden"] = true; report["actualWindowsResizeTested"] = true; report["ok"] = true;
-                        } catch (System.Exception error) { report["failedStage"] = stage; report["error"] = error.ToString(); if (activeResizeObservation != null) report["activeResizeObservation"] = activeResizeObservation; }
+                        } catch (System.Exception error) {
+                            report["failedStage"] = stage; report["error"] = error.ToString(); if (activeResizeObservation != null) report["activeResizeObservation"] = activeResizeObservation;
+                            if (geometryPort != 0 && stage == "management-width-retention" && app != null && !app.HasExited) {
+                                try { report["failureGeometryProbe"] = ResizeFailureGeometryProbe(app, main, executable, expectedApplicationHash, geometryProbeScript, geometryPort); }
+                                catch (System.Exception probeError) { report["failureGeometryProbe"] = new System.Collections.Generic.Dictionary<string, object> { { "ok", false }, { "failedPhase", "fixture-probe-launch" }, { "exceptionType", probeError.GetType().FullName } }; }
+                            }
+                        }
                         finally {
                             INPUT release = new INPUT(); release.type = 0; release.data.mouse.flags = 4;
                             SendInput(2, new INPUT[] { release, Key(0x12, true) }, System.Runtime.InteropServices.Marshal.SizeOf(typeof(INPUT)));
+                            var geometryChildren = new System.Collections.Generic.List<long[]>();
+                            if (geometryPort != 0 && app != null && !app.HasExited) try { geometryChildren = ResizeOwnedProcessSnapshot(app); report["geometryOwnedProcessSnapshot"] = geometryChildren; } catch (System.Exception snapshotError) { report["geometryCleanupSnapshotExceptionType"] = snapshotError.GetType().FullName; }
                             if (app != null) try { if (!app.HasExited) { app.Kill(); app.WaitForExit(5000); } Require(app.HasExited, "Own test app failed to stop."); report["ownApplicationStopped"] = true; }
                                 catch (System.Exception error) { report["ok"] = false; report["cleanupError"] = error.Message; }
+                            if (geometryPort != 0) try { ResizeFinishProbeCleanup(geometryChildren, geometryPort, report); } catch (System.Exception cleanupError) { report["ok"] = false; report["geometryProbeCleanupExceptionType"] = cleanupError.GetType().FullName; }
                             Ui(form, delegate { done = true; form.Close(); });
                         }
                     });

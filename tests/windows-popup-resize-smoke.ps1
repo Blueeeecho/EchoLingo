@@ -1,7 +1,7 @@
 # Actual stage application + native pointer resizing on an ephemeral desktop.
 # Reuses the visibility fixture's isolation/UIA helpers without running its cases.
 [CmdletBinding()]
-param([Parameter(Mandatory=$true)][string]$ApplicationPath, [switch]$IsolatedTestSession)
+param([Parameter(Mandatory=$true)][string]$ApplicationPath, [switch]$IsolatedTestSession, [switch]$ReadOnlyGeometryProbe)
 $ErrorActionPreference = 'Stop'
 [Console]::OutputEncoding = [Text.UTF8Encoding]::new($false)
 try {
@@ -31,7 +31,11 @@ try {
         [Windows.Automation.AutomationElement].Assembly.Location,[Windows.Automation.ControlType].Assembly.Location,
         [Windows.Rect].Assembly.Location) | Select-Object -Unique
     Add-Type -TypeDefinition ($harness + "`n" + $extra) -ReferencedAssemblies $references -Language CSharp
-    $result = [EchoLingoPopupVisibilitySmoke]::RunResize($ApplicationPath, [bool]$IsolatedTestSession)
+    if ($ReadOnlyGeometryProbe) {
+        $probeScript = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot 'windows-webview-geometry-probe.ps1')).Path
+        $result = [EchoLingoPopupVisibilitySmoke]::RunResize($ApplicationPath, [bool]$IsolatedTestSession, $probeScript, $applicationHash)
+        $result['geometryProbeScriptSha256'] = (Get-FileHash -LiteralPath $probeScript -Algorithm SHA256).Hash.ToLowerInvariant()
+    } else { $result = [EchoLingoPopupVisibilitySmoke]::RunResize($ApplicationPath, [bool]$IsolatedTestSession) }
     $result['applicationSha256'] = $applicationHash
     $result['applicationBytes'] = $applicationBytes
     $result['resizeFixtureSha256'] = (Get-FileHash -LiteralPath (Join-Path $PSScriptRoot 'windows-popup-resize-fixture.cs') -Algorithm SHA256).Hash.ToLowerInvariant()

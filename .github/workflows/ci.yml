@@ -1656,7 +1656,7 @@ jobs:
           if ('${{ matrix.fixture }}' -eq 'application') {
             $output = @(& powershell.exe -NoProfile -STA -ExecutionPolicy Bypass -File tests/windows-application-smoke.ps1 -ApplicationPath $env:ECHOLINGO_CANDIDATE -LatestIntentTests 2>&1)
           } else {
-            $output = @(& powershell.exe -NoProfile -STA -ExecutionPolicy Bypass -File tests/windows-popup-resize-smoke.ps1 -ApplicationPath $env:ECHOLINGO_CANDIDATE -IsolatedTestSession 2>&1)
+            $output = @(& powershell.exe -NoProfile -STA -ExecutionPolicy Bypass -File tests/windows-popup-resize-smoke.ps1 -ApplicationPath $env:ECHOLINGO_CANDIDATE -IsolatedTestSession -ReadOnlyGeometryProbe 2>&1)
           }
           $fixtureExit = $LASTEXITCODE
           $output | Out-File "$env:RUNNER_TEMP/echolingo-exact-488-${{ matrix.fixture }}.log" -Encoding utf8
