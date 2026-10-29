@@ -23,7 +23,10 @@ export function installPanelLayout(desktop: boolean, getPresentation: () => Tran
     const natural = (header?.getBoundingClientRect().height ?? 0) + (view?.getBoundingClientRect().height ?? 0)
       + (parseFloat(padding?.paddingTop ?? '0') || 0) + (parseFloat(padding?.paddingBottom ?? '0') || 0);
     const minimum = shell ? parseFloat(getComputedStyle(shell).minHeight) || 0 : 0;
-    return { presentation: management ? 'management' : 'popup', contentHeight: boundedSize(Math.max(natural, minimum) + 2), contentWidth: boundedSize(window.innerWidth) };
+    // Settings/history use the native viewport chosen by the user. Growing
+    // form content should scroll, not keep negotiating a different HWND size.
+    const height = management ? window.innerHeight : Math.max(natural, minimum) + 2;
+    return { presentation: management ? 'management' : 'popup', contentHeight: boundedSize(height), contentWidth: boundedSize(window.innerWidth) };
   };
   const drain = (): Promise<void> => {
     if (inFlight) return inFlight;

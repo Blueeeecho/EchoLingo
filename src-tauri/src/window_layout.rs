@@ -298,9 +298,39 @@ fn content_size(management: bool, height: f64, width: f64, available: (f64, f64)
     let min_height = (if management { 480.0_f64 } else { 160.0_f64 }).min(max_height);
     (
         width.clamp(min_width, max_width),
-        (if management { 720.0 } else { height.ceil() })
-            .clamp(min_height, max_height.min(760.0).max(min_height)),
+        height.ceil().clamp(
+            min_height,
+            (if management {
+                max_height
+            } else {
+                max_height.min(760.0)
+            })
+            .max(min_height),
+        ),
     )
+}
+
+fn presentation_size(
+    previous_management: bool,
+    management: bool,
+    measured_height: f64,
+    current: (f64, f64),
+    popup_width: f64,
+    available: (f64, f64),
+) -> (f64, f64) {
+    let (width, height) = if management {
+        // Entering settings needs its own initial geometry, not the previous
+        // popup's height. Later fits preserve the user's native resize instead
+        // of replacing it with that initial size after every content reflow.
+        if previous_management {
+            current
+        } else {
+            (640.0, 720.0)
+        }
+    } else {
+        (popup_width, measured_height)
+    };
+    content_size(management, height, width, available)
 }
 fn window_geometry(window: &WebviewWindow) -> Result<(f64, Bounds), String> {
     let scale = window.scale_factor().map_err(|_| "无法读取窗口比例")?;
@@ -599,17 +629,15 @@ fn fit_inner(
         .to_logical::<f64>(scale);
     let mut popup = state.popup.lock().map_err(|_| "窗口布局状态异常")?;
     let changed = popup.observe_user_width(!previous, old_size.width, content_width, scale, area);
-    let desired_width = if management {
-        if previous {
-            old_size.width
-        } else {
-            640.0
-        }
-    } else {
-        popup.preferred
-    };
     let available = available_size(area, scale, management);
-    let (width, height) = content_size(management, height, desired_width, available);
+    let (width, height) = presentation_size(
+        previous,
+        management,
+        height,
+        (old_size.width, old_size.height),
+        popup.preferred,
+        available,
+    );
     let next_constraints = Constraints {
         management,
         scale,
@@ -947,12 +975,46 @@ mod tests {
             (1500.0, 760.0)
         );
         assert_eq!(
-            content_size(true, 190.0, 640.0, (1200.0, 900.0)),
+            presentation_size(false, true, 190.0, (680.0, 240.0), 680.0, (1200.0, 900.0)),
             (640.0, 720.0)
         );
         assert_eq!(
             content_size(false, 300.0, 680.0, (380.0, 140.0)),
             (380.0, 140.0)
+        );
+    }
+
+    #[test]
+    fn management_initial_size_is_separate_from_later_native_resizes() {
+        assert_eq!(
+            presentation_size(false, true, 4000.0, (680.0, 240.0), 850.0, (1200.0, 1000.0)),
+            (640.0, 720.0)
+        );
+        for height in [620.0, 920.0] {
+            assert_eq!(
+                content_size(true, height, 910.0, (1200.0, 1000.0)),
+                (910.0, height)
+            );
+            assert_eq!(
+                presentation_size(true, true, 4000.0, (910.0, height), 850.0, (1200.0, 1000.0)),
+                (910.0, height)
+            );
+        }
+        // A monitor/DPI work-area change may clamp the native management size,
+        // but content growth must not substitute a popup or default dimension.
+        assert_eq!(
+            presentation_size(true, true, 4000.0, (1400.0, 1100.0), 850.0, (800.0, 650.0)),
+            (800.0, 650.0)
+        );
+        assert_eq!(
+            presentation_size(false, true, 190.0, (680.0, 240.0), 850.0, (380.0, 430.0)),
+            (380.0, 430.0)
+        );
+        // Returning to translation still restores the independent popup width
+        // and sizes height from its current source/results.
+        assert_eq!(
+            presentation_size(true, false, 230.0, (910.0, 920.0), 850.0, (1200.0, 1000.0)),
+            (850.0, 230.0)
         );
     }
 

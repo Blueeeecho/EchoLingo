@@ -13,11 +13,14 @@ try {
     window.isTauri = true;
     Object.defineProperty(navigator, 'platform', { configurable: true, get: () => new URL(location.href).searchParams.has('windowsSelectionFixture') ? 'Win32' : 'MacIntel' });
     const state = {
+      appVersion: '9.8.7-beta.6',
       providers: [{ id: 'qa-service', name: 'QA IPC fixture', kind: 'openai', baseUrl: 'https://example.invalid/v1', model: 'test-model', enabled: true, prompt: '', hasKey: true }],
       sourceLanguage: 'auto', targetLanguage: 'zh-Hans',
       shortcuts: { selection: 'Alt+D', capture: 'Alt+S', ocr: 'Alt+Shift+S', silentOcr: 'Alt+C', input: 'Alt+A' },
       saveHistory: true, theme: 'light', maxHistory: 20, autoHideSeconds: 0, ocrProviders: [], activeOcrProviderId: null,
     };
+    const setupKind = new URL(location.href).searchParams.get('translationSetupFixture');
+    if (['system', 'offline', 'openai'].includes(setupKind)) state.providers[0].kind = setupKind;
     const callbacks = new Map(), listeners = new Map(), ocrKeys = new Map(), translationKeys = new Map(); let callbackId = 0;
     window.__TAURI_EVENT_PLUGIN_INTERNALS__ = { unregisterListener: (event) => listeners.delete(event) };
     const scope = (provider) => ['system', 'offline'].includes(provider.kind) ? `${provider.id}:${provider.kind}` : `${provider.id}:${provider.kind}:${new URL(provider.baseUrl).origin}`;
@@ -200,7 +203,7 @@ try {
           });
           if (fixture.translationError) throw new Error(fixture.translationError);
           activeTranslationId = null;
-          return [{ providerId: 'qa-service', providerName: 'QA IPC fixture', text: fixture.translationResultText ?? 'Isolated test translation fixture', elapsedMs: 50 }];
+          return [{ providerId: 'qa-service', providerName: 'QA IPC fixture', text: fixture.translationResultError ? '' : fixture.translationResultText ?? 'Isolated test translation fixture', ...(fixture.translationResultError ? { error: fixture.translationResultError } : {}), elapsedMs: 50 }];
         }
         throw new Error(`Unimplemented QA command: ${command}`);
       },
@@ -2343,6 +2346,44 @@ try {
   assert.equal(await page.evaluate(() => window.__qa.ocrTestCalls), credentialBaseline.ocrTests + 1);
   assert.equal(await page.evaluate(() => window.__qa.translationRequests.length), credentialBaseline.translations);
   assert.deepEqual(errors, []);
+  // Result setup actions only navigate. They never authorize, download, read
+  // credentials or silently retry; preparation remains a separate explicit act.
+  for (const [platform, kind, appleAction] of [
+    ['mac', 'system', true], ['windows', 'offline', false],
+    ['windows', 'system', false], ['mac', 'openai', false],
+  ]) {
+    const url = new URL(process.env.ECHOLINGO_TEST_URL ?? 'http://127.0.0.1:1420/');
+    url.searchParams.set('translationSetupFixture', kind);
+    if (platform === 'windows') url.searchParams.set('windowsSelectionFixture', '1');
+    await page.goto(url.href);
+    await page.waitForFunction(() => document.querySelector('#footer-status')?.textContent === '准备就绪');
+    await page.evaluate((kind) => {
+      window.__qa.translationResultError = kind === 'offline'
+        ? 'Synthetic offline resources unavailable'
+        : 'SYSTEM_TRANSLATION_DOWNLOAD_REQUIRED: Synthetic language packs not installed';
+    }, kind);
+    await page.locator('#source-text').fill('Generated translation setup fixture');
+    await page.locator('#source-text').press('Enter');
+    const setup = page.locator('.result-setup');
+    await setup.waitFor({ state: 'visible' });
+    assert.equal(await setup.textContent(), appleAction ? '准备系统翻译' : '打开翻译设置');
+    assert.deepEqual(await page.evaluate(() => window.__qa.systemPrepareCalls), []);
+    const reads = await page.evaluate(() => ({ translation: window.__qa.credentialReadCalls, ocr: window.__qa.ocrKeyCalls, requests: window.__qa.translationRequests.length }));
+    await setup.click();
+    await page.waitForFunction(() => document.body.dataset.view === 'settings');
+    assert.equal(await page.locator('#app-version').textContent(), 'EchoLingo 9.8.7-beta.6');
+    assert.deepEqual(await page.evaluate(() => window.__qa.systemPrepareCalls), []);
+    assert.deepEqual(await page.evaluate(() => ({ translation: window.__qa.credentialReadCalls, ocr: window.__qa.ocrKeyCalls, requests: window.__qa.translationRequests.length })), reads);
+    if (appleAction) {
+      assert.equal(await page.locator('#system-translation-setup').getAttribute('open'), '');
+      await page.waitForFunction(() => !document.querySelector('#prepare-system-translation').disabled);
+      await page.locator('#prepare-system-translation').click();
+      await page.waitForFunction(() => window.__qa.systemPrepareCalls.length === 1);
+      assert.deepEqual(await page.evaluate(() => window.__qa.systemPrepareCalls), [{ sourceLanguage: 'en', targetLanguage: 'zh-Hans' }]);
+    }
+  }
+  assert.deepEqual(errors, []);
+  console.log('PASS: full runtime version visible; result error settings actions use request provider kind plus platform, navigate without preparation/credentials/retry, and only explicit Apple preparation downloads the selected pair. Fake IPC only.');
   // A registered main key can be consumed by the OS, and its DOM modifier
   // keyups can be absent too. Observe this handoff separately from the
   // held/null/stale/releasedEvidence cases above: a matching native release

@@ -106,10 +106,13 @@ func selectionForegroundSource(axStatus: AXError, axPIDStatus: AXError?, axPID: 
     if axStatus == .success, axPIDStatus == .success, let axPID, axPID > 0 {
         return (axPID, "axFocusedApplication")
     }
-    // A transient missing/invalid AX target must not resurrect a cached app.
-    // Workspace fallback is restricted to an explicitly unsupported API.
-    if [.attributeUnsupported, .notImplemented].contains(axStatus), let workspacePID, workspacePID > 0 {
-        return (workspacePID, "workspaceUnsupportedFallback")
+    // noValue means the requested AX value does not exist, not that access was
+    // denied or the app timed out. Custom applications can omit the system
+    // focused-app value while remaining the live Workspace key-event target.
+    // Only the current main-thread Workspace read may supply this identity;
+    // failures, invalid AX objects and invalid successful PID reads stay closed.
+    if [.attributeUnsupported, .notImplemented, .noValue].contains(axStatus), let workspacePID, workspacePID > 0 {
+        return (workspacePID, axStatus == .noValue ? "workspaceNoValueFallback" : "workspaceUnsupportedFallback")
     }
     return (nil, "unavailable")
 }
@@ -1048,9 +1051,15 @@ func selectionQueryPolicySelfTest() throws {
         (.success, .success, 42, nil, 42, "axFocusedApplication"),
         (.attributeUnsupported, nil, nil, 7, 7, "workspaceUnsupportedFallback"),
         (.notImplemented, nil, nil, 7, 7, "workspaceUnsupportedFallback"),
-        (.noValue, nil, nil, 7, nil, "unavailable"),
+        (.noValue, nil, nil, 7, 7, "workspaceNoValueFallback"),
+        (.noValue, nil, nil, nil, nil, "unavailable"),
+        (.noValue, nil, nil, 0, nil, "unavailable"),
+        (.noValue, nil, nil, -1, nil, "unavailable"),
         (.cannotComplete, nil, nil, 7, nil, "unavailable"),
         (.apiDisabled, nil, nil, 7, nil, "unavailable"),
+        (.failure, nil, nil, 7, nil, "unavailable"),
+        (.invalidUIElement, nil, nil, 7, nil, "unavailable"),
+        (.illegalArgument, nil, nil, 7, nil, "unavailable"),
         (.success, .invalidUIElement, nil, 7, nil, "unavailable"),
         (.success, .success, 0, 7, nil, "unavailable"),
         (.success, nil, nil, 7, nil, "unavailable"),
@@ -1061,6 +1070,41 @@ func selectionQueryPolicySelfTest() throws {
         guard actual.0 == expectedPID, actual.1 == expectedSource else {
             throw NativeError("SELF_TEST: Selection foreground used stale or invalid application metadata.")
         }
+    }
+    // Replay the retained noValue foreground failure using generated PIDs.
+    // The fallback only establishes a candidate identity; every later source
+    // and focused-element owner must still match, including when AX recovers.
+    let fallback = selectionForegroundSource(axStatus: .noValue, axPIDStatus: nil,
+                                            axPID: nil, workspacePID: 42)
+    guard AXError.noValue.rawValue == -25212, fallback.0 == 42,
+          fallback.1 == "workspaceNoValueFallback" else {
+        throw NativeError("SELF_TEST: Missing focused-application AX values lost the live Workspace candidate.")
+    }
+    let rechecks: [(AXError, AXError?, pid_t?, pid_t?, Bool)] = [
+        (.noValue, nil, nil, 42, true),
+        (.success, .success, 42, 42, true),
+        (.attributeUnsupported, nil, nil, 42, true),
+        (.noValue, nil, nil, 43, false),
+        (.noValue, nil, nil, nil, false),
+        (.success, .success, 43, 42, false),
+        (.success, .invalidUIElement, nil, 42, false),
+        (.cannotComplete, nil, nil, 42, false),
+        (.apiDisabled, nil, nil, 42, false)
+    ]
+    for (status, pidStatus, pid, workspace, expected) in rechecks {
+        let current = selectionForegroundSource(axStatus: status, axPIDStatus: pidStatus,
+                                                axPID: pid, workspacePID: workspace)
+        var accepted = true
+        do { try requireSelectionForeground(fallback.0, current.0) }
+        catch { accepted = false }
+        guard accepted == expected else {
+            throw NativeError("SELF_TEST: Workspace fallback accepted a changed or unverified source application.")
+        }
+    }
+    guard selectionFocusOwnerMatches(fallback.0, 42, .success),
+          !selectionFocusOwnerMatches(fallback.0, 43, .success),
+          !selectionFocusOwnerMatches(fallback.0, 42, .cannotComplete) else {
+        throw NativeError("SELF_TEST: Workspace fallback bypassed focused-element owner validation.")
     }
     guard selectionFocusOwnerMatches(42, 42, .success),
           !selectionFocusOwnerMatches(42, 7, .success),

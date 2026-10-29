@@ -625,6 +625,7 @@ async fn test_ocr_provider(
 fn get_settings(state: State<AppState>) -> Result<serde_json::Value, String> {
     let settings = locked(&state.settings)?;
     let mut value = settings_snapshot(&settings, &state.credentials)?;
+    value["appVersion"] = serde_json::json!(env!("CARGO_PKG_VERSION"));
     let registered = locked(&state.registered_shortcuts)?;
     let failures = locked(&state.shortcut_failures)?;
     value["shortcutRegistration"] = serde_json::Value::Array(parsed_shortcuts(&settings.shortcuts)?.into_iter().map(|(action, binding)| {

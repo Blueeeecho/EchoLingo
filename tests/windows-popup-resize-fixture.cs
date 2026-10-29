@@ -6,6 +6,7 @@ public static partial class EchoLingoPopupVisibilitySmoke {
     [System.Runtime.InteropServices.DllImport("user32.dll")] static extern bool GetClientRect(System.IntPtr window, out RECT bounds);
     [System.Runtime.InteropServices.DllImport("user32.dll")] static extern bool GetGUIThreadInfo(uint thread, ref ResizeGuiInfo info);
     [System.Runtime.InteropServices.DllImport("user32.dll")] static extern short GetAsyncKeyState(int key);
+    [System.Runtime.InteropServices.DllImport("user32.dll", EntryPoint="GetWindowLongW", SetLastError=true)] static extern int ResizeWindowStyle(System.IntPtr window, int index);
     [System.Runtime.InteropServices.DllImport("user32.dll", SetLastError=true)] static extern bool RegisterHotKey(System.IntPtr window, int id, uint modifiers, uint key);
     [System.Runtime.InteropServices.DllImport("user32.dll", SetLastError=true)] static extern bool UnregisterHotKey(System.IntPtr window, int id);
     [System.Runtime.InteropServices.StructLayout(System.Runtime.InteropServices.LayoutKind.Sequential)]
@@ -24,6 +25,28 @@ public static partial class EchoLingoPopupVisibilitySmoke {
         RECT bounds; Require(GetWindowRect(main, out bounds), "Own window bounds are unavailable."); return bounds;
     }
     static int ResizeWidth(System.IntPtr main) { RECT bounds = ResizeBounds(main); return bounds.right - bounds.left; }
+    static int ResizeHeight(System.IntPtr main) { RECT bounds = ResizeBounds(main); return bounds.bottom - bounds.top; }
+    static int ResizeHitTest(System.IntPtr main, int x, int y) {
+        // Only query this exact owned HWND; never dispatch input to another app.
+        System.UIntPtr result;
+        int coordinates = unchecked((int)(((uint)y & 0xffff) << 16 | ((uint)x & 0xffff)));
+        Require(SendMessageTimeout(main, 0x0084, System.UIntPtr.Zero, new System.IntPtr(coordinates), 0x0001 | 0x0002 | 0x0020, 500, out result) != System.IntPtr.Zero, "Own management nonclient hit-test did not respond.");
+        return unchecked((int)result.ToUInt64());
+    }
+    static System.Collections.Generic.Dictionary<string, object> ManagementResizeFrame(Process app, System.IntPtr main) {
+        RequireUniqueOwnedMainWindow(app, main); RECT bounds = ResizeBounds(main);
+        int style = ResizeWindowStyle(main, -16), centerX = (bounds.left + bounds.right) / 2, centerY = (bounds.top + bounds.bottom) / 2;
+        int west = ResizeHitTest(main, bounds.left + 2, centerY), east = ResizeHitTest(main, bounds.right - 2, centerY);
+        int north = ResizeHitTest(main, centerX, bounds.top + 2), south = ResizeHitTest(main, centerX, bounds.bottom - 2);
+        var result = new System.Collections.Generic.Dictionary<string, object> {
+            { "style", style }, { "thickFrame", (style & 0x00040000) != 0 }, { "caption", (style & 0x00c00000) == 0x00c00000 },
+            { "westHit", west }, { "eastHit", east }, { "northHit", north }, { "southHit", south }
+        };
+        activeResizeObservation = result;
+        Require((bool)result["thickFrame"] && (bool)result["caption"], "Settings did not restore a decorated resizable native frame.");
+        Require(west == 10 && east == 11 && south == 15, "Settings edges did not report native resize hit targets.");
+        return result;
+    }
     static System.Collections.Generic.Dictionary<string, object> ResizeInputRegistrationProbe() {
         // Never call while production may be registering: a successful probe
         // temporarily owns the binding. Call only before launch or after the
@@ -149,6 +172,53 @@ public static partial class EchoLingoPopupVisibilitySmoke {
             }
         }
         result["finalPhysicalWidth"] = ResizeWidth(main); result["passed"] = true; return result;
+    }
+    static System.Collections.Generic.Dictionary<string, object> DragManagementHeight(Process app, System.IntPtr main, int distance) {
+        RequireUniqueOwnedMainWindow(app, main);
+        Require(IsWindowVisible(main) && GetForegroundWindow() == main, "Only the exact foreground settings HWND may receive a generated resize.");
+        RECT before = ResizeBounds(main); int height = before.bottom - before.top, width = before.right - before.left;
+        int x = (before.left + before.right) / 2, y = before.bottom - 2;
+        POINT point = new POINT(); point.x = x; point.y = y; uint owner;
+        System.IntPtr hit = WindowFromPoint(point); GetWindowThreadProcessId(hit, out owner);
+        Require(owner == app.Id && GetAncestor(hit, 2) == main && ResizeHitTest(main, x, y) == 15, "Settings bottom resize edge is occluded or unavailable; no mouse-down sent.");
+        Require(SetCursorPos(x, y), "Could not position the generated settings resize pointer.");
+        var result = new System.Collections.Generic.Dictionary<string, object> {
+            { "edge", "south" }, { "initialPhysicalHeight", height }, { "deltaPhysicalPixels", distance }, { "nativeSizingLoopObserved", false }, { "retentionRequired", true }
+        };
+        activeResizeObservation = result;
+        var samples = new System.Collections.Generic.List<int>(); result["heightSamples"] = samples; bool held = false;
+        try {
+            INPUT down = new INPUT(); down.type = 0; down.data.mouse.flags = 2; Send(new INPUT[] { down }); held = true;
+            Wait(delegate { Require(IsWindowVisible(main), "Settings hid during resize edge-down."); return ResizeLoop(main); }, 3000, "Settings never entered an actual native sizing loop.");
+            result["nativeSizingLoopObserved"] = true;
+            var desktop = System.Windows.Forms.SystemInformation.VirtualScreen;
+            for (int step = 1; step <= 8; step++) {
+                Require(GetForegroundWindow() == main && IsWindowVisible(main), "Settings foreground changed during generated resize.");
+                int delta = distance * step / 8, expected = height + delta;
+                INPUT move = new INPUT(); move.type = 0; move.data.mouse.flags = 0x8000 | 0x4000 | 1;
+                move.data.mouse.x = (int)System.Math.Round((x - desktop.Left) * 65535.0 / (desktop.Width - 1));
+                move.data.mouse.y = (int)System.Math.Round((y + delta - desktop.Top) * 65535.0 / (desktop.Height - 1));
+                Send(new INPUT[] { move }); result["lastStep"] = step; result["expectedPhysicalHeight"] = expected;
+                Wait(delegate { int actual = ResizeHeight(main); result["lastObservedPhysicalHeight"] = actual; return System.Math.Abs(actual - expected) <= 5; }, 1500, "Settings height did not follow the native resize pointer.");
+                Stopwatch observation = Stopwatch.StartNew();
+                while (observation.ElapsedMilliseconds < 32) {
+                    int actual = ResizeHeight(main); samples.Add(actual);
+                    Require(System.Math.Abs(actual - expected) <= 5 && System.Math.Abs(ResizeWidth(main) - width) <= 5, "Settings geometry jumped during native vertical resize.");
+                    System.Threading.Thread.Sleep(4);
+                }
+            }
+        } finally {
+            if (held) { INPUT up = new INPUT(); up.type = 0; up.data.mouse.flags = 4; Send(new INPUT[] { up }); }
+        }
+        Wait(delegate { return !ResizeLoop(main); }, 3000, "Settings sizing loop did not end on mouse release.");
+        int finalHeight = height + distance;
+        Wait(delegate { return System.Math.Abs(ResizeHeight(main) - finalHeight) <= 5; }, 3000, "Settings height rewound after the native sizing loop ended.");
+        Stopwatch retention = Stopwatch.StartNew();
+        while (retention.ElapsedMilliseconds < 350) {
+            Require(IsWindowVisible(main) && System.Math.Abs(ResizeHeight(main) - finalHeight) <= 5 && System.Math.Abs(ResizeWidth(main) - width) <= 5, "Settings size was replaced after native resize/reflow.");
+            System.Threading.Thread.Sleep(8);
+        }
+        result["finalPhysicalHeight"] = ResizeHeight(main); result["passed"] = true; return result;
     }
     static double SavedResizeWidth(string directory) {
         string file = Path.Combine(directory, "window-layout.json");
@@ -291,7 +361,15 @@ public static partial class EchoLingoPopupVisibilitySmoke {
                             stage = "management-does-not-overwrite-popup-preference";
                             Invoke(main, "\u66f4\u591a"); Invoke(main, "\u8bbe\u7f6e");
                             Wait(delegate { var back = Element(main, "\u8fd4\u56de\u7ffb\u8bd1"); return back != null && !back.Current.IsOffscreen; }, 5000, "Actual settings presentation did not open.");
-                            report["managementDrag"] = DragResize(app, main, false, -64, false);
+                            stage = "management-native-resize-frame";
+                            report["managementResizeFrame"] = ManagementResizeFrame(app, main);
+                            stage = "management-width-retention";
+                            report["managementDrag"] = DragResize(app, main, false, -64, true);
+                            RECT managementClient; Require(GetClientRect(main, out managementClient), "Settings client bounds are unavailable.");
+                            int verticalDistance = -(int)System.Math.Round(48 * scale);
+                            Require(managementClient.bottom - managementClient.top + verticalDistance >= 480 * scale, "Fixture display has no space above the settings minimum for the generated vertical resize; no product failure inferred.");
+                            stage = "management-height-retention";
+                            report["managementVerticalDrag"] = DragManagementHeight(app, main, verticalDistance);
                             Require(File.ReadAllText(Path.Combine(roaming, "window-layout.json")) == saved, "Management resize overwrote the popup width preference.");
                             Invoke(main, "\u8fd4\u56de\u7ffb\u8bd1");
                             Wait(delegate { return System.Math.Abs(ResizeWidth(main) - finalWidth) <= 5 && SourceValue(main) == text; }, 5000, "Return from management failed to restore the saved popup width/source.");
