@@ -27,6 +27,12 @@ fn is_han(c: char) -> bool {
     matches!(c as u32, 0x3400..=0x4dbf | 0x4e00..=0x9fff | 0xf900..=0xfaff | 0x20000..=0x3134f)
 }
 
+/// Digits, punctuation and symbols do not turn Han-only text into another
+/// language. Mixed Latin/Kana/Hangul or other letters retain the native route.
+fn han_without_other_letters(text: &str) -> bool {
+    text.chars().any(is_han) && text.chars().filter(|c| c.is_alphabetic()).all(is_han)
+}
+
 /// Strong script evidence is useful for short Chinese phrases for which an OS
 /// recognizer can report Traditional Chinese even when every character is shared
 /// by both scripts (for example, 你好). This is a conservative hint, not a full
@@ -161,6 +167,13 @@ pub fn resolve_translation_languages(
         });
         let fallback = fallback_language(text);
         match (native, fallback) {
+            (native, Some(language))
+                if chinese(&language)
+                    && han_without_other_letters(text)
+                    && native.map_or(true, |value| !chinese(value)) =>
+            {
+                language
+            }
             (_, Some(language)) if language == "en" && ascii_technical_label(text) => language,
             // Stabilize shared short Han text. For longer text, retain the
             // native Chinese script; both still choose English as the target.
@@ -207,6 +220,79 @@ mod tests {
             let (source, target) =
                 resolve_translation_languages(text, "auto", "auto", detected).unwrap();
             assert_eq!((&*source, &*target), expected, "{text}");
+        }
+    }
+
+    #[test]
+    fn han_with_digits_and_symbols_overrides_unreliable_native_guesses() {
+        for (text, expected) in [
+            ("晚上9-10单打1=1，三级", "zh-Hans"),
+            ("【20:30】第3组_进度=100%！", "zh-Hans"),
+            ("9-10，三级", "zh-Hans"),
+            ("（1）三级；2=2", "zh-Hans"),
+            ("晚上９－１０，三級＝１ 🪞", "zh-Hans"),
+            ("晚上9-10，請選擇第3組；進度=100%", "zh-Hant"),
+        ] {
+            for detected in [
+                Some("en"),
+                Some("ja"),
+                Some("es"),
+                Some("ru"),
+                Some("und"),
+                None,
+            ] {
+                assert_eq!(
+                    resolve_translation_languages(text, "auto", "auto", detected).unwrap(),
+                    (expected.into(), "en".into()),
+                    "{text} / {detected:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn han_evidence_preserves_explicit_choices_and_other_script_detection() {
+        let text = "晚上9-10单打1=1，三级";
+        assert_eq!(
+            resolve_translation_languages(text, "en", "auto", Some("zh-Hans")).unwrap(),
+            ("en".into(), "zh-Hans".into())
+        );
+        assert_eq!(
+            resolve_translation_languages(text, "ja", "fr", Some("zh-Hans")).unwrap(),
+            ("ja".into(), "fr".into())
+        );
+        assert_eq!(
+            resolve_translation_languages(text, "auto", "zh-Hant", Some("en")).unwrap(),
+            ("zh-Hans".into(), "zh-Hant".into())
+        );
+        // Keep the existing native model variant for longer Chinese text.
+        for language in ["zh-Hans", "zh-Hant"] {
+            assert_eq!(
+                resolve_translation_languages(
+                    "晚上9-10单打1=1，三级；明天仍然继续练习。",
+                    "auto",
+                    "auto",
+                    Some(language),
+                )
+                .unwrap(),
+                (language.into(), "en".into())
+            );
+        }
+        for (text, detected) in [
+            ("日本語です9-10=1", "ja"),
+            ("漢字カナ9_10", "ja"),
+            ("한국 漢字 9=1", "ko"),
+            ("Привет 中文 9-10", "ru"),
+            ("中文 مرحبا 9=1", "ar"),
+            ("Bonjour à 中文 9-10", "fr"),
+            ("A long English sentence 你好 9=1", "en"),
+        ] {
+            assert!(!han_without_other_letters(text));
+            assert_eq!(
+                resolve_translation_languages(text, "auto", "auto", Some(detected)).unwrap(),
+                (detected.into(), "zh-Hans".into()),
+                "{text}"
+            );
         }
     }
 

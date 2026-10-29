@@ -1,4 +1,4 @@
-use crate::model::{validate_url, Provider, TranslationResult, DEFAULT_PROMPT};
+use crate::model::{validate_url, Provider, ResolvedLanguages, TranslationResult, DEFAULT_PROMPT};
 use futures_util::StreamExt;
 use serde_json::{json, Value};
 use std::time::{Duration, Instant};
@@ -162,6 +162,26 @@ fn streaming_request_body(
     body
 }
 
+// Use the already resolved request arguments. Do not redetect source text or
+// derive setup choices from provider names or localized error messages.
+fn system_setup_languages(
+    kind: &str,
+    error: Option<&str>,
+    source: &str,
+    target: &str,
+) -> Option<ResolvedLanguages> {
+    (kind == "system"
+        && error.is_some_and(|error| error.starts_with("SYSTEM_TRANSLATION_DOWNLOAD_REQUIRED:"))
+        && source != "auto"
+        && target != "auto"
+        && !source.is_empty()
+        && !target.is_empty())
+    .then(|| ResolvedLanguages {
+        source_language: source.into(),
+        target_language: target.into(),
+    })
+}
+
 async fn translate_one_inner(
     client: &reqwest::Client,
     p: &Provider,
@@ -289,18 +309,49 @@ async fn translate_one_inner(
         } else { Ok(answer) }
     }
     .await;
+    let resolved_languages = system_setup_languages(
+        &p.kind,
+        result.as_ref().err().map(String::as_str),
+        source,
+        target,
+    );
     TranslationResult {
         provider_id: p.id.clone(),
         provider_name: p.name.clone(),
         text: result.as_ref().cloned().unwrap_or_default(),
         error: result.err(),
         elapsed_ms: start.elapsed().as_millis() as u64,
+        resolved_languages,
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn setup_languages_are_scoped_to_system_missing_models_and_a_resolved_request() {
+        let error = Some("SYSTEM_TRANSLATION_DOWNLOAD_REQUIRED: fixture");
+        assert_eq!(
+            system_setup_languages("system", error, "zh-Hant", "en"),
+            Some(ResolvedLanguages {
+                source_language: "zh-Hant".into(),
+                target_language: "en".into()
+            })
+        );
+        for kind in ["openai", "offline", "deepl"] {
+            assert!(system_setup_languages(kind, error, "zh-Hant", "en").is_none());
+        }
+        for error in [
+            None,
+            Some("SYSTEM_TRANSLATION_UNSUPPORTED: fixture"),
+            Some("SYSTEM_TRANSLATION_CANCELLED: fixture"),
+            Some("other SYSTEM_TRANSLATION_DOWNLOAD_REQUIRED: fixture"),
+        ] {
+            assert!(system_setup_languages("system", error, "zh-Hant", "en").is_none());
+        }
+        assert!(system_setup_languages("system", error, "auto", "en").is_none());
+        assert!(system_setup_languages("system", error, "en", "auto").is_none());
+    }
     #[tokio::test]
     async fn system_route_does_not_require_a_key_or_use_http() {
         let mut p = crate::model::system_translation_provider(true);

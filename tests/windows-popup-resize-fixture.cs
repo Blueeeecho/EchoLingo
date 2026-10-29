@@ -4,8 +4,31 @@ public static partial class EchoLingoPopupVisibilitySmoke {
     static System.Collections.Generic.Dictionary<string, object> activeResizeObservation;
     [System.Runtime.InteropServices.DllImport("user32.dll")] static extern uint GetDpiForWindow(System.IntPtr window);
     [System.Runtime.InteropServices.DllImport("user32.dll")] static extern bool GetClientRect(System.IntPtr window, out RECT bounds);
+    [System.Runtime.InteropServices.DllImport("user32.dll")] static extern bool ClientToScreen(System.IntPtr window, ref POINT point);
     [System.Runtime.InteropServices.DllImport("user32.dll")] static extern bool GetGUIThreadInfo(uint thread, ref ResizeGuiInfo info);
     [System.Runtime.InteropServices.DllImport("user32.dll")] static extern short GetAsyncKeyState(int key);
+    [System.Runtime.InteropServices.DllImport("user32.dll", EntryPoint="SystemParametersInfoW", SetLastError=true)]
+    static extern int ResizeGetSystemParameter(uint action, uint parameter, out int value, uint flags);
+    [System.Runtime.InteropServices.DllImport("user32.dll", EntryPoint="SystemParametersInfoW", SetLastError=true)]
+    static extern int ResizeSetSystemParameter(uint action, uint parameter, System.IntPtr value, uint flags);
+    static int ReadResizeFullWindowDrag(System.Collections.Generic.Dictionary<string, object> observation, string phase) {
+        int value; bool ok = ResizeGetSystemParameter(0x0026, 0, out value, 0) != 0;
+        observation[phase + "QuerySucceeded"] = ok;
+        observation[phase + "QueryLastError"] = ok ? 0 : System.Runtime.InteropServices.Marshal.GetLastWin32Error();
+        Require(ok, "Could not query SPI_GETDRAGFULLWINDOWS on the isolated test desktop.");
+        Require(value == 0 || value == 1, "SPI_GETDRAGFULLWINDOWS returned an invalid BOOL.");
+        observation[phase + "Enabled"] = value != 0; return value;
+    }
+    static void SetResizeFullWindowDrag(System.Collections.Generic.Dictionary<string, object> observation, string phase, int value) {
+        observation[phase + "SetAttempted"] = true;
+        // Microsoft SystemParametersInfoW: SET uses uiParam, not pvParam.
+        // fWinIni=0 keeps this temporary session change out of the user profile
+        // and does not broadcast WM_SETTINGCHANGE. Restore in RunResize finally.
+        bool ok = ResizeSetSystemParameter(0x0025, (uint)value, System.IntPtr.Zero, 0) != 0;
+        observation[phase + "SetSucceeded"] = ok;
+        observation[phase + "SetLastError"] = ok ? 0 : System.Runtime.InteropServices.Marshal.GetLastWin32Error();
+        Require(ok, "Could not set SPI_SETDRAGFULLWINDOWS on the isolated test desktop.");
+    }
     [System.Runtime.InteropServices.DllImport("user32.dll", EntryPoint="GetWindowLongW", SetLastError=true)] static extern int ResizeWindowStyle(System.IntPtr window, int index);
     [System.Runtime.InteropServices.DllImport("user32.dll", SetLastError=true)] static extern bool RegisterHotKey(System.IntPtr window, int id, uint modifiers, uint key);
     [System.Runtime.InteropServices.DllImport("user32.dll", SetLastError=true)] static extern bool UnregisterHotKey(System.IntPtr window, int id);
@@ -26,6 +49,15 @@ public static partial class EchoLingoPopupVisibilitySmoke {
     }
     static int ResizeWidth(System.IntPtr main) { RECT bounds = ResizeBounds(main); return bounds.right - bounds.left; }
     static int ResizeHeight(System.IntPtr main) { RECT bounds = ResizeBounds(main); return bounds.bottom - bounds.top; }
+    static POINT ResizeClientEdgePoint(System.IntPtr main, bool west, bool south) {
+        RECT client; Require(GetClientRect(main, out client), "Own client edge bounds are unavailable.");
+        int inset = (int)System.Math.Round(8 * GetDpiForWindow(main) / 96.0);
+        POINT point = new POINT();
+        point.x = south ? (client.left + client.right) / 2 : west ? client.left + inset : client.right - inset;
+        point.y = south ? client.bottom - inset : (client.top + client.bottom) / 2;
+        Require(ClientToScreen(main, ref point), "Own client edge position is unavailable.");
+        return point;
+    }
     static int ResizeHitTest(System.IntPtr main, int x, int y) {
         // Only query this exact owned HWND; never dispatch input to another app.
         System.UIntPtr result;
@@ -109,15 +141,14 @@ public static partial class EchoLingoPopupVisibilitySmoke {
         RequireUniqueOwnedMainWindow(app, main);
         Require(IsWindowVisible(main) && GetForegroundWindow() == main, "Only the exact foreground app HWND may receive the generated resize.");
         RECT before = ResizeBounds(main); int startWidth = before.right - before.left;
-        int x = west ? before.left + 2 : before.right - 2, y = (before.top + before.bottom) / 2;
+        POINT point = ResizeClientEdgePoint(main, west, false); int x = point.x, y = point.y;
         Require(SetCursorPos(x, y), "Could not position the generated resize pointer.");
-        POINT point = new POINT(); point.x = x; point.y = y;
         uint owner; System.IntPtr hit = WindowFromPoint(point); GetWindowThreadProcessId(hit, out owner);
         Require(owner == app.Id && GetAncestor(hit, 2) == main, "Resize edge is occluded or belongs to another window; no button-down sent.");
         var samples = new System.Collections.Generic.List<int>(); bool held = false;
         var result = new System.Collections.Generic.Dictionary<string, object> {
             { "edge", west ? "west" : "east" }, { "initialPhysicalWidth", startWidth }, { "deltaPhysicalPixels", distance },
-            { "nativeSizingLoopObserved", false }, { "widthSamples", samples }, { "retentionRequired", retainAfterRelease }
+            { "nativeSizingLoopObserved", false }, { "widthSamples", samples }, { "retentionRequired", retainAfterRelease }, { "clientInsetLogicalPixels", 8 }
         };
         activeResizeObservation = result;
         var motion = new System.Collections.Generic.List<object>(); result["boundedMotionObservations"] = motion;
@@ -173,17 +204,18 @@ public static partial class EchoLingoPopupVisibilitySmoke {
         }
         result["finalPhysicalWidth"] = ResizeWidth(main); result["passed"] = true; return result;
     }
-    static System.Collections.Generic.Dictionary<string, object> DragManagementHeight(Process app, System.IntPtr main, int distance) {
+    static System.Collections.Generic.Dictionary<string, object> DragManagementHeight(Process app, System.IntPtr main, int distance, bool corner = false) {
         RequireUniqueOwnedMainWindow(app, main);
         Require(IsWindowVisible(main) && GetForegroundWindow() == main, "Only the exact foreground settings HWND may receive a generated resize.");
         RECT before = ResizeBounds(main); int height = before.bottom - before.top, width = before.right - before.left;
-        int x = (before.left + before.right) / 2, y = before.bottom - 2;
-        POINT point = new POINT(); point.x = x; point.y = y; uint owner;
+        POINT point = ResizeClientEdgePoint(main, false, true);
+        if (corner) point.x = ResizeClientEdgePoint(main, false, false).x;
+        int x = point.x, y = point.y; uint owner;
         System.IntPtr hit = WindowFromPoint(point); GetWindowThreadProcessId(hit, out owner);
-        Require(owner == app.Id && GetAncestor(hit, 2) == main && ResizeHitTest(main, x, y) == 15, "Settings bottom resize edge is occluded or unavailable; no mouse-down sent.");
+        Require(owner == app.Id && GetAncestor(hit, 2) == main, "Settings client bottom resize edge is occluded or unavailable; no mouse-down sent.");
         Require(SetCursorPos(x, y), "Could not position the generated settings resize pointer.");
         var result = new System.Collections.Generic.Dictionary<string, object> {
-            { "edge", "south" }, { "initialPhysicalHeight", height }, { "deltaPhysicalPixels", distance }, { "nativeSizingLoopObserved", false }, { "retentionRequired", true }
+            { "edge", corner ? "south-east" : "south" }, { "initialPhysicalHeight", height }, { "initialPhysicalWidth", width }, { "deltaPhysicalPixels", distance }, { "nativeSizingLoopObserved", false }, { "retentionRequired", true }, { "clientInsetLogicalPixels", 8 }
         };
         activeResizeObservation = result;
         var samples = new System.Collections.Generic.List<int>(); result["heightSamples"] = samples; bool held = false;
@@ -196,14 +228,14 @@ public static partial class EchoLingoPopupVisibilitySmoke {
                 Require(GetForegroundWindow() == main && IsWindowVisible(main), "Settings foreground changed during generated resize.");
                 int delta = distance * step / 8, expected = height + delta;
                 INPUT move = new INPUT(); move.type = 0; move.data.mouse.flags = 0x8000 | 0x4000 | 1;
-                move.data.mouse.x = (int)System.Math.Round((x - desktop.Left) * 65535.0 / (desktop.Width - 1));
+                move.data.mouse.x = (int)System.Math.Round((x + (corner ? delta : 0) - desktop.Left) * 65535.0 / (desktop.Width - 1));
                 move.data.mouse.y = (int)System.Math.Round((y + delta - desktop.Top) * 65535.0 / (desktop.Height - 1));
                 Send(new INPUT[] { move }); result["lastStep"] = step; result["expectedPhysicalHeight"] = expected;
                 Wait(delegate { int actual = ResizeHeight(main); result["lastObservedPhysicalHeight"] = actual; return System.Math.Abs(actual - expected) <= 5; }, 1500, "Settings height did not follow the native resize pointer.");
                 Stopwatch observation = Stopwatch.StartNew();
                 while (observation.ElapsedMilliseconds < 32) {
                     int actual = ResizeHeight(main); samples.Add(actual);
-                    Require(System.Math.Abs(actual - expected) <= 5 && System.Math.Abs(ResizeWidth(main) - width) <= 5, "Settings geometry jumped during native vertical resize.");
+                    Require(System.Math.Abs(actual - expected) <= 5 && System.Math.Abs(ResizeWidth(main) - width - (corner ? delta : 0)) <= 5, "Settings geometry jumped during native resize.");
                     System.Threading.Thread.Sleep(4);
                 }
             }
@@ -215,10 +247,10 @@ public static partial class EchoLingoPopupVisibilitySmoke {
         Wait(delegate { return System.Math.Abs(ResizeHeight(main) - finalHeight) <= 5; }, 3000, "Settings height rewound after the native sizing loop ended.");
         Stopwatch retention = Stopwatch.StartNew();
         while (retention.ElapsedMilliseconds < 350) {
-            Require(IsWindowVisible(main) && System.Math.Abs(ResizeHeight(main) - finalHeight) <= 5 && System.Math.Abs(ResizeWidth(main) - width) <= 5, "Settings size was replaced after native resize/reflow.");
+            Require(IsWindowVisible(main) && System.Math.Abs(ResizeHeight(main) - finalHeight) <= 5 && System.Math.Abs(ResizeWidth(main) - width - (corner ? distance : 0)) <= 5, "Settings size was replaced after native resize/reflow.");
             System.Threading.Thread.Sleep(8);
         }
-        result["finalPhysicalHeight"] = ResizeHeight(main); result["passed"] = true; return result;
+        result["finalPhysicalHeight"] = ResizeHeight(main); result["finalPhysicalWidth"] = ResizeWidth(main); result["passed"] = true; return result;
     }
     static double SavedResizeWidth(string directory) {
         string file = Path.Combine(directory, "window-layout.json");
@@ -227,7 +259,11 @@ public static partial class EchoLingoPopupVisibilitySmoke {
         var value = new JavaScriptSerializer().Deserialize<System.Collections.Generic.Dictionary<string, object>>(File.ReadAllText(file));
         return System.Convert.ToDouble(value["popupWidth"], System.Globalization.CultureInfo.InvariantCulture);
     }
-    public static System.Collections.Generic.Dictionary<string, object> RunResize(string executable) {
+    public static System.Collections.Generic.Dictionary<string, object> RunResize(string executable, bool isolatedTestSession) {
+        Require(isolatedTestSession && System.Environment.OSVersion.Platform == System.PlatformID.Win32NT &&
+            System.Environment.GetEnvironmentVariable("GITHUB_ACTIONS") == "true" &&
+            System.Environment.GetEnvironmentVariable("RUNNER_ENVIRONMENT") == "github-hosted" && System.Environment.UserInteractive,
+            "ISOLATION_REQUIRED: Full-window drag setup is confined to an unlocked ephemeral GitHub-hosted desktop.");
         foreach (Process existing in Process.GetProcessesByName(Path.GetFileNameWithoutExtension(executable))) using (existing)
             Require(existing.HasExited, "An EchoLingo process already runs; refused to touch the daily app.");
         string token = System.Guid.NewGuid().ToString("N"), root = Path.Combine(Path.GetTempPath(), "echolingo-resize-" + System.Guid.NewGuid().ToString("N"));
@@ -237,8 +273,26 @@ public static partial class EchoLingoPopupVisibilitySmoke {
             { "clipboardRead", false }, { "externalApiUsed", false }, { "physicalWindows10Tested", false }, { "dwmFrameRateMeasured", false }
         };
         activeResizeObservation = null;
-        string stage = "claim-isolated-data";
+        var fullWindowDrag = new System.Collections.Generic.Dictionary<string, object> {
+            { "scope", "ephemeral-github-hosted-interactive-session" }, { "getAction", 0x0026 }, { "setAction", 0x0025 },
+            { "flags", 0 }, { "profileUpdated", false }, { "settingChangeBroadcast", false },
+            { "enableSetAttempted", false }, { "restoreSetAttempted", false }, { "restoreRequired", false }, { "restoreVerified", false }
+        };
+        report["fullWindowDrag"] = fullWindowDrag;
+        bool fullWindowDragInitialKnown = false, restoreFullWindowDrag = false; int initialFullWindowDrag = 0;
+        string stage = "read-isolated-desktop-full-window-drag";
         try {
+            initialFullWindowDrag = ReadResizeFullWindowDrag(fullWindowDrag, "initial"); fullWindowDragInitialKnown = true;
+            if (initialFullWindowDrag == 0) {
+                // RDP/Server may draw only an outline while the button is held.
+                // The existing live-size assertions require full-window drag;
+                // establish that explicit test precondition, without relaxing them.
+                restoreFullWindowDrag = true; fullWindowDrag["restoreRequired"] = true;
+                stage = "enable-isolated-desktop-full-window-drag";
+                SetResizeFullWindowDrag(fullWindowDrag, "enable", 1);
+            }
+            Require(ReadResizeFullWindowDrag(fullWindowDrag, "effective") == 1, "Full-window dragging is unavailable; no live-size gesture sent.");
+            stage = "claim-isolated-data";
             string roaming = Path.Combine(KnownFolder("3EB685DB-65F9-4CF6-A03A-E3EF65729F3D"), Identifier);
             string local = Path.Combine(KnownFolder("F1B32785-6FBA-4FCF-9D55-7B8E7F157091"), Identifier);
             Claim(roaming, token, owned); Claim(local, token, owned); Claim(root, token, owned);
@@ -370,6 +424,10 @@ public static partial class EchoLingoPopupVisibilitySmoke {
                             Require(managementClient.bottom - managementClient.top + verticalDistance >= 480 * scale, "Fixture display has no space above the settings minimum for the generated vertical resize; no product failure inferred.");
                             stage = "management-height-retention";
                             report["managementVerticalDrag"] = DragManagementHeight(app, main, verticalDistance);
+                            stage = "management-corner-retention";
+                            int cornerDistance = -(int)System.Math.Round(24 * scale);
+                            Require(GetClientRect(main, out managementClient) && managementClient.bottom - managementClient.top + cornerDistance >= 480 * scale, "Fixture has no space above the settings minimum for the corner resize; no product failure inferred.");
+                            report["managementCornerDrag"] = DragManagementHeight(app, main, cornerDistance, true);
                             Require(File.ReadAllText(Path.Combine(roaming, "window-layout.json")) == saved, "Management resize overwrote the popup width preference.");
                             Invoke(main, "\u8fd4\u56de\u7ffb\u8bd1");
                             Wait(delegate { return System.Math.Abs(ResizeWidth(main) - finalWidth) <= 5 && SourceValue(main) == text; }, 5000, "Return from management failed to restore the saved popup width/source.");
@@ -397,6 +455,13 @@ public static partial class EchoLingoPopupVisibilitySmoke {
             }
         } catch (System.Exception error) { report["failedStage"] = stage; report["error"] = error.Message; }
         finally {
+            if (fullWindowDragInitialKnown) {
+                try {
+                    if (restoreFullWindowDrag) SetResizeFullWindowDrag(fullWindowDrag, "restore", initialFullWindowDrag);
+                    Require(ReadResizeFullWindowDrag(fullWindowDrag, "restored") == initialFullWindowDrag, "The isolated desktop full-window drag setting was not restored.");
+                    fullWindowDrag["restoreVerified"] = true;
+                } catch (System.Exception error) { report["ok"] = false; report["fullWindowDragRestoreError"] = error.Message; }
+            }
             bool clean = true;
             for (int at = owned.Count - 1; at >= 0; at--) try { Clean(owned[at], token); } catch (System.Exception error) { clean = false; report["ok"] = false; report["cleanupError"] = error.Message; }
             report["ownedDirectoriesRemoved"] = clean;

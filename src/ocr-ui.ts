@@ -4,6 +4,8 @@ import { invoke } from '@tauri-apps/api/core';
 import { errorMessage, validateProvider } from './model';
 import { buildOcrCredential, isNativeOcr, OCR_NATIVE_ACTIONS, OCR_NATIVE_URLS } from './ocr-credentials';
 import { OCR_GUIDES, renderServiceGuide } from './service-guides';
+import { OCR_QUOTAS } from './service-quotas';
+import { renderServiceQuota } from './service-quota-ui';
 import type { CredentialState, OcrProvider, Settings } from './types';
 
 type UiContext = {
@@ -79,7 +81,7 @@ export function createOcrUi(context: UiContext): { render: () => void; close: ()
   const kindChanged = (resetDefaults = false): void => {
     const kind = select('ocr-provider-kind').value as OcrProvider['kind'];
     const native = isNativeOcr(kind);
-    renderServiceGuide($('ocr-service-guide'), OCR_GUIDES[kind]);
+    renderServiceGuide($('ocr-service-guide'), OCR_GUIDES[kind], OCR_QUOTAS[kind]);
     const vision = kind === 'openai-vision';
     if (resetDefaults) {
       clearSecrets();
@@ -141,7 +143,7 @@ export function createOcrUi(context: UiContext): { render: () => void; close: ()
     const settings = context.settings();
     const providers = settings.ocrProviders ?? [];
     const activeSelect = select('active-ocr-provider'); activeSelect.replaceChildren();
-    const localOption = el('option', '', '本机 OCR · 不上传截图'); localOption.value = ''; activeSelect.append(localOption);
+    const localOption = el('option', '', '本机 OCR · 免费 · 不上传截图'); localOption.value = ''; activeSelect.append(localOption);
     for (const provider of providers) {
       const native = isNativeOcr(provider.kind);
       const state = credentialStateOf(provider);
@@ -150,6 +152,7 @@ export function createOcrUi(context: UiContext): { render: () => void; close: ()
     }
     activeSelect.value = settings.activeOcrProviderId ?? '';
     const active = providers.find((provider) => provider.id === settings.activeOcrProviderId);
+    $('ocr-quota-card').replaceChildren(renderServiceQuota(OCR_QUOTAS[active?.kind ?? 'local']));
     const notice = $('ocr-privacy-notice');
     notice.classList.toggle('cloud-active', Boolean(active));
     notice.textContent = active ? `云端 OCR 已启用：截图将上传到“${active.name}”的端点 ${active.baseUrl}。` : '本机 OCR 已启用：文字识别在此设备进行，不上传截图。';

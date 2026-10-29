@@ -15,6 +15,7 @@ export function installPanelLayout(desktop: boolean, getPresentation: () => Tran
   const shell = document.querySelector<HTMLElement>('.app-shell');
   const boundedSize = (value: number): number => Math.min(100_000, Math.max(1, Math.ceil(Number.isFinite(value) ? value : 1)));
   const measure = (): { presentation: string; contentHeight: number; contentWidth: number } => {
+    syncModalResizeInset();
     const management = document.body.dataset.view !== 'translate';
     const main = document.querySelector('main');
     const view = document.querySelector<HTMLElement>('.view:not([hidden])');
@@ -72,16 +73,17 @@ export function installPanelLayout(desktop: boolean, getPresentation: () => Tran
   document.querySelectorAll('.view').forEach((view) => observer.observe(view));
   window.addEventListener('echolingo:layout', schedule);
   window.addEventListener('resize', schedule);
-  type ResizeDirection = 'west' | 'east';
-  interface WidthRequest { width: number; direction: ResizeDirection; presentationEpoch: number }
-  interface ResizeGesture { edge: HTMLElement; pointerId: number; startX: number; startWidth: number; direction: ResizeDirection; presentationEpoch: number }
+  type ResizeDirection = 'west' | 'east' | 'north' | 'south' | 'north-west' | 'north-east' | 'south-west' | 'south-east';
+  interface ResizeRequest { width: number; height: number; direction: ResizeDirection; presentationEpoch: number; management: boolean; modalOpen: boolean }
+  interface ResizeGesture extends ResizeRequest { edge: HTMLElement; pointerId: number; startX: number; startY: number }
   let gesture: ResizeGesture | null = null;
-  let widthFrame = 0, nextWidth: WidthRequest | null = null;
+  let widthFrame = 0, nextWidth: ResizeRequest | null = null;
   let widthInFlight: Promise<void> | null = null;
   let lastWidth = '';
-  const currentPopup = (epoch: number): boolean => {
-    const presentation = getPresentation();
-    return !disposed && document.body.dataset.view === 'translate' && !document.body.classList.contains('modal-open')
+  const currentResizePresentation = (epoch: number, management: boolean, expectedModalOpen?: boolean): boolean => {
+    const presentation = getPresentation(), modalOpen = document.body.classList.contains('modal-open');
+    return !disposed && (document.body.dataset.view !== 'translate') === management && (management || !modalOpen)
+      && (expectedModalOpen === undefined || modalOpen === expectedModalOpen)
       && !document.hidden && presentation.presented && presentation.epoch === epoch;
   };
   const drainWidth = (): Promise<void> => {
@@ -89,31 +91,38 @@ export function installPanelLayout(desktop: boolean, getPresentation: () => Tran
     widthInFlight = (async () => {
       while (nextWidth && !disposed) {
         const payload = nextWidth; nextWidth = null;
-        if (!currentPopup(payload.presentationEpoch)) continue;
+        if (!currentResizePresentation(payload.presentationEpoch, payload.management, payload.modalOpen)) continue;
         const key = JSON.stringify(payload);
         if (key === lastWidth) continue;
-        try { await invoke('resize_popup_width', { ...payload }); lastWidth = key; }
-        catch { /* A hidden/superseded popup must not be resized or reopened. */ }
+        try {
+          if (payload.management) await invoke('resize_management_window', { width: payload.width, height: payload.height, direction: payload.direction, presentationEpoch: payload.presentationEpoch });
+          else await invoke('resize_popup_width', { width: payload.width, direction: payload.direction, presentationEpoch: payload.presentationEpoch });
+          lastWidth = key;
+        } catch { /* A hidden/superseded presentation must not resize or reopen. */ }
       }
     })().finally(() => { widthInFlight = null; });
     return widthInFlight;
   };
   const clearGesture = (discardPending = true): void => {
     const previous = gesture; gesture = null;
-    document.body.classList.remove('popup-resizing');
+    document.body.classList.remove('popup-resizing'); delete document.body.dataset.resizeDirection;
     if (discardPending) { nextWidth = null; cancelAnimationFrame(widthFrame); widthFrame = 0; }
     if (previous?.edge.hasPointerCapture(previous.pointerId)) previous.edge.releasePointerCapture(previous.pointerId);
   };
-  const queueWidth = (event: PointerEvent): void => {
+  const queueWidth = (event: PointerEvent, final = false): void => {
     if (!gesture || event.pointerId !== gesture.pointerId) return;
-    if (!currentPopup(gesture.presentationEpoch)) { clearGesture(); return; }
-    const delta = (event.screenX - gesture.startX) * (gesture.direction === 'east' ? 1 : -1);
-    nextWidth = { width: boundedSize(gesture.startWidth + delta), direction: gesture.direction, presentationEpoch: gesture.presentationEpoch };
+    if (!currentResizePresentation(gesture.presentationEpoch, gesture.management, gesture.modalOpen) || (!final && !(event.buttons & 1))) { clearGesture(); return; }
+    const horizontal = gesture.direction.includes('west') ? -1 : gesture.direction.includes('east') ? 1 : 0;
+    const vertical = gesture.direction.includes('north') ? -1 : gesture.direction.includes('south') ? 1 : 0;
+    nextWidth = { width: boundedSize(gesture.width + (event.screenX - gesture.startX) * horizontal),
+      height: boundedSize(gesture.height + (event.screenY - gesture.startY) * vertical), direction: gesture.direction,
+      presentationEpoch: gesture.presentationEpoch, management: gesture.management, modalOpen: gesture.modalOpen };
     if (!widthFrame) widthFrame = requestAnimationFrame(() => { widthFrame = 0; void drainWidth(); });
   };
+  const moveWidth = (event: PointerEvent): void => queueWidth(event);
   const endWidth = (event: PointerEvent): void => {
     if (!gesture || event.pointerId !== gesture.pointerId) return;
-    queueWidth(event); clearGesture(false);
+    queueWidth(event, true); clearGesture(false);
     cancelAnimationFrame(widthFrame); widthFrame = 0;
     void drainWidth();
   };
@@ -121,28 +130,45 @@ export function installPanelLayout(desktop: boolean, getPresentation: () => Tran
     if (event instanceof PointerEvent && (!gesture || event.pointerId !== gesture.pointerId)) return;
     clearGesture();
   };
-  const checkWidthPresentation = (): void => { if (gesture && !currentPopup(gesture.presentationEpoch)) clearGesture(); };
+  function syncModalResizeInset(): void {
+    const modal = document.querySelector<HTMLElement>('.modal-overlay:not([hidden])');
+    const inset = document.body.dataset.view !== 'translate' && document.body.classList.contains('modal-open') && modal
+      ? Math.max(0, modal.offsetWidth - modal.clientWidth) : 0;
+    // A classic Windows scrollbar occupies real client pixels. Place the
+    // narrow east hit strip beside it, never over its thumb or track.
+    document.body.style.setProperty('--resize-scrollbar-inset', `${inset}px`);
+  }
+  const checkWidthPresentation = (): void => {
+    if (gesture && !currentResizePresentation(gesture.presentationEpoch, gesture.management, gesture.modalOpen)) clearGesture();
+    syncModalResizeInset();
+  };
   const widthViewObserver = new MutationObserver(checkWidthPresentation);
   widthViewObserver.observe(document.body, { attributes: true, attributeFilter: ['data-view', 'class'] });
   document.body.classList.add('popup-resize-enabled');
   const drag = (event: PointerEvent): void => {
-    if (event.button !== 0 || !(event.target instanceof Element)) return;
+    if (event.button !== 0 || !event.isPrimary || !(event.target instanceof Element)) return;
     const edge = event.target.closest<HTMLElement>('[data-window-resize]');
     if (edge) {
-      const direction = edge.dataset.windowResize;
+      const direction = edge.dataset.windowResize as ResizeDirection;
+      const management = document.body.dataset.view !== 'translate';
       const presentation = getPresentation();
-      if ((direction !== 'west' && direction !== 'east') || !currentPopup(presentation.epoch) || getComputedStyle(edge).display === 'none') return;
+      if (!['west', 'east', 'north', 'south', 'north-west', 'north-east', 'south-west', 'south-east'].includes(direction)
+        || (!management && direction !== 'west' && direction !== 'east')
+        || !currentResizePresentation(presentation.epoch, management) || getComputedStyle(edge).display === 'none') return;
       event.preventDefault();
       if (/Mac/.test(navigator.platform)) {
         clearGesture();
-        // screenX stays stable when dragging the west edge moves the window;
-        // clientX would feed that movement back into the next width request.
+        // Global screen coordinates remain stable when north/west edges move
+        // the window; client coordinates would feed that movement back in.
         try { edge.setPointerCapture(event.pointerId); } catch { return; }
-        gesture = { edge, pointerId: event.pointerId, startX: event.screenX, startWidth: boundedSize(window.innerWidth), direction, presentationEpoch: presentation.epoch };
-        lastWidth = '';
+        gesture = { edge, pointerId: event.pointerId, startX: event.screenX, startY: event.screenY,
+          width: boundedSize(window.innerWidth), height: boundedSize(window.innerHeight), direction,
+          presentationEpoch: presentation.epoch, management, modalOpen: document.body.classList.contains('modal-open') };
+        lastWidth = ''; document.body.dataset.resizeDirection = direction;
         document.body.classList.add('popup-resizing');
       } else {
-        void invoke('start_window_resize', { direction, presentationEpoch: presentation.epoch }).catch(() => {});
+        const payload = { direction, presentationEpoch: presentation.epoch };
+        void invoke('start_window_resize', management ? { ...payload, management: true } : payload).catch(() => {});
       }
       return;
     }
@@ -150,9 +176,9 @@ export function installPanelLayout(desktop: boolean, getPresentation: () => Tran
     event.preventDefault();
     void invoke('start_window_drag').catch(() => {});
   };
-  // A custom command avoids granting unrelated window-control capabilities.
+  // Custom commands avoid granting unrelated general window-control powers.
   document.addEventListener('pointerdown', drag);
-  document.addEventListener('pointermove', queueWidth);
+  document.addEventListener('pointermove', moveWidth);
   document.addEventListener('pointerup', endWidth);
   document.addEventListener('pointercancel', cancelWidth);
   document.addEventListener('lostpointercapture', cancelWidth);
@@ -169,7 +195,7 @@ export function installPanelLayout(desktop: boolean, getPresentation: () => Tran
     window.removeEventListener('blur', cancelWidth);
     window.removeEventListener('echolingo:layout', checkWidthPresentation);
     document.removeEventListener('pointerdown', drag);
-    document.removeEventListener('pointermove', queueWidth);
+    document.removeEventListener('pointermove', moveWidth);
     document.removeEventListener('pointerup', endWidth);
     document.removeEventListener('pointercancel', cancelWidth);
     document.removeEventListener('lostpointercapture', cancelWidth);

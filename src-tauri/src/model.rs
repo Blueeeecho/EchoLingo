@@ -230,6 +230,13 @@ pub fn migrate_core_preferences(settings: &mut Settings) {
     settings.auto_hide_seconds = 0;
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ResolvedLanguages {
+    pub source_language: String,
+    pub target_language: String,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TranslationResult {
@@ -239,6 +246,9 @@ pub struct TranslationResult {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
     pub elapsed_ms: u64,
+    /// Per-request setup guidance only; history clones clear this metadata.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resolved_languages: Option<ResolvedLanguages>,
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -682,5 +692,29 @@ mod tests {
             settings.providers[0].base_url = "https://proxy.invalid/translate".into();
             assert!(validate_settings(&settings).is_err());
         }
+    }
+}
+
+#[cfg(test)]
+mod resolved_languages_tests {
+    use super::*;
+    #[test]
+    fn old_results_remain_readable_and_omit_absent_setup_metadata() {
+        let old = serde_json::json!({"providerId":"fixture","providerName":"Fixture","text":"done","elapsedMs":1});
+        let result: TranslationResult = serde_json::from_value(old.clone()).unwrap();
+        assert!(result.resolved_languages.is_none());
+        assert_eq!(serde_json::to_value(result).unwrap(), old);
+    }
+    #[test]
+    fn setup_metadata_has_only_the_resolved_language_pair() {
+        let value = serde_json::json!({"providerId":"fixture","providerName":"Fixture","text":"","elapsedMs":1,"error":"SYSTEM_TRANSLATION_DOWNLOAD_REQUIRED: fixture","resolvedLanguages":{"sourceLanguage":"zh-Hant","targetLanguage":"en"}});
+        let result: TranslationResult = serde_json::from_value(value.clone()).unwrap();
+        assert_eq!(
+            result.resolved_languages.unwrap(),
+            ResolvedLanguages {
+                source_language: "zh-Hant".into(),
+                target_language: "en".into()
+            }
+        );
     }
 }

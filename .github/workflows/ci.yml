@@ -527,6 +527,8 @@ jobs:
           curl --retry 20 --retry-connrefused --retry-delay 1 -s http://127.0.0.1:1420/ > /dev/null
           npm run test:ui
           node tests/panel-layout-performance.mjs
+          node tests/window-resize-edges.mjs
+          node tests/service-quota-ui.mjs
 
   windows-popup-diagnostics:
     name: Targeted popup diagnostics (verified immutable candidate)

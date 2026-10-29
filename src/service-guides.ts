@@ -1,3 +1,5 @@
+import type { ServiceQuota } from './service-quotas';
+import { renderServiceQuota } from './service-quota-ui';
 import type { ProviderPresetId } from './provider-presets';
 import type { OcrProvider } from './types';
 
@@ -26,10 +28,10 @@ export const OCR_GUIDES: Record<OcrProvider['kind'], ServiceGuide> = {
   'openai-vision': { steps: ['在视觉模型服务商平台开通 API，创建密钥并确认模型支持图片。', '填写该服务的兼容地址和模型；截图会上传到此服务。'], links: [['OpenAI 账号 / 控制台', 'https://platform.openai.com/'], ['API 密钥', 'https://platform.openai.com/api-keys'], ['API 文档', 'https://developers.openai.com/api/reference/overview']] },
   'http-json': { steps: ['向你信任的 OCR 网关运营方取得地址、认证方式和请求格式。', '按网关文档填写图片模板与响应路径；可先查看 JSON Pointer 格式。'], links: [['JSON Pointer 标准', 'https://www.rfc-editor.org/rfc/rfc6901']] },
 };
-export function renderServiceGuide(container: HTMLElement, guide: ServiceGuide): void {
+export function renderServiceGuide(container: HTMLElement, guide: ServiceGuide, quota?: ServiceQuota, currentModel = ''): void {
   const steps = document.createElement('ol');
   for (const text of guide.steps) { const item = document.createElement('li'); item.textContent = text; steps.append(item); }
   const links = document.createElement('div'); links.className = 'service-guide-links';
   for (const [label, url] of guide.links) { const anchor = document.createElement('a'); anchor.textContent = `${label} ↗`; anchor.href = url; anchor.target = '_blank'; anchor.rel = 'noopener noreferrer'; anchor.dataset.serviceLink = 'true'; links.append(anchor); }
-  container.replaceChildren(steps, links);
+  container.replaceChildren(...(quota ? [renderServiceQuota(quota, currentModel)] : []), steps, links);
 }

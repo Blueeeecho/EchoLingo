@@ -1357,6 +1357,7 @@ async fn translate(
                                         text: partial.to_owned(),
                                         error: None,
                                         elapsed_ms: started.elapsed().as_millis() as u64,
+                                        resolved_languages: None,
                                     },
                                 );
                             },
@@ -1417,7 +1418,15 @@ fn finish_translation(
                 text,
                 source_language,
                 target_language,
-                results: results.to_vec(),
+                // Setup guidance belongs only to this result's live request.
+                results: results
+                    .iter()
+                    .cloned()
+                    .map(|mut result| {
+                        result.resolved_languages = None;
+                        result
+                    })
+                    .collect(),
                 created_at,
                 favorite: false,
             };
@@ -2971,6 +2980,7 @@ fn main() {
             window_layout::start_window_drag,
             window_layout::start_window_resize,
             window_layout::resize_popup_width,
+            window_layout::resize_management_window,
             show_popup,
             show_management,
             get_pending_settings,
@@ -3772,13 +3782,27 @@ mod tests {
             source_deliveries: Mutex::new(source_delivery::SourceDeliveries::default()),
             pending_shortcut_settings: AtomicBool::new(false),
         };
-        let result = vec![TranslationResult {
-            provider_id: "fixture".into(),
-            provider_name: "fixture".into(),
-            text: "fixture translation".into(),
-            error: None,
-            elapsed_ms: 1,
-        }];
+        let result = vec![
+            TranslationResult {
+                provider_id: "fixture".into(),
+                provider_name: "fixture".into(),
+                text: "fixture translation".into(),
+                error: None,
+                elapsed_ms: 1,
+                resolved_languages: None,
+            },
+            TranslationResult {
+                provider_id: "system-fixture".into(),
+                provider_name: "System fixture".into(),
+                text: String::new(),
+                error: Some("SYSTEM_TRANSLATION_DOWNLOAD_REQUIRED: fixture".into()),
+                elapsed_ms: 1,
+                resolved_languages: Some(ResolvedLanguages {
+                    source_language: "zh-Hant".into(),
+                    target_language: "en".into(),
+                }),
+            },
+        ];
         let finish = |id| {
             finish_translation(
                 &state,
@@ -3806,6 +3830,12 @@ mod tests {
         let saved: Vec<HistoryEntry> =
             serde_json::from_slice(&fs::read(directory.join("history.json")).unwrap()).unwrap();
         assert_eq!(saved[0].text, "fixture source");
+        assert_eq!(saved[0].results.len(), 2);
+        assert!(saved[0].results[1].resolved_languages.is_none());
+        assert!(result[1].resolved_languages.is_some());
+        assert!(!fs::read_to_string(directory.join("history.json"))
+            .unwrap()
+            .contains("resolvedLanguages"));
         fs::remove_dir_all(directory).unwrap();
     }
     #[test]

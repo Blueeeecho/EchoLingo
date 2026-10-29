@@ -157,10 +157,29 @@ public static class WindowsSelectionApplicationFixture {
         Need(value is int||value is long,"DIAGNOSTIC_INTEGER_REQUIRED");long number=Convert.ToInt64(value);Need(number>=0&&number<=maximum,"DIAGNOSTIC_NUMBER_BOUND");return number;
     }
     static HashSet<string> SelectionDiagnosticFields(){
-        HashSet<string> allowed=new HashSet<string>(new string[]{"selectionQueryCount","helperResponseReceived","helperElapsedMilliseconds","helperResultNonempty","cancellationRequested","cancellationSignalled","cancellationSignalFailed","attemptId","attemptPhase","configuredCopyStrategy","actionResultOk","actionResultNonempty"});
+        HashSet<string> allowed=new HashSet<string>(new string[]{"selectionQueryCount","helperResponseReceived","helperElapsedMilliseconds","helperResultNonempty","cancellationRequested","cancellationSignalled","cancellationSignalFailed","attemptId","attemptPhase","attemptStartedAtUnixMs","attemptFinishedAtUnixMs","nativeBoundaryStage","sourceSnapshotOutcome","sourceCurrentAtWorker","configuredCopyStrategy","actionResultOk","actionResultNonempty","actionErrorKind"});
         foreach(string suffix in new string[]{"Stage","Depth","IdentityCompared","IdentityEqual","RootWalkReason","ExceptionKind","Milliseconds"})for(int i=1;i<=16;i++)allowed.Add("selectionQuery"+i+suffix);
-        foreach(string field in new string[]{"copyStrategy","copyPhase","copyNativeContextValid","copyNativeContextChecks","copyNativeGuardReason","copyNativeEditable","copyNativeProtection","copyNativeSelectionKnown","copyNativeSelectionNonempty","copyProtectionProbe","copyProtectionProbeMilliseconds","copyProtectionUnknown","copySnapshotOutcome","copyDispatchInserted","copyOwnInputObserved","copyOwnerOutcome","copyClipboardRestored","copyTerminalReason"})allowed.Add(field);
+        foreach(string field in new string[]{"copyStrategy","copyPhase","copyNativeContextValid","copyNativeContextChecks","copyNativeGuardReason","copyNativeInvalidReason","copyNativeGtiSucceeded","copyNativeGtiFlags","copyNativeFocusPresent","copyNativeFocusProcessMatchesForeground","copyNativeFocusRootMatchesForeground","copyNativeActivePresent","copyNativeActiveRootMatchesForeground","copyNativeEditable","copyNativeProtection","copyNativeSelectionKnown","copyNativeSelectionNonempty","copyProtectionProbe","copyProtectionProbeMilliseconds","copyProtectionUnknown","copySnapshotOutcome","copyDispatchInserted","copyOwnInputObserved","copyOwnerOutcome","copyClipboardRestored","copyTerminalReason"})allowed.Add(field);
         return allowed;
+    }
+    // Process timestamps have a different unit from bounded helper counters.
+    // Keep the exact production key allowlist; unknown fields and non-integers
+    // still fail rather than being ignored or copied into failure evidence.
+    static Dictionary<string,object> ValidatedSelectionHealth(Dictionary<string,object> health,long recorded){
+        Need(health!=null,"DIAGNOSTIC_LAST_SELECTION_MISSING");
+        HashSet<string> allowed=SelectionDiagnosticFields();Dictionary<string,object> numeric=new Dictionary<string,object>();
+        foreach(KeyValuePair<string,object> pair in health){
+            Need(allowed.Contains(pair.Key),"DIAGNOSTIC_CONTENT_OR_UNKNOWN_FIELD");
+            bool timestamp=pair.Key=="attemptStartedAtUnixMs"||pair.Key=="attemptFinishedAtUnixMs";
+            long maximum=timestamp?recorded:10000000;
+            if(pair.Key=="nativeBoundaryStage"||pair.Key=="actionErrorKind")maximum=8;
+            if(pair.Key=="sourceSnapshotOutcome"||pair.Key=="sourceCurrentAtWorker")maximum=2;
+            if(pair.Key=="copyNativeInvalidReason")maximum=15;
+            if(pair.Key=="copyNativeGtiSucceeded"||pair.Key=="copyNativeFocusPresent"||pair.Key=="copyNativeFocusProcessMatchesForeground"||pair.Key=="copyNativeFocusRootMatchesForeground"||pair.Key=="copyNativeActivePresent"||pair.Key=="copyNativeActiveRootMatchesForeground")maximum=1;
+            long number=DiagnosticNumber(pair.Value,maximum);Need(!timestamp||number>0,"DIAGNOSTIC_ATTEMPT_TIMESTAMP_REQUIRED");numeric[pair.Key]=number;
+        }
+        if(numeric.ContainsKey("attemptFinishedAtUnixMs"))Need(numeric.ContainsKey("attemptStartedAtUnixMs")&&(long)numeric["attemptFinishedAtUnixMs"]>=(long)numeric["attemptStartedAtUnixMs"],"DIAGNOSTIC_ATTEMPT_TIME_ORDER");
+        return numeric;
     }
     static void SelectionDiagnosticsCli(string executable,ProcessStartInfo primaryStart,string roaming,string token,Form form,TextBox source){
         Dictionary<string,object> result=new Dictionary<string,object>{{"ok",false},{"attempts",1},{"newSelectionRequested",false},{"secondaryProcessExitObserved",false}};Report["selectionDiagnosticsCli"]=result;
@@ -191,8 +210,8 @@ public static class WindowsSelectionApplicationFixture {
             Need(String.Equals((string)payload["executablePath"],Path.GetFullPath(executable),StringComparison.OrdinalIgnoreCase),"DIAGNOSTIC_EXPORTED_EXECUTABLE_MISMATCH");
             long recorded=DiagnosticNumber(payload["recordedAtUnixMs"],Int64.MaxValue),latest=(long)(DateTime.UtcNow-new DateTime(1970,1,1,0,0,0,DateTimeKind.Utc)).TotalMilliseconds;Need(recorded>=earliest&&recorded<=latest,"DIAGNOSTIC_TIMESTAMP_OUTSIDE_EXPLICIT_CALL");
             Dictionary<string,object> health=payload["diagnostics"] as Dictionary<string,object>;Need(health!=null,"DIAGNOSTIC_LAST_SELECTION_MISSING");
-            HashSet<string> allowed=SelectionDiagnosticFields();
-            foreach(KeyValuePair<string,object> pair in health){Need(allowed.Contains(pair.Key),"DIAGNOSTIC_CONTENT_OR_UNKNOWN_FIELD");DiagnosticNumber(pair.Value,10000000);}
+            ValidatedSelectionHealth(health,recorded);
+            Need(health.ContainsKey("attemptStartedAtUnixMs")&&health.ContainsKey("attemptFinishedAtUnixMs")&&health.ContainsKey("actionErrorKind")&&DiagnosticNumber(health["actionErrorKind"],8)==0&&health.ContainsKey("nativeBoundaryStage")&&DiagnosticNumber(health["nativeBoundaryStage"],8)==8,"DIAGNOSTIC_SUCCESS_BOUNDARY_METADATA_MISMATCH");
             Need(health.ContainsKey("selectionQueryCount")&&DiagnosticNumber(health["selectionQueryCount"],16)>=2&&health.ContainsKey("helperResponseReceived")&&DiagnosticNumber(health["helperResponseReceived"],1)==1&&health.ContainsKey("selectionQuery1Stage"),"DIAGNOSTIC_COMPLETED_SELECTION_NOT_RETAINED");
             Need(health.ContainsKey("configuredCopyStrategy")&&DiagnosticNumber(health["configuredCopyStrategy"],1)==0,"DIAGNOSTIC_STRICT_AUTO_STRATEGY_NOT_APPLIED");
             foreach(string flag in new string[]{"cancellationRequested","cancellationSignalled","cancellationSignalFailed"})Need(health.ContainsKey(flag)&&DiagnosticNumber(health[flag],1)==0,"DIAGNOSTIC_SUCCESS_CANCELLATION_MISMATCH");
@@ -237,9 +256,8 @@ public static class WindowsSelectionApplicationFixture {
                 long recorded=DiagnosticNumber(payload["recordedAtUnixMs"],Int64.MaxValue),latest=(long)(DateTime.UtcNow-new DateTime(1970,1,1,0,0,0,DateTimeKind.Utc)).TotalMilliseconds;
                 snapshot["diagnosticIsFreshAfterFailure"]=recorded>=earliest&&recorded<=latest?1:0;
                 if(recorded>=earliest&&recorded<=latest){
-                    Dictionary<string,object> health=payload["diagnostics"] as Dictionary<string,object>;Need(health!=null,"FAILURE_DIAGNOSTIC_HEALTH_MISSING");Dictionary<string,object> numeric=new Dictionary<string,object>();HashSet<string> fields=SelectionDiagnosticFields();
-                    foreach(KeyValuePair<string,object> entry in health){Need(fields.Contains(entry.Key),"FAILURE_DIAGNOSTIC_UNKNOWN_FIELD");numeric[entry.Key]=DiagnosticNumber(entry.Value,10000000);}
-                    snapshot["nativeHealth"]=numeric;
+                    Dictionary<string,object> health=payload["diagnostics"] as Dictionary<string,object>;Need(health!=null,"FAILURE_DIAGNOSTIC_HEALTH_MISSING");
+                    snapshot["nativeHealth"]=ValidatedSelectionHealth(health,recorded);
                 }
             }
         }catch{snapshot["observationFailed"]=1;}

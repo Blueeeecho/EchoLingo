@@ -30,7 +30,7 @@ try {
         [Web.Script.Serialization.JavaScriptSerializer].Assembly.Location,[Management.ManagementObject].Assembly.Location,
         [Windows.Automation.AutomationElement].Assembly.Location,[Windows.Automation.ControlType].Assembly.Location) | Select-Object -Unique
     Add-Type -TypeDefinition ($harness + "`n" + $extra) -ReferencedAssemblies $references -Language CSharp
-    $result = [EchoLingoPopupVisibilitySmoke]::RunResize($ApplicationPath)
+    $result = [EchoLingoPopupVisibilitySmoke]::RunResize($ApplicationPath, [bool]$IsolatedTestSession)
     $result['applicationSha256'] = $applicationHash
     $result['applicationBytes'] = $applicationBytes
     $result['resizeFixtureSha256'] = (Get-FileHash -LiteralPath (Join-Path $PSScriptRoot 'windows-popup-resize-fixture.cs') -Algorithm SHA256).Hash.ToLowerInvariant()

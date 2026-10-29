@@ -52,6 +52,7 @@ export interface TranslationResult {
   providerName: string;
   text: string;
   error?: string;
+  resolvedLanguages?: { sourceLanguage: string; targetLanguage: string };
   elapsedMs: number;
 }
 export interface TranslationProgress {
