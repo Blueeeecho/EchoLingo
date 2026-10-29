@@ -1604,7 +1604,7 @@ jobs:
 
 
   windows-focus-resize-current-diagnostics:
-    name: Exact 488 resize acceptance (${{ matrix.fixture }})
+    name: Exact 57 rigorous selection acceptance (${{ matrix.fixture }})
     if: github.event_name == 'workflow_dispatch' && github.event.inputs.mode == 'windows-focus-resize-current-diagnostics'
     runs-on: windows-latest
     permissions:
@@ -1613,7 +1613,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        fixture: [resize]
+        fixture: [rigorous]
     steps:
       - uses: actions/checkout@v4
         with:
@@ -1623,29 +1623,29 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          $source = '488681a91d2081fbadef2718471de8092c181f11'
+          $source = '57d5f18336881bf8fe00559200edad7284c3cae6'
           git diff --quiet $source HEAD -- src src-tauri resources assets scripts index.html package.json package-lock.json vite.config.ts tsconfig.json tsconfig.node.json .cargo
           if ($LASTEXITCODE -ne 0) { throw 'Production source differs; this stage cannot accept current source.' }
-          $run = gh api repos/Blueeeecho/EchoLingo/actions/runs/40846764988 | ConvertFrom-Json
+          $run = gh api repos/Blueeeecho/EchoLingo/actions/runs/40863042526 | ConvertFrom-Json
           if ($LASTEXITCODE -ne 0 -or $run.head_sha -ne $source -or $run.status -ne 'completed') { throw 'Immutable source-run mismatch.' }
-          $artifact = gh api repos/Blueeeecho/EchoLingo/actions/artifacts/12886850161 | ConvertFrom-Json
-          if ($LASTEXITCODE -ne 0 -or $artifact.workflow_run.id -ne 40846764988 -or $artifact.workflow_run.head_sha -ne $source -or $artifact.expired -or $artifact.size_in_bytes -ne 17955922 -or $artifact.digest -ne 'sha256:051c12a25ad234d5c12042043632d97be8321bc8b12d6969c05c99cead45feb5') { throw 'Immutable evidence artifact mismatch.' }
+          $artifact = gh api repos/Blueeeecho/EchoLingo/actions/artifacts/12892644752 | ConvertFrom-Json
+          if ($LASTEXITCODE -ne 0 -or $artifact.workflow_run.id -ne 40863042526 -or $artifact.workflow_run.head_sha -ne $source -or $artifact.expired -or $artifact.size_in_bytes -ne 17955491 -or $artifact.digest -ne 'sha256:3611ebeac387c904eab8ed9c03dea78936ac17a84b4dbea813186e5bc3d144ba') { throw 'Immutable evidence artifact mismatch.' }
       - uses: actions/download-artifact@v4
         with:
-          artifact-ids: '12886850161'
-          run-id: '40846764988'
+          artifact-ids: '12892644752'
+          run-id: '40863042526'
           github-token: ${{ github.token }}
-          path: exact-488-evidence
+          path: exact-57-evidence
       - name: Verify exact stage executable and unchanged binary inputs
         id: candidate
         shell: powershell
         run: |
-          $files = @(Get-ChildItem exact-488-evidence -Recurse -File -Filter echolingo.exe)
+          $files = @(Get-ChildItem exact-57-evidence -Recurse -File -Filter echolingo.exe)
           if ($files.Count -ne 1) { throw 'Expected one staged candidate.' }
           $candidateHash = (Get-FileHash -LiteralPath $files[0].FullName -Algorithm SHA256).Hash.ToLowerInvariant()
-          if ($candidateHash -ne '73efd7fbe14b7fc7a494db67cc06b139491ca2bb27b8e407e26000b25c1b8754' -or $files[0].Length -ne 6068736) { throw 'Staged candidate bytes mismatch.' }
+          if ($candidateHash -ne '3e04dacdea0a3b23795fc408e2bbfec8f4904c50ca770abb932a5918e9233e42' -or $files[0].Length -ne 6073344) { throw 'Staged candidate bytes mismatch.' }
           'path=' + $files[0].FullName | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
-          [ordered]@{ sourceRun=40846764988; sourceArtifactId=12886850161; applicationSource='488681a91d2081fbadef2718471de8092c181f11'; fixtureSource='${{ github.sha }}'; stageSha256=$candidateHash; stageBytes=$files[0].Length; productionSourceUnchanged=$true; rebuilt=$false; scope='Supplemental actual acceptance; preserves original 17/18 red full run' } | ConvertTo-Json -Compress
+          [ordered]@{ sourceRun=40863042526; sourceArtifactId=12892644752; applicationSource='57d5f18336881bf8fe00559200edad7284c3cae6'; fixtureSource='${{ github.sha }}'; stageSha256=$candidateHash; stageBytes=$files[0].Length; productionSourceUnchanged=$true; rebuilt=$false; scope='Supplemental actual acceptance; preserves original 17/18 red full run' } | ConvertTo-Json -Compress
       - name: Actual same-binary desktop fixture
         id: actual
         continue-on-error: true
@@ -1654,27 +1654,26 @@ jobs:
         env:
           ECHOLINGO_CANDIDATE: ${{ steps.candidate.outputs.path }}
         run: |
-          if ('${{ matrix.fixture }}' -eq 'application') {
-            $output = @(& powershell.exe -NoProfile -STA -ExecutionPolicy Bypass -File tests/windows-application-smoke.ps1 -ApplicationPath $env:ECHOLINGO_CANDIDATE -LatestIntentTests 2>&1)
-          } else {
-            $output = @(& powershell.exe -NoProfile -STA -ExecutionPolicy Bypass -File tests/windows-popup-resize-smoke.ps1 -ApplicationPath $env:ECHOLINGO_CANDIDATE -IsolatedTestSession -ReadOnlyGeometryProbe 2>&1)
-          }
+          $candidate = $env:ECHOLINGO_CANDIDATE
+          $hash = (Get-FileHash -LiteralPath $candidate -Algorithm SHA256).Hash.ToLowerInvariant()
+          $bytes = (Get-Item -LiteralPath $candidate).Length
+          $output = @(& powershell.exe -NoProfile -STA -ExecutionPolicy Bypass -File tests/windows-selection-application-smoke.ps1 -ApplicationPath $candidate -ExpectedApplicationSha256 $hash -ExpectedApplicationBytes $bytes -IsolatedTestSession 2>&1)
           $fixtureExit = $LASTEXITCODE
-          $output | Out-File "$env:RUNNER_TEMP/echolingo-exact-488-${{ matrix.fixture }}.log" -Encoding utf8
+          $output | Out-File "$env:RUNNER_TEMP/echolingo-exact-57-${{ matrix.fixture }}.log" -Encoding utf8
           $output | Write-Output
-          if ((Get-FileHash -LiteralPath $env:ECHOLINGO_CANDIDATE -Algorithm SHA256).Hash.ToLowerInvariant() -ne '73efd7fbe14b7fc7a494db67cc06b139491ca2bb27b8e407e26000b25c1b8754') { throw 'Candidate changed during fixture.' }
+          if ((Get-FileHash -LiteralPath $env:ECHOLINGO_CANDIDATE -Algorithm SHA256).Hash.ToLowerInvariant() -ne '3e04dacdea0a3b23795fc408e2bbfec8f4904c50ca770abb932a5918e9233e42') { throw 'Candidate changed during fixture.' }
           exit $fixtureExit
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: EchoLingo-Windows-exact-488-${{ matrix.fixture }}
+          name: EchoLingo-Windows-exact-57-${{ matrix.fixture }}
           if-no-files-found: error
-          path: ${{ runner.temp }}/echolingo-exact-488-${{ matrix.fixture }}.log
+          path: ${{ runner.temp }}/echolingo-exact-57-${{ matrix.fixture }}.log
       - name: Gate unchanged candidate supplemental acceptance
         if: always()
         shell: powershell
         run: |
-          [ordered]@{ scope='Supplemental exact 488 same-binary acceptance only'; fixture='${{ matrix.fixture }}'; outcome='${{ steps.actual.outcome }}' } | ConvertTo-Json -Compress
+          [ordered]@{ scope='Supplemental exact 57 same-binary acceptance only'; fixture='${{ matrix.fixture }}'; outcome='${{ steps.actual.outcome }}' } | ConvertTo-Json -Compress
           if ('${{ steps.actual.outcome }}' -ne 'success') { throw 'Actual same-binary acceptance failed.' }
 
   windows-priority-input:

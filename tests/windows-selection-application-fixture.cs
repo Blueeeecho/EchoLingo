@@ -267,11 +267,66 @@ public static class WindowsSelectionApplicationFixture {
             snapshot["elapsedMilliseconds"]=Math.Min(10000000,budget.ElapsedMilliseconds);
         }
     }
+    static void RecordBlankSource(Dictionary<string,object> trace,string value,string expected){
+        trace["sourceObserved"]=true;trace["sourceAvailable"]=value!=null;trace["sourceEmpty"]=value=="";trace["sourceMatchesTyped"]=value==expected;
+        // Only fixture literals/prefixes may contribute lengths or hashes. Never
+        // serialize an unexpected value, even from this disposable own textarea.
+        bool known=value!=null&&(expected.StartsWith(value,StringComparison.Ordinal)||value=="Pinned edit exact source 54001"||value=="Unselected source 55000");
+        trace["sourceIsKnownFixtureDummy"]=known;
+        if(known){trace["sourceDummyLength"]=value.Length;trace["sourceDummySha256"]=Hash(value);}
+        else{trace.Remove("sourceDummyLength");trace.Remove("sourceDummySha256");}
+    }
+    sealed class FailedBlankObservation { public Dictionary<string,object> Metadata;public int Complete; }
+    static void PublishBlankObservation(FailedBlankObservation result,Dictionary<string,object> value){Interlocked.Exchange(ref result.Metadata,new Dictionary<string,object>(value));}
+    static void ObserveFailedBlank(Dictionary<string,object> trace,string typed){
+        // This runs only after the original failure. A background UIA call may
+        // outlive the budget, but it cannot hold up the original own-app cleanup.
+        Dictionary<string,object> report=new Dictionary<string,object>{{"takenAfterCaseFailure",true},{"budgetMilliseconds",2000},{"inputRetried",false},{"frontendRequestEpochExportAvailable",false}};
+        trace["failureOnlyObservation"]=report;Stopwatch budget=Stopwatch.StartNew();FailedBlankObservation observation=new FailedBlankObservation();
+        Thread reader=new Thread(delegate(){Dictionary<string,object> value=new Dictionary<string,object>();try{
+            Need(App!=null&&!App.HasExited&&Main!=IntPtr.Zero,"BLANK_OBSERVATION_APP_UNAVAILABLE");
+            uint owner;GetWindowThreadProcessId(Main,out owner);Need(owner==App.Id&&GetAncestor(Main,2)==Main,"BLANK_OBSERVATION_MAIN_NOT_OWNED");
+            value["appForeground"]=ForegroundPid()==App.Id;Dictionary<string,object> mock=Server.Snapshot(typed);value["mock"]=mock;value["mockErrorPresent"]=Server.Error!=null;value["mockTerminalWithoutReply"]=Convert.ToInt32(mock["done"])!=0&&Convert.ToInt32(mock["responseSent"])==0;
+            value["historyMatchesTyped"]=HistoryHas(typed);value["lastCompletedPhase"]="native-mock-history";PublishBlankObservation(observation,value);
+            AutomationElement root=AutomationElement.FromHandle(Main);Need(root!=null&&root.Current.ProcessId==App.Id&&!App.HasExited,"BLANK_OBSERVATION_UIA_ROOT_NOT_OWNED");
+            AutomationElement input=root.FindFirst(TreeScope.Descendants,new AndCondition(new PropertyCondition(AutomationElement.ControlTypeProperty,ControlType.Edit),new OrCondition(new PropertyCondition(AutomationElement.AutomationIdProperty,"source-text"),new PropertyCondition(AutomationElement.NameProperty,"\u539f\u6587"))));
+            value["sourceElementAvailable"]=input!=null;int[] wanted=null;
+            if(input!=null){
+                value["sourceIsOffscreen"]=input.Current.IsOffscreen;value["sourceHasKeyboardFocus"]=input.Current.HasKeyboardFocus;wanted=input.GetRuntimeId();Need(wanted!=null&&wanted.Length<=64,"BLANK_SOURCE_RUNTIME_ID_BOUND");object raw;
+                string source=!input.Current.IsOffscreen&&input.TryGetCurrentPattern(ValuePattern.Pattern,out raw)?((ValuePattern)raw).Current.Value:null;RecordBlankSource(value,source,typed);
+            }
+            value["lastCompletedPhase"]="own-textarea";PublishBlankObservation(observation,value);
+            // The global focused element contributes only its runtime-ID equality
+            // boolean. Do not read its Current properties, Name, Text or Value.
+            AutomationElement focused=AutomationElement.FocusedElement;int[] actual=focused==null?null:focused.GetRuntimeId();Need(actual==null||actual.Length<=64,"BLANK_FOCUS_RUNTIME_ID_BOUND");
+            value["focusedRuntimeIdObserved"]=actual!=null;value["focusedRuntimeIdMatchesTextarea"]=wanted!=null&&actual!=null&&SameRuntimeId(wanted,actual);
+            value["lastCompletedPhase"]="focus-runtime-id-only";PublishBlankObservation(observation,value);
+            AutomationElement button=root.FindFirst(TreeScope.Descendants,new AndCondition(new PropertyCondition(AutomationElement.ControlTypeProperty,ControlType.Button),new PropertyCondition(AutomationElement.AutomationIdProperty,"translate-button")));
+            string label=button==null?null:button.Current.Name;value["translationBusyState"]=label=="\u505c\u6b62\u7ffb\u8bd1"?"busy":label=="\u7ffb\u8bd1"?"idle":"unknown";
+            value["lastCompletedPhase"]="own-button-fixed-label";
+        }catch(Exception e){value["observationExceptionType"]=e.GetType().Name;}finally{PublishBlankObservation(observation,value);Interlocked.Exchange(ref observation.Complete,1);}});
+        reader.IsBackground=true;reader.Name="EchoLingo failed blank-input metadata";reader.SetApartmentState(ApartmentState.MTA);reader.Start();
+        reader.Join((int)Math.Max(0,2000-budget.ElapsedMilliseconds));
+        Dictionary<string,object> metadata=Interlocked.CompareExchange(ref observation.Metadata,null,null);if(metadata!=null)report["metadata"]=metadata;
+        report["observationCompleted"]=Interlocked.CompareExchange(ref observation.Complete,0,0)!=0;report["elapsedMilliseconds"]=Math.Min(10000000,budget.ElapsedMilliseconds);
+    }
     static void BlankCase(Form form,TextBox edit,Control[] controls){
         const string typed="Typed blank popup 55001";Server.Allow(typed,false);PutSource(form,edit,controls,"Unselected source 55000",false);Ui(form,delegate{edit.Select(0,0);});SeedClipboard();Dictionary<string,object> blank=Begin("empty-selection-first-input-enter",typed,"actual-Unicode-SendInput");Hotkey(form);
         try{Wait(delegate{return SourceValue()==""&&ForegroundPid()==App.Id;},15000,"EMPTY_SELECTION_NOT_FOCUSED_BLANK");}
         catch(InvalidOperationException e){if(e.Message!="TIMEOUT:EMPTY_SELECTION_NOT_FOCUSED_BLANK")throw;Need(Helpers().Count==0,"BLANK_FAILURE_WITH_PENDING_HELPER");CheckClipboard();blank["error"]=e.Message;blank["hotkeysSent"]=1;blank["actualSourceSha256"]=SourceValue()==null?null:Hash(SourceValue());blank["appForeground"]=ForegroundPid()==App.Id;blank["typedTextInjected"]=false;blank["safeToContinue"]=true;return;}
-        Type(typed,true);Wait(delegate{return HistoryHas(typed)&&SourceValue()==typed;},30000,"EMPTY_FIRST_INPUT_EXACT");CheckClipboard();blank["hotkeysSent"]=1;blank["actualSourceSha256"]=Hash(SourceValue());blank["typedTextInjected"]=true;blank["ok"]=true;
+        Type(typed,true);blank["typedTextInjected"]=true;Stopwatch submitted=Stopwatch.StartNew();
+        Dictionary<string,object> predicate=new Dictionary<string,object>{{"historyObserved",false},{"historyEverMatched",false},{"sourceObserved",false},{"sourceEverMatched",false},{"sourceSkippedOnLastPredicate",true}};blank["submissionPredicate"]=predicate;
+        try{Wait(delegate{
+            // Preserve the original HistoryHas && SourceValue short circuit.
+            bool history=HistoryHas(typed);predicate["historyObserved"]=true;predicate["lastHistoryMatched"]=history;predicate["lastAtMilliseconds"]=submitted.ElapsedMilliseconds;predicate["sourceSkippedOnLastPredicate"]=!history;
+            if(!history)return false;
+            if(!Convert.ToBoolean(predicate["historyEverMatched"]))predicate["historyFirstMatchedMilliseconds"]=submitted.ElapsedMilliseconds;predicate["historyEverMatched"]=true;
+            string value=SourceValue();RecordBlankSource(predicate,value,typed);
+            if(value==typed){if(!Convert.ToBoolean(predicate["sourceEverMatched"]))predicate["sourceFirstMatchedMilliseconds"]=submitted.ElapsedMilliseconds;predicate["sourceEverMatched"]=true;}
+            return value==typed;
+        },30000,"EMPTY_FIRST_INPUT_EXACT");}
+        catch{blank["failedAtMilliseconds"]=submitted.ElapsedMilliseconds;try{ObserveFailedBlank(blank,typed);}catch{blank["failureObservationFailed"]=true;}throw;}
+        CheckClipboard();blank["hotkeysSent"]=1;blank["actualSourceSha256"]=Hash(SourceValue());blank["ok"]=true;
     }
     static HashSet<int> Helpers(){HashSet<int> ids=new HashSet<int>();IntPtr snapshot=CreateToolhelp32Snapshot(2,0);Need(snapshot!=new IntPtr(-1),"PROCESS_SNAPSHOT_FAILED");try{ENTRY e=new ENTRY();e.size=(uint)Marshal.SizeOf(typeof(ENTRY));if(Process32FirstW(snapshot,ref e))do{if(e.parent==App.Id&&String.Equals(e.exe,"powershell.exe",StringComparison.OrdinalIgnoreCase))ids.Add((int)e.pid);}while(Process32NextW(snapshot,ref e));}finally{CloseHandle(snapshot);}return ids;}
     static bool IsSelectedHelper(int pid){
