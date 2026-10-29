@@ -1,3 +1,4 @@
+<p align="center"><strong>中文</strong> · <a href="README.en.md">English</a></p>
 <p align="center"><img src="https://blueeeecho.github.io/EchoLingo/assets/echolingo-icon.png" width="96" alt="EchoLingo · 回声译" /></p>
 <h1 align="center">EchoLingo · 回声译</h1>
 <p align="center"><strong>让陌生的语言，有熟悉的回声。</strong></p>
