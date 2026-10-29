@@ -149,6 +149,33 @@ public static class WindowsPriorityInputFixture {
         Wait(delegate{events.AddRange(Drain());return Released()&&Snapshot()[AltUp]-before[AltUp]==2;},2500,"SCAN_COMPARISON_INPUT_RELEASED");ownedHeldKeys=false;Quiet(events);long[] after=Snapshot();
         return new Dictionary<string,object>{{"diagnosticOnly",true},{"changesOriginalGateResult",false},{"inputEventCount",6},{"inputRepresentation","KEYEVENTF_SCANCODE; Alt=0x38; right Alt extended; D=0x20"},{"nativeEvents",events},{"peerBefore",before},{"peerAfter",after},{"unconsumedSuffixObserved",after[SuffixDown]>before[SuffixDown]},{"diagnosticsBefore",diagBefore},{"diagnosticsAfter",Diagnostics()},{"sourceSelectionPreserved",SameSelection(before,after)},{"sourceStillForeground",after[Foreground]==1},{"sourceFocusIsEditor",after[FocusFlag]==1},{"scKeyMenu",after[KeyMenu]-before[KeyMenu]},{"menuLoops",after[MenuLoop]-before[MenuLoop]},{"keysReleased",Released()}};
     }
+    static Dictionary<string,object> RunBothAltCase() {
+        const string name="both-alt-release-left-keeps-right-anchor";
+        pendingCase=new Dictionary<string,object>{{"name",name},{"expectedNativeId",1},{"expectedPeerHotkey",0},{"expectedRecordingLease",0},{"inputPhases","ordinary Alt prelude, then priority suffix"}};
+        // The first release precedes any priority intent. Keep all six original
+        // inputs, but assert ordinary Alt behavior and owned suffix separately.
+        long[] beforePrelude=Prepare(false);Need(Drain().Count==0,"PHASE_COMPARISON_PENDING_EVENT");ulong[] diagBefore=Diagnostics();List<ulong[]> preludeEvents=new List<ulong[]>();
+        pendingCase["beforePrelude"]=beforePrelude;pendingCase["preludeEvents"]=preludeEvents;
+        ownedHeldKeys=true;Send(AltKey(false,false),AltKey(true,false),AltKey(false,true));
+        Wait(delegate{long[] now=Snapshot();return now[AltDown]-beforePrelude[AltDown]==2&&now[AltUp]-beforePrelude[AltUp]==1&&(GetAsyncKeyState(0xa4)&0x8000)==0&&(GetAsyncKeyState(0xa5)&0x8000)!=0;},2500,"PHASE_COMPARISON_PRELUDE_RELEASED");
+        // Command 7 only acknowledges and publishes on the owned source UI
+        // thread. Keep the bounded zero-action observation; an acknowledgement
+        // alone is not a promise that all asynchronous menu work has finished.
+        Ask(7);Quiet(preludeEvents);long[] afterPrelude=Snapshot();ulong[] diagAfterPrelude=Diagnostics();long[] beforeSuffix=Snapshot();List<ulong[]> suffixEvents=new List<ulong[]>();
+        pendingCase["afterPrelude"]=afterPrelude;pendingCase["beforeSuffix"]=beforeSuffix;pendingCase["nativeEvents"]=suffixEvents;
+        uint sourcePid;uint sourceThread=GetWindowThreadProcessId(new IntPtr(beforePrelude[Window]),out sourcePid);GUI sourceGui=new GUI();sourceGui.size=(uint)Marshal.SizeOf(typeof(GUI));bool sourceGuiKnown=sourcePid==(uint)peer.Id&&sourceThread!=0&&GetGUIThreadInfo(sourceThread,ref sourceGui);
+        pendingCase["beforeSuffixGuiMetadataAvailable"]=sourceGuiKnown;pendingCase["beforeSuffixGuiFlags"]=sourceGui.flags;
+        Need(sourceGuiKnown&&sourceGui.focus==new IntPtr(beforePrelude[Editor])&&(sourceGui.flags&0x1c)==0&&afterPrelude[KeyMenu]==beforeSuffix[KeyMenu]&&afterPrelude[MenuLoop]==beforeSuffix[MenuLoop],"TWO_ALT_PRELUDE_MENU_NOT_SETTLED");
+        Need(preludeEvents.Count==0&&afterPrelude[MaskDown]==beforePrelude[MaskDown]&&afterPrelude[MaskUp]==beforePrelude[MaskUp]&&diagAfterPrelude[ObservedDown]==diagBefore[ObservedDown]&&diagAfterPrelude[ObservedUp]==diagBefore[ObservedUp]&&diagAfterPrelude[AcceptedPairs]==diagBefore[AcceptedPairs]&&diagAfterPrelude[Enqueued]==diagBefore[Enqueued],"ORDINARY_ALT_PRELUDE_CLAIMED_OR_MASKED");
+        Need(afterPrelude[SuffixDown]==beforePrelude[SuffixDown]&&afterPrelude[SuffixUp]==beforePrelude[SuffixUp]&&afterPrelude[HotD]==beforePrelude[HotD]&&afterPrelude[HotS]==beforePrelude[HotS]&&SameSelection(beforePrelude,beforeSuffix)&&beforeSuffix[Foreground]==1&&beforeSuffix[FocusFlag]==1,"ORDINARY_ALT_PRELUDE_CHANGED_SOURCE");
+        Send(Key(0x44,false),Key(0x44,true),AltKey(true,true));
+        Wait(delegate{suffixEvents.AddRange(Drain());return Released()&&Snapshot()[AltUp]-beforePrelude[AltUp]==2;},2500,"PHASE_COMPARISON_SUFFIX_RELEASED");ownedHeldKeys=false;Quiet(suffixEvents);long[] afterSuffix=Snapshot();
+        pendingCase["afterSuffix"]=afterSuffix;ulong[] diagAfterSuffix=Diagnostics();OwnSourceEvent(suffixEvents,1,beforePrelude,name);
+        Need(afterSuffix[SuffixDown]==beforeSuffix[SuffixDown]&&afterSuffix[SuffixUp]==beforeSuffix[SuffixUp]&&afterSuffix[HotD]==beforeSuffix[HotD]&&afterSuffix[HotS]==beforeSuffix[HotS],"TWO_ALT_SUFFIX_LEAKED_TO_SOURCE_OR_PEER");
+        Need(afterSuffix[KeyMenu]==beforeSuffix[KeyMenu]&&afterSuffix[MenuLoop]==beforeSuffix[MenuLoop]&&afterSuffix[AppCommand]==beforeSuffix[AppCommand]&&afterSuffix[MaskDown]-beforeSuffix[MaskDown]==1&&afterSuffix[MaskUp]-beforeSuffix[MaskUp]==1,"TWO_ALT_PRIORITY_SUFFIX_CHANGED_MENU");
+        Need(SameSelection(beforePrelude,afterSuffix)&&afterSuffix[Foreground]==1&&afterSuffix[FocusFlag]==1&&diagAfterSuffix[ObservedDown]-diagAfterPrelude[ObservedDown]==1&&diagAfterSuffix[ObservedUp]-diagAfterPrelude[ObservedUp]==1&&diagAfterSuffix[AcceptedPairs]-diagAfterPrelude[AcceptedPairs]==1&&diagAfterSuffix[Enqueued]-diagAfterPrelude[Enqueued]==1,"TWO_ALT_SUFFIX_LOST_OR_RETARGETED_SOURCE_ACTION");
+        return new Dictionary<string,object>{{"name",name},{"ok",true},{"inputEventCount",6},{"inputPhases","ordinary Alt prelude, then priority suffix"},{"beforePrelude",beforePrelude},{"afterPrelude",afterPrelude},{"beforeSuffix",beforeSuffix},{"afterSuffix",afterSuffix},{"beforeSuffixGuiMetadataAvailable",sourceGuiKnown},{"beforeSuffixGuiFlags",sourceGui.flags},{"preludeEvents",preludeEvents},{"nativeEvents",suffixEvents},{"diagnosticsBefore",diagBefore},{"diagnosticsAfterPrelude",diagAfterPrelude},{"diagnosticsAfterSuffix",diagAfterSuffix},{"preludeScKeyMenu",afterPrelude[KeyMenu]-beforePrelude[KeyMenu]},{"preludeMenuLoops",afterPrelude[MenuLoop]-beforePrelude[MenuLoop]},{"suffixScKeyMenu",afterSuffix[KeyMenu]-beforeSuffix[KeyMenu]},{"suffixMenuLoops",afterSuffix[MenuLoop]-beforeSuffix[MenuLoop]},{"ordinaryAltPreludePassedWithoutMask",true},{"prioritySuffixHadNoMenuSideEffect",true},{"sourceSelectionPreserved",true},{"sourceStillForeground",true},{"sourceFocusIsEditor",true},{"keysReleased",Released()}};
+    }
     static void OwnSourceEvent(List<ulong[]> events,uint expected,long[] source,string name) {
         Need(events.Count==1&&events[0][0]==expected&&events[0][1]==1&&events[0][3]==0&&events[0][4]==0&&events[0][5]==0&&events[0][6]==(ulong)source[Window]&&events[0][7]==(ulong)source[Editor],"RECOVERY_WRONG_OR_DUPLICATED_SOURCE_EVENT:"+name);
     }
@@ -300,7 +327,7 @@ public static class WindowsPriorityInputFixture {
                 cases.Add(RunCase("repeat-still-one-paired-action",new INPUT[]{Key(0x12,false),Key(0x44,false),Key(0x44,false),Key(0x44,true),Key(0x12,true)},1,0,0,0,0,0));
                 cases.Add(RunCase("left-alt-repeat-still-one-source-action",new INPUT[]{AltKey(false,false),AltKey(false,false),Key(0x44,false),Key(0x44,true),AltKey(false,true)},1,0,0,0,0,0));
                 cases.Add(RunCase("right-alt-s-anchors-original-source",new INPUT[]{AltKey(true,false),Key(0x53,false),Key(0x53,true),AltKey(true,true)},2,0,0,0,0,0));
-                cases.Add(RunCase("both-alt-release-left-keeps-right-anchor",new INPUT[]{AltKey(false,false),AltKey(true,false),AltKey(false,true),Key(0x44,false),Key(0x44,true),AltKey(true,true)},1,0,0,0,0,0));
+                cases.Add(RunBothAltCase());
                 cases.Add(RunCase("ctrl-alt-d-passes-source",new INPUT[]{Key(0x11,false),Key(0x12,false),Key(0x44,false),Key(0x44,true),Key(0x12,true),Key(0x11,true)},0,0,1,0,0,0));
                 cases.Add(RunCase("unrelated-alt-f4-passes-source",Chord(0x73),0,0,-1,0,0,1));Need(configure(0)==1,"DISABLE_PRIORITY_FAILED");
                 cases.Add(RunCase("removing-binding-restores-peer",Chord(0x44),0,1,-1,0,0,0));Need(configure(1)==1,"PRIORITY_D_BINDING_FAILED");context(IntPtr.Zero,1);
