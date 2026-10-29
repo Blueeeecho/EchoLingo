@@ -110,15 +110,15 @@ try {
     $result | Add-Member -NotePropertyName sourcePeerFixtureSha256 -NotePropertyValue (Get-FileHash -LiteralPath $fixture -Algorithm SHA256).Hash.ToLowerInvariant()
     $result | Add-Member -NotePropertyName standaloneNativeFixture -NotePropertyValue $true
     $historicalOk=$baselineExit -eq 0 -and $baseline.ok -and $baseline.executedCases -eq 9 -and $baseline.requiredCases -eq 9 -and
-        $baseline.laterHookOldPriorityFailureReproduced -and $baseline.nativeHookStopped -and $baseline.ownedPeerStopped
+        $baseline.laterHookOldPriorityFailureReproduced -and $baseline.historicalActivationRetargetReproduced -and $baseline.nativeHookStopped -and $baseline.ownedPeerStopped
     $result | Add-Member -NotePropertyName historicalControlPassed -NotePropertyValue ([bool]$historicalOk)
     if(-not $historicalOk){$result.ok=$false}
     $json=$result | ConvertTo-Json -Depth 16 -Compress
     [IO.File]::WriteAllText($report,$json,[Text.UTF8Encoding]::new($false))
     [IO.File]::WriteAllText($summary,$json,[Text.UTF8Encoding]::new($false))
     $json
-    if($exit -ne 0 -or -not $result.ok -or $result.executedCases -ne 32 -or $result.requiredCases -ne 32 -or
-       -not $result.laterHookOldPriorityFailureReproduced -or -not $historicalOk -or
+    if($exit -ne 0 -or -not $result.ok -or $result.executedCases -ne 35 -or $result.requiredCases -ne 35 -or
+       -not $result.laterHookOldPriorityFailureReproduced -or -not $result.changedSourceAltAnchorDiscardVerified -or -not $historicalOk -or
        -not $result.nativeHookStopped -or -not $result.ownedPeerStopped){exit 1}
 }catch{
     $json=@{ok=$false;standaloneNativeFixture=$true;stage='fixture-entry';error=$_.Exception.Message;actualApplicationTested=$false;actualWpsTested=$false;actualDoubaoTested=$false;userContentRead=$false;historicalControl=$baseline}|ConvertTo-Json -Depth 16 -Compress

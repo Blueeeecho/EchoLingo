@@ -59,7 +59,10 @@ pub extern "system" fn EchoLingoPriorityCapture(token: u64) {
 }
 
 /// Caller owns exactly eight writable u64 slots. The final two are metadata
-/// handles, never text or clipboard content. 0 means no event; -1 is ABI error.
+/// handles, never text or clipboard content. Current production queues only an
+/// accepted Alt-anchored pair; the fixed historical build intentionally exposes
+/// a later hook's generated-decoy retarget as a required red control.
+/// 0 means no event; -1 is ABI error.
 #[unsafe(no_mangle)]
 pub unsafe extern "system" fn EchoLingoPriorityPoll(values: *mut u64, count: u32) -> i32 {
     if values.is_null() || count != 8 {

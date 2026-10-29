@@ -78,6 +78,7 @@ public static class WindowsPriorityInputFixture {
         return Marshal.GetDelegateForFunctionPointer(address,typeof(T)) as T;
     }
     static INPUT Key(ushort key,bool up) { INPUT value=new INPUT();value.type=1;value.data.keyboard.key=key;value.data.keyboard.flags=up?2U:0U;return value; }
+    static INPUT AltKey(bool right,bool up) { INPUT value=Key(right?(ushort)0xa5:(ushort)0xa4,up);if(right)value.data.keyboard.flags|=1;return value; }
     static INPUT Side(uint button,bool up) { INPUT value=new INPUT();value.data.mouse.data=button;value.data.mouse.flags=up?0x100U:0x80U;return value; }
     static void Send(params INPUT[] values) { Need(SendInput((uint)values.Length,values,Marshal.SizeOf(typeof(INPUT)))==(uint)values.Length,"OWN_SENDINPUT_REJECTED"); }
     static void Wait(Func<bool> predicate,int milliseconds,string reason) {
@@ -105,11 +106,12 @@ public static class WindowsPriorityInputFixture {
     static Dictionary<string,object> RunCase(string name,INPUT[] inputs,uint expectedId,int peerHotkey,int sourceSuffix,int side,uint expectedLease,int closeRequests) {
         pendingCase=new Dictionary<string,object>{{"name",name},{"expectedNativeId",expectedId},{"expectedPeerHotkey",peerHotkey},{"expectedRecordingLease",expectedLease}};
         bool pointer=side!=0;long[] before=Prepare(pointer);Need(Drain().Count==0,"UNEXPECTED_PENDING_NATIVE_EVENT");
-        List<ulong[]> events=new List<ulong[]>();pendingCase["peerBefore"]=before;pendingCase["nativeEvents"]=events;Send(inputs);
+        List<ulong[]> events=new List<ulong[]>();pendingCase["peerBefore"]=before;pendingCase["nativeEvents"]=events;ownedHeldKeys=true;Send(inputs);
         Wait(delegate {
             events.AddRange(Drain());long[] now=Snapshot();bool peerDone=side==0?now[AltUp]>before[AltUp]:expectedId!=0||now[side==1?X1Up:X2Up]>before[side==1?X1Up:X2Up];
             return Released()&&peerDone&&(expectedId==0||events.Count>0)&&(peerHotkey==0||now[peerHotkey==1?HotD:HotS]>before[peerHotkey==1?HotD:HotS])&&(closeRequests==0||now[CloseRequest]>before[CloseRequest]);
         },2500,"OWN_INPUT_COMPLETION:"+name);
+        ownedHeldKeys=false;
         // A bounded negative observation, never a product preparation delay.
         Stopwatch quiet=Stopwatch.StartNew();while(quiet.ElapsedMilliseconds<QuietObservationMilliseconds) {events.AddRange(Drain());Application.DoEvents();Thread.Sleep(1);}
         long[] after=Snapshot();Need(events.Count==(expectedId==0?0:1),"WRONG_NATIVE_EVENT_COUNT:"+name);
@@ -141,8 +143,8 @@ public static class WindowsPriorityInputFixture {
         Prepare(false);if(!legacy){ulong ready=Diag(RecoverySuccesses);Need(recover()==1,"PRE_CONTROL_RECOVERY_REQUEST_REJECTED");Wait(delegate{return Diag(RecoverySuccesses)>ready&&Diag(RecoveryPending)==0;},2500,"PRE_CONTROL_HOOK_READY");}Ask(mode==1?3:4);long[] before=Snapshot();Need(before[LateInstalled]==1&&before[LateMode]==mode,"LATER_ACTIVE_HOOK_NOT_INSTALLED");Need(Drain().Count==0,"LATE_HOOK_PENDING_EVENT");
         ulong[] diagBefore=legacy?null:Diagnostics();pendingCase["peerBefore"]=before;if(diagBefore!=null)pendingCase["diagnosticsBefore"]=diagBefore;
         if(restored){ulong successes=Diag(RecoverySuccesses),requests=Diag(RecoveryRequests);Need(recover()==1,"KEYBOARD_RECOVERY_REQUEST_REJECTED");Wait(delegate{return Diag(RecoveryRequests)>requests&&Diag(RecoverySuccesses)>successes&&Diag(RecoveryPending)==0;},2500,"REAL_KEYBOARD_RECOVERY_COMPLETED");Need(Diag(RecoveryFailures)==diagBefore[RecoveryFailures],"KEYBOARD_RECOVERY_FAILED");}
-        List<ulong[]> events=new List<ulong[]>();pendingCase["nativeEvents"]=events;Send(Chord(key));
-        Wait(delegate{events.AddRange(Drain());long[] now=Snapshot();return Released()&&now[AltUp]>before[AltUp]&&(restored?events.Count>0:now[LateUp]>before[LateUp]);},2500,"LATER_ACTIVE_INPUT_COMPLETED:"+name);Quiet(events);long[] after=Snapshot();
+        List<ulong[]> events=new List<ulong[]>();pendingCase["nativeEvents"]=events;ownedHeldKeys=true;Send(Chord(key));
+        Wait(delegate{events.AddRange(Drain());long[] now=Snapshot();return Released()&&now[AltUp]>before[AltUp]&&(restored?events.Count>0:now[LateUp]>before[LateUp]);},2500,"LATER_ACTIVE_INPUT_COMPLETED:"+name);ownedHeldKeys=false;Quiet(events);long[] after=Snapshot();
         Need(after[HotD]==before[HotD]&&after[HotS]==before[HotS],"LATER_ACTIVE_REGISTERHOTKEY_UNEXPECTED_DELIVERY:"+name);
         Need(SameSelection(before,after),"LATER_ACTIVE_SELECTION_CHANGED:"+name);
         int originalEvents=0;foreach(ulong[] value in events)if(value[6]==(ulong)before[Window]&&value[7]==(ulong)before[Editor])originalEvents++;
@@ -151,15 +153,19 @@ public static class WindowsPriorityInputFixture {
             Need(after[LateDown]==before[LateDown]&&after[LateUp]==before[LateUp]&&after[LateActions]==before[LateActions]&&after[LateSwallowedDown]==before[LateSwallowedDown]&&after[LateSwallowedUp]==before[LateSwallowedUp],"RECOVERY_DID_NOT_EXCLUDE_LATER_ACTIVE_PEER:"+name);
             Need(after[SuffixDown]==before[SuffixDown]&&after[SuffixUp]==before[SuffixUp]&&after[Foreground]==1&&after[FocusFlag]==1&&after[KeyMenu]==before[KeyMenu]&&after[MenuLoop]==before[MenuLoop]&&after[AppCommand]==before[AppCommand],"RECOVERY_CHANGED_OR_DELIVERED_TO_SOURCE:"+name);
         }else{
-            // These are measured negative controls, never product acceptance:
-            // the later hook either consumes both suffix events or activates
-            // its own generated second window before chaining to production.
+            // The fixed historical module must actually enqueue the decoy
+            // context. Current production must discard that changed-source
+            // pair; only the later consumer remains a priority-loss control.
             Need(after[LateDown]-before[LateDown]==1&&after[LateUp]-before[LateUp]==1&&after[LateActions]-before[LateActions]==1,"LATER_ACTIVE_HYPOTHESIS_NOT_REPRODUCED:"+name);
-            Need(originalEvents==0&&events.Count<=1,"UNRECOVERED_EVENT_MISIDENTIFIED_AS_ORIGINAL_SOURCE:"+name);
+            Need(originalEvents==0,"UNRECOVERED_EVENT_MISIDENTIFIED_AS_ORIGINAL_SOURCE:"+name);
             if(mode==1)Need(events.Count==0&&after[LateSwallowedDown]-before[LateSwallowedDown]==1&&after[LateSwallowedUp]-before[LateSwallowedUp]==1,"LATE_CONSUMER_DID_NOT_REPRODUCE_OLD_FAILURE:"+name);
-            else{Need(after[DecoyForeground]==1&&after[DecoyFocus]==1,"LATE_ACTIVATION_DID_NOT_REPRODUCE_SOURCE_CHANGE:"+name);foreach(ulong[] value in events)Need(value[6]==(ulong)before[DecoyWindow]&&value[7]==(ulong)before[DecoyEditor],"UNRECOVERED_NEW_WINDOW_CONTEXT_UNEXPLAINED:"+name);}
+            else{
+                Need(after[DecoyForeground]==1&&after[DecoyFocus]==1,"LATE_ACTIVATION_DID_NOT_REPRODUCE_SOURCE_CHANGE:"+name);
+                if(legacy)Need(events.Count==1&&events[0][0]==(key==0x44?1U:2U)&&events[0][6]==(ulong)before[DecoyWindow]&&events[0][7]==(ulong)before[DecoyEditor],"HISTORICAL_ACTIVATION_RETARGET_NOT_REPRODUCED:"+name);
+                else Need(events.Count==0&&Diag(DiscardedPairs)==diagBefore[DiscardedPairs]+1&&Diag(AcceptedPairs)==diagBefore[AcceptedPairs]&&Diag(Enqueued)==diagBefore[Enqueued]&&Diag(ObservedDown)==diagBefore[ObservedDown]+1&&Diag(ObservedUp)==diagBefore[ObservedUp]+1,"ALT_ANCHOR_DID_NOT_DISCARD_CHANGED_SOURCE:"+name);
+            }
         }
-        Dictionary<string,object> result=new Dictionary<string,object>{{"name",name},{"ok",true},{"controlOnly",!restored},{"historicalSourceControl",legacy},{"lateHookInstalledAfterNative",true},{"latePeerMode",mode},{"recoveryRequested",restored},{"nativeEvents",events},{"originalSourceEventCount",originalEvents},{"peerActionCount",after[LateActions]-before[LateActions]},{"peerSuffixDowns",after[LateDown]-before[LateDown]},{"peerSuffixUps",after[LateUp]-before[LateUp]},{"peerSwallowedDowns",after[LateSwallowedDown]-before[LateSwallowedDown]},{"peerSwallowedUps",after[LateSwallowedUp]-before[LateSwallowedUp]},{"sourceSelectionPreserved",SameSelection(before,after)},{"sourceStillForeground",after[Foreground]==1},{"sourceFocusIsEditor",after[FocusFlag]==1},{"sourceScKeyMenu",after[KeyMenu]-before[KeyMenu]},{"sourceMenuLoops",after[MenuLoop]-before[MenuLoop]},{"generatedDecoyIsForeground",after[DecoyForeground]==1},{"queuedGeneratedDecoyEventCount",events.Count-originalEvents},{"nativeCaptureOrCopyInvoked",false}};
+        Dictionary<string,object> result=new Dictionary<string,object>{{"name",name},{"ok",true},{"controlOnly",legacy||(!restored&&mode==1)},{"sourceAnchorSafetyAcceptance",!legacy&&!restored&&mode==2},{"historicalSourceControl",legacy},{"lateHookInstalledAfterNative",true},{"latePeerMode",mode},{"recoveryRequested",restored},{"nativeEvents",events},{"originalSourceEventCount",originalEvents},{"peerActionCount",after[LateActions]-before[LateActions]},{"peerSuffixDowns",after[LateDown]-before[LateDown]},{"peerSuffixUps",after[LateUp]-before[LateUp]},{"peerSwallowedDowns",after[LateSwallowedDown]-before[LateSwallowedDown]},{"peerSwallowedUps",after[LateSwallowedUp]-before[LateSwallowedUp]},{"sourceSelectionPreserved",SameSelection(before,after)},{"sourceStillForeground",after[Foreground]==1},{"sourceFocusIsEditor",after[FocusFlag]==1},{"sourceScKeyMenu",after[KeyMenu]-before[KeyMenu]},{"sourceMenuLoops",after[MenuLoop]-before[MenuLoop]},{"generatedDecoyIsForeground",after[DecoyForeground]==1},{"queuedGeneratedDecoyEventCount",events.Count-originalEvents},{"nativeCaptureOrCopyInvoked",false}};
         if(!legacy){result["diagnosticsBefore"]=diagBefore;result["diagnosticsAfter"]=Diagnostics();}Ask(5);return result;
     }
     // change: 0=ordinary held pair, 1=disable binding while held,
@@ -248,7 +254,7 @@ public static class WindowsPriorityInputFixture {
         using(MemoryMappedFile memory=MemoryMappedFile.OpenExisting(name))using(MemoryMappedViewAccessor shared=memory.CreateViewAccessor())using(PeerForm form=new PeerForm(shared))Application.Run(form);return 0;
     }
     static Dictionary<string,object> Run(string library,bool legacy) {
-        int required=legacy?9:32;List<Dictionary<string,object>> cases=new List<Dictionary<string,object>>();Dictionary<string,object> result=new Dictionary<string,object>{{"ok",false},{"cases",cases},{"requiredCases",required},{"historicalSourceControl",legacy},{"productRecoveryAcceptance",!legacy},{"actualWindowsInputTested",true},{"syntheticSendInputOnly",true},{"physicalInputTested",false},{"actualApplicationTested",false},{"actualWpsTested",false},{"actualDoubaoTested",false},{"actualBrowserTested",false},{"externalOwnedRegisterHotKeyProcess",true},{"laterActiveHookProcess",true},{"peerPassThroughObservation","earlier-passive-hook-and-later-owned-active-hook-and-owned-window-messages"},{"userContentRead",false},{"clipboardRead",false},{"fixedPreparationSleepMilliseconds",0},{"negativeObservationMilliseconds",QuietObservationMilliseconds},{"heldContextRaceTested",!legacy},{"recordingLeaseExpiryClockTested",false},{"diagnosticFieldOrder",new string[]{"recoverySuccesses","recoveryRequests","recoveryAttempts","recoveryPending","recoveryDeferred","recoveryFailures","priorityKeyDownObserved","priorityKeyUpObserved","priorityPairsAccepted","priorityPairsDiscarded","recoveryOwnedPairsBlocked","eventsEnqueued","eventsStaleContext"}}};
+        int required=legacy?9:35;List<Dictionary<string,object>> cases=new List<Dictionary<string,object>>();Dictionary<string,object> result=new Dictionary<string,object>{{"ok",false},{"cases",cases},{"requiredCases",required},{"historicalSourceControl",legacy},{"productRecoveryAcceptance",!legacy},{"actualWindowsInputTested",true},{"syntheticSendInputOnly",true},{"physicalInputTested",false},{"actualApplicationTested",false},{"actualWpsTested",false},{"actualDoubaoTested",false},{"actualBrowserTested",false},{"externalOwnedRegisterHotKeyProcess",true},{"laterActiveHookProcess",true},{"peerPassThroughObservation","earlier-passive-hook-and-later-owned-active-hook-and-owned-window-messages"},{"userContentRead",false},{"clipboardRead",false},{"fixedPreparationSleepMilliseconds",0},{"negativeObservationMilliseconds",QuietObservationMilliseconds},{"heldContextRaceTested",!legacy},{"recordingLeaseExpiryClockTested",false},{"diagnosticFieldOrder",new string[]{"recoverySuccesses","recoveryRequests","recoveryAttempts","recoveryPending","recoveryDeferred","recoveryFailures","priorityKeyDownObserved","priorityKeyUpObserved","priorityPairsAccepted","priorityPairsDiscarded","recoveryOwnedPairsBlocked","eventsEnqueued","eventsStaleContext"}}};
         result["futureCompetingHookPriorityGuaranteed"]=false;result["ownedKeyUpMustBeObservedBeforeReinstall"]=true;result["knownRecoveryBoundary"]="If a later hook consumes an already-owned key-up, remain safely deferred until restart; never infer its release from asynchronous key state.";
         Stop stop=null;POINT pointer;bool pointerSaved=GetCursorPos(out pointer);IntPtr module=IntPtr.Zero;
         string name="Local\\EchoLingoPriority-"+Guid.NewGuid().ToString("N");
@@ -266,6 +272,9 @@ public static class WindowsPriorityInputFixture {
                 capture(41);cases.Add(RunCase("priority-alt-d-beats-peer-with-old-capture",Chord(0x44),1,0,0,0,0,0));capture(0);Need(current()==1,"OLDER_CAPTURE_END_INVALIDATED_NEW_KEYBOARD_INTENT");result["oldCaptureEndingDoesNotInvalidatePriorityEvent"]=true;Need(configure(3)==1&&current()==0,"QUEUED_OLD_CONTEXT_REMAINED_CURRENT");result["queuedEventInvalidatedByBindingRevision"]=true;
                 cases.Add(RunCase("priority-alt-s-beats-peer",Chord(0x53),2,0,0,0,0,0));
                 cases.Add(RunCase("repeat-still-one-paired-action",new INPUT[]{Key(0x12,false),Key(0x44,false),Key(0x44,false),Key(0x44,true),Key(0x12,true)},1,0,0,0,0,0));
+                cases.Add(RunCase("left-alt-repeat-still-one-source-action",new INPUT[]{AltKey(false,false),AltKey(false,false),Key(0x44,false),Key(0x44,true),AltKey(false,true)},1,0,0,0,0,0));
+                cases.Add(RunCase("right-alt-s-anchors-original-source",new INPUT[]{AltKey(true,false),Key(0x53,false),Key(0x53,true),AltKey(true,true)},2,0,0,0,0,0));
+                cases.Add(RunCase("both-alt-release-left-keeps-right-anchor",new INPUT[]{AltKey(false,false),AltKey(true,false),AltKey(false,true),Key(0x44,false),Key(0x44,true),AltKey(true,true)},1,0,0,0,0,0));
                 cases.Add(RunCase("ctrl-alt-d-passes-source",new INPUT[]{Key(0x11,false),Key(0x12,false),Key(0x44,false),Key(0x44,true),Key(0x12,true),Key(0x11,true)},0,0,1,0,0,0));
                 cases.Add(RunCase("unrelated-alt-f4-passes-source",Chord(0x73),0,0,-1,0,0,1));Need(configure(0)==1,"DISABLE_PRIORITY_FAILED");
                 cases.Add(RunCase("removing-binding-restores-peer",Chord(0x44),0,1,-1,0,0,0));Need(configure(1)==1,"PRIORITY_D_BINDING_FAILED");context(IntPtr.Zero,1);
@@ -280,6 +289,8 @@ public static class WindowsPriorityInputFixture {
                 }
                 foreach(int mode in new int[]{1,2})foreach(ushort key in new ushort[]{0x44,0x53})cases.Add(RunLateHookCase((legacy?"historical":"current")+"-unrecovered-later-"+(mode==1?"consumer":"activate-and-chain")+"-alt-"+(key==0x44?"d":"s"),key,mode,false,legacy));
                 result["laterHookOldPriorityFailureReproduced"]=true;
+                result["historicalActivationRetargetReproduced"]=legacy;
+                result["changedSourceAltAnchorDiscardVerified"]=!legacy;
                 if(!legacy){
                     foreach(int mode in new int[]{1,2})foreach(ushort key in new ushort[]{0x44,0x53})cases.Add(RunLateHookCase("recovered-later-"+(mode==1?"consumer":"activate-and-chain")+"-alt-"+(key==0x44?"d":"s"),key,mode,true,false));
                     cases.Add(RunHeldRecoveryCase("held-alt-d-defers-recovery-and-keeps-one-source-action",0x44,0,configure));cases.Add(RunHeldRecoveryCase("held-alt-s-defers-recovery-and-keeps-one-source-action",0x53,0,configure));
@@ -291,7 +302,7 @@ public static class WindowsPriorityInputFixture {
                 cases.Add(RunCase("stopping-hook-restores-peer",Chord(0x44),0,1,-1,0,0,0));Need(cases.Count==required,"FIXTURE_CASE_COUNT_CHANGED");result["ok"]=true;
             }catch(Exception error){result["error"]=error.Message;result["failedCase"]=pendingCase;try{result["failedCasePeerAfter"]=Snapshot();result["keysReleasedAtFailure"]=Released();}catch{result["failedCaseMetadataUnavailable"]=true;}}
             finally {
-                if(ownedHeldKeys){try{Send(Key(0x44,true),Key(0x53,true),Key(0x12,true));ownedHeldKeys=false;result["ownedHeldInputReleasedDuringCleanup"]=true;}catch{result["ownedHeldInputReleasedDuringCleanup"]=false;}}
+                if(ownedHeldKeys){try{Send(Key(0x44,true),Key(0x53,true),Key(0x12,true),AltKey(false,true),AltKey(true,true));ownedHeldKeys=false;result["ownedHeldInputReleasedDuringCleanup"]=true;}catch{result["ownedHeldInputReleasedDuringCleanup"]=false;}}
                 if(nativeStarted&&stop!=null){stop();nativeStarted=false;result["nativeHookStopped"]=true;}
                 if(peer!=null){try{bool killed=false;if(!peer.HasExited){map.Write(Command*8,2L);map.Write(Request*8,++request);if(!peer.WaitForExit(2500)){killed=true;peer.Kill();peer.WaitForExit(2500);}}result["ownedPeerStopped"]=peer.HasExited;result["ownedPeerForcedTermination"]=killed;if(peer.HasExited){result["ownedPeerExitCode"]=peer.ExitCode;if(killed||peer.ExitCode!=0)result["ok"]=false;}}catch{result["ok"]=false;result["ownedPeerStopped"]=false;}peer.Dispose();peer=null;}
                 if(pointerSaved)result["pointerRestored"]=SetCursorPos(pointer.x,pointer.y);result["executedCases"]=cases.Count;result["nativeLibraryHeldUntilProcessExit"]=module!=IntPtr.Zero;

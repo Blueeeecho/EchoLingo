@@ -321,8 +321,16 @@ unsafe extern "system" fn keyboard(code: i32, word: usize, param: isize) -> isiz
                         let _ = post_recovery(s);
                     }
                     let alt = matches!(k.key, 0x12 | 0xa4 | 0xa5);
-                    if alt && up {
-                        if PAIRS.with(|p| p.borrow_mut().alt_release()) {
+                    if alt {
+                        let side = if recovery_key == 8 {
+                            policy::Alt::Right
+                        } else {
+                            policy::Alt::Left
+                        };
+                        if down {
+                            let c = context(s);
+                            PAIRS.with(|p| p.borrow_mut().alt_down(side, c));
+                        } else if PAIRS.with(|p| p.borrow_mut().alt_up(side)) {
                             mask_alt();
                         }
                     } else if let Some((slot, bit, id)) = match k.key {
@@ -502,6 +510,7 @@ fn recover_keyboard(s: &Shared, keyboard: &mut Handle, orphan: &mut Option<Handl
         s.health.recovery_last_error.store(0, Ordering::Relaxed);
     }
     *keyboard = replacement;
+    PAIRS.with(|p| p.borrow_mut().reset_alt_anchor());
     s.health.recovery_successes.fetch_add(1, Ordering::Relaxed);
 }
 pub fn start(priority_ids: [u32; 2]) -> Result<Receiver<Event>, String> {
