@@ -195,7 +195,9 @@ public static class EchoLingoApplicationSmoke {
             int parent;
             if (!helperParents.TryGetValue(owner, out parent)) { parent = ParentPid((int)owner); helperParents.Add(owner, parent); }
             if (parent == appId) {
-                RECT rectangle; Assert(GetWindowRect(window, out rectangle), "Cannot inspect the actual app's capture border geometry.");
+                // A capture can finish while this scan is running. A destroyed edge is not a live border.
+                if (!IsWindow(window)) return true;
+                RECT rectangle; if (!GetWindowRect(window, out rectangle) || !IsWindow(window)) return true;
                 int width = rectangle.right - rectangle.left, height = rectangle.bottom - rectangle.top;
                 Assert(width > 0 && height > 0 && Math.Min(width, height) <= 2, "Actual OCR still created a full-screen overlay surface instead of thin edges.");
                 result.Add(new AppEdge { Handle = window, ProcessId = owner, ParentProcessId = parent,
