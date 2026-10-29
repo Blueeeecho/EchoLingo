@@ -2538,9 +2538,9 @@ sealed class CaptureInputPump : IDisposable {
     public void Dispose() { if (Stop()) ready.Dispose(); }
 }
 
-// A small topmost loupe beside the pointer. It is not layered or click-through,
-// so thin-edge accounting ignores it by title EchoLingoCaptureMagnifier. The
-// window stays outside the sampled square so CopyFromScreen cannot see itself.
+// A small topmost loupe beside the pointer. It is click-through but not layered,
+// so it is not one of the thin edges. Title EchoLingoCaptureMagnifier identifies it.
+// The window stays outside the sampled square so CopyFromScreen cannot see itself.
 sealed class CaptureMagnifier : Form {
     public const string WindowTitle = "EchoLingoCaptureMagnifier";
     const int Sample = 52, Zoom = 3, View = Sample * Zoom, Caption = 18, Gap = 16;
