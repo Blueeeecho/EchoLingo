@@ -1106,7 +1106,12 @@ fn shortcut_registration_message(active: bool, stored: Option<&str>) -> Option<S
     })
 }
 
-fn inactive_retry_actions(settings: &Settings, registered_ids: &[u32], failures: &std::collections::BTreeMap<String, String>, native_active: impl Fn(&Binding) -> bool) -> Result<Vec<String>, String> {
+fn inactive_retry_actions(
+    settings: &Settings,
+    registered_ids: &[u32],
+    failures: &std::collections::BTreeMap<String, String>,
+    native_active: impl Fn(&Binding) -> bool,
+) -> Result<Vec<String>, String> {
     let mut actions = Vec::new();
     for (action, binding) in parsed_shortcuts(&settings.shortcuts)? {
         let active = registered_ids.contains(&binding.id()) && native_active(&binding);
@@ -1995,7 +2000,10 @@ fn actionable_capture_hint(action: &str, error: &str) -> Option<String> {
     if !matches!(action, "capture" | "ocr" | "silentOcr") || !error.starts_with("CANCELLED") {
         return None;
     }
-    let body = error.split_once(':').map(|(_, rest)| rest.trim()).unwrap_or("");
+    let body = error
+        .split_once(':')
+        .map(|(_, rest)| rest.trim())
+        .unwrap_or("");
     if body.contains("太小") || body.contains("拖动") || body.contains("超时，已取消") {
         Some("请按住左键拖选要识别的区域。Esc 或右键取消。".into())
     } else {
@@ -3985,7 +3993,9 @@ mod tests {
             friendly_shortcut_error("selection（Alt+D）：系统注册失败：AlreadyRegistered"),
             "被其他程序占用。可一键更换，或等对方退出后自动重试。"
         );
-        assert!(friendly_shortcut_error("Windows 为调试器保留 F12，请选择其他按键").contains("保留"));
+        assert!(
+            friendly_shortcut_error("Windows 为调试器保留 F12，请选择其他按键").contains("保留")
+        );
         assert_eq!(
             shortcut_registration_message(false, None).as_deref(),
             Some("快捷键没有注册成功，可能被其他程序占用。")
@@ -4007,7 +4017,11 @@ mod tests {
     #[test]
     fn tiny_or_timed_out_region_capture_tells_the_user_how_to_drag() {
         assert_eq!(
-            visible_action_error("silentOcr", "CANCELLED: 框选区域太小；请按住左键拖动选择区域。").as_deref(),
+            visible_action_error(
+                "silentOcr",
+                "CANCELLED: 框选区域太小；请按住左键拖动选择区域。"
+            )
+            .as_deref(),
             Some("请按住左键拖选要识别的区域。Esc 或右键取消。")
         );
         assert_eq!(

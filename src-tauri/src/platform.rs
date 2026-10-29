@@ -1720,7 +1720,10 @@ mod tests {
             }),
             "b"
         );
-        assert_eq!(super::keyboard_focus_target("only", |_| None::<&str>), "only");
+        assert_eq!(
+            super::keyboard_focus_target("only", |_| None::<&str>),
+            "only"
+        );
     }
     #[test]
     fn forced_selection_stop_never_claims_clipboard_cleanup_or_hides_its_warning() {
