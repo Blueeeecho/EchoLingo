@@ -1137,7 +1137,7 @@ jobs:
           } elseif ('${{ github.event.inputs.mode }}' -eq 'windows-selection-application-diagnostics') {
             $hash = (Get-FileHash -LiteralPath $env:ECHOLINGO_APPLICATION_CANDIDATE -Algorithm SHA256).Hash.ToLowerInvariant()
             $bytes = (Get-Item -LiteralPath $env:ECHOLINGO_APPLICATION_CANDIDATE).Length
-            $output = @(& powershell.exe -NoProfile -STA -ExecutionPolicy Bypass -File tests/windows-selection-application-smoke.ps1 -ApplicationPath $env:ECHOLINGO_APPLICATION_CANDIDATE -ExpectedApplicationSha256 $hash -ExpectedApplicationBytes $bytes -IsolatedTestSession 2>&1)
+            $output = @(& powershell.exe -NoProfile -STA -ExecutionPolicy Bypass -File tests/windows-selection-application-smoke.ps1 -ApplicationPath $env:ECHOLINGO_APPLICATION_CANDIDATE -ExpectedApplicationSha256 $hash -ExpectedApplicationBytes $bytes -ExpectedApplicationVersion 0.1.0 -IsolatedTestSession 2>&1)
           } else {
             $output = @(& powershell.exe -NoProfile -STA -ExecutionPolicy Bypass -File tests/windows-application-smoke.ps1 -ApplicationPath $env:ECHOLINGO_APPLICATION_CANDIDATE -LatestIntentTests 2>&1)
           }
@@ -1369,7 +1369,7 @@ jobs:
         run: |
           $ErrorActionPreference = 'Continue'
           $global:LASTEXITCODE = 1
-          $output = @(& powershell.exe -NoProfile -STA -ExecutionPolicy Bypass -File tests/windows-selection-application-smoke.ps1 -ApplicationPath '${{ steps.candidate.outputs.path }}' -ExpectedApplicationSha256 8490a973c9e4f4568b851f61524a4ef8f554d8b3a506b12dd19ba34f0dd22a4b -ExpectedApplicationBytes 5825536 -IsolatedTestSession 2>&1)
+          $output = @(& powershell.exe -NoProfile -STA -ExecutionPolicy Bypass -File tests/windows-selection-application-smoke.ps1 -ApplicationPath '${{ steps.candidate.outputs.path }}' -ExpectedApplicationSha256 8490a973c9e4f4568b851f61524a4ef8f554d8b3a506b12dd19ba34f0dd22a4b -ExpectedApplicationBytes 5825536 -ExpectedApplicationVersion 0.1.0 -IsolatedTestSession 2>&1)
           $code = $LASTEXITCODE
           $output | Out-File "$env:RUNNER_TEMP/echolingo-selection-winforms.log" -Encoding utf8
           $output | Write-Output

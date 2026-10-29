@@ -50,7 +50,7 @@ public static class WindowsSelectionApplicationFixture {
     [StructLayout(LayoutKind.Sequential)] struct KEY {public ushort vk,scan;public uint flags,time;public UIntPtr extra;}
     static Process App;static IntPtr Main;static string History,Provider;static Mock Server;
     const string ConfiguredWindowsSelectionStrategy="auto";
-    static ProcessStartInfo DiagnosticPrimaryStart;static string DiagnosticExecutable,DiagnosticRoaming,DiagnosticToken;
+    static ProcessStartInfo DiagnosticPrimaryStart;static string DiagnosticExecutable,DiagnosticRoaming,DiagnosticToken,ExpectedApplicationVersion;
     static Dictionary<string,object> Report;static readonly List<Dictionary<string,object>> Cases=new List<Dictionary<string,object>>();
     static readonly Dictionary<TextBoxBase,int> SourceVersions=new Dictionary<TextBoxBase,int>();
     static readonly Dictionary<TextBoxBase,int> MouseDownCounts=new Dictionary<TextBoxBase,int>(),MouseUpCounts=new Dictionary<TextBoxBase,int>();
@@ -187,7 +187,7 @@ public static class WindowsSelectionApplicationFixture {
             Need((File.GetAttributes(roaming)&FileAttributes.ReparsePoint)==0&&File.ReadAllText(Path.Combine(roaming,Marker))==token&&(File.GetAttributes(file)&FileAttributes.ReparsePoint)==0,"DIAGNOSTIC_FILE_OWNERSHIP_CHANGED");
             byte[] bytes=File.ReadAllBytes(file);Need(bytes.Length>0&&bytes.Length<=16384,"DIAGNOSTIC_FILE_BOUND");Dictionary<string,object> payload=Json.Deserialize<Dictionary<string,object>>(Encoding.UTF8.GetString(bytes));
             HashSet<string> metadata=new HashSet<string>(new string[]{"diagnostic","recordedAtUnixMs","appVersion","processId","executablePath","diagnostics"});Need(payload.Count==metadata.Count,"DIAGNOSTIC_METADATA_SCHEMA");foreach(string key in payload.Keys)Need(metadata.Contains(key),"DIAGNOSTIC_METADATA_FIELD");
-            Need((string)payload["diagnostic"]=="last-selection-attempt"&&(string)payload["appVersion"]=="0.1.0"&&DiagnosticNumber(payload["processId"],Int32.MaxValue)==primaryPid,"DIAGNOSTIC_PRIMARY_METADATA_MISMATCH");
+            Need((string)payload["diagnostic"]=="last-selection-attempt"&&(string)payload["appVersion"]==ExpectedApplicationVersion&&DiagnosticNumber(payload["processId"],Int32.MaxValue)==primaryPid,"DIAGNOSTIC_PRIMARY_METADATA_MISMATCH");
             Need(String.Equals((string)payload["executablePath"],Path.GetFullPath(executable),StringComparison.OrdinalIgnoreCase),"DIAGNOSTIC_EXPORTED_EXECUTABLE_MISMATCH");
             long recorded=DiagnosticNumber(payload["recordedAtUnixMs"],Int64.MaxValue),latest=(long)(DateTime.UtcNow-new DateTime(1970,1,1,0,0,0,DateTimeKind.Utc)).TotalMilliseconds;Need(recorded>=earliest&&recorded<=latest,"DIAGNOSTIC_TIMESTAMP_OUTSIDE_EXPLICIT_CALL");
             Dictionary<string,object> health=payload["diagnostics"] as Dictionary<string,object>;Need(health!=null,"DIAGNOSTIC_LAST_SELECTION_MISSING");
@@ -333,9 +333,10 @@ public static class WindowsSelectionApplicationFixture {
     static void Claim(string path,string token,List<string> owned){Need(CreateDirectory(path,IntPtr.Zero),"EXISTING_DIRECTORY_REFUSED");File.WriteAllText(Path.Combine(path,Marker),token,new UTF8Encoding(false));owned.Add(path);}
     static void Remove(string path,string token){if(!Directory.Exists(path))return;Need((File.GetAttributes(path)&FileAttributes.ReparsePoint)==0&&File.ReadAllText(Path.Combine(path,Marker))==token,"OWNERSHIP_CHANGED_DIRECTORY_PRESERVED");for(int i=0;;i++){try{Directory.Delete(path,true);return;}catch(IOException){if(i>=19)throw;}catch(UnauthorizedAccessException){if(i>=19)throw;}Thread.Sleep(100);}}
     static void KillOwn(){if(App==null||App.HasExited)return;ProcessStartInfo s=new ProcessStartInfo("taskkill.exe","/PID "+App.Id+" /T /F");s.UseShellExecute=false;s.CreateNoWindow=true;s.RedirectStandardOutput=true;s.RedirectStandardError=true;using(Process p=Process.Start(s)){p.StandardOutput.ReadToEnd();p.StandardError.ReadToEnd();Need(p.WaitForExit(10000),"OWN_TREE_KILL_TIMEOUT");}Need(App.WaitForExit(5000),"OWN_APP_REMAINED");}
-    public static Dictionary<string,object> Run(string executable){
+    public static Dictionary<string,object> Run(string executable,string expectedApplicationVersion){
+        Need(!String.IsNullOrWhiteSpace(expectedApplicationVersion)&&expectedApplicationVersion.Length<=128,"EXPECTED_APPLICATION_VERSION_REQUIRED");ExpectedApplicationVersion=expectedApplicationVersion;
         Cases.Clear();SourceVersions.Clear();MouseDownCounts.Clear();MouseUpCounts.Clear();PreviousSelectionDown.Clear();MouseSelectionPlacement=0;ForbiddenFocusB=null;FocusRaceCase=null;ExplicitFocusBAllowed=0;UnexpectedFocusB=0;Hotkeys=0;Report=new Dictionary<string,object>{{"ok",false},{"cases",Cases},{"actualApplicationTested",false},{"actualRegisteredAltD",true},{"fakeIpcUsed",false},{"translationBackend","loopback-mock"},{"userContentRead",false},{"physicalWindows11Tested",false},{"browserTested",false},{"fullscreenTested",false},{"multiMonitorTested",false},{"credentialsCreated",false},{"credentialScope","One random absent mock provider; no existing credentials"},{"sameHotkeyRetries",0}};
-        Report["configuredWindowsSelectionStrategy"]=ConfiguredWindowsSelectionStrategy;Report["defaultWindowsSelectionStrategyUnderTest"]=false;DiagnosticPrimaryStart=null;DiagnosticExecutable=executable;
+        Report["configuredWindowsSelectionStrategy"]=ConfiguredWindowsSelectionStrategy;Report["defaultWindowsSelectionStrategyUnderTest"]=false;Report["expectedApplicationVersion"]=ExpectedApplicationVersion;DiagnosticPrimaryStart=null;DiagnosticExecutable=executable;
         string token=Guid.NewGuid().ToString("N"),root=Path.Combine(Path.GetTempPath(),"echolingo-selection-app-"+token),roaming=Path.Combine(KnownFolder("3EB685DB-65F9-4CF6-A03A-E3EF65729F3D"),Identifier),local=Path.Combine(KnownFolder("F1B32785-6FBA-4FCF-9D55-7B8E7F157091"),Identifier);List<string> owned=new List<string>();
         foreach(Process p in Process.GetProcessesByName(Path.GetFileNameWithoutExtension(executable)))using(p)Need(p.HasExited,"EXISTING_APPLICATION_REFUSED");
         try{

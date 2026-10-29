@@ -2,7 +2,7 @@ name: Publish preview release
 on:
   workflow_dispatch:
   push:
-    tags: ['v*']
+    tags: ['v*', '0.*']
 permissions:
   contents: write
 jobs:
@@ -103,38 +103,91 @@ jobs:
       - name: Windows native self-test
         if: runner.os == 'Windows'
         shell: powershell
-        run: powershell.exe -NoProfile -STA -ExecutionPolicy Bypass -File src-tauri/native/windows.ps1 -Mode self-test
+        run: |
+          $ErrorActionPreference = 'Continue'
+          $global:LASTEXITCODE = 1
+          $output = @(& powershell.exe -NoProfile -STA -ExecutionPolicy Bypass -File src-tauri/native/windows.ps1 -Mode self-test 2>&1)
+          $fixtureExit = $LASTEXITCODE
+          $output | Out-File "$env:RUNNER_TEMP/echolingo-release-native-self-test.log" -Encoding utf8
+          $output | Write-Output
+          exit $fixtureExit
       - name: Windows selected-text and clipboard desktop smoke
         if: runner.os == 'Windows'
         shell: powershell
-        run: powershell.exe -NoProfile -STA -ExecutionPolicy Bypass -File tests/windows-native-smoke.ps1
+        run: |
+          $ErrorActionPreference = 'Continue'
+          $global:LASTEXITCODE = 1
+          $output = @(& powershell.exe -NoProfile -STA -ExecutionPolicy Bypass -File tests/windows-native-smoke.ps1 2>&1)
+          $fixtureExit = $LASTEXITCODE
+          $output | Out-File "$env:RUNNER_TEMP/echolingo-release-native-selection.log" -Encoding utf8
+          $output | Write-Output
+          exit $fixtureExit
+      - name: Windows exact priority keyboard and optional side-button input
+        if: runner.os == 'Windows'
+        timeout-minutes: 8
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Continue'
+          $global:LASTEXITCODE = 1
+          $output = @(& powershell.exe -NoProfile -STA -ExecutionPolicy Bypass -File tests/windows-priority-input-smoke.ps1 -OutputDirectory "$env:RUNNER_TEMP/echolingo-release-priority-input" -IsolatedTestSession 2>&1)
+          $fixtureExit = $LASTEXITCODE
+          $output | Out-File "$env:RUNNER_TEMP/echolingo-release-priority-input.log" -Encoding utf8
+          $output | Write-Output
+          exit $fixtureExit
       - uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
-          tagName: v__VERSION__
-          releaseName: EchoLingo v__VERSION__ · Preview
+          tagName: __VERSION__
+          releaseName: EchoLingo · 回声译 __VERSION__
           releaseBody: |
-            Windows-first lightweight translation and offline OCR preview.
-            Windows includes bundled offline English-Chinese translation; macOS uses installed Apple translation models when available.
-            Configure optional translation APIs in Settings. No API key is included.
-            Unsigned Windows / ad-hoc signed macOS preview; no store submission or notarization.
-            Usage and source-build instructions are in README.md and docs/build.md.
+            EchoLingo · 回声译 内测版 Beta2。
+
+            选中文字后快捷翻译，或左键框选进行 OCR 并自动翻译。支持自定义快捷键、翻译服务、主题和翻译历史。
+
+            Windows：下载并运行 x64 安装程序。
+            macOS：打开 DMG，将 EchoLingo 拖入 Applications。此为未公证预览包，安装指引见 README。
           releaseDraft: true
           prerelease: true
           args: ${{ matrix.args }}
+      - name: Actual packaged Windows shortcut settings and automatic saving
+        if: runner.os == 'Windows'
+        timeout-minutes: 4
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Continue'
+          $output = @(); $fixtureExit = 1
+          $global:LASTEXITCODE = 1
+          try {
+            $candidate = (Resolve-Path src-tauri/target/release/echolingo.exe).Path
+            $hash = (Get-FileHash -LiteralPath $candidate -Algorithm SHA256).Hash.ToLowerInvariant()
+            $bytes = (Get-Item -LiteralPath $candidate).Length
+            $output = @(& powershell.exe -NoProfile -STA -ExecutionPolicy Bypass -File tests/windows-shortcuts-uia-smoke.ps1 -ApplicationPath $candidate -ExpectedApplicationSha256 $hash -ExpectedApplicationBytes $bytes -IsolatedTestSession 2>&1)
+            $fixtureExit = $LASTEXITCODE
+          } finally {
+            $output | Out-File "$env:RUNNER_TEMP/echolingo-release-shortcuts-ui.log" -Encoding utf8
+            $output | Write-Output
+          }
+          exit $fixtureExit
       - name: Windows installed NSIS real offline-model acceptance
         if: runner.os == 'Windows'
         timeout-minutes: 25
         shell: powershell
-        run: powershell.exe -NoProfile -STA -ExecutionPolicy Bypass -File scripts/windows-offline-translation-test.ps1
+        run: |
+          $ErrorActionPreference = 'Continue'
+          $global:LASTEXITCODE = 1
+          $output = @(& powershell.exe -NoProfile -STA -ExecutionPolicy Bypass -File scripts/windows-offline-translation-test.ps1 2>&1)
+          $fixtureExit = $LASTEXITCODE
+          $output | Out-File "$env:RUNNER_TEMP/echolingo-release-installed-offline.log" -Encoding utf8
+          $output | Write-Output
+          exit $fixtureExit
       - name: Attach corresponding offline source to the unpublished preview
         if: runner.os == 'Windows'
         shell: pwsh
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          $tag = 'v' + (Get-Content -Raw package.json | ConvertFrom-Json).version
+          $tag = (Get-Content -Raw package.json | ConvertFrom-Json).version
           gh release upload $tag "$env:RUNNER_TEMP/EchoLingo-offline-engine-source.zip" --clobber
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Preserve offline acceptance and corresponding source evidence
@@ -145,8 +198,20 @@ jobs:
           if-no-files-found: warn
           path: |
             ${{ runner.temp }}/echolingo-offline-validation.json
+            ${{ runner.temp }}/echolingo-release-*.log
+            ${{ runner.temp }}/echolingo-priority-input-validation.json
+            ${{ runner.temp }}/echolingo-release-priority-input/report.json
             ${{ runner.temp }}/EchoLingo-offline-engine-source.zip
             resources/offline-translation/manifest.json
             src-tauri/target/release/echolingo.exe
             ${{ runner.temp }}/echolingo-offline-engine-build/build-windows/CMakeCache.txt
             ${{ runner.temp }}/echolingo-offline-engine-build/build-windows/build.ninja
+      - name: Preserve built preview installers on every outcome
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: EchoLingo-release-${{ runner.os }}
+          if-no-files-found: warn
+          path: |
+            src-tauri/target/release/bundle/nsis/*.exe
+            src-tauri/target/release/bundle/dmg/*.dmg
