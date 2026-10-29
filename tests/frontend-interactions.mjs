@@ -142,6 +142,8 @@ try {
           (fixture.shortcutRetryActions ??= []).push(structuredClone(args.retryShortcutActions ?? []));
           if (fixture.holdSave) await new Promise((resolve) => { fixture.releaseSave = resolve; });
           if (fixture.failSave) throw new Error('QA save failure');
+          const unavailable = args.retryShortcutActions?.find((action) => fixture.unavailableShortcutActions?.includes(action));
+          if (unavailable) throw new Error(`QA unavailable shortcut: ${unavailable}`);
           fixture.settings = structuredClone(args.settings);
           for (const provider of fixture.settings.ocrProviders ?? []) provider.hasKey = ocrKeys.has(scope(provider));
           for (const provider of fixture.settings.providers) provider.hasKey = translationKeys.has(scope(provider));
@@ -798,6 +800,42 @@ try {
   await page.locator('#shortcut-feedback').getByText('快捷键已保存并立即生效', { exact: false }).waitFor();
   assert.equal(await page.evaluate(() => window.__qa.saveCalls), beforeRecordedSave + 1);
   assert.deepEqual(await page.evaluate(() => window.__qa.shortcutRetryActions.at(-1)), ['selection']);
+  // Editing one or several rows must not explicitly retry an unrelated
+  // inactive registration. An unchanged explicit save remains a retry intent.
+  const beforeManualRows = await page.evaluate(() => {
+    window.__qa.unavailableShortcutActions = ['input'];
+    return { saves: window.__qa.saveCalls, shortcuts: structuredClone(window.__qa.settings.shortcuts) };
+  });
+  await page.locator('#shortcut-selection').fill('Ctrl+Shift+K');
+  await page.locator('#save-shortcuts').click();
+  await page.waitForFunction((count) => window.__qa.saveCalls === count + 1 && !document.querySelector('#save-shortcuts').disabled, beforeManualRows.saves);
+  assert.equal(await page.evaluate(() => window.__qa.settings.shortcuts.selection), 'Ctrl+Shift+K');
+  assert.equal(await page.evaluate(() => window.__qa.settings.shortcuts.input), beforeManualRows.shortcuts.input);
+  assert.deepEqual(await page.evaluate(() => window.__qa.shortcutRetryActions.at(-1)), ['selection']);
+  await page.locator('#shortcut-selection').fill('Ctrl+Shift+J');
+  await page.locator('#shortcut-silentOcr').fill('Ctrl+Shift+P');
+  await page.locator('#save-shortcuts').click();
+  await page.waitForFunction((count) => window.__qa.saveCalls === count + 2 && !document.querySelector('#save-shortcuts').disabled, beforeManualRows.saves);
+  assert.equal(await page.evaluate(() => window.__qa.settings.shortcuts.selection), 'Ctrl+Shift+J');
+  assert.equal(await page.evaluate(() => window.__qa.settings.shortcuts.silentOcr), 'Ctrl+Shift+P');
+  assert.deepEqual(await page.evaluate(() => window.__qa.shortcutRetryActions.at(-1)), ['selection', 'silentOcr']);
+  await page.locator('#shortcut-selection').fill(beforeManualRows.shortcuts.selection);
+  await page.locator('#shortcut-silentOcr').fill(beforeManualRows.shortcuts.silentOcr);
+  await page.locator('#save-shortcuts').click();
+  await page.waitForFunction((count) => window.__qa.saveCalls === count + 3 && !document.querySelector('#save-shortcuts').disabled, beforeManualRows.saves);
+  assert.deepEqual(await page.evaluate(() => window.__qa.settings.shortcuts), beforeManualRows.shortcuts);
+  assert.deepEqual(await page.evaluate(() => window.__qa.shortcutRetryActions.at(-1)), ['selection', 'silentOcr']);
+  await page.locator('#save-shortcuts').click();
+  await page.locator('#shortcut-feedback').getByText('QA unavailable shortcut: input', { exact: false }).waitFor();
+  assert.equal(await page.evaluate(() => window.__qa.saveCalls), beforeManualRows.saves + 4);
+  assert.deepEqual(await page.evaluate(() => window.__qa.settings.shortcuts), beforeManualRows.shortcuts);
+  assert.deepEqual(await page.evaluate(() => window.__qa.shortcutRetryActions.at(-1)), ['selection', 'silentOcr', 'capture', 'ocr', 'input']);
+  await page.evaluate(() => { window.__qa.unavailableShortcutActions = []; });
+  await page.locator('#shortcut-selection').fill('Control+Shift+t');
+  await page.locator('#save-shortcuts').click();
+  await page.waitForFunction((count) => window.__qa.saveCalls === count + 5 && !document.querySelector('#save-shortcuts').disabled, beforeManualRows.saves);
+  assert.deepEqual(await page.evaluate(() => window.__qa.settings.shortcuts), beforeManualRows.shortcuts);
+  assert.deepEqual(await page.evaluate(() => window.__qa.shortcutRetryActions.at(-1)), ['selection', 'silentOcr', 'capture', 'ocr', 'input']);
   // A backend registration/save rejection must retain both the committed
   // binding and the editable candidate; it must not claim success.
   await page.locator('input[name="selection"]').fill('Ctrl+Shift+K');

@@ -73,10 +73,14 @@ export function createShortcutEditor(context: Context) {
   const persist = async (values: Bindings, intent: number | null = null, recordedAction?: ShortcutAction) => {
     const current = () => intent === null || (intent === revision && context.canRecord());
     if (!current()) return;
+    const changed = actions.filter((action) => persisted === null || values[action] !== persisted[action]);
+    // An actual manual edit retries only its changed rows. Unavailable rows
+    // elsewhere must not block it; an unchanged explicit save retries all rows.
+    const retryActions = recordedAction ? [recordedAction] : changed.length ? changed : actions;
     saving = true; const operation = { values: bindingsKey(values), intent }; pendingSave = operation;
     updateControls(); status(intent === null ? '正在保存快捷键…' : '正在自动保存快捷键…');
     try {
-      await context.save(values, intent === null ? undefined : current, recordedAction ? [recordedAction] : actions);
+      await context.save(values, intent === null ? undefined : current, retryActions);
       if (!current()) return;
       const message = context.desktop ? '快捷键已保存并立即生效；下次启动继续使用。' : '已在界面预览中更新；桌面应用才能注册全局快捷键。';
       status(message + (intent !== null && hasDrafts() ? '其他手动修改仍待保存。' : ''));
