@@ -11,7 +11,7 @@
 
 Windows supports Windows 10 1809+ and Windows 11. The macOS package is for Apple silicon Macs on macOS 12 or later. Apple system translation needs macOS 26 or later. After installation, EchoLingo stays in the tray or menu bar. Quit the previous version completely before you upgrade.
 
-[Windows release and checksums](https://github.com/Blueeeecho/EchoLingo/releases/tag/0.1.0-beta.2) · [macOS release and checksums](https://github.com/Blueeeecho/EchoLingo/releases/tag/0.1.0-beta.2.2) · [First-launch notes for macOS](docs/macos-install.zh-CN.md) (Chinese) · [Build from source](docs/build.md) (Chinese)
+[Windows release and checksums](https://github.com/Blueeeecho/EchoLingo/releases/tag/0.1.0-beta.2.2) · [macOS release and checksums](https://github.com/Blueeeecho/EchoLingo/releases/tag/0.1.0-beta.2.2) · [First-launch notes for macOS](docs/macos-install.zh-CN.md) (Chinese) · [Build from source](docs/build.md) (Chinese)
 
 ## Two shortcuts
 

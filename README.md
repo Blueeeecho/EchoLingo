@@ -11,7 +11,7 @@
 
 Windows 适用于 Windows 10 1809+ / Windows 11；macOS 安装包适用于 Apple 芯片 Mac、macOS 12+，Apple 系统翻译需要 macOS 26+。安装后打开回声译，应用会驻留托盘或菜单栏；升级前先完整退出旧版。
 
-[Windows 版本与校验](https://github.com/Blueeeecho/EchoLingo/releases/tag/0.1.0-beta.2) · [macOS 版本与校验](https://github.com/Blueeeecho/EchoLingo/releases/tag/0.1.0-beta.2.2) · [macOS 首次安装说明](docs/macos-install.zh-CN.md) · [源码构建](docs/build.md)
+[Windows 版本与校验](https://github.com/Blueeeecho/EchoLingo/releases/tag/0.1.0-beta.2.2) · [macOS 版本与校验](https://github.com/Blueeeecho/EchoLingo/releases/tag/0.1.0-beta.2.2) · [macOS 首次安装说明](docs/macos-install.zh-CN.md) · [源码构建](docs/build.md)
 
 ## 两个快捷动作
 
