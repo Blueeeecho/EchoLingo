@@ -41,6 +41,7 @@ using System.Windows.Forms;
 public static class EchoLingoLiveCaptureSmoke {
     static string nativeArguments = "";
     static bool requireInputPlanes = true;
+    static bool requireCaptureLoupe = true;
     static string inputBackend = "hybrid";
     static int activeHelperProcessId;
     static Dictionary<string,object> failedPlaneComposition;
@@ -429,7 +430,8 @@ public static class EchoLingoLiveCaptureSmoke {
             context.LastEdges = EdgeMetadata(context, actual, stage, elapsed.Elapsed.TotalMilliseconds);
             Point pointer; bool pointerKnown = GetPhysicalCursorPos(out pointer);
             bool planesReady = pointerKnown && PlaneComposition(process.Id,actual,pointer,context.LastEdges);
-            bool loupeReady = pointerKnown && CaptureLoupeReady(process.Id, pointer, context.LastEdges);
+            // The frozen ab4405c baseline has no magnifier. Only the current helper must show one.
+            bool loupeReady = !requireCaptureLoupe || (pointerKnown && CaptureLoupeReady(process.Id, pointer, context.LastEdges));
             if (!process.HasExited && Matches(actual, expected) && planesReady && loupeReady) return actual;
             if (process.HasExited) break;
             Thread.Sleep(20);
@@ -1120,7 +1122,7 @@ public static class EchoLingoLiveCaptureSmoke {
         }
     }
     public static Dictionary<string, object> Run(string helper, string assembly, bool performance, bool legacy, string backend) {
-        requireInputPlanes = !legacy; inputBackend = backend; failedPlaneComposition = null;
+        requireInputPlanes = !legacy; requireCaptureLoupe = !legacy; inputBackend = backend; failedPlaneComposition = null;
         Assert(!assembly.Contains("\""), "Invalid native DLL path.");
         nativeArguments = String.IsNullOrEmpty(assembly) ? "" : " -NativeAssemblyPath \"" + assembly + "\"";
         if (performance) nativeArguments += " -PerformanceDiagnostics";
