@@ -585,13 +585,14 @@ function renderShortcutHints(): void {
   source.placeholder = '输入或粘贴文字';
   for (const button of document.querySelectorAll<HTMLElement>('[data-action="capture"]')) button.title = `截图翻译${settings.shortcuts.capture ? ` · ${settings.shortcuts.capture}` : ''}`;
 }
-async function updateSettings(mutator: (next: Settings) => void): Promise<void> {
+async function updateSettings(mutator: (next: Settings) => void, canCommit?: () => boolean, retryShortcutActions?: ShortcutAction[]): Promise<void> {
   const operation = saveQueue.then(async () => {
+    if (canCommit && !canCommit()) return;
     if (!settingsReady) throw new Error('设置尚未加载，无法保存。请稍后重试。');
     const next = structuredClone(settings);
     mutator(next);
     if (desktop) {
-      await invoke('save_settings', { settings: next });
+      await invoke('save_settings', { settings: next, retryShortcutActions });
       settings = await invoke<Settings>('get_settings');
     } else settings = next;
     applyTheme();
@@ -779,14 +780,14 @@ const shortcutEditor = createShortcutEditor({
   canRecord: () => currentView === 'settings' && settingsReady,
   begin: () => desktop ? invoke<number>('set_shortcut_recording', { active: true, leaseId: null }) : Promise.resolve(++previewShortcutLease),
   end: async (id) => { if (desktop) await invoke('set_shortcut_recording', { active: false, leaseId: id }); },
-  save: (values) => updateSettings((next) => { next.shortcuts = values; }),
+  save: (values, canCommit, retryActions) => updateSettings((next) => { next.shortcuts = values; }, canCommit, retryActions),
   error: userFacingError, changed: notifyLayout,
 });
 function renderSettings(): void {
   renderProviders(); renderPopupServices();
   renderSystemTranslationSetup();
   ocrUi.render();
-  shortcutEditor.render(settings.shortcuts, settingsReady);
+  shortcutEditor.render(settings.shortcuts, settingsReady, settings.shortcutRegistration);
   $('#windows-selection-settings').hidden = document.documentElement.dataset.platform !== 'windows';
   $<HTMLSelectElement>('#windows-selection-strategy').value = settings.windowsSelectionStrategy ?? 'copy';
   $<HTMLSelectElement>('#windows-selection-strategy').disabled = !settingsReady;

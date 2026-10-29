@@ -115,11 +115,19 @@ try {
   enter('record-current-registered-key');
   await page.locator('[data-shortcut-record="selection"]').click();
   await page.locator('#shortcut-feedback').filter({ hasText: '请按快捷键' }).waitFor();
-  await nativeKey(1, 0x44); // OS-registered Alt+D, not a fake DOM event.
-  await until(async () => (await page.locator('#shortcut-feedback').textContent()).includes('已录入'), 'Current registered Alt+D could not be recorded.');
+  await nativeKey(1, 0x44); // Native priority Alt+D, not a fake DOM event.
+  await until(async () => (await page.locator('#shortcut-feedback').textContent()).includes('快捷键已保存并立即生效'), 'Current registered Alt+D could not be recorded.');
   assert.equal(await page.locator('#shortcut-selection').inputValue(), 'Alt+D');
   assert.equal(await page.locator('#view-settings').isVisible(), true);
-  cases.push('Actual OS-registered Alt+D records through the lease bridge without executing selection');
+  cases.push('Actual priority Alt+D records and autosaves through the lease bridge without executing selection');
+  enter('record-new-key-and-autosave-without-save-click');
+  await page.locator('[data-shortcut-record="selection"]').click();
+  await page.locator('#shortcut-feedback').filter({ hasText: '请按快捷键' }).waitFor();
+  await nativeKey(7, 0x78);
+  await until(async () => JSON.parse(await fs.readFile(settingsPath, 'utf8')).shortcuts.selection === 'Ctrl+Alt+Shift+F9', 'Recorded new key did not autosave without a save-button click.');
+  await until(async () => (await page.locator('#shortcut-feedback').textContent()).includes('快捷键已保存并立即生效'), 'Recorded key did not finish automatic registration.');
+  assert.equal(actualAvailability(7, 0x78), 'CONFLICT');
+  cases.push('A new native chord records, persists and registers without a second save action');
   enter('save-and-independently-probe-new-bindings');
   await page.locator('#shortcut-selection').fill('Ctrl+Alt+Shift+F9');
   await page.locator('#shortcut-silentOcr').fill('Ctrl+Alt+Shift+F10');
@@ -149,7 +157,7 @@ try {
   await page.locator('[data-shortcut-record="selection"]').click();
   await page.locator('#shortcut-feedback').filter({ hasText: '请按快捷键' }).waitFor();
   await nativeKey(7, 0x78); // F9 remains registered after failed save.
-  await until(async () => (await page.locator('#shortcut-feedback').textContent()).includes('已录入'), 'Prior registration was lost after failed conflict save.');
+  await until(async () => (await page.locator('#shortcut-feedback').textContent()).includes('快捷键已保存并立即生效'), 'Prior registration was lost after failed conflict save.');
   assert.equal(await page.locator('#shortcut-selection').inputValue(), 'Ctrl+Alt+Shift+F9');
   cases.push('Prior live binding remains registered after conflict rollback');
   enter('completed');

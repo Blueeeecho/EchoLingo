@@ -110,6 +110,14 @@ impl ShortcutGate {
         }
     }
 
+    /// Native hooks already own a complete down/up pair. Observe the pair
+    /// while the caller holds one gate lock, even if final delivery is later
+    /// rejected as stale; no synthetic held key can leak into the next input.
+    pub fn observe_pair(&mut self, binding: u32, now: Instant) -> ShortcutDelivery {
+        self.observe(binding, true, now);
+        self.observe(binding, false, now)
+    }
+
     fn suppress_releases(&mut self, now: Instant) {
         self.allowed_pressed.clear();
         self.recording_pressed.clear();
@@ -210,6 +218,39 @@ pub fn recording_modifiers_down() -> Option<u8> {
 pub trait Registry {
     fn register(&mut self, binding: u32) -> Result<(), String>;
     fn unregister(&mut self, binding: u32) -> Result<(), String>;
+}
+
+/// Plan a settings update from successfully acquired IDs, rather than treating
+/// every configured shortcut as an existing registration. Callers supply parsed,
+/// enabled action/ID pairs after validating duplicate actions and bindings.
+///
+/// Keep any acquired ID that is still desired, including action swaps. Attempt
+/// new or changed actions, but leave an unchanged unavailable action inactive:
+/// saving an unrelated setting must not keep retrying its failed registration.
+/// `retry_actions` identifies an explicit edit/re-record of an unavailable row;
+/// it never causes an already acquired ID to be registered again.
+pub fn registration_targets(
+    actual: &[u32],
+    previous: &[(String, u32)],
+    next: &[(String, u32)],
+    retry_actions: &[String],
+) -> Vec<u32> {
+    let actual: BTreeSet<_> = actual.iter().copied().collect();
+    let previous: BTreeMap<_, _> = previous
+        .iter()
+        .map(|(action, id)| (action.as_str(), *id))
+        .collect();
+    let retries: BTreeSet<_> = retry_actions.iter().map(String::as_str).collect();
+    next.iter()
+        .filter(|(action, id)| {
+            actual.contains(id)
+                || previous.get(action.as_str()) != Some(id)
+                || retries.contains(action.as_str())
+        })
+        .map(|(_, id)| *id)
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect()
 }
 
 /// Stage new-only IDs while old bindings remain registered; then remove old-only
@@ -673,6 +714,126 @@ mod tests {
         }
     }
 
+    fn named_bindings(values: &[(&str, u32)]) -> Vec<(String, u32)> {
+        values
+            .iter()
+            .map(|(action, id)| ((*action).into(), *id))
+            .collect()
+    }
+
+    #[test]
+    fn unavailable_unchanged_action_does_not_block_new_free_shortcuts() {
+        let previous = named_bindings(&[("selection", 1), ("capture", 2)]);
+        for free in [3, 4, 5] {
+            let next = named_bindings(&[("selection", free), ("capture", 2)]);
+            let mut registry = FakeRegistry::new(&[1], &[Operation::Add(2)]);
+            let persisted = Cell::new(0);
+            let targets = registration_targets(&[1], &previous, &next, &[]);
+            replace_bindings(&mut registry, &[1], &targets, || {
+                persisted.set(persisted.get() + 1);
+                Ok(())
+            })
+            .unwrap();
+            assert_eq!(registry.active, BTreeSet::from([free]));
+            assert_eq!(persisted.get(), 1);
+            assert_eq!(
+                registry.operations,
+                [Operation::Add(free), Operation::Remove(1)]
+            );
+        }
+    }
+
+    #[test]
+    fn empty_actual_registry_can_recover_one_action_without_retrying_other_defaults() {
+        let previous = named_bindings(&[("selection", 1), ("capture", 2)]);
+        let next = named_bindings(&[("selection", 3), ("capture", 2)]);
+        let mut registry = FakeRegistry::new(&[], &[Operation::Add(2)]);
+        let targets = registration_targets(&[], &previous, &next, &[]);
+        replace_bindings(&mut registry, &[], &targets, || Ok(())).unwrap();
+        assert_eq!(registry.active, BTreeSet::from([3]));
+        assert_eq!(registry.operations, [Operation::Add(3)]);
+    }
+
+    #[test]
+    fn unrelated_settings_save_does_not_retry_missing_configured_actions() {
+        let configured = named_bindings(&[("selection", 1), ("capture", 2)]);
+        let mut registry = FakeRegistry::new(&[1], &[Operation::Add(2)]);
+        let persisted = Cell::new(false);
+        let targets = registration_targets(&[1], &configured, &configured, &[]);
+        replace_bindings(&mut registry, &[1], &targets, || {
+            persisted.set(true);
+            Ok(())
+        })
+        .unwrap();
+        assert!(persisted.get());
+        assert!(registry.operations.is_empty());
+        assert_eq!(registry.active, BTreeSet::from([1]));
+    }
+
+    #[test]
+    fn explicit_same_row_retry_reports_conflict_without_losing_working_actions() {
+        let configured = named_bindings(&[("selection", 1), ("capture", 2)]);
+        let targets = registration_targets(&[1], &configured, &configured, &["capture".into()]);
+        let mut registry = FakeRegistry::new(&[1], &[Operation::Add(2)]);
+        let persisted = Cell::new(false);
+        let error = replace_bindings(&mut registry, &[1], &targets, || {
+            persisted.set(true);
+            Ok(())
+        })
+        .unwrap_err();
+        assert!(error.contains("注册快捷键失败"));
+        assert!(!persisted.get());
+        assert_eq!(registry.active, BTreeSet::from([1]));
+        assert_eq!(registry.operations, [Operation::Add(2)]);
+
+        // A later explicit retry can acquire that same configured row once the
+        // competing owner has released it; no unrelated save performed a retry.
+        registry.operations.clear();
+        replace_bindings(&mut registry, &[1], &targets, || Ok(())).unwrap();
+        assert_eq!(registry.active, BTreeSet::from([1, 2]));
+        assert_eq!(registry.operations, [Operation::Add(2)]);
+    }
+
+    #[test]
+    fn action_swaps_reuse_acquired_ids_even_when_only_one_row_is_active() {
+        let previous = named_bindings(&[("selection", 1), ("capture", 2)]);
+        let next = named_bindings(&[("selection", 2), ("capture", 1)]);
+        assert_eq!(registration_targets(&[1, 2], &previous, &next, &[]), [1, 2]);
+        let targets = registration_targets(&[1], &previous, &next, &[]);
+        let mut registry = FakeRegistry::new(&[1], &[]);
+        replace_bindings(&mut registry, &[1], &targets, || Ok(())).unwrap();
+        assert_eq!(registry.active, BTreeSet::from([1, 2]));
+        assert_eq!(registry.operations, [Operation::Add(2)]);
+    }
+
+    #[test]
+    fn disabling_rows_removes_only_acquired_ids_and_ignores_disabled_retry_requests() {
+        let previous = named_bindings(&[("selection", 1), ("capture", 2)]);
+        let next = named_bindings(&[("capture", 2)]);
+        let targets = registration_targets(&[1], &previous, &next, &["selection".into()]);
+        let mut registry = FakeRegistry::new(&[1], &[Operation::Add(2)]);
+        replace_bindings(&mut registry, &[1], &targets, || Ok(())).unwrap();
+        assert!(registry.active.is_empty());
+        assert_eq!(registry.operations, [Operation::Remove(1)]);
+    }
+
+    #[test]
+    fn already_active_retry_and_new_action_alias_do_not_reregister_shared_id() {
+        let previous = named_bindings(&[("selection", 1)]);
+        let next = named_bindings(&[("capture", 1)]);
+        let targets = registration_targets(&[1], &previous, &next, &["capture".into()]);
+        let mut registry = FakeRegistry::new(&[1], &[Operation::Add(1)]);
+        replace_bindings(&mut registry, &[1], &targets, || Ok(())).unwrap();
+        assert!(registry.operations.is_empty());
+        assert_eq!(registry.active, BTreeSet::from([1]));
+    }
+
+    #[test]
+    fn initial_registration_plan_includes_all_new_desired_actions() {
+        let next = named_bindings(&[("selection", 2), ("capture", 1)]);
+        assert_eq!(registration_targets(&[], &[], &next, &[]), [1, 2]);
+    }
+
     #[test]
     fn replacement_stages_all_new_ids_before_removing_old_then_persists_once() {
         let mut registry = FakeRegistry::new(&[1, 2], &[]);
@@ -807,5 +968,38 @@ mod tests {
         assert!(error.contains("保存快捷键失败：write rejected"));
         assert!(registry.operations.is_empty());
         assert_eq!(registry.active, BTreeSet::from([1, 2]));
+    }
+}
+
+#[cfg(test)]
+mod completed_pair_tests {
+    use super::*;
+    #[test]
+    fn discarded_completed_pair_never_consumes_the_next_press() {
+        let mut gate = ShortcutGate::default();
+        let now = Instant::now();
+        let stale_delivery = gate.observe_pair(23, now);
+        assert_eq!(stale_delivery, ShortcutDelivery::Action);
+        // The route/context validator discards stale_delivery after the lock, but
+        // this next complete physical gesture still owns a fresh press.
+        assert_eq!(
+            gate.observe_pair(23, now + Duration::from_millis(1)),
+            ShortcutDelivery::Action
+        );
+    }
+    #[test]
+    fn recorded_complete_pair_does_not_leave_a_held_id_after_end() {
+        let mut gate = ShortcutGate::default();
+        let now = Instant::now();
+        let lease = gate.begin(now).unwrap();
+        assert_eq!(
+            gate.observe_pair(29, now),
+            ShortcutDelivery::Recorded(lease)
+        );
+        assert!(gate.end(lease, now));
+        assert_eq!(
+            gate.observe_pair(29, now + Duration::from_secs(1)),
+            ShortcutDelivery::Action
+        );
     }
 }

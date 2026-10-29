@@ -25,6 +25,10 @@ const modifier = (token: string, mac: boolean): string | undefined => {
   return undefined;
 };
 const isWindows = () => typeof navigator !== 'undefined' && /Win/i.test(navigator.platform);
+const mouseKey = (value: string): string | undefined => ({
+  MOUSEX1: 'MouseX1', XBUTTON1: 'MouseX1', MOUSEBACK: 'MouseX1',
+  MOUSEX2: 'MouseX2', XBUTTON2: 'MouseX2', MOUSEFORWARD: 'MouseX2',
+} as Record<string, string>)[value];
 export function normalizeShortcut(value: string, mac = false, windows = isWindows()): string {
   if (value.length > 80 || /[\r\n\0]/.test(value)) throw new Error('快捷键过长或包含无效字符。');
   const text = value.trim();
@@ -42,10 +46,15 @@ export function normalizeShortcut(value: string, mac = false, windows = isWindow
     if (/^(?:KEY)?[A-Z]$/.test(token)) key = token.replace(/^KEY/, '');
     else if (/^(?:DIGIT)?[0-9]$/.test(token)) key = token.replace(/^DIGIT/, '');
     else if (/^F(?:[1-9]|1[0-9]|2[0-4])$/.test(token)) key = token;
-    else key = names[token] ?? '';
+    else key = mouseKey(token) ?? names[token] ?? '';
     if (!key) throw new Error(`不支持按键“${part.trim()}”；可使用字母、数字、F1–F24 或 Enter、Space 等键名。`);
   }
   if (!key) throw new Error('请再按一个普通按键，不能只设置 Ctrl、Alt 等修饰键。');
+  if (key === 'MouseX1' || key === 'MouseX2') {
+    if (!windows || mac) throw new Error('鼠标侧键快捷操作目前仅支持 Windows。');
+    if (mods.size) throw new Error('鼠标侧键请单独使用，不搭配 Ctrl、Alt 等修饰键。');
+    return key;
+  }
   // The pinned Windows backend maps NumpadEqual to the ordinary E key.
   if (windows && !mac && key === 'NumpadEqual') throw new Error('Windows 暂不支持小键盘等号键，请选择其他按键。');
   if (![...mods].some((item) => item !== 'Shift') && !/^F\d+$/.test(key)) {
@@ -68,6 +77,15 @@ export function displayShortcut(value: string, mac = false): string {
   catch { return value; }
 }
 export type RecordedKey = { kind: 'wait' | 'cancel' } | { kind: 'key'; value: string } | { kind: 'error'; message: string };
+export function recordedMouseShortcut(event: Pick<MouseEvent, 'button' | 'ctrlKey' | 'altKey' | 'shiftKey' | 'metaKey'>, mac = false, windows = isWindows()): RecordedKey | null {
+  if (event.button !== 3 && event.button !== 4) return null;
+  const modifiers = [event.ctrlKey ? 'Ctrl' : '', event.altKey ? 'Alt' : '', event.shiftKey ? 'Shift' : '', event.metaKey ? 'Super' : ''].filter(Boolean);
+  try {
+    return { kind: 'key', value: normalizeShortcut([...modifiers, event.button === 3 ? 'MouseX1' : 'MouseX2'].join('+'), mac, windows) };
+  } catch (error) {
+    return { kind: 'error', message: error instanceof Error ? error.message : '无法录制鼠标侧键。' };
+  }
+}
 export function recordedShortcut(event: Pick<KeyboardEvent, 'key' | 'code' | 'ctrlKey' | 'altKey' | 'shiftKey' | 'metaKey' | 'repeat' | 'isComposing' | 'keyCode'> & { getModifierState?: (key: string) => boolean }, mac = false, windows = isWindows()): RecordedKey {
   if (event.isComposing || event.keyCode === 229 || ['Process', 'Dead', 'Unidentified'].includes(event.key)) return { kind: 'error', message: '请先结束输入法组合，再录制快捷键。' };
   if (event.repeat) return { kind: 'wait' };

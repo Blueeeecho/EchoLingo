@@ -298,6 +298,7 @@ body[data-view="translate"] .result-provider { font-size: 10px; }
 .shortcut-binding { display: grid; grid-template-columns: minmax(115px, 1fr) minmax(180px, 1.4fr); gap: 12px; align-items: center; }
 .shortcut-binding > label { font-size: 12px; line-height: 1.6; color: var(--text); }
 .shortcut-binding small { display: block; font-size: 10px; color: var(--muted); font-weight: 400; }
+.shortcut-binding .shortcut-registration[data-error="true"] { color: var(--danger, #b42318); }
 .shortcut-binding-control { display: flex; gap: 7px; min-width: 0; }
 .shortcut-binding-control input { width: 100%; min-width: 0; max-width: none; padding: 8px 10px; border: 1px solid var(--border); border-radius: 6px; background: var(--surface-soft); color: inherit; font: inherit; font-size: 12px; }
 .shortcut-record { flex: 0 0 76px; min-height: 34px; padding: 6px 8px; font-size: 11px; }

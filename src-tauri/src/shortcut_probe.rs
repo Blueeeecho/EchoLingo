@@ -83,7 +83,7 @@ fn bindings(bytes: Option<&[u8]>) -> Result<Vec<Binding>, ()> {
     ]
     .into_iter()
     .map(|(action, combo)| {
-        let shortcut = if combo.is_empty() {
+        let shortcut = if combo.is_empty() || matches!(combo.as_str(), "MouseX1" | "MouseX2") {
             None
         } else {
             Some(combo.parse().map_err(|_| ())?)
@@ -186,6 +186,19 @@ fn check(registry: &mut impl ProbeRegistry, rows: Vec<Binding>) -> Outcome {
     } else {
         Outcome::Conflict(conflicts)
     }
+}
+
+// Exact runtime-priority keys and optional side buttons use the native hook,
+// not RegisterHotKey. A competing registration cannot classify them as occupied.
+// The normal startup separately verifies hook installation and reports failure.
+#[cfg(any(target_os = "windows", test))]
+fn check_windows(registry: &mut impl ProbeRegistry, mut rows: Vec<Binding>) -> Outcome {
+    for row in &mut rows {
+        if crate::shortcut_bindings::windows_priority(&row.combo) {
+            row.shortcut = None;
+        }
+    }
+    check(registry, rows)
 }
 
 #[cfg(any(target_os = "windows", test))]
@@ -410,7 +423,7 @@ mod windows {
             // and do not process or synthesize any keystrokes.
             let mut registry =
                 NativeRegistry(global_hotkey::GlobalHotKeyManager::new().map_err(|_| ())?);
-            let outcome = check(&mut registry, rows);
+            let outcome = check_windows(&mut registry, rows);
             drop(registry);
             if own_instance_running(&own)? {
                 return Err(());
@@ -662,5 +675,27 @@ mod tests {
         assert!(windows_reserved(&"F12".parse().unwrap()));
         assert!(windows_reserved(&"Ctrl+F12".parse().unwrap()));
         assert!(!windows_reserved(&"F11".parse().unwrap()));
+    }
+}
+
+#[cfg(test)]
+mod native_priority_probe_tests {
+    use super::*;
+    struct Probe(usize);
+    impl ProbeRegistry for Probe {
+        fn register(&mut self, _: &Shortcut) -> Result<(), RegisterFailure> {
+            self.0 += 1;
+            Ok(())
+        }
+        fn unregister(&mut self, _: &Shortcut) -> Result<(), ()> {
+            Ok(())
+        }
+    }
+    #[test]
+    fn priority_defaults_do_not_get_false_registerhotkey_conflicts() {
+        let mut probe = Probe(0);
+        let outcome = check_windows(&mut probe, bindings(None).unwrap());
+        assert_eq!(outcome.protocol().0, 0);
+        assert_eq!(probe.0, 2);
     }
 }

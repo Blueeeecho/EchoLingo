@@ -139,6 +139,7 @@ try {
         if (command === 'diagnostics') return { warnings: [] };
         if (command === 'save_settings') {
           fixture.saveCalls++; fixture.settingsWrites.push(structuredClone(args.settings));
+          (fixture.shortcutRetryActions ??= []).push(structuredClone(args.retryShortcutActions ?? []));
           if (fixture.holdSave) await new Promise((resolve) => { fixture.releaseSave = resolve; });
           if (fixture.failSave) throw new Error('QA save failure');
           fixture.settings = structuredClone(args.settings);
@@ -783,16 +784,20 @@ try {
   // Recorder uses an acknowledged bounded native lease; these assertions exercise
   // the frontend/fake IPC only, not OS-wide shortcut registration.
   assert.equal(await page.locator('[data-shortcut-record]').count(), 2);
+  const beforeRecordedSave = await page.evaluate(() => window.__qa.saveCalls);
   await page.locator('[data-shortcut-record="selection"]').click();
   await page.waitForFunction(() => window.__qa.shortcutLeases.at(-1)?.active === true);
   await page.locator('#shortcut-feedback').getByText('请按快捷键', { exact: false }).waitFor();
   await page.keyboard.down('Control'); await page.keyboard.down('Shift'); await page.keyboard.down('t');
   assert.equal(await page.locator('input[name="selection"]').inputValue(), 'Alt+D');
+  assert.equal(await page.evaluate(() => window.__qa.saveCalls), beforeRecordedSave);
   await page.keyboard.up('t'); await page.keyboard.up('Shift'); await page.keyboard.up('Control');
   await page.waitForFunction(() => document.querySelector('input[name="selection"]').value === 'Ctrl+Shift+T');
   assert.equal(await page.evaluate(() => window.__qa.shortcutLeases.at(-1).active), false);
-  await page.locator('#save-shortcuts').click();
   await page.waitForFunction(() => window.__qa.settings.shortcuts.selection === 'Ctrl+Shift+T');
+  await page.locator('#shortcut-feedback').getByText('快捷键已保存并立即生效', { exact: false }).waitFor();
+  assert.equal(await page.evaluate(() => window.__qa.saveCalls), beforeRecordedSave + 1);
+  assert.deepEqual(await page.evaluate(() => window.__qa.shortcutRetryActions.at(-1)), ['selection']);
   // A backend registration/save rejection must retain both the committed
   // binding and the editable candidate; it must not claim success.
   await page.locator('input[name="selection"]').fill('Ctrl+Shift+K');
@@ -801,6 +806,51 @@ try {
   await page.locator('#shortcut-feedback').getByText('QA save failure', { exact: false }).waitFor();
   assert.equal(await page.evaluate(() => window.__qa.settings.shortcuts.selection), 'Ctrl+Shift+T');
   assert.equal(await page.locator('input[name="selection"]').inputValue(), 'Ctrl+Shift+K');
+  assert.equal(await page.locator('#save-shortcuts').isEnabled(), true);
+  await page.evaluate(() => { window.__qa.failSave = false; });
+  // A recorded field saves automatically once, without committing unrelated
+  // manual drafts or requiring them to be syntactically valid.
+  await page.locator('#shortcut-advanced > summary').click();
+  const savedOcr = await page.evaluate(() => window.__qa.settings.shortcuts.silentOcr);
+  const savedCapture = await page.evaluate(() => window.__qa.settings.shortcuts.capture);
+  await page.locator('#shortcut-silentOcr').fill('Ctrl+Shift+L');
+  await page.locator('#shortcut-capture').fill('Unfinished manual draft');
+  const beforeFieldOnlySave = await page.evaluate(() => window.__qa.saveCalls);
+  await page.evaluate(() => { window.__qa.holdSave = true; });
+  await page.locator('[data-shortcut-record="selection"]').click();
+  await page.locator('#shortcut-feedback').getByText('请按快捷键', { exact: false }).waitFor();
+  await page.keyboard.press('Control+Shift+j');
+  await page.waitForFunction((count) => window.__qa.saveCalls === count + 1, beforeFieldOnlySave);
+  assert.equal(await page.locator('#save-shortcuts').isDisabled(), true);
+  assert.equal(await page.locator('#shortcut-silentOcr').getAttribute('readonly'), '');
+  // A duplicate delivery for the completed lease cannot submit another save.
+  await page.evaluate(() => window.__qa.emit('shortcut-recorded', { leaseId: window.__qa.shortcutLeases.at(-1).id, shortcut: 'Ctrl+Shift+J', modifiersDown: 0 }));
+  await page.evaluate(() => { window.__qa.holdSave = false; window.__qa.releaseSave(); });
+  await page.waitForFunction(() => window.__qa.settings.shortcuts.selection === 'Ctrl+Shift+J');
+  await page.locator('#shortcut-feedback').getByText('其他手动修改仍待保存', { exact: false }).waitFor();
+  assert.equal(await page.evaluate(() => window.__qa.saveCalls), beforeFieldOnlySave + 1);
+  assert.equal(await page.evaluate(() => window.__qa.settings.shortcuts.silentOcr), savedOcr);
+  assert.equal(await page.evaluate(() => window.__qa.settings.shortcuts.capture), savedCapture);
+  assert.equal(await page.locator('#shortcut-silentOcr').inputValue(), 'Ctrl+Shift+L');
+  assert.equal(await page.locator('#shortcut-capture').inputValue(), 'Unfinished manual draft');
+  await page.locator('#shortcut-silentOcr').fill(savedOcr);
+  await page.locator('#shortcut-capture').fill(savedCapture);
+  await page.locator('#shortcut-advanced > summary').click();
+  await page.locator('[data-shortcut-record="selection"]').click();
+  await page.locator('#shortcut-feedback').getByText('请按快捷键', { exact: false }).waitFor();
+  await page.keyboard.press('Control+Shift+t');
+  await page.waitForFunction(() => window.__qa.settings.shortcuts.selection === 'Ctrl+Shift+T');
+  // Backend conflict/save rejection keeps the old committed binding and the
+  // new editable recorded candidate; no second attempt occurs automatically.
+  const beforeAutomaticFailure = await page.evaluate(() => window.__qa.saveCalls);
+  await page.evaluate(() => { window.__qa.failSave = true; });
+  await page.locator('[data-shortcut-record="selection"]').click();
+  await page.locator('#shortcut-feedback').getByText('请按快捷键', { exact: false }).waitFor();
+  await page.keyboard.press('Control+Shift+k');
+  await page.locator('#shortcut-feedback').getByText('QA save failure', { exact: false }).waitFor();
+  assert.equal(await page.evaluate(() => window.__qa.settings.shortcuts.selection), 'Ctrl+Shift+T');
+  assert.equal(await page.locator('#shortcut-selection').inputValue(), 'Ctrl+Shift+K');
+  assert.equal(await page.evaluate(() => window.__qa.saveCalls), beforeAutomaticFailure + 1);
   assert.equal(await page.locator('#save-shortcuts').isEnabled(), true);
   await page.evaluate(() => { window.__qa.failSave = false; });
   // A preference save must not erase a shortcut draft.
@@ -824,6 +874,7 @@ try {
   await page.keyboard.press('Escape');
   await page.waitForFunction(() => window.__qa.shortcutLeases.at(-1)?.active === false);
   // A delayed end ACK cannot commit a candidate after navigation cancels it.
+  const beforeCancelledEnd = await page.evaluate(() => window.__qa.saveCalls);
   await page.evaluate(() => { window.__qa.holdShortcutEnd = true; });
   await page.locator('[data-shortcut-record="silentOcr"]').click();
   await page.locator('#shortcut-feedback').getByText('请按快捷键', { exact: false }).waitFor();
@@ -833,6 +884,53 @@ try {
   await page.evaluate(() => { window.__qa.holdShortcutEnd = false; window.__qa.releaseShortcutEnd(); });
   await page.locator('#more-toggle').click(); await page.locator('button[data-view="settings"]').click();
   assert.equal(await page.locator('input[name="silentOcr"]').inputValue(), 'Alt+C');
+  assert.equal(await page.evaluate(() => window.__qa.saveCalls), beforeCancelledEnd);
+  // An automatic save queued behind a preference write is cancelled before
+  // its IPC call when settings closes; it must not overwrite newer state.
+  const beforeQueuedRecording = await page.evaluate(() => window.__qa.saveCalls);
+  await page.evaluate(() => { window.__qa.holdSave = true; });
+  await page.locator('#theme-select').selectOption('light');
+  await page.waitForFunction((count) => window.__qa.saveCalls === count + 1, beforeQueuedRecording);
+  await page.locator('[data-shortcut-record="selection"]').click();
+  await page.locator('#shortcut-feedback').getByText('请按快捷键', { exact: false }).waitFor();
+  await page.keyboard.press('Control+Shift+n');
+  await page.waitForFunction(() => window.__qa.shortcutLeases.at(-1)?.active === false && document.querySelector('#shortcut-feedback').textContent.startsWith('正在自动保存'));
+  assert.equal(await page.evaluate(() => window.__qa.saveCalls), beforeQueuedRecording + 1);
+  await page.getByRole('button', { name: '返回翻译', exact: true }).click();
+  await page.evaluate(() => { window.__qa.holdSave = false; window.__qa.releaseSave(); });
+  await page.waitForFunction(() => window.__qa.settings.theme === 'light');
+  await page.locator('#more-toggle').click(); await page.locator('button[data-view="settings"]').click();
+  await page.waitForFunction(() => !document.querySelector('#save-shortcuts').disabled);
+  assert.equal(await page.evaluate(() => window.__qa.settings.shortcuts.selection), 'Ctrl+Shift+T');
+  assert.equal(await page.evaluate(() => window.__qa.saveCalls), beforeQueuedRecording + 1);
+  assert.doesNotMatch(await page.locator('#shortcut-feedback').textContent(), /正在自动保存|SHORTCUT_SAVE_CANCELLED/);
+  assert.equal(await page.locator('#shortcut-selection').inputValue(), 'Ctrl+Shift+N');
+  // A preceding preference save can return bindings changed independently by
+  // the backend. The queued recording cannot overwrite that newer snapshot.
+  const beforeChangedBindings = await page.evaluate(() => window.__qa.saveCalls);
+  await page.evaluate(() => { window.__qa.holdSave = true; });
+  await page.locator('#theme-select').selectOption('dark');
+  await page.waitForFunction((count) => window.__qa.saveCalls === count + 1, beforeChangedBindings);
+  await page.locator('[data-shortcut-record="selection"]').click();
+  await page.locator('#shortcut-feedback').getByText('请按快捷键', { exact: false }).waitFor();
+  await page.keyboard.press('Control+Shift+m');
+  await page.waitForFunction(() => document.querySelector('#shortcut-feedback').textContent.startsWith('正在自动保存'));
+  await page.evaluate(() => {
+    window.__qa.holdSave = false; window.__qa.releaseSave();
+    // Run after the held save publishes its mock state, before get_settings
+    // returns that state to the real frontend's serialized save queue.
+    queueMicrotask(() => { window.__qa.settings.shortcuts.selection = 'Ctrl+Shift+U'; });
+  });
+  await page.waitForFunction(() => !document.querySelector('#save-shortcuts').disabled && window.__qa.settings.shortcuts.selection === 'Ctrl+Shift+U');
+  assert.equal(await page.evaluate(() => window.__qa.saveCalls), beforeChangedBindings + 1);
+  assert.equal(await page.locator('#shortcut-selection').inputValue(), 'Ctrl+Shift+M');
+  await page.locator('#shortcut-feedback').getByText('录制的输入尚未保存', { exact: false }).waitFor();
+  await page.locator('[data-shortcut-record="selection"]').click();
+  await page.locator('#shortcut-feedback').getByText('请按快捷键', { exact: false }).waitFor();
+  await page.keyboard.press('Control+Shift+t');
+  await page.waitForFunction(() => window.__qa.settings.shortcuts.selection === 'Ctrl+Shift+T');
+  await page.locator('#shortcut-feedback').getByText('快捷键已保存并立即生效', { exact: false }).waitFor();
+  await page.locator('#shortcut-selection').fill('Ctrl+Shift+Y');
   // Leaving settings before the begin reply still ends exactly that lease.
   await page.evaluate(() => { window.__qa.holdShortcutBegin = true; });
   await page.locator('[data-shortcut-record="silentOcr"]').click();
@@ -2128,7 +2226,7 @@ try {
     // Same five-second completion expectation as the actual Windows recorder
     // fixture, before its existing fourteen-second cancellation deadline.
     await page.waitForFunction(() => document.querySelector('#shortcut-selection').value === 'Ctrl+Alt+Shift+F9'
-      && document.querySelector('#shortcut-feedback').textContent.startsWith('已录入，点击')
+      && document.querySelector('#shortcut-feedback').textContent.startsWith('快捷键已保存并立即生效')
       && window.__qa.shortcutLeases.at(-1)?.active === false, null, { timeout: 5000 });
     releaseProbeCompleted = true;
   } catch (error) { if (error.name !== 'TimeoutError') throw error; }
@@ -2161,7 +2259,7 @@ try {
   }));
   const requireReleaseCompletion = async () => {
     await page.waitForFunction(() => document.querySelector('#shortcut-selection').value === 'Ctrl+Alt+Shift+F9'
-      && document.querySelector('#shortcut-feedback').textContent.startsWith('已录入，点击')
+      && document.querySelector('#shortcut-feedback').textContent.startsWith('快捷键已保存并立即生效')
       && window.__qa.shortcutLeases.at(-1)?.active === false, null, { timeout: 5000 });
     return releaseBoundaryState();
   };
@@ -2238,6 +2336,69 @@ try {
   await page.evaluate(() => { window.__qa.failSave = false; });
   await page.locator('#windows-selection-strategy').selectOption('copy');
   await page.waitForFunction(() => window.__qa.settings.windowsSelectionStrategy === 'copy');
+  // Windows side buttons share the recorder's release/cancel/autosave path.
+  // Synthetic DOM pointers prove editor handling, not a native global hook.
+  const beginMouseRecording = async (action = 'selection') => {
+    await page.locator(`[data-shortcut-record="${action}"]`).click();
+    await page.locator('#shortcut-feedback').getByText('请按快捷键', { exact: false }).waitFor();
+  };
+  const pointer = async (type, button, extra = {}) => page.evaluate(({ type, button, extra }) => {
+    const target = document.querySelector('#shortcut-selection');
+    const event = new PointerEvent(type, { bubbles: true, cancelable: true, pointerType: 'mouse', pointerId: 9, button, ...extra });
+    return !target.dispatchEvent(event);
+  }, { type, button, extra });
+  await beginMouseRecording();
+  const beforeMouseSave = await page.evaluate(() => window.__qa.saveCalls);
+  assert.equal(await pointer('pointerdown', 0), false);
+  assert.equal(await pointer('pointerup', 0), false);
+  assert.equal(await pointer('pointerdown', 1), false);
+  assert.equal(await pointer('pointerup', 1), false);
+  assert.equal(await pointer('pointerdown', 3), true);
+  assert.equal(await page.evaluate(() => window.__qa.saveCalls), beforeMouseSave);
+  const releaseAndAuxclick = await page.evaluate(() => {
+    const input = document.querySelector('#shortcut-selection');
+    const up = new PointerEvent('pointerup', { bubbles: true, cancelable: true, pointerType: 'mouse', pointerId: 9, button: 3 });
+    const aux = new MouseEvent('auxclick', { bubbles: true, cancelable: true, button: 3 });
+    return { upBlocked: !input.dispatchEvent(up), auxBlocked: !input.dispatchEvent(aux) };
+  });
+  assert.deepEqual(releaseAndAuxclick, { upBlocked: true, auxBlocked: true });
+  await page.waitForFunction(() => window.__qa.settings.shortcuts.selection === 'MouseX1');
+  await page.locator('#shortcut-feedback').getByText('快捷键已保存并立即生效', { exact: false }).waitFor();
+  assert.equal(await page.evaluate(() => window.__qa.saveCalls), beforeMouseSave + 1);
+  assert.deepEqual(await page.evaluate(() => window.__qa.shortcutRetryActions.at(-1)), ['selection']);
+  assert.equal(await pointer('pointerdown', 3), false);
+  assert.equal(await pointer('pointerup', 3), false);
+  await beginMouseRecording();
+  const beforeNativeMouseSave = await page.evaluate(() => window.__qa.saveCalls);
+  assert.equal(await pointer('pointerdown', 4), true);
+  await page.evaluate(() => window.__qa.emit('shortcut-recorded', { leaseId: window.__qa.shortcutLeases.at(-1).id, shortcut: 'MouseX2', modifiersDown: 0 }));
+  await page.waitForFunction(() => window.__qa.settings.shortcuts.selection === 'MouseX2');
+  await page.locator('#shortcut-feedback').getByText('快捷键已保存并立即生效', { exact: false }).waitFor();
+  assert.equal(await page.evaluate(() => window.__qa.saveCalls), beforeNativeMouseSave + 1);
+  // The native release can consume DOM pointerup. Its completed pairing must
+  // not leave a stale frontend side-button marker that swallows another up.
+  assert.equal(await pointer('pointerup', 4), false);
+  await beginMouseRecording();
+  const beforeModifiedMouseSave = await page.evaluate(() => window.__qa.saveCalls);
+  await page.locator('#shortcut-selection').dispatchEvent('keydown', { key: 'Control', code: 'ControlLeft', ctrlKey: true });
+  assert.equal(await pointer('pointerdown', 4, { ctrlKey: true }), true);
+  assert.equal(await pointer('pointerup', 4, { ctrlKey: true }), true);
+  assert.equal(await page.evaluate(() => window.__qa.saveCalls), beforeModifiedMouseSave);
+  await page.locator('#shortcut-selection').dispatchEvent('keyup', { key: 'Control', code: 'ControlLeft' });
+  assert.equal(await page.evaluate(() => window.__qa.settings.shortcuts.selection), 'MouseX2');
+  assert.equal(await page.evaluate(() => window.__qa.saveCalls), beforeModifiedMouseSave);
+  await page.keyboard.press('Escape');
+  await page.waitForFunction(() => window.__qa.shortcutLeases.at(-1)?.active === false);
+  await beginMouseRecording();
+  const beforeCancelledMouseSave = await page.evaluate(() => window.__qa.saveCalls);
+  assert.equal(await pointer('pointerdown', 3), true);
+  await page.locator('#shortcut-selection').dispatchEvent('keydown', { key: 'Escape', code: 'Escape' });
+  await page.locator('#shortcut-selection').dispatchEvent('keyup', { key: 'Escape', code: 'Escape' });
+  assert.equal(await pointer('pointerup', 3), true);
+  await page.waitForFunction(() => window.__qa.shortcutLeases.at(-1)?.active === false);
+  assert.equal(await page.evaluate(() => window.__qa.settings.shortcuts.selection), 'MouseX2');
+  assert.equal(await page.evaluate(() => window.__qa.saveCalls), beforeCancelledMouseSave);
+  console.log('PASS: completed recording automatically saves one field once, preserves unrelated manual drafts, reports failed saves without replacing committed bindings, cancels queued writes on navigation, and records Windows side-button DOM release/cancel without intercepting ordinary buttons. Fake IPC/pointer events only.');
   await goView('translate');
   await page.locator('#source-text').fill('English translation font fixture');
   await page.locator('#source-text').press('Enter');

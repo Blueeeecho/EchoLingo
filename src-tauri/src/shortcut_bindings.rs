@@ -4,6 +4,43 @@ use crate::model::Shortcuts;
 use std::collections::HashSet;
 use tauri_plugin_global_shortcut::Shortcut;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Binding {
+    Keyboard(Shortcut),
+    KeyboardPriority(Shortcut),
+    Mouse(crate::mouse_shortcuts::Button),
+}
+impl Binding {
+    pub fn id(&self) -> u32 {
+        match self {
+            Self::Keyboard(value) | Self::KeyboardPriority(value) => value.id(),
+            Self::Mouse(value) => value.id(),
+        }
+    }
+    pub fn keyboard(&self) -> Option<Shortcut> {
+        match self {
+            Self::Keyboard(value) | Self::KeyboardPriority(value) => Some(*value),
+            Self::Mouse(_) => None,
+        }
+    }
+    pub fn native_bit(&self) -> Option<u8> {
+        match self {
+            Self::KeyboardPriority(value) => {
+                Some(if value.key == tauri_plugin_global_shortcut::Code::KeyD {
+                    crate::mouse_shortcuts::PRIORITY_D
+                } else {
+                    crate::mouse_shortcuts::PRIORITY_S
+                })
+            }
+            Self::Mouse(value) => Some(value.bit()),
+            Self::Keyboard(_) => None,
+        }
+    }
+}
+pub fn windows_priority(value: &str) -> bool {
+    matches!(value, "Alt+D" | "Alt+S")
+}
+
 const NAMED_KEYS: &[&str] = &[
     "Escape",
     "Enter",
@@ -134,6 +171,14 @@ fn normalize_one(value: &str, mac: bool) -> Result<String, String> {
     if value.is_empty() {
         return Ok(String::new());
     }
+    if value.eq_ignore_ascii_case("MouseX1") || value.eq_ignore_ascii_case("MouseX2") {
+        return Ok(if value.eq_ignore_ascii_case("MouseX1") {
+            "MouseX1"
+        } else {
+            "MouseX2"
+        }
+        .into());
+    }
     let mut modifiers = [false; 4];
     let mut main_key = None;
     for part in value.split('+') {
@@ -169,7 +214,7 @@ fn normalize_one(value: &str, mac: bool) -> Result<String, String> {
     Ok(parts.join("+"))
 }
 
-fn prepare(shortcuts: &Shortcuts) -> Result<(Shortcuts, Vec<(String, Shortcut)>), String> {
+fn prepare(shortcuts: &Shortcuts) -> Result<(Shortcuts, Vec<(String, Binding)>), String> {
     prepare_for_platform(
         shortcuts,
         cfg!(target_os = "macos"),
@@ -181,7 +226,7 @@ fn prepare_for_platform(
     shortcuts: &Shortcuts,
     mac: bool,
     windows: bool,
-) -> Result<(Shortcuts, Vec<(String, Shortcut)>), String> {
+) -> Result<(Shortcuts, Vec<(String, Binding)>), String> {
     let canonical = Shortcuts {
         selection: normalize_one(&shortcuts.selection, mac)?,
         capture: normalize_one(&shortcuts.capture, mac)?,
@@ -195,6 +240,21 @@ fn prepare_for_platform(
         if value.is_empty() {
             continue;
         }
+        if matches!(value, "MouseX1" | "MouseX2") {
+            if !windows || mac {
+                return Err("鼠标侧键快捷键仅支持 Windows".into());
+            }
+            let binding = Binding::Mouse(if value == "MouseX1" {
+                crate::mouse_shortcuts::Button::X1
+            } else {
+                crate::mouse_shortcuts::Button::X2
+            });
+            if !ids.insert(binding.id()) {
+                return Err("不同操作不能使用相同的快捷键".into());
+            }
+            parsed.push((action.to_owned(), binding));
+            continue;
+        }
         // A frontend key-name whitelist cannot guarantee support in the real
         // pinned native parser. Its accepted ID also owns conflict detection.
         let binding: Shortcut = value.parse().map_err(|_| format!("快捷键无效：{value}"))?;
@@ -203,9 +263,17 @@ fn prepare_for_platform(
         if windows && !mac && binding.key == tauri_plugin_global_shortcut::Code::NumpadEqual {
             return Err("Windows 暂不支持小键盘等号键，请选择其他按键。".into());
         }
+        if binding.id() & 0x8000_0000 != 0 {
+            return Err("快捷键标识超出支持范围".into());
+        }
         if !ids.insert(binding.id()) {
             return Err("不同操作不能使用相同的快捷键".into());
         }
+        let binding = if windows && !mac && windows_priority(value) {
+            Binding::KeyboardPriority(binding)
+        } else {
+            Binding::Keyboard(binding)
+        };
         parsed.push((action.to_owned(), binding));
     }
     Ok((canonical, parsed))
@@ -215,16 +283,23 @@ pub fn normalized(shortcuts: &Shortcuts) -> Result<Shortcuts, String> {
     prepare(shortcuts).map(|(canonical, _)| canonical)
 }
 
-pub fn parsed(shortcuts: &Shortcuts) -> Result<Vec<(String, Shortcut)>, String> {
+/// Registration plans retain canonical reserved rows as inactive so an unrelated
+/// settings edit can succeed. The registry rejects a new/retried reserved row.
+pub fn prepared(shortcuts: &Shortcuts) -> Result<Vec<(String, Binding)>, String> {
+    prepare(shortcuts).map(|(_, parsed)| parsed)
+}
+
+pub fn parsed(shortcuts: &Shortcuts) -> Result<Vec<(String, Binding)>, String> {
     let (_, parsed) = prepare(shortcuts)?;
     // Windows reserves F12 for the debugger at all times. Keep canonical
     // parsing available to the installer's read-only reserved-key report, but
     // never let any runtime registration path acquire that key.
     #[cfg(target_os = "windows")]
-    if parsed
-        .iter()
-        .any(|(_, binding)| binding.key == tauri_plugin_global_shortcut::Code::F12)
-    {
+    if parsed.iter().any(|(_, binding)| {
+        binding
+            .keyboard()
+            .is_some_and(|value| value.key == tauri_plugin_global_shortcut::Code::F12)
+    }) {
         return Err("Windows 为调试器保留 F12，请选择其他按键".into());
     }
     Ok(parsed)
@@ -278,7 +353,7 @@ mod tests {
                 let (_, bindings) = prepare_for_platform(&values, mac, false).unwrap();
                 assert_eq!(bindings.len(), 1);
                 assert_eq!(
-                    bindings[0].1.key,
+                    bindings[0].1.keyboard().unwrap().key,
                     tauri_plugin_global_shortcut::Code::NumpadEqual
                 );
             }
@@ -555,5 +630,45 @@ mod tests {
                 .selection,
             "Ctrl+A"
         );
+    }
+}
+
+#[cfg(test)]
+mod native_binding_tests {
+    use super::*;
+    #[test]
+    fn priority_and_mouse_have_distinct_real_routes() {
+        let s = Shortcuts {
+            selection: "Alt+D".into(),
+            silent_ocr: "MouseX1".into(),
+            capture: String::new(),
+            ocr: String::new(),
+            input: String::new(),
+        };
+        let (_, p) = prepare_for_platform(&s, false, true).unwrap();
+        assert!(matches!(p[0].1, Binding::KeyboardPriority(_)));
+        assert!(matches!(p[1].1, Binding::Mouse(_)));
+        assert_ne!(p[0].1.id(), p[1].1.id());
+        assert!(prepare_for_platform(&s, true, false).is_err());
+    }
+    #[test]
+    fn all_canonical_keyboard_modifiers_keep_native_mouse_ids_disjoint() {
+        for modifiers in 0..16 {
+            let names = ["Ctrl", "Alt", "Shift", "Super"];
+            let mut parts = Vec::new();
+            for (index, name) in names.iter().enumerate() {
+                if modifiers & (1 << index) != 0 {
+                    parts.push(*name);
+                }
+            }
+            parts.push("F1");
+            let value: Shortcut = parts.join("+").parse().unwrap();
+            assert_eq!(value.id() & 0x8000_0000, 0);
+        }
+    }
+    #[test]
+    fn mouse_aliases_normalize_and_modifiers_are_rejected() {
+        assert_eq!(normalize_one("mousex2", false).unwrap(), "MouseX2");
+        assert!(normalize_one("Ctrl+MouseX1", false).is_err());
     }
 }
