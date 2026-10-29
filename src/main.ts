@@ -718,16 +718,20 @@ async function translate(providerId?: string): Promise<void> {
   $('#translation-state').textContent = '正在翻译';
   status('正在翻译…');
   try {
+    for (const provider of providers) {
+      const pending = { providerId: provider.id, providerName: provider.name, text: '', elapsedMs: 0 };
+      // A retry owns a fresh provider snapshot: a same-ID configuration may
+      // have changed kind/name, and history cards do not carry live kind data.
+      // Replace only this target so setup routing, labels and sequence all
+      // reset together while successful sibling cards stay untouched.
+      const previous = progressViews.get(provider.id);
+      const view = createResultView(pending, false, provider.kind);
+      previous?.card.replaceWith(view.card);
+      progressViews.set(provider.id, view);
+    }
     const requestId = await beginTranslation(presentationEpoch);
     if (token !== generation) { await invoke('cancel_translation', { requestId }); return; }
     activeTranslationId = requestId;
-    for (const provider of providers) {
-      const pending = { providerId: provider.id, providerName: provider.name, text: '', elapsedMs: 0 };
-      const view = progressViews.get(provider.id) ?? createResultView(pending, false, provider.kind);
-      view.sequence = 0;
-      updateResultView(view, pending, false);
-      progressViews.set(provider.id, view);
-    }
     const results = await invoke<TranslationResult[]>('translate', { requestId, text, sourceLanguage: from, targetLanguage: to, ...(retrying ? { providerId } : {}) });
     if (token !== generation) return;
     currentResults = retrying ? mergeProviderRetry(previousResults, providerId, results) : results;
@@ -740,7 +744,8 @@ async function translate(providerId?: string): Promise<void> {
     if (errorMessage(error).startsWith('CANCELLED:')) { invalidateResults(true); status('翻译已取消'); return; }
     if (retrying) {
       const previous = previousResults.find((result) => result.providerId === providerId)!;
-      currentResults = mergeProviderRetry(previousResults, providerId, [{ ...previous, text: '', error: errorMessage(error), elapsedMs: 0 }]);
+      currentResults = mergeProviderRetry(previousResults, providerId, [{ providerId, providerName: providers[0]?.name ?? previous.providerName,
+        text: '', error: errorMessage(error), elapsedMs: 0 }]);
       renderResults(currentResults); status('服务返回错误'); return;
     }
     resultsContainer.replaceChildren();

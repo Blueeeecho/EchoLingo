@@ -2983,6 +2983,54 @@ try {
   assert.equal(await page.locator('.result-card').count(), 0);
   assert.deepEqual(errors, []);
   console.log('PASS: retry sends one provider ID, preserves successful text and DOM through streaming/completion/error, suppresses duplicate clicks, validates source/language snapshots, and discards cancelled late progress. Mock IPC only.');
+  // Same-ID provider edits must replace request-owned metadata, not retain the
+  // previous cloud kind/name on a newly retried system-translation result.
+  await page.locator('#translate-button').click();
+  await successCard.getByText('Keep successful result', { exact: true }).waitFor();
+  await successCard.evaluate((element) => { element.dataset.retained = 'metadata-sibling'; });
+  await goView('settings');
+  await page.locator('.provider-row').filter({ hasText: 'QA retry service' }).getByRole('button', { name: '编辑', exact: true }).click();
+  await page.locator('#provider-preset').selectOption('system');
+  await page.locator('#provider-name').fill('Renamed system retry');
+  await page.locator('#save-provider').click();
+  await page.locator('#provider-dialog').waitFor({ state: 'hidden' });
+  await goView('translate');
+  await page.evaluate(() => { window.__qa.translationResults[1] = {
+    providerId: 'qa-retry', providerName: 'Renamed system retry', text: '', elapsedMs: 2,
+    error: 'SYSTEM_TRANSLATION_DOWNLOAD_REQUIRED: Retry language packs unavailable',
+    resolvedLanguages: { sourceLanguage: 'zh-Hant', targetLanguage: 'en' },
+  }; });
+  await retryCard.locator('.result-retry').click();
+  await retryCard.locator('.result-setup').waitFor({ state: 'visible' });
+  assert.equal(await retryCard.locator('.result-provider').textContent(), 'Renamed system retry');
+  assert.equal(await retryCard.locator('.result-actions').getAttribute('aria-label'), 'Renamed system retry译文操作');
+  assert.equal(await retryCard.locator('.result-setup').textContent(), '准备系统翻译');
+  assert.equal(await successCard.getAttribute('data-retained'), 'metadata-sibling');
+  await retryCard.locator('.result-setup').click();
+  assert.equal(await page.locator('#system-translation-source').inputValue(), 'zh-Hant');
+  assert.equal(await page.locator('#system-translation-target').inputValue(), 'en');
+  assert.deepEqual(await page.evaluate(() => window.__qa.systemPrepareCalls), []);
+  // A history card starts without a provider kind; its retry must acquire the
+  // current system kind and name, then offer the returned resolved pair.
+  await page.evaluate(() => { window.__qa.history = [{
+    id: 'history-system-retry', text: 'Historical system retry source', sourceLanguage: 'en', targetLanguage: 'zh-Hans',
+    results: [{ providerId: 'qa-retry', providerName: 'Old historical name', text: 'Old historical result', elapsedMs: 3 }],
+    createdAt: Date.now(), favorite: false,
+  }]; });
+  await goView('history');
+  await page.locator('.history-open').click();
+  assert.equal(await retryCard.locator('.result-provider').textContent(), 'Old historical name');
+  await retryCard.locator('.result-retry').click();
+  await retryCard.locator('.result-setup').waitFor({ state: 'visible' });
+  assert.equal(await retryCard.locator('.result-provider').textContent(), 'Renamed system retry');
+  assert.equal(await retryCard.locator('.result-actions').getAttribute('aria-label'), 'Renamed system retry译文操作');
+  assert.equal(await retryCard.locator('.result-setup').textContent(), '准备系统翻译');
+  await retryCard.locator('.result-setup').click();
+  assert.equal(await page.locator('#system-translation-source').inputValue(), 'zh-Hant');
+  assert.equal(await page.locator('#system-translation-target').inputValue(), 'en');
+  assert.deepEqual(await page.evaluate(() => window.__qa.systemPrepareCalls), []);
+  assert.deepEqual(errors, []);
+  console.log('PASS: same-ID cloud-to-system/rename and history-card retries refresh provider kind, visible name and accessible action labels, route to the resolved system-language setup without downloading, and preserve successful sibling DOM. Mock IPC only.');
   console.log('PASS: persistent screenshot permission guidance prepared before presentation; click-only correct pane without authorization; retained sanitized link failure and manual path; first-use pending-open help navigation/focus; 800 px light and 420 px narrow/dark screenshots; dismiss/input/quiet Alt+D/Alt+A/stale-epoch recovery; deferred-modal permission payload and granted-status clearing; backend cancellation tickets on edit/clear/stop/Escape/close/native hide; native presentation epochs cover unallocated tickets, omitted/stale hide events, reopen overtaking pending begin and stale delayed popup fitting; backend-only cancellation clears old result state; late-ticket and replacement ordering; pending-save close/reentry guard; failure unlock; blank shortcuts; duplicate rejection; no countdown; theme/favorites and history bounds; OCR dual-key bundles/protocol isolation/no plaintext settings; documented vendor presets; origin-bound saved-key indications; minimal popup/menu/automatic source height; OCR configuration/privacy; empty-selection immediate typing; persistent source copy/speech; pin edge/icon/keyboard hit areas and drag isolation; captured source editing after completion and pending cancellation/retranslation; narrow-wrap source presentation; inconsistent permission feedback; automatic/fixed targets; Enter/ShiftEnter/IME/repeat; passive permissions; real capture and translation error preservation.');
 } finally {
   await browser.close();
