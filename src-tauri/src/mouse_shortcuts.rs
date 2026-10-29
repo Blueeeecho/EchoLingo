@@ -147,6 +147,13 @@ impl Policy {
         self.alt_anchor = None;
         std::mem::take(&mut self.mask_alt)
     }
+    /// A missing OS Alt context flag can fall back only to the same side being
+    /// both observed here and still physically down. Stale or unobserved bits
+    /// must never turn ordinary typing into a priority shortcut.
+    pub fn tracked_alt_down(&self, left_down: bool, right_down: bool) -> bool {
+        (self.alt_held & Alt::Left.bit() != 0 && left_down)
+            || (self.alt_held & Alt::Right.bit() != 0 && right_down)
+    }
     /// Called only after the recovery pump proves physical keys and owned
     /// keyboard pairs are drained; never abandon a suffix release.
     pub fn reset_alt_anchor(&mut self) {
@@ -680,5 +687,58 @@ mod alt_anchor_tests {
         p.alt_down(Alt::Right, source());
         p.reset_alt_anchor();
         assert!(!pair(&mut p, source()).release);
+    }
+    #[test]
+    fn alt_fallback_requires_the_same_observed_and_physical_side() {
+        for side in [Alt::Left, Alt::Right] {
+            let mut p = Policy::default();
+            p.alt_down(side, source());
+            let left = matches!(side, Alt::Left);
+            assert!(p.tracked_alt_down(left, !left));
+            assert!(!p.tracked_alt_down(!left, left));
+            assert!(!p.tracked_alt_down(false, false));
+        }
+    }
+    #[test]
+    fn stale_alt_observation_cannot_claim_ordinary_d() {
+        let mut p = Policy::default();
+        p.alt_down(Alt::Right, source());
+        let exact = p.tracked_alt_down(false, false);
+        assert!(!p.pair(0, true, exact, source()).consume);
+        assert!(!p.pair(0, false, exact, source()).consume);
+    }
+    #[test]
+    fn physical_alt_without_an_observed_side_cannot_arm_fallback() {
+        let mut p = Policy::default();
+        assert!(!p.tracked_alt_down(true, true));
+        p.alt_down(Alt::Left, source());
+        p.alt_up(Alt::Left);
+        assert!(!p.tracked_alt_down(true, false));
+    }
+    #[test]
+    fn other_alt_release_keeps_the_live_side_and_original_source() {
+        let mut p = Policy::default();
+        p.alt_down(Alt::Left, source());
+        p.alt_down(Alt::Right, source());
+        assert!(!p.alt_up(Alt::Left));
+        let exact = p.tracked_alt_down(false, true);
+        assert!(exact);
+        assert!(p.pair(0, true, exact, source()).consume);
+        assert!(p.pair(0, false, exact, source()).release);
+        assert!(p.alt_up(Alt::Right));
+        assert!(!p.tracked_alt_down(false, true));
+    }
+    #[test]
+    fn physical_alt_fallback_cannot_bypass_the_source_anchor() {
+        let mut p = Policy::default();
+        p.alt_down(Alt::Right, source());
+        let changed = Context {
+            foreground: 999,
+            ..source()
+        };
+        let exact = p.tracked_alt_down(false, true);
+        assert!(p.pair(0, true, exact, changed).consume);
+        let up = p.pair(0, false, exact, changed);
+        assert!(up.consume && !up.release);
     }
 }

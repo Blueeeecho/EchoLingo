@@ -338,8 +338,20 @@ unsafe extern "system" fn keyboard(code: i32, word: usize, param: isize) -> isiz
                         0x53 => Some((1, policy::PRIORITY_S, s.priority_ids[1])),
                         _ => None,
                     } {
+                        // Releasing one Alt can clear the OS context flag even
+                        // while the other side remains down. Require that same
+                        // side's observed down and current physical state; never
+                        // trust an observed bit or aggregate Alt state alone.
                         let exact = s.enabled.load(Ordering::SeqCst) & bit != 0
-                            && modifiers(k.flags & 0x20 != 0);
+                            && modifiers(
+                                k.flags & 0x20 != 0
+                                    || PAIRS.with(|p| {
+                                        p.borrow().tracked_alt_down(
+                                            unsafe { GetAsyncKeyState(0xa4) } < 0,
+                                            unsafe { GetAsyncKeyState(0xa5) } < 0,
+                                        )
+                                    }),
+                            );
                         if !exact && !PAIRS.with(|p| p.borrow().owns(slot)) {
                             return unsafe {
                                 CallNextHookEx(std::ptr::null_mut(), code, word, param)

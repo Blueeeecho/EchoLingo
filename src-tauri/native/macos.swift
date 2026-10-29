@@ -1962,6 +1962,18 @@ func systemTranslationFailure(_ error: Error) -> NativeError {
 }
 
 @available(macOS 26.0, *)
+func systemInstalledTranslationContractSelfTest() throws {
+    let session = TranslationSession(installedSource: Locale.Language(identifier: "zh-Hans"),
+                                     target: Locale.Language(identifier: "en"))
+    guard !session.canRequestDownloads,
+          systemTranslationFailure(TranslationError.notInstalled).message.hasPrefix("SYSTEM_TRANSLATION_DOWNLOAD_REQUIRED:"),
+          systemTranslationFailure(TranslationError.unsupportedLanguagePairing).message.hasPrefix("SYSTEM_TRANSLATION_UNSUPPORTED:"),
+          systemTranslationFailure(CancellationError()).message.hasPrefix("SYSTEM_TRANSLATION_CANCELLED:") else {
+        throw NativeError("SELF_TEST: Installed-only translation contract failed.")
+    }
+}
+
+@available(macOS 26.0, *)
 func availableSystemTranslation(_ request: SystemTranslationInput) async throws -> [String: Any] {
     let (source, starterPair) = try systemSourceLanguage(request, forTranslation: false)
     let state: LanguageAvailability.Status
@@ -2020,12 +2032,8 @@ func translateWithSystem(_ request: SystemTranslationInput) async throws -> [Str
     if systemLanguagesEquivalent(source, request.target) {
         return ["text": text, "sourceLanguage": source, "targetLanguage": request.target]
     }
-    let status = await LanguageAvailability().status(from: Locale.Language(identifier: source), to: Locale.Language(identifier: request.target))
-    guard status == .installed else {
-        throw NativeError(status == .supported
-            ? "SYSTEM_TRANSLATION_DOWNLOAD_REQUIRED: 请在设置中点击「准备系统翻译」，确认下载所需语言后重试。"
-            : "SYSTEM_TRANSLATION_UNSUPPORTED: Apple 系统翻译不支持当前语言组合，请选择其他语言或翻译服务。")
-    }
+    // Availability is advisory in Settings and can be transient. This session
+    // cannot request downloads; translate reports the actual installed state.
     let session = TranslationSession(installedSource: Locale.Language(identifier: source), target: Locale.Language(identifier: request.target))
     guard !session.canRequestDownloads else {
         throw NativeError("SYSTEM_TRANSLATION_FAILED: 系统翻译未能进入本机语言模式。")
@@ -2347,9 +2355,14 @@ func nativeResponse(mode: String, input: Data = Data()) -> [String: Any] {
         case "--system-translation-self-test":
             try systemTranslationPolicySelfTest()
             var cancellationTested = false
+            var installedOnlyContractTested = false
             #if canImport(Translation) && compiler(>=6.2)
             try systemTranslationCancellationSelfTest()
             cancellationTested = true
+            if #available(macOS 26.0, *) {
+                try systemInstalledTranslationContractSelfTest()
+                installedOnlyContractTested = true
+            }
             #endif
             if #available(macOS 13.0, *) {
                 #if canImport(Translation) && compiler(>=6.2)
@@ -2364,7 +2377,7 @@ func nativeResponse(mode: String, input: Data = Data()) -> [String: Any] {
                 }
                 #endif
             }
-            return ["ok": true, "diagnostics": ["systemTranslationPolicyFixturePassed": true, "systemTranslationOutputFixturePassed": true, "systemTranslationOutputFixtureCount": 19, "systemTranslationCancellationFixturePassed": cancellationTested, "systemTranslationCancellationFixtureSkipped": !cancellationTested, "translationEngineCalled": false, "languageDownloadRequested": false]]
+            return ["ok": true, "diagnostics": ["systemTranslationPolicyFixturePassed": true, "systemTranslationOutputFixturePassed": true, "systemTranslationOutputFixtureCount": 19, "systemTranslationCancellationFixturePassed": cancellationTested, "systemTranslationCancellationFixtureSkipped": !cancellationTested, "systemTranslationInstalledOnlyFixturePassed": installedOnlyContractTested, "translationEngineCalled": false, "languageDownloadRequested": false]]
         case "--detect-language":
             guard input.count <= 2 * 1024 * 1024, let text = String(data: input, encoding: .utf8) else {
                 throw NativeError("SYSTEM_TRANSLATION_LANGUAGE: 无法检测原文语言，请手动选择源语言。")

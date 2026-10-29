@@ -83,6 +83,7 @@ public static class WindowsPriorityInputFixture {
     }
     static INPUT Key(ushort key,bool up) { INPUT value=new INPUT();value.type=1;value.data.keyboard.key=key;value.data.keyboard.flags=up?2U:0U;return value; }
     static INPUT AltKey(bool right,bool up) { INPUT value=Key(right?(ushort)0xa5:(ushort)0xa4,up);if(right)value.data.keyboard.flags|=1;return value; }
+    static INPUT ScanKey(ushort scan,bool extended,bool up) { INPUT value=Key(0,up);value.data.keyboard.scan=scan;value.data.keyboard.flags|=8U|(extended?1U:0U);return value; }
     static INPUT Side(uint button,bool up) { INPUT value=new INPUT();value.data.mouse.data=button;value.data.mouse.flags=up?0x100U:0x80U;return value; }
     static void Send(params INPUT[] values) { Need(SendInput((uint)values.Length,values,Marshal.SizeOf(typeof(INPUT)))==(uint)values.Length,"OWN_SENDINPUT_REJECTED"); }
     static void Wait(Func<bool> predicate,int milliseconds,string reason) {
@@ -138,6 +139,15 @@ public static class WindowsPriorityInputFixture {
     }
     static bool SameSelection(long[] before,long[] after) {
         return after[SelectionStart]==before[SelectionStart]&&after[SelectionLength]==before[SelectionLength]&&after[DecoySelectionStart]==before[DecoySelectionStart]&&after[DecoySelectionLength]==before[DecoySelectionLength];
+    }
+    static Dictionary<string,object> ObserveBothAltScanComparison() {
+        // This runs only after the unchanged virtual-key case has already failed.
+        // Preserve that failure; compare physical scan-code semantics without
+        // presuming either an action or pass-through is the expected outcome.
+        long[] before=Prepare(false);Need(Drain().Count==0,"SCAN_COMPARISON_PENDING_EVENT");ulong[] diagBefore=Diagnostics();List<ulong[]> events=new List<ulong[]>();
+        ownedHeldKeys=true;Send(ScanKey(0x38,false,false),ScanKey(0x38,true,false),ScanKey(0x38,false,true),ScanKey(0x20,false,false),ScanKey(0x20,false,true),ScanKey(0x38,true,true));
+        Wait(delegate{events.AddRange(Drain());return Released()&&Snapshot()[AltUp]-before[AltUp]==2;},2500,"SCAN_COMPARISON_INPUT_RELEASED");ownedHeldKeys=false;Quiet(events);long[] after=Snapshot();
+        return new Dictionary<string,object>{{"diagnosticOnly",true},{"changesOriginalGateResult",false},{"inputEventCount",6},{"inputRepresentation","KEYEVENTF_SCANCODE; Alt=0x38; right Alt extended; D=0x20"},{"nativeEvents",events},{"peerBefore",before},{"peerAfter",after},{"unconsumedSuffixObserved",after[SuffixDown]>before[SuffixDown]},{"diagnosticsBefore",diagBefore},{"diagnosticsAfter",Diagnostics()},{"sourceSelectionPreserved",SameSelection(before,after)},{"sourceStillForeground",after[Foreground]==1},{"sourceFocusIsEditor",after[FocusFlag]==1},{"scKeyMenu",after[KeyMenu]-before[KeyMenu]},{"menuLoops",after[MenuLoop]-before[MenuLoop]},{"keysReleased",Released()}};
     }
     static void OwnSourceEvent(List<ulong[]> events,uint expected,long[] source,string name) {
         Need(events.Count==1&&events[0][0]==expected&&events[0][1]==1&&events[0][3]==0&&events[0][4]==0&&events[0][5]==0&&events[0][6]==(ulong)source[Window]&&events[0][7]==(ulong)source[Editor],"RECOVERY_WRONG_OR_DUPLICATED_SOURCE_EVENT:"+name);
@@ -318,6 +328,9 @@ public static class WindowsPriorityInputFixture {
                 cases.Add(RunCase("stopping-hook-restores-peer",Chord(0x44),0,1,-1,0,0,0));Need(cases.Count==required,"FIXTURE_CASE_COUNT_CHANGED");result["ok"]=true;
             }catch(Exception error){result["error"]=error.Message;result["failedCase"]=pendingCase;try{long[] failed=Snapshot();result["failedCasePeerAfter"]=failed;result["unconsumedSuffixMetadata"]=new Dictionary<string,object>{{"virtualKey",failed[LastSuffixKey]},{"lowLevelFlags",failed[LastSuffixFlags]},{"scanCode",failed[LastSuffixScan]},{"leftAltAsync",failed[LastSuffixLeftAlt]},{"rightAltAsync",failed[LastSuffixRightAlt]},{"genericAltAsync",failed[LastSuffixAlt]},{"controlAsync",failed[LastSuffixControl]},{"shiftAsync",failed[LastSuffixShift]},{"leftWinAsync",failed[LastSuffixLeftWin]},{"rightWinAsync",failed[LastSuffixRightWin]},{"lastAltVirtualKey",failed[LastAltKey]},{"lastAltFlags",failed[LastAltFlags]},{"lastAltScanCode",failed[LastAltScan]},{"ownGuiMetadataAvailable",failed[LastSuffixGuiSucceeded]},{"ownGuiFlags",failed[LastSuffixGuiFlags]},{"ownFocusWasSourceEditor",failed[LastSuffixFocusIsEditor]}};result["keysReleasedAtFailure"]=Released();}catch{result["failedCaseMetadataUnavailable"]=true;}}
             finally {
+                if(!legacy&&nativeStarted&&pendingCase!=null&&result.ContainsKey("error")&&Convert.ToString(pendingCase["name"])=="both-alt-release-left-keeps-right-anchor") {
+                    try{result["scanCodeComparison"]=ObserveBothAltScanComparison();}catch(Exception comparisonError){result["scanCodeComparisonError"]=comparisonError.Message;}
+                }
                 if(ownedHeldKeys){try{Send(Key(0x44,true),Key(0x53,true),Key(0x12,true),AltKey(false,true),AltKey(true,true));ownedHeldKeys=false;result["ownedHeldInputReleasedDuringCleanup"]=true;}catch{result["ownedHeldInputReleasedDuringCleanup"]=false;}}
                 if(nativeStarted&&stop!=null){stop();nativeStarted=false;result["nativeHookStopped"]=true;}
                 if(peer!=null){try{bool killed=false;if(!peer.HasExited){map.Write(Command*8,2L);map.Write(Request*8,++request);if(!peer.WaitForExit(2500)){killed=true;peer.Kill();peer.WaitForExit(2500);}}result["ownedPeerStopped"]=peer.HasExited;result["ownedPeerForcedTermination"]=killed;if(peer.HasExited){result["ownedPeerExitCode"]=peer.ExitCode;if(killed||peer.ExitCode!=0)result["ok"]=false;}}catch{result["ok"]=false;result["ownedPeerStopped"]=false;}peer.Dispose();peer=null;}
