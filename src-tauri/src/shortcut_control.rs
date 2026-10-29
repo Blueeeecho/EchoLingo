@@ -1,11 +1,119 @@
 //! Pure shortcut recording and registration policies. The caller serializes
 //! access to a gate and resolves an accepted binding ID to its current action.
 use std::collections::{BTreeMap, BTreeSet, HashSet};
-use std::sync::{Arc, RwLock};
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc, Mutex, RwLock,
+};
 use std::time::{Duration, Instant};
 
 pub const RECORDING_LEASE: Duration = Duration::from_secs(15);
 pub const RELEASE_COOLDOWN: Duration = Duration::from_millis(350);
+
+/// Serialize registration work without making UI commands wait for a worker
+/// that may itself be synchronously dispatching an OS call to the UI thread.
+#[derive(Default)]
+pub struct ShortcutMaintenance(AtomicBool);
+
+pub struct MaintenanceGuard<'a>(&'a AtomicBool);
+
+impl Drop for MaintenanceGuard<'_> {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::SeqCst);
+    }
+}
+
+impl ShortcutMaintenance {
+    pub fn try_enter(&self) -> Option<MaintenanceGuard<'_>> {
+        self.0
+            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+            .ok()
+            .map(|_| MaintenanceGuard(&self.0))
+    }
+
+    /// Take ownership before checking the lease. Recording admission checks
+    /// that ownership under the same gate, so neither ordering can cancel a
+    /// live recording or admit one while maintenance is touching native hooks.
+    pub fn try_enter_idle(
+        &self,
+        gate: &Mutex<ShortcutGate>,
+        now: Instant,
+    ) -> Result<Option<MaintenanceGuard<'_>>, String> {
+        let Some(guard) = self.try_enter() else {
+            return Ok(None);
+        };
+        if gate.lock().map_err(|_| "快捷键状态异常")?.is_recording(now) {
+            return Ok(None);
+        }
+        Ok(Some(guard))
+    }
+
+    pub fn begin_recording(&self, gate: &Mutex<ShortcutGate>, now: Instant) -> Result<u64, String> {
+        let mut gate = gate.lock().map_err(|_| "快捷键状态异常")?;
+        if self.0.load(Ordering::SeqCst) {
+            return Err("快捷键正在更新，请稍后再录制。".into());
+        }
+        gate.begin(now)
+    }
+}
+
+#[cfg(test)]
+mod maintenance_tests {
+    use super::*;
+
+    #[test]
+    fn recording_wins_admission_without_losing_lease_or_held_pair() {
+        let maintenance = ShortcutMaintenance::default();
+        let gate = Mutex::new(ShortcutGate::default());
+        let now = Instant::now();
+        let lease = maintenance.begin_recording(&gate, now).unwrap();
+        gate.lock().unwrap().observe(7, true, now);
+        assert!(maintenance.try_enter_idle(&gate, now).unwrap().is_none());
+        assert!(gate.lock().unwrap().matches_recording(lease, now));
+        assert_eq!(
+            gate.lock().unwrap().observe(7, false, now),
+            ShortcutDelivery::Recorded(lease)
+        );
+        assert!(gate.lock().unwrap().end(lease, now));
+        assert!(maintenance.try_enter_idle(&gate, now).unwrap().is_some());
+    }
+
+    #[test]
+    fn maintenance_wins_admission_and_releases_ownership_on_early_return() {
+        let maintenance = ShortcutMaintenance::default();
+        let gate = Mutex::new(ShortcutGate::default());
+        let now = Instant::now();
+        let guard = maintenance.try_enter_idle(&gate, now).unwrap().unwrap();
+        // Simulates UI commands arriving while native registration waits for
+        // the main thread: admission is nonblocking and the gate is unlocked.
+        assert!(gate.try_lock().is_ok());
+        assert!(maintenance.try_enter().is_none());
+        assert!(maintenance.begin_recording(&gate, now).is_err());
+        assert!(!gate.lock().unwrap().is_recording(now));
+        drop(guard);
+        let lease = maintenance.begin_recording(&gate, now).unwrap();
+        assert!(gate.lock().unwrap().matches_recording(lease, now));
+    }
+
+    #[test]
+    fn expired_recording_allows_maintenance_but_never_rearms_old_press() {
+        let maintenance = ShortcutMaintenance::default();
+        let gate = Mutex::new(ShortcutGate::default());
+        let now = Instant::now();
+        let old = maintenance.begin_recording(&gate, now).unwrap();
+        gate.lock().unwrap().observe(7, true, now);
+        let later = now + RECORDING_LEASE + RELEASE_COOLDOWN;
+        let guard = maintenance.try_enter_idle(&gate, later).unwrap().unwrap();
+        assert!(!gate.lock().unwrap().end(old, later));
+        drop(guard);
+        let next = maintenance.begin_recording(&gate, later).unwrap();
+        assert!(next > old);
+        assert_eq!(
+            gate.lock().unwrap().observe(7, false, later),
+            ShortcutDelivery::Ignored
+        );
+    }
+}
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum ShortcutDelivery {
@@ -218,6 +326,28 @@ pub fn recording_modifiers_down() -> Option<u8> {
 pub trait Registry {
     fn register(&mut self, binding: u32) -> Result<(), String>;
     fn unregister(&mut self, binding: u32) -> Result<(), String>;
+}
+
+/// Recover unavailable rows independently. This runtime-only operation has no
+/// persistence callback: a timer must not rewrite settings or trim history.
+pub fn recover_bindings(
+    registry: &mut impl Registry,
+    candidates: &[(String, u32)],
+    failures: &mut BTreeMap<String, String>,
+) -> bool {
+    let mut recovered = false;
+    for (action, id) in candidates {
+        match registry.register(*id) {
+            Ok(()) => {
+                failures.remove(action);
+                recovered = true;
+            }
+            Err(error) => {
+                failures.insert(action.clone(), error);
+            }
+        }
+    }
+    recovered
 }
 
 /// Plan a settings update from successfully acquired IDs, rather than treating
@@ -719,6 +849,48 @@ mod tests {
             .iter()
             .map(|(action, id)| ((*action).into(), *id))
             .collect()
+    }
+
+    #[test]
+    fn runtime_recovery_keeps_working_rows_and_attempts_conflicts_independently() {
+        let mut registry = FakeRegistry::new(&[1], &[Operation::Add(2)]);
+        let mut failures = BTreeMap::from([
+            ("capture".into(), "old conflict".into()),
+            ("input".into(), "old input conflict".into()),
+            ("reserved".into(), "permanent error".into()),
+        ]);
+        let candidates = named_bindings(&[("capture", 2), ("input", 3)]);
+        assert!(recover_bindings(&mut registry, &candidates, &mut failures));
+        assert_eq!(registry.active, BTreeSet::from([1, 3]));
+        assert_eq!(registry.operations, [Operation::Add(2), Operation::Add(3)]);
+        assert!(failures["capture"].contains("synthetic"));
+        assert!(!failures.contains_key("input"));
+        assert_eq!(failures["reserved"], "permanent error");
+        registry.operations.clear();
+        assert!(recover_bindings(
+            &mut registry,
+            &named_bindings(&[("capture", 2)]),
+            &mut failures
+        ));
+        assert_eq!(registry.operations, [Operation::Add(2)]);
+        assert_eq!(registry.active, BTreeSet::from([1, 2, 3]));
+        assert!(!failures.contains_key("capture"));
+    }
+
+    #[test]
+    fn empty_or_failed_runtime_recovery_does_not_claim_success_or_remove_bindings() {
+        let mut registry = FakeRegistry::new(&[1], &[Operation::Add(2)]);
+        let mut failures = BTreeMap::new();
+        assert!(!recover_bindings(&mut registry, &[], &mut failures));
+        assert!(registry.operations.is_empty());
+        assert!(!recover_bindings(
+            &mut registry,
+            &named_bindings(&[("capture", 2)]),
+            &mut failures
+        ));
+        assert_eq!(registry.active, BTreeSet::from([1]));
+        assert_eq!(registry.operations, [Operation::Add(2)]);
+        assert!(failures.contains_key("capture"));
     }
 
     #[test]

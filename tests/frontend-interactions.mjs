@@ -20,6 +20,9 @@ try {
       saveHistory: true, theme: 'light', maxHistory: 20, autoHideSeconds: 0, ocrProviders: [], activeOcrProviderId: null,
     };
     const setupKind = new URL(location.href).searchParams.get('translationSetupFixture');
+    if (new URL(location.href).searchParams.has('translationRetryFixture')) {
+      state.providers.push({ ...state.providers[0], id: 'qa-retry', name: 'QA retry service' });
+    }
     if (['system', 'offline', 'openai'].includes(setupKind)) state.providers[0].kind = setupKind;
     const callbacks = new Map(), listeners = new Map(), ocrKeys = new Map(), translationKeys = new Map(); let callbackId = 0;
     window.__TAURI_EVENT_PLUGIN_INTERNALS__ = { unregisterListener: (event) => listeners.delete(event) };
@@ -36,6 +39,7 @@ try {
     Object.assign(fixture, { pinned: false, nativeVisible: true, popupReveals: 0, nativeHideTransitions: 0 });
     Object.assign(fixture, { holdPopupAck: false, popupAckWaits: 0, releasePopupAck: () => {}, sourceFocusCalls: 0 });
     Object.assign(fixture, { holdPresentationRead: false, presentationReadWaits: 0, releasePresentationRead: () => {} });
+    Object.assign(fixture, { historyReads: 0, holdHistory: false, failHistory: false, releaseHistory: () => {} });
     const sourceBoot = new URL(location.href).searchParams.get('sourceDeliveryFixture');
     Object.assign(fixture, { pendingSource: null, sourceAcks: [], sourceAckResults: [], pendingSourceReads: 0, bootSettingsWaits: 0, releaseBootSettings: () => {}, oldSourceAckWaits: 0, newSourceAckWaits: 0, releaseOldSourceAck: () => {}, releaseNewSourceAck: () => {} });
     if (sourceBoot) {
@@ -108,8 +112,15 @@ try {
         }
         if (command === 'plugin:event|unlisten') { listeners.delete(args.event); return; }
         if (command === 'get_settings') { fixture.settingsReads++; if (sourceBoot === 'edit' && fixture.settingsReads === 1) { fixture.bootSettingsWaits++; await new Promise(resolve => { fixture.releaseBootSettings = resolve; }); } for (const provider of fixture.settings.providers) decorateCredential(provider, translationKeys); for (const provider of fixture.settings.ocrProviders) decorateCredential(provider, ocrKeys); const value = structuredClone(fixture.settings); if (fixture.registrationOverride !== undefined) value.shortcutRegistration = structuredClone(fixture.registrationOverride); return value; }
-        if (command === 'get_history') return structuredClone(fixture.history ?? []);
+        if (command === 'get_history') {
+          fixture.historyReads++;
+          const snapshot = structuredClone(fixture.history ?? []);
+          if (fixture.holdHistory) await new Promise(resolve => { fixture.releaseHistory = resolve; });
+          if (fixture.failHistory) throw new Error('QA history read failed');
+          return snapshot;
+        }
         if (command === 'toggle_favorite') { const entry = fixture.history?.find(item => item.id === args.id); if (entry) entry.favorite = !entry.favorite; return; }
+        if (command === 'delete_history') { fixture.history = args.id ? (fixture.history ?? []).filter(item => item.id !== args.id) : []; return; }
         if (command === 'copy_text') { fixture.copies.push(args.text); return; }
         if (command === 'get_translation_presentation') {
           const presentation = structuredClone(fixture.presentation);
@@ -208,6 +219,7 @@ try {
           });
           if (fixture.translationError) throw new Error(fixture.translationError);
           activeTranslationId = null;
+          if (fixture.translationResults) return structuredClone(fixture.translationResults.filter((result) => !args.providerId || result.providerId === args.providerId));
           return [{ providerId: 'qa-service', providerName: 'QA IPC fixture', text: fixture.translationResultError ? '' : fixture.translationResultText ?? 'Isolated test translation fixture', ...(fixture.translationResultError ? { error: fixture.translationResultError } : {}), ...(fixture.translationResultLanguages !== undefined ? { resolvedLanguages: structuredClone(fixture.translationResultLanguages) } : {}), elapsedMs: 50 }];
         }
         throw new Error(`Unimplemented QA command: ${command}`);
@@ -225,6 +237,8 @@ try {
     await page.waitForTimeout(60);
     assert.equal(await page.evaluate(() => window.__qa.translationRequests.length), 1);
     assert.equal(await page.evaluate(() => window.__qa.pendingSource), null);
+    assert.equal(await page.evaluate(() => window.__qa.historyReads), 0);
+    assert.equal(await page.locator('#history-list > *').count(), 0);
   }
   // The startup-pull ACK is still in flight when a newer live delivery arrives.
   // Hold the new ACK too, so the old completion must visibly preserve ID2.
@@ -289,6 +303,60 @@ try {
     await page.locator('#more-toggle').click();
     await page.locator(`button[data-view="${view}"]`).click();
   };
+  // History is not on the startup/capture/translation critical path. A read
+  // already in flight may finish after navigation, but must not build hidden
+  // cards or clear a newer translation's dirty revision.
+  assert.equal(await page.evaluate(() => window.__qa.historyReads), 0);
+  assert.equal(await page.locator('#history-list > *').count(), 0);
+  await page.evaluate(() => {
+    window.__qa.history = [{ id: 'lazy-old', createdAt: 1792890000000, text: 'Old lazy snapshot', sourceLanguage: 'en', targetLanguage: 'zh-Hans', results: [], favorite: false }];
+    window.__qa.holdHistory = true;
+  });
+  await page.locator('#source-text').fill('Translation before history is opened');
+  await page.locator('#translate-button').click();
+  await page.getByText('Isolated test translation fixture', { exact: true }).waitFor();
+  assert.equal(await page.evaluate(() => window.__qa.historyReads), 0);
+  await goView('history');
+  await page.waitForFunction(() => window.__qa.historyReads === 1);
+  await goView('translate');
+  await page.evaluate(() => { window.__qa.history = [{ id: 'lazy-new', createdAt: 1792890001000, text: 'New lazy snapshot', sourceLanguage: 'en', targetLanguage: 'zh-Hans', results: [], favorite: false }]; });
+  await page.locator('#source-text').fill('Translation superseding the held history snapshot');
+  await page.locator('#translate-button').click();
+  await page.getByText('Isolated test translation fixture', { exact: true }).waitFor();
+  await page.evaluate(async () => {
+    window.__qa.holdHistory = false; window.__qa.releaseHistory();
+    await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+  });
+  assert.equal(await page.evaluate(() => window.__qa.historyReads), 1);
+  assert.equal(await page.locator('#history-list > *').count(), 0);
+  await goView('history');
+  await page.getByText('New lazy snapshot', { exact: true }).waitFor();
+  assert.equal(await page.evaluate(() => window.__qa.historyReads), 2);
+  await goView('translate');
+  await goView('history');
+  assert.equal(await page.evaluate(() => window.__qa.historyReads), 2, 'clean history reuses its fetched snapshot');
+  await page.evaluate(() => { window.__qa.holdHistory = true; });
+  await page.getByRole('button', { name: '收藏翻译', exact: true }).click();
+  await page.waitForFunction(() => window.__qa.historyReads === 3);
+  await page.getByRole('button', { name: '收藏翻译', exact: true }).click();
+  await page.waitForFunction(() => window.__qa.history[0].favorite === false);
+  assert.equal(await page.evaluate(() => window.__qa.historyReads), 3, 'mutations share one active history read');
+  await page.evaluate(() => { window.__qa.holdHistory = false; window.__qa.releaseHistory(); });
+  await page.waitForFunction(() => window.__qa.historyReads === 4);
+  await page.getByRole('button', { name: '收藏翻译', exact: true }).waitFor();
+  await page.evaluate(() => { window.__qa.failHistory = true; });
+  await page.getByRole('button', { name: '收藏翻译', exact: true }).click();
+  await page.locator('#toast').filter({ hasText: 'QA history read failed' }).waitFor();
+  await goView('translate');
+  await page.evaluate(() => { window.__qa.failHistory = false; });
+  await goView('history');
+  await page.getByRole('button', { name: '取消收藏', exact: true }).waitFor();
+  assert.equal(await page.evaluate(() => window.__qa.historyReads), 6, 'failed history reads stay dirty and can retry');
+  await page.getByRole('button', { name: '删除记录', exact: true }).click();
+  await page.getByText('暂无翻译记录', { exact: true }).waitFor();
+  console.log('PASS: history never fetches/renders during startup or hidden translation; clean visits reuse data; delayed reads do not render hidden cards or erase newer mutations; concurrent mutations coalesce; failures retry and deletion refreshes.');
+  await page.goto(process.env.ECHOLINGO_TEST_URL ?? 'http://127.0.0.1:1420/');
+  await page.waitForFunction(() => document.querySelector('#footer-status')?.textContent === '准备就绪');
   // A blank popup has no app chrome, tutorial, counters, or result placeholder.
   assert.equal(await page.locator('.management-header').isVisible(), false);
   assert.equal(await page.locator('.app-footer').isVisible(), false);
@@ -352,6 +420,47 @@ try {
   assert.equal(await page.evaluate(() => window.__qa.showPopupAttempts.at(-1).focusInput), true);
   assert.equal(await page.evaluate(() => window.__qa.showPopupAttempts.at(-1).reuseVisiblePopup), false);
   assert.equal(await page.evaluate(() => window.__qa.translationRequests.length), emptyRequestsBefore);
+  // Window activation can move focus to the document after the editor was focused.
+  // A single redirected character has no later native input event to repair
+  // button state. Backspace and paste need the same editing/layout pipeline.
+  await page.locator('#source-text').fill('');
+  await page.evaluate(() => document.querySelector('#source-text').blur());
+  await page.keyboard.type('X');
+  assert.equal(await page.locator('#source-text').inputValue(), 'X');
+  for (const id of ['#translate-button', '#copy-source', '#speak-source', '#clear-source']) assert.equal(await page.locator(id).isEnabled(), true);
+  assert.equal(await page.locator('body').evaluate(element => element.classList.contains('source-empty')), false);
+  await page.evaluate(() => document.querySelector('#source-text').blur());
+  await page.keyboard.press('Backspace');
+  assert.equal(await page.locator('#source-text').inputValue(), '');
+  for (const id of ['#translate-button', '#copy-source', '#speak-source', '#clear-source']) assert.equal(await page.locator(id).isDisabled(), true);
+  assert.equal(await page.locator('body').evaluate(element => element.classList.contains('source-empty')), true);
+  const emptySourceHeight = await page.locator('#source-text').evaluate(element => element.getBoundingClientRect().height);
+  const fallbackPaste = (text) => page.evaluate((text) => {
+    document.querySelector('#source-text').blur();
+    const clipboardData = new DataTransfer(); clipboardData.setData('text', text);
+    document.dispatchEvent(new ClipboardEvent('paste', { clipboardData, bubbles: true, cancelable: true }));
+  }, text);
+  await fallbackPaste('Pasted line one\nPasted line two\nPasted line three\nPasted line four');
+  assert.equal(await page.locator('#translate-button').isEnabled(), true);
+  assert.equal(await page.locator('#copy-source').isEnabled(), true);
+  assert.ok(await page.locator('#source-text').evaluate(element => element.getBoundingClientRect().height) > emptySourceHeight);
+  const fallbackPending = await page.evaluate(() => {
+    window.__qa.holdTranslation = true;
+    return { requests: window.__qa.translationRequests.length, cancellations: window.__qa.cancellationRequests.length };
+  });
+  await page.locator('#source-text').press('Enter');
+  await page.waitForFunction(count => window.__qa.translationRequests.length > count, fallbackPending.requests);
+  await fallbackPaste(' newer fallback edit');
+  await page.waitForFunction(count => window.__qa.cancellationRequests.length > count, fallbackPending.cancellations);
+  assert.equal(await page.locator('.results-column').isHidden(), true);
+  assert.equal(await page.locator('#translate-button').getAttribute('aria-label'), '翻译');
+  await page.evaluate(() => { window.__qa.holdTranslation = false; window.__qa.releaseTranslation(); });
+  await page.locator('#source-text').fill('x'.repeat(20000));
+  await page.evaluate(() => document.querySelector('#source-text').setSelectionRange(19998, 20000));
+  await fallbackPaste('ABCDE');
+  assert.equal((await page.locator('#source-text').inputValue()).length, 20000);
+  assert.ok((await page.locator('#source-text').inputValue()).endsWith('AB'));
+  console.log('PASS: body-focus single-key input, fallback Backspace and paste immediately synchronize actions/layout; fallback edits cancel old translation; selection replacement respects the text limit.');
   // Window activation can move focus to the document after the editor was focused.
   // The first typed burst, including Enter, must still land in the blank popup.
   await page.locator('#source-text').fill('');
@@ -2814,6 +2923,114 @@ try {
   assert.equal(await page.locator('#windows-selection-settings').isHidden(), true);
   assert.deepEqual(errors, []);
   console.log('PASS: isolated Windows strategy settings default compatibility for old payloads; strict and copy save without changing providers/shortcuts/theme, navigation retains strict, failed save rolls back, and macOS hides the setting. Fake IPC only.');
+  const retryUrl = new URL(process.env.ECHOLINGO_TEST_URL ?? 'http://127.0.0.1:1420/');
+  retryUrl.searchParams.set('translationRetryFixture', '1');
+  await page.goto(retryUrl.href);
+  await page.waitForFunction(() => document.querySelector('#footer-status')?.textContent === '准备就绪');
+  await page.evaluate(() => { window.__qa.translationResults = [
+    { providerId: 'qa-service', providerName: 'QA IPC fixture', text: 'Keep successful result', elapsedMs: 10 },
+    { providerId: 'qa-retry', providerName: 'QA retry service', text: '', error: 'Initial timeout', elapsedMs: 20 },
+  ]; });
+  await page.locator('#source-text').fill('Provider retry source');
+  await page.locator('#translate-button').click();
+  await page.getByText('Keep successful result', { exact: true }).waitFor();
+  const successCard = page.locator('.result-card[data-provider-id="qa-service"]');
+  const retryCard = page.locator('.result-card[data-provider-id="qa-retry"]');
+  await successCard.evaluate((element) => { element.dataset.retained = 'same-card'; });
+  await page.evaluate(() => { window.__qa.holdTranslation = true; window.__qa.translationResults[1] = { ...window.__qa.translationResults[1], error: undefined, text: 'Retried only one provider' }; });
+  await retryCard.locator('.result-retry').click();
+  await page.waitForFunction(() => window.__qa.translationRequests.length === 2);
+  assert.deepEqual(await page.evaluate(() => window.__qa.translationRequests.map(({ providerId }) => providerId ?? null)), [null, 'qa-retry']);
+  assert.equal(await successCard.locator('.result-text').textContent(), 'Keep successful result');
+  assert.equal(await successCard.getAttribute('data-retained'), 'same-card');
+  assert.equal(await retryCard.locator('.result-retry').isDisabled(), true);
+  await retryCard.locator('.result-retry').dispatchEvent('click');
+  assert.equal(await page.evaluate(() => window.__qa.translationRequests.length), 2);
+  await page.evaluate(() => {
+    const request = window.__qa.translationRequests.at(-1);
+    window.__qa.emit('translation-progress', { requestId: request.requestId, presentationEpoch: window.__qa.presentation.epoch, sequence: 1, done: false,
+      result: { providerId: 'qa-retry', providerName: 'untrusted name', text: 'Retry streaming', elapsedMs: 1 } });
+  });
+  await retryCard.getByText('Retry streaming', { exact: true }).waitFor();
+  assert.equal(await successCard.getAttribute('data-retained'), 'same-card');
+  await page.evaluate(() => { window.__qa.holdTranslation = false; window.__qa.releaseTranslation(); });
+  await retryCard.getByText('Retried only one provider', { exact: true }).waitFor();
+  assert.equal(await successCard.locator('.result-text').textContent(), 'Keep successful result');
+  assert.equal(await successCard.getAttribute('data-retained'), 'same-card');
+  assert.equal(await page.locator('.result-card').count(), 2);
+  // A top-level IPC failure must affect just this card, not the successful sibling.
+  await page.evaluate(() => { window.__qa.translationError = 'Retry transport failed'; });
+  await retryCard.locator('.result-retry').click();
+  await retryCard.getByText('Retry transport failed', { exact: true }).waitFor();
+  assert.equal(await successCard.locator('.result-text').textContent(), 'Keep successful result');
+  // Protect against an out-of-band language change without trusting stale cards.
+  await page.evaluate(() => { document.querySelector('#target-language').value = 'ja'; });
+  await retryCard.locator('.result-retry').click();
+  assert.equal(await page.evaluate(() => window.__qa.translationRequests.length), 3);
+  await page.evaluate(() => { document.querySelector('#target-language').value = 'zh-Hans'; window.__qa.translationError = null; window.__qa.holdTranslation = true; });
+  await retryCard.locator('.result-retry').click();
+  await page.waitForFunction(() => window.__qa.translationRequests.length === 4);
+  const cancelledRetry = await page.evaluate(() => structuredClone(window.__qa.translationRequests.at(-1)));
+  await page.locator('#source-text').fill('Newer source wins over retry');
+  await page.waitForFunction((id) => window.__qa.cancellationRequests.includes(id), cancelledRetry.requestId);
+  await page.evaluate((request) => {
+    window.__qa.holdTranslation = false; window.__qa.releaseTranslation();
+    window.__qa.emit('translation-progress', { requestId: request.requestId, presentationEpoch: window.__qa.presentation.epoch, sequence: 99, done: true,
+      result: { providerId: 'qa-retry', providerName: 'QA retry service', text: 'Stale retry result', elapsedMs: 1 } });
+  }, cancelledRetry);
+  await page.waitForTimeout(50);
+  assert.equal(await page.locator('#source-text').inputValue(), 'Newer source wins over retry');
+  assert.equal(await page.locator('.result-card').count(), 0);
+  assert.deepEqual(errors, []);
+  console.log('PASS: retry sends one provider ID, preserves successful text and DOM through streaming/completion/error, suppresses duplicate clicks, validates source/language snapshots, and discards cancelled late progress. Mock IPC only.');
+  // Same-ID provider edits must replace request-owned metadata, not retain the
+  // previous cloud kind/name on a newly retried system-translation result.
+  await page.locator('#translate-button').click();
+  await successCard.getByText('Keep successful result', { exact: true }).waitFor();
+  await successCard.evaluate((element) => { element.dataset.retained = 'metadata-sibling'; });
+  await goView('settings');
+  await page.locator('.provider-row').filter({ hasText: 'QA retry service' }).getByRole('button', { name: '编辑', exact: true }).click();
+  await page.locator('#provider-preset').selectOption('system');
+  await page.locator('#provider-name').fill('Renamed system retry');
+  await page.locator('#save-provider').click();
+  await page.locator('#provider-dialog').waitFor({ state: 'hidden' });
+  await goView('translate');
+  await page.evaluate(() => { window.__qa.translationResults[1] = {
+    providerId: 'qa-retry', providerName: 'Renamed system retry', text: '', elapsedMs: 2,
+    error: 'SYSTEM_TRANSLATION_DOWNLOAD_REQUIRED: Retry language packs unavailable',
+    resolvedLanguages: { sourceLanguage: 'zh-Hant', targetLanguage: 'en' },
+  }; });
+  await retryCard.locator('.result-retry').click();
+  await retryCard.locator('.result-setup').waitFor({ state: 'visible' });
+  assert.equal(await retryCard.locator('.result-provider').textContent(), 'Renamed system retry');
+  assert.equal(await retryCard.locator('.result-actions').getAttribute('aria-label'), 'Renamed system retry译文操作');
+  assert.equal(await retryCard.locator('.result-setup').textContent(), '准备系统翻译');
+  assert.equal(await successCard.getAttribute('data-retained'), 'metadata-sibling');
+  await retryCard.locator('.result-setup').click();
+  assert.equal(await page.locator('#system-translation-source').inputValue(), 'zh-Hant');
+  assert.equal(await page.locator('#system-translation-target').inputValue(), 'en');
+  assert.deepEqual(await page.evaluate(() => window.__qa.systemPrepareCalls), []);
+  // A history card starts without a provider kind; its retry must acquire the
+  // current system kind and name, then offer the returned resolved pair.
+  await page.evaluate(() => { window.__qa.history = [{
+    id: 'history-system-retry', text: 'Historical system retry source', sourceLanguage: 'en', targetLanguage: 'zh-Hans',
+    results: [{ providerId: 'qa-retry', providerName: 'Old historical name', text: 'Old historical result', elapsedMs: 3 }],
+    createdAt: Date.now(), favorite: false,
+  }]; });
+  await goView('history');
+  await page.locator('.history-open').click();
+  assert.equal(await retryCard.locator('.result-provider').textContent(), 'Old historical name');
+  await retryCard.locator('.result-retry').click();
+  await retryCard.locator('.result-setup').waitFor({ state: 'visible' });
+  assert.equal(await retryCard.locator('.result-provider').textContent(), 'Renamed system retry');
+  assert.equal(await retryCard.locator('.result-actions').getAttribute('aria-label'), 'Renamed system retry译文操作');
+  assert.equal(await retryCard.locator('.result-setup').textContent(), '准备系统翻译');
+  await retryCard.locator('.result-setup').click();
+  assert.equal(await page.locator('#system-translation-source').inputValue(), 'zh-Hant');
+  assert.equal(await page.locator('#system-translation-target').inputValue(), 'en');
+  assert.deepEqual(await page.evaluate(() => window.__qa.systemPrepareCalls), []);
+  assert.deepEqual(errors, []);
+  console.log('PASS: same-ID cloud-to-system/rename and history-card retries refresh provider kind, visible name and accessible action labels, route to the resolved system-language setup without downloading, and preserve successful sibling DOM. Mock IPC only.');
   console.log('PASS: persistent screenshot permission guidance prepared before presentation; click-only correct pane without authorization; retained sanitized link failure and manual path; first-use pending-open help navigation/focus; 800 px light and 420 px narrow/dark screenshots; dismiss/input/quiet Alt+D/Alt+A/stale-epoch recovery; deferred-modal permission payload and granted-status clearing; backend cancellation tickets on edit/clear/stop/Escape/close/native hide; native presentation epochs cover unallocated tickets, omitted/stale hide events, reopen overtaking pending begin and stale delayed popup fitting; backend-only cancellation clears old result state; late-ticket and replacement ordering; pending-save close/reentry guard; failure unlock; blank shortcuts; duplicate rejection; no countdown; theme/favorites and history bounds; OCR dual-key bundles/protocol isolation/no plaintext settings; documented vendor presets; origin-bound saved-key indications; minimal popup/menu/automatic source height; OCR configuration/privacy; empty-selection immediate typing; persistent source copy/speech; pin edge/icon/keyboard hit areas and drag isolation; captured source editing after completion and pending cancellation/retranslation; narrow-wrap source presentation; inconsistent permission feedback; automatic/fixed targets; Enter/ShiftEnter/IME/repeat; passive permissions; real capture and translation error preservation.');
 } finally {
   await browser.close();

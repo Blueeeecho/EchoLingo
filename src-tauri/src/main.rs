@@ -19,6 +19,7 @@ mod source_delivery;
 mod storage_tests;
 mod translation;
 mod translation_requests;
+mod translation_selection;
 mod window_layout;
 #[cfg(target_os = "windows")]
 mod windows_capture_input;
@@ -52,7 +53,7 @@ struct AppState {
     shortcut_gate: Mutex<shortcut_control::ShortcutGate>,
     shortcut_routes: shortcut_control::ShortcutRoutes,
     shortcut_updating: AtomicBool,
-    shortcut_maintenance: AtomicBool,
+    shortcut_maintenance: shortcut_control::ShortcutMaintenance,
     registered_shortcuts: Mutex<Vec<Binding>>,
     shortcut_failures: Mutex<std::collections::BTreeMap<String, String>>,
     translation_busy: tokio::sync::Semaphore,
@@ -861,7 +862,11 @@ impl shortcut_control::Registry for NativeShortcutRegistry<'_> {
                 self.labels.get(&id).map(String::as_str).unwrap_or("快捷键")
             )
         })?;
-        self.registered.push(shortcut);
+        // Native hooks may need recovery even while the binding is already
+        // present in our last successful snapshot. Do not duplicate that ID.
+        if !self.registered.iter().any(|binding| binding.id() == id) {
+            self.registered.push(shortcut);
+        }
         Ok(())
     }
     fn unregister(&mut self, id: u32) -> Result<(), String> {
@@ -916,36 +921,47 @@ fn shortcut_registry<'a>(
 }
 fn retry_inactive_shortcuts(app: &tauri::AppHandle) -> Result<bool, String> {
     let state = app.state::<AppState>();
-    if state.shortcut_maintenance.load(Ordering::SeqCst) {
+    let Some(_maintenance) = state
+        .shortcut_maintenance
+        .try_enter_idle(&state.shortcut_gate, Instant::now())?
+    else {
         return Ok(false);
-    }
+    };
+    // Never retain AppState mutexes while invoking the native registry. The
+    // global-shortcut plugin dispatches to the UI thread and waits for a reply;
+    // synchronous UI commands must remain free to read these snapshots.
     let settings = locked(&state.settings)?.clone();
-    let registered = locked(&state.registered_shortcuts)?
-        .iter()
-        .map(Binding::id)
-        .collect::<Vec<_>>();
-    let failures = locked(&state.shortcut_failures)?.clone();
-    let actions = inactive_retry_actions(&settings, &registered, &failures, |binding| {
+    let mut registered = locked(&state.registered_shortcuts)?.clone();
+    let mut failures = locked(&state.shortcut_failures)?.clone();
+    let ids = registered.iter().map(Binding::id).collect::<Vec<_>>();
+    let actions = inactive_retry_actions(&settings, &ids, &failures, |binding| {
         native_binding_active(*binding)
     })?;
     if actions.is_empty() {
         return Ok(false);
     }
-    let mut recovered = false;
-    for action in actions {
-        // Drop the settings lock before save_settings acquires it again.
-        let latest = locked(&app.state::<AppState>().settings)?.clone();
-        if save_settings(
-            app.clone(),
-            app.state::<AppState>(),
-            latest,
-            Some(vec![action]),
-        )
-        .is_ok()
-        {
-            recovered = true;
-        }
+    let next = parsed_shortcuts(&settings.shortcuts)?;
+    let candidates = next
+        .iter()
+        .filter(|(action, _)| actions.contains(action))
+        .map(|(action, binding)| (action.clone(), binding.id()))
+        .collect::<Vec<_>>();
+    state.shortcut_updating.store(true, Ordering::SeqCst);
+    let _update = ShortcutUpdateGuard(&state.shortcut_updating);
+    locked(&state.shortcut_gate)?.cancel(Instant::now());
+    #[cfg(target_os = "windows")]
+    {
+        let _ = windows_mouse_shortcuts::recording(0);
+        windows_mouse_shortcuts::invalidate();
     }
+    let recovered = shortcut_control::recover_bindings(
+        &mut shortcut_registry(app, &mut registered, &next),
+        &candidates,
+        &mut failures,
+    );
+    *locked(&state.registered_shortcuts)? = registered.clone();
+    *locked(&state.shortcut_failures)? = failures;
+    sync_shortcut_routes(&state, &settings.shortcuts, &registered, Ok(()))?;
     Ok(recovered)
 }
 
@@ -953,7 +969,15 @@ fn schedule_shortcut_retries(app: tauri::AppHandle) {
     tauri::async_runtime::spawn(async move {
         loop {
             tokio::time::sleep(Duration::from_secs(20)).await;
-            if retry_inactive_shortcuts(&app).unwrap_or(false) {
+            let retry_app = app.clone();
+            // OS registration is blocking; do not occupy a Tokio executor
+            // thread, and await completion so timer attempts cannot pile up.
+            let recovered = tauri::async_runtime::spawn_blocking(move || {
+                retry_inactive_shortcuts(&retry_app).unwrap_or(false)
+            })
+            .await
+            .unwrap_or(false);
+            if recovered {
                 let _ = app.emit("shortcut-registration-changed", ());
             }
         }
@@ -963,9 +987,9 @@ fn schedule_shortcut_retries(app: tauri::AppHandle) {
 fn install_shortcuts(app: &tauri::AppHandle, s: &Shortcuts) -> Result<(), String> {
     let next = parsed_shortcuts(s)?;
     let state = app.state::<AppState>();
-    let mut registered = locked(&state.registered_shortcuts)?;
+    let mut registered = locked(&state.registered_shortcuts)?.clone();
     let mut registry = shortcut_registry(app, &mut registered, &next);
-    let mut failures = locked(&state.shortcut_failures)?;
+    let mut failures = locked(&state.shortcut_failures)?.clone();
     failures.clear();
     for (action, binding) in &next {
         if registry
@@ -984,7 +1008,10 @@ fn install_shortcuts(app: &tauri::AppHandle, s: &Shortcuts) -> Result<(), String
     } else {
         Err(failures.values().cloned().collect::<Vec<_>>().join("；"))
     };
-    sync_shortcut_routes(&state, s, registry.registered, result)
+    let result = sync_shortcut_routes(&state, s, registry.registered, result);
+    *locked(&state.registered_shortcuts)? = registered;
+    *locked(&state.shortcut_failures)? = failures;
+    result
 }
 
 fn sync_shortcut_routes(
@@ -1052,7 +1079,9 @@ fn set_shortcut_recording(
         {
             return Err("请在前台设置窗口中录制快捷键".into());
         }
-        let id = locked(&state.shortcut_gate)?.begin(Instant::now())?;
+        let id = state
+            .shortcut_maintenance
+            .begin_recording(&state.shortcut_gate, Instant::now())?;
         #[cfg(target_os = "windows")]
         {
             sync_native_shortcut_context(&window.app_handle());
@@ -1129,13 +1158,6 @@ fn inactive_retry_actions(
     Ok(actions)
 }
 
-struct ShortcutMaintenanceGuard<'a>(&'a AtomicBool);
-impl Drop for ShortcutMaintenanceGuard<'_> {
-    fn drop(&mut self) {
-        self.0.store(false, Ordering::SeqCst);
-    }
-}
-
 #[tauri::command]
 fn save_settings(
     app: tauri::AppHandle,
@@ -1143,14 +1165,10 @@ fn save_settings(
     mut settings: Settings,
     retry_shortcut_actions: Option<Vec<String>>,
 ) -> Result<(), String> {
-    if state
+    let _maintenance = state
         .shortcut_maintenance
-        .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
-        .is_err()
-    {
-        return Err("快捷键正在更新，请稍后再保存。".into());
-    }
-    let _maintenance = ShortcutMaintenanceGuard(&state.shortcut_maintenance);
+        .try_enter()
+        .ok_or("快捷键正在更新，请稍后再保存。")?;
     validate_settings(&settings)?;
     settings.shortcuts = shortcut_bindings::normalized(&settings.shortcuts)?;
     let next = parsed_shortcuts(&settings.shortcuts)?;
@@ -1160,9 +1178,9 @@ fn save_settings(
     for p in &mut settings.ocr_providers {
         p.has_key = false;
     }
-    let mut current = locked(&state.settings)?;
+    let mut current = locked(&state.settings)?.clone();
     let previous = current.clone();
-    let mut registered = locked(&state.registered_shortcuts)?;
+    let mut registered = locked(&state.registered_shortcuts)?.clone();
     let old_ids = registered.iter().map(Binding::id).collect::<Vec<_>>();
     let previous_bindings = parsed_shortcuts(&previous.shortcuts)?;
     let previous_ids = previous_bindings
@@ -1201,9 +1219,15 @@ fn save_settings(
     }
     let mut registry = shortcut_registry(&app, &mut registered, &next);
     let mut result = shortcut_control::replace_bindings(&mut registry, &old_ids, &new_ids, || {
-        locked(&state.history).and_then(|mut history| {
-            persist_settings_and_history(&state.data_dir, &mut current, &mut history, settings)
-        })
+        // Only persistence owns settings/history locks, after all native calls.
+        // Maintenance serializes settings writers; translation completion still
+        // reads privacy and appends history under the same lock order.
+        let mut latest = locked(&state.settings)?;
+        let mut history = locked(&state.history)?;
+        let result =
+            persist_settings_and_history(&state.data_dir, &mut latest, &mut history, settings);
+        current = latest.clone();
+        result
     });
     // The existing storage helper can report a double disk-write failure after
     // committing settings. Keep native bindings aligned with that actual state
@@ -1252,6 +1276,7 @@ fn save_settings(
             });
         }
     }
+    *locked(&state.registered_shortcuts)? = registered;
     result
 }
 
@@ -1398,6 +1423,7 @@ async fn translate(
     text: String,
     source_language: String,
     target_language: String,
+    provider_id: Option<String>,
 ) -> Result<Vec<TranslationResult>, String> {
     if text.trim().is_empty() {
         return Err("请输入需要翻译的文本".into());
@@ -1413,15 +1439,8 @@ async fn translate(
         .try_acquire()
         .map_err(|_| "翻译任务较多，请等待当前请求完成")?;
     let settings = locked(&state.settings)?.clone();
-    let providers: Vec<_> = settings
-        .providers
-        .iter()
-        .filter(|p| p.enabled)
-        .cloned()
-        .collect();
-    if providers.is_empty() {
-        return Err("请在设置中添加并启用翻译服务".into());
-    }
+    let providers =
+        translation_selection::request_providers(&settings.providers, provider_id.as_deref())?;
     let (resolved_source, resolved_target, results) = state
         .translation_requests
         .execute(request_id, async {
@@ -3046,7 +3065,7 @@ fn main() {
                 shortcut_gate: Mutex::new(shortcut_control::ShortcutGate::default()),
                 shortcut_routes: shortcut_control::ShortcutRoutes::default(),
                 shortcut_updating: AtomicBool::new(false),
-                shortcut_maintenance: AtomicBool::new(false),
+                shortcut_maintenance: shortcut_control::ShortcutMaintenance::default(),
                 registered_shortcuts: Mutex::new(Vec::new()),
                 shortcut_failures: Mutex::new(std::collections::BTreeMap::new()),
                 translation_busy: tokio::sync::Semaphore::new(2),
@@ -3920,7 +3939,7 @@ mod tests {
             shortcut_gate: Mutex::new(shortcut_control::ShortcutGate::default()),
             shortcut_routes: shortcut_control::ShortcutRoutes::default(),
             shortcut_updating: AtomicBool::new(false),
-            shortcut_maintenance: AtomicBool::new(false),
+            shortcut_maintenance: shortcut_control::ShortcutMaintenance::default(),
             registered_shortcuts: Mutex::new(Vec::new()),
             shortcut_failures: Mutex::new(std::collections::BTreeMap::new()),
             translation_busy: tokio::sync::Semaphore::new(2),
