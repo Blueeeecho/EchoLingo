@@ -2015,6 +2015,10 @@ fn start_action(app: tauri::AppHandle, action: String) {
     } else {
         Ok(None)
     };
+    #[cfg(target_os = "windows")]
+    if let Some((_, attempt)) = selection_attempt {
+        platform::record_selection_source(attempt, source_snapshot.is_ok(), None);
+    }
     let presentation = match begin_native_request_presentation(
         &state.native_tasks,
         &request,
@@ -2069,7 +2073,11 @@ fn start_action(app: tauri::AppHandle, action: String) {
             let expected_source = source_snapshot?;
             #[cfg(target_os = "windows")]
             if let Some(source) = &expected_source {
-                if !source.is_current() {
+                let current = source.is_current();
+                if let Some((_, attempt)) = selection_attempt {
+                    platform::record_selection_source(attempt, true, Some(current));
+                }
+                if !current {
                     return Err("CANCELLED: 原选词窗口已改变，请重新选词".into());
                 }
             }
@@ -2156,6 +2164,7 @@ fn start_action(app: tauri::AppHandle, action: String) {
                 result
                     .as_ref()
                     .is_ok_and(|(text, _)| !text.trim().is_empty()),
+                result.as_ref().err().map(String::as_str),
             );
         }
         if let Err(error) = &result {
@@ -2202,6 +2211,7 @@ fn start_action(app: tauri::AppHandle, action: String) {
                     5,
                     result.is_ok(),
                     result.as_ref().is_ok_and(|text| !text.trim().is_empty()),
+                    result.as_ref().err().map(String::as_str),
                 );
             }
             match result {
@@ -2671,6 +2681,16 @@ async fn diagnostics(
     value["warnings"] = serde_json::json!(warnings);
     value["dataDirectory"] = serde_json::json!(state.data_dir.display().to_string());
     value["ocrUpload"] = serde_json::json!(false);
+    value["processId"] = serde_json::json!(std::process::id());
+    #[cfg(target_os = "windows")]
+    {
+        value["shortcutInput"] = serde_json::Value::Object(
+            windows_mouse_shortcuts::diagnostics()
+                .into_iter()
+                .map(|(key, value)| (key.to_owned(), serde_json::json!(value)))
+                .collect(),
+        );
+    }
     #[cfg(target_os = "macos")]
     {
         let policy_diagnostics = app.state::<ApplicationPolicyDiagnostics>();

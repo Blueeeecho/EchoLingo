@@ -8,6 +8,46 @@ pub const MOUSE_X2: u8 = 8;
 pub const MOUSE_X1_ID: u32 = 0x8000_0001;
 pub const MOUSE_X2_ID: u32 = 0x8000_0002;
 
+// Only keys relevant to a priority pair or its modifier exclusion are sampled.
+pub const HELD_D: u16 = 1;
+pub const HELD_S: u16 = 2;
+pub fn recovery_key_bit(key: u32, scan: u32, extended: bool) -> u16 {
+    match key {
+        0x44 => HELD_D,
+        0x53 => HELD_S,
+        0xa4 => 4,
+        0xa5 => 8,
+        0x12 => {
+            if extended {
+                8
+            } else {
+                4
+            }
+        }
+        0xa2 => 16,
+        0xa3 => 32,
+        0x11 => {
+            if extended {
+                32
+            } else {
+                16
+            }
+        }
+        0xa0 => 64,
+        0xa1 => 128,
+        0x10 => {
+            if scan == 0x36 {
+                128
+            } else {
+                64
+            }
+        }
+        0x5b => 256,
+        0x5c => 512,
+        _ => 0,
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Button {
     X1,
@@ -138,6 +178,14 @@ impl Policy {
     }
     pub fn mouse_owned(&self) -> bool {
         self.held[2..].iter().any(|held| held.owned)
+    }
+    pub fn keyboard_owned(&self) -> bool {
+        self.held[..2].iter().any(|held| held.owned)
+    }
+    pub fn can_recover_keyboard(&self, physical_held: u16) -> bool {
+        // Async state alone cannot prove a suppressed suffix-up was delivered.
+        // Keep ownership until the actual callback drains that release.
+        physical_held == 0 && !self.keyboard_owned()
     }
     pub fn alt_release(&mut self) -> bool {
         std::mem::take(&mut self.mask_alt)
@@ -321,5 +369,62 @@ mod focus_context_tests {
             focus: 102,
             ..Context::default()
         }));
+    }
+}
+
+#[cfg(test)]
+mod recovery_tests {
+    use super::*;
+    #[test]
+    fn owned_suffix_keeps_the_release_even_if_async_state_reports_up() {
+        let mut p = Policy::default();
+        let c = Context::default();
+        p.pair(0, true, true, c);
+        assert!(!p.can_recover_keyboard(HELD_D));
+        assert!(!p.can_recover_keyboard(0));
+        assert!(p.keyboard_owned());
+        assert!(p.pair(0, false, true, c).release);
+    }
+    #[test]
+    fn modifier_release_does_not_discard_a_held_suffix() {
+        let mut p = Policy::default();
+        let c = Context::default();
+        p.pair(0, true, true, c);
+        assert!(p.alt_release());
+        assert!(!p.can_recover_keyboard(0));
+        assert!(p.pair(0, false, true, c).release);
+        assert!(p.can_recover_keyboard(0));
+    }
+    #[test]
+    fn only_keyboard_ownership_and_relevant_held_keys_defer_recovery() {
+        let mut p = Policy::default();
+        let c = Context::default();
+        p.pair(2, true, true, c);
+        assert!(p.can_recover_keyboard(0));
+        assert!(!p.can_recover_keyboard(HELD_S));
+        assert!(p.mouse_owned());
+        assert!(p.pair(2, false, true, c).release);
+    }
+    #[test]
+    fn release_hints_distinguish_both_sides_and_ignore_unrelated_keys() {
+        for (generic, left, right, scan) in [
+            (0x12, 0xa4, 0xa5, 0),
+            (0x11, 0xa2, 0xa3, 0),
+            (0x10, 0xa0, 0xa1, 0x36),
+        ] {
+            assert_ne!(
+                recovery_key_bit(left, 0, false),
+                recovery_key_bit(right, 0, false)
+            );
+            assert_eq!(
+                recovery_key_bit(generic, 0, false),
+                recovery_key_bit(left, 0, false)
+            );
+            assert_eq!(
+                recovery_key_bit(generic, scan, true),
+                recovery_key_bit(right, 0, false)
+            );
+        }
+        assert_eq!(recovery_key_bit(0x41, 0, false), 0);
     }
 }

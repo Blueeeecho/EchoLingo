@@ -539,6 +539,8 @@ impl SelectionHealth {
         self.generation = self.generation.wrapping_add(1);
         self.value = json!({
             "attemptId": self.generation, "attemptPhase": 1,
+            "attemptStartedAtUnixMs": selection_diagnostic_time(),
+            "nativeBoundaryStage": 0,
             "configuredCopyStrategy": u64::from(strategy == crate::model::WindowsSelectionStrategy::Copy),
             "helperResponseReceived": 0
         });
@@ -569,12 +571,60 @@ pub fn begin_selection_attempt(
         .begin(strategy)
 }
 #[cfg(target_os = "windows")]
-pub fn update_selection_attempt(attempt: SelectionAttempt, phase: u64, ok: bool, nonempty: bool) {
+pub fn update_selection_attempt(
+    attempt: SelectionAttempt,
+    phase: u64,
+    ok: bool,
+    nonempty: bool,
+    error: Option<&str>,
+) {
     update_selection_health(
         attempt,
         json!({
             "attemptPhase": phase, "actionResultOk": u64::from(ok),
-            "actionResultNonempty": u64::from(nonempty)
+            "actionResultNonempty": u64::from(nonempty),
+            "actionErrorKind": selection_error_kind(error),
+            "attemptFinishedAtUnixMs": selection_diagnostic_time(),
+        }),
+    );
+}
+
+#[cfg(any(target_os = "windows", test))]
+fn selection_diagnostic_time() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|value| value.as_millis().min(u128::from(u64::MAX)) as u64)
+        .unwrap_or(0)
+}
+
+// Only numeric categories leave the process. Never copy an error message,
+// source text, application name, window handle or clipboard data into health.
+#[cfg(any(target_os = "windows", test))]
+fn selection_error_kind(error: Option<&str>) -> u64 {
+    match error {
+        None => 0,
+        Some(error) if error.starts_with("CANCELLED:") => 1,
+        Some(error) if error.starts_with("NO_SELECTION:") || error.starts_with("SELECTION:") => 2,
+        Some(error) if error.starts_with("NATIVE_START:") => 3,
+        Some(error) if error.starts_with("NATIVE_PROTOCOL:") => 4,
+        Some(error) if error.starts_with("NATIVE_WAIT:") => 5,
+        Some(error) if error.starts_with("NATIVE_TIMEOUT:") => 6,
+        Some(error) if error.starts_with("CLIPBOARD_") => 7,
+        Some(_) => 8,
+    }
+}
+
+#[cfg(target_os = "windows")]
+pub fn record_selection_source(
+    attempt: SelectionAttempt,
+    snapshot_ok: bool,
+    current: Option<bool>,
+) {
+    update_selection_health(
+        attempt,
+        json!({
+            "sourceSnapshotOutcome": if snapshot_ok { 1 } else { 2 },
+            "sourceCurrentAtWorker": current.map_or(0, |current| if current { 1 } else { 2 }),
         }),
     );
 }
@@ -998,6 +1048,12 @@ fn run_windows_selection(
     let capture = matches!(mode, "capture-ocr" | "capture-image");
     let selection = mode == "selected-text";
     let attempt = selection.then(|| attempt.unwrap_or_else(|| begin_selection_attempt(strategy)));
+    let stage = |stage| {
+        if let Some(attempt) = attempt {
+            update_selection_health(attempt, json!({"nativeBoundaryStage": stage}));
+        }
+    };
+    stage(1);
     if capture {
         if let Ok(mut health) = windows_capture_health().lock() {
             *health = json!({"helperResponseReceived": 0});
@@ -1012,9 +1068,11 @@ fn run_windows_selection(
     } else {
         None
     };
+    stage(2);
     if capture || mode == "selected-text" {
         crate::windows_capture_input::wait_available(|| cancelled(cancel.as_ref()))?;
     }
+    stage(3);
     let mut command = native_command(mode)?;
     if selection {
         command.args(["-SelectionStrategy", strategy.native_argument()]);
@@ -1032,6 +1090,7 @@ fn run_windows_selection(
     } else {
         None
     };
+    stage(4);
     if let Some(session) = &capture_session {
         command.args([
             "-CaptureHostThreadId",
@@ -1057,6 +1116,7 @@ fn run_windows_selection(
                 .into(),
         );
     }
+    stage(5);
     let helper_started = Instant::now();
     if let Some(attempt) = attempt {
         update_selection_health(attempt, json!({"attemptPhase": 2}));
@@ -1064,6 +1124,7 @@ fn run_windows_selection(
     let mut child = command
         .spawn()
         .map_err(|error| format!("NATIVE_START: Could not start the system helper: {error}"))?;
+    stage(6);
     if let Some(session) = &capture_session {
         session.bind_child(child.id());
     }
@@ -1139,6 +1200,7 @@ fn run_windows_selection(
             }
         }
     };
+    stage(7);
     if let Some(session) = &mut capture_session {
         session.close();
     }
@@ -1209,6 +1271,7 @@ fn run_windows_selection(
         }
     }
     let result = parse_response(&output, status.success());
+    stage(8);
     // Clipboard restoration errors remain visible even when a task was replaced.
     if cancellation_signal_failed
         && result
@@ -1751,6 +1814,37 @@ mod tests {
         assert_eq!(health.value["attemptPhase"], 4);
         assert_eq!(health.value["helperResponseReceived"], 0);
         assert_eq!(health.value["actionResultOk"], 0);
+    }
+
+    #[test]
+    fn selection_failure_health_distinguishes_pre_helper_errors_without_error_text() {
+        for (error, expected) in [
+            (None, 0),
+            (Some("CANCELLED: synthetic source changed"), 1),
+            (Some("NO_SELECTION: synthetic empty"), 2),
+            (Some("SELECTION: synthetic empty"), 2),
+            (Some("NATIVE_START: synthetic startup"), 3),
+            (Some("NATIVE_PROTOCOL: synthetic malformed reply"), 4),
+            (Some("NATIVE_WAIT: synthetic wait failure"), 5),
+            (Some("NATIVE_TIMEOUT: synthetic timeout"), 6),
+            (
+                Some("CLIPBOARD_RESTORE_SKIPPED: synthetic cleanup failure"),
+                7,
+            ),
+            (Some("synthetic unknown error"), 8),
+        ] {
+            assert_eq!(super::selection_error_kind(error), expected);
+        }
+        let mut health = super::SelectionHealth::default();
+        let old = health.begin(crate::model::WindowsSelectionStrategy::Copy);
+        let latest = health.begin(crate::model::WindowsSelectionStrategy::Copy);
+        health.update(old, json!({"actionErrorKind": 1, "nativeBoundaryStage": 6}));
+        assert!(health.value.get("actionErrorKind").is_none());
+        assert_eq!(health.value["nativeBoundaryStage"], 0);
+        health.update(latest, json!({"actionErrorKind": super::selection_error_kind(Some("NATIVE_START: synthetic"))}));
+        assert_eq!(health.value["actionErrorKind"], 3);
+        assert!(health.value["attemptStartedAtUnixMs"].as_u64().unwrap() > 0);
+        assert!(!health.value.to_string().contains("synthetic"));
     }
 
     #[test]

@@ -9,7 +9,7 @@ on:
         description: Full regression or exact-binary desktop diagnostics
         type: choice
         default: full
-        options: [full, macos-preview, windows-popup-diagnostics, windows-popup-current-diagnostics, windows-application-diagnostics, windows-input-plane-experiment, windows-native-diagnostics, windows-shortcuts-ui-diagnostics, windows-shortcuts-ui-medium-diagnostics, windows-shortcuts-current-diagnostics, windows-shortcuts-workflows-diagnostics, windows-delegated-diagnostics, windows-browser-diagnostics, windows-selection-same-page-diagnostics, windows-selection-browser-app-diagnostics, windows-browser-ocr-visibility-diagnostics, windows-selection-cold-edge-diagnostics, windows-selection-paced-edge-diagnostics, windows-selection-nonbrowser-app-diagnostics, windows-latest-intent-diagnostics, windows-selection-application-diagnostics, windows-selection-clipboard-diagnostics, windows-selection-notepad-diagnostics, windows-selection-budget-diagnostics, windows-selection-context-diagnostics, windows-wps-selection-diagnostics, windows-focus-resize-current-diagnostics, windows-priority-input-diagnostics, windows-priority-candidate-diagnostics]
+        options: [full, macos-preview, windows-preview, windows-popup-diagnostics, windows-popup-current-diagnostics, windows-application-diagnostics, windows-input-plane-experiment, windows-native-diagnostics, windows-shortcuts-ui-diagnostics, windows-shortcuts-ui-medium-diagnostics, windows-shortcuts-current-diagnostics, windows-shortcuts-workflows-diagnostics, windows-delegated-diagnostics, windows-browser-diagnostics, windows-selection-same-page-diagnostics, windows-selection-browser-app-diagnostics, windows-browser-ocr-visibility-diagnostics, windows-selection-cold-edge-diagnostics, windows-selection-paced-edge-diagnostics, windows-selection-nonbrowser-app-diagnostics, windows-latest-intent-diagnostics, windows-selection-application-diagnostics, windows-selection-clipboard-diagnostics, windows-selection-notepad-diagnostics, windows-selection-budget-diagnostics, windows-selection-context-diagnostics, windows-wps-selection-diagnostics, windows-focus-resize-current-diagnostics, windows-priority-input-diagnostics, windows-priority-candidate-diagnostics]
 permissions:
   contents: read
 jobs:
@@ -18,7 +18,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: ${{ fromJSON(github.event.inputs.mode == 'macos-preview' && '["macos-latest"]' || '["windows-latest","macos-latest"]') }}
+        os: ${{ fromJSON(github.event.inputs.mode == 'macos-preview' && '["macos-latest"]' || github.event.inputs.mode == 'windows-preview' && '["windows-latest"]' || '["windows-latest","macos-latest"]') }}
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
