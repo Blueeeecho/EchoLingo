@@ -5,6 +5,7 @@ public static partial class EchoLingoPopupVisibilitySmoke {
     [System.Runtime.InteropServices.DllImport("user32.dll")] static extern uint GetDpiForWindow(System.IntPtr window);
     [System.Runtime.InteropServices.DllImport("user32.dll")] static extern bool GetClientRect(System.IntPtr window, out RECT bounds);
     [System.Runtime.InteropServices.DllImport("user32.dll")] static extern bool ClientToScreen(System.IntPtr window, ref POINT point);
+    [System.Runtime.InteropServices.DllImport("user32.dll")] static extern bool IsChild(System.IntPtr parent, System.IntPtr window);
     [System.Runtime.InteropServices.DllImport("user32.dll")] static extern bool GetGUIThreadInfo(uint thread, ref ResizeGuiInfo info);
     [System.Runtime.InteropServices.DllImport("user32.dll")] static extern short GetAsyncKeyState(int key);
     [System.Runtime.InteropServices.DllImport("user32.dll", EntryPoint="SystemParametersInfoW", SetLastError=true)]
@@ -64,6 +65,36 @@ public static partial class EchoLingoPopupVisibilitySmoke {
         int coordinates = unchecked((int)(((uint)y & 0xffff) << 16 | ((uint)x & 0xffff)));
         Require(SendMessageTimeout(main, 0x0084, System.UIntPtr.Zero, new System.IntPtr(coordinates), 0x0001 | 0x0002 | 0x0020, 500, out result) != System.IntPtr.Zero, "Own management nonclient hit-test did not respond.");
         return unchecked((int)result.ToUInt64());
+    }
+    static bool ResizePointerTargetAllowed(bool uniqueOwnedMain, bool mainVisible, bool foregroundIsMain, System.IntPtr main, System.IntPtr hit, System.IntPtr hitRoot, bool hitIsChild, bool hitVisible) {
+        return uniqueOwnedMain && mainVisible && foregroundIsMain && main != System.IntPtr.Zero && hit != System.IntPtr.Zero &&
+            hitVisible && hitRoot == main && (hit == main || hitIsChild);
+    }
+    static void RequireResizePointerTarget(Process app, System.IntPtr main, POINT point, System.Collections.Generic.Dictionary<string, object> observation) {
+        var candidates = MainWindowCandidates(app.Id); uint mainOwner, hitOwner, rootOwner;
+        uint mainThread = GetWindowThreadProcessId(main, out mainOwner);
+        System.IntPtr mainRoot = GetAncestor(main, 2), hit = WindowFromPoint(point), hitRoot = GetAncestor(hit, 2), foreground = GetForegroundWindow();
+        uint hitThread = GetWindowThreadProcessId(hit, out hitOwner), rootThread = GetWindowThreadProcessId(hitRoot, out rootOwner);
+        bool uniqueOwnedMain = candidates.Count == 1 && candidates[0] == main && mainOwner == app.Id && mainRoot == main;
+        bool visible = IsWindowVisible(main), hitVisible = hit != System.IntPtr.Zero && IsWindowVisible(hit), child = hit != System.IntPtr.Zero && IsChild(main, hit);
+        POINT cursor; bool cursorKnown = GetPhysicalCursorPos(out cursor);
+        var probe = new System.Collections.Generic.Dictionary<string, object> {
+            { "appProcessId", app.Id }, { "mainHwnd", main.ToInt64() }, { "mainOwnerProcessId", mainOwner }, { "mainThreadId", mainThread },
+            { "mainRootHwnd", mainRoot.ToInt64() }, { "mainCandidateCount", candidates.Count }, { "uniqueOwnedMain", uniqueOwnedMain },
+            { "mainVisible", visible }, { "foregroundHwnd", foreground.ToInt64() }, { "foregroundIsMain", foreground == main },
+            { "mainDpi", GetDpiForWindow(main) }, { "targetPhysicalXY", new int[] { point.x, point.y } },
+            { "cursorPhysicalPositionKnown", cursorKnown }, { "cursorPhysicalXY", new int[] { cursor.x, cursor.y } },
+            { "hitHwnd", hit.ToInt64() }, { "hitOwnerProcessId", hitOwner }, { "hitThreadId", hitThread }, { "hitDpi", GetDpiForWindow(hit) },
+            { "hitRootHwnd", hitRoot.ToInt64() }, { "hitRootOwnerProcessId", rootOwner }, { "hitRootThreadId", rootThread },
+            { "hitIsMain", hit == main }, { "hitIsChildOfMain", child }, { "hitVisible", hitVisible }
+        };
+        var probes = new System.Collections.Generic.List<object>(); probes.Add(probe);
+        observation["targetProbes"] = probes; observation["targetProbeCount"] = probes.Count;
+        // WebView2 creates a child HWND in its host; its process identity is
+        // diagnostic only. Require both the native parent chain and exact root.
+        bool accepted = ResizePointerTargetAllowed(uniqueOwnedMain, visible, foreground == main, main, hit, hitRoot, child, hitVisible);
+        probe["accepted"] = accepted;
+        Require(accepted, "Resize edge is occluded or is not the exact visible foreground main or its descendant; no button-down sent.");
     }
     static System.Collections.Generic.Dictionary<string, object> ManagementResizeFrame(Process app, System.IntPtr main) {
         RequireUniqueOwnedMainWindow(app, main); RECT bounds = ResizeBounds(main);
@@ -138,19 +169,19 @@ public static partial class EchoLingoPopupVisibilitySmoke {
         Wait(delegate { return SourceValue(main) == text; }, 3000, "Generated long source was not accepted by the actual editor.");
     }
     static System.Collections.Generic.Dictionary<string, object> DragResize(Process app, System.IntPtr main, bool west, int distance, bool retainAfterRelease) {
-        RequireUniqueOwnedMainWindow(app, main);
-        Require(IsWindowVisible(main) && GetForegroundWindow() == main, "Only the exact foreground app HWND may receive the generated resize.");
-        RECT before = ResizeBounds(main); int startWidth = before.right - before.left;
-        POINT point = ResizeClientEdgePoint(main, west, false); int x = point.x, y = point.y;
-        Require(SetCursorPos(x, y), "Could not position the generated resize pointer.");
-        uint owner; System.IntPtr hit = WindowFromPoint(point); GetWindowThreadProcessId(hit, out owner);
-        Require(owner == app.Id && GetAncestor(hit, 2) == main, "Resize edge is occluded or belongs to another window; no button-down sent.");
         var samples = new System.Collections.Generic.List<int>(); bool held = false;
         var result = new System.Collections.Generic.Dictionary<string, object> {
-            { "edge", west ? "west" : "east" }, { "initialPhysicalWidth", startWidth }, { "deltaPhysicalPixels", distance },
+            { "edge", west ? "west" : "east" }, { "deltaPhysicalPixels", distance },
             { "nativeSizingLoopObserved", false }, { "widthSamples", samples }, { "retentionRequired", retainAfterRelease }, { "clientInsetLogicalPixels", 8 }
         };
         activeResizeObservation = result;
+        RequireUniqueOwnedMainWindow(app, main);
+        Require(IsWindowVisible(main) && GetForegroundWindow() == main, "Only the exact foreground app HWND may receive the generated resize.");
+        RECT before = ResizeBounds(main); int startWidth = before.right - before.left;
+        result["initialPhysicalWidth"] = startWidth;
+        POINT point = ResizeClientEdgePoint(main, west, false); int x = point.x, y = point.y;
+        Require(SetCursorPos(x, y), "Could not position the generated resize pointer.");
+        RequireResizePointerTarget(app, main, point, result);
         var motion = new System.Collections.Generic.List<object>(); result["boundedMotionObservations"] = motion;
         result["initialBounds"] = new int[] { before.left, before.top, before.right, before.bottom };
         try {
@@ -205,19 +236,19 @@ public static partial class EchoLingoPopupVisibilitySmoke {
         result["finalPhysicalWidth"] = ResizeWidth(main); result["passed"] = true; return result;
     }
     static System.Collections.Generic.Dictionary<string, object> DragManagementHeight(Process app, System.IntPtr main, int distance, bool corner = false) {
+        var result = new System.Collections.Generic.Dictionary<string, object> {
+            { "edge", corner ? "south-east" : "south" }, { "deltaPhysicalPixels", distance }, { "nativeSizingLoopObserved", false }, { "retentionRequired", true }, { "clientInsetLogicalPixels", 8 }
+        };
+        activeResizeObservation = result;
         RequireUniqueOwnedMainWindow(app, main);
         Require(IsWindowVisible(main) && GetForegroundWindow() == main, "Only the exact foreground settings HWND may receive a generated resize.");
         RECT before = ResizeBounds(main); int height = before.bottom - before.top, width = before.right - before.left;
+        result["initialPhysicalHeight"] = height; result["initialPhysicalWidth"] = width;
         POINT point = ResizeClientEdgePoint(main, false, true);
         if (corner) point.x = ResizeClientEdgePoint(main, false, false).x;
-        int x = point.x, y = point.y; uint owner;
-        System.IntPtr hit = WindowFromPoint(point); GetWindowThreadProcessId(hit, out owner);
-        Require(owner == app.Id && GetAncestor(hit, 2) == main, "Settings client bottom resize edge is occluded or unavailable; no mouse-down sent.");
+        int x = point.x, y = point.y;
         Require(SetCursorPos(x, y), "Could not position the generated settings resize pointer.");
-        var result = new System.Collections.Generic.Dictionary<string, object> {
-            { "edge", corner ? "south-east" : "south" }, { "initialPhysicalHeight", height }, { "initialPhysicalWidth", width }, { "deltaPhysicalPixels", distance }, { "nativeSizingLoopObserved", false }, { "retentionRequired", true }, { "clientInsetLogicalPixels", 8 }
-        };
-        activeResizeObservation = result;
+        RequireResizePointerTarget(app, main, point, result);
         var samples = new System.Collections.Generic.List<int>(); result["heightSamples"] = samples; bool held = false;
         try {
             INPUT down = new INPUT(); down.type = 0; down.data.mouse.flags = 2; Send(new INPUT[] { down }); held = true;
