@@ -1971,14 +1971,12 @@ func systemInstalledTranslationContractSelfTest() throws {
           systemTranslationFailure(CancellationError()).message.hasPrefix("SYSTEM_TRANSLATION_CANCELLED:") else {
         throw NativeError("SELF_TEST: Installed-only translation contract failed.")
     }
+    try systemTranslationStatusPolicySelfTest()
 }
 
 @available(macOS 26.0, *)
-func availableSystemTranslation(_ request: SystemTranslationInput) async throws -> [String: Any] {
-    let (source, starterPair) = try systemSourceLanguage(request, forTranslation: false)
-    let state: LanguageAvailability.Status
-    if systemLanguagesEquivalent(source, request.target) { state = .installed }
-    else { state = await LanguageAvailability().status(from: Locale.Language(identifier: source), to: Locale.Language(identifier: request.target)) }
+func systemTranslationStatusPayload(_ state: LanguageAvailability.Status, source: String,
+                                    target: String, starterPair: Bool) -> [String: Any] {
     let status: String
     let available: Bool
     let requiresSetup: Bool
@@ -1988,8 +1986,8 @@ func availableSystemTranslation(_ request: SystemTranslationInput) async throws 
         status = "installed"; available = true; requiresSetup = false
         message = "此语言组合已可使用 Apple 系统翻译，无需 API 密钥。"
     case .supported:
-        status = "downloadRequired"; available = false; requiresSetup = true
-        message = "请点击「准备系统翻译」，在系统确认后下载所需语言。"
+        status = "supported"; available = false; requiresSetup = true
+        message = "此语言组合受系统支持，可直接尝试翻译；需要语言包时再点击「准备系统翻译」。"
     case .unsupported:
         status = "unsupported"; available = false; requiresSetup = false
         message = "Apple 系统翻译不支持此语言组合，请选择其他语言或翻译服务。"
@@ -1997,11 +1995,40 @@ func availableSystemTranslation(_ request: SystemTranslationInput) async throws 
         status = "unavailable"; available = false; requiresSetup = false
         message = "无法确认系统翻译状态，请重试。"
     }
-    if starterPair { message += " 当前检查的是 \(source) → \(request.target)，其他源语言将分别检查。" }
+    if starterPair { message += " 当前检查的是 \(source) → \(target)，其他源语言将分别检查。" }
     return ["supported": true, "available": available, "requiresSetup": requiresSetup,
             "status": status, "platform": "macos", "providerName": "Apple 系统翻译",
             "minimumVersion": "26.0", "onDevice": true, "source": source,
-            "target": request.target, "starterPair": starterPair, "message": message]
+            "target": target, "starterPair": starterPair, "message": message]
+}
+
+@available(macOS 26.0, *)
+func systemTranslationStatusPolicySelfTest() throws {
+    let supported = systemTranslationStatusPayload(.supported, source: "zh-Hans", target: "en", starterPair: false)
+    let installed = systemTranslationStatusPayload(.installed, source: "en", target: "zh-Hans", starterPair: false)
+    let unsupported = systemTranslationStatusPayload(.unsupported, source: "ja", target: "ko", starterPair: true)
+    guard supported["status"] as? String == "supported",
+          supported["available"] as? Bool == false,
+          supported["requiresSetup"] as? Bool == true,
+          supported["message"] as? String == "此语言组合受系统支持，可直接尝试翻译；需要语言包时再点击「准备系统翻译」。",
+          installed["status"] as? String == "installed",
+          installed["available"] as? Bool == true,
+          installed["requiresSetup"] as? Bool == false,
+          unsupported["status"] as? String == "unsupported",
+          unsupported["requiresSetup"] as? Bool == false,
+          unsupported["starterPair"] as? Bool == true,
+          unsupported["source"] as? String == "ja", unsupported["target"] as? String == "ko" else {
+        throw NativeError("SELF_TEST: Advisory translation availability was mistaken for a missing or installed language pack.")
+    }
+}
+
+@available(macOS 26.0, *)
+func availableSystemTranslation(_ request: SystemTranslationInput) async throws -> [String: Any] {
+    let (source, starterPair) = try systemSourceLanguage(request, forTranslation: false)
+    let state: LanguageAvailability.Status
+    if systemLanguagesEquivalent(source, request.target) { state = .installed }
+    else { state = await LanguageAvailability().status(from: Locale.Language(identifier: source), to: Locale.Language(identifier: request.target)) }
+    return systemTranslationStatusPayload(state, source: source, target: request.target, starterPair: starterPair)
 }
 
 @available(macOS 13.0, *)

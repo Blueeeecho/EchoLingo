@@ -23,6 +23,14 @@ fn chinese(value: &str) -> bool {
         .is_some_and(|code| code.eq_ignore_ascii_case("zh"))
 }
 
+fn native_uses_han(value: &str) -> bool {
+    chinese(value)
+        || value
+            .split('-')
+            .next()
+            .is_some_and(|code| code.eq_ignore_ascii_case("ja") || code.eq_ignore_ascii_case("ko"))
+}
+
 fn is_han(c: char) -> bool {
     matches!(c as u32, 0x3400..=0x4dbf | 0x4e00..=0x9fff | 0xf900..=0xfaff | 0x20000..=0x3134f)
 }
@@ -170,7 +178,9 @@ pub fn resolve_translation_languages(
             (native, Some(language))
                 if chinese(&language)
                     && han_without_other_letters(text)
-                    && native.map_or(true, |value| !chinese(value)) =>
+                    // Japanese Kanji and Korean Hanja can also be Han-only;
+                    // preserve those native results instead of changing direction.
+                    && native.map_or(true, |value| !native_uses_han(value)) =>
             {
                 language
             }
@@ -233,20 +243,34 @@ mod tests {
             ("晚上９－１０，三級＝１ 🪞", "zh-Hans"),
             ("晚上9-10，請選擇第3組；進度=100%", "zh-Hant"),
         ] {
-            for detected in [
-                Some("en"),
-                Some("ja"),
-                Some("es"),
-                Some("ru"),
-                Some("und"),
-                None,
-            ] {
+            for detected in [Some("en"), Some("es"), Some("ru"), Some("und"), None] {
                 assert_eq!(
                     resolve_translation_languages(text, "auto", "auto", detected).unwrap(),
                     (expected.into(), "en".into()),
                     "{text} / {detected:?}"
                 );
             }
+        }
+    }
+
+    #[test]
+    fn pure_han_preserves_japanese_and_korean_native_language_variants() {
+        for (text, detected) in [
+            ("日本語", "ja"),
+            ("東京都", "ja-JP"),
+            ("大韓民國", "ko"),
+            ("韓國9-10=1", "ko-KR"),
+        ] {
+            assert!(han_without_other_letters(text));
+            assert_eq!(
+                resolve_translation_languages(text, "auto", "auto", Some(detected)).unwrap(),
+                (detected.into(), "zh-Hans".into()),
+                "{text} / {detected}"
+            );
+            assert_eq!(
+                resolve_translation_languages(text, "en", "auto", Some(detected)).unwrap(),
+                ("en".into(), "zh-Hans".into())
+            );
         }
     }
 
