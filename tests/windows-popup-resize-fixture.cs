@@ -59,6 +59,81 @@ public static partial class EchoLingoPopupVisibilitySmoke {
         Require(ClientToScreen(main, ref point), "Own client edge position is unavailable.");
         return point;
     }
+    static bool ResizeFiniteRectangle(double[] bounds) {
+        if (bounds == null || bounds.Length != 4) return false;
+        foreach (double value in bounds) if (double.IsNaN(value) || double.IsInfinity(value)) return false;
+        return bounds[2] > bounds[0] && bounds[3] > bounds[1];
+    }
+    static bool ResizeScrollbarGeometry(double[] client, double[] bounds, double y, double scale, bool visible, bool vertical) {
+        if (!visible || !vertical || !ResizeFiniteRectangle(client) || !ResizeFiniteRectangle(bounds) || scale <= 0) return false;
+        double width = bounds[2] - bounds[0], gap = client[2] - bounds[0];
+        return width <= 32 * scale && gap >= scale && gap <= 32 * scale && System.Math.Abs(bounds[2] - client[2]) <= scale &&
+            bounds[0] >= client[0] && bounds[1] >= client[1] - scale && bounds[3] <= client[3] + scale &&
+            bounds[3] - bounds[1] >= (client[3] - client[1]) / 2 && bounds[1] <= y && bounds[3] > y;
+    }
+    static bool ResizeDocumentGeometry(double[] client, double[] bounds, double y, double scale, bool visible, bool mainDocument) {
+        if (!visible || !mainDocument || !ResizeFiniteRectangle(client) || !ResizeFiniteRectangle(bounds) || scale <= 0) return false;
+        double gap = client[2] - bounds[2];
+        return System.Math.Abs(bounds[0] - client[0]) <= scale && System.Math.Abs(bounds[1] - client[1]) <= scale &&
+            gap >= scale && gap <= 32 * scale && bounds[3] >= client[3] - scale && bounds[1] <= y && bounds[3] > y;
+    }
+    static double ResizeObservedViewportRight(double originalRight, System.Collections.Generic.List<double[]> bars, System.Collections.Generic.List<double[]> documents, int visibleMainDocuments, bool complete, out string reason) {
+        if (!complete) { reason = "incomplete-or-failed-owned-UIA-observation"; return originalRight; }
+        if (bars.Count == 1) { reason = "unique-visible-right-vertical-scrollbar"; return bars[0][0]; }
+        if (bars.Count > 1) { reason = "ambiguous-right-vertical-scrollbars"; return originalRight; }
+        if (documents.Count == 1 && visibleMainDocuments == 1) { reason = "unique-main-document-viewport"; return documents[0][2]; }
+        reason = documents.Count > 1 || visibleMainDocuments > 1 ? "ambiguous-main-document-viewport" : "no-reliable-layout-viewport-boundary";
+        return originalRight;
+    }
+    static bool ResizeIsMainDocument(System.Windows.Automation.AutomationElement element, System.Windows.Automation.AutomationElement root) {
+        // An iframe Document has a Document ancestor. Stop at the exact owned
+        // root; never walk the desktop or read names, text, values or patterns.
+        var parent = System.Windows.Automation.TreeWalker.RawViewWalker.GetParent(element);
+        for (int depth = 0; parent != null && depth < 16; depth++) {
+            if (System.Windows.Automation.Automation.Compare(parent, root)) return true;
+            if (parent.Current.ControlType == System.Windows.Automation.ControlType.Document) return false;
+            parent = System.Windows.Automation.TreeWalker.RawViewWalker.GetParent(parent);
+        }
+        return false;
+    }
+    static POINT ResizeLayoutViewportPoint(Process app, System.IntPtr main, POINT original, System.Collections.Generic.Dictionary<string, object> observation) {
+        RequireUniqueOwnedMainWindow(app, main);
+        RECT nativeClient; Require(GetClientRect(main, out nativeClient), "Owned layout viewport client bounds are unavailable.");
+        POINT topLeft = new POINT(), bottomRight = new POINT(); topLeft.x = nativeClient.left; topLeft.y = nativeClient.top; bottomRight.x = nativeClient.right; bottomRight.y = nativeClient.bottom;
+        Require(ClientToScreen(main, ref topLeft) && ClientToScreen(main, ref bottomRight), "Owned layout viewport position is unavailable.");
+        double[] client = new double[] { topLeft.x, topLeft.y, bottomRight.x, bottomRight.y }; double scale = GetDpiForWindow(main) / 96.0;
+        var candidates = new System.Collections.Generic.List<object>(); var bars = new System.Collections.Generic.List<double[]>(); var documents = new System.Collections.Generic.List<double[]>();
+        var probe = new System.Collections.Generic.Dictionary<string, object> {
+            { "originalPhysicalXY", new int[] { original.x, original.y } }, { "newPhysicalXY", new int[] { original.x, original.y } },
+            { "clientPhysicalBounds", client }, { "scale", scale }, { "insetLogicalPixels", 8 }, { "candidates", candidates }, { "candidateLimit", 32 }
+        };
+        observation["layoutViewportObservation"] = probe; bool complete = false; int mainDocuments = 0;
+        try {
+            var root = System.Windows.Automation.AutomationElement.FromHandle(main);
+            var found = root.FindAll(System.Windows.Automation.TreeScope.Descendants, new System.Windows.Automation.OrCondition(
+                new System.Windows.Automation.PropertyCondition(System.Windows.Automation.AutomationElement.ControlTypeProperty, System.Windows.Automation.ControlType.ScrollBar),
+                new System.Windows.Automation.PropertyCondition(System.Windows.Automation.AutomationElement.ControlTypeProperty, System.Windows.Automation.ControlType.Document)));
+            probe["candidateCount"] = found.Count; probe["truncated"] = found.Count > 32;
+            for (int index = 0; index < found.Count && index < 32; index++) {
+                var element = found[index]; var info = element.Current; var rectangle = info.BoundingRectangle;
+                double[] bounds = new double[] { rectangle.Left, rectangle.Top, rectangle.Right, rectangle.Bottom };
+                bool valid = ResizeFiniteRectangle(bounds), visible = !info.IsOffscreen, scrollbar = info.ControlType == System.Windows.Automation.ControlType.ScrollBar;
+                var orientation = info.Orientation; bool mainDocument = !scrollbar && ResizeIsMainDocument(element, root);
+                if (!scrollbar && visible && mainDocument) mainDocuments++;
+                bool eligible = scrollbar ? ResizeScrollbarGeometry(client, bounds, original.y, scale, visible, orientation == System.Windows.Automation.OrientationType.Vertical) : ResizeDocumentGeometry(client, bounds, original.y, scale, visible, mainDocument);
+                candidates.Add(new System.Collections.Generic.Dictionary<string, object> {
+                    { "controlType", info.ControlType.Id }, { "orientation", (int)orientation }, { "isOffscreen", !visible },
+                    { "physicalBounds", valid ? (object)bounds : null }, { "finiteRectangle", valid }, { "mainDocumentVerified", mainDocument }, { "eligible", eligible }
+                });
+                if (eligible) { if (scrollbar) bars.Add(bounds); else documents.Add(bounds); }
+            }
+            complete = found.Count <= 32;
+        } catch (System.Exception error) { probe["exceptionType"] = error.GetType().Name; }
+        probe["eligibleScrollbarCount"] = bars.Count; probe["eligibleDocumentCount"] = documents.Count; probe["visibleMainDocumentCount"] = mainDocuments;
+        string reason; double right = ResizeObservedViewportRight(client[2], bars, documents, mainDocuments, complete, out reason); probe["reason"] = reason; probe["observedRightPhysicalX"] = right;
+        if (right != client[2]) original.x = (int)System.Math.Round(right - 8 * scale);
+        probe["newPhysicalXY"] = new int[] { original.x, original.y }; return original;
+    }
     static int ResizeHitTest(System.IntPtr main, int x, int y) {
         // Only query this exact owned HWND; never dispatch input to another app.
         System.UIntPtr result;
@@ -179,7 +254,9 @@ public static partial class EchoLingoPopupVisibilitySmoke {
         Require(IsWindowVisible(main) && GetForegroundWindow() == main, "Only the exact foreground app HWND may receive the generated resize.");
         RECT before = ResizeBounds(main); int startWidth = before.right - before.left;
         result["initialPhysicalWidth"] = startWidth;
-        POINT point = ResizeClientEdgePoint(main, west, false); int x = point.x, y = point.y;
+        POINT point = ResizeClientEdgePoint(main, west, false);
+        if (!west) point = ResizeLayoutViewportPoint(app, main, point, result);
+        int x = point.x, y = point.y;
         Require(SetCursorPos(x, y), "Could not position the generated resize pointer.");
         RequireResizePointerTarget(app, main, point, result);
         var motion = new System.Collections.Generic.List<object>(); result["boundedMotionObservations"] = motion;
@@ -245,7 +322,10 @@ public static partial class EchoLingoPopupVisibilitySmoke {
         RECT before = ResizeBounds(main); int height = before.bottom - before.top, width = before.right - before.left;
         result["initialPhysicalHeight"] = height; result["initialPhysicalWidth"] = width;
         POINT point = ResizeClientEdgePoint(main, false, true);
-        if (corner) point.x = ResizeClientEdgePoint(main, false, false).x;
+        if (corner) {
+            point.x = ResizeClientEdgePoint(main, false, false).x;
+            point = ResizeLayoutViewportPoint(app, main, point, result);
+        }
         int x = point.x, y = point.y;
         Require(SetCursorPos(x, y), "Could not position the generated settings resize pointer.");
         RequireResizePointerTarget(app, main, point, result);
