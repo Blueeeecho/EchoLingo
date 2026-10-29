@@ -1,6 +1,7 @@
 // Compiled with the existing visibility harness as a partial class. Only
 // RunResize executes: its other visibility/OCR/clipboard cases are not run.
 public static partial class EchoLingoPopupVisibilitySmoke {
+    static System.Collections.Generic.Dictionary<string, object> activeResizeObservation;
     [System.Runtime.InteropServices.DllImport("user32.dll")] static extern uint GetDpiForWindow(System.IntPtr window);
     [System.Runtime.InteropServices.DllImport("user32.dll")] static extern bool GetClientRect(System.IntPtr window, out RECT bounds);
     [System.Runtime.InteropServices.DllImport("user32.dll")] static extern bool GetGUIThreadInfo(uint thread, ref ResizeGuiInfo info);
@@ -95,6 +96,9 @@ public static partial class EchoLingoPopupVisibilitySmoke {
             { "edge", west ? "west" : "east" }, { "initialPhysicalWidth", startWidth }, { "deltaPhysicalPixels", distance },
             { "nativeSizingLoopObserved", false }, { "widthSamples", samples }, { "retentionRequired", retainAfterRelease }
         };
+        activeResizeObservation = result;
+        var motion = new System.Collections.Generic.List<object>(); result["boundedMotionObservations"] = motion;
+        result["initialBounds"] = new int[] { before.left, before.top, before.right, before.bottom };
         try {
             INPUT down = new INPUT(); down.type = 0; down.data.mouse.flags = 2; Send(new INPUT[] { down }); held = true;
             Wait(delegate { Require(IsWindowVisible(main), "Popup hid during edge-down."); return ResizeLoop(main); }, 3000, "Actual native WM move/size loop did not start; resize was not tested.");
@@ -103,7 +107,14 @@ public static partial class EchoLingoPopupVisibilitySmoke {
                 Require(GetForegroundWindow() == main && IsWindowVisible(main), "Foreground changed during generated drag.");
                 int delta = distance * step / 8, expected = startWidth + delta;
                 Require(SetCursorPos(x + (west ? -delta : delta), y), "Could not move the generated resize pointer.");
-                Wait(delegate { return System.Math.Abs(ResizeWidth(main) - expected) <= 5; }, 1500, "Native window failed to reach the generated edge position; possible layout fight.");
+                result["lastStep"] = step; result["expectedPhysicalWidth"] = expected;
+                result["expectedPointer"] = new int[] { x + (west ? -delta : delta), y };
+                Wait(delegate {
+                    int actual = ResizeWidth(main); result["lastObservedPhysicalWidth"] = actual;
+                    POINT pointer; bool pointerKnown = GetPhysicalCursorPos(out pointer);
+                    if (motion.Count < 256) motion.Add(new object[] { step, expected, actual, pointerKnown, pointer.x, pointer.y, ResizeLoop(main), (GetAsyncKeyState(1) & 0x8000) != 0 });
+                    return System.Math.Abs(actual - expected) <= 5;
+                }, 1500, "Native window failed to reach the generated edge position; possible layout fight.");
                 // Test observation only: sample while the physical button is
                 // still held, so a late content-fit rewind is not missed.
                 Stopwatch observation = Stopwatch.StartNew();
@@ -145,6 +156,7 @@ public static partial class EchoLingoPopupVisibilitySmoke {
             { "ok", false }, { "actualWindowsResizeTested", false }, { "fakeIpcUsed", false }, { "userContentRead", false },
             { "clipboardRead", false }, { "externalApiUsed", false }, { "physicalWindows10Tested", false }, { "dwmFrameRateMeasured", false }
         };
+        activeResizeObservation = null;
         string stage = "claim-isolated-data";
         try {
             string roaming = Path.Combine(KnownFolder("3EB685DB-65F9-4CF6-A03A-E3EF65729F3D"), Identifier);
@@ -282,7 +294,7 @@ public static partial class EchoLingoPopupVisibilitySmoke {
                             Stopwatch hiddenObservation = Stopwatch.StartNew();
                             while (hiddenObservation.ElapsedMilliseconds < 500) { Require(!IsWindowVisible(main), "Resize/reflow showed the hidden popup."); System.Threading.Thread.Sleep(8); }
                             report["hiddenResizeStayedHidden"] = true; report["actualWindowsResizeTested"] = true; report["ok"] = true;
-                        } catch (System.Exception error) { report["failedStage"] = stage; report["error"] = error.ToString(); }
+                        } catch (System.Exception error) { report["failedStage"] = stage; report["error"] = error.ToString(); if (activeResizeObservation != null) report["activeResizeObservation"] = activeResizeObservation; }
                         finally {
                             INPUT release = new INPUT(); release.type = 0; release.data.mouse.flags = 4;
                             SendInput(2, new INPUT[] { release, Key(0x12, true) }, System.Runtime.InteropServices.Marshal.SizeOf(typeof(INPUT)));

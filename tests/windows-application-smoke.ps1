@@ -739,7 +739,11 @@ public static class EchoLingoApplicationSmoke {
                                 if (customBindings) hotkeys["afterApplicationStart"] = new object[] {
                                     ProbeHotkey(0x6E19, selectionShortcut, 7, 0x78, false), ProbeHotkey(0x6E1A, silentOcrShortcut, 7, 0x79, false),
                                     ProbeHotkey(0x6E1B, "Alt+D", 1, 0x44, true), ProbeHotkey(0x6E1C, "Alt+S", 1, 0x53, true) };
-                                else hotkeys["afterApplicationStart"]=ProbeHotkey(0x6E19,selectionShortcut,1,selectionKey,false);
+                                // Exact default Alt+D uses the priority input hook and
+                                // intentionally leaves RegisterHotKey available. This
+                                // probe cannot prove ownership; the one real shortcut
+                                // and complete source/translation/history flow below do.
+                                else hotkeys["afterApplicationStart"]=ProbeHotkey(0x6E19,selectionShortcut,1,selectionKey,true);
                                 OnUi(form, delegate { form.Activate(); SetForegroundWindow(form.Handle); source.Focus(); source.Select(7, Selected.Length); }); Thread.Sleep(150);
                                 stage="first-selected-text-shortcut";
                                 Shortcut(form, selectionKey, customBindings);
