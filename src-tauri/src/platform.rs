@@ -342,9 +342,10 @@ pub fn ensure_popup_behavior(window: &tauri::WebviewWindow) -> Result<(), String
     Ok(())
 }
 
-/// WebView2 delivers typing to the deepest first-child host, not the top-level
-/// window activated by `set_focus`. Walk only that chain, and stop on a cycle.
-#[cfg(any(target_os = "windows", test))]
+/// Walk the first-child chain and stop before a cycle. Kept as a pure policy
+/// test; production input focus uses WebView2 MoveFocus instead of SetFocus
+/// on an arbitrary descendant, which drops Unicode keystrokes.
+#[cfg(test)]
 pub(crate) fn keyboard_focus_target<T: Copy + Eq>(
     root: T,
     mut first_child: impl FnMut(T) -> Option<T>,
@@ -361,40 +362,6 @@ pub(crate) fn keyboard_focus_target<T: Copy + Eq>(
         }
     }
     current
-}
-
-#[cfg(target_os = "windows")]
-pub fn focus_webview_keyboard_target(window: &tauri::WebviewWindow) {
-    use std::ffi::c_void;
-    #[link(name = "user32")]
-    unsafe extern "system" {
-        fn GetWindow(window: *mut c_void, command: u32) -> *mut c_void;
-        fn IsWindow(window: *mut c_void) -> i32;
-        fn SetFocus(window: *mut c_void) -> *mut c_void;
-    }
-    let Ok(native) = window.hwnd() else {
-        return;
-    };
-    let root = native.0;
-    if root.is_null() {
-        return;
-    }
-    let target = keyboard_focus_target(root, |hwnd| {
-        // SAFETY: hwnd is the Tauri-owned window or a child returned by the
-        // previous GetWindow in this walk. GW_CHILD (5) is the first child.
-        let child = unsafe { GetWindow(hwnd, 5) };
-        if child.is_null() || unsafe { IsWindow(child) } == 0 {
-            None
-        } else {
-            Some(child)
-        }
-    });
-    if target != root {
-        // SAFETY: target is a live descendant of the window Tauri owns.
-        unsafe {
-            SetFocus(target);
-        }
-    }
 }
 
 #[cfg(not(any(target_os = "macos", target_os = "windows")))]

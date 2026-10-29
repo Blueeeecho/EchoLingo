@@ -1704,8 +1704,13 @@ fn show(app: &tauri::AppHandle) -> Result<translation_requests::Presentation, St
                 let _ = handle.emit("action-error", "无法显示输入窗口");
                 return;
             }
-            #[cfg(target_os = "windows")]
-            platform::focus_webview_keyboard_target(&window);
+            // HWND focus does not deliver KEYEVENTF_UNICODE into the editor.
+            // WebView2 only accepts that input after controller MoveFocus.
+            let webview: &tauri::Webview = window.as_ref();
+            if webview.set_focus().is_err() {
+                let _ = handle.emit("action-error", "无法显示输入窗口");
+                return;
+            }
             // Only a still-current native input presentation grants DOM focus.
             // The frontend verifies this exact epoch again after IPC delivery.
             if handle
@@ -1900,8 +1905,8 @@ fn show_prepared_popup(
                 let _ = window.show();
                 let _ = window.unminimize();
                 if window.set_focus().is_ok() {
-                    #[cfg(target_os = "windows")]
-                    platform::focus_webview_keyboard_target(&window);
+                    let webview: &tauri::Webview = window.as_ref();
+                    let _ = webview.set_focus();
                 }
             } else if popup_needs_native_show(
                 reuse_visible_popup,
