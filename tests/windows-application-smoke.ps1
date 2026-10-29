@@ -70,6 +70,7 @@ public static class EchoLingoApplicationSmoke {
     [DllImport("user32.dll")] static extern bool IsWindow(IntPtr window);
     [DllImport("user32.dll")] static extern bool IsWindowVisible(IntPtr window);
     [DllImport("user32.dll", CharSet=CharSet.Unicode)] static extern int GetClassName(IntPtr window, StringBuilder name, int capacity);
+    [DllImport("user32.dll", CharSet=CharSet.Unicode)] static extern int GetWindowText(IntPtr window, StringBuilder text, int capacity);
     [DllImport("user32.dll")] static extern IntPtr GetDesktopWindow();
     [DllImport("user32.dll")] static extern IntPtr GetTopWindow(IntPtr parent);
     [DllImport("user32.dll")] static extern IntPtr GetWindow(IntPtr window, uint command);
@@ -208,6 +209,10 @@ public static class EchoLingoApplicationSmoke {
         StringBuilder name = new StringBuilder(256); GetClassName(window,name,name.Capacity);
         return name.ToString() == "EchoLingoCaptureInputPlane-" + processId;
     }
+    static bool IsCaptureLoupe(IntPtr window) {
+        StringBuilder title = new StringBuilder(64);
+        return GetWindowText(window, title, title.Capacity) > 0 && title.ToString() == "EchoLingoCaptureMagnifier";
+    }
     sealed class InputPlaneStyleException : InvalidOperationException {
         public readonly Dictionary<string,object> ScalarMetadata;
         public InputPlaneStyleException(Dictionary<string,object> metadata)
@@ -335,14 +340,33 @@ public static class EchoLingoApplicationSmoke {
         bool rawPlane=planes.Exists(delegate(AppEdge plane) { return plane.Handle==target && plane.Bounds.Contains(pointer); });
         bool rawThin=actual.Exists(delegate(AppEdge edge) { return edge.Handle==target && edge.Bounds.Contains(pointer); });
         bool throughPlane=planes.Exists(delegate(AppEdge plane) { return plane.Handle==through && plane.Bounds.Contains(pointer); });
-        int thinAllocated=helper==0 ? 0 : AllocatedThinCount(helper), visibleOwned=0;
+        int thinAllocated=helper==0 ? 0 : AllocatedThinCount(helper), visibleOwned=0, loupes=0;
+        bool loupeNear=false; Rectangle loupeBounds=Rectangle.Empty;
         if (helper!=0) EnumWindows(delegate(IntPtr window,IntPtr unused) {
-            uint owner; GetWindowThreadProcessId(window,out owner); if (owner==helper && IsWindowVisible(window)) visibleOwned++;
+            uint owner; GetWindowThreadProcessId(window,out owner);
+            if (owner!=helper || !IsWindowVisible(window)) return true;
+            if (IsCaptureLoupe(window)) {
+                loupes++;
+                RECT value; if (!GetWindowRect(window, out value)) return true;
+                Rectangle candidate=Rectangle.FromLTRB(value.left,value.top,value.right,value.bottom);
+                long style=GetWindowLongPtr(window,-20).ToInt64();
+                int dx=candidate.Left+candidate.Width/2-pointer.X, dy=candidate.Top+candidate.Height/2-pointer.Y;
+                bool styleOk=(style&0x08000000L)!=0 && (style&0x20L)==0 && (style&0x00080000L)==0;
+                bool sizeOk=candidate.Width>=140 && candidate.Width<=360 && candidate.Height>=150 && candidate.Height<=420;
+                bool near=(long)dx*dx+(long)dy*dy<=500L*500L && !candidate.Contains(pointer);
+                if (styleOk && sizeOk && near) { loupeNear=true; loupeBounds=candidate; }
+                return true;
+            }
+            visibleOwned++;
             return true;
         },IntPtr.Zero);
-        exactPlanes=exactPlanes && visibleOwned==actual.Count+planes.Count;
+        bool loupeReady=pointerKnown && loupes==1 && loupeNear;
+        exactPlanes=exactPlanes && visibleOwned==actual.Count+planes.Count && loupeReady;
         probe["allVisibleHelperWindowsClassified"]=visibleOwned==actual.Count+planes.Count;
         probe["actualVisibleHelperWindowCount"]=visibleOwned;
+        probe["captureMagnifierCount"]=loupes;
+        probe["captureMagnifierNearPointer"]=loupeReady;
+        if (loupes==1) probe["captureMagnifierBounds"]=RectValue(loupeBounds);
         IntPtr underneath=helper==0 ? IntPtr.Zero : UnderlyingRootAt(pointer,helper);
         validSource=validSource && underneath==expectedSource;
         exactPlanes=exactPlanes && planeBounds.Count==0 && thinAllocated==12*Screen.AllScreens.Length;

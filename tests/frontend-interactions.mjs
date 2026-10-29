@@ -674,10 +674,15 @@ try {
   assert.equal(await page.locator('#popup-more-menu').isHidden(), true);
   assert.equal(await page.evaluate(() => window.__qa.hideCalls), 0);
   await page.locator('#source-text').fill(Array(30).fill('A line for automatic height.').join('\n'));
-  assert.ok(await page.locator('#source-text').evaluate((element) => element.getBoundingClientRect().height <= 100));
+  const tallSourceShell = await page.locator('.app-shell').evaluate((element) => element.getBoundingClientRect().height);
+  // The editor grows past one line for a long selection, then stops at 180px and scrolls.
+  assert.ok(await page.locator('#source-text').evaluate((element) => {
+    const height = element.getBoundingClientRect().height;
+    return height > 100 && height <= 180;
+  }));
   assert.equal(await page.locator('#translate-button').isEnabled(), true);
   await page.locator('#source-text').fill('');
-  assert.ok(await page.locator('.app-shell').evaluate((element) => element.getBoundingClientRect().height < 190));
+  assert.ok(await page.locator('.app-shell').evaluate((element, tall) => element.getBoundingClientRect().height < tall - 40, tallSourceShell));
   assert.ok(await page.locator('#source-text').evaluate((element) => element.getBoundingClientRect().height >= 44));
 
   // A blocked screenshot is an atomic source event: its persistent guidance is

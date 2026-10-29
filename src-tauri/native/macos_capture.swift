@@ -179,6 +179,44 @@ final class CaptureSelectionPanel: NSPanel {
     override var canBecomeMain: Bool { false }
 }
 
+let captureLoupeSample: CGFloat = 52
+let captureLoupeZoom: CGFloat = 3
+let captureLoupeCaption: CGFloat = 16
+let captureLoupeGap: CGFloat = 18
+
+func captureLoupeFrame(anchor: CGPoint, viewSize: CGSize) -> CGRect {
+    let view = captureLoupeSample * captureLoupeZoom
+    let width = view
+    let height = view + captureLoupeCaption
+    let sample = CGRect(x: anchor.x - captureLoupeSample / 2, y: anchor.y - captureLoupeSample / 2,
+                         width: captureLoupeSample, height: captureLoupeSample)
+    var origin = CGPoint(x: sample.maxX + captureLoupeGap, y: sample.maxY + captureLoupeGap)
+    if origin.x + width > viewSize.width { origin.x = sample.minX - captureLoupeGap - width }
+    if origin.y + height > viewSize.height { origin.y = sample.minY - captureLoupeGap - height }
+    origin.x = min(max(0, origin.x), max(0, viewSize.width - width))
+    origin.y = min(max(0, origin.y), max(0, viewSize.height - height))
+    var frame = CGRect(x: origin.x, y: origin.y, width: width, height: height)
+    if frame.intersects(sample) || frame.contains(anchor) {
+        let left = anchor.x > viewSize.width / 2
+        let below = anchor.y > viewSize.height / 2
+        origin.x = left ? 0 : max(0, viewSize.width - width)
+        origin.y = below ? 0 : max(0, viewSize.height - height)
+        frame = CGRect(x: origin.x, y: origin.y, width: width, height: height)
+    }
+    return frame
+}
+
+func captureLoupeImage(at screenPoint: CGPoint, windowID: CGWindowID) -> NSImage? {
+    let primary = CGDisplayBounds(CGMainDisplayID()).height
+    let rect = CGRect(x: screenPoint.x - captureLoupeSample / 2,
+                      y: primary - screenPoint.y - captureLoupeSample / 2,
+                      width: captureLoupeSample, height: captureLoupeSample)
+    guard rect.width > 1, rect.height > 1 else { return nil }
+    let list: CGWindowListOption = windowID == 0 ? .optionOnScreenOnly : .optionOnScreenBelowWindow
+    guard let image = CGWindowListCreateImage(rect, list, windowID, [.bestResolution, .boundsIgnoreFraming]) else { return nil }
+    return NSImage(cgImage: image, size: NSSize(width: captureLoupeSample, height: captureLoupeSample))
+}
+
 func configureCaptureSelectionPanel(_ panel: CaptureSelectionPanel) {
     panel.isReleasedWhenClosed = false
     panel.isOpaque = false
@@ -200,9 +238,17 @@ func configureCaptureSelectionPanel(_ panel: CaptureSelectionPanel) {
     panel.sharingType = .none
 }
 
+struct CaptureLoupe {
+    let image: NSImage
+    let frame: CGRect
+    let label: String
+}
+
 final class CaptureSelectionView: NSView {
     var highlighted = false
     var selection: CGRect?
+    var loupeAnchor: CGPoint?
+    var loupe: CaptureLoupe?
     override var isOpaque: Bool { false }
     override var acceptsFirstResponder: Bool { true }
     override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
@@ -221,6 +267,29 @@ final class CaptureSelectionView: NSView {
             outline.lineWidth = 1.5
             outline.stroke()
         }
+        guard let loupe = loupe else { return }
+        let plate = NSBezierPath(roundedRect: loupe.frame, xRadius: 6, yRadius: 6)
+        NSColor(calibratedWhite: 0.08, alpha: 0.94).setFill()
+        plate.fill()
+        NSColor(calibratedRed: 0.10, green: 0.48, blue: 1.0, alpha: 1).setStroke()
+        plate.lineWidth = 1
+        plate.stroke()
+        let imageRect = NSRect(x: loupe.frame.minX, y: loupe.frame.minY + captureLoupeCaption,
+                               width: captureLoupeSample * captureLoupeZoom, height: captureLoupeSample * captureLoupeZoom)
+        loupe.image.draw(in: imageRect, from: .zero, operation: .sourceOver, fraction: 1)
+        NSColor(calibratedRed: 0.86, green: 0.22, blue: 0.22, alpha: 0.95).setStroke()
+        let cross = NSBezierPath()
+        cross.move(to: NSPoint(x: imageRect.midX, y: imageRect.minY))
+        cross.line(to: NSPoint(x: imageRect.midX, y: imageRect.maxY))
+        cross.move(to: NSPoint(x: imageRect.minX, y: imageRect.midY))
+        cross.line(to: NSPoint(x: imageRect.maxX, y: imageRect.midY))
+        cross.lineWidth = 1
+        cross.stroke()
+        let text = NSAttributedString(string: loupe.label, attributes: [
+            .font: NSFont.systemFont(ofSize: 11),
+            .foregroundColor: NSColor.white
+        ])
+        text.draw(at: NSPoint(x: loupe.frame.minX + 6, y: loupe.frame.minY + 1))
     }
 
     // The local event monitor handles the capture gesture. Do not invoke a
@@ -248,6 +317,7 @@ final class CaptureSelectionSession {
     private let waiter: CaptureResultWaiter<CaptureRegionPlan>
     fileprivate let lifetime: CaptureSelectionLifetime
     private var completed = false
+    private var pointer = NSEvent.mouseLocation
 
     init(displays: [CaptureDisplayGeometry], waiter: CaptureResultWaiter<CaptureRegionPlan>,
          lifetime: CaptureSelectionLifetime) {
@@ -321,6 +391,12 @@ final class CaptureSelectionSession {
 
     func receive(_ event: CaptureSelectorEvent) {
         guard !completed else { return }
+        switch event {
+        case .move(let point), .leftDown(let point), .leftDrag(let point), .leftUp(let point):
+            pointer = point
+        case .cancel:
+            break
+        }
         state.receive(event)
         if let outcome = state.outcome {
             switch outcome {
@@ -331,16 +407,37 @@ final class CaptureSelectionSession {
             }
             return
         }
-        for (geometry, _, view) in panels {
+        for (geometry, panel, view) in panels {
             let highlight = state.highlightedDisplay == geometry.id
             let clipped = state.selection?.intersection(geometry.frame)
             let local = clipped.flatMap { rectangle -> CGRect? in
                 if rectangle.isEmpty || rectangle.isNull { return nil }
                 return rectangle.offsetBy(dx: -geometry.frame.minX, dy: -geometry.frame.minY)
             }
-            if view.highlighted != highlight || view.selection != local {
+            let localPointer = geometry.frame.contains(pointer) && highlight
+                ? CGPoint(x: pointer.x - geometry.frame.minX, y: pointer.y - geometry.frame.minY) : nil
+            let pointerMoved: Bool = {
+                switch (view.loupeAnchor, localPointer) {
+                case (nil, nil): return false
+                case let (previous?, next?): return abs(previous.x - next.x) >= 1 || abs(previous.y - next.y) >= 1
+                default: return true
+                }
+            }()
+            if view.highlighted != highlight || view.selection != local || pointerMoved {
                 view.highlighted = highlight
                 view.selection = local
+                view.loupeAnchor = localPointer
+                if let localPointer = localPointer {
+                    let number = panel.windowNumber
+                    let windowID: CGWindowID = number > 0 ? CGWindowID(number) : 0
+                    if let image = captureLoupeImage(at: pointer, windowID: windowID) {
+                        let label: String
+                        if let selection = state.selection, selection.width >= 2, selection.height >= 2 {
+                            label = "\(Int(selection.width.rounded())) × \(Int(selection.height.rounded()))"
+                        } else { label = "3×" }
+                        view.loupe = CaptureLoupe(image: image, frame: captureLoupeFrame(anchor: localPointer, viewSize: view.bounds.size), label: label)
+                    } else { view.loupe = nil }
+                } else { view.loupe = nil }
                 view.needsDisplay = true
             }
         }
@@ -557,6 +654,11 @@ func captureSelectionSelfTest() throws {
     state.receive(.leftDown(CGPoint(x: -100, y: 100)))
     state.receive(.leftDrag(CGPoint(x: 200, y: 300)))
     try expect(state.highlightedDisplay == 1 && state.selection == plan.region && state.outcome == nil)
+    let interior = captureLoupeFrame(anchor: CGPoint(x: 200, y: 200), viewSize: CGSize(width: 1440, height: 900))
+    let sample = CGRect(x: 174, y: 174, width: 52, height: 52)
+    try expect(interior.minX >= sample.maxX && interior.maxX <= 1440 && interior.maxY <= 900 && !interior.intersects(sample))
+    let corner = captureLoupeFrame(anchor: CGPoint(x: 1430, y: 880), viewSize: CGSize(width: 1440, height: 900))
+    try expect(corner.maxX <= 1440 && corner.maxY <= 900 && !corner.contains(CGPoint(x: 1430, y: 880)))
     state.receive(.leftUp(CGPoint(x: 200, y: 300)))
     try expect(state.outcome == .selected(plan.region))
     state.receive(.cancel)

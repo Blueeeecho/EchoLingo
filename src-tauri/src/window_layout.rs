@@ -300,12 +300,9 @@ fn content_size(management: bool, height: f64, width: f64, available: (f64, f64)
         width.clamp(min_width, max_width),
         height.ceil().clamp(
             min_height,
-            (if management {
-                max_height
-            } else {
-                max_height.min(760.0)
-            })
-            .max(min_height),
+            // Popup height follows the translation until the monitor work area.
+            // A fixed 760px cap hid long streamed results on larger screens.
+            max_height.max(min_height),
         ),
     )
 }
@@ -1133,7 +1130,7 @@ mod tests {
         );
         assert_eq!(
             content_size(false, 18000.0, 1500.0, (1900.0, 900.0)),
-            (1500.0, 760.0)
+            (1500.0, 900.0)
         );
         assert_eq!(
             presentation_size(false, true, 190.0, (680.0, 240.0), 680.0, (1200.0, 900.0)),

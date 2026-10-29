@@ -17,6 +17,7 @@ import { invoke, isTauri } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 import { defaultSettings, errorMessage, userFacingError, filterHistory, LANGUAGES, languageName, MAX_TEXT_LENGTH, normalizeTimestamp, validateProvider, isLocalProvider } from './model';
 import { coreGuidanceMessage, coreShortcutProblems, emptyPopupPlaceholder, type CoreShortcutProblem } from './shortcut-guidance';
+import { engineLimitCopy, isWeakEngineSignal, shouldShowFirstRun, shouldShowSoftHint, type EngineHintState } from './engine-hint';
 import type { Action, CredentialState, HistoryEntry, PermissionKind, Provider, ProviderKind, Settings, ShortcutAction, SourceTextEvent, SystemTranslationStatus, TranslationProgress, TranslationResult } from './types';
 
 const desktop = isTauri();
@@ -188,6 +189,7 @@ function setView(view: string, skipSystemStatusRefresh = false): void {
   window.scrollTo({ top: 0, behavior: 'instant' });
   if (view === 'translate') resizeSourceEditor();
   renderCoreGuidance();
+  renderEngineStatus();
   notifyLayout();
 }
 function applyTheme(): void {
@@ -219,9 +221,9 @@ function resizeSourceEditor(): void {
   if (currentView === 'translate') {
     source.style.height = '0px';
     const naturalHeight = source.scrollHeight;
-    const height = Math.min(100, Math.max(source.value.trim() ? 25 : 46, naturalHeight));
+    const height = Math.min(180, Math.max(source.value.trim() ? 25 : 46, naturalHeight));
     source.style.height = `${height}px`;
-    source.style.overflowY = naturalHeight > 100 ? 'auto' : 'hidden';
+    source.style.overflowY = naturalHeight > 180 ? 'auto' : 'hidden';
   }
   const empty = !source.value.trim();
   document.body.classList.toggle('source-empty', empty);
@@ -408,7 +410,10 @@ async function receiveCapturedText(payload: SourceTextEvent): Promise<void> {
     return;
   }
   if (payload.mode === 'translate') { if (settingsReady) run(translate); else pendingTranslate = true; }
-  else if (payload.mode === 'ocr') status('文字识别完成');
+  else if (payload.mode === 'ocr') {
+    status('文字识别完成');
+    if (!normalized.trim() || normalized.includes('没有识别')) maybeSoftEngineHint('没有识别到文字');
+  }
   // Empty Alt+D is now an explicit input action. Nonempty selection/OCR stays
   // passive; only the epoch-bound input payload may activate and focus.
   if (payload.focusInput) {
@@ -651,6 +656,7 @@ function renderResults(results: TranslationResult[]): void {
   });
   const success = results.filter((result) => !result.error).length;
   $('#translation-state').textContent = success === results.length ? '翻译完成' : `${success} / ${results.length} 个服务成功`;
+  if (results.some((result) => result.error || !result.text.trim())) maybeSoftEngineHint(results.some((result) => result.error) ? '翻译失败' : '服务返回错误');
   notifyLayout();
 }
 async function translate(): Promise<void> {
@@ -695,6 +701,7 @@ async function translate(): Promise<void> {
     resultsContainer.append(card); $('.results-column').hidden = false; notifyLayout();
     $('#translation-state').textContent = '翻译失败';
     status('翻译失败');
+    maybeSoftEngineHint('翻译失败');
   } finally {
     if (token === generation) {
       activeTranslationId = null; setLoading(false);
@@ -711,15 +718,62 @@ function renderCoreGuidance(): void {
   const apply = $<HTMLButtonElement>('#core-guidance-apply');
   const retry = $<HTMLButtonElement>('#core-guidance-retry');
   coreGuidanceProblem = problems[0] ?? null;
-  if (!coreGuidanceProblem || currentView !== 'translate') {
-    guidance.hidden = true;
-    return;
+  if (!coreGuidanceProblem || currentView !== 'translate') guidance.hidden = true;
+  else {
+    text.textContent = coreGuidanceMessage(problems);
+    apply.hidden = !coreGuidanceProblem.alternative;
+    apply.textContent = coreGuidanceProblem.alternative ? `改用 ${coreGuidanceProblem.alternative}` : '';
+    retry.hidden = false;
+    guidance.hidden = false;
   }
-  text.textContent = coreGuidanceMessage(problems);
-  apply.hidden = !coreGuidanceProblem.alternative;
-  apply.textContent = coreGuidanceProblem.alternative ? `改用 ${coreGuidanceProblem.alternative}` : '';
-  retry.hidden = false;
-  guidance.hidden = false;
+  renderEngineStatus();
+}
+const ENGINE_HINT_KEY = 'echolingo.engine-hint';
+const OFFICIAL_SERVICES_URL = 'https://github.com/Blueeeecho/EchoLingo/blob/main/docs/official-services.zh-CN.md';
+let engineHintState: EngineHintState = readEngineHint();
+let engineHintKind: 'first' | 'soft' | null = null;
+function readEngineHint(): EngineHintState {
+  try {
+    const raw = localStorage.getItem(ENGINE_HINT_KEY);
+    if (!raw) return { dismissed: false, shownAt: 0 };
+    const parsed = JSON.parse(raw) as Partial<EngineHintState>;
+    return {
+      dismissed: parsed.dismissed === true,
+      shownAt: typeof parsed.shownAt === 'number' && Number.isFinite(parsed.shownAt) ? parsed.shownAt : 0,
+    };
+  } catch { return { dismissed: false, shownAt: 0 }; }
+}
+function writeEngineHint(state: EngineHintState): void {
+  try { localStorage.setItem(ENGINE_HINT_KEY, JSON.stringify(state)); } catch { /* A private window can reject storage; the hint still works this session. */ }
+}
+function renderEngineStatus(): void {
+  const enabled = settings.providers.filter((provider) => provider.enabled);
+  const localOcr = !settings.activeOcrProviderId;
+  const ocrName = localOcr ? '本机 OCR' : (settings.ocrProviders.find((provider) => provider.id === settings.activeOcrProviderId)?.name ?? '云端 OCR');
+  const names = enabled.map((provider) => provider.name).join('、') || '未启用翻译服务';
+  $('#engine-status').textContent = `当前：${names} · ${ocrName}`;
+  const hint = $('#engine-hint');
+  const blocked = !$('#core-guidance').hidden || currentView !== 'translate';
+  if (engineHintKind === null && !blocked && shouldShowFirstRun(engineHintState)) {
+    engineHintKind = 'first';
+    engineHintState = { dismissed: false, shownAt: Date.now() };
+    writeEngineHint(engineHintState);
+  }
+  const show = engineHintKind !== null && !blocked && !engineHintState.dismissed;
+  hint.hidden = !show;
+  if (!show) return;
+  const copy = engineLimitCopy(enabled.map((provider) => provider.kind), localOcr);
+  $('#engine-hint-title').textContent = engineHintKind === 'first' ? '默认是本机翻译和本机识别' : copy.title;
+  $('#engine-hint-detail').textContent = copy.detail;
+}
+function maybeSoftEngineHint(text?: string): void {
+  if (text !== undefined && !isWeakEngineSignal(text)) return;
+  if (engineHintState.dismissed || engineHintKind === 'first' || !$('#core-guidance').hidden) return;
+  if (!shouldShowSoftHint(engineHintState, Date.now())) return;
+  engineHintKind = 'soft';
+  engineHintState = { dismissed: false, shownAt: Date.now() };
+  writeEngineHint(engineHintState);
+  renderEngineStatus();
 }
 function renderShortcutHints(): void {
   for (const element of document.querySelectorAll<HTMLElement>('[data-shortcut]')) {
@@ -867,6 +921,7 @@ function renderPopupServices(): void {
   }
   const manage = node('button', 'text-button', '管理翻译服务'); manage.type = 'button';
   manage.addEventListener('click', () => setView('settings')); list.append(manage);
+  renderEngineStatus();
   notifyLayout();
 }
 function systemTranslationPair(): { sourceLanguage: string; targetLanguage: string } {
@@ -1273,6 +1328,7 @@ function handleActionError(message: string): void {
   if (/^(?:NO_SELECTION|SELECTION_EMPTY|CANCELLED):/i.test(message.trim()) || /^未取得选区/.test(message.trim())) return;
   const guidance = /^PERMISSION:/i.test(message.trim()) ? '\n可在“更多 → 设置 → 系统权限”中检查或授权。' : '';
   toast(`${message}${guidance}`, 'error', 8000);
+  maybeSoftEngineHint(message);
 }
 
 const ocrUi = createOcrUi({
@@ -1380,6 +1436,17 @@ document.addEventListener('paste', (event) => {
   if (!text) return;
   event.preventDefault();
   insertIntoSource(text);
+});
+$('#engine-hint-settings').addEventListener('click', () => setView('settings'));
+$('#engine-hint-docs').addEventListener('click', () => {
+  if (desktop) run(() => invoke('open_service_link', { url: OFFICIAL_SERVICES_URL }));
+  else window.open(OFFICIAL_SERVICES_URL, '_blank', 'noopener');
+});
+$('#engine-hint-dismiss').addEventListener('click', () => {
+  engineHintKind = null;
+  engineHintState = { dismissed: true, shownAt: Date.now() };
+  writeEngineHint(engineHintState);
+  renderEngineStatus();
 });
 $('#core-guidance-settings').addEventListener('click', () => {
   setView('settings');
