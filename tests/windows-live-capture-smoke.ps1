@@ -265,10 +265,15 @@ public static class EchoLingoLiveCaptureSmoke {
         bool rawPlane = visible.Exists(delegate(EdgeWindow plane) { return plane.Handle == rawRoot && plane.Bounds.Contains(pointer); });
         bool rawEdge = edges.Exists(delegate(EdgeWindow edge) { return edge.Handle == rawRoot && edge.Bounds.Contains(pointer); });
         bool actualPlane = visible.Exists(delegate(EdgeWindow plane) { return plane.Handle == through && plane.Bounds.Contains(pointer); });
+        // WindowFromPoint still returns a disabled click-through loupe. The skip-transparent
+        // hit is the window that receives the pointer, and that must be the input plane.
+        long rawStyle = GetWindowLongPtr(rawRoot, -20).ToInt64();
+        bool rawLoupe = IsCaptureLoupe(rawRoot) && (rawStyle & 0x20L) != 0 && (rawStyle & 0x00080000L) == 0;
         metadata["rawPointerRootHwnd"] = WindowId(rawRoot); metadata["transparentSkippingPointerRootHwnd"] = WindowId(through);
         metadata["rawPointerIsExactPlane"] = rawPlane; metadata["rawPointerIsVerifiedThinEdge"] = rawEdge;
+        metadata["rawPointerIsClickThroughLoupe"] = rawLoupe;
         metadata["transparentSkippingHitIsExactPlane"] = actualPlane;
-        bool matched = geometry && actualPlane && (rawPlane || rawEdge);
+        bool matched = geometry && actualPlane && (rawPlane || rawEdge || rawLoupe);
         if (failureDetails && !matched) {
             // Observe only the failing check. No new move, input, capture,
             // repeated hit test, settling wait or window-order mutation.

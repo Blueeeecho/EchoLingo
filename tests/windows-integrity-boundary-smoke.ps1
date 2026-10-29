@@ -232,8 +232,10 @@ public static class EchoLingoIntegrityBoundarySmoke {
         foreach (WindowInfo plane in planes) {int index=monitors.IndexOf(plane.Bounds);if(index<0)planeGeometry=false;else monitors.RemoveAt(index);}
         IntPtr raw=GetAncestor(WindowFromPoint(point),2);Point client=point;IntPtr desktop=GetDesktopWindow();
         IntPtr through=ScreenToClient(desktop,ref client)?GetAncestor(ChildWindowFromPointEx(desktop,client,5),2):IntPtr.Zero;
+        long rawStyle=GetWindowLongPtr(raw,-20).ToInt64();
+        bool rawLoupe=Loupe(raw)&&(rawStyle&0x20L)!=0&&(rawStyle&0x80000L)==0;
         bool hit=planes.Exists(delegate(WindowInfo p){return p.Handle==through&&p.Bounds.Contains(point);})
-            && (planes.Exists(delegate(WindowInfo p){return p.Handle==raw;})||thin.Exists(delegate(WindowInfo e){return e.Handle==raw&&e.Bounds.Contains(point);}));
+            && (planes.Exists(delegate(WindowInfo p){return p.Handle==raw;})||thin.Exists(delegate(WindowInfo e){return e.Handle==raw&&e.Bounds.Contains(point);})||rawLoupe);
         bool loupeReady=loupes==1 && loupeNear;
         observed["thinVisibleCount"]=thin.Count;observed["thinAllocatedCount"]=allocated;observed["planeVisibleCount"]=planes.Count;
         observed["captureMagnifierCount"]=loupes;observed["captureMagnifierNearPointer"]=loupeReady;

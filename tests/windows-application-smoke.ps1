@@ -370,8 +370,10 @@ public static class EchoLingoApplicationSmoke {
         IntPtr underneath=helper==0 ? IntPtr.Zero : UnderlyingRootAt(pointer,helper);
         validSource=validSource && underneath==expectedSource;
         exactPlanes=exactPlanes && planeBounds.Count==0 && thinAllocated==12*Screen.AllScreens.Length;
+        long rawStyle=GetWindowLongPtr(target,-20).ToInt64();
+        bool rawLoupe=IsCaptureLoupe(target)&&(rawStyle&0x20L)!=0&&(rawStyle&0x00080000L)==0;
         bool ready = validSource && screen.Count == 4 && hover.Count == 4 && oneHelper && exactGeometry && remaining.Count == 0
-            && exactPlanes && throughPlane && (rawPlane || rawThin);
+            && exactPlanes && throughPlane && (rawPlane || rawThin || rawLoupe);
         probe["requiredInputPlane"]=true; probe["allocatedInputPlaneCount"]=allPlanes.Count; probe["visibleInputPlaneCount"]=planes.Count;
         probe["allocatedThinWindowCount"]=thinAllocated; probe["physicalInputPlaneMultisetMatches"]=exactPlanes;
         probe["rawPointerIsExactPlane"]=rawPlane; probe["rawPointerIsVerifiedThinEdge"]=rawThin;
