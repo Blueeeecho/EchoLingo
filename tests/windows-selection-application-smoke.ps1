@@ -2,7 +2,8 @@
 [CmdletBinding()]
 param([Parameter(Mandatory=$true)][string]$ApplicationPath,[switch]$IsolatedTestSession,
     [string]$ExpectedApplicationSha256='86373b0c771b6644b66b6dc0f8a8c50295b6b7da50a8b1227953d11e78b1cf03',
-    [long]$ExpectedApplicationBytes=5784064)
+    [long]$ExpectedApplicationBytes=5784064,
+    [string]$ExpectedApplicationVersion='')
 $ErrorActionPreference = 'Stop'
 [Console]::OutputEncoding = [Text.UTF8Encoding]::new($false)
 try {
@@ -21,7 +22,14 @@ try {
     Add-Type -AssemblyName System.Windows.Forms,System.Drawing,System.Web.Extensions,System.Management,UIAutomationClient,UIAutomationTypes,WindowsBase
     $references = @([Windows.Forms.Form].Assembly.Location,[Drawing.Bitmap].Assembly.Location,[Web.Script.Serialization.JavaScriptSerializer].Assembly.Location,[Management.ManagementObject].Assembly.Location,[Windows.Automation.AutomationElement].Assembly.Location,[Windows.Automation.ControlType].Assembly.Location,[Windows.DependencyObject].Assembly.Location) | Select-Object -Unique
     Add-Type -TypeDefinition ([IO.File]::ReadAllText((Join-Path $PSScriptRoot 'windows-selection-application-fixture.cs'))) -ReferencedAssemblies $references
-    $result = [WindowsSelectionApplicationFixture]::Run($ApplicationPath)
+    $expectedVersion = $ExpectedApplicationVersion
+    if ([string]::IsNullOrWhiteSpace($expectedVersion)) {
+        # No custom identity means the pinned historical default above; current
+        # builds supply their identity and use checked source metadata instead.
+        $expectedVersion = if ($expectedCustom) { [string]((Get-Content -Raw -LiteralPath (Join-Path $PSScriptRoot '..\package.json') | ConvertFrom-Json).version) } else { '0.1.0' }
+    }
+    if ($expectedVersion -notmatch '\A(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?\z' -or $expectedVersion.Length -gt 128) { throw 'EXPECTED_VERSION_REQUIRED: package.json must contain the checked source version.' }
+    $result = [WindowsSelectionApplicationFixture]::Run($ApplicationPath, $expectedVersion)
     $result['applicationSha256'] = $hash
     $result['applicationBytes'] = $bytes.LongLength
     $result['expectedApplicationSha256'] = $ExpectedApplicationSha256

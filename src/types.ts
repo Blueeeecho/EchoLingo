@@ -28,6 +28,7 @@ export interface OcrProvider {
 }
 export type Action = 'selection' | 'capture' | 'ocr' | 'silentOcr' | 'input' | 'clipboard';
 export type ShortcutAction = Exclude<Action, 'clipboard'>;
+export interface ShortcutRegistration { action: ShortcutAction; combo?: string; active: boolean; error?: string | null }
 export interface Settings {
   providers: Provider[];
   targetLanguage: string;
@@ -35,6 +36,7 @@ export interface Settings {
   languageDirectionVersion?: number;
   shortcutDefaultsVersion?: number;
   shortcuts: Record<ShortcutAction, string>;
+  shortcutRegistration?: ShortcutRegistration[];
   windowsSelectionStrategy?: 'copy' | 'auto';
   saveHistory: boolean;
   theme: 'system' | 'light' | 'dark';

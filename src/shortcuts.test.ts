@@ -1,8 +1,27 @@
 import { describe, expect, it, vi } from 'vitest';
-import { displayShortcut, normalizeShortcut, normalizeShortcuts, recordedShortcut } from './shortcuts';
+import { displayShortcut, normalizeShortcut, normalizeShortcuts, recordedShortcut, recordedMouseShortcut } from './shortcuts';
 const keys = { selection: 'Alt+D', silentOcr: 'Alt+S', capture: '', ocr: 'Alt+Shift+S', input: 'Alt+A' };
 const event = (values: Partial<KeyboardEvent> = {}): Parameters<typeof recordedShortcut>[0] => ({ key: 't', code: 'KeyT', ctrlKey: true, altKey: false, shiftKey: false, metaKey: false, repeat: false, isComposing: false, keyCode: 84, ...values });
 describe('shortcut configuration', () => {
+  it('accepts opt-in unmodified Windows side buttons and rejects cross-platform or modified bindings', () => {
+    expect(normalizeShortcut('xbutton1', false, true)).toBe('MouseX1');
+    expect(normalizeShortcut('MouseForward', false, true)).toBe('MouseX2');
+    expect(normalizeShortcuts({ ...keys, selection: 'MouseX1', silentOcr: 'MouseX2' }, false, true).selection).toBe('MouseX1');
+    expect(() => normalizeShortcuts({ ...keys, selection: 'MouseX1', silentOcr: 'XButton1' }, false, true)).toThrow('相同');
+    for (const key of ['MouseX1', 'MouseX2']) {
+      expect(() => normalizeShortcut(key, true, false)).toThrow('Windows');
+      expect(() => normalizeShortcut(key, false, false)).toThrow('Windows');
+      expect(() => normalizeShortcut('Ctrl+' + key, false, true)).toThrow('单独');
+    }
+  });
+  it('records only the two side buttons while leaving normal pointer controls alone', () => {
+    const mouse = { button: 3, ctrlKey: false, altKey: false, shiftKey: false, metaKey: false };
+    expect(recordedMouseShortcut(mouse, false, true)).toEqual({ kind: 'key', value: 'MouseX1' });
+    expect(recordedMouseShortcut({ ...mouse, button: 4 }, false, true)).toEqual({ kind: 'key', value: 'MouseX2' });
+    for (const button of [0, 1, 2, 5]) expect(recordedMouseShortcut({ ...mouse, button }, false, true)).toBeNull();
+    expect(recordedMouseShortcut({ ...mouse, ctrlKey: true }, false, true)?.kind).toBe('error');
+    expect(recordedMouseShortcut(mouse, true, false)?.kind).toBe('error');
+  });
   it('canonicalizes aliases and modifier order without changing the physical key', () => {
     expect(normalizeShortcut(' shift + control + KeyT ')).toBe('Ctrl+Shift+T');
     expect(normalizeShortcut('Windows+Digit2')).toBe('Super+2');

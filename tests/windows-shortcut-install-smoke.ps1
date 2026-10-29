@@ -57,8 +57,8 @@ public static class EchoLingoShortcutOwner {
     Probe 0 "selection=Alt+D`nsilentOcr=Alt+S`n" 'fresh-install-defaults'
     Require ([EchoLingoShortcutOwner]::RegisterHotKey([IntPtr]::Zero, 17031, 1, 0x53)) 'Cannot own the fixture Alt+S conflict.'
     $held = $true
-    Probe 2 "silentOcr=Alt+S`n" 'default-conflict-real-registration'
-    Probe 2 "silentOcr=Alt+S`n" 'conflict-owner-not-unregistered'
+    Probe 0 "selection=Alt+D`nsilentOcr=Alt+S`n" 'default-priority-is-independent-of-registerhotkey-conflict'
+    Probe 0 "selection=Alt+D`nsilentOcr=Alt+S`n" 'priority-probe-does-not-remove-external-owner'
     Require ([EchoLingoShortcutOwner]::UnregisterHotKey([IntPtr]::Zero, 17031)) 'Cannot release fixture Alt+S.'
     $held = $false
     Probe 0 "selection=Alt+D`nsilentOcr=Alt+S`n" 'available-after-owner-release'
@@ -74,6 +74,8 @@ public static class EchoLingoShortcutOwner {
     Probe 2 "silentOcr=Ctrl+Alt+Shift+F10`n" 'custom-conflict-real-registration'
     Require ([EchoLingoShortcutOwner]::UnregisterHotKey([IntPtr]::Zero, 17031)) 'Cannot release custom fixture hotkey.'
     $held = $false
+    Set-Bindings 'MouseX1' 'MouseX2'
+    Probe 0 "selection=MouseX1`nsilentOcr=MouseX2`n" 'sidebuttons-do-not-use-registerhotkey-in-readonly-installer-check'
     Set-Bindings '' ''
     Probe 0 "selection=`nsilentOcr=`n" 'explicitly-disabled-core-shortcuts'
     # Real early CLI validation only: not Settings UI recording or physical

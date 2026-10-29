@@ -9,12 +9,12 @@ on:
         description: Full regression or exact-binary desktop diagnostics
         type: choice
         default: full
-        options: [full, windows-popup-diagnostics, windows-popup-current-diagnostics, windows-application-diagnostics, windows-input-plane-experiment, windows-native-diagnostics, windows-shortcuts-ui-diagnostics, windows-shortcuts-ui-medium-diagnostics, windows-shortcuts-current-diagnostics, windows-shortcuts-workflows-diagnostics, windows-delegated-diagnostics, windows-browser-diagnostics, windows-selection-same-page-diagnostics, windows-selection-browser-app-diagnostics, windows-browser-ocr-visibility-diagnostics, windows-selection-cold-edge-diagnostics, windows-selection-paced-edge-diagnostics, windows-selection-nonbrowser-app-diagnostics, windows-latest-intent-diagnostics, windows-selection-application-diagnostics, windows-selection-clipboard-diagnostics, windows-selection-notepad-diagnostics, windows-selection-budget-diagnostics, windows-selection-context-diagnostics, windows-wps-selection-diagnostics, windows-focus-resize-current-diagnostics]
+        options: [full, windows-popup-diagnostics, windows-popup-current-diagnostics, windows-application-diagnostics, windows-input-plane-experiment, windows-native-diagnostics, windows-shortcuts-ui-diagnostics, windows-shortcuts-ui-medium-diagnostics, windows-shortcuts-current-diagnostics, windows-shortcuts-workflows-diagnostics, windows-delegated-diagnostics, windows-browser-diagnostics, windows-selection-same-page-diagnostics, windows-selection-browser-app-diagnostics, windows-browser-ocr-visibility-diagnostics, windows-selection-cold-edge-diagnostics, windows-selection-paced-edge-diagnostics, windows-selection-nonbrowser-app-diagnostics, windows-latest-intent-diagnostics, windows-selection-application-diagnostics, windows-selection-clipboard-diagnostics, windows-selection-notepad-diagnostics, windows-selection-budget-diagnostics, windows-selection-context-diagnostics, windows-wps-selection-diagnostics, windows-focus-resize-current-diagnostics, windows-priority-input-diagnostics, windows-priority-candidate-diagnostics]
 permissions:
   contents: read
 jobs:
   desktop:
-    if: github.event.inputs.mode != 'windows-popup-diagnostics' && github.event.inputs.mode != 'windows-popup-current-diagnostics' && github.event.inputs.mode != 'windows-application-diagnostics' && github.event.inputs.mode != 'windows-input-plane-experiment' && github.event.inputs.mode != 'windows-native-diagnostics' && github.event.inputs.mode != 'windows-shortcuts-ui-diagnostics' && github.event.inputs.mode != 'windows-shortcuts-ui-medium-diagnostics' && github.event.inputs.mode != 'windows-shortcuts-current-diagnostics' && github.event.inputs.mode != 'windows-shortcuts-workflows-diagnostics' && github.event.inputs.mode != 'windows-delegated-diagnostics' && github.event.inputs.mode != 'windows-browser-diagnostics' && github.event.inputs.mode != 'windows-selection-same-page-diagnostics' && github.event.inputs.mode != 'windows-selection-browser-app-diagnostics' && github.event.inputs.mode != 'windows-browser-ocr-visibility-diagnostics' && github.event.inputs.mode != 'windows-selection-cold-edge-diagnostics' && github.event.inputs.mode != 'windows-selection-paced-edge-diagnostics' && github.event.inputs.mode != 'windows-selection-nonbrowser-app-diagnostics' && github.event.inputs.mode != 'windows-latest-intent-diagnostics' && github.event.inputs.mode != 'windows-selection-application-diagnostics' && github.event.inputs.mode != 'windows-selection-clipboard-diagnostics' && github.event.inputs.mode != 'windows-selection-notepad-diagnostics' && github.event.inputs.mode != 'windows-selection-budget-diagnostics' && github.event.inputs.mode != 'windows-selection-context-diagnostics' && github.event.inputs.mode != 'windows-wps-selection-diagnostics' && github.event.inputs.mode != 'windows-focus-resize-current-diagnostics'
+    if: github.event.inputs.mode != 'windows-popup-diagnostics' && github.event.inputs.mode != 'windows-popup-current-diagnostics' && github.event.inputs.mode != 'windows-application-diagnostics' && github.event.inputs.mode != 'windows-input-plane-experiment' && github.event.inputs.mode != 'windows-native-diagnostics' && github.event.inputs.mode != 'windows-shortcuts-ui-diagnostics' && github.event.inputs.mode != 'windows-shortcuts-ui-medium-diagnostics' && github.event.inputs.mode != 'windows-shortcuts-current-diagnostics' && github.event.inputs.mode != 'windows-shortcuts-workflows-diagnostics' && github.event.inputs.mode != 'windows-delegated-diagnostics' && github.event.inputs.mode != 'windows-browser-diagnostics' && github.event.inputs.mode != 'windows-selection-same-page-diagnostics' && github.event.inputs.mode != 'windows-selection-browser-app-diagnostics' && github.event.inputs.mode != 'windows-browser-ocr-visibility-diagnostics' && github.event.inputs.mode != 'windows-selection-cold-edge-diagnostics' && github.event.inputs.mode != 'windows-selection-paced-edge-diagnostics' && github.event.inputs.mode != 'windows-selection-nonbrowser-app-diagnostics' && github.event.inputs.mode != 'windows-latest-intent-diagnostics' && github.event.inputs.mode != 'windows-selection-application-diagnostics' && github.event.inputs.mode != 'windows-selection-clipboard-diagnostics' && github.event.inputs.mode != 'windows-selection-notepad-diagnostics' && github.event.inputs.mode != 'windows-selection-budget-diagnostics' && github.event.inputs.mode != 'windows-selection-context-diagnostics' && github.event.inputs.mode != 'windows-wps-selection-diagnostics' && github.event.inputs.mode != 'windows-focus-resize-current-diagnostics' && github.event.inputs.mode != 'windows-priority-input-diagnostics' && github.event.inputs.mode != 'windows-priority-candidate-diagnostics'
     strategy:
       fail-fast: false
       matrix:
@@ -493,7 +493,7 @@ jobs:
           }
 
   frontend-interactions:
-    if: github.event.inputs.mode != 'windows-popup-diagnostics' && github.event.inputs.mode != 'windows-popup-current-diagnostics' && github.event.inputs.mode != 'windows-application-diagnostics' && github.event.inputs.mode != 'windows-input-plane-experiment' && github.event.inputs.mode != 'windows-native-diagnostics' && github.event.inputs.mode != 'windows-shortcuts-ui-diagnostics' && github.event.inputs.mode != 'windows-shortcuts-ui-medium-diagnostics' && github.event.inputs.mode != 'windows-shortcuts-current-diagnostics' && github.event.inputs.mode != 'windows-shortcuts-workflows-diagnostics' && github.event.inputs.mode != 'windows-delegated-diagnostics' && github.event.inputs.mode != 'windows-browser-diagnostics' && github.event.inputs.mode != 'windows-selection-same-page-diagnostics' && github.event.inputs.mode != 'windows-selection-browser-app-diagnostics' && github.event.inputs.mode != 'windows-browser-ocr-visibility-diagnostics' && github.event.inputs.mode != 'windows-selection-cold-edge-diagnostics' && github.event.inputs.mode != 'windows-selection-paced-edge-diagnostics' && github.event.inputs.mode != 'windows-selection-nonbrowser-app-diagnostics' && github.event.inputs.mode != 'windows-latest-intent-diagnostics' && github.event.inputs.mode != 'windows-selection-application-diagnostics' && github.event.inputs.mode != 'windows-selection-clipboard-diagnostics' && github.event.inputs.mode != 'windows-selection-notepad-diagnostics' && github.event.inputs.mode != 'windows-selection-budget-diagnostics' && github.event.inputs.mode != 'windows-selection-context-diagnostics' && github.event.inputs.mode != 'windows-wps-selection-diagnostics' && github.event.inputs.mode != 'windows-focus-resize-current-diagnostics'
+    if: github.event.inputs.mode != 'windows-popup-diagnostics' && github.event.inputs.mode != 'windows-popup-current-diagnostics' && github.event.inputs.mode != 'windows-application-diagnostics' && github.event.inputs.mode != 'windows-input-plane-experiment' && github.event.inputs.mode != 'windows-native-diagnostics' && github.event.inputs.mode != 'windows-shortcuts-ui-diagnostics' && github.event.inputs.mode != 'windows-shortcuts-ui-medium-diagnostics' && github.event.inputs.mode != 'windows-shortcuts-current-diagnostics' && github.event.inputs.mode != 'windows-shortcuts-workflows-diagnostics' && github.event.inputs.mode != 'windows-delegated-diagnostics' && github.event.inputs.mode != 'windows-browser-diagnostics' && github.event.inputs.mode != 'windows-selection-same-page-diagnostics' && github.event.inputs.mode != 'windows-selection-browser-app-diagnostics' && github.event.inputs.mode != 'windows-browser-ocr-visibility-diagnostics' && github.event.inputs.mode != 'windows-selection-cold-edge-diagnostics' && github.event.inputs.mode != 'windows-selection-paced-edge-diagnostics' && github.event.inputs.mode != 'windows-selection-nonbrowser-app-diagnostics' && github.event.inputs.mode != 'windows-latest-intent-diagnostics' && github.event.inputs.mode != 'windows-selection-application-diagnostics' && github.event.inputs.mode != 'windows-selection-clipboard-diagnostics' && github.event.inputs.mode != 'windows-selection-notepad-diagnostics' && github.event.inputs.mode != 'windows-selection-budget-diagnostics' && github.event.inputs.mode != 'windows-selection-context-diagnostics' && github.event.inputs.mode != 'windows-wps-selection-diagnostics' && github.event.inputs.mode != 'windows-focus-resize-current-diagnostics' && github.event.inputs.mode != 'windows-priority-input-diagnostics' && github.event.inputs.mode != 'windows-priority-candidate-diagnostics'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -1137,7 +1137,7 @@ jobs:
           } elseif ('${{ github.event.inputs.mode }}' -eq 'windows-selection-application-diagnostics') {
             $hash = (Get-FileHash -LiteralPath $env:ECHOLINGO_APPLICATION_CANDIDATE -Algorithm SHA256).Hash.ToLowerInvariant()
             $bytes = (Get-Item -LiteralPath $env:ECHOLINGO_APPLICATION_CANDIDATE).Length
-            $output = @(& powershell.exe -NoProfile -STA -ExecutionPolicy Bypass -File tests/windows-selection-application-smoke.ps1 -ApplicationPath $env:ECHOLINGO_APPLICATION_CANDIDATE -ExpectedApplicationSha256 $hash -ExpectedApplicationBytes $bytes -IsolatedTestSession 2>&1)
+            $output = @(& powershell.exe -NoProfile -STA -ExecutionPolicy Bypass -File tests/windows-selection-application-smoke.ps1 -ApplicationPath $env:ECHOLINGO_APPLICATION_CANDIDATE -ExpectedApplicationSha256 $hash -ExpectedApplicationBytes $bytes -ExpectedApplicationVersion 0.1.0 -IsolatedTestSession 2>&1)
           } else {
             $output = @(& powershell.exe -NoProfile -STA -ExecutionPolicy Bypass -File tests/windows-application-smoke.ps1 -ApplicationPath $env:ECHOLINGO_APPLICATION_CANDIDATE -LatestIntentTests 2>&1)
           }
@@ -1369,7 +1369,7 @@ jobs:
         run: |
           $ErrorActionPreference = 'Continue'
           $global:LASTEXITCODE = 1
-          $output = @(& powershell.exe -NoProfile -STA -ExecutionPolicy Bypass -File tests/windows-selection-application-smoke.ps1 -ApplicationPath '${{ steps.candidate.outputs.path }}' -ExpectedApplicationSha256 8490a973c9e4f4568b851f61524a4ef8f554d8b3a506b12dd19ba34f0dd22a4b -ExpectedApplicationBytes 5825536 -IsolatedTestSession 2>&1)
+          $output = @(& powershell.exe -NoProfile -STA -ExecutionPolicy Bypass -File tests/windows-selection-application-smoke.ps1 -ApplicationPath '${{ steps.candidate.outputs.path }}' -ExpectedApplicationSha256 8490a973c9e4f4568b851f61524a4ef8f554d8b3a506b12dd19ba34f0dd22a4b -ExpectedApplicationBytes 5825536 -ExpectedApplicationVersion 0.1.0 -IsolatedTestSession 2>&1)
           $code = $LASTEXITCODE
           $output | Out-File "$env:RUNNER_TEMP/echolingo-selection-winforms.log" -Encoding utf8
           $output | Write-Output
@@ -1673,3 +1673,118 @@ jobs:
         run: |
           [ordered]@{ scope='Supplemental exact 952 same-binary acceptance only'; fixture='${{ matrix.fixture }}'; outcome='${{ steps.actual.outcome }}' } | ConvertTo-Json -Compress
           if ('${{ steps.actual.outcome }}' -ne 'success') { throw 'Actual same-binary acceptance failed.' }
+
+  windows-priority-input:
+    if: github.event_name == 'workflow_dispatch' && github.event.inputs.mode == 'windows-priority-input-diagnostics'
+    runs-on: windows-latest
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Native priority keyboard and mouse side-button regression
+        shell: powershell
+        run: powershell.exe -NoProfile -STA -ExecutionPolicy Bypass -File tests/windows-priority-input-smoke.ps1 -IsolatedTestSession
+      - name: Preserve generated-input validation
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: EchoLingo-Windows-priority-input-validation
+          if-no-files-found: warn
+          path: ${{ runner.temp }}/echolingo-priority-input-validation.json
+
+  windows-priority-candidate:
+    name: Exact priority candidate (${{ matrix.fixture }})
+    if: github.event_name == 'workflow_dispatch' && github.event.inputs.mode == 'windows-priority-candidate-diagnostics'
+    runs-on: windows-latest
+    timeout-minutes: 18
+    permissions:
+      contents: read
+      actions: read
+    strategy:
+      fail-fast: false
+      matrix:
+        fixture: [application, resize, installed]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Verify unchanged production source and immutable artifacts
+        shell: powershell
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $source = '41f873c949b914691aad3bd5af1b8ba6eb327733'
+          git diff --quiet $source HEAD -- src src-tauri resources assets scripts index.html package.json package-lock.json vite.config.ts tsconfig.json tsconfig.node.json .cargo
+          if ($LASTEXITCODE -ne 0) { throw 'Production inputs differ; rebuild required.' }
+          $run = gh api repos/Blueeeecho/EchoLingo/actions/runs/40814191898 | ConvertFrom-Json
+          if ($LASTEXITCODE -ne 0 -or $run.head_sha -ne $source -or $run.status -ne 'completed') { throw 'Immutable source run mismatch.' }
+          foreach ($expected in @(@{ id=12872247410; size=75370006; digest='sha256:ff9459cb13268f2145383e56a49a41b87aecd3c3113042a62b23447d31a592a6' }, @{ id=12871744846; size=17940496; digest='sha256:aeb7cff6713dc98634e46f46e73d2a1aea3df17271935ef3d04c5f68980a9f70' })) {
+            $artifact = gh api ('repos/Blueeeecho/EchoLingo/actions/artifacts/' + $expected.id) | ConvertFrom-Json
+            if ($LASTEXITCODE -ne 0 -or $artifact.expired -or $artifact.workflow_run.head_sha -ne $source -or $artifact.workflow_run.id -ne 40814191898 -or $artifact.size_in_bytes -ne $expected.size -or $artifact.digest -ne $expected.digest) { throw 'Immutable candidate artifact mismatch.' }
+          }
+      - uses: actions/download-artifact@v4
+        with:
+          artifact-ids: '12872247410,12871744846'
+          run-id: '40814191898'
+          github-token: ${{ github.token }}
+          path: priority-candidate
+      - name: Verify and place the exact stage and installer
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $apps = @(Get-ChildItem priority-candidate -Recurse -File -Filter echolingo.exe)
+          $installers = @(Get-ChildItem priority-candidate/EchoLingo-Windows -Recurse -File -Filter '*.exe')
+          if ($apps.Count -ne 1 -or $apps[0].Length -ne 6045696 -or (Get-FileHash $apps[0].FullName -Algorithm SHA256).Hash.ToLowerInvariant() -ne 'aca5362bf102d83b0ec8aa60aaaba75a6be8412d55c7751f2082897cb15b434f') { throw 'Stage binary mismatch.' }
+          if ($installers.Count -ne 1 -or $installers[0].Length -ne 75367978 -or (Get-FileHash $installers[0].FullName -Algorithm SHA256).Hash.ToLowerInvariant() -ne '4afea9695e95efb242b0fdf7e3da745526fc06a79401ccfb937402cb26a9e9a5') { throw 'NSIS installer mismatch.' }
+          New-Item src-tauri/target/release/bundle/nsis -ItemType Directory -Force | Out-Null
+          Copy-Item $apps[0].FullName src-tauri/target/release/echolingo.exe
+          Copy-Item $installers[0].FullName src-tauri/target/release/bundle/nsis/echolingo-priority-setup.exe
+          # This immutable-package job has no newly built staging engine.
+          # Extract the exact original engine and prove its full-run hash before
+          # staging the file required by the installed-vs-stage fixture.
+          $engineStage = Join-Path $env:RUNNER_TEMP 'priority-expected-engine'
+          New-Item $engineStage -ItemType Directory -Force | Out-Null
+          & 7z e $installers[0].FullName '-r' '-y' ("-o" + $engineStage) 'echolingo-offline-engine.exe' | Out-Null
+          if ($LASTEXITCODE -ne 0) { throw 'Could not extract the immutable expected engine.' }
+          $engines = @(Get-ChildItem $engineStage -Recurse -File -Filter echolingo-offline-engine.exe)
+          if ($engines.Count -ne 1 -or $engines[0].Length -ne 6479872 -or (Get-FileHash $engines[0].FullName -Algorithm SHA256).Hash.ToLowerInvariant() -ne '2c30ca6387cfa8967c9d4be3686936654eac86ffd5f37ae1def2336d6a3c0566') { throw 'Original staged-engine identity mismatch.' }
+          if (($engines[0].Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) { throw 'Expected engine must be a regular file.' }
+          New-Item resources/offline-translation/bin -ItemType Directory -Force | Out-Null
+          Copy-Item $engines[0].FullName resources/offline-translation/bin/echolingo-offline-engine.exe
+          if ((Get-FileHash resources/offline-translation/bin/echolingo-offline-engine.exe -Algorithm SHA256).Hash.ToLowerInvariant() -ne '2c30ca6387cfa8967c9d4be3686936654eac86ffd5f37ae1def2336d6a3c0566') { throw 'Expected engine copy changed.' }
+          [ordered]@{ applicationSource='41f873c949b914691aad3bd5af1b8ba6eb327733'; fixtureSource='${{ github.sha }}'; sourceRun=40814191898; rebuilt=$false; expectedEngineOrigin='immutable NSIS and original-build SHA256'; productionSourceUnchanged=$true; originalFullGatePassed=$false; scope='Exact-binary supplemental checks; original full run remains 15/18' } | ConvertTo-Json -Compress
+      - name: Actual same-binary supplemental acceptance
+        id: actual
+        continue-on-error: true
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Continue'
+          $global:LASTEXITCODE = 1
+          $fixture = '${{ matrix.fixture }}'
+          if ($fixture -eq 'application') {
+            $output = @(& powershell.exe -NoProfile -STA -ExecutionPolicy Bypass -File tests/windows-application-smoke.ps1 -ApplicationPath src-tauri/target/release/echolingo.exe -LatestIntentTests 2>&1)
+          } elseif ($fixture -eq 'resize') {
+            $output = @(& powershell.exe -NoProfile -STA -ExecutionPolicy Bypass -File tests/windows-popup-resize-smoke.ps1 -ApplicationPath src-tauri/target/release/echolingo.exe -IsolatedTestSession 2>&1)
+          } else {
+            $output = @(& powershell.exe -NoProfile -STA -ExecutionPolicy Bypass -File scripts/windows-offline-translation-test.ps1 2>&1)
+          }
+          $fixtureExit = $LASTEXITCODE
+          $output | Out-File "$env:RUNNER_TEMP/echolingo-priority-${{ matrix.fixture }}.log" -Encoding utf8
+          $output | Write-Output
+          if ((Get-FileHash src-tauri/target/release/echolingo.exe -Algorithm SHA256).Hash.ToLowerInvariant() -ne 'aca5362bf102d83b0ec8aa60aaaba75a6be8412d55c7751f2082897cb15b434f') { throw 'Stage binary changed.' }
+          exit $fixtureExit
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: EchoLingo-Windows-priority-candidate-${{ matrix.fixture }}
+          if-no-files-found: error
+          path: |
+            ${{ runner.temp }}/echolingo-priority-${{ matrix.fixture }}.log
+            ${{ runner.temp }}/echolingo-offline-validation.json
+      - name: Gate exact-binary supplement
+        if: always()
+        shell: powershell
+        run: |
+          [ordered]@{ fixture='${{ matrix.fixture }}'; actualOutcome='${{ steps.actual.outcome }}'; rebuilt=$false } | ConvertTo-Json -Compress
+          if ('${{ steps.actual.outcome }}' -ne 'success') { throw 'Same-binary supplemental acceptance failed.' }

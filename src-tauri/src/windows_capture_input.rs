@@ -686,3 +686,10 @@ mod tests {
         assert_eq!(refresh_token(REFRESH, 41, 1), None);
     }
 }
+
+/// Metadata only; hooks never initialize capture state while checking it.
+pub fn current_token() -> u64 {
+    SHARED
+        .get()
+        .map_or(0, |state| state.token.load(Ordering::SeqCst))
+}

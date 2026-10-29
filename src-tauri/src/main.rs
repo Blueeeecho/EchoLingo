@@ -4,6 +4,7 @@ mod language_detection;
 #[cfg(target_os = "macos")]
 mod macos_startup;
 mod model;
+mod mouse_shortcuts;
 mod native_tasks;
 mod ocr;
 mod ocr_native;
@@ -21,11 +22,14 @@ mod translation_requests;
 mod window_layout;
 #[cfg(target_os = "windows")]
 mod windows_capture_input;
+#[cfg(target_os = "windows")]
+mod windows_mouse_shortcuts;
 #[cfg(any(target_os = "windows", test))]
 mod windows_visibility;
 
 use model::*;
 use serde::{Deserialize, Serialize};
+use shortcut_bindings::Binding;
 use std::{
     fs,
     path::{Path, PathBuf},
@@ -48,7 +52,8 @@ struct AppState {
     shortcut_gate: Mutex<shortcut_control::ShortcutGate>,
     shortcut_routes: shortcut_control::ShortcutRoutes,
     shortcut_updating: AtomicBool,
-    registered_shortcuts: Mutex<Vec<Shortcut>>,
+    registered_shortcuts: Mutex<Vec<Binding>>,
+    shortcut_failures: Mutex<std::collections::BTreeMap<String, String>>,
     translation_busy: tokio::sync::Semaphore,
     translation_requests: translation_requests::TranslationRequests,
     data_dir: PathBuf,
@@ -619,7 +624,14 @@ async fn test_ocr_provider(
 #[tauri::command]
 fn get_settings(state: State<AppState>) -> Result<serde_json::Value, String> {
     let settings = locked(&state.settings)?;
-    settings_snapshot(&settings, &state.credentials)
+    let mut value = settings_snapshot(&settings, &state.credentials)?;
+    let registered = locked(&state.registered_shortcuts)?;
+    let failures = locked(&state.shortcut_failures)?;
+    value["shortcutRegistration"] = serde_json::Value::Array(parsed_shortcuts(&settings.shortcuts)?.into_iter().map(|(action, binding)| {
+        let active = registered.iter().any(|actual| actual.id() == binding.id()) && native_binding_active(binding);
+        serde_json::json!({"action":action,"active":active,"combo":settings.shortcuts.pairs().into_iter().find(|(name,_)| *name==action).map(|(_,combo)|combo).unwrap_or(""),"error":if active { None } else { failures.get(&action).cloned() }})
+    }).collect());
+    Ok(value)
 }
 
 // Startup and Settings refresh must never touch Keychain, even for presence
@@ -654,20 +666,37 @@ fn settings_snapshot(
     Ok(value)
 }
 
-fn parsed_shortcuts(s: &Shortcuts) -> Result<Vec<(String, Shortcut)>, String> {
-    shortcut_bindings::parsed(s)
+fn parsed_shortcuts(s: &Shortcuts) -> Result<Vec<(String, Binding)>, String> {
+    shortcut_bindings::prepared(s)
 }
 
 fn dispatch_shortcut(app: &tauri::AppHandle, shortcut: &Shortcut, phase: ShortcutState) {
+    dispatch_shortcut_id(app, shortcut.id(), phase, None, false, || true);
+}
+fn dispatch_shortcut_id(
+    app: &tauri::AppHandle,
+    id: u32,
+    phase: ShortcutState,
+    recorded_combo: Option<&str>,
+    paired: bool,
+    still_current: impl Fn() -> bool,
+) {
     let state = app.state::<AppState>();
     let delivery = state.shortcut_gate.lock().ok().and_then(|mut gate| {
         let now = Instant::now();
+        if paired && !still_current() {
+            return None;
+        }
         if state.shortcut_updating.load(Ordering::SeqCst) {
             gate.cancel(now);
         }
         // Observe releases even during updates: dropping them leaves a stale
         // held ID which would swallow the next genuine press after saving.
-        let delivery = gate.observe(shortcut.id(), phase == ShortcutState::Pressed, now);
+        let delivery = if paired {
+            gate.observe_pair(id, now)
+        } else {
+            gate.observe(id, phase == ShortcutState::Pressed, now)
+        };
         if delivery == shortcut_control::ShortcutDelivery::Ignored {
             return None;
         }
@@ -681,15 +710,20 @@ fn dispatch_shortcut(app: &tauri::AppHandle, shortcut: &Shortcut, phase: Shortcu
     };
     // This lookup never takes the settings/registration locks, which may span
     // disk sync or a synchronous visit to the UI thread. Reject stale maps.
-    if state.shortcut_updating.load(Ordering::SeqCst) || !state.shortcut_routes.is_current(&routes)
+    if state.shortcut_updating.load(Ordering::SeqCst)
+        || !state.shortcut_routes.is_current(&routes)
+        || !still_current()
     {
         return;
     }
-    if let Some(shortcut_control::ShortcutRoute { action, combo }) =
-        routes.get(&shortcut.id()).cloned()
-    {
-        match delivery {
-            shortcut_control::ShortcutDelivery::Recorded(lease_id) => {
+    let route = routes.get(&id).cloned();
+    match delivery {
+        shortcut_control::ShortcutDelivery::Recorded(lease_id) => {
+            let combo = route
+                .as_ref()
+                .map(|route| route.combo.as_str())
+                .or(recorded_combo);
+            if let Some(combo) = combo {
                 if state
                     .shortcut_gate
                     .lock()
@@ -704,10 +738,75 @@ fn dispatch_shortcut(app: &tauri::AppHandle, shortcut: &Shortcut, phase: Shortcu
                     );
                 }
             }
-            shortcut_control::ShortcutDelivery::Action => start_action(app.clone(), action),
-            shortcut_control::ShortcutDelivery::Ignored => {}
         }
+        shortcut_control::ShortcutDelivery::Action => {
+            if let Some(route) = route {
+                start_action(app.clone(), route.action);
+            }
+        }
+        shortcut_control::ShortcutDelivery::Ignored => {}
     }
+}
+
+fn native_binding_active(binding: Binding) -> bool {
+    #[cfg(target_os = "windows")]
+    if let Some(bit) = binding.native_bit() {
+        return windows_mouse_shortcuts::active(bit);
+    }
+    let _ = binding;
+    true
+}
+#[cfg(target_os = "windows")]
+fn sync_native_shortcut_context(app: &tauri::AppHandle) {
+    if let Some(window) = app.get_webview_window("main") {
+        windows_mouse_shortcuts::set_context(
+            window.hwnd().map(|native| native.0 as isize).unwrap_or(0),
+            !app.state::<window_layout::LayoutState>().is_popup(),
+        );
+    }
+}
+#[cfg(target_os = "windows")]
+fn start_native_shortcuts(app: tauri::AppHandle) -> Result<(), String> {
+    let ids = [
+        "Alt+D"
+            .parse::<Shortcut>()
+            .map_err(|_| "默认快捷键无效")?
+            .id(),
+        "Alt+S"
+            .parse::<Shortcut>()
+            .map_err(|_| "默认快捷键无效")?
+            .id(),
+    ];
+    let events = windows_mouse_shortcuts::start(ids)?;
+    sync_native_shortcut_context(&app);
+    std::thread::Builder::new()
+        .name("shortcut-input-events".into())
+        .spawn(move || {
+            while let Ok(event) = events.recv() {
+                if event.id == 0 || !windows_mouse_shortcuts::running() {
+                    break;
+                }
+                if !windows_mouse_shortcuts::current(event) {
+                    continue;
+                }
+                let combo = match event.id {
+                    mouse_shortcuts::MOUSE_X1_ID => Some("MouseX1"),
+                    mouse_shortcuts::MOUSE_X2_ID => Some("MouseX2"),
+                    _ => None,
+                };
+                // Native hooks already accepted one physical down/up pair. Feed
+                // both phases under one gate lock, so invalidation cannot leave
+                // a synthetic held ID that swallows the following gesture.
+                dispatch_shortcut_id(&app, event.id, ShortcutState::Released, combo, true, || {
+                    windows_mouse_shortcuts::current(event)
+                });
+            }
+        })
+        .map_err(|error| {
+            windows_mouse_shortcuts::stop();
+            format!("输入事件队列启动失败：{error}")
+        })?;
+    Ok(())
 }
 
 struct ShortcutUpdateGuard<'a>(&'a AtomicBool);
@@ -718,35 +817,74 @@ impl Drop for ShortcutUpdateGuard<'_> {
 }
 struct NativeShortcutRegistry<'a> {
     app: &'a tauri::AppHandle,
-    known: std::collections::HashMap<u32, Shortcut>,
-    registered: &'a mut Vec<Shortcut>,
+    known: std::collections::HashMap<u32, Binding>,
+    labels: std::collections::HashMap<u32, String>,
+    registered: &'a mut Vec<Binding>,
 }
 impl shortcut_control::Registry for NativeShortcutRegistry<'_> {
     fn register(&mut self, id: u32) -> Result<(), String> {
         let shortcut = *self.known.get(&id).ok_or("未知快捷键")?;
-        self.app
-            .global_shortcut()
-            .on_shortcut(shortcut, |app, binding, event| {
-                dispatch_shortcut(app, binding, event.state());
-            })
-            .map_err(|error| format!("快捷键已被占用或系统不支持：{error}"))?;
+        #[cfg(target_os = "windows")]
+        if shortcut
+            .keyboard()
+            .is_some_and(|value| value.key == tauri_plugin_global_shortcut::Code::F12)
+        {
+            return Err(format!(
+                "{}：Windows 为调试器保留 F12，请选择其他按键",
+                self.labels.get(&id).map(String::as_str).unwrap_or("快捷键")
+            ));
+        }
+        let result = match shortcut {
+            Binding::Keyboard(shortcut) => self
+                .app
+                .global_shortcut()
+                .on_shortcut(shortcut, |app, binding, event| {
+                    dispatch_shortcut(app, binding, event.state());
+                })
+                .map_err(|error| format!("系统注册失败：{error}")),
+            _ => {
+                #[cfg(target_os = "windows")]
+                {
+                    windows_mouse_shortcuts::register(shortcut.native_bit().ok_or("输入绑定无效")?)
+                }
+                #[cfg(not(target_os = "windows"))]
+                {
+                    Err("该输入绑定仅支持 Windows".into())
+                }
+            }
+        };
+        result.map_err(|error| {
+            format!(
+                "{}：{error}",
+                self.labels.get(&id).map(String::as_str).unwrap_or("快捷键")
+            )
+        })?;
         self.registered.push(shortcut);
         Ok(())
     }
     fn unregister(&mut self, id: u32) -> Result<(), String> {
         let shortcut = *self.known.get(&id).ok_or("未知快捷键")?;
-        self.app
-            .global_shortcut()
-            .unregister(shortcut)
-            .map_err(|error| format!("无法移除快捷键：{error}"))?;
+        match shortcut {
+            Binding::Keyboard(shortcut) => self
+                .app
+                .global_shortcut()
+                .unregister(shortcut)
+                .map_err(|error| format!("无法移除快捷键：{error}"))?,
+            _ => {
+                #[cfg(target_os = "windows")]
+                windows_mouse_shortcuts::unregister(shortcut.native_bit().ok_or("输入绑定无效")?)?;
+                #[cfg(not(target_os = "windows"))]
+                return Err("该输入绑定仅支持 Windows".into());
+            }
+        }
         self.registered.retain(|binding| binding.id() != id);
         Ok(())
     }
 }
 fn shortcut_registry<'a>(
     app: &'a tauri::AppHandle,
-    registered: &'a mut Vec<Shortcut>,
-    next: &[(String, Shortcut)],
+    registered: &'a mut Vec<Binding>,
+    next: &[(String, Binding)],
 ) -> NativeShortcutRegistry<'a> {
     let known = registered
         .iter()
@@ -756,6 +894,21 @@ fn shortcut_registry<'a>(
     NativeShortcutRegistry {
         app,
         known,
+        labels: next
+            .iter()
+            .map(|(action, binding)| {
+                (
+                    binding.id(),
+                    format!(
+                        "{action}（{}）",
+                        match binding {
+                            Binding::Mouse(button) => button.name().to_owned(),
+                            _ => binding.keyboard().unwrap().to_string(),
+                        }
+                    ),
+                )
+            })
+            .collect(),
         registered,
     }
 }
@@ -763,42 +916,59 @@ fn install_shortcuts(app: &tauri::AppHandle, s: &Shortcuts) -> Result<(), String
     let next = parsed_shortcuts(s)?;
     let state = app.state::<AppState>();
     let mut registered = locked(&state.registered_shortcuts)?;
-    let old = registered.iter().map(Shortcut::id).collect::<Vec<_>>();
-    let ids = next
-        .iter()
-        .map(|(_, binding)| binding.id())
-        .collect::<Vec<_>>();
     let mut registry = shortcut_registry(app, &mut registered, &next);
-    let result = shortcut_control::replace_bindings(&mut registry, &old, &ids, || Ok(()));
+    let mut failures = locked(&state.shortcut_failures)?;
+    failures.clear();
+    for (action, binding) in &next {
+        if registry
+            .registered
+            .iter()
+            .any(|value| value.id() == binding.id())
+        {
+            continue;
+        }
+        if let Err(error) = shortcut_control::Registry::register(&mut registry, binding.id()) {
+            failures.insert(action.clone(), error);
+        }
+    }
+    let result = if failures.is_empty() {
+        Ok(())
+    } else {
+        Err(failures.values().cloned().collect::<Vec<_>>().join("；"))
+    };
     sync_shortcut_routes(&state, s, registry.registered, result)
 }
 
 fn sync_shortcut_routes(
     state: &AppState,
     shortcuts: &Shortcuts,
-    registered: &[Shortcut],
+    registered: &[Binding],
     result: Result<(), String>,
 ) -> Result<(), String> {
     let sync = (|| {
         let canonical = shortcut_bindings::normalized(shortcuts)?;
-        let desired = canonical
-            .pairs()
+        let parsed = parsed_shortcuts(&canonical)?;
+        let desired = parsed
             .into_iter()
-            .filter(|(_, combo)| !combo.is_empty())
-            .map(|(action, combo)| {
-                let binding: Shortcut = combo.parse().map_err(|_| "快捷键路由无效")?;
-                Ok((
+            .map(|(action, binding)| {
+                let combo = canonical
+                    .pairs()
+                    .into_iter()
+                    .find(|(name, _)| *name == action)
+                    .map(|(_, combo)| combo)
+                    .unwrap_or("");
+                (
                     binding.id(),
                     shortcut_control::ShortcutRoute {
-                        action: action.to_owned(),
+                        action,
                         combo: combo.to_owned(),
                     },
-                ))
+                )
             })
-            .collect::<Result<Vec<_>, String>>()?;
+            .collect::<Vec<_>>();
         state
             .shortcut_routes
-            .publish_registered(desired, registered.iter().map(Shortcut::id))
+            .publish_registered(desired, registered.iter().map(Binding::id))
     })();
     match sync {
         Ok(()) => result,
@@ -810,6 +980,8 @@ fn sync_shortcut_routes(
 }
 
 fn cancel_shortcut_recording(app: &tauri::AppHandle) {
+    #[cfg(target_os = "windows")]
+    let _ = windows_mouse_shortcuts::recording(0);
     if let Ok(mut gate) = app.state::<AppState>().shortcut_gate.lock() {
         if gate.is_recording(Instant::now()) {
             gate.cancel(Instant::now());
@@ -832,10 +1004,25 @@ fn set_shortcut_recording(
         {
             return Err("请在前台设置窗口中录制快捷键".into());
         }
-        locked(&state.shortcut_gate)?.begin(Instant::now())
+        let id = locked(&state.shortcut_gate)?.begin(Instant::now())?;
+        #[cfg(target_os = "windows")]
+        {
+            sync_native_shortcut_context(&window.app_handle());
+            if let Err(error) = windows_mouse_shortcuts::recording(id) {
+                locked(&state.shortcut_gate)?.end(id, Instant::now());
+                return Err(error);
+            }
+        }
+        Ok(id)
     } else {
         let id = lease_id.ok_or("录制编号缺失")?;
-        locked(&state.shortcut_gate)?.end(id, Instant::now());
+        let ended = locked(&state.shortcut_gate)?.end(id, Instant::now());
+        #[cfg(target_os = "windows")]
+        if ended {
+            windows_mouse_shortcuts::end_recording(id);
+        }
+        #[cfg(not(target_os = "windows"))]
+        let _ = ended;
         Ok(id)
     }
 }
@@ -844,6 +1031,7 @@ fn save_settings(
     app: tauri::AppHandle,
     state: State<AppState>,
     mut settings: Settings,
+    retry_shortcut_actions: Option<Vec<String>>,
 ) -> Result<(), String> {
     validate_settings(&settings)?;
     settings.shortcuts = shortcut_bindings::normalized(&settings.shortcuts)?;
@@ -857,20 +1045,41 @@ fn save_settings(
     let mut current = locked(&state.settings)?;
     let previous = current.clone();
     let mut registered = locked(&state.registered_shortcuts)?;
-    let old_ids = registered.iter().map(Shortcut::id).collect::<Vec<_>>();
-    let new_ids = next
+    let old_ids = registered.iter().map(Binding::id).collect::<Vec<_>>();
+    let previous_bindings = parsed_shortcuts(&previous.shortcuts)?;
+    let previous_ids = previous_bindings
         .iter()
-        .map(|(_, binding)| binding.id())
+        .map(|(action, binding)| (action.clone(), binding.id()))
         .collect::<Vec<_>>();
+    let next_ids = next
+        .iter()
+        .map(|(action, binding)| (action.clone(), binding.id()))
+        .collect::<Vec<_>>();
+    let retry_actions = retry_shortcut_actions.unwrap_or_default();
+    if retry_actions.iter().any(|action| {
+        !matches!(
+            action.as_str(),
+            "selection" | "silentOcr" | "capture" | "ocr" | "input"
+        )
+    }) {
+        return Err("未知快捷键操作".into());
+    }
+    let new_ids =
+        shortcut_control::registration_targets(&old_ids, &previous_ids, &next_ids, &retry_actions);
     let bindings_changed = previous.shortcuts.pairs() != settings.shortcuts.pairs();
     // A theme/provider/history save leaves the registrations and recording
     // lease alone. Binding changes suppress in-flight press/release pairs.
-    let _update = bindings_changed.then(|| {
+    let _update = (bindings_changed || !retry_actions.is_empty()).then(|| {
         state.shortcut_updating.store(true, Ordering::SeqCst);
         ShortcutUpdateGuard(&state.shortcut_updating)
     });
-    if bindings_changed {
+    if bindings_changed || !retry_actions.is_empty() {
         locked(&state.shortcut_gate)?.cancel(Instant::now());
+        #[cfg(target_os = "windows")]
+        {
+            let _ = windows_mouse_shortcuts::recording(0);
+            windows_mouse_shortcuts::invalidate();
+        }
     }
     let mut registry = shortcut_registry(&app, &mut registered, &next);
     let mut result = shortcut_control::replace_bindings(&mut registry, &old_ids, &new_ids, || {
@@ -890,7 +1099,7 @@ fn save_settings(
         let ids = registry
             .registered
             .iter()
-            .map(Shortcut::id)
+            .map(Binding::id)
             .collect::<Vec<_>>();
         for (_, binding) in actual {
             registry.known.insert(binding.id(), binding);
@@ -905,6 +1114,18 @@ fn save_settings(
         }
     }
     result = sync_shortcut_routes(&state, &current.shortcuts, registry.registered, result);
+    if let Ok(mut failures) = state.shortcut_failures.lock() {
+        let current_bindings = parsed_shortcuts(&current.shortcuts)?;
+        failures.retain(|action, _| {
+            current_bindings.iter().any(|(name, binding)| {
+                name == action
+                    && !registry
+                        .registered
+                        .iter()
+                        .any(|actual| actual.id() == binding.id())
+            })
+        });
+    }
     for account in changed_credential_accounts(&previous, &current) {
         if let Err(error) = state.credentials.invalidate_account(&account) {
             result = Err(match result {
@@ -1479,6 +1700,8 @@ fn show_management(
     Ok(presentation)
 }
 fn wake_outside_watcher(app: &tauri::AppHandle) {
+    #[cfg(target_os = "windows")]
+    sync_native_shortcut_context(app);
     #[cfg(target_os = "windows")]
     {
         let state = app.state::<AppState>();
@@ -2633,6 +2856,7 @@ fn main() {
                 shortcut_routes: shortcut_control::ShortcutRoutes::default(),
                 shortcut_updating: AtomicBool::new(false),
                 registered_shortcuts: Mutex::new(Vec::new()),
+                shortcut_failures: Mutex::new(std::collections::BTreeMap::new()),
                 translation_busy: tokio::sync::Semaphore::new(2),
                 translation_requests: translation_requests::TranslationRequests::default(),
                 data_dir,
@@ -2661,6 +2885,14 @@ fn main() {
                         .unwrap()
                         .push(error);
                 }
+            }
+            #[cfg(target_os = "windows")]
+            if let Err(error) = start_native_shortcuts(app.handle().clone()) {
+                app.state::<AppState>()
+                    .startup_warnings
+                    .lock()
+                    .unwrap()
+                    .push(error);
             }
             if let Err(e) = install_shortcuts(app.handle(), &settings.shortcuts) {
                 app.state::<AppState>()
@@ -2750,7 +2982,10 @@ fn main() {
     app.run(|app, event| {
         if matches!(&event, tauri::RunEvent::Exit) {
             #[cfg(target_os = "windows")]
-            windows_visibility::stop();
+            {
+                windows_mouse_shortcuts::stop();
+                windows_visibility::stop();
+            }
             let _ = app.state::<window_layout::LayoutState>().flush();
         }
         #[cfg(target_os = "macos")]
@@ -3492,6 +3727,7 @@ mod tests {
             shortcut_routes: shortcut_control::ShortcutRoutes::default(),
             shortcut_updating: AtomicBool::new(false),
             registered_shortcuts: Mutex::new(Vec::new()),
+            shortcut_failures: Mutex::new(std::collections::BTreeMap::new()),
             translation_busy: tokio::sync::Semaphore::new(2),
             translation_requests: translation_requests::TranslationRequests::default(),
             data_dir: directory.clone(),
