@@ -15,7 +15,8 @@ public static class WindowsPriorityInputFixture {
     const int Status=0,Error=1,Command=2,Request=3,Ack=4,PeerPid=5,Window=6,Editor=7,
         HotD=8,HotS=9,AltDown=10,AltUp=11,SuffixDown=12,SuffixUp=13,MaskDown=14,MaskUp=15,
         KeyMenu=16,MenuLoop=17,AppCommand=18,X1Down=19,X1Up=20,X2Down=21,X2Up=22,
-        CloseRequest=23,Foreground=24,FocusFlag=25,SelectionStart=26,SelectionLength=27,Revision=39;
+        CloseRequest=23,Foreground=24,FocusFlag=25,SelectionStart=26,SelectionLength=27,
+        X1DoubleDown=28,X2DoubleDown=29,Revision=39;
     const int QuietObservationMilliseconds=150;
     [DllImport("kernel32.dll",CharSet=CharSet.Unicode,SetLastError=true)] static extern IntPtr LoadLibraryW(string path);
     [DllImport("kernel32.dll",CharSet=CharSet.Ansi,SetLastError=true)] static extern IntPtr GetProcAddress(IntPtr module,string name);
@@ -107,16 +108,20 @@ public static class WindowsPriorityInputFixture {
         if(expectedId!=0)Need(after[KeyMenu]==before[KeyMenu]&&after[MenuLoop]==before[MenuLoop]&&after[AppCommand]==before[AppCommand]&&after[Foreground]==1&&after[FocusFlag]==1&&after[SelectionStart]==before[SelectionStart]&&after[SelectionLength]==before[SelectionLength],"BOUND_INPUT_CHANGED_SOURCE_OR_MENU:"+name);
         if(side!=0) {int down=side==1?X1Down:X2Down,up=side==1?X1Up:X2Up;Need(expectedId==0?after[down]-before[down]==1&&after[up]-before[up]==1:after[down]==before[down]&&after[up]==before[up],"SOURCE_MOUSE_PASSTHROUGH_WRONG:"+name);}
         if(closeRequests>0)Need(after[CloseRequest]-before[CloseRequest]==closeRequests,"UNRELATED_ALT_F4_WAS_SWALLOWED");
-        return new Dictionary<string,object>{{"name",name},{"ok",true},{"inputEventCount",inputs.Length},{"nativeEvents",events},{"peerAltD",after[HotD]-before[HotD]},{"peerAltS",after[HotS]-before[HotS]},{"sourceSuffixDowns",after[SuffixDown]-before[SuffixDown]},{"sourceSuffixUps",after[SuffixUp]-before[SuffixUp]},{"sourceMouseDowns",side==0?0:after[side==1?X1Down:X2Down]-before[side==1?X1Down:X2Down]},{"sourceMouseUps",side==0?0:after[side==1?X1Up:X2Up]-before[side==1?X1Up:X2Up]},{"scKeyMenu",after[KeyMenu]-before[KeyMenu]},{"menuLoops",after[MenuLoop]-before[MenuLoop]},{"sourceCloseRequests",after[CloseRequest]-before[CloseRequest]},{"sourceStillForeground",after[Foreground]==1},{"sourceFocusIsEditor",after[FocusFlag]==1}};
+        return new Dictionary<string,object>{{"name",name},{"ok",true},{"inputEventCount",inputs.Length},{"nativeEvents",events},{"peerAltD",after[HotD]-before[HotD]},{"peerAltS",after[HotS]-before[HotS]},{"sourceSuffixDowns",after[SuffixDown]-before[SuffixDown]},{"sourceSuffixUps",after[SuffixUp]-before[SuffixUp]},{"sourceMouseDowns",side==0?0:after[side==1?X1Down:X2Down]-before[side==1?X1Down:X2Down]},{"sourceMouseUps",side==0?0:after[side==1?X1Up:X2Up]-before[side==1?X1Up:X2Up]},{"sourceMouseDoubleClickDowns",side==0?0:after[side==1?X1DoubleDown:X2DoubleDown]-before[side==1?X1DoubleDown:X2DoubleDown]},{"scKeyMenu",after[KeyMenu]-before[KeyMenu]},{"menuLoops",after[MenuLoop]-before[MenuLoop]},{"sourceCloseRequests",after[CloseRequest]-before[CloseRequest]},{"sourceStillForeground",after[Foreground]==1},{"sourceFocusIsEditor",after[FocusFlag]==1}};
     }
     static INPUT[] Chord(ushort key) { return new INPUT[]{Key(0x12,false),Key(key,false),Key(key,true),Key(0x12,true)}; }
 
     sealed class PeerEditor:TextBox {
         readonly PeerForm owner;public PeerEditor(PeerForm owner){this.owner=owner;}
-        protected override void WndProc(ref Message message) { if(message.Msg==0x20b||message.Msg==0x20c){int button=(int)((message.WParam.ToInt64()>>16)&0xffff);if(button==1||button==2)owner.counts[button==1?(message.Msg==0x20b?X1Down:X1Up):(message.Msg==0x20b?X2Down:X2Up)]++;}base.WndProc(ref message); }
+        protected override void WndProc(ref Message message) {
+            // Windows replaces the second DOWN with DBLCLK within its native
+            // double-click interval; that is still exactly one button down.
+            if(message.Msg==0x20b||message.Msg==0x20c||message.Msg==0x20d){int button=(int)((message.WParam.ToInt64()>>16)&0xffff);if(button==1||button==2){bool down=message.Msg!=0x20c;owner.counts[button==1?(down?X1Down:X1Up):(down?X2Down:X2Up)]++;if(message.Msg==0x20d)owner.counts[button==1?X1DoubleDown:X2DoubleDown]++;}}base.WndProc(ref message);
+        }
     }
     sealed class PeerForm:Form {
-        public readonly long[] counts=new long[40];readonly PeerEditor editor;readonly MemoryMappedViewAccessor shared;readonly System.Windows.Forms.Timer timer=new System.Windows.Forms.Timer();readonly Hook observe;IntPtr hook;bool d,s,closing;long revision;
+        public readonly long[] counts=new long[40];readonly PeerEditor editor;readonly MemoryMappedViewAccessor shared;readonly System.Windows.Forms.Timer timer=new System.Windows.Forms.Timer();readonly Hook observe;IntPtr hook,registeredWindow;bool d,s,closing,disposed;long revision;
         public PeerForm(MemoryMappedViewAccessor shared) {
             this.shared=shared;observe=Observe;Text="Generated priority input peer";KeyPreview=true;StartPosition=FormStartPosition.Manual;Bounds=new Rectangle(45,50,700,250);
             editor=new PeerEditor(this);editor.Multiline=true;editor.SetBounds(20,55,640,115);editor.Text="Generated selected source 41729";Controls.Add(editor);
@@ -124,7 +129,7 @@ public static class WindowsPriorityInputFixture {
             timer.Interval=10;timer.Tick+=delegate{long next=shared.ReadInt64(Request*8);if(next!=counts[Ack]){int command=(int)shared.ReadInt64(Command*8);if(command==1){Activate();SetForegroundWindow(Handle);editor.Focus();editor.SelectAll();}if(command==2){closing=true;Close();return;}counts[Ack]=next;}Publish();};
         }
         protected override void OnShown(EventArgs args) {
-            base.OnShown(args);d=RegisterHotKey(Handle,101,0x4001,0x44);int error=d?0:Marshal.GetLastWin32Error();s=RegisterHotKey(Handle,102,0x4001,0x53);if(!s&&error==0)error=Marshal.GetLastWin32Error();hook=SetWindowsHookExW(13,observe,GetModuleHandleW(null),0);if(hook==IntPtr.Zero&&error==0)error=Marshal.GetLastWin32Error();counts[Status]=d&&s&&hook!=IntPtr.Zero?1:-1;counts[Error]=error;timer.Start();Publish();
+            base.OnShown(args);registeredWindow=Handle;d=RegisterHotKey(registeredWindow,101,0x4001,0x44);int error=d?0:Marshal.GetLastWin32Error();s=RegisterHotKey(registeredWindow,102,0x4001,0x53);if(!s&&error==0)error=Marshal.GetLastWin32Error();hook=SetWindowsHookExW(13,observe,GetModuleHandleW(null),0);if(hook==IntPtr.Zero&&error==0)error=Marshal.GetLastWin32Error();counts[Status]=d&&s&&hook!=IntPtr.Zero?1:-1;counts[Error]=error;timer.Start();Publish();
         }
         void Publish() {
             counts[PeerPid]=Process.GetCurrentProcess().Id;counts[Window]=Handle.ToInt64();counts[Editor]=editor.Handle.ToInt64();counts[Foreground]=GetForegroundWindow()==Handle?1:0;counts[FocusFlag]=editor.Focused?1:0;counts[SelectionStart]=editor.SelectionStart;counts[SelectionLength]=editor.SelectionLength;
@@ -143,7 +148,11 @@ public static class WindowsPriorityInputFixture {
             return CallNextHookEx(hook,code,word,parameter);
         }
         protected override void OnFormClosing(FormClosingEventArgs args) { if(!closing){counts[CloseRequest]++;args.Cancel=true;}base.OnFormClosing(args); }
-        protected override void Dispose(bool disposing) { if(disposing){timer.Stop();timer.Dispose();if(hook!=IntPtr.Zero){UnhookWindowsHookEx(hook);hook=IntPtr.Zero;}if(d)UnregisterHotKey(Handle,101);if(s)UnregisterHotKey(Handle,102);}base.Dispose(disposing); }
+        protected override void Dispose(bool disposing) {
+            // Close() already disposes a modeless form; the enclosing using
+            // disposes it again. Never recreate/read Handle during cleanup.
+            if(disposing&&!disposed){disposed=true;timer.Stop();timer.Dispose();if(hook!=IntPtr.Zero){UnhookWindowsHookEx(hook);hook=IntPtr.Zero;}if(d){d=false;UnregisterHotKey(registeredWindow,101);}if(s){s=false;UnregisterHotKey(registeredWindow,102);}}base.Dispose(disposing);
+        }
     }
     static int Owner(string name) {
         using(MemoryMappedFile memory=MemoryMappedFile.OpenExisting(name))using(MemoryMappedViewAccessor shared=memory.CreateViewAccessor())using(PeerForm form=new PeerForm(shared))Application.Run(form);return 0;
