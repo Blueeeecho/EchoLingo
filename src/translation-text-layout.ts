@@ -8,7 +8,9 @@ export interface TranslationTextPart {
  * Fenced/indented literal content keeps its original whitespace geometry.
  */
 export function translationTextParts(text: string): TranslationTextPart[] {
-  if (/^(?:[ \t]*(`{3,}|~{3,})| {4}|\t)/m.test(text)) {
+  // Provider output is plain text, not Markdown: two-space code/list indentation
+  // is meaningful too. Whitespace-only separator lines do not count as code.
+  if (/^(?:[ \t]*(`{3,}|~{3,})| {2,}\S|\t+\S)/m.test(text)) {
     return [{ text, paragraphBreak: false, edge: false }];
   }
   const parts: TranslationTextPart[] = [];

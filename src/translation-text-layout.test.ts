@@ -18,7 +18,7 @@ describe('display-only translation paragraph spacing', () => {
     expect(parts.map(part => part.text).join('')).toBe(text);
   });
   it('does not compact fenced or indented literal content', () => {
-    for (const text of ['Before\n\n```js\nconst a = 1;\n\nnext();\n```', '~~~\na\n\nb\n~~~', 'Header\n\n    code\n\n    more', '\tcode\n\nmore']) {
+    for (const text of ['Before\n\n```js\nconst a = 1;\n\nnext();\n```', '~~~\na\n\nb\n~~~', 'Header\n\n    code\n\n    more', 'const values = [1, 2];\n  return values;\n\nNext paragraph', 'List\n  - nested\n\nNext', '\tcode\n\nmore']) {
       expect(translationTextParts(text)).toEqual([{ text, paragraphBreak: false, edge: false }]);
     }
   });

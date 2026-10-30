@@ -3,6 +3,7 @@ mod credential_cache;
 mod language_detection;
 #[cfg(target_os = "macos")]
 mod macos_startup;
+mod mixed_local_translation;
 mod model;
 mod mouse_shortcuts;
 mod native_tasks;
@@ -1503,28 +1504,41 @@ async fn translate(
         let settings = locked(&state.settings)?.clone();
         let providers =
             translation_selection::request_providers(&settings.providers, provider_id.as_deref())?;
+        let mixed_plan = mixed_local_translation::for_local_providers(
+            &text,
+            &source_language,
+            &target_language,
+            providers.iter().map(|provider| provider.kind.as_str()),
+        );
         let (resolved_source, resolved_target, results) = state
             .translation_requests
             .execute(request_id, async {
-                let detected = if source_language == "auto" {
+                let detected = if source_language == "auto" && mixed_plan.is_none() {
                     platform::detect_language(&text).await.ok()
                 } else {
                     None
                 };
-                let (resolved_source, resolved_target) =
+                let (resolved_source, resolved_target) = if let Some(plan) = &mixed_plan {
+                    (plan.source.to_string(), "en".to_string())
+                } else {
                     language_detection::resolve_translation_languages(
                         &text,
                         &source_language,
                         &target_language,
                         detected.as_deref(),
-                    )?;
+                    )?
+                };
                 trace.languages(&resolved_source, &resolved_target);
+                if let Some(plan) = &mixed_plan {
+                    trace.mixed_local_fragments(plan.fragment_count());
+                }
                 let jobs = providers.iter().enumerate().map(|(provider_index, p)| {
                     let app = &app;
                     let state = &state;
                     let text = &text;
                     let resolved_source = &resolved_source;
                     let resolved_target = &resolved_target;
+                    let mixed_plan = mixed_plan.as_ref();
                     async move {
                         let mut provider_trace = translation_health::ProviderTrace::start(
                             request_id,
@@ -1536,7 +1550,47 @@ async fn translate(
                                 .await;
                         let sequence = std::sync::atomic::AtomicU64::new(0);
                         let started = std::time::Instant::now();
-                        let result = if p.kind == "offline" {
+                        let result = if let Some(plan) = mixed_plan {
+                            let answer = plan
+                                .translate(|fragment| {
+                                    let key = key.clone();
+                                    async move {
+                                        let result = if p.kind == "offline" {
+                                            state
+                                                .offline
+                                                .translate_result(
+                                                    p,
+                                                    &fragment,
+                                                    resolved_source,
+                                                    resolved_target,
+                                                )
+                                                .await
+                                        } else {
+                                            translation::translate_one(
+                                                &state.client,
+                                                p,
+                                                key,
+                                                &fragment,
+                                                resolved_source,
+                                                resolved_target,
+                                            )
+                                            .await
+                                        };
+                                        match result.error {
+                                            Some(error) => Err(error),
+                                            None => Ok(result.text),
+                                        }
+                                    }
+                                })
+                                .await;
+                            translation::local_mixed_result(
+                                p,
+                                answer,
+                                resolved_source,
+                                resolved_target,
+                                started.elapsed().as_millis() as u64,
+                            )
+                        } else if p.kind == "offline" {
                             state
                                 .offline
                                 .translate_result(p, text, resolved_source, resolved_target)
