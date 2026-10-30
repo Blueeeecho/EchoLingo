@@ -254,9 +254,16 @@ pub struct ResolvedLanguages {
     pub target_language: String,
 }
 
+fn is_false(value: &bool) -> bool {
+    !*value
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TranslationResult {
+    /// True only when the bilingual input classifier bypassed every provider.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub preserved: bool,
     pub provider_id: String,
     pub provider_name: String,
     pub text: String,
@@ -784,7 +791,17 @@ mod resolved_languages_tests {
         let old = serde_json::json!({"providerId":"fixture","providerName":"Fixture","text":"done","elapsedMs":1});
         let result: TranslationResult = serde_json::from_value(old.clone()).unwrap();
         assert!(result.resolved_languages.is_none());
+        assert!(!result.preserved);
         assert_eq!(serde_json::to_value(result).unwrap(), old);
+        let mut preserved: TranslationResult = serde_json::from_value(old).unwrap();
+        preserved.preserved = true;
+        let encoded = serde_json::to_value(preserved).unwrap();
+        assert_eq!(encoded["preserved"], true);
+        assert!(
+            serde_json::from_value::<TranslationResult>(encoded)
+                .unwrap()
+                .preserved
+        );
     }
     #[test]
     fn setup_metadata_has_only_the_resolved_language_pair() {

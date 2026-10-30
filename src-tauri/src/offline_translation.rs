@@ -224,6 +224,7 @@ impl OfflineTranslation {
         let started = Instant::now();
         let result = self.translate(text, source, target).await;
         TranslationResult {
+            preserved: false,
             provider_id: provider.id.clone(),
             provider_name: provider.name.clone(),
             text: result.as_ref().cloned().unwrap_or_default(),

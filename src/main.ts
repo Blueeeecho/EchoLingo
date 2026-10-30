@@ -89,7 +89,7 @@ let saveQueue: Promise<void> = Promise.resolve();
 let settingsReady = !desktop;
 let currentView = 'translate';
 let currentResults: TranslationResult[] = [];
-interface ResultView { card: HTMLElement; body: HTMLElement; actions: HTMLButtonElement[]; result: TranslationResult; done: boolean; sequence: number; providerKind?: ProviderKind }
+interface ResultView { card: HTMLElement; body: HTMLElement; preservedNotice: HTMLElement; actions: HTMLButtonElement[]; result: TranslationResult; done: boolean; sequence: number; providerKind?: ProviderKind }
 const progressViews = new Map<string, ResultView>();
 let progressEpoch: number | null = null;
 let resultSource = '';
@@ -597,13 +597,18 @@ function speak(text: string, language: string): void {
 }
 function updateResultView(view: ResultView, result: TranslationResult, done: boolean): void {
   view.result = result; view.done = done;
+  view.preservedNotice.hidden = !done || !result.preserved;
+  view.actions[0].setAttribute('aria-label', result.preserved ? '朗读原文' : '朗读译文');
+  view.actions[1].setAttribute('aria-label', result.preserved ? '复制原文' : '复制译文');
+  for (const button of view.actions.slice(0, 2)) button.title = button.getAttribute('aria-label')!;
+  view.actions[0].parentElement?.setAttribute('aria-label', `${result.providerName}${result.preserved ? '原文' : '译文'}操作`);
   view.card.setAttribute('aria-busy', String(!done));
   view.body.className = result.error ? 'result-error' : !done && !result.text ? 'result-loading' : 'result-text';
   const setupPair = needsSystemTranslationSetup(view) ? systemTranslationSetupPair(result.resolvedLanguages) : null;
   const content = result.error ? userFacingError(result.error) + (setupPair
     ? ` 本次语言组合：${languageName(setupPair.sourceLanguage)} → ${languageName(setupPair.targetLanguage)}。若原文语言识别不正确，请手动选择源语言后重试。` : '') : result.text;
   const previous = view.body.textContent ?? '';
-  const compact = done && !result.error;
+  const compact = done && !result.error && !result.preserved;
   const layoutChanged = view.body.dataset.paragraphLayout !== String(compact);
   view.body.dataset.paragraphLayout = String(compact);
   if (compact && (content !== previous || layoutChanged)) {
@@ -662,10 +667,12 @@ function createResultView(result: TranslationResult, done: boolean, providerKind
   const header = node('div', 'result-card-header');
   const name = node('span', 'result-provider');
   name.append(node('span', 'provider-dot'), document.createTextNode(result.providerName));
-  header.append(name);
+  const preservedNotice = node('span', 'result-preserved', '原文（无需翻译，未调用服务）');
+  preservedNotice.hidden = true;
+  header.append(name, preservedNotice);
   const body = node('p');
   const actions = node('div', 'result-actions'); actions.setAttribute('role', 'group'); actions.setAttribute('aria-label', `${result.providerName}译文操作`);
-  const view: ResultView = { card, body, actions: [], result, done, sequence: 0, providerKind };
+  const view: ResultView = { card, body, preservedNotice, actions: [], result, done, sequence: 0, providerKind };
   const read = actionButton('朗读译文', 'audio', () => speak(view.result.text, targetLanguage.value));
   const copy = actionButton('复制译文', 'copy', () => run(() => copyText(view.result.text)));
   const retry = actionButton('重试此服务', 'history', () => {
@@ -707,7 +714,7 @@ function renderResults(results: TranslationResult[]): void {
     if (resultsContainer.children[index] !== card) resultsContainer.insertBefore(card, resultsContainer.children[index] ?? null);
   });
   const success = results.filter((result) => !result.error).length;
-  $('#translation-state').textContent = success === results.length ? '翻译完成' : `${success} / ${results.length} 个服务成功`;
+  $('#translation-state').textContent = results.every((result) => result.preserved && !result.error) ? '原文已保留' : success === results.length ? '翻译完成' : `${success} / ${results.length} 个服务成功`;
   if (results.some((result) => result.error || !result.text.trim())) {
     const weakSignal = results.some((result) => result.error) ? '翻译失败' : '服务返回错误';
     maybeSoftEngineHint(weakSignal);
@@ -723,13 +730,13 @@ function restoreHistoryResults(entry: HistoryEntry): void {
     }
     select.value = value;
   }
-  currentResults = entry.results; resultSource = entry.text.trim();
+  currentResults = entry.results; resultSource = entry.text;
   resultSnapshot = { text: resultSource, sourceLanguage: entry.sourceLanguage, targetLanguage: entry.targetLanguage };
   renderResults(entry.results);
 }
 async function translate(providerId?: string): Promise<void> {
-  const text = source.value.trim();
-  if (!text || translating) return;
+  const text = source.value;
+  if (!text.trim() || translating) return;
   if (!settingsReady) throw new Error('设置正在加载，请稍候。');
   if (text.length > MAX_TEXT_LENGTH) throw new Error('每次最多翻译 20,000 字符。');
   if (!requireDesktop()) return;
@@ -781,7 +788,7 @@ async function translate(providerId?: string): Promise<void> {
     resultSource = text;
     resultSnapshot = snapshot;
     renderResults(currentResults);
-    status(results.some((result) => !result.error) ? '翻译完成' : '服务返回错误');
+    status(results.every((result) => result.preserved && !result.error) ? '原文已保留' : results.some((result) => !result.error) ? '翻译完成' : '服务返回错误');
   } catch (error) {
     if (token !== generation) return;
     if (errorMessage(error).startsWith('CANCELLED:')) { invalidateResults(true); status('翻译已取消'); return; }
@@ -1532,7 +1539,7 @@ $('#swap-language').addEventListener('click', () => {
   if (sourceLanguage.value === 'auto' || targetLanguage.value === 'auto') { toast('自动模式会按原文决定翻译方向；需要交换时，请先选择具体语言。'); return; }
   const previousSource = sourceLanguage.value;
   sourceLanguage.value = targetLanguage.value; targetLanguage.value = previousSource;
-  if (currentResults.find((result) => !result.error)?.text && resultSource === source.value.trim()) setSourceText(currentResults.find((result) => !result.error)!.text);
+  if (currentResults.find((result) => !result.error)?.text && resultSource === source.value) setSourceText(currentResults.find((result) => !result.error)!.text);
   else invalidateResults();
   run(() => updateSettings((next) => { next.sourceLanguage = sourceLanguage.value; next.targetLanguage = targetLanguage.value; }));
 });

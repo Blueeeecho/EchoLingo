@@ -182,29 +182,17 @@ fn system_setup_languages(
     })
 }
 
-/// The mixed-local path sends only Chinese fragments, then publishes one final
-/// provider result. Keep failure language-pair setup metadata identical to the
-/// ordinary route, rather than losing it while assembling fragment answers.
-pub fn local_mixed_result(
-    p: &Provider,
-    answer: Result<String, String>,
-    source: &str,
-    target: &str,
-    elapsed_ms: u64,
-) -> TranslationResult {
-    let resolved_languages = system_setup_languages(
-        &p.kind,
-        answer.as_ref().err().map(String::as_str),
-        source,
-        target,
-    );
+/// A structural input has no translation prose. This is not a provider success
+/// or an error fallback; retain the provider slot while stating what happened.
+pub fn preserved_result(p: &Provider, raw: &str) -> TranslationResult {
     TranslationResult {
+        preserved: true,
         provider_id: p.id.clone(),
         provider_name: p.name.clone(),
-        text: answer.as_ref().cloned().unwrap_or_default(),
-        error: answer.err(),
-        elapsed_ms,
-        resolved_languages,
+        text: raw.to_owned(),
+        error: None,
+        elapsed_ms: 0,
+        resolved_languages: None,
     }
 }
 
@@ -342,6 +330,7 @@ async fn translate_one_inner(
         target,
     );
     TranslationResult {
+        preserved: false,
         provider_id: p.id.clone(),
         provider_name: p.name.clone(),
         text: result.as_ref().cloned().unwrap_or_default(),
@@ -355,31 +344,16 @@ async fn translate_one_inner(
 mod tests {
     use super::*;
     #[test]
-    fn mixed_local_failure_keeps_actual_pair_and_no_partial_text() {
-        let mut p = crate::model::system_translation_provider(true);
-        p.kind = "system".into();
-        p.id = "local".into();
-        p.name = "Local".into();
-        let result = local_mixed_result(
-            &p,
-            Err("SYSTEM_TRANSLATION_DOWNLOAD_REQUIRED: setup".into()),
-            "zh-Hans",
-            "en",
-            99,
-        );
-        assert!(result.text.is_empty());
-        assert_eq!(result.elapsed_ms, 99);
-        let pair = result.resolved_languages.unwrap();
-        assert_eq!(pair.source_language, "zh-Hans");
-        assert_eq!(pair.target_language, "en");
-        let ok = local_mixed_result(&p, Ok("result { key: KeyA }".into()), "zh-Hans", "en", 100);
-        assert!(ok.error.is_none());
-        assert!(ok.resolved_languages.is_none());
-        assert_eq!(ok.text, "result { key: KeyA }");
-        p.kind = "offline".into();
-        let offline = local_mixed_result(&p, Err("local failed".into()), "zh-Hans", "en", 2);
-        assert!(offline.text.is_empty());
-        assert!(offline.resolved_languages.is_none());
+    fn preserved_result_is_exact_and_does_not_claim_model_translation() {
+        let p = crate::model::system_translation_provider(true);
+        let raw = "  EchoLingo_0.2.1_macos_arm64.dmg\r\nEchoLingo_0.2.0_macos_arm64.dmg\n";
+        let result = preserved_result(&p, raw);
+        assert_eq!(result.text.as_bytes(), raw.as_bytes());
+        assert_eq!(result.provider_id, p.id);
+        assert_eq!(result.provider_name, p.name);
+        assert!(result.preserved);
+        assert!(result.error.is_none());
+        assert!(result.resolved_languages.is_none());
     }
 
     #[test]
