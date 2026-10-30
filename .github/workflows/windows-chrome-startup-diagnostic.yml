@@ -28,6 +28,8 @@ jobs:
           $message = if ($eligible) { 'Fixture-only diagnostic of fixed b111 bytes; original run failed 19/21. Not current release acceptance.' } else { 'NOT EXECUTED: production differs from fixed b111 source. No immutable-binary acceptance claimed.' }
           $message >> $env:GITHUB_STEP_SUMMARY
           [ordered]@{ eligible=$eligible; tested=$false; source='b111056f959164c94fde37f5846ab3407ae647d5'; fixture='${{ github.sha }}'; scope=$message } | ConvertTo-Json | Set-Content "$env:RUNNER_TEMP/chrome-diagnostic-eligibility.json"
+          # git diff exit 1 means explicitly ineligible, not a failed diagnostic.
+          exit 0
       - name: Verify fixed failed-run artifact provenance
         if: steps.source.outputs.eligible == 'true'
         shell: pwsh

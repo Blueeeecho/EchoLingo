@@ -52,6 +52,7 @@ public static class WindowsBrowserSelectionBridge {
     [DllImport("kernel32.dll")] static extern UIntPtr GlobalSize(IntPtr memory);
     [DllImport("kernel32.dll")] static extern IntPtr GlobalLock(IntPtr memory);
     [DllImport("kernel32.dll")] static extern bool GlobalUnlock(IntPtr memory);
+    static bool NoClipboardProbe;
     static readonly string ProbeNonce=Guid.NewGuid().ToString("N");
     static readonly string ProbeFormat="EchoLingo.ClipboardProbe."+ProbeNonce;
     static readonly JavaScriptSerializer Json=new JavaScriptSerializer { MaxJsonLength=1048576 };
@@ -188,7 +189,9 @@ public static class WindowsBrowserSelectionBridge {
         finally{result["sequenceWhileLocked"]=GetClipboardSequenceNumber();CloseClipboard();result["sequenceAfterUnlock"]=GetClipboardSequenceNumber();}
     }
     static DataObject Seed(){
-        DataObject data=new DataObject();data.SetData(DataFormats.UnicodeText,false,"Generated browser clipboard original 24680");data.SetData(DataFormats.Html,false,"<p>Generated browser rich original 24680</p>");data.SetData(DataFormats.Rtf,false,"{\\rtf1 Generated browser rich original 24680}");data.SetData(ProbeFormat,false,new MemoryStream(Encoding.ASCII.GetBytes(ProbeNonce)));Clipboard.SetDataObject(data,true,0,0);ownedClipboard=GetClipboardSequenceNumber();seeded=true;
+        DataObject data=new DataObject();data.SetData(DataFormats.UnicodeText,false,"Generated browser clipboard original 24680");data.SetData(DataFormats.Html,false,"<p>Generated browser rich original 24680</p>");data.SetData(DataFormats.Rtf,false,"{\\rtf1 Generated browser rich original 24680}");if(!NoClipboardProbe)data.SetData(ProbeFormat,false,new MemoryStream(Encoding.ASCII.GetBytes(ProbeNonce)));Clipboard.SetDataObject(data,true,0,0);ownedClipboard=GetClipboardSequenceNumber();seeded=true;
+        if(LastMetadata!=null)LastMetadata["clipboardProbeEnabled"]=!NoClipboardProbe;
+        if(NoClipboardProbe)return data; // no raw acquisition before the original OLE verdict
         var seedObservation=ObserveSyntheticFormats(data);
         bool valid=Convert.ToBoolean(seedObservation["unicodeExactEqual"])&&Convert.ToBoolean(seedObservation["rtfExactEqual"])&&Convert.ToBoolean(seedObservation["htmlExactEqual"]);
         if(LastMetadata!=null)LastMetadata["seedPublicationObservation"]=seedObservation;
@@ -221,7 +224,7 @@ public static class WindowsBrowserSelectionBridge {
             // Supplement only: never turn the original OLE failure into a pass.
             // GetClipboardData may trigger delayed rendering: this later raw
             // read is not proof of the representation at the original OLE read.
-            if(!matches)observation["rawFormatsAfterOleFailure"]=ObserveSyntheticFormats(expected);
+            if(!matches&&!NoClipboardProbe)observation["rawFormatsAfterOleFailure"]=ObserveSyntheticFormats(expected);
         }return matches;
     }
     static Dictionary<string,object> QueryDiagnostics(Dictionary<string,object> reply){
@@ -340,7 +343,7 @@ public static class WindowsBrowserSelectionBridge {
                 Claim(roaming);Claim(local);Claim(root);history=Path.Combine(roaming,"history.json");
                 var settings=new Dictionary<string,object>{{"providers",new object[]{new Dictionary<string,object>{{"id",provider},{"name","Generated browser loopback mock"},{"kind","libretranslate"},{"baseUrl",mockUrl},{"requiresApiKey",false},{"enabled",true},{"model",""},{"prompt",""}}}},{"ocrProviders",new object[0]},{"sourceLanguage","auto"},{"targetLanguage","auto"},{"languageDirectionVersion",1},{"shortcutDefaultsVersion",1},{"saveHistory",true},{"maxHistory",100},{"theme","light"},{"autoHideSeconds",0},{"shortcuts",new Dictionary<string,object>{{"selection","Alt+D"},{"silentOcr",""},{"ocr",""},{"capture",""},{"input",""}}}};
                 File.WriteAllText(Path.Combine(roaming,"settings.json"),Json.Serialize(settings),new UTF8Encoding(false));
-                ProcessStartInfo start=new ProcessStartInfo(executable);start.UseShellExecute=false;start.CreateNoWindow=true;string temp=Path.Combine(root,"Temp");Directory.CreateDirectory(temp);start.EnvironmentVariables["ECHOLINGO_CLIPBOARD_DIAGNOSTIC_NONCE"]=ProbeNonce;start.EnvironmentVariables["TEMP"]=temp;start.EnvironmentVariables["TMP"]=temp;start.EnvironmentVariables["LOCALAPPDATA"]=local;start.EnvironmentVariables["WEBVIEW2_USER_DATA_FOLDER"]=Path.Combine(local,"webview-browser-fixture");app=Process.Start(start);Need(app.WaitForInputIdle(15000),"APP_NATIVE_INPUT_IDLE_DEADLINE");
+                ProcessStartInfo start=new ProcessStartInfo(executable);start.UseShellExecute=false;start.CreateNoWindow=true;string temp=Path.Combine(root,"Temp");Directory.CreateDirectory(temp);if(NoClipboardProbe){start.EnvironmentVariables.Remove("ECHOLINGO_CLIPBOARD_DIAGNOSTIC_NONCE");start.EnvironmentVariables.Remove("ECHOLINGO_SELECTION_TRACE");Need(!start.EnvironmentVariables.ContainsKey("ECHOLINGO_CLIPBOARD_DIAGNOSTIC_NONCE")&&!start.EnvironmentVariables.ContainsKey("ECHOLINGO_SELECTION_TRACE"),"CLIPBOARD_OBSERVER_ENV_NOT_REMOVED");}else start.EnvironmentVariables["ECHOLINGO_CLIPBOARD_DIAGNOSTIC_NONCE"]=ProbeNonce;Identity["clipboardProbeEnabled"]=!NoClipboardProbe;Identity["selectionTraceEnvironmentRemoved"]=NoClipboardProbe;start.EnvironmentVariables["TEMP"]=temp;start.EnvironmentVariables["TMP"]=temp;start.EnvironmentVariables["LOCALAPPDATA"]=local;start.EnvironmentVariables["WEBVIEW2_USER_DATA_FOLDER"]=Path.Combine(local,"webview-browser-fixture");app=Process.Start(start);Need(app.WaitForInputIdle(15000),"APP_NATIVE_INPUT_IDLE_DEADLINE");
                 WaitNative(delegate{Need(!app.HasExited,"APP_EXITED_BEFORE_NATIVE_MAIN");main=OwnMain();return main!=IntPtr.Zero;},20000,"APP_NATIVE_MAIN_DEADLINE");WaitNative(NativeReady,15000,"APP_HOTKEY_HOST_AND_TRAY_DEADLINE");Need(!IsWindowVisible(main),"APP_DID_NOT_START_SILENTLY");Identity["applicationProcessId"]=app.Id;Identity["mainHwnd"]=WindowId(main);
                 uiThread=new Thread(delegate(){while(true){wake.WaitOne();Action next;lock(uiGate){next=pending;pending=null;}if(next!=null)next();if(uiStop)return;}});uiThread.IsBackground=true;uiThread.SetApartmentState(ApartmentState.MTA);uiThread.Start();
             }catch{Close();throw;}
@@ -484,7 +487,8 @@ public static class WindowsBrowserSelectionBridge {
             if(HostedApplication.Diagnostics)try{metadata["ownAppFailureDiagnostics"]=HostedApplication.FailureDiagnostics();}catch(Exception e){metadata["ownAppFailureDiagnosticErrorType"]=e.GetType().Name;metadata["ownAppFailureDiagnosticErrorHResult"]=e.HResult;}
         }return metadata;
     }
-    public static void Run(string helper,string assembly,string browser,string application,string mockUrl,string provider,string hash,long bytes,bool diagnostics,string shortcutGesture){
+    public static void Run(string helper,string assembly,string browser,string application,string mockUrl,string provider,string hash,long bytes,bool diagnostics,string shortcutGesture,bool noClipboardProbe){
+        NoClipboardProbe=noClipboardProbe;Need(!noClipboardProbe||(!String.IsNullOrEmpty(application)&&!diagnostics),"NO_PROBE_REQUIRES_ORDINARY_ACTUAL_APPLICATION");
         RawPayloadSelfTest();
         Need(shortcutGesture=="instant"||shortcutGesture=="paced","SHORTCUT_GESTURE_INVALID");Need(shortcutGesture=="instant"||!String.IsNullOrEmpty(application),"PACED_GESTURE_REQUIRES_APPLICATION");ShortcutGesture=shortcutGesture;
         Helper=String.IsNullOrEmpty(helper)?null:Path.GetFullPath(helper);Assembly=String.IsNullOrEmpty(assembly)?null:Path.GetFullPath(assembly);Browser=Path.GetFullPath(browser);Need(Helper==null||!Helper.Contains("\"")&&!Assembly.Contains("\""),"INVALID_FIXTURE_PATH");
