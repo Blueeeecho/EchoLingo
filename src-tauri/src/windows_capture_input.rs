@@ -202,6 +202,16 @@ pub fn wait_available(cancelled: impl Fn() -> bool) -> Result<(), String> {
         },
     )
 }
+/// Bounded state only: never expose the random session token or target HWND.
+pub fn diagnostic_state() -> [u64; 4] {
+    let s = shared();
+    [
+        u64::from(s.token.load(Ordering::SeqCst) != 0),
+        u64::from(s.flags.load(Ordering::SeqCst) & BUTTONS),
+        u64::from(s.closing.load(Ordering::SeqCst)),
+        u64::from(s.end_requested.load(Ordering::SeqCst)),
+    ]
+}
 pub fn replacement_is_valid(old_unhooked: bool, error: Option<i32>) -> bool {
     old_unhooked || error == Some(1404)
 }

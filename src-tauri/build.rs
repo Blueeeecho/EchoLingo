@@ -1,9 +1,12 @@
+mod windows_launcher;
+
 fn main() {
     tauri_build::build();
     println!("cargo:rerun-if-changed=native/macos.swift");
     println!("cargo:rerun-if-changed=native/macos_capture.swift");
     println!("cargo:rerun-if-changed=native/macos_window.swift");
     println!("cargo:rerun-if-changed=native/windows.ps1");
+    println!("cargo:rerun-if-changed=windows_launcher.rs");
     println!("cargo:rerun-if-changed=../scripts/build-windows-native-helper.ps1");
     println!("cargo:rerun-if-env-changed=MACOSX_DEPLOYMENT_TARGET");
 
@@ -96,6 +99,13 @@ fn build_windows_native_helper() {
         .join("System32/WindowsPowerShell/v1.0/powershell.exe");
     let output = std::path::PathBuf::from(std::env::var_os("OUT_DIR").unwrap())
         .join("echolingo-windows-native.dll");
+    let launcher = windows_launcher::generate(include_str!("native/windows.ps1"))
+        .expect("Packaged Windows launcher generation failed");
+    std::fs::write(
+        output.with_file_name("echolingo-windows-launcher.ps1"),
+        launcher,
+    )
+    .expect("Could not write packaged Windows launcher");
     let build = std::process::Command::new(powershell)
         .args([
             "-NoLogo",

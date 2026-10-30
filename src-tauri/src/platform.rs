@@ -841,6 +841,45 @@ fn bounded_capture_health(value: &Value) -> Value {
     Value::Object(safe)
 }
 
+/// Snapshot only: never starts a helper, takes pixels or changes input ownership.
+#[cfg(target_os = "windows")]
+pub fn capture_diagnostics() -> Result<Value, String> {
+    let mut snapshot = windows_capture_health()
+        .lock()
+        .map(|health| health.clone())
+        .map_err(|_| "CAPTURE_DIAGNOSTICS: Capture metadata is unavailable.".to_string())?;
+    if !snapshot.is_object() {
+        snapshot = json!({});
+    }
+    for (field, value) in [
+        "currentHostSessionReserved",
+        "currentHostOwnedButtons",
+        "currentHostSessionClosing",
+        "currentHostEndRequested",
+    ]
+    .into_iter()
+    .zip(crate::windows_capture_input::diagnostic_state())
+    {
+        snapshot[field] = json!(value);
+    }
+    Ok(snapshot)
+}
+
+#[cfg(target_os = "windows")]
+fn record_capture_host_state(health: &mut Value) {
+    for (field, value) in [
+        "hostSessionReserved",
+        "hostOwnedButtons",
+        "hostSessionClosing",
+        "hostEndRequested",
+    ]
+    .into_iter()
+    .zip(crate::windows_capture_input::diagnostic_state())
+    {
+        health[field] = json!(value);
+    }
+}
+
 /// Read the bounded metadata of the last selected-text attempt in this process.
 /// This does not capture text, query other applications or request permissions.
 #[cfg(target_os = "macos")]
@@ -1152,7 +1191,13 @@ fn run_windows_selection(
     };
     stage(2);
     if capture || mode == "selected-text" {
-        crate::windows_capture_input::wait_available(|| cancelled(cancel.as_ref()))?;
+        let available = crate::windows_capture_input::wait_available(|| cancelled(cancel.as_ref()));
+        if capture {
+            if let Ok(mut health) = windows_capture_health().lock() {
+                record_capture_host_state(&mut health);
+            }
+        }
+        available?;
     }
     stage(3);
     let input_available_ms = started.elapsed().as_millis() as u64;
@@ -1347,6 +1392,7 @@ fn run_windows_selection(
             safe["cancellationRequested"] = json!(u64::from(cancellation_requested));
             safe["cancellationSignalled"] = json!(u64::from(cancellation_signalled));
             safe["cancellationSignalFailed"] = json!(u64::from(cancellation_signal_failed));
+            record_capture_host_state(&mut safe);
             if let Ok(mut health) = windows_capture_health().lock() {
                 *health = safe;
             }
@@ -1519,7 +1565,10 @@ fn native_command(mode: &str) -> Result<std::process::Command, String> {
             ensure_private_directory(&folder)?;
             // Windows PowerShell 5.1 needs a BOM to decode non-ASCII source reliably.
             let mut bytes = vec![0xef, 0xbb, 0xbf];
-            bytes.extend_from_slice(include_bytes!("../native/windows.ps1"));
+            bytes.extend_from_slice(include_bytes!(concat!(
+                env!("OUT_DIR"),
+                "/echolingo-windows-launcher.ps1"
+            )));
             let script = materialize(&folder, "echolingo-native-helper.ps1", &bytes)?;
             let dll = include_bytes!(concat!(env!("OUT_DIR"), "/echolingo-windows-native.dll"));
             let digest = format!("{:x}", Sha256::digest(dll));

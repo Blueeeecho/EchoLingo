@@ -459,6 +459,89 @@ public static class EchoLingoApplicationSmoke {
         foreach(string key in new string[]{"copyStrategy","copyPhase","copyNativeContextValid","copyNativeContextChecks","copyNativeGuardReason","copyNativeEditable","copyNativeProtection","copyNativeSelectionKnown","copyNativeSelectionNonempty","copyProtectionProbe","copyProtectionProbeMilliseconds","copyProtectionUnknown","copySnapshotOutcome","copyDispatchInserted","copyOwnInputObserved","copyOwnerOutcome","copyClipboardRestored","copyTerminalReason","copyNativeInvalidReason","copyNativeGtiSucceeded","copyNativeGtiFlags","copyNativeFocusPresent","copyNativeFocusProcessMatchesForeground","copyNativeFocusRootMatchesForeground","copyNativeActivePresent","copyNativeActiveRootMatchesForeground"})fields.Add(key);
         return fields;
     }
+    [DllImport("user32.dll",EntryPoint="SendMessageTimeoutW",SetLastError=true)]
+    static extern IntPtr SendOwnedDisplayChange(IntPtr window,uint message,IntPtr wparam,IntPtr lparam,uint flags,uint timeout,out IntPtr result);
+    static uint InvalidateOwnedCaptureDisplay(int appId) {
+        List<AppEdge> planes=AppInputPlanes(appId,true);
+        Assert(planes.Count>0,"Display cancellation requires the actual application's visible input plane.");
+        AppEdge plane=planes[0];uint owner;GetWindowThreadProcessId(plane.Handle,out owner);
+        Assert(owner==plane.ProcessId&&ParentPid((int)owner)==appId&&IsInputPlane(plane.Handle,owner)&&IsWindowVisible(plane.Handle),"Capture display target ownership changed.");
+        foreach(AppEdge item in planes)Assert(item.ProcessId==owner,"Display fixture found multiple active helper generations.");
+        IntPtr result;
+        Assert(SendOwnedDisplayChange(plane.Handle,0x007e,IntPtr.Zero,IntPtr.Zero,2,1500,out result)!=IntPtr.Zero,"Owned display-change notification failed or timed out.");
+        return owner;
+    }
+    static int RemainingOwnedCaptureWindows(uint helper) {
+        int count=0;
+        EnumWindows(delegate(IntPtr window,IntPtr unused){uint pid;GetWindowThreadProcessId(window,out pid);if(pid!=helper)return true;
+            long style=GetWindowLongPtr(window,-20).ToInt64();
+            if(IsInputPlane(window,pid)||IsCaptureLoupe(window)||(style&(0x08000000L|0x00080000L|0x20L))==(0x08000000L|0x00080000L|0x20L))count++;
+            return true;},IntPtr.Zero);
+        return count;
+    }
+    static readonly HashSet<string> CaptureFields=new HashSet<string>(new string[]{
+        "attemptId","attemptStage","resultOk","displayChangedError","helperResponseReceived","helperElapsedMilliseconds",
+        "nativeHostReady","nativeHostStopped","nativeHostFailed","hookRunningAfterStop","inputPlaneRemainingAfterCleanup",
+        "hostSessionReserved","hostOwnedButtons","hostSessionClosing","hostEndRequested","cancellationRequested","displayInvalidationReason","currentHostSessionReserved","currentHostOwnedButtons","currentHostSessionClosing","currentHostEndRequested"});
+    static string ReadBoundedCaptureFile(string path) {
+        using(FileStream stream=new FileStream(path,FileMode.Open,FileAccess.Read,FileShare.ReadWrite|FileShare.Delete)) {
+            Assert(stream.Length>0&&stream.Length<=16384,"Opened capture snapshot exceeds 16 KiB.");
+            using(StreamReader reader=new StreamReader(stream,Encoding.UTF8,true)) {
+                char[] data=new char[16385];int used=0,count;
+                while(used<data.Length&&(count=reader.Read(data,used,data.Length-used))>0)used+=count;
+                Assert(used<=16384&&reader.Peek()==-1,"Capture snapshot grew beyond its bounded read.");
+                return new string(data,0,used);
+            }
+        }
+    }
+    static Dictionary<string,object> CaptureSnapshot(Process app,ProcessStartInfo primaryStart,string executable,string roaming,string token) {
+        Assert(app!=null&&!app.HasExited,"Capture snapshot requires the same live application.");
+        Assert((File.GetAttributes(roaming)&FileAttributes.ReparsePoint)==0&&File.ReadAllText(Path.Combine(roaming,MarkerName))==token,"Capture snapshot directory is not fixture-owned.");
+        string file=Path.Combine(roaming,"capture-diagnostics.json");
+        ProcessStartInfo start=new ProcessStartInfo(executable,"--capture-diagnostics");start.UseShellExecute=false;start.CreateNoWindow=true;
+        foreach(string key in new string[]{"APPDATA","LOCALAPPDATA","TEMP","TMP","WEBVIEW2_USER_DATA_FOLDER"})start.EnvironmentVariables[key]=primaryStart.EnvironmentVariables[key];
+        long earliest=(long)(DateTime.UtcNow-new DateTime(1970,1,1,0,0,0,DateTimeKind.Utc)).TotalMilliseconds;
+        Process secondary=null;Stopwatch clock=Stopwatch.StartNew();
+        try {
+            secondary=Process.Start(start);Assert(secondary.WaitForExit(5000)&&secondary.ExitCode==0,"Read-only capture diagnostic request did not exit successfully.");
+            while(clock.ElapsedMilliseconds<5000) {
+                if(File.Exists(file)) {
+                    Assert((File.GetAttributes(file)&FileAttributes.ReparsePoint)==0&&new FileInfo(file).Length>0&&new FileInfo(file).Length<=16384,"Capture diagnostic file violates its bound or ownership contract.");
+                    Dictionary<string,object> payload=new JavaScriptSerializer().Deserialize<Dictionary<string,object>>(ReadBoundedCaptureFile(file));
+                    Assert((string)payload["diagnostic"]=="last-capture-attempt"&&BoundedDiagnosticNumber(payload["processId"],Int32.MaxValue)==app.Id&&String.Equals((string)payload["executablePath"],Path.GetFullPath(executable),StringComparison.OrdinalIgnoreCase),"Capture diagnostic belongs to a different process/executable.");
+                    long recorded=BoundedDiagnosticNumber(payload["recordedAtUnixMs"],Int64.MaxValue),now=(long)(DateTime.UtcNow-new DateTime(1970,1,1,0,0,0,DateTimeKind.Utc)).TotalMilliseconds;
+                    if(recorded>=earliest&&recorded<=now) {
+                        Dictionary<string,object> health=payload["diagnostics"] as Dictionary<string,object>;
+                        Assert(health!=null&&health.Count<=CaptureFields.Count,"Capture numeric metadata is missing or too large.");
+                        foreach(KeyValuePair<string,object> pair in health){Assert(CaptureFields.Contains(pair.Key),"Unexpected capture diagnostic field.");BoundedDiagnosticNumber(pair.Value,Int64.MaxValue);}
+                        Assert(!app.HasExited,"Primary exited during read-only snapshot.");return health;
+                    }
+                }
+                Thread.Sleep(10);
+            }
+            throw new InvalidOperationException("Fresh same-process capture diagnostic was not received.");
+        } finally {if(secondary!=null){try{if(!secondary.HasExited)secondary.Kill();}finally{secondary.Dispose();}}}
+    }
+    static long CaptureNumber(Dictionary<string,object> health,string name) {
+        Assert(health.ContainsKey(name),"Missing capture health field: "+name);return BoundedDiagnosticNumber(health[name],Int64.MaxValue);
+    }
+    static Dictionary<string,object> CompletedCaptureSnapshot(Process app,ProcessStartInfo start,string executable,string roaming,string token,long afterAttempt) {
+        Dictionary<string,object> health=null;
+        WaitFor(delegate {
+            health=CaptureSnapshot(app,start,executable,roaming,token);
+            if(!health.ContainsKey("attemptId")||!health.ContainsKey("attemptStage")||CaptureNumber(health,"attemptId")<=afterAttempt||CaptureNumber(health,"attemptStage")!=4)return false;
+            foreach(string field in new string[]{"currentHostSessionReserved","currentHostOwnedButtons","currentHostSessionClosing","currentHostEndRequested"})
+                if(!health.ContainsKey(field)||CaptureNumber(health,field)!=0)return false;
+            return true;
+        },10,"Capture completion and live host release were not observed; no capture was retried.",app);
+        return health;
+    }
+    static void RequireCaptureReleased(Dictionary<string,object> health) {
+        Assert(CaptureNumber(health,"attemptStage")==4&&CaptureNumber(health,"helperResponseReceived")==1,"Capture did not complete its helper reply stage.");
+        foreach(string field in new string[]{"hookRunningAfterStop","inputPlaneRemainingAfterCleanup","currentHostSessionReserved","currentHostOwnedButtons","currentHostSessionClosing","currentHostEndRequested"})
+            Assert(CaptureNumber(health,field)==0,"Capture resource is still owned: "+field);
+        Assert(CaptureNumber(health,"nativeHostStopped")==1,"Capture native host did not acknowledge STOP.");
+    }
     static long BoundedDiagnosticNumber(object value,long maximum) {
         Assert(value is int||value is long,"Failure diagnostic must contain integer metadata.");
         long number=Convert.ToInt64(value);Assert(number>=0&&number<=maximum,"Failure diagnostic metadata exceeds its bound.");return number;
@@ -819,6 +902,26 @@ public static class EchoLingoApplicationSmoke {
                                 // cannot satisfy the readiness condition.
                                 move(first);
                                 Dictionary<string, object> ocrReady = new Dictionary<string, object>(); report["ocrOverlayReadiness"] = ocrReady;
+                                Dictionary<string,object> displayCancellation=null;
+                                uint cancelledDisplayHelper=0;
+                                if(!offline&&!customBindings&&!latest) {
+                                    stage="display-change-cancellation";
+                                    int sameApplication=app.Id,requestsBefore=server.Count;
+                                    Dictionary<string,object> baseline=CaptureSnapshot(app,start,executable,roaming,token);
+                                    long previousAttempt=baseline.ContainsKey("attemptId")?CaptureNumber(baseline,"attemptId"):0;
+                                    Dictionary<string,object> cancelledReady=new Dictionary<string,object>();
+                                    Shortcut(form,silentOcrKey,false);
+                                    WaitFor(delegate{return AppOcrReady(form,app.Id,ocrSource,ocrSourceFrame,first,pointerDisplay,cancelledReady);},25,"Actual Alt+S did not arm the display-cancellation generation.",app);
+                                    cancelledDisplayHelper=InvalidateOwnedCaptureDisplay(app.Id);
+                                    WaitFor(delegate{return RemainingOwnedCaptureWindows(cancelledDisplayHelper)==0&&AppInputPlanes(app.Id,false).Count==0&&AppOverlays(app.Id)==0;},8,"Display cancellation left owned picker windows behind.",app);
+                                    displayCancellation=CompletedCaptureSnapshot(app,start,executable,roaming,token,previousAttempt);
+                                    Assert(app.Id==sameApplication&&CaptureNumber(displayCancellation,"attemptId")>previousAttempt,"Display cancellation was not a new attempt in the same app.");
+                                    Assert(CaptureNumber(displayCancellation,"displayChangedError")==1&&CaptureNumber(displayCancellation,"resultOk")==0,"Owned display notification did not produce the exact failed capture outcome.");
+                                    RequireCaptureReleased(displayCancellation);
+                                    Assert(server.Count==requestsBefore&&!HasHistory(history,OcrText,"ocr",providerId),"Cancelled display generation translated or published OCR content.");
+                                    report["displayChangeCancellation"]=new Dictionary<string,object>{{"sameApplicationProcessId",sameApplication},{"cancelledHelperProcessId",cancelledDisplayHelper},{"actualDisplayConfigurationChanged",false},{"ownedOverlayMessage",0x007e},{"actualShortcutPresses",1},{"remainingOwnedCaptureWindows",0},{"metadata",displayCancellation}};
+                                    RequireForeground(form);move(first);
+                                }
                                 stage="first-region-ocr";
                                 Shortcut(form, silentOcrKey, customBindings);
                                 if (customBindings) report["customShortcutExecutedWorkflowCount"] = 3;
@@ -829,6 +932,15 @@ public static class EchoLingoApplicationSmoke {
                                 move(first); Thread.Sleep(100); INPUT down = new INPUT(); down.data.mouse.flags = 2; Send(new INPUT[] { down }); Thread.Sleep(100); move(last); Thread.Sleep(100);
                                 RequireForeground(form); INPUT up = new INPUT(); up.data.mouse.flags = 4; Send(new INPUT[] { up });
                                 WaitFor(delegate { if (server != null && server.Error != null) throw new InvalidOperationException(server.Error); return HasHistory(history, OcrText, "ocr", providerId) && (!customBindings || AppSourceMatches(app.Id, OcrText, true)); }, 50, "Actual " + silentOcrShortcut + " left-drag OCR did not fill/translate exact generated text.", app);
+                                if(displayCancellation!=null) {
+                                    Dictionary<string,object> recovered=CompletedCaptureSnapshot(app,start,executable,roaming,token,CaptureNumber(displayCancellation,"attemptId"));
+                                    Assert(CaptureNumber(recovered,"attemptId")>CaptureNumber(displayCancellation,"attemptId")&&CaptureNumber(recovered,"resultOk")==1&&CaptureNumber(recovered,"displayChangedError")==0,"The next actual Alt+S did not complete a newer successful capture attempt.");
+                                    Assert(Convert.ToUInt32(ocrReady["helperProcessId"])!=cancelledDisplayHelper,"Recovery reused the cancelled helper process.");
+                                    RequireCaptureReleased(recovered);
+                                    Assert(RemainingOwnedCaptureWindows(cancelledDisplayHelper)==0&&AppInputPlanes(app.Id,false).Count==0,"Recovery left cancelled or current input planes behind.");
+                                    report["displayChangeRecovery"]=new Dictionary<string,object>{{"sameApplicationProcessId",app.Id},{"actualShortcutPresses",1},{"actualWinRtOcrAndHistoryMatched",true},{"metadata",recovered}};
+                                    passed.Add("Same actual application: owned WM_DISPLAYCHANGE -> exact cancellation and released host -> next real Alt+S new attempt -> WinRT OCR/history; no system display changes");
+                                }
                                 Assert(server == null || server.Count == 3, "OCR caused duplicate or unexpected translations."); RequireForeground(form);
                                 OnUi(form, delegate { Assert(sourceMouseEvents == 0, "OCR drag reached generated source control."); });
                                 Assert(AppOverlays(app.Id) == 0, "Actual OCR left selection overlays behind.");

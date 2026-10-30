@@ -248,6 +248,64 @@ fn write_selection_diagnostics(app: &tauri::AppHandle) -> Result<(), String> {
     )
 }
 
+// Explicit read-only capture-attempt metadata. Never starts OCR or a helper.
+#[cfg(any(target_os = "windows", test))]
+fn capture_diagnostics_requested(args: &[String]) -> bool {
+    args.iter()
+        .skip(1)
+        .any(|argument| argument == "--capture-diagnostics")
+}
+
+#[cfg(any(target_os = "windows", test))]
+fn capture_diagnostic_payload(diagnostics: serde_json::Value) -> serde_json::Value {
+    let mut safe = serde_json::Map::new();
+    for field in [
+        "attemptId",
+        "attemptStage",
+        "resultOk",
+        "displayChangedError",
+        "helperResponseReceived",
+        "helperElapsedMilliseconds",
+        "nativeHostReady",
+        "nativeHostStopped",
+        "nativeHostFailed",
+        "hookRunningAfterStop",
+        "inputPlaneRemainingAfterCleanup",
+        "hostSessionReserved",
+        "hostOwnedButtons",
+        "hostSessionClosing",
+        "hostEndRequested",
+        "cancellationRequested",
+        "displayInvalidationReason",
+        "currentHostSessionReserved",
+        "currentHostOwnedButtons",
+        "currentHostSessionClosing",
+        "currentHostEndRequested",
+    ] {
+        if let Some(number) = diagnostics.get(field).and_then(serde_json::Value::as_u64) {
+            safe.insert(field.to_owned(), serde_json::json!(number));
+        }
+    }
+    serde_json::json!({
+        "diagnostic": "last-capture-attempt", "recordedAtUnixMs": now(),
+        "appVersion": env!("CARGO_PKG_VERSION"), "processId": std::process::id(),
+        "executablePath": std::env::current_exe().ok().map(|path| path.display().to_string()),
+        "diagnostics": safe,
+    })
+}
+
+#[cfg(target_os = "windows")]
+fn write_capture_diagnostics(app: &tauri::AppHandle) -> Result<(), String> {
+    static WRITE: Mutex<()> = Mutex::new(());
+    let _write = locked(&WRITE)?;
+    write_json(
+        &app.state::<AppState>()
+            .data_dir
+            .join("capture-diagnostics.json"),
+        &capture_diagnostic_payload(platform::capture_diagnostics()?),
+    )
+}
+
 fn permission_diagnostics_requested(args: &[String]) -> bool {
     args.iter()
         .skip(1)
@@ -280,6 +338,11 @@ fn write_permission_diagnostics(app: &tauri::AppHandle) -> Result<(), String> {
 }
 
 fn explicit_launch(app: &tauri::AppHandle, args: &[String]) {
+    #[cfg(target_os = "windows")]
+    if capture_diagnostics_requested(args) {
+        let _ = write_capture_diagnostics(app);
+        return;
+    }
     if configure_shortcuts_requested(args) {
         request_shortcut_settings(app);
         return;
@@ -3512,6 +3575,10 @@ fn main() {
             if selection_diagnostics_requested(&std::env::args().collect::<Vec<_>>()) {
                 let _ = write_selection_diagnostics(app.handle());
             }
+            #[cfg(target_os = "windows")]
+            if capture_diagnostics_requested(&std::env::args().collect::<Vec<_>>()) {
+                let _ = write_capture_diagnostics(app.handle());
+            }
             if configure_shortcuts_requested(&std::env::args().collect::<Vec<_>>()) {
                 request_shortcut_settings(app.handle());
             }
@@ -3610,6 +3677,30 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn capture_export_is_exact_flag_and_numeric_allowlist_only() {
+        assert!(super::capture_diagnostics_requested(&[
+            "app".into(),
+            "--capture-diagnostics".into()
+        ]));
+        assert!(!super::capture_diagnostics_requested(&[
+            "--capture-diagnostics".into()
+        ]));
+        assert!(!super::capture_diagnostics_requested(&[
+            "app".into(),
+            "--capture-diagnostics=other.json".into()
+        ]));
+        let payload = super::capture_diagnostic_payload(serde_json::json!({
+            "attemptId": 7, "resultOk": 0, "hostOwnedButtons": 0,
+            "displayChangedError": "private", "sourceText": "private", "imageBase64": "private",
+        }));
+        assert_eq!(payload["diagnostic"], "last-capture-attempt");
+        assert_eq!(
+            payload["diagnostics"],
+            serde_json::json!({"attemptId": 7, "resultOk": 0, "hostOwnedButtons": 0})
+        );
+        assert!(!payload.to_string().contains("private"));
+    }
     use super::*;
     #[test]
     fn explicit_input_always_advances_visible_epoch_and_invalidates_old_requests() {
