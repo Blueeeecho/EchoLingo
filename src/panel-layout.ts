@@ -10,7 +10,10 @@ export interface TranslationPresentation { epoch: number; presented: boolean }
 export function installPanelLayout(desktop: boolean, getPresentation: () => TranslationPresentation): { dispose: () => void; presentPopup: (presentationEpoch: number, focusInput?: boolean, reuseVisiblePopup?: boolean) => Promise<TranslationPresentation | null>; presentManagement: (presentationEpoch: number) => Promise<TranslationPresentation | null> } {
   if (!desktop) return { dispose: () => {}, presentPopup: async () => null, presentManagement: async () => null };
   let frame = 0, pending = false, disposed = false, last = '';
+  let invalidation = 0;
+  let unlistenUserResize: UnlistenFn | null = null;
   let committedPopupHeight = 0;
+  let fittedPopupEpoch: number | null = null;
   let inFlight: Promise<void> | null = null;
   let nativeSizingRevision: number | null = null, completedSizingRevision = 0;
   let unlistenSizing: UnlistenFn | null = null;
@@ -44,7 +47,8 @@ export function installPanelLayout(desktop: boolean, getPresentation: () => Tran
         pending = false;
         const payload = measure(), key = JSON.stringify(payload);
         if (key === last) continue;
-        try { await invoke('fit_window', payload); last = key; }
+        const measuredRevision = invalidation;
+        try { await invoke('fit_window', payload); if (measuredRevision === invalidation) last = key; }
         catch { /* Keep translation usable if OS window sizing is unavailable. */ }
       }
     })().finally(() => { inFlight = null; });
@@ -74,6 +78,10 @@ export function installPanelLayout(desktop: boolean, getPresentation: () => Tran
       last = ''; schedule();
     }
   }).then((unlisten) => { if (disposed) unlisten(); else unlistenSizing = unlisten; }).catch(() => {});
+  if (/Mac/.test(navigator.platform)) void listen<unknown>('popup-user-resize-ended', ({ payload }) => {
+    if (disposed || payload !== getPresentation().epoch) return;
+    invalidation++; last = ''; schedule();
+  }).then((unlisten) => { if (disposed) unlisten(); else unlistenUserResize = unlisten; }).catch(() => {});
   const observer = new ResizeObserver(schedule);
   if (shell) observer.observe(shell);
   document.querySelectorAll('.view').forEach((view) => observer.observe(view));
@@ -252,6 +260,7 @@ export function installPanelLayout(desktop: boolean, getPresentation: () => Tran
   const dispose = (): void => {
     disposed = true; cancelPopupDrag(); clearGesture(); widthViewObserver.disconnect(); observer.disconnect(); cancelAnimationFrame(frame);
     unlistenSizing?.(); unlistenSizing = null;
+    unlistenUserResize?.(); unlistenUserResize = null;
     document.body.classList.remove('popup-resize-enabled');
     window.removeEventListener('echolingo:layout', schedule);
     window.removeEventListener('resize', schedule);
@@ -290,6 +299,11 @@ export function installPanelLayout(desktop: boolean, getPresentation: () => Tran
     return !disposed;
   };
   const presentPopup = async (presentationEpoch: number, focusInput = false, reuseVisiblePopup = false): Promise<TranslationPresentation | null> => {
+    if (fittedPopupEpoch !== presentationEpoch) {
+      // Native manual height belongs only to its presentation. Equal content
+      // dimensions in a new translation must still restore automatic fitting.
+      fittedPopupEpoch = presentationEpoch; invalidation++; last = ''; committedPopupHeight = 0;
+    }
     if (!await preparePresentation()) return null;
     // The source event has switched the DOM and fitted its content before the
     // native window is shown, so a previous settings page cannot flash first.

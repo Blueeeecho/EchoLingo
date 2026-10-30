@@ -29,8 +29,36 @@ fn current_layout_request(
     request == latest && actual_style == Some(expected_style)
 }
 
+#[derive(Default)]
+struct ManualPopupHeight {
+    active: Option<(u64, f64)>,
+    saved: Option<(u64, f64)>,
+}
+impl ManualPopupHeight {
+    fn begin(&mut self, epoch: u64, height: f64) {
+        self.active = Some((epoch, height));
+    }
+    fn finish(&mut self, epoch: u64, height: f64) {
+        if self
+            .active
+            .take()
+            .is_some_and(|(started, initial)| started == epoch && (initial - height).abs() > 1.0)
+            && height.is_finite()
+            && height > 0.0
+        {
+            self.saved = Some((epoch, height));
+        }
+    }
+    fn height(&self, epoch: u64, automatic: f64) -> f64 {
+        self.saved
+            .filter(|(saved_epoch, _)| *saved_epoch == epoch)
+            .map_or(automatic, |(_, height)| height)
+    }
+}
+
 pub struct LayoutState {
     management: AtomicBool,
+    manual_height: Mutex<ManualPopupHeight>,
     popup: Arc<Mutex<PopupWidth>>,
     data_dir: Option<PathBuf>,
     constraints: Mutex<Option<Constraints>>,
@@ -47,6 +75,7 @@ impl Default for LayoutState {
     fn default() -> Self {
         Self {
             management: AtomicBool::new(false),
+            manual_height: Mutex::new(ManualPopupHeight::default()),
             popup: Arc::new(Mutex::new(PopupWidth::new(None))),
             data_dir: None,
             constraints: Mutex::new(None),
@@ -614,6 +643,20 @@ mod native_resize {
                     if let Ok(mut sizing) = state.native_sizing.lock() {
                         let token = sizing.begin(presentation.epoch);
                         drop(sizing);
+                        if state.is_popup() && presentation.presented {
+                            if let Some(native) = app.get_webview_window("main") {
+                                if let (Ok(size), Ok(scale)) =
+                                    (native.inner_size(), native.scale_factor())
+                                {
+                                    if let Ok(mut manual) = state.manual_height.lock() {
+                                        manual.begin(
+                                            token.epoch,
+                                            size.to_logical::<f64>(scale).height,
+                                        );
+                                    }
+                                }
+                            }
+                        }
                         notify(app, token, true);
                     }
                 }
@@ -702,6 +745,10 @@ mod native_resize {
                             // A move, DPI transition or work-area clamp is not
                             // permission to replace the owner's wider preference.
                             if resized {
+                                if let Ok(mut manual) = state.manual_height.lock() {
+                                    manual
+                                        .finish(token.epoch, size.to_logical::<f64>(scale).height);
+                                }
                                 changed =
                                     popup.observe_user_width(true, width, Some(width), scale, area);
                             }
@@ -709,6 +756,11 @@ mod native_resize {
                         }
                     }
                 }
+            }
+        }
+        if let Ok(mut manual) = state.manual_height.lock() {
+            if manual.active.is_some_and(|(epoch, _)| epoch == token.epoch) {
+                manual.active = None;
             }
         }
         if state
@@ -823,6 +875,61 @@ pub async fn fit(
 }
 
 #[cfg(target_os = "macos")]
+fn install_mac_resize_observer(window: &WebviewWindow) -> Result<(), String> {
+    unsafe extern "C" fn notification(context: *mut std::ffi::c_void, phase: i32, height: f64) {
+        let app = unsafe { &*context.cast::<tauri::AppHandle>() };
+        let state = app.state::<LayoutState>();
+        let Ok(presentation) = app
+            .state::<crate::AppState>()
+            .translation_requests
+            .presentation()
+        else {
+            return;
+        };
+        let Ok(mut manual) = state.manual_height.lock() else {
+            return;
+        };
+        if phase == 0 {
+            if state.is_popup() && presentation.presented {
+                manual.begin(presentation.epoch, height);
+            }
+        } else if state.is_popup() && presentation.presented {
+            manual.finish(presentation.epoch, height);
+        } else {
+            manual.active = None;
+        }
+        drop(manual);
+        if phase == 1 {
+            use tauri::Emitter;
+            // Remeasure after native resizing: fit calls during the gesture
+            // were intentionally skipped, so their frontend cache is stale.
+            let _ = app.emit("popup-user-resize-ended", presentation.epoch);
+        }
+    }
+    unsafe extern "C" fn release(context: *mut std::ffi::c_void) {
+        drop(unsafe { Box::from_raw(context.cast::<tauri::AppHandle>()) });
+    }
+    unsafe extern "C" {
+        fn echolingo_observe_live_resize(
+            window: *mut std::ffi::c_void,
+            callback: unsafe extern "C" fn(*mut std::ffi::c_void, i32, f64),
+            release: unsafe extern "C" fn(*mut std::ffi::c_void),
+            context: *mut std::ffi::c_void,
+        ) -> i32;
+    }
+    let native = window.ns_window().map_err(|_| "窗口不可用")?;
+    let context = Box::into_raw(Box::new(window.app_handle().clone())).cast();
+    // Swift either owns context until observer deinit, or releases it immediately
+    // for an already-installed observer. Failure leaves ownership with Rust.
+    let status = unsafe { echolingo_observe_live_resize(native, notification, release, context) };
+    if status != 0 {
+        unsafe { release(context) };
+        return Err("无法观察窗口调整".into());
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
 fn after_mac_window_changes(operation: impl FnOnce() + Send + 'static) {
     type Operation = Box<dyn FnOnce() + Send>;
     unsafe extern "C" fn complete(context: *mut std::ffi::c_void) {
@@ -914,6 +1021,24 @@ fn fit_inner(
             drag.finish(token.id);
         }
     }
+    let presentation = window
+        .state::<crate::AppState>()
+        .translation_requests
+        .presentation()?;
+    #[cfg(target_os = "macos")]
+    install_mac_resize_observer(window)?;
+    let height = if management {
+        height
+    } else {
+        let manual = state.manual_height.lock().map_err(|_| "窗口布局状态异常")?;
+        if manual
+            .active
+            .is_some_and(|(epoch, _)| epoch == presentation.epoch)
+        {
+            return Ok(());
+        }
+        manual.height(presentation.epoch, height)
+    };
     let previous = state.management.load(Ordering::SeqCst);
     let (scale, area) = window_geometry(window)?;
     let old_size = window
@@ -1031,7 +1156,7 @@ fn fit_inner(
 #[tauri::command]
 pub async fn fit_window(
     window: WebviewWindow,
-    state: State<LayoutState>,
+    state: State<'_, LayoutState>,
     presentation: String,
     content_height: f64,
     content_width: Option<f64>,
@@ -2085,5 +2210,28 @@ mod tests {
         // Reverse direction has the same property, without a new epoch.
         assert!(!current_layout_request(b, 3, true, Some(false)));
         assert!(current_layout_request(3, 3, false, Some(false)));
+    }
+    #[test]
+    fn manual_height_respects_user_size_only_in_same_presentation() {
+        let mut manual = ManualPopupHeight::default();
+        assert_eq!(manual.height(1, 280.0), 280.0);
+        manual.begin(1, 280.0);
+        manual.finish(1, 469.0);
+        assert_eq!(manual.height(1, 300.0), 469.0);
+        manual.begin(1, 469.0);
+        manual.finish(1, 160.0);
+        assert_eq!(manual.height(1, 300.0), 160.0);
+        assert_eq!(manual.height(2, 300.0), 300.0);
+        // Width-only gestures must not disable automatic vertical fitting.
+        manual.begin(2, 300.0);
+        manual.finish(2, 300.0);
+        assert_eq!(manual.height(2, 400.0), 400.0);
+        // A superseded gesture cannot set a newer presentation's height.
+        manual.begin(2, 300.0);
+        manual.finish(3, 160.0);
+        assert_eq!(manual.height(3, 400.0), 400.0);
+        manual.begin(3, 300.0);
+        manual.finish(3, f64::NAN);
+        assert_eq!(manual.height(3, 400.0), 400.0);
     }
 }

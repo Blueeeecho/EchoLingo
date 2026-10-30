@@ -3085,7 +3085,7 @@ fn windows_popup_focus_changed(app: &tauri::AppHandle, focused: bool) {
 #[tauri::command(rename = "fit_window")]
 async fn fit_window_with_visibility(
     window: tauri::WebviewWindow,
-    state: State<window_layout::LayoutState>,
+    state: State<'_, window_layout::LayoutState>,
     presentation: String,
     content_height: f64,
     content_width: Option<f64>,

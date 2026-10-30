@@ -536,6 +536,7 @@ jobs:
           npm run test:ui
           node tests/panel-layout-performance.mjs
           node tests/window-resize-edges.mjs
+          node tests/popup-manual-height.mjs
           node tests/windows-management-scroll-container.mjs
           node tests/service-quota-ui.mjs
 

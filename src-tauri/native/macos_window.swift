@@ -1,6 +1,7 @@
 import AppKit
 import Foundation
 import CoreGraphics
+import ObjectiveC
 
 // Metadata from this process only. Callers use NSApplication's synchronous
 // getter rather than treating a cached NSRunningApplication value as proof of
@@ -271,4 +272,45 @@ public func echoLingoSetContentSizeSync(_ pointer: UnsafeMutableRawPointer?,
 public func echoLingoAfterWindowChanges(_ callback: @escaping @convention(c) (UnsafeMutableRawPointer?) -> Void,
                                        _ context: UnsafeMutableRawPointer?) {
     DispatchQueue.main.async { callback(context) }
+}
+
+private var liveResizeObserverKey: UInt8 = 0
+private final class PopupLiveResizeObserver: NSObject {
+    let callback: @convention(c) (UnsafeMutableRawPointer?, Int32, Double) -> Void
+    let release: @convention(c) (UnsafeMutableRawPointer?) -> Void
+    let context: UnsafeMutableRawPointer?
+    var tokens: [NSObjectProtocol] = []
+    init(window: NSWindow,
+         callback: @escaping @convention(c) (UnsafeMutableRawPointer?, Int32, Double) -> Void,
+         release: @escaping @convention(c) (UnsafeMutableRawPointer?) -> Void,
+         context: UnsafeMutableRawPointer?) {
+        self.callback = callback; self.release = release; self.context = context
+        super.init()
+        for (name, phase) in [(NSWindow.willStartLiveResizeNotification, Int32(0)),
+                              (NSWindow.didEndLiveResizeNotification, Int32(1))] {
+            tokens.append(NotificationCenter.default.addObserver(forName: name, object: window, queue: nil) {
+                [weak self, weak window] _ in
+                guard Thread.isMainThread, let self = self, let window = window else { return }
+                self.callback(self.context, phase, window.contentRect(forFrameRect: window.frame).height)
+            })
+        }
+    }
+    deinit {
+        for token in tokens { NotificationCenter.default.removeObserver(token) }
+        release(context)
+    }
+}
+
+@_cdecl("echolingo_observe_live_resize")
+public func echoLingoObserveLiveResize(_ pointer: UnsafeMutableRawPointer?,
+    _ callback: @escaping @convention(c) (UnsafeMutableRawPointer?, Int32, Double) -> Void,
+    _ release: @escaping @convention(c) (UnsafeMutableRawPointer?) -> Void,
+    _ context: UnsafeMutableRawPointer?) -> Int32 {
+    guard Thread.isMainThread else { return -1 }
+    guard let pointer = pointer,
+          let window = Unmanaged<AnyObject>.fromOpaque(pointer).takeUnretainedValue() as? NSWindow else { return -2 }
+    if objc_getAssociatedObject(window, &liveResizeObserverKey) != nil { release(context); return 0 }
+    let observer = PopupLiveResizeObserver(window: window, callback: callback, release: release, context: context)
+    objc_setAssociatedObject(window, &liveResizeObserverKey, observer, .OBJC_ASSOCIATION_RETAIN_NONATOMIC)
+    return 0
 }

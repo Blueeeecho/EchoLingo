@@ -3,6 +3,8 @@ import Foundation
 
 @main struct WindowSizeChecks {
     static func trace(_ value: String) { FileHandle.standardError.write(Data(("geometry-check: " + value + "\n").utf8)) }
+    static var observedPhases: [Int32] = []
+    static var releasedContexts = 0
     static func main() {
         trace("before NSApplication.shared")
         _ = NSApplication.shared
@@ -35,6 +37,25 @@ import Foundation
         }
         precondition(echoLingoSetContentSizeSync(nil, 680, 240) == -2)
         trace("create transition window")
+        let observedWindow = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 680, height: 280),
+                                      styleMask: [.resizable], backing: .buffered, defer: false)
+        let observedPointer = Unmanaged.passUnretained(observedWindow).toOpaque()
+        precondition(echoLingoObserveLiveResize(observedPointer, { _, phase, _ in
+            WindowSizeChecks.observedPhases.append(phase)
+        }, { _ in WindowSizeChecks.releasedContexts += 1 }, nil) == 0)
+        precondition(echoLingoSetContentSizeSync(observedPointer, 713, 469) == 0)
+        precondition(observedPhases.isEmpty, "Programmatic resizing must not be mistaken for a live user gesture")
+        NotificationCenter.default.post(name: NSWindow.willStartLiveResizeNotification, object: observedWindow)
+        NotificationCenter.default.post(name: NSWindow.didEndLiveResizeNotification, object: observedWindow)
+        precondition(observedPhases == [0, 1])
+        precondition(echoLingoObserveLiveResize(observedPointer, { _, _, _ in
+            preconditionFailure("Duplicate observer must not be installed")
+        }, { _ in WindowSizeChecks.releasedContexts += 1 }, nil) == 0)
+        precondition(releasedContexts == 1)
+        observedPhases = []
+        NotificationCenter.default.post(name: NSWindow.willStartLiveResizeNotification, object: observedWindow)
+        NotificationCenter.default.post(name: NSWindow.didEndLiveResizeNotification, object: observedWindow)
+        precondition(observedPhases == [0, 1])
         let transitionWindow = NSWindow(contentRect: NSRect(x: -500, y: 140, width: 680, height: 480),
                                         styleMask: [.titled, .resizable], backing: .buffered, defer: false)
         let context = Unmanaged.passRetained(transitionWindow).toOpaque()

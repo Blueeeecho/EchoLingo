@@ -197,7 +197,7 @@ try {
         if (command === 'test_ocr_provider') { fixture.ocrTestCalls++; fixture.credentialReadCalls++; const provider = fixture.settings.ocrProviders.find(item => item.id === args.providerId); if (provider && fixture.credentialStates[scope(provider)]) fixture.setCredentialState(provider, 'ready'); return 'QA OCR test succeeded'; }
         if (command === 'hide_window') { fixture.hideCalls++; fixture.nativeHide(); return; }
         if (command === 'wait_for_window_sizing') return 0;
-        if (command === 'fit_window') { fixture.layoutCalls.push(args); if (fixture.holdFit) { fixture.fitWaits++; await new Promise((resolve) => { fixture.releaseFit = resolve; }); } return; }
+        if (command === 'fit_window') { fixture.layoutCalls.push(args); if (fixture.manualHeightQA) { const manual = fixture.manualHeightQA; (fixture.appliedHeightQA ??= []).push(manual.epoch === fixture.presentation.epoch ? manual.height : args.contentHeight); } if (fixture.holdFit) { fixture.fitWaits++; await new Promise((resolve) => { fixture.releaseFit = resolve; }); } return; }
         if (command === 'start_window_drag') { fixture.dragCalls++; return; }
         if (command === 'begin_popup_drag') {
           if (args.presentationEpoch !== fixture.presentation.epoch || !fixture.presentation.presented) throw new Error('CANCELLED: stale popup drag');
@@ -3502,6 +3502,52 @@ try {
     for (const key of ['selection', 'silentOcr', 'input', 'ocr']) await page.locator(`input[name="${key}"]`).fill('');
     await page.locator('#save-shortcuts').click();
     await page.waitForFunction(() => Object.values(window.__qa.settings.shortcuts).every(value => value === ''));
+  }
+  // Production main.ts/panel-layout and real pin handler, with native resize
+  // events at the IPC boundary. Native policy itself has Rust/AppKit fixtures.
+  for (const platform of ['macos', 'windows']) {
+    await page.goto(`${process.env.ECHOLINGO_TEST_URL ?? 'http://127.0.0.1:1420/'}${platform === 'windows' ? '?windowsSelectionFixture=1' : ''}`);
+    await page.waitForFunction(() => document.querySelector('#core-guidance').hidden);
+    await page.locator('#source-text').fill('明白');
+    await page.locator('#translate-button').click();
+    await page.getByText('Isolated test translation fixture', { exact: true }).waitFor();
+    for (const height of [469, 160]) {
+      await page.setViewportSize({ width: 713, height });
+      const before = await page.evaluate(({ height, platform }) => {
+        const q = window.__qa; q.manualHeightQA = { epoch: q.presentation.epoch, height };
+        const before = q.layoutCalls.length;
+        if (platform === 'macos') q.emit('popup-user-resize-ended', q.presentation.epoch);
+        else q.emit('popup-native-sizing', { revision: height === 469 ? 7001 : 7002, active: false, presentationEpoch: q.presentation.epoch });
+        return before;
+      }, { height, platform });
+      await page.waitForFunction(count => window.__qa.layoutCalls.length > count, before);
+      assert.equal(await page.evaluate(() => window.__qa.appliedHeightQA.at(-1)), height);
+      const pinCalls = await page.evaluate(() => (window.__qa.pinRequests ?? []).length);
+      await page.locator('#pin-button').click();
+      await page.waitForFunction(count => (window.__qa.pinRequests ?? []).length > count, pinCalls);
+      assert.equal(await page.evaluate(() => innerHeight), height);
+      const visibleResultEnd = await page.locator('.view:not([hidden])').evaluate(view => {
+        view.scrollTop = view.scrollHeight;
+        const result = document.querySelector('.result-card');
+        const rect = result.getBoundingClientRect();
+        return rect.bottom <= innerHeight && view.getBoundingClientRect().bottom <= innerHeight;
+      });
+      assert.ok(visibleResultEnd, `${platform}: real result footer remains scrollable at ${height}px`);
+      assert.equal(await page.locator('#source-text').inputValue(), '明白');
+    }
+    // New presentation, identical empty-input content: force a fresh fit even
+    // if the previous manual resize had cached the same measured dimensions.
+    await page.evaluate(() => window.__qa.emit('source-text', { text: 'same content', mode: 'input', presentationEpoch: window.__qa.presentation.epoch }));
+    await page.waitForFunction(() => document.querySelector('#source-text').value === 'same content');
+    await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+    const before = await page.evaluate(() => {
+      const q = window.__qa; const before = q.layoutCalls.length;
+      const presentation = q.nativeInputShow();
+      q.emit('source-text', { text: 'same content', mode: 'input', presentationEpoch: presentation.epoch });
+      return before;
+    });
+    await page.waitForFunction(count => window.__qa.layoutCalls.length > count, before);
+    assert.equal(await page.evaluate(() => window.__qa.appliedHeightQA.at(-1)), await page.evaluate(() => window.__qa.layoutCalls.at(-1).contentHeight));
   }
   assert.deepEqual(errors, []);
   console.log('PASS: Windows and macOS two-default shortcut UI permits changing core bindings, explicitly opting in optional actions, rejecting duplicates and clearing all bindings. Mock IPC only.');
