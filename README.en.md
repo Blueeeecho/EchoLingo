@@ -3,17 +3,22 @@
 <h1 align="center">EchoLingo · 回声译</h1>
 <p align="center"><strong>A familiar echo for unfamiliar words.</strong></p>
 <p align="center">A lightweight desktop app for selection translation and seamless OCR, so understanding can keep up with your reading.</p>
-<p align="center"><a href="https://blueeeecho.github.io/EchoLingo/">Website</a> · <a href="https://github.com/Blueeeecho/EchoLingo/releases/tag/0.2.0">Download 0.2.0 internal preview</a> · <a href="https://github.com/Blueeeecho/EchoLingo/issues">Feedback</a></p>
+<p align="center"><a href="https://blueeeecho.github.io/EchoLingo/">Website</a> · <a href="https://github.com/Blueeeecho/EchoLingo/releases/tag/0.2.0">Windows 0.2.0 preview</a> · <a href="https://github.com/Blueeeecho/EchoLingo/releases/tag/0.2.1">macOS 0.2.1 preview</a> · <a href="https://github.com/Blueeeecho/EchoLingo/issues">Feedback</a></p>
 
 ## Download and install
 
-**[Download Windows 0.2.0 internal preview (x64)](https://github.com/Blueeeecho/EchoLingo/releases/download/0.2.0/EchoLingo_0.2.0_windows_x64-setup.exe)** · **[Download macOS 0.2.0 internal preview (Apple silicon)](https://github.com/Blueeeecho/EchoLingo/releases/download/0.2.0/EchoLingo_0.2.0_macos_arm64.dmg)**
+**[Download Windows 0.2.0 internal preview (x64)](https://github.com/Blueeeecho/EchoLingo/releases/download/0.2.0/EchoLingo_0.2.0_windows_x64-setup.exe)** · **[Download macOS 0.2.1 internal preview (Apple silicon)](https://github.com/Blueeeecho/EchoLingo/releases/download/0.2.1/EchoLingo_0.2.1_macos_arm64.dmg)**
 
 Windows supports Windows 10 1809+ and Windows 11. The macOS package is for Apple silicon Macs on macOS 12 or later. Apple system translation needs macOS 26 or later. After installation, EchoLingo stays in the tray or menu bar. Quit the previous version completely before you upgrade.
 
+This update is for macOS only: 0.2.1 provides separate free translation and OCR service lists, with only `Alt+D` and `Alt+S` enabled by default. Shortcuts remain customizable. Windows 0.2.1 is not released; please continue using 0.2.0.
+
 This is an internal prerelease, not a stable release. Windows has no commercial code signature; macOS uses ad hoc signing and is not notarized by Apple. Your system may show warnings or request permissions again. Install only files from this repository’s release page with matching checksums.
 
-[0.2.0 release notes](https://github.com/Blueeeecho/EchoLingo/releases/tag/0.2.0) · [SHA-256 checksums](https://github.com/Blueeeecho/EchoLingo/releases/download/0.2.0/SHA256SUMS.txt) · [Release manifest](https://github.com/Blueeeecho/EchoLingo/releases/download/0.2.0/RELEASE-MANIFEST.json) · [First-launch notes for macOS](docs/macos-install.zh-CN.md) (Chinese) · [Build from source](docs/build.md) (Chinese)
+- **Windows 0.2.0**: [Release notes](https://github.com/Blueeeecho/EchoLingo/releases/tag/0.2.0) · [SHA-256 checksums](https://github.com/Blueeeecho/EchoLingo/releases/download/0.2.0/SHA256SUMS.txt) · [Release manifest](https://github.com/Blueeeecho/EchoLingo/releases/download/0.2.0/RELEASE-MANIFEST.json)
+- **macOS 0.2.1**: [Release notes](https://github.com/Blueeeecho/EchoLingo/releases/tag/0.2.1) · [SHA-256 checksums](https://github.com/Blueeeecho/EchoLingo/releases/download/0.2.1/SHA256SUMS.txt) · [Release manifest](https://github.com/Blueeeecho/EchoLingo/releases/download/0.2.1/RELEASE-MANIFEST.json)
+
+[First-launch notes for macOS](docs/macos-install.zh-CN.md) (Chinese) · [Build from source](docs/build.md) (Chinese)
 
 ## Two shortcuts
 
@@ -32,7 +37,7 @@ Open Settings from the tray menu to configure services, manage keys, or change s
 
 ## Free update notices
 
-Use **Check for updates** and **Open download page** in Settings. Automatic checks are off by default; opt in for at most one public GitHub metadata request per day. No text or keys are sent. This internal 0.2.0 build includes prereleases by default; you can select stable releases only. Downloads and installation remain manual, with no paid updater or signing purchase required.
+Use **Check for updates** and **Open download page** in Settings. Automatic checks are off by default; opt in for at most one public GitHub metadata request per day. No text or keys are sent. The current internal preview builds include prereleases by default; you can select stable releases only. Downloads and installation remain manual, with no paid updater or signing purchase required.
 
 ## Privacy and data
 
