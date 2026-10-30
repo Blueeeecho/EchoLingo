@@ -187,9 +187,21 @@ public static class EchoLingoNativeCaptureSmoke {
             }finally{Process.Dispose();}
         }
     }
+    sealed class EscapeSourceFilter : IMessageFilter {
+        readonly Sources owner;public EscapeSourceFilter(Sources value){owner=value;}
+        public bool PreFilterMessage(ref Message message) {
+            // This thread's OWN generated source only; observe Escape before
+            // WinForms dialog-key routing, without swallowing or reading text.
+            if(owner.AH!=IntPtr.Zero&&GetAncestor(message.HWnd,2)==owner.AH&&message.WParam.ToInt64()==0x1b) {
+                if(message.Msg==0x100||message.Msg==0x104)Interlocked.Increment(ref owner.EscapeDowns);
+                if(message.Msg==0x101||message.Msg==0x105)Interlocked.Increment(ref owner.EscapeUps);
+            }
+            return false;
+        }
+    }
     sealed class Sources : IDisposable {
         public Form A,B,Background;public IntPtr AH,BH;public uint ThreadId;public Rectangle AFrame,BFrame,Display;public Point First,Last;
-        public int Downs,Ups,Clicks;public bool Partial;Thread ui;ManualResetEvent ready=new ManualResetEvent(false);string error;
+        public int Downs,Ups,Clicks,EscapeDowns,EscapeUps;public bool Partial,EscapePartial;Thread ui;ManualResetEvent ready=new ManualResetEvent(false);string error;
         public Sources() {
             ui=new Thread(delegate(){
                 try {
@@ -206,7 +218,7 @@ public static class EchoLingoNativeCaptureSmoke {
                             Need(GetAncestor(AH,2)==AH&&GetAncestor(BH,2)==BH,"Peer roots changed.");
                             SetForegroundWindow(AH);A.Activate();AFrame=Frame(AH);BFrame=Frame(BH);First=A.PointToScreen(new Point(65,70));Last=B.PointToScreen(new Point(100,115));
                         }catch(Exception e){error=e.Message;}finally{ready.Set();}
-                    };Application.Run(A);
+                    };EscapeSourceFilter filter=new EscapeSourceFilter(this);Application.AddMessageFilter(filter);try{Application.Run(A);}finally{Application.RemoveMessageFilter(filter);}
                 }catch(Exception e){error=e.Message;ready.Set();}
                 finally {if(Background!=null)Background.Dispose();if(B!=null)B.Dispose();if(A!=null)A.Dispose();}
             });ui.IsBackground=true;ui.SetApartmentState(ApartmentState.STA);ui.Start();
@@ -233,6 +245,13 @@ public static class EchoLingoNativeCaptureSmoke {
             if(A!=null&&!A.IsDisposed)try{OnUi(delegate {if(GetCapture()!=IntPtr.Zero)ReleaseCapture();B.Close();Background.Close();A.Close();});}catch{}
             Need(ui.Join(5000),"Generated peer UI thread did not clean up.");ready.Dispose();
         }
+    }
+    static void EscapePart(IntPtr source,bool up) {
+        Need(GetForegroundWindow()==source,"Source foreground changed; no Escape input sent elsewhere.");
+        INPUT value=new INPUT();value.type=1;value.data.key.vk=0x1b;value.data.key.flags=up?2u:0u;Send(new INPUT[]{value});
+    }
+    static int VisibleOwnedWindows(int helper) {
+        int count=0;EnumWindows(delegate(IntPtr window,IntPtr unused){uint pid;GetWindowThreadProcessId(window,out pid);if(pid==helper&&IsWindowVisible(window))count++;return true;},IntPtr.Zero);return count;
     }
     static bool HasVisibleOwnedBorder(int helper) {
         bool seen=false;
@@ -262,6 +281,13 @@ public static class EchoLingoNativeCaptureSmoke {
             source=new Sources();int oldDown=0,oldUp=0,oldClick=0;
             bool preheld=kind=="preheld-source-release-then-first-fresh-pair";
             if(preheld){Send(new INPUT[]{Mouse(2)});source.Partial=true;Thread.Sleep(80);source.Drain();Need(source.Downs==1&&source.Ups==0,"Preheld setup did not deliver exactly one source down.");}
+            if(kind=="escape-held900ms-drains-real-key-up") {
+                Escape(source.AH);Stopwatch positive=Stopwatch.StartNew();
+                while(positive.ElapsedMilliseconds<1500&&(source.EscapeDowns<1||source.EscapeUps<1)){source.Drain();Thread.Sleep(5);}
+                source.Drain();
+                Need(source.EscapeDowns==1&&source.EscapeUps==1,"Escape source observation positive control failed before capture.");
+                report["escapeObservationPositiveControl"]=true;
+            }
             Stopwatch requestToBorder=Stopwatch.StartNew();
             int helper=host.Begin();report["helperProcessId"]=helper;report["hostProcessId"]=host.Process.Id;report["generation"]=host.Generation;report["firstCommandBomRemoved"]=host.FirstCommandBomRemoved;report["ordinaryNativeCapturePathVerified"]=host.OrdinaryPathsVerified;
             report["sourceAHwnd"]=Id(source.AH);report["sourceBHwnd"]=Id(source.BH);report["sourceUiThreadId"]=source.ThreadId;report["controllerThreadId"]=GetCurrentThreadId();
@@ -283,8 +309,17 @@ public static class EchoLingoNativeCaptureSmoke {
                 }
                 if(Ready(helper,source.AH,source.AFrame,source.Display,source.First,observed)){ready=true;break;}Thread.Sleep(10);}
             Need(ready,"Exact delegated helper screen/hover/plane readiness was not observed within25000ms.");report["helperReadyMilliseconds"]=clock.Elapsed.TotalMilliseconds;report["requestToFullPickerReadyObservedMilliseconds"]=requestToBorder.Elapsed.TotalMilliseconds;
-            bool displayInvalid=kind=="display-change-before-input";bool late=kind=="escape-held-release-after-helper-close";Dictionary<string,object> reply=null;bool cross=kind=="cross-peer-held900ms";if(cross)source.OnUi(delegate {source.Background.BackColor=Color.FromArgb(75,115,165);source.Background.Refresh();});Point last=cross?source.Last:new Point(source.First.X+35,source.First.Y+15);bool cancel=kind=="escape-drains-owned-release";
-            if(displayInvalid){
+            bool heldEscape=kind=="escape-held900ms-drains-real-key-up";bool displayInvalid=kind=="display-change-before-input";bool late=kind=="escape-held-release-after-helper-close";Dictionary<string,object> reply=null;bool cross=kind=="cross-peer-held900ms";if(cross)source.OnUi(delegate {source.Background.BackColor=Color.FromArgb(75,115,165);source.Background.Refresh();});Point last=cross?source.Last:new Point(source.First.X+35,source.First.Y+15);bool cancel=kind=="escape-drains-owned-release";
+            if(heldEscape){
+                EscapePart(source.AH,false);source.EscapePartial=true;
+                Stopwatch hidden=Stopwatch.StartNew();while(hidden.ElapsedMilliseconds<2500&&Alive(helper)&&VisibleOwnedWindows(helper)!=0)Thread.Sleep(10);
+                Need(Alive(helper)&&VisibleOwnedWindows(helper)==0,"Held Escape must hide all picker visuals without abandoning its owned up.");
+                Thread.Sleep(900);Need(Alive(helper)&&VisibleOwnedWindows(helper)==0,"Child exited or showed overlays before its real held Escape up.");
+                EscapePart(source.AH,false); // Own auto-repeat must remain consumed while closing.
+                EscapePart(source.AH,true);source.EscapePartial=false;
+                source.Drain();Need(source.EscapeDowns==1&&source.EscapeUps==1,"Owned Escape down/repeat/up leaked into source beyond the verified positive-control pair.");
+                report["heldEscapeMilliseconds"]=900;report["allVisualsHiddenWhileEscapeOwned"]=true;report["zeroUnderlyingEscapeInput"]=true;
+            }else if(displayInvalid){
                 InvalidateOwnedPickerDisplay(helper);report["actualDisplayConfigurationChanged"]=false;
             }else if(late){
                 source.Partial=true;Send(new INPUT[]{Move(source.First),Mouse(2),Move(last)});Thread.Sleep(100);Escape(source.AH);
@@ -317,7 +352,13 @@ public static class EchoLingoNativeCaptureSmoke {
             Need(reply.ContainsKey("nativeBackend")&&(string)reply["nativeBackend"]=="rust-win32-capture"&&health.ContainsKey("nativeCaptureBackend")&&Convert.ToInt64(health["nativeCaptureBackend"])==1,"Candidate test must never silently use legacy PowerShell/C# capture.");
             Need(Convert.ToInt64(health["inputBackend"])==3&&Convert.ToInt64(health["nativeHostReady"])==1&&Convert.ToInt64(health["nativeHostArmed"])==1,"Actual production native host handshake did not complete.");
             Need(Convert.ToInt64(health["mouseHookInstalled"])==0&&Convert.ToInt64(health["hookMouseDowns"])==0&&Convert.ToInt64(health["hookMouseUps"])==0&&Convert.ToInt64(health["inputPlaneDowns"])==0&&Convert.ToInt64(health["inputPlaneUps"])==0,"Old managed hook or input plane handled this purported delegated capture.");
-            if(displayInvalid){
+            if(heldEscape){
+                source.Drain();Need(source.EscapeDowns==1&&source.EscapeUps==1,"Owned Escape leaked after completed child teardown.");
+                Need(!(bool)reply["ok"]&&!reply.ContainsKey("imageBase64")&&reply.ContainsKey("error"),"Held Escape cancellation produced pixels or success.");
+                Need(Convert.ToString(reply["error"]).StartsWith("CANCELLED:",StringComparison.Ordinal)||Convert.ToString(reply["error"]).StartsWith("CAPTURE_INPUT_RELEASE:",StringComparison.Ordinal),"Held Escape failed for an unrelated native error.");
+                Need(health.ContainsKey("nativeHostStopped")&&Convert.ToInt64(health["nativeHostStopped"])==1&&Convert.ToInt64(health["nativeHostDowns"])==0&&Convert.ToInt64(health["nativeHostUps"])==0,"Escape-only session fabricated a mouse pair or missed STOP.");
+                Need(health.ContainsKey("hookEscapeReleaseUnconfirmed")&&Convert.ToInt64(health["hookEscapeReleaseUnconfirmed"])==0&&Convert.ToInt64(health["hookRunningAfterStop"])==0,"Escape hook exited without proving owned key-up drained.");
+            }else if(displayInvalid){
                 Need(health.ContainsKey("nativeHostStopped")&&Convert.ToInt64(health["nativeHostStopped"])==1
                     &&(!health.ContainsKey("nativeHostDowns")||Convert.ToInt64(health["nativeHostDowns"])==0)
                     &&(!health.ContainsKey("nativeHostUps")||Convert.ToInt64(health["nativeHostUps"])==0),
@@ -331,7 +372,7 @@ public static class EchoLingoNativeCaptureSmoke {
                 Need(!(bool)reply["ok"]&&reply.ContainsKey("error")&&Convert.ToString(reply["error"]).Contains("CAPTURE_INPUT_HOST")&&!reply.ContainsKey("imageBase64")&&health.ContainsKey("nativeHostFailed")&&Convert.ToInt64(health["nativeHostFailed"])==1,"Held release must make child shutdown fail closed visibly; it cannot return a screenshot.");
                 report["childFailClosedBeforeDelayedOwnedUp"]=true;
             }else Need(health.ContainsKey("nativeHostStopped")&&Convert.ToInt64(health["nativeHostStopped"])==1&&health.ContainsKey("nativeHostUps")&&Convert.ToInt64(health["nativeHostDowns"])==1&&Convert.ToInt64(health["nativeHostUps"])==1,"First actual native host pair or stop handshake was lost/duplicated.");
-            if(late||displayInvalid){}else if(cancel){Need(!(bool)reply["ok"]&&reply.ContainsKey("error")&&Convert.ToString(reply["error"]).ToLowerInvariant().Contains("cancel"),"Actual Esc did not cancel.");report["actualEscapeCancelled"]=true;}
+            if(late||displayInvalid||heldEscape){}else if(cancel){Need(!(bool)reply["ok"]&&reply.ContainsKey("error")&&Convert.ToString(reply["error"]).ToLowerInvariant().Contains("cancel"),"Actual Esc did not cancel.");report["actualEscapeCancelled"]=true;}
             else {
                 Need((bool)reply["ok"],"Delegated capture failed.");using(MemoryStream bytes=new MemoryStream(Convert.FromBase64String((string)reply["imageBase64"])))using(Bitmap image=new Bitmap(bytes)){
                     Need(image.Width==last.X-source.First.X&&image.Height==last.Y-source.First.Y,"First-release free ROI dimensions changed.");
@@ -356,6 +397,7 @@ public static class EchoLingoNativeCaptureSmoke {
         }catch(Exception error){while(error.InnerException!=null)error=error.InnerException;report["error"]=error.Message;}
         finally {
             if(source!=null){
+                if(source.EscapePartial&&GetForegroundWindow()==source.AH)try{EscapePart(source.AH,true);source.EscapePartial=false;}catch{}
                 if(source.Partial&&GetForegroundWindow()==source.AH)try{Send(new INPUT[]{Mouse(4)});source.Partial=false;}catch{}
                 if(host.Child!=0){
                     if(GetForegroundWindow()==source.AH)try{Escape(source.AH);}catch{}
@@ -371,13 +413,13 @@ public static class EchoLingoNativeCaptureSmoke {
         Need(!helper.Contains("\"")&&!harness.Contains("\""),"Invalid fixture path.");SetProcessDpiAwarenessContext(new IntPtr(-4));Need(SetThreadDpiAwarenessContext(new IntPtr(-4))!=IntPtr.Zero,"Controller physical DPI context failed.");
         List<Dictionary<string,object>> cases=new List<Dictionary<string,object>>();bool ok=true;Dictionary<string,object> stopped=null;
         using(Host host=new Host(harness,helper)){
-            foreach(string kind in new string[]{"first-fresh-pair-immediate-release","topmost-self-raise-immediate-first-pair","foreign-thread-native-capture","cross-peer-held900ms","preheld-source-release-then-first-fresh-pair","escape-drains-owned-release","escape-held-release-after-helper-close","next-capture-after-escape","display-change-before-input","next-capture-after-display-change"}){
+            foreach(string kind in new string[]{"first-fresh-pair-immediate-release","topmost-self-raise-immediate-first-pair","foreign-thread-native-capture","cross-peer-held900ms","preheld-source-release-then-first-fresh-pair","escape-drains-owned-release","escape-held-release-after-helper-close","next-capture-after-escape","display-change-before-input","next-capture-after-display-change","escape-held900ms-drains-real-key-up","next-capture-after-held-escape"}){
                 Dictionary<string,object> result=Case(host,kind);cases.Add(result);ok=ok&&(bool)result["ok"];if(!host.Usable||host.Child!=0||host.Process.HasExited)break;
             }
             if(host.Child==0&&!host.Process.HasExited){host.Shutdown();stopped=host.Read(4000);Need((string)stopped["event"]=="stopped"&&Convert.ToInt32(stopped["completedGenerations"])==cases.Count,"Host stop/generation mismatch.");Need(host.Process.WaitForExit(4000)&&host.Process.ExitCode==0,"Production observer host failed to exit.");}
             else ok=false;
         }
-        return new Dictionary<string,object>{{"ok",ok&&cases.Count==10},{"cases",cases},{"hostShutdown",stopped},{"productionModulesImported",true},{"requestedInputBackend","delegated-exact-production"},{"userContentCaptured",false},{"clipboardAccessed",false},{"scope","Exact production hook pump/session and Rust candidate picker with generated same-integrity peers only; no Tauri/engine, physical app, elevated boundary or universal acceptance claim."}};
+        return new Dictionary<string,object>{{"ok",ok&&cases.Count==12},{"cases",cases},{"hostShutdown",stopped},{"productionModulesImported",true},{"requestedInputBackend","delegated-exact-production"},{"userContentCaptured",false},{"clipboardAccessed",false},{"scope","Exact production hook pump/session and Rust candidate picker with generated same-integrity peers only; no Tauri/engine, physical app, elevated boundary or universal acceptance claim."}};
     }
 }
 '@
