@@ -210,11 +210,11 @@ public static class EchoLingoLiveCaptureSmoke {
     }
     static void ProbeBenignDpiNotifications(TrialContext context, Process process, Rectangle display,
         Rectangle hover, Dictionary<string,object> metrics) {
-        List<IntPtr> planes = InputPlanes(process.Id, true);
+        List<EdgeWindow> planes = InputPlanes(process.Id, true);
         List<EdgeWindow> edges = VisibleEdges(process.Id);
         Assert(planes.Count > 0 && edges.Count >= 8, "DPI probe requires real ready input plane and decoration edges.");
         foreach (bool changedValue in new bool[] { false, true }) {
-            SendOwnedDpiNotification(planes[0], process.Id, changedValue);
+            SendOwnedDpiNotification(planes[0].Handle, process.Id, changedValue);
             SendOwnedDpiNotification(edges[0].Handle, process.Id, changedValue);
             WaitEdges(context, process, display, hover, Rectangle.Empty,
                 changedValue ? "different-window-dpi-notification-same-monitor" : "same-window-dpi-notification", 1500);
@@ -226,11 +226,11 @@ public static class EchoLingoLiveCaptureSmoke {
         metrics["actualSystemDisplayConfigurationChanged"] = false;
     }
     static void ProbeDisplayInvalidation(Process process, Dictionary<string,object> metrics) {
-        List<IntPtr> planes = InputPlanes(process.Id, true);
+        List<EdgeWindow> planes = InputPlanes(process.Id, true);
         Assert(planes.Count > 0, "Display invalidation probe requires an actual input plane.");
-        RequireOwnedNotificationTarget(planes[0], process.Id);
+        RequireOwnedNotificationTarget(planes[0].Handle, process.Id);
         IntPtr result;
-        Assert(SendDisplayNotification(planes[0], 0x007E, IntPtr.Zero, IntPtr.Zero, 0x0002, 1500, out result) != IntPtr.Zero,
+        Assert(SendDisplayNotification(planes[0].Handle, 0x007E, IntPtr.Zero, IntPtr.Zero, 0x0002, 1500, out result) != IntPtr.Zero,
             "Owned display-change notification timed out.");
         metrics["displayChangeNotificationSent"] = true;
         metrics["actualSystemDisplayConfigurationChanged"] = false;

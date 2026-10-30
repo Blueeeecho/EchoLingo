@@ -296,12 +296,14 @@ public static class EchoLingoDelegatedCaptureSmoke {
             if(reply==null){reply=host.Finish(report,12000);finished=true;}
             Need(zero,"UNDERLYING_INPUT: Generated source received a fresh capture down/up/click.");
             Dictionary<string,object> health=(Dictionary<string,object>)reply["captureHealth"];
-            foreach(string key in new string[]{"inputBackend","nativeHostReady","nativeHostArmed","nativeHostDowns","mouseHookInstalled","hookMouseDowns","hookMouseUps","inputPlaneDowns","inputPlaneUps","inputPlaneRemainingAfterCleanup"})Need(health.ContainsKey(key),"Missing delegated health field: "+key);
+            // Host down/up counters are sparse: production creates them only when an event occurs.
+            // Only this intentionally no-input display-cancellation case may omit them.
+            foreach(string key in new string[]{"inputBackend","nativeHostReady","nativeHostArmed","nativeHostDowns","mouseHookInstalled","hookMouseDowns","hookMouseUps","inputPlaneDowns","inputPlaneUps","inputPlaneRemainingAfterCleanup"})Need((displayInvalid&&key=="nativeHostDowns")||health.ContainsKey(key),"Missing delegated health field: "+key);
             Need(Convert.ToInt64(health["inputBackend"])==3&&Convert.ToInt64(health["nativeHostReady"])==1&&Convert.ToInt64(health["nativeHostArmed"])==1,"Actual production native host handshake did not complete.");
             Need(Convert.ToInt64(health["mouseHookInstalled"])==0&&Convert.ToInt64(health["hookMouseDowns"])==0&&Convert.ToInt64(health["hookMouseUps"])==0&&Convert.ToInt64(health["inputPlaneDowns"])==0&&Convert.ToInt64(health["inputPlaneUps"])==0,"Old managed hook or input plane handled this purported delegated capture.");
             if(displayInvalid){
                 Need(health.ContainsKey("nativeHostStopped")&&Convert.ToInt64(health["nativeHostStopped"])==1
-                    &&Convert.ToInt64(health["nativeHostDowns"])==0
+                    &&(!health.ContainsKey("nativeHostDowns")||Convert.ToInt64(health["nativeHostDowns"])==0)
                     &&(!health.ContainsKey("nativeHostUps")||Convert.ToInt64(health["nativeHostUps"])==0),
                     "Display cancellation did not stop the actual host session without consuming nonexistent input.");
                 Need(!(bool)reply["ok"]&&reply.ContainsKey("error")

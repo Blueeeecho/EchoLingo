@@ -779,7 +779,8 @@ public static class EchoLingoApplicationSmoke {
         Offline = offline; ActualTranslations.Clear(); hiddenPlaneStyleChecks=hiddenPlaneWithoutTopmostChecks=visiblePlaneStyleChecks=0;
         Dictionary<string, object> report = new Dictionary<string, object>(); List<string> passed = new List<string>();
         report["ok"] = false; report["passed"] = passed; report["actualApplicationTested"] = false;
-        report["latestIntentTestsRequested"]=latest; report["singleHotkeyPerAction"] = true; report["uiAutomationSelectorsUsed"] = false;
+        report["latestIntentTestsRequested"]=latest; report["singleHotkeyPerAction"] = true;
+        report["displayChangeRecoveryRequired"]=!offline&&!customBindings; report["uiAutomationSelectorsUsed"] = false;
         report["credentialsCreated"] = false; report["credentialAccessScope"] = offline ? "None: bundled offline provider" : "One random absent provider account; no existing credential or key supplied";
         report["translationBackend"] = offline ? "real-bundled-offline-model" : "loopback-mock";
         report["multiMonitorTested"] = false; report["fullscreenTested"] = false; report["installedPackageTested"] = installed;
@@ -904,7 +905,7 @@ public static class EchoLingoApplicationSmoke {
                                 Dictionary<string, object> ocrReady = new Dictionary<string, object>(); report["ocrOverlayReadiness"] = ocrReady;
                                 Dictionary<string,object> displayCancellation=null;
                                 uint cancelledDisplayHelper=0;
-                                if(!offline&&!customBindings&&!latest) {
+                                if(!offline&&!customBindings) {
                                     stage="display-change-cancellation";
                                     int sameApplication=app.Id,requestsBefore=server.Count;
                                     Dictionary<string,object> baseline=CaptureSnapshot(app,start,executable,roaming,token);
@@ -959,6 +960,7 @@ public static class EchoLingoApplicationSmoke {
                                 if (offline) {
                                     Assert(ActualTranslations.Count == 3 && new JavaScriptSerializer().Deserialize<object[]>(File.ReadAllText(history)).Length == 3, "Offline flows did not produce exactly three successful synthetic histories.");
                                 }
+                                if(!offline&&!customBindings) Assert(report.ContainsKey("displayChangeCancellation")&&report.ContainsKey("displayChangeRecovery"),"Required same-application display cancellation/recovery evidence is missing.");
                                 report["actualOfflineTranslations"] = ActualTranslations; report["ok"] = true;
                             } catch (Exception error) { report["failedStage"]=stage;report["error"] = error.Message;InputPlaneStyleException planeError=error as InputPlaneStyleException;if(planeError!=null)report["inputPlaneStyleFailure"]=planeError.ScalarMetadata;if(app!=null&&!app.HasExited){try{report["ownMainFailureMetadata"]=MainMetadata(app);}catch(Exception diagnostic){report["mainMetadataErrorType"]=diagnostic.GetType().Name;}ObserveFailedWorkflow(report,app,start,executable,roaming,token,form,server);} }
                             finally {
