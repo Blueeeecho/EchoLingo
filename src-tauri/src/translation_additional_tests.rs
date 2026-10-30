@@ -24,6 +24,9 @@ fn server(
         socket
             .set_read_timeout(Some(Duration::from_secs(3)))
             .unwrap();
+        socket
+            .set_write_timeout(Some(Duration::from_secs(3)))
+            .unwrap();
         let mut data = Vec::new();
         loop {
             let mut buffer = [0; 4096];
@@ -74,7 +77,9 @@ async fn niu_posts_form_key_and_source_without_query_secrets() {
         "Hello"
     );
     let request = got.recv().unwrap();
-    task.join().unwrap();
+    tokio::task::spawn_blocking(move || task.join().unwrap())
+        .await
+        .unwrap();
     assert!(request.starts_with("POST /translate HTTP/1.1"));
     let form = reqwest::Url::parse(&format!(
         "http://fixture/?{}",
@@ -110,7 +115,9 @@ async fn google_uses_header_key_plain_nmt_and_omits_auto_source() {
             "你好"
         );
         let request = got.recv().unwrap();
-        task.join().unwrap();
+        tokio::task::spawn_blocking(move || task.join().unwrap())
+            .await
+            .unwrap();
         assert!(request.starts_with("POST /translate HTTP/1.1"));
         assert!(request
             .to_ascii_lowercase()
@@ -145,7 +152,9 @@ async fn caiyun_sends_own_token_and_one_text_with_auto_detection() {
         "你好"
     );
     let request = got.recv().unwrap();
-    task.join().unwrap();
+    tokio::task::spawn_blocking(move || task.join().unwrap())
+        .await
+        .unwrap();
     assert!(request
         .to_ascii_lowercase()
         .contains("x-authorization: token fixture-key"));
@@ -234,7 +243,9 @@ async fn http_errors_redirects_and_invalid_json_stay_sanitized() {
             if kind == "google-translate" && status == 403 {
                 assert!(error.contains("额度"));
             }
-            task.join().unwrap();
+            tokio::task::spawn_blocking(move || task.join().unwrap())
+                .await
+                .unwrap();
         }
     }
 }
@@ -254,7 +265,9 @@ async fn bounded_response_and_dropped_future_do_not_retry() {
     .await
     .unwrap_err()
     .contains("上限"));
-    task.join().unwrap();
+    tokio::task::spawn_blocking(move || task.join().unwrap())
+        .await
+        .unwrap();
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let url = format!("http://{}/translate", listener.local_addr().unwrap());
     let c = client();
