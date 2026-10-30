@@ -94,6 +94,9 @@ try {
   await page.evaluate(() => { document.body.dataset.view='translate'; document.body.classList.add('modal-open'); });
   assert.equal(await edge('east').isVisible(),false);
   assert.equal(await edge('south-east').isVisible(),false);
+  // Layout and edge resizing may never show/focus/hide or start a drag.
+  const deliberateDragStart = await page.evaluate(() => window.__resizeQA.commands.length);
+  assert.equal(await page.evaluate(() => window.__resizeQA.commands.some(command => /show|focus|hide|drag$/.test(command))), false);
   // A Mac toolbar click must be a click, not an asynchronous native drag. The
   // original press anchor is retained only after a deliberate movement.
   await page.evaluate(() => { document.body.dataset.view='translate'; document.body.classList.remove('modal-open');
@@ -123,7 +126,14 @@ try {
   assert.deepEqual(await page.evaluate(() => window.__resizeQA.dragCommands.map(value=>value.command)),['begin_popup_drag','end_popup_drag']);
   await page.evaluate(() => window.__resizeQA.layout.dispose());
   assert.equal(await page.locator('body').evaluate(element=>element.classList.contains('popup-resize-enabled')),false);
-  assert.equal(await page.evaluate(()=>window.__resizeQA.commands.some(command=>/show|focus|hide|drag$/.test(command))),false);
+  // Only the deliberate Mac drag section may use the three tokenized drag
+  // commands. Layout still cannot reveal/focus/hide or use start_window_drag.
+  assert.equal(await page.evaluate(() => window.__resizeQA.commands.some(command => /show|focus|hide/.test(command) || command === 'start_window_drag')), false);
+  const deliberateCommands = await page.evaluate(start => window.__resizeQA.commands.slice(start), deliberateDragStart);
+  assert.ok(deliberateCommands.every(command => ['fit_window','begin_popup_drag','move_popup_drag','end_popup_drag'].includes(command)));
+  assert.equal(deliberateCommands.filter(command => command === 'begin_popup_drag').length, 2);
+  assert.ok(deliberateCommands.filter(command => command === 'move_popup_drag').length >= 1);
+  assert.equal(deliberateCommands.filter(command => command === 'end_popup_drag').length, 2);
   assert.deepEqual(errors,[]);
   // Mount the layout module over the actual application DOM in browser-preview
   // mode, then open the real Add API form. IPC stays mocked; pointer capture,
@@ -161,6 +171,7 @@ try {
     if(initiallyOpen)await page.locator('#add-provider').click();
   }
   await page.evaluate(()=>window.__resizeQA.layout.dispose());
+  assert.equal(await page.evaluate(() => window.__resizeQA.commands.some(command => /show|focus|hide|drag$/.test(command))), false, 'Real modal layout/resize must not initiate any drag or presentation operation.');
   assert.deepEqual(errors,[]);
   console.log(JSON.stringify({ok:true,scope:'real browser pointer capture + production CSS/layout; mocked native IPC only',managementDirections:8,managementModalDirections:8,popupEdgeLogicalPixels:10,physicalPlatformAcceptance:false}));
 } finally { await browser.close(); }
