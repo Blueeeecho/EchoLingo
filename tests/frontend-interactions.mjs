@@ -3713,6 +3713,7 @@ try {
       await page.locator('#managed-service-list [data-service-id="qa-local"] .managed-service-select').click();
       assert.equal(await page.locator('#managed-service-detail').getByText('删除配置', { exact: true }).count(), 0);
       assert.match(await page.locator('#managed-service-detail').innerText(), /内置.*无需密钥|内置服务/);
+      if (width === 900) await page.locator('.app-shell').screenshot({ path: `test-results/service-manager-${windows ? 'windows' : 'macos'}-translation.png` });
       if (width === 420) {
         await page.evaluate(() => { window.__qa.failSave = true; });
         const savesBeforeDetail = await page.evaluate(() => window.__qa.saveCalls);
@@ -3753,6 +3754,7 @@ try {
       await page.locator('#managed-service-list [data-service-id="qa-ocr-2"] .managed-service-select').click();
       assert.deepEqual(await page.evaluate(() => ({ reads: window.__qa.credentialReadCalls, keys: window.__qa.keyCalls, ocrKeys: window.__qa.ocrKeyCalls })), before);
       assert.match(await page.locator('#managed-service-detail').innerText(), /当前 OCR/);
+      if (width === 900) await page.locator('.app-shell').screenshot({ path: `test-results/service-manager-${windows ? 'windows' : 'macos'}-ocr.png` });
       await page.evaluate(() => { window.__qa.holdFreeSetupTest = true; });
       const testsBefore = await page.evaluate(() => window.__qa.freeSetupTestWaits);
       await page.locator('#managed-service-detail [data-manager-action="test"]').click();

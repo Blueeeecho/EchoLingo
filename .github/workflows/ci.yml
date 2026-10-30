@@ -530,6 +530,13 @@ jobs:
           node tests/window-resize-edges.mjs
           node tests/windows-management-scroll-container.mjs
           node tests/service-quota-ui.mjs
+      - name: Preserve actual service management UI screenshots
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: EchoLingo-service-management-ui
+          if-no-files-found: warn
+          path: test-results/service-manager-*.png
 
   windows-popup-diagnostics:
     name: Targeted popup diagnostics (verified immutable candidate)
