@@ -1,5 +1,6 @@
 import { invoke } from '@tauri-apps/api/core';
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
+import { nextPopupContentHeight } from './popup-growth';
 
 export interface TranslationPresentation { epoch: number; presented: boolean }
 
@@ -8,6 +9,7 @@ export interface TranslationPresentation { epoch: number; presented: boolean }
 export function installPanelLayout(desktop: boolean, getPresentation: () => TranslationPresentation): { dispose: () => void; presentPopup: (presentationEpoch: number, focusInput?: boolean, reuseVisiblePopup?: boolean) => Promise<TranslationPresentation | null>; presentManagement: (presentationEpoch: number) => Promise<TranslationPresentation | null> } {
   if (!desktop) return { dispose: () => {}, presentPopup: async () => null, presentManagement: async () => null };
   let frame = 0, pending = false, disposed = false, last = '';
+  let committedPopupHeight = 0;
   let inFlight: Promise<void> | null = null;
   let nativeSizingRevision: number | null = null, completedSizingRevision = 0;
   let unlistenSizing: UnlistenFn | null = null;
@@ -21,12 +23,15 @@ export function installPanelLayout(desktop: boolean, getPresentation: () => Tran
     const view = document.querySelector<HTMLElement>('.view:not([hidden])');
     const header = document.querySelector<HTMLElement>(management ? '.management-header' : '.popup-toolbar');
     const padding = main ? getComputedStyle(main) : null;
-    const natural = (header?.getBoundingClientRect().height ?? 0) + (view?.getBoundingClientRect().height ?? 0)
+    const viewHeight = view ? Math.max(view.getBoundingClientRect().height, view.scrollHeight) : 0;
+    const natural = (header?.getBoundingClientRect().height ?? 0) + viewHeight
       + (parseFloat(padding?.paddingTop ?? '0') || 0) + (parseFloat(padding?.paddingBottom ?? '0') || 0);
     const minimum = shell ? parseFloat(getComputedStyle(shell).minHeight) || 0 : 0;
     // Settings/history use the native viewport chosen by the user. Growing
     // form content should scroll, not keep negotiating a different HWND size.
-    const height = management ? window.innerHeight : Math.max(natural, minimum) + 2;
+    const raw = Math.max(natural, minimum) + 2;
+    const height = management ? window.innerHeight : nextPopupContentHeight(raw, committedPopupHeight);
+    if (!management) committedPopupHeight = height;
     return { presentation: management ? 'management' : 'popup', contentHeight: boundedSize(height), contentWidth: boundedSize(window.innerWidth) };
   };
   const drain = (): Promise<void> => {
