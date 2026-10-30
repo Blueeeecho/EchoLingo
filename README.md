@@ -3,15 +3,17 @@
 <h1 align="center">EchoLingo · 回声译</h1>
 <p align="center"><strong>让陌生的语言，有熟悉的回声。</strong></p>
 <p align="center">轻量的桌面选词翻译与无感 OCR 工具，让理解跟上思路。</p>
-<p align="center"><a href="https://blueeeecho.github.io/EchoLingo/">官方网站</a> · <a href="https://github.com/Blueeeecho/EchoLingo/releases/tag/0.1.0-beta.2.2">下载 Beta 2.2</a> · <a href="https://github.com/Blueeeecho/EchoLingo/issues">反馈与建议</a></p>
+<p align="center"><a href="https://blueeeecho.github.io/EchoLingo/">官方网站</a> · <a href="https://github.com/Blueeeecho/EchoLingo/releases/tag/0.2.0">下载 0.2.0 内测版</a> · <a href="https://github.com/Blueeeecho/EchoLingo/issues">反馈与建议</a></p>
 
 ## 下载与安装
 
-**[下载 Windows Beta 2.2（x64）](https://github.com/Blueeeecho/EchoLingo/releases/download/0.1.0-beta.2.2/EchoLingo_0.1.0-beta.2.2_windows_x64-setup.exe)** · **[下载 macOS Beta 2.2（Apple 芯片）](https://github.com/Blueeeecho/EchoLingo/releases/download/0.1.0-beta.2.2/EchoLingo_0.1.0-beta.2.2_macos_arm64.dmg)**
+**[下载 Windows 0.2.0 内测版（x64）](https://github.com/Blueeeecho/EchoLingo/releases/download/0.2.0/EchoLingo_0.2.0_windows_x64-setup.exe)** · **[下载 macOS 0.2.0 内测版（Apple 芯片）](https://github.com/Blueeeecho/EchoLingo/releases/download/0.2.0/EchoLingo_0.2.0_macos_arm64.dmg)**
 
 Windows 适用于 Windows 10 1809+ / Windows 11；macOS 安装包适用于 Apple 芯片 Mac、macOS 12+，Apple 系统翻译需要 macOS 26+。安装后打开回声译，应用会驻留托盘或菜单栏；升级前先完整退出旧版。
 
-[Windows 版本与校验](https://github.com/Blueeeecho/EchoLingo/releases/tag/0.1.0-beta.2.2) · [macOS 版本与校验](https://github.com/Blueeeecho/EchoLingo/releases/tag/0.1.0-beta.2.2) · [macOS 首次安装说明](docs/macos-install.zh-CN.md) · [源码构建](docs/build.md)
+这是内测预发布版本，不是稳定版。Windows 未商业签名；macOS 使用 ad hoc 签名，未经 Apple 公证。系统可能提示风险或要求重新授权，请仅安装来自本仓库发布页且校验值相符的文件。
+
+[0.2.0 版本说明](https://github.com/Blueeeecho/EchoLingo/releases/tag/0.2.0) · [SHA-256 校验值](https://github.com/Blueeeecho/EchoLingo/releases/download/0.2.0/SHA256SUMS.txt) · [发布清单](https://github.com/Blueeeecho/EchoLingo/releases/download/0.2.0/RELEASE-MANIFEST.json) · [macOS 首次安装说明](docs/macos-install.zh-CN.md) · [源码构建](docs/build.md)
 
 ## 两个快捷动作
 

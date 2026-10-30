@@ -3,15 +3,17 @@
 <h1 align="center">EchoLingo · 回声译</h1>
 <p align="center"><strong>A familiar echo for unfamiliar words.</strong></p>
 <p align="center">A lightweight desktop app for selection translation and seamless OCR, so understanding can keep up with your reading.</p>
-<p align="center"><a href="https://blueeeecho.github.io/EchoLingo/">Website</a> · <a href="https://github.com/Blueeeecho/EchoLingo/releases/tag/0.1.0-beta.2.2">Download Beta 2.2</a> · <a href="https://github.com/Blueeeecho/EchoLingo/issues">Feedback</a></p>
+<p align="center"><a href="https://blueeeecho.github.io/EchoLingo/">Website</a> · <a href="https://github.com/Blueeeecho/EchoLingo/releases/tag/0.2.0">Download 0.2.0 internal preview</a> · <a href="https://github.com/Blueeeecho/EchoLingo/issues">Feedback</a></p>
 
 ## Download and install
 
-**[Download Windows Beta 2.2 (x64)](https://github.com/Blueeeecho/EchoLingo/releases/download/0.1.0-beta.2.2/EchoLingo_0.1.0-beta.2.2_windows_x64-setup.exe)** · **[Download macOS Beta 2.2 (Apple silicon)](https://github.com/Blueeeecho/EchoLingo/releases/download/0.1.0-beta.2.2/EchoLingo_0.1.0-beta.2.2_macos_arm64.dmg)**
+**[Download Windows 0.2.0 internal preview (x64)](https://github.com/Blueeeecho/EchoLingo/releases/download/0.2.0/EchoLingo_0.2.0_windows_x64-setup.exe)** · **[Download macOS 0.2.0 internal preview (Apple silicon)](https://github.com/Blueeeecho/EchoLingo/releases/download/0.2.0/EchoLingo_0.2.0_macos_arm64.dmg)**
 
 Windows supports Windows 10 1809+ and Windows 11. The macOS package is for Apple silicon Macs on macOS 12 or later. Apple system translation needs macOS 26 or later. After installation, EchoLingo stays in the tray or menu bar. Quit the previous version completely before you upgrade.
 
-[Windows release and checksums](https://github.com/Blueeeecho/EchoLingo/releases/tag/0.1.0-beta.2.2) · [macOS release and checksums](https://github.com/Blueeeecho/EchoLingo/releases/tag/0.1.0-beta.2.2) · [First-launch notes for macOS](docs/macos-install.zh-CN.md) (Chinese) · [Build from source](docs/build.md) (Chinese)
+This is an internal prerelease, not a stable release. Windows has no commercial code signature; macOS uses ad hoc signing and is not notarized by Apple. Your system may show warnings or request permissions again. Install only files from this repository’s release page with matching checksums.
+
+[0.2.0 release notes](https://github.com/Blueeeecho/EchoLingo/releases/tag/0.2.0) · [SHA-256 checksums](https://github.com/Blueeeecho/EchoLingo/releases/download/0.2.0/SHA256SUMS.txt) · [Release manifest](https://github.com/Blueeeecho/EchoLingo/releases/download/0.2.0/RELEASE-MANIFEST.json) · [First-launch notes for macOS](docs/macos-install.zh-CN.md) (Chinese) · [Build from source](docs/build.md) (Chinese)
 
 ## Two shortcuts
 
