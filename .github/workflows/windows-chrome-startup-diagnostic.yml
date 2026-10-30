@@ -1,0 +1,91 @@
+name: Immutable b111 Chrome startup diagnostic (not release acceptance)
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/windows-chrome-startup-diagnostic.yml'
+      - 'tests/windows-browser-ocr-visibility-smoke.mjs'
+      - 'tests/browser-startup-observation*'
+permissions:
+  contents: read
+  actions: read
+jobs:
+  immutable-chrome-startup:
+    runs-on: windows-latest
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Require unchanged production for immutable binary reuse
+        id: source
+        shell: pwsh
+        run: |
+          git diff --quiet b111056f959164c94fde37f5846ab3407ae647d5 HEAD -- src src-tauri resources assets index.html package.json package-lock.json .cargo
+          if ($LASTEXITCODE -gt 1) { throw 'Cannot verify immutable source comparison.' }
+          $eligible = $LASTEXITCODE -eq 0
+          "eligible=$($eligible.ToString().ToLowerInvariant())" >> $env:GITHUB_OUTPUT
+          $message = if ($eligible) { 'Fixture-only diagnostic of fixed b111 bytes; original run failed 19/21. Not current release acceptance.' } else { 'NOT EXECUTED: production differs from fixed b111 source. No immutable-binary acceptance claimed.' }
+          $message >> $env:GITHUB_STEP_SUMMARY
+          [ordered]@{ eligible=$eligible; tested=$false; source='b111056f959164c94fde37f5846ab3407ae647d5'; fixture='${{ github.sha }}'; scope=$message } | ConvertTo-Json | Set-Content "$env:RUNNER_TEMP/chrome-diagnostic-eligibility.json"
+      - name: Verify fixed failed-run artifact provenance
+        if: steps.source.outputs.eligible == 'true'
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $headers = @{Authorization="Bearer $env:GH_TOKEN";Accept='application/vnd.github+json'}
+          $base='https://api.github.com/repos/Blueeeecho/EchoLingo'
+          $run=Invoke-RestMethod "$base/actions/runs/41087558210" -Headers $headers
+          if ($run.head_sha -ne 'b111056f959164c94fde37f5846ab3407ae647d5' -or $run.run_attempt -ne 1 -or $run.status -ne 'completed' -or $run.conclusion -ne 'failure') { throw 'Immutable run identity/status mismatch.' }
+          $job=Invoke-RestMethod "$base/actions/jobs/124172602997" -Headers $headers
+          $build=@($job.steps | Where-Object { $_.name -eq 'Build desktop installer' -and $_.conclusion -eq 'success' })
+          if ($job.run_id -ne 41087558210 -or $build.Count -ne 1) { throw 'Actual binary build evidence missing.' }
+          $a=Invoke-RestMethod "$base/actions/artifacts/12993023143" -Headers $headers
+          if ($a.id -ne 12993023143 -or $a.name -ne 'EchoLingo-Windows-offline-evidence' -or $a.expired -ne $false -or $a.size_in_bytes -ne 18659340 -or $a.digest -ne 'sha256:a243bc244e607555693d5215cd9b3b0a6e87bb28c1bb95c6a6248bb6be1be40f' -or $a.workflow_run.id -ne 41087558210 -or $a.workflow_run.head_sha -ne $run.head_sha) { throw 'Immutable artifact identity mismatch.' }
+      - uses: actions/download-artifact@v4
+        if: steps.source.outputs.eligible == 'true'
+        with:
+          artifact-ids: '12993023143'
+          run-id: '41087558210'
+          github-token: ${{ github.token }}
+          path: immutable-browser-candidate
+      - name: Verify stage and exact embedded child bytes
+        if: steps.source.outputs.eligible == 'true'
+        id: candidate
+        shell: pwsh
+        run: |
+          $files=@(Get-ChildItem immutable-browser-candidate -Recurse -File -Filter echolingo.exe)
+          if ($files.Count -ne 1 -or $files[0].Length -ne 7512576 -or (Get-FileHash $files[0].FullName -Algorithm SHA256).Hash.ToLowerInvariant() -ne 'fc373c4a07c53270a4da6789be6113835420cfceb5579315edc7e99fb9652632') { throw 'Immutable stage mismatch.' }
+          $bytes=[IO.File]::ReadAllBytes($files[0].FullName);$offset=5432989;$length=381440
+          if ($offset -lt 0 -or $offset+$length -gt $bytes.Length) { throw 'Child extraction exceeds verified stage.' }
+          $child=[byte[]]::new($length);[Array]::Copy($bytes,$offset,$child,0,$length)
+          $hash=[Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($child)).ToLowerInvariant()
+          if ($hash -ne '6b32134f8dff9fa90e891278e0ef3273788e361106b421580eb3a0fbc01f94af') { throw 'Exact embedded native child mismatch.' }
+          $path=Join-Path $env:RUNNER_TEMP 'immutable-b111-native-capture.exe'
+          $stream=[IO.File]::Open($path,[IO.FileMode]::CreateNew);try{$stream.Write($child,0,$child.Length)}finally{$stream.Dispose()}
+          "app=$($files[0].FullName)" >> $env:GITHUB_OUTPUT
+          "native=$path" >> $env:GITHUB_OUTPUT
+      - uses: actions/setup-node@v4
+        if: steps.source.outputs.eligible == 'true'
+        with:
+          node-version: '24'
+          cache: npm
+      - run: npm ci
+        if: steps.source.outputs.eligible == 'true'
+      - run: node --test tests/browser-startup-observation-checks.mjs
+        if: steps.source.outputs.eligible == 'true'
+      - name: One fresh Chrome startup and unchanged native OCR workflow
+        if: steps.source.outputs.eligible == 'true'
+        shell: pwsh
+        run: |
+          & node tests/windows-browser-ocr-visibility-smoke.mjs --browser chrome --application '${{ steps.candidate.outputs.app }}' --expected-application-sha256 fc373c4a07c53270a4da6789be6113835420cfceb5579315edc7e99fb9652632 --expected-application-bytes 7512576 --native-capture '${{ steps.candidate.outputs.native }}' 2>&1 | Tee-Object "$env:RUNNER_TEMP/chrome-startup-diagnostic.log"
+          exit $LASTEXITCODE
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: immutable-b111-chrome-startup-evidence
+          if-no-files-found: error
+          path: |
+            ${{ runner.temp }}/chrome-diagnostic-eligibility.json
+            ${{ runner.temp }}/chrome-startup-diagnostic.log
