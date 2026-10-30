@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { SourceDeliveryInbox } from './source-delivery';
+import { SourceDeliveryInbox, hasCurrentPresentationIntent } from './source-delivery';
 
 const source = (deliveryId: number, presentationEpoch = 1) => ({ deliveryId, presentationEpoch, text: 'generated source' });
 
@@ -43,10 +43,36 @@ describe('native source delivery inbox', () => {
     expect(inbox.offer(source(1), 0)).toBe(false);
   });
 
+  it('deduplicates bounded runtime retransmissions before, during and after processing', () => {
+    const inbox = new SourceDeliveryInbox<ReturnType<typeof source>>();
+    const first = source(10, 4);
+    expect(inbox.offer(first, 0)).toBe(true);
+    expect(inbox.offer(first, 0)).toBe(false); // Before settings/DOM is ready.
+    expect(inbox.take(4, 0, true)?.apply).toBe(true);
+    expect(inbox.offer(first, 0)).toBe(false); // Show/ACK still in flight.
+    expect(inbox.take(4, 0, true)).toBeNull();
+    expect(inbox.offer(source(11, 5), 0)).toBe(true);
+    expect(inbox.offer(first, 0)).toBe(false); // Old retry after newer task.
+    expect(inbox.take(5, 0, true)?.payload.deliveryId).toBe(11);
+  });
+
   it('does not admit malformed or unsafe delivery identities', () => {
     const inbox = new SourceDeliveryInbox<ReturnType<typeof source>>();
     for (const id of [0, -1, 1.5, Number.MAX_SAFE_INTEGER + 1, NaN]) expect(inbox.offer(source(id), 0)).toBe(false);
     expect(inbox.offer(source(1, -1), 0)).toBe(false);
     expect(inbox.peek()).toBeNull();
+  });
+});
+
+describe('runtime delivery retry intent', () => {
+  it('accepts a missed source only after its request boundary was observed', () => {
+    expect(hasCurrentPresentationIntent(4, 4, { epoch: 4, intentRevision: 2 }, 2)).toBe(true);
+    expect(hasCurrentPresentationIntent(4, 3, { epoch: 3, intentRevision: 2 }, 2)).toBe(false);
+    expect(hasCurrentPresentationIntent(4, 4, null, 2)).toBe(false);
+  });
+  it('cannot overwrite later edits, navigation, hides or another request', () => {
+    expect(hasCurrentPresentationIntent(4, 4, { epoch: 4, intentRevision: 2 }, 3)).toBe(false);
+    expect(hasCurrentPresentationIntent(4, 5, { epoch: 5, intentRevision: 2 }, 2)).toBe(false);
+    expect(hasCurrentPresentationIntent(undefined, 4, { epoch: 4, intentRevision: 2 }, 2)).toBe(false);
   });
 });

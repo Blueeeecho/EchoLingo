@@ -145,14 +145,16 @@ public static class WindowsSelectionCompatibilityFixture {
                                 bool noOp=mode==Mode.NoSelectionCopyNoOp;
                                 bool rejected=empty||protectedCase||noOp;
                                 Need(Convert.ToBoolean(reply["ok"])==!rejected,"COPY_COMPAT_UNEXPECTED_RESULT:"+(reply.ContainsKey("error")?reply["error"]:"success"));
-                                if(rejected)Need(Convert.ToString(reply["error"]).StartsWith(protectedCase?"PROTECTED:":"NO_SELECTION:"),"COPY_COMPAT_WRONG_REJECTION");
+                                if(rejected)Need(Convert.ToString(reply["error"]).StartsWith(protectedCase?"PROTECTED:":noOp?"COPY_NO_UPDATE:":"NO_SELECTION:"),"COPY_COMPAT_WRONG_REJECTION");
                                 else Need(Convert.ToString(reply["text"])==(mode==Mode.WholeLineCounterexample?WholeLine:Selected),"COPY_COMPAT_INEXACT_GENERATED_TEXT");
                                 Dictionary<string,object> health=reply.ContainsKey("captureHealth")?reply["captureHealth"] as Dictionary<string,object>:null;
                                 Need(health!=null&&Health(health,"copyStrategy")==1&&Health(health,"selectionQueryCount")==0,"COPY_COMPAT_STRATEGY_OR_DEEP_UIA_QUERY");
                                 Need(Health(health,"copyDispatchInserted")==((empty||protectedCase)?0:4),"COPY_COMPAT_DISPATCH_ACK_COUNT");
                                 if(!empty&&!protectedCase)Need(Health(health,"copyOwnInputObserved")==1,"COPY_COMPAT_OWN_INPUT_NOT_OBSERVED");
                                 if(!rejected)Need(Health(health,"copyClipboardRestored")==1&&Health(health,"copyOwnerOutcome")==1&&Health(health,"copyTerminalReason")==1,"COPY_COMPAT_COMPLETION_METADATA");
-                                if(rejected)Need(Health(health,"copyTerminalReason")==((protectedCase)?2:3),"COPY_COMPAT_REJECTION_METADATA");
+                                if(rejected)Need(Health(health,"copyTerminalReason")==(protectedCase?2:noOp?14:3),"COPY_COMPAT_REJECTION_METADATA");
+                                if(noOp)Need(Health(health,"copyClipboardOutcome")==3&&Health(health,"copyWaitElapsedMilliseconds")>=1200&&Health(health,"copyClipboardRestored")==0,"COPY_COMPAT_UNCHANGED_TIMEOUT_METADATA");
+                                if(!rejected)Need(Health(health,"copyClipboardOutcome")==2&&Health(health,"copyWaitElapsedMilliseconds")<1200,"COPY_COMPAT_COMPLETION_OUTCOME");
                                 if(knownPassword)Need(Health(health,"copyProtectionProbe")==1,"COPY_COMPAT_KNOWN_PASSWORD_NOT_OBSERVED");
                                 source.Invoke((Action)delegate {
                                     Need(source.Copies-copies==(empty||protectedCase?0:1),"COPY_COMPAT_REAL_COPY_COUNT");

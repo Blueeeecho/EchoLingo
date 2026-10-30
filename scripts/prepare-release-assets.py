@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Prepare 0.2.0 public assets from the exact successful CI run, without rebuilding."""
+"""Prepare 0.2.1 public assets from the exact successful CI run, without rebuilding."""
 
 import argparse
 import hashlib
@@ -12,7 +12,7 @@ import zipfile
 
 
 ROOT = Path(__file__).resolve().parent.parent
-VERSION = "0.2.0"
+VERSION = "0.2.1"
 
 
 def check_version(root=ROOT):
@@ -25,7 +25,7 @@ def check_version(root=ROOT):
                 tauri["version"], cargo["package"]["version"]]
     versions.extend(item["version"] for item in cargo_lock["package"] if item["name"] == "echolingo")
     if len(versions) != 6 or any(version != VERSION for version in versions):
-        raise ValueError("All package, Tauri and Cargo versions must be exactly 0.2.0")
+        raise ValueError("All package, Tauri and Cargo versions must be exactly 0.2.1")
 
 
 def one_file(directory, pattern):
@@ -101,7 +101,7 @@ def main():
     args = parser.parse_args()
     check_version()
     if args.check_version:
-        print("All release versions match 0.2.0.")
+        print("All release versions match 0.2.1.")
         return
     if not all((args.artifacts, args.output, args.commit, args.run_url)):
         parser.error("--artifacts, --output, --commit and --run-url are required")

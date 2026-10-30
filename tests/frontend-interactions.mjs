@@ -41,12 +41,14 @@ try {
     Object.assign(fixture, { holdFreeSetupTest: false, freeSetupTestWaits: 0, releaseFreeSetupTest: () => {} });
     Object.assign(fixture, { resizeRequests: [], nativeResizeRequests: [], holdResize: false, releaseResize: () => {} });
     Object.assign(fixture, { pinned: false, nativeVisible: true, popupReveals: 0, nativeHideTransitions: 0 });
+    Object.assign(fixture, { popupStages: [], failPopupShow: false });
     Object.assign(fixture, { holdPopupAck: false, popupAckWaits: 0, releasePopupAck: () => {}, sourceFocusCalls: 0 });
     Object.assign(fixture, { holdPresentationRead: false, presentationReadWaits: 0, releasePresentationRead: () => {} });
     Object.assign(fixture, { historyReads: 0, holdHistory: false, failHistory: false, releaseHistory: () => {} });
     const sourceBoot = new URL(location.href).searchParams.get('sourceDeliveryFixture');
     Object.assign(fixture, { pendingSource: null, sourceAcks: [], sourceAckResults: [], pendingSourceReads: 0, bootSettingsWaits: 0, releaseBootSettings: () => {}, oldSourceAckWaits: 0, newSourceAckWaits: 0, releaseOldSourceAck: () => {}, releaseNewSourceAck: () => {} });
     if (sourceBoot) {
+      fixture.failPopupShow = sourceBoot === 'show-failure';
       const permissionBlocked = sourceBoot === 'accessibility-permission';
       fixture.presentation = { epoch: sourceBoot === 'management' || sourceBoot === 'newtask' ? 2 : 1, presented: false };
       fixture.pendingSource = { deliveryId: sourceBoot === 'newtask' ? 2 : 1, presentationEpoch: fixture.presentation.epoch,
@@ -131,6 +133,7 @@ try {
           if (fixture.holdPresentationRead) { fixture.presentationReadWaits++; await new Promise((resolve) => { fixture.releasePresentationRead = resolve; }); }
           return presentation;
         }
+        if (command === 'record_popup_stage') { fixture.popupStages.push(structuredClone(args)); return; }
         if (command === 'get_pending_settings') return fixture.pendingSettings ?? null;
         if (command === 'get_pending_source') { fixture.pendingSourceReads++; return structuredClone(fixture.pendingSource); }
         if (command === 'ack_source_delivery') {
@@ -204,6 +207,7 @@ try {
         }
         if (command === 'show_popup') {
           fixture.showPopupAttempts.push(structuredClone(args));
+          if (fixture.failPopupShow) throw new Error('WINDOW_SHOW: QA native show failed');
           if (args.presentationEpoch !== fixture.presentation.epoch) throw new Error('CANCELLED: stale popup presentation');
           fixture.permissionAtShow.push({ visible: !document.querySelector('#permission-guidance').hidden, title: document.querySelector('#permission-guidance-title').textContent, layout: structuredClone(fixture.layoutCalls.at(-1)) });
           fixture.showCalls.push(structuredClone(fixture.layoutCalls.at(-1)));
@@ -258,6 +262,93 @@ try {
     assert.equal(await page.evaluate(() => window.__qa.historyReads), 0);
     assert.equal(await page.locator('#history-list > *').count(), 0);
   }
+  // An actual show rejection must not acknowledge visible success or start
+  // translation. A retransmission of that ID is not a second show; a newer
+  // explicit user action can still recover normally.
+  await page.goto(sourceFixtureUrl('show-failure'));
+  await page.waitForFunction(() => window.__qa.popupStages.some(stage => stage.phase === 'presentationFailed') && window.__qa.sourceAcks.length === 1);
+  assert.equal(await page.evaluate(() => window.__qa.translationRequests.length), 0);
+  assert.equal(await page.evaluate(() => window.__qa.popupStages.some(stage => stage.phase === 'presentationComplete')), false);
+  await page.evaluate(() => {
+    const fixture = window.__qa;
+    fixture.emit('source-text', { deliveryId: 1, presentationEpoch: 1, text: 'Generated startup source', mode: 'translate' });
+  });
+  await page.waitForTimeout(60);
+  assert.equal(await page.evaluate(() => window.__qa.showPopupAttempts.length), 1);
+  await page.evaluate(() => {
+    const fixture = window.__qa;
+    fixture.failPopupShow = false;
+    fixture.presentation = { epoch: 2, presented: false };
+    fixture.pendingSource = { deliveryId: 2, presentationEpoch: 2, text: 'Recovered explicit source', mode: 'translate', deliveryRetry: true };
+    fixture.emit('translation-presentation', structuredClone(fixture.presentation));
+    fixture.emit('source-text', structuredClone(fixture.pendingSource));
+  });
+  await page.waitForFunction(() => window.__qa.translationRequests.length === 1 && window.__qa.sourceAcks.length === 2);
+  assert.equal(await page.locator('#source-text').inputValue(), 'Recovered explicit source');
+  assert.equal(await page.evaluate(() => window.__qa.popupStages.some(stage => stage.phase === 'presentationComplete')), true);
+
+  // Real delivery IDs and delayed IPC reproduce the original error-toast race.
+  // Both compatibility hints must be displayed after clearToast/layout/show,
+  // never before, and old payloads/errors cannot overwrite a newer success.
+  for (const prefix of ['COPY_NO_UPDATE', 'SELECTION_UNAVAILABLE']) {
+    await page.goto(process.env.ECHOLINGO_TEST_URL ?? 'http://127.0.0.1:1420/');
+    await page.waitForFunction(() => document.querySelector('#footer-status')?.textContent === '准备就绪');
+    await page.locator('#source-text').fill('Generated editor content before failed selection\n'.repeat(12));
+    await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+    await page.evaluate((prefix) => {
+      const fixture = window.__qa;
+      fixture.holdPresentationRead = true; fixture.holdFit = true;
+      fixture.presentation = { epoch: 1, presented: false };
+      fixture.pendingSource = { deliveryId: 101, presentationEpoch: 1, text: '', mode: 'input', focusInput: true,
+        actionError: `${prefix}: 当前软件未提供可验证的选区，请手动复制后使用剪贴板翻译` };
+      fixture.emit('translation-presentation', structuredClone(fixture.presentation));
+      fixture.emit('source-text', structuredClone(fixture.pendingSource));
+    }, prefix);
+    await page.waitForFunction(() => window.__qa.presentationReadWaits === 1);
+    assert.equal(await page.locator('#toast').isHidden(), true);
+    await page.evaluate(() => { window.__qa.holdPresentationRead = false; window.__qa.releasePresentationRead(); });
+    await page.waitForFunction(() => window.__qa.fitWaits >= 1);
+    assert.equal(await page.locator('#toast').isHidden(), true);
+    await page.evaluate(() => { window.__qa.holdFit = false; window.__qa.releaseFit(); });
+    await page.waitForFunction(() => window.__qa.sourceAcks.includes(101));
+    assert.equal(await page.locator('#toast').isVisible(), true);
+    assert.match(await page.locator('#toast').textContent(), /复制|选区/);
+    assert.equal(await page.evaluate(() => window.__qa.translationRequests.length), 0);
+    await page.evaluate((prefix) => {
+      const fixture = window.__qa;
+      fixture.holdPresentationRead = true;
+      fixture.presentation = { epoch: 3, presented: false };
+      fixture.pendingSource = { deliveryId: 102, presentationEpoch: 3, text: '', mode: 'input', focusInput: true,
+        actionError: `${prefix}: QA old failure must not reappear` };
+      fixture.emit('translation-presentation', structuredClone(fixture.presentation));
+      fixture.emit('source-text', structuredClone(fixture.pendingSource));
+    }, prefix);
+    await page.waitForFunction(() => window.__qa.presentationReadWaits === 2);
+    await page.evaluate(() => {
+      const fixture = window.__qa;
+      fixture.holdPresentationRead = false;
+      fixture.presentation = { epoch: 4, presented: false };
+      fixture.pendingSource = { deliveryId: 103, presentationEpoch: 4, text: 'New successful source', mode: 'translate' };
+      fixture.emit('translation-presentation', structuredClone(fixture.presentation));
+      fixture.emit('source-text', structuredClone(fixture.pendingSource));
+    });
+    await page.waitForFunction(() => window.__qa.sourceAcks.includes(103) && window.__qa.translationRequests.length === 1);
+    await page.evaluate(() => {
+      const fixture = window.__qa;
+      fixture.releasePresentationRead();
+      fixture.emit('action-error', { presentationEpoch: 3, message: 'QA old standalone failure must not reappear' });
+    });
+    await page.waitForFunction(() => window.__qa.sourceAcks.includes(102));
+    assert.equal(await page.locator('#source-text').inputValue(), 'New successful source');
+    assert.equal(await page.locator('#toast').isHidden(), true);
+    // Restoration failure is intentionally global: it concerns the user's
+    // current clipboard even when the operation that caused it is obsolete.
+    await page.evaluate(() => window.__qa.emit('action-error', '原剪贴板恢复失败，当前剪贴板可能仍是刚才复制的选中文字。'));
+    await page.locator('#toast').getByText('原剪贴板恢复失败，当前剪贴板可能仍是刚才复制的选中文字。').waitFor();
+    assert.equal(await page.locator('#source-text').inputValue(), 'New successful source');
+    assert.equal(await page.evaluate(() => window.__qa.translationRequests.length), 1);
+  }
+
   // The startup-pull ACK is still in flight when a newer live delivery arrives.
   // Hold the new ACK too, so the old completion must visibly preserve ID2.
   await page.goto(sourceFixtureUrl('delayed-ack'));
@@ -1641,6 +1732,22 @@ try {
     assert.equal(await page.locator('#toast').isHidden(), true);
   }
   assert.equal(await page.evaluate(() => window.__qa.translationRequests.length), emptyRequestCount);
+  // A sent copy that receives no clipboard update is NOT a confirmed empty
+  // selection. Exercise the actual native event listener and visible toast.
+  await page.evaluate(() => window.__qa.emit('action-error', 'COPY_NO_UPDATE: generated timeout detail'));
+  await page.locator('#toast').getByText('目标应用没有及时更新剪贴板', { exact: false }).waitFor();
+  assert.match(await page.locator('#toast').textContent(), /Ctrl\+C/);
+  assert.doesNotMatch(await page.locator('#toast').textContent(), /generated timeout detail|未选中|管理员/);
+  assert.equal(await page.evaluate(() => window.__qa.translationRequests.length), emptyRequestCount);
+  await page.evaluate(() => window.__qa.emit('source-text', { text: '', mode: 'input' }));
+  assert.equal(await page.locator('#toast').isHidden(), true);
+  await page.evaluate(() => window.__qa.emit('action-error', 'SELECTION_UNAVAILABLE: generated native detail'));
+  await page.locator('#toast').getByText('当前应用未提供可验证的选区', { exact: false }).waitFor();
+  assert.match(await page.locator('#toast').textContent(), /先按 ⌘C.*翻译剪贴板/);
+  assert.doesNotMatch(await page.locator('#toast').textContent(), /generated native detail|权限/);
+  assert.equal(await page.evaluate(() => window.__qa.translationRequests.length), emptyRequestCount);
+  await page.evaluate(() => window.__qa.emit('source-text', { text: '', mode: 'input' }));
+  assert.equal(await page.locator('#toast').isHidden(), true);
   // Real screenshot permission/NO_TEXT/OCR failures remain visible and explain
   // where the user can inspect permissions; translating API errors are separate.
   await page.evaluate(() => window.__qa.emit('action-error', 'PERMISSION: Screen capture is not granted'));

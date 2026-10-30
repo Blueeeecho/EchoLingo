@@ -10,6 +10,7 @@ mod ocr;
 mod ocr_native;
 mod offline_translation;
 mod platform;
+mod popup_health;
 mod service_links;
 mod shortcut_bindings;
 mod shortcut_control;
@@ -68,6 +69,7 @@ struct AppState {
     pending_settings: Mutex<Option<u64>>,
     source_deliveries: Mutex<source_delivery::SourceDeliveries<serde_json::Value>>,
     pending_shortcut_settings: AtomicBool,
+    popup_health: Mutex<popup_health::PopupHealth>,
 }
 
 #[cfg(target_os = "macos")]
@@ -632,11 +634,61 @@ fn get_settings(state: State<AppState>) -> Result<serde_json::Value, String> {
     value["appVersion"] = serde_json::json!(env!("CARGO_PKG_VERSION"));
     let registered = locked(&state.registered_shortcuts)?;
     let failures = locked(&state.shortcut_failures)?;
-    value["shortcutRegistration"] = serde_json::Value::Array(parsed_shortcuts(&settings.shortcuts)?.into_iter().map(|(action, binding)| {
-        let active = registered.iter().any(|actual| actual.id() == binding.id()) && native_binding_active(binding);
-        serde_json::json!({"action":action,"active":active,"combo":settings.shortcuts.pairs().into_iter().find(|(name,_)| *name==action).map(|(_,combo)|combo).unwrap_or(""),"error":shortcut_registration_message(active, failures.get(&action).map(String::as_str))})
-    }).collect());
+    value["shortcutRegistration"] = serde_json::json!(shortcut_registration_snapshot(
+        &settings,
+        &registered,
+        &failures,
+        native_binding_active,
+    )?);
     Ok(value)
+}
+
+// Both Settings and support diagnostics use the current registration snapshot.
+// A recovered or removed binding must not retain its old startup warning.
+fn shortcut_registration_snapshot(
+    settings: &Settings,
+    registered: &[Binding],
+    failures: &std::collections::BTreeMap<String, String>,
+    native_active: impl Fn(Binding) -> bool,
+) -> Result<Vec<serde_json::Value>, String> {
+    Ok(parsed_shortcuts(&settings.shortcuts)?.into_iter().map(|(action, binding)| {
+        let active = registered.iter().any(|actual| actual.id() == binding.id())
+            && native_active(binding);
+        serde_json::json!({
+            "action": action,
+            "active": active,
+            "combo": settings.shortcuts.pairs().into_iter()
+                .find(|(name, _)| *name == action).map(|(_, combo)| combo).unwrap_or(""),
+            "error": shortcut_registration_message(active, failures.get(&action).map(String::as_str)),
+        })
+    }).collect())
+}
+
+fn non_binding_installation_error(error: &str, binding_errors: &str) -> Option<String> {
+    if !binding_errors.is_empty() && error == binding_errors {
+        return None;
+    }
+    Some(
+        error
+            .strip_prefix(&format!("{binding_errors}；"))
+            .unwrap_or(error)
+            .to_owned(),
+    )
+}
+
+fn current_shortcut_warnings(registrations: &[serde_json::Value]) -> Vec<String> {
+    registrations
+        .iter()
+        .filter_map(|item| {
+            let error = item["error"].as_str()?;
+            Some(format!(
+                "{}（{}）：{}",
+                item["action"].as_str().unwrap_or("快捷键"),
+                item["combo"].as_str().unwrap_or(""),
+                error
+            ))
+        })
+        .collect()
 }
 
 // Startup and Settings refresh must never touch Keychain, even for presence
@@ -1119,7 +1171,7 @@ fn friendly_shortcut_error(error: &str) -> String {
         || text.contains("1409")
         || text.contains("占用")
     {
-        return "被其他程序占用。可一键更换，或等对方退出后自动重试。".into();
+        return "系统报告该组合键已被注册。可更换快捷键，或释放占用后等待自动重试。".into();
     }
     if text.contains("监听") {
         return "系统键盘监听没有就绪。请重启应用，或改用其他快捷键。".into();
@@ -1408,6 +1460,9 @@ fn announce_presentation(app: &tauri::AppHandle, presentation: translation_reque
     let _ = app.emit("translation-presentation", presentation);
 }
 fn cancel_active_translation(app: &tauri::AppHandle) -> Option<translation_requests::Presentation> {
+    if let Ok(presentation) = app.state::<AppState>().translation_requests.presentation() {
+        record_popup_health(app, presentation.epoch, "presentationCancelled", None);
+    }
     app.state::<AppState>().native_tasks.cancel();
     let presentation = app
         .state::<AppState>()
@@ -1886,63 +1941,99 @@ fn wake_outside_watcher(app: &tauri::AppHandle) {
         }
     }
 }
-fn show_prepared_popup(
+fn record_popup_health(
+    app: &tauri::AppHandle,
+    epoch: u64,
+    phase: &'static str,
+    visible: Option<bool>,
+) {
+    let state = app.state::<AppState>();
+    if let Ok(mut health) = state.popup_health.lock() {
+        health.record(epoch, phase, now(), visible);
+    };
+}
+
+async fn show_prepared_popup(
     app: &tauri::AppHandle,
     expected_epoch: u64,
     focus_input: bool,
     reuse_visible_popup: bool,
 ) -> Result<translation_requests::Presentation, String> {
-    let presentation = app
-        .state::<AppState>()
-        .translation_requests
-        .resume(Some(expected_epoch))?;
-    announce_presentation(app, presentation);
+    record_popup_health(app, expected_epoch, "showQueued", None);
+    let (reply, result) = tokio::sync::oneshot::channel();
     let handle = app.clone();
     app.run_on_main_thread(move || {
-        // A hide can race the queued native presentation. Do not reopen an
-        // abandoned popup after its epoch has already been invalidated.
-        if handle
-            .state::<AppState>()
-            .translation_requests
-            .presentation()
-            .ok()
-            != Some(presentation)
-            || !handle.state::<window_layout::LayoutState>().is_popup()
-        {
-            return;
-        }
-        if let Some(window) = handle.get_webview_window("main") {
-            if let Err(error) = verify_application_policy(&handle, "beforePopup") {
-                let _ = handle.emit("action-error", error);
-                return;
+        // Resume only after reaching the UI thread. A queued show cannot claim
+        // success or revive a task hidden/superseded while it was waiting.
+        let operation = (|| {
+            let state = handle.state::<AppState>();
+            if state.translation_requests.presentation()?.epoch != expected_epoch
+                || !handle.state::<window_layout::LayoutState>().is_popup()
+            {
+                return Err(translation_requests::CANCELLED.to_owned());
             }
-            // Floating level is independent from pin retention. Reassert it
-            // even when an in-place OCR update needs no ordering/show action.
-            if let Err(error) = platform::ensure_popup_behavior(&window) {
-                let _ = handle.emit("action-error", error);
-                return;
-            }
+            let window = handle.get_webview_window("main").ok_or("窗口不存在")?;
+            record_popup_health(&handle, expected_epoch, "showStarted", None);
+            verify_application_policy(&handle, "beforePopup")?;
+            platform::ensure_popup_behavior(&window)?;
+            let presentation = state.translation_requests.resume(Some(expected_epoch))?;
+            announce_presentation(&handle, presentation);
             if focus_input {
-                let _ = window.show();
-                let _ = window.unminimize();
-                if window.set_focus().is_ok() {
-                    let webview: &tauri::Webview = window.as_ref();
-                    let _ = webview.set_focus();
-                }
+                window.show().map_err(|_| "WINDOW_SHOW: 无法显示翻译窗口")?;
+                window
+                    .unminimize()
+                    .map_err(|_| "WINDOW_SHOW: 无法恢复翻译窗口")?;
+                window
+                    .set_focus()
+                    .map_err(|_| "WINDOW_FOCUS: 无法聚焦翻译窗口")?;
+                let webview: &tauri::Webview = window.as_ref();
+                webview
+                    .set_focus()
+                    .map_err(|_| "WINDOW_FOCUS: 无法聚焦输入框")?;
             } else if popup_needs_native_show(
                 reuse_visible_popup,
                 window.is_visible().unwrap_or(false),
                 handle.state::<window_layout::LayoutState>().is_popup(),
-                handle.state::<AppState>().pinned.load(Ordering::SeqCst),
+                state.pinned.load(Ordering::SeqCst),
             ) {
-                let _ = platform::show_without_activation(&window);
+                platform::show_without_activation(&window)?;
+            }
+            if state.translation_requests.presentation()? != presentation {
+                return Err(translation_requests::CANCELLED.to_owned());
+            }
+            // This observation is separate from API success: window managers
+            // may still defer painting/order changes. Do not report it as proof
+            // of frontmost visibility on the user's current Space.
+            if let Ok(mut health) = state.popup_health.lock() {
+                health.record_related(
+                    expected_epoch,
+                    "showCompleted",
+                    now(),
+                    window.is_visible().ok(),
+                    Some(presentation.epoch),
+                );
             }
             wake_outside_watcher(&handle);
+            Ok(presentation)
+        })();
+        if let Err(error) = &operation {
+            record_popup_health(
+                &handle,
+                expected_epoch,
+                if error.starts_with("CANCELLED:") {
+                    "showCancelled"
+                } else {
+                    "showFailed"
+                },
+                None,
+            );
         }
+        let _ = reply.send(operation);
     })
-    .map_err(|_| "无法显示翻译窗口")?;
-    Ok(presentation)
+    .map_err(|_| "WINDOW_SHOW: 无法安排翻译窗口显示")?;
+    popup_health::await_show(result).await
 }
+
 fn popup_needs_native_show(
     reuse_requested: bool,
     visible: bool,
@@ -1955,6 +2046,26 @@ fn popup_needs_native_show(
 }
 fn empty_input_payload(presentation_epoch: u64) -> serde_json::Value {
     serde_json::json!({"text":"","mode":"input","presentationEpoch":presentation_epoch})
+}
+fn emit_presented_action_error(
+    app: &tauri::AppHandle,
+    presentation: translation_requests::Presentation,
+    message: impl Into<String>,
+) {
+    let _ = app.emit(
+        "action-error",
+        serde_json::json!({ "presentationEpoch": presentation.epoch, "message": message.into() }),
+    );
+}
+
+fn source_with_action_error(
+    mut source: serde_json::Value,
+    error: Option<String>,
+) -> serde_json::Value {
+    if let Some(message) = error {
+        source["actionError"] = serde_json::json!(message);
+    }
+    source
 }
 fn empty_selection_window(app: &tauri::AppHandle, presentation_epoch: u64) {
     emit_source_text(app, empty_selection_payload(presentation_epoch));
@@ -1983,13 +2094,75 @@ fn emit_source_text(app: &tauri::AppHandle, payload: serde_json::Value) {
     })();
     match result {
         Ok(payload) => {
-            let _ = app.emit("source-text", payload);
+            let epoch = payload["presentationEpoch"].as_u64().unwrap_or(0);
+            let id = payload["deliveryId"].as_u64().unwrap_or(0);
+            record_popup_health(app, epoch, "sourcePublished", None);
+            emit_source_attempt(app, payload, epoch);
+            let handle = app.clone();
+            tauri::async_runtime::spawn(async move {
+                // Bounded ACK-driven recovery for a lost runtime event. Reuse
+                // the ID so the inbox cannot translate or focus twice. Stop on
+                // ACK/new task/hide; never poll indefinitely or resurrect text.
+                for delay in [200, 800] {
+                    tokio::time::sleep(Duration::from_millis(delay)).await;
+                    let pending = {
+                        let state = handle.state::<AppState>();
+                        let current = state.translation_requests.presentation().ok();
+                        let queue = state.source_deliveries.lock().ok();
+                        current.and_then(|current| {
+                            queue.and_then(|queue| {
+                                queue
+                                    .retry(id, epoch, current.epoch)
+                                    .map(source_delivery_event)
+                            })
+                        })
+                    };
+                    let Some(mut payload) = pending else {
+                        return;
+                    };
+                    payload["deliveryRetry"] = serde_json::json!(true);
+                    record_popup_health(&handle, epoch, "sourceRetried", None);
+                    emit_source_attempt(&handle, payload, epoch);
+                }
+            });
         }
         Err(error) if error.starts_with("CANCELLED:") => {}
         Err(error) => {
             let _ = app.emit("action-error", error);
         }
     }
+}
+
+fn emit_source_attempt(app: &tauri::AppHandle, payload: serde_json::Value, epoch: u64) {
+    let phase = if app.emit("source-text", payload).is_ok() {
+        "sourceEmitSucceeded"
+    } else {
+        "sourceEmitFailed"
+    };
+    record_popup_health(app, epoch, phase, None);
+}
+
+#[tauri::command]
+fn record_popup_stage(
+    window: tauri::WebviewWindow,
+    presentation_epoch: u64,
+    phase: String,
+) -> Result<(), String> {
+    if window.label() != "main" {
+        return Err("窗口不可用".into());
+    }
+    let phase = popup_health::frontend_phase(&phase).ok_or("未知窗口阶段")?;
+    let app = window.app_handle();
+    if app
+        .state::<AppState>()
+        .translation_requests
+        .presentation()?
+        .epoch
+        == presentation_epoch
+    {
+        record_popup_health(app, presentation_epoch, phase, None);
+    }
+    Ok(())
 }
 
 #[tauri::command]
@@ -2011,11 +2184,24 @@ fn ack_source_delivery(
     window: tauri::WebviewWindow,
     state: State<AppState>,
     delivery_id: u64,
+    presentation_epoch: Option<u64>,
 ) -> Result<bool, String> {
     if window.label() != "main" {
         return Err("捕获结果只能由主窗口确认".into());
     }
-    Ok(locked(&state.source_deliveries)?.acknowledge(delivery_id))
+    let acknowledged = locked(&state.source_deliveries)?.acknowledge(delivery_id);
+    let epoch = presentation_epoch.unwrap_or(state.translation_requests.presentation()?.epoch);
+    record_popup_health(
+        window.app_handle(),
+        epoch,
+        if acknowledged {
+            "sourceAcknowledged"
+        } else {
+            "sourceRetiredBeforeAck"
+        },
+        None,
+    );
+    Ok(acknowledged)
 }
 fn empty_selection_payload(presentation_epoch: u64) -> serde_json::Value {
     let mut payload = empty_input_payload(presentation_epoch);
@@ -2048,8 +2234,13 @@ fn visible_action_error(action: &str, error: &str) -> Option<String> {
         // A shortcut with no obtainable selection is also the user's manual
         // input shortcut. Permission setup belongs in Settings, not a toast on
         // an otherwise empty popup. Preserve a warning only if the clipboard
-        // could not be restored after our copy fallback changed it.
-        return if error.starts_with("CLIPBOARD_RESTORE_FAILED") {
+        // could not be restored after our copy fallback changed it, or a sent
+        // copy received no response (which does not establish an empty selection).
+        return if error.starts_with("COPY_NO_UPDATE:")
+            || error.starts_with("SELECTION_UNAVAILABLE:")
+        {
+            Some(error.to_owned())
+        } else if error.starts_with("CLIPBOARD_RESTORE_FAILED") {
             Some("原剪贴板恢复失败，当前剪贴板可能仍是刚才复制的选中文字。".into())
         } else if error.starts_with("CLIPBOARD_RESTORE_SKIPPED") {
             Some(
@@ -2139,7 +2330,7 @@ fn action_failure_presentation(
     })
 }
 #[tauri::command]
-fn show_popup(
+async fn show_popup(
     app: tauri::AppHandle,
     presentation_epoch: u64,
     focus_input: Option<bool>,
@@ -2151,6 +2342,7 @@ fn show_popup(
         focus_input.unwrap_or(false),
         reuse_visible_popup.unwrap_or(false),
     )
+    .await
 }
 fn start_action(app: tauri::AppHandle, action: String) {
     if action == "input" {
@@ -2217,6 +2409,7 @@ fn start_action(app: tauri::AppHandle, action: String) {
         }
         None => return,
     };
+    record_popup_health(&app, presentation.epoch, "nativeActionPrepared", None);
     tauri::async_runtime::spawn(async move {
         if capture && !keep_popup {
             // Native window work stays on the UI thread, outside the short
@@ -2225,7 +2418,7 @@ fn start_action(app: tauri::AppHandle, action: String) {
             if let Err(error) = hide_native_capture_window(&app, &request, presentation).await {
                 publish_native_result(&app, &request, presentation, keep_popup, || {
                     if let Some(message) = visible_action_error(&action, &error) {
-                        let _ = app.emit("action-error", message);
+                        emit_presented_action_error(&app, presentation, message);
                     }
                 });
                 return;
@@ -2235,7 +2428,7 @@ fn start_action(app: tauri::AppHandle, action: String) {
         if capture {
             if let Err(error) = verify_capture_application_policy(&app).await {
                 publish_native_result(&app, &request, presentation, keep_popup, || {
-                    let _ = app.emit("action-error", error);
+                    emit_presented_action_error(&app, presentation, error);
                 });
                 return;
             }
@@ -2410,25 +2603,40 @@ fn start_action(app: tauri::AppHandle, action: String) {
                     empty_selection_window(&app, presentation.epoch);
                 }
                 Ok(_) => {
+                    let message = "没有识别到文字，请选择更清晰的区域";
                     if !keep_popup {
-                        emit_source_text(&app, empty_input_payload(presentation.epoch));
+                        emit_source_text(
+                            &app,
+                            source_with_action_error(
+                                empty_input_payload(presentation.epoch),
+                                Some(message.to_owned()),
+                            ),
+                        );
+                    } else {
+                        emit_presented_action_error(&app, presentation, message);
                     }
-                    let _ = app.emit("action-error", "没有识别到文字，请选择更清晰的区域");
                 }
                 Err(error) => {
                     if keep_popup && action != "selection" {
                         // Failed/cancelled OCR preserves completed content.
                         // Unavailable selection still opens the quiet editor.
                         if let Some(message) = visible_action_error(&action, &error) {
-                            let _ = app.emit("action-error", if capture { error } else { message });
+                            emit_presented_action_error(
+                                &app,
+                                presentation,
+                                if capture { error } else { message },
+                            );
                         }
                     } else if let Some(failure) =
                         action_failure_presentation(&action, &error, presentation.epoch)
                     {
-                        emit_source_text(&app, failure.source);
-                        if let Some(message) = failure.error {
-                            let _ = app.emit("action-error", message);
-                        }
+                        // Keep the hint with the source delivery: an earlier
+                        // independent toast could be cleared while this source
+                        // waits for presentation/layout IPC acknowledgments.
+                        emit_source_text(
+                            &app,
+                            source_with_action_error(failure.source, failure.error),
+                        );
                     }
                 }
             }
@@ -2633,6 +2841,7 @@ fn outside_click_watcher(app: tauri::AppHandle) {
                             size.width,
                             size.height,
                         ) {
+                            record_popup_health(&handle, current.epoch, "hideOutsideClick", None);
                             cancel_active_translation(&handle);
                             let _ = platform::hide_webview_window(&window);
                         }
@@ -2709,6 +2918,12 @@ fn outside_click_watcher(app: tauri::AppHandle) {
                                 window.is_visible().unwrap_or(false),
                                 state.pinned.load(Ordering::SeqCst),
                             ) {
+                                record_popup_health(
+                                    &handle,
+                                    current.epoch,
+                                    "hideOutsideClick",
+                                    None,
+                                );
                                 cancel_active_translation(&handle);
                                 let _ = platform::hide_webview_window(&window);
                             }
@@ -2764,6 +2979,7 @@ fn windows_popup_focus_changed(app: &tauri::AppHandle, focused: bool) {
         token,
         platform::popup_foreground_is_external(&window),
     ) {
+        record_popup_health(app, current.epoch, "hideExternalFocus", None);
         cancel_active_translation(app);
         let _ = platform::hide_webview_window(&window);
     }
@@ -2840,6 +3056,9 @@ async fn set_pinned(app: tauri::AppHandle, pinned: bool) -> Result<(), String> {
 }
 #[tauri::command]
 fn hide_window(app: tauri::AppHandle) -> Result<(), String> {
+    if let Ok(current) = app.state::<AppState>().translation_requests.presentation() {
+        record_popup_health(&app, current.epoch, "hideRequested", None);
+    }
     cancel_shortcut_recording(&app);
     cancel_active_translation(&app);
     let window = app.get_webview_window("main").ok_or("窗口不存在")?;
@@ -2851,7 +3070,15 @@ async fn diagnostics(
     state: State<'_, AppState>,
     include_native: Option<bool>,
 ) -> Result<serde_json::Value, String> {
-    let warnings = locked(&state.startup_warnings)?.clone();
+    let startup_warnings = locked(&state.startup_warnings)?.clone();
+    let registrations = {
+        let settings = locked(&state.settings)?;
+        let registered = locked(&state.registered_shortcuts)?;
+        let failures = locked(&state.shortcut_failures)?;
+        shortcut_registration_snapshot(&settings, &registered, &failures, native_binding_active)?
+    };
+    let mut warnings = startup_warnings.clone();
+    warnings.extend(current_shortcut_warnings(&registrations));
     let mut value = if include_native.unwrap_or(true) {
         tauri::async_runtime::spawn_blocking(platform::diagnostics)
             .await
@@ -2861,8 +3088,12 @@ async fn diagnostics(
     };
     value["appVersion"] = serde_json::json!(env!("CARGO_PKG_VERSION"));
     value["warnings"] = serde_json::json!(warnings);
+    value["startupWarnings"] = serde_json::json!(startup_warnings);
+    value["shortcutRegistration"] = serde_json::json!(registrations);
     value["dataDirectory"] = serde_json::json!(state.data_dir.display().to_string());
     value["ocrUpload"] = serde_json::json!(false);
+    value["popupDelivery"] =
+        serde_json::to_value(&*locked(&state.popup_health)?).map_err(|_| "无法读取浮窗诊断")?;
     value["processId"] = serde_json::json!(std::process::id());
     #[cfg(target_os = "windows")]
     {
@@ -3119,6 +3350,7 @@ fn main() {
                 pending_settings: Mutex::new(None),
                 source_deliveries: Mutex::new(source_delivery::SourceDeliveries::default()),
                 pending_shortcut_settings: AtomicBool::new(false),
+                popup_health: Mutex::new(popup_health::PopupHealth::default()),
             });
             app.manage(window_layout::LayoutState::new(layout_data_dir));
             // The first registered OCR shortcut must already have its native
@@ -3145,11 +3377,18 @@ fn main() {
                     .push(error);
             }
             if let Err(e) = install_shortcuts(app.handle(), &settings.shortcuts) {
-                app.state::<AppState>()
-                    .startup_warnings
-                    .lock()
-                    .unwrap()
-                    .push(e);
+                // Binding failures already live in shortcut_failures, which is
+                // updated by retries and settings saves. Only non-binding
+                // installation failures belong in the historical startup list.
+                let state = app.state::<AppState>();
+                let binding_errors = locked(&state.shortcut_failures)?
+                    .values()
+                    .cloned()
+                    .collect::<Vec<_>>()
+                    .join("；");
+                if let Some(error) = non_binding_installation_error(&e, &binding_errors) {
+                    locked(&state.startup_warnings)?.push(error);
+                }
             }
             schedule_shortcut_retries(app.handle().clone());
             tray(app.handle())?;
@@ -3189,6 +3428,9 @@ fn main() {
             fit_window_with_visibility,
             window_layout::wait_for_window_sizing,
             window_layout::start_window_drag,
+            window_layout::begin_popup_drag,
+            window_layout::move_popup_drag,
+            window_layout::end_popup_drag,
             window_layout::start_window_resize,
             window_layout::resize_popup_width,
             window_layout::resize_management_window,
@@ -3197,6 +3439,7 @@ fn main() {
             get_pending_settings,
             get_pending_source,
             ack_source_delivery,
+            record_popup_stage,
             get_settings,
             save_settings,
             set_shortcut_recording,
@@ -3837,6 +4080,23 @@ mod tests {
     }
 
     #[test]
+    fn action_hint_is_bound_to_its_source_identity_not_an_independent_event() {
+        let source = empty_selection_payload(42);
+        let plain = source_with_action_error(source.clone(), None);
+        assert_eq!(plain, source);
+        let hinted = source_with_action_error(
+            source,
+            Some("COPY_NO_UPDATE: copied text unavailable".into()),
+        );
+        assert_eq!(hinted["presentationEpoch"], 42);
+        assert_eq!(hinted["focusInput"], true);
+        assert_eq!(
+            hinted["actionError"],
+            "COPY_NO_UPDATE: copied text unavailable"
+        );
+    }
+
+    #[test]
     fn ordinary_shortcuts_raise_even_visible_popups_and_only_pinned_ocr_can_reuse() {
         for pinned in [false, true] {
             for visible in [false, true] {
@@ -3996,6 +4256,7 @@ mod tests {
             pending_settings: Mutex::new(None),
             source_deliveries: Mutex::new(source_delivery::SourceDeliveries::default()),
             pending_shortcut_settings: AtomicBool::new(false),
+            popup_health: Mutex::new(popup_health::PopupHealth::default()),
         };
         let result = vec![
             TranslationResult {
@@ -4057,7 +4318,7 @@ mod tests {
     fn shortcut_failures_explain_conflicts_and_only_permanent_errors_skip_retry() {
         assert_eq!(
             friendly_shortcut_error("selection（Alt+D）：系统注册失败：AlreadyRegistered"),
-            "被其他程序占用。可一键更换，或等对方退出后自动重试。"
+            "系统报告该组合键已被注册。可更换快捷键，或释放占用后等待自动重试。"
         );
         assert!(
             friendly_shortcut_error("Windows 为调试器保留 F12，请选择其他按键").contains("保留")
@@ -4080,6 +4341,62 @@ mod tests {
             .iter()
             .any(|action| action == "silentOcr"));
     }
+    #[test]
+    fn shortcut_startup_history_keeps_routing_errors_without_stale_binding_failures() {
+        assert_eq!(
+            non_binding_installation_error("binding failed", "binding failed"),
+            None
+        );
+        assert_eq!(
+            non_binding_installation_error("binding failed；routing failed", "binding failed"),
+            Some("routing failed".into())
+        );
+        assert_eq!(
+            non_binding_installation_error("parse failed", ""),
+            Some("parse failed".into())
+        );
+    }
+
+    #[test]
+    fn shortcut_diagnostics_clear_recovered_and_removed_startup_failures() {
+        let mut settings = Settings::default();
+        let bindings = parsed_shortcuts(&settings.shortcuts).unwrap();
+        let registered: Vec<_> = bindings.iter().map(|(_, binding)| *binding).collect();
+        let mut failures = std::collections::BTreeMap::new();
+        failures.insert("input".into(), "HotKey already registered".into());
+        let failed = shortcut_registration_snapshot(&settings, &[], &failures, |_| true).unwrap();
+        assert!(current_shortcut_warnings(&failed)
+            .iter()
+            .any(|warning| warning.starts_with("input（Alt+A）") && warning.contains("已被注册")));
+        // Recovery must override even a stale stored message.
+        let recovered =
+            shortcut_registration_snapshot(&settings, &registered, &failures, |_| true).unwrap();
+        assert!(current_shortcut_warnings(&recovered).is_empty());
+        assert!(recovered
+            .iter()
+            .all(|item| item["active"] == true && item["error"].is_null()));
+        settings.shortcuts.input.clear();
+        let removed = shortcut_registration_snapshot(&settings, &[], &failures, |_| true).unwrap();
+        assert!(removed.iter().all(|item| item["action"] != "input"));
+        assert!(!current_shortcut_warnings(&removed)
+            .iter()
+            .any(|warning| warning.contains("Alt+A")));
+    }
+
+    #[test]
+    fn shortcut_diagnostics_distinguish_registered_id_from_live_native_hook() {
+        let settings = Settings::default();
+        let bindings = parsed_shortcuts(&settings.shortcuts).unwrap();
+        let registered: Vec<_> = bindings.iter().map(|(_, binding)| *binding).collect();
+        let failures = std::collections::BTreeMap::new();
+        let inactive =
+            shortcut_registration_snapshot(&settings, &registered, &failures, |_| false).unwrap();
+        assert_eq!(current_shortcut_warnings(&inactive).len(), registered.len());
+        assert!(inactive
+            .iter()
+            .all(|item| item["active"] == false && item["error"].is_string()));
+    }
+
     #[test]
     fn tiny_or_timed_out_region_capture_tells_the_user_how_to_drag() {
         assert_eq!(
@@ -4109,6 +4426,30 @@ mod tests {
         .unwrap();
         assert_eq!(hint.source["mode"], "input");
         assert!(hint.error.unwrap().contains("拖选"));
+    }
+    #[test]
+    fn copy_without_clipboard_update_remains_actionable_through_selection_presentation() {
+        let error = "COPY_NO_UPDATE: The target did not update the clipboard";
+        assert_eq!(visible_action_error("selection", error), Some(error.into()));
+        let failure = action_failure_presentation("selection", error, 44).unwrap();
+        assert_eq!(failure.source, empty_selection_payload(44));
+        assert_eq!(failure.error.as_deref(), Some(error));
+        assert_eq!(
+            finish_native_text::<String>(Err(error.into()), false),
+            Err(error.into())
+        );
+        assert_eq!(
+            finish_native_text::<String>(Err(error.into()), true),
+            Err(translation_requests::CANCELLED.into())
+        );
+    }
+    #[test]
+    fn unverifiable_selection_retains_manual_copy_guidance_without_permission_claim() {
+        let error = "SELECTION_UNAVAILABLE: Native provider did not expose selection evidence";
+        let failure = action_failure_presentation("selection", error, 45).unwrap();
+        assert_eq!(failure.source, empty_selection_payload(45));
+        assert_eq!(failure.error.as_deref(), Some(error));
+        assert!(failure.source.get("permissionRequired").is_none());
     }
     #[test]
     fn empty_selection_is_quiet_but_other_actions_keep_actionable_errors() {

@@ -1,7 +1,7 @@
-# 0.2.0 uses the full normal CI jobs plus the existing release priority-input gate.
+# 0.2.1 uses the full normal CI jobs plus the existing release priority-input gate.
 # Keep diagnostic-only token permissions out of this reusable publication gate.
 # Build/test steps mirror ci.yml; no production binaries are rebuilt afterward.
-name: Validate 0.2.0 release installers
+name: Validate 0.2.1 release installers
 on:
   workflow_call:
 permissions:

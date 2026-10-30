@@ -31,6 +31,8 @@ export function errorMessage(error: unknown): string {
   return '操作失败，请稍后重试。';
 }
 export function userFacingError(error: unknown): string {
+  if (/^SELECTION_UNAVAILABLE:/i.test(errorMessage(error).trim())) return '当前应用未提供可验证的选区。请先按 ⌘C，再使用菜单栏的“翻译剪贴板”或浮窗更多里的“剪贴板翻译”；也可使用截图识别。';
+  if (/^COPY_NO_UPDATE:/i.test(errorMessage(error).trim())) return '已发送复制快捷键，但目标应用没有及时更新剪贴板。请在原应用选中文字后手动按 Ctrl+C 验证，或使用截图识别。';
   return errorMessage(error).replace(/^(?:SYSTEM_TRANSLATION_[A-Z_]+|NATIVE_[A-Z_]+|CAPTURE(?:_[A-Z_]+)?):\s*/, '');
 }
 export function isLocalProvider(kind: string): boolean { return kind === 'system' || kind === 'offline'; }

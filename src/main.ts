@@ -5,7 +5,7 @@ import { installPanelLayout } from './panel-layout';
 import type { TranslationPresentation } from './panel-layout';
 import { normalizeCapturedText, normalizeOcrCapturedText } from './text-normalization';
 import { createShortcutEditor, type NativeRecordedShortcut } from './shortcut-editor';
-import { SourceDeliveryInbox, type SourceDeliveryIdentity } from './source-delivery';
+import { SourceDeliveryInbox, hasCurrentPresentationIntent, type SourceDeliveryIdentity } from './source-delivery';
 import { HistoryCache } from './history-cache';
 import { mergeProviderRetry, sameTranslationSnapshot, type TranslationSnapshot } from './translation-retry';
 import { credentialScope } from './credential-scope';
@@ -329,8 +329,8 @@ function clearOriginalCapture(): void {
   originalCapture = null;
   $('#restore-original-breaks').hidden = true;
 }
-async function acknowledgeSource(id: number): Promise<void> {
-  await invoke('ack_source_delivery', { deliveryId: id });
+async function acknowledgeSource(id: number, presentationEpoch?: number): Promise<void> {
+  await invoke('ack_source_delivery', { deliveryId: id, presentationEpoch });
 }
 async function flushSourceDeliveries(): Promise<void> {
   let item = sourceDeliveryInbox.peek();
@@ -344,7 +344,7 @@ async function flushSourceDeliveries(): Promise<void> {
     if (!sourceDeliveryInbox.isLatest(id)) return;
     if (item.intentRevision !== focusIntentRevision || current.epoch !== item.payload.presentationEpoch) {
       sourceDeliveryInbox.discard(id);
-      await acknowledgeSource(id);
+      await acknowledgeSource(id, item.payload.presentationEpoch);
       return;
     }
     applyTranslationPresentation(current, item.intentRevision);
@@ -361,12 +361,21 @@ async function flushSourceDeliveries(): Promise<void> {
     await receiveCapturedText(payload);
   } finally {
     // A delayed ACK can only clear this ID, never a newer task's pending text.
-    await acknowledgeSource(payload.deliveryId);
+    await acknowledgeSource(payload.deliveryId, payload.presentationEpoch);
   }
 }
+function recordPopupStage(epoch: number, phase: 'sourceReceived' | 'sourceRetryDiscarded' | 'domPrepared' | 'presentationComplete' | 'presentationFailed'): void {
+  if (desktop) void invoke('record_popup_stage', { presentationEpoch: epoch, phase }).catch(() => {});
+}
 async function receiveNativeSource(payload: SourceTextEvent, replay = false): Promise<void> {
+  recordPopupStage(payload.presentationEpoch ?? translationPresentation.epoch, 'sourceReceived');
   // Browser previews and older synthetic fixtures have no transport identity.
   if (payload.deliveryId === undefined) { await receiveCapturedText(payload); return; }
+  if (payload.deliveryRetry && settingsReady && !hasCurrentPresentationIntent(payload.presentationEpoch, translationPresentation.epoch, sourceDeliveryIntent, focusIntentRevision)) {
+    recordPopupStage(translationPresentation.epoch, 'sourceRetryDiscarded');
+    await acknowledgeSource(payload.deliveryId, payload.presentationEpoch);
+    return;
+  }
   const intent = !settingsReady || replay ? startupSourceIntentRevision
     : sourceDeliveryIntent !== null && sourceDeliveryIntent.epoch === payload.presentationEpoch ? sourceDeliveryIntent.intentRevision : focusIntentRevision;
   sourceDeliveryInbox.offer(payload as NativeSourceDelivery, intent);
@@ -403,9 +412,10 @@ async function receiveCapturedText(payload: SourceTextEvent): Promise<void> {
   let presentedEpoch = presentationEpoch;
   endSourceInputSession();
   const inputSession = payload.focusInput ? beginSourceInputSession() : 0;
+  recordPopupStage(presentationEpoch, 'domPrepared');
   try {
     const presentation = await panelLayout.presentPopup(presentationEpoch, Boolean(payload.focusInput), Boolean(payload.reuseVisiblePopup ?? payload.updateVisiblePopup));
-    if (presentation) { applyTranslationPresentation(presentation); presentedEpoch = presentation.epoch; }
+    if (presentation) { applyTranslationPresentation(presentation); presentedEpoch = presentation.epoch; recordPopupStage(presentedEpoch, 'presentationComplete'); }
     else if (desktop) {
       if (inputSession) endSourceInputSession(inputSession);
       return;
@@ -413,6 +423,7 @@ async function receiveCapturedText(payload: SourceTextEvent): Promise<void> {
   } catch (error) {
     if (inputSession) endSourceInputSession(inputSession);
     if (errorMessage(error).startsWith('CANCELLED:')) return;
+    recordPopupStage(translationPresentation.epoch, 'presentationFailed');
     throw error;
   }
   // A valid native show acknowledgment can arrive after a newer selection has
@@ -423,6 +434,9 @@ async function receiveCapturedText(payload: SourceTextEvent): Promise<void> {
     if (inputSession) endSourceInputSession(inputSession);
     return;
   }
+  // Source-bound failure guidance must follow successful presentation and the
+  // same generation/intent guard above, never a separate racing toast event.
+  if (payload.actionError) handleActionError(payload.actionError);
   if (payload.mode === 'translate') { if (settingsReady) run(translate); else pendingTranslate = true; }
   else if (payload.mode === 'ocr') {
     status('文字识别完成');
@@ -1406,7 +1420,20 @@ async function refreshPermissionStatus(): Promise<void> {
   catch (error) { $('#permission-error').textContent = errorMessage(error); $('#permission-error').hidden = false; }
   finally { setPermissionBusy(false); }
 }
+interface PresentedActionError { presentationEpoch: number; message: string }
+function receiveActionError(payload: string | PresentedActionError): void {
+  if (typeof payload === 'string') { handleActionError(payload); return; }
+  if (!payload || typeof payload.message !== 'string'
+    || !hasCurrentPresentationIntent(payload.presentationEpoch, translationPresentation.epoch, sourceDeliveryIntent, focusIntentRevision)) return;
+  handleActionError(payload.message);
+}
 function handleActionError(message: string): void {
+  // A copy with no clipboard update is not evidence of an empty selection.
+  // Surface the actionable failure, without suggesting a different cloud service.
+  if (/^(?:COPY_NO_UPDATE|SELECTION_UNAVAILABLE):/i.test(message.trim())) {
+    toast(userFacingError(message), 'error', 8000);
+    return;
+  }
   // Selection/cancellation compatibility only. Screenshot permission, NO_TEXT,
   // OCR service failures and translation failures remain actionable errors.
   if (/^(?:NO_SELECTION|SELECTION_EMPTY|CANCELLED):/i.test(message.trim()) || /^未取得选区/.test(message.trim())) return;
@@ -1704,7 +1731,7 @@ async function initialize(): Promise<void> {
     cleanupListeners.push(await listen<NativeSettingsRequest>('open-settings', (event) => run(() => openSettingsFromNative(event.payload))));
     cleanupListeners.push(await listen<TranslationPresentation>('translation-presentation', (event) => applyTranslationPresentation(event.payload)));
     cleanupListeners.push(await listen<TranslationProgress>('translation-progress', (event) => receiveTranslationProgress(event.payload)));
-    cleanupListeners.push(await listen<string>('action-error', (event) => handleActionError(event.payload)));
+    cleanupListeners.push(await listen<string | PresentedActionError>('action-error', (event) => receiveActionError(event.payload)));
     cleanupListeners.push(await listen<string>('shortcut-error', (event) => toast(event.payload, 'error', 8000)));
     cleanupListeners.push(await listen('shortcut-registration-changed', () => run(async () => {
       settings = await invoke<Settings>('get_settings');
