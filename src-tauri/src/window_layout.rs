@@ -533,12 +533,14 @@ mod native_resize {
                 // pointer to POINTS (Tao 0.37.2's Windows resize path). Dispatch
                 // synchronously on the owning UI thread so no stale queued down
                 // can start a resize after release or a new presentation.
+                let filter = ResizeFilter::install(hwnd);
                 unsafe {
                     if GetAsyncKeyState(1) >= 0 {
                         return Err(crate::translation_requests::CANCELLED.into());
                     }
                     SendMessageW(hwnd, 0x00a1, hit, parameter);
                 }
+                drop(filter);
                 // The OS modal sizing loop consumes release. Mirror the host's
                 // release cleanup, but never synthesize up during a newer press.
                 let same_presentation = window
@@ -573,6 +575,297 @@ mod native_resize {
         })
         .map_err(|_| "无法开始调整窗口大小")?;
         result.await.map_err(|_| "窗口调整已中断".to_string())?
+    }
+
+    #[derive(Clone, Copy)]
+    struct FilterContext {
+        window: Handle,
+        marker: u32,
+    }
+    thread_local! {
+        static RESIZE_FILTER: std::cell::Cell<FilterContext> = const { std::cell::Cell::new(FilterContext { window: std::ptr::null_mut(), marker: 0 }) };
+    }
+    #[repr(C)]
+    struct FilterMessage {
+        window: Handle,
+        message: u32,
+        word: usize,
+        parameter: isize,
+        time: u32,
+        point: Point,
+        private: u32,
+    }
+    type FilterCallback = unsafe extern "system" fn(i32, usize, isize) -> isize;
+    #[link(name = "user32")]
+    unsafe extern "system" {
+        fn RegisterWindowMessageW(name: *const u16) -> u32;
+        fn SetWindowsHookExW(
+            kind: i32,
+            callback: Option<FilterCallback>,
+            module: Handle,
+            thread: u32,
+        ) -> Handle;
+        fn UnhookWindowsHookEx(hook: Handle) -> i32;
+        fn CallNextHookEx(hook: Handle, code: i32, word: usize, parameter: isize) -> isize;
+    }
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        fn GetCurrentThreadId() -> u32;
+    }
+    struct ResizeFilter {
+        hook: Handle,
+        window: Handle,
+    }
+    impl ResizeFilter {
+        fn install(window: Handle) -> Option<Self> {
+            // Opt-in fixture observation only. No global hook, no user runtime
+            // dependency, and failure must not change normal sizing behavior.
+            if std::env::var_os("ECHOLINGO_NATIVE_RESIZE_PROBE").as_deref()
+                != Some(std::ffi::OsStr::new("1"))
+                || RESIZE_FILTER.with(|value| !value.get().window.is_null())
+            {
+                return None;
+            }
+            let name: Vec<u16> = "EchoLingo.Resize.Readiness.v1"
+                .encode_utf16()
+                .chain(Some(0))
+                .collect();
+            let marker = unsafe { RegisterWindowMessageW(name.as_ptr()) };
+            if marker == 0 {
+                return None;
+            }
+            RESIZE_FILTER.with(|value| value.set(FilterContext { window, marker }));
+            let hook = unsafe {
+                SetWindowsHookExW(
+                    -1,
+                    Some(resize_filter),
+                    std::ptr::null_mut(),
+                    GetCurrentThreadId(),
+                )
+            };
+            if hook.is_null() {
+                RESIZE_FILTER.with(|value| {
+                    value.set(FilterContext {
+                        window: std::ptr::null_mut(),
+                        marker: 0,
+                    })
+                });
+                return None;
+            }
+            Some(Self { hook, window })
+        }
+    }
+    impl Drop for ResizeFilter {
+        fn drop(&mut self) {
+            RESIZE_FILTER.with(|value| {
+                value.set(FilterContext {
+                    window: std::ptr::null_mut(),
+                    marker: 0,
+                })
+            });
+            let removed = unsafe { UnhookWindowsHookEx(self.hook) } != 0;
+            diagnostic_write(
+                self.window,
+                false,
+                &[("filterRemoved", isize::from(removed))],
+            );
+        }
+    }
+    unsafe extern "system" fn resize_filter(code: i32, word: usize, parameter: isize) -> isize {
+        // MSGF_SIZE is a system-defined modal-sizing filter context. Unlike a
+        // WindowProc marker, this acknowledgement requires that context itself
+        // to consume the message. Never modify or suppress any message.
+        let next = unsafe { CallNextHookEx(std::ptr::null_mut(), code, word, parameter) };
+        if next == 0 && code == 4 && parameter != 0 {
+            let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let context = RESIZE_FILTER.with(|value| value.get());
+                let message = unsafe { &*(parameter as *const FilterMessage) };
+                if context.window.is_null() || message.window != context.window {
+                    return;
+                }
+                let revision = diagnostic_get(context.window, "revision");
+                if message.message == context.marker
+                    && message.word > 0
+                    && message.word <= i32::MAX as usize
+                    && message.parameter == revision
+                    && revision > 0
+                    && unsafe { GetAsyncKeyState(1) } < 0
+                {
+                    diagnostic_write(
+                        context.window,
+                        false,
+                        &[
+                            ("barrierNonce", message.word as isize),
+                            ("barrierRevision", revision),
+                        ],
+                    );
+                } else if message.message == 0x0200 {
+                    diagnostic_write(
+                        context.window,
+                        false,
+                        &[
+                            (
+                                "filterMoves",
+                                diagnostic_get(context.window, "filterMoves") + 1,
+                            ),
+                            ("filterMoveX", message.point.x as isize),
+                            ("filterMoveY", message.point.y as isize),
+                        ],
+                    );
+                }
+            }));
+        }
+        next
+    }
+
+    // Bounded numeric diagnostics on this app's own HWND only. They never
+    // influence sizing, read user content, or retain message-owned pointers.
+    const DIAGNOSTIC_KEYS: &[&str] = &[
+        "version",
+        "revision",
+        "sizingCount",
+        "edge",
+        "enterX",
+        "enterY",
+        "messageX",
+        "messageY",
+        "captureAtEnter",
+        "enterTick",
+        "exitTick",
+        "requestedLeft",
+        "requestedTop",
+        "requestedRight",
+        "requestedBottom",
+        "returnedLeft",
+        "returnedTop",
+        "returnedRight",
+        "returnedBottom",
+        "filterInstalled",
+        "filterRemoved",
+        "barrierNonce",
+        "barrierRevision",
+        "filterMoves",
+        "filterMoveX",
+        "filterMoveY",
+    ];
+    #[repr(C)]
+    #[derive(Clone, Copy)]
+    struct DiagnosticRect {
+        left: i32,
+        top: i32,
+        right: i32,
+        bottom: i32,
+    }
+    #[link(name = "user32")]
+    unsafe extern "system" {
+        fn SetPropW(window: Handle, name: *const u16, value: Handle) -> i32;
+        fn GetPropW(window: Handle, name: *const u16) -> Handle;
+        fn RemovePropW(window: Handle, name: *const u16) -> Handle;
+        fn GetMessagePos() -> u32;
+        fn GetCapture() -> Handle;
+    }
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        fn GetTickCount64() -> u64;
+    }
+    fn diagnostic_key(name: &str) -> Vec<u16> {
+        format!("EchoLingo.Resize.{name}")
+            .encode_utf16()
+            .chain(Some(0))
+            .collect()
+    }
+    fn diagnostic_get(window: Handle, name: &str) -> isize {
+        unsafe { GetPropW(window, diagnostic_key(name).as_ptr()) as isize }
+    }
+    fn diagnostic_set(window: Handle, name: &str, value: isize) -> bool {
+        unsafe { SetPropW(window, diagnostic_key(name).as_ptr(), value as Handle) != 0 }
+    }
+    fn diagnostic_write(window: Handle, reset: bool, values: &[(&str, isize)]) {
+        let previous = diagnostic_get(window, "version");
+        // Only a full new ENTER snapshot can recover a failed partial write.
+        if !reset && (previous == 0 || previous & 1 != 0) {
+            return;
+        }
+        let version = previous.saturating_add(2) & !1;
+        if !diagnostic_set(window, "version", version - 1) {
+            return;
+        }
+        let mut complete = true;
+        for (name, value) in values {
+            complete &= diagnostic_set(window, name, *value);
+        }
+        // A failed partial write remains odd: readers must reject that snapshot.
+        if complete {
+            diagnostic_set(window, "version", version);
+        }
+    }
+    fn diagnostic_enter(window: Handle) {
+        let mut point = Point { x: 0, y: 0 };
+        if unsafe { GetCursorPos(&mut point) } == 0 {
+            diagnostic_set(window, "version", 0);
+            return;
+        }
+        let position = unsafe { GetMessagePos() };
+        diagnostic_write(
+            window,
+            true,
+            &[
+                ("revision", diagnostic_get(window, "revision") + 1),
+                ("sizingCount", 0),
+                (
+                    "filterInstalled",
+                    isize::from(RESIZE_FILTER.with(|value| value.get().window == window)),
+                ),
+                ("filterRemoved", 0),
+                ("barrierNonce", 0),
+                ("barrierRevision", 0),
+                ("filterMoves", 0),
+                ("filterMoveX", 0),
+                ("filterMoveY", 0),
+                ("edge", 0),
+                ("enterX", point.x as isize),
+                ("enterY", point.y as isize),
+                ("messageX", position as u16 as i16 as isize),
+                ("messageY", (position >> 16) as u16 as i16 as isize),
+                (
+                    "captureAtEnter",
+                    isize::from(unsafe { GetCapture() } == window),
+                ),
+                ("enterTick", unsafe { GetTickCount64() } as isize),
+                ("exitTick", 0),
+                ("requestedLeft", 0),
+                ("requestedTop", 0),
+                ("requestedRight", 0),
+                ("requestedBottom", 0),
+                ("returnedLeft", 0),
+                ("returnedTop", 0),
+                ("returnedRight", 0),
+                ("returnedBottom", 0),
+            ],
+        );
+    }
+    fn diagnostic_sizing(
+        window: Handle,
+        edge: usize,
+        requested: DiagnosticRect,
+        returned: DiagnosticRect,
+    ) {
+        diagnostic_write(
+            window,
+            false,
+            &[
+                ("sizingCount", diagnostic_get(window, "sizingCount") + 1),
+                ("edge", edge as isize),
+                ("requestedLeft", requested.left as isize),
+                ("requestedTop", requested.top as isize),
+                ("requestedRight", requested.right as isize),
+                ("requestedBottom", requested.bottom as isize),
+                ("returnedLeft", returned.left as isize),
+                ("returnedTop", returned.top as isize),
+                ("returnedRight", returned.right as isize),
+                ("returnedBottom", returned.bottom as isize),
+            ],
+        );
     }
 
     #[derive(Clone, Serialize)]
@@ -629,12 +922,18 @@ mod native_resize {
             return unsafe { DefSubclassProc(window, message, word, parameter) };
         }
         let app = unsafe { &*(data as *const tauri::AppHandle) };
+        let requested = if message == 0x0214 && parameter != 0 {
+            Some(unsafe { *(parameter as *const DiagnosticRect) })
+        } else {
+            None
+        };
         // Keep a panic from crossing the Win32 ABI. The observer never consumes
         // the native message or performs painting, focus or geometry changes.
         let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             let state = app.state::<LayoutState>();
             if message == 0x0231 {
                 // WM_ENTERSIZEMOVE
+                diagnostic_enter(window);
                 if let Ok(presentation) = app
                     .state::<crate::AppState>()
                     .translation_requests
@@ -669,6 +968,11 @@ mod native_resize {
                 }
             } else if message == 0x0232 {
                 // WM_EXITSIZEMOVE
+                diagnostic_write(
+                    window,
+                    false,
+                    &[("exitTick", unsafe { GetTickCount64() } as isize)],
+                );
                 let token = state
                     .native_sizing
                     .lock()
@@ -693,6 +997,9 @@ mod native_resize {
                 };
             }));
             unsafe {
+                for key in DIAGNOSTIC_KEYS {
+                    RemovePropW(window, diagnostic_key(key).as_ptr());
+                }
                 RemoveWindowSubclass(window, Some(callback), ID);
             }
             let result = unsafe { DefSubclassProc(window, message, word, parameter) };
@@ -701,7 +1008,14 @@ mod native_resize {
             }
             return result;
         }
-        unsafe { DefSubclassProc(window, message, word, parameter) }
+        let result = unsafe { DefSubclassProc(window, message, word, parameter) };
+        if let Some(requested) = requested {
+            let returned = unsafe { *(parameter as *const DiagnosticRect) };
+            let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                diagnostic_sizing(window, word, requested, returned);
+            }));
+        }
+        result
     }
 
     fn finish(app: &tauri::AppHandle, token: SizingToken) {
