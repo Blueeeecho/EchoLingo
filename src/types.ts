@@ -41,6 +41,8 @@ export interface Settings {
   shortcutRegistration?: ShortcutRegistration[];
   windowsSelectionStrategy?: 'copy' | 'auto';
   saveHistory: boolean;
+  automaticUpdateChecks?: boolean;
+  includePrereleaseUpdates?: boolean;
   theme: 'system' | 'light' | 'dark';
   maxHistory: number;
   autoHideSeconds: number;

@@ -364,3 +364,10 @@ body[data-view="translate"] .result-provider { font-size: 10px; }
 
 /* Keep prose aligned while preserving explicit lines and long technical text. */
 body[data-view="translate"] #source-text, body[data-view="translate"] .result-text { text-align: justify; text-align-last: left; text-justify: inter-word; white-space: pre-wrap; word-break: normal; overflow-wrap: anywhere; }
+
+/* A quiet update marker, never a popup, toast or focus-stealing notification. */
+.update-badge { margin-left: auto; color: var(--accent); font-size: 11px; white-space: nowrap; }
+#more-toggle[data-update-available="true"]::after { content: ''; position: absolute; top: 4px; right: 4px; width: 5px; height: 5px; border-radius: 50%; background: var(--accent); }
+#more-toggle { position: relative; }
+#update-settings .settings-card-heading > div { min-width: 0; }
+#check-updates { flex-shrink: 0; }

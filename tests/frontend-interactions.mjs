@@ -14,6 +14,7 @@ try {
     Object.defineProperty(navigator, 'platform', { configurable: true, get: () => new URL(location.href).searchParams.has('windowsSelectionFixture') ? 'Win32' : 'MacIntel' });
     const state = {
       appVersion: '9.8.7-beta.6',
+      automaticUpdateChecks: false, includePrereleaseUpdates: true,
       providers: [{ id: 'qa-service', name: 'QA IPC fixture', kind: 'openai', baseUrl: 'https://example.invalid/v1', model: 'test-model', enabled: true, prompt: '', hasKey: true }],
       sourceLanguage: 'auto', targetLanguage: 'zh-Hans',
       shortcuts: { selection: 'Alt+D', capture: 'Alt+S', ocr: 'Alt+Shift+S', silentOcr: 'Alt+C', input: 'Alt+A' },
@@ -35,6 +36,8 @@ try {
     Object.assign(fixture, { copies: [], spoken: [], permissionOverride: null, managementShows: [] });
     Object.assign(fixture, { diagnosticCalls: [], diagnosticReport: { warnings: [] }, holdDiagnostics: false, releaseDiagnostics: () => {} });
     Object.assign(fixture, { credentialStates: {}, credentialReadCalls: 0, translationTestCalls: 0, settingsReads: 0, translationCredentialWrites: [], serviceLinks: [] });
+    Object.assign(fixture, { updateChecks: [], updateReads: 0, updateStatus: { available: null, checkedAt: null, failed: false }, holdUpdate: false, releaseUpdate: () => {}, failUpdate: false, holdServiceLink: false, releaseServiceLink: () => {}, failServiceLink: false });
+    const updateSnapshot = () => { const value = structuredClone(fixture.updateStatus); if (!fixture.settings.includePrereleaseUpdates && value.available?.prerelease) value.available = null; return value; };
     Object.assign(fixture, { holdFreeSetupTest: false, freeSetupTestWaits: 0, releaseFreeSetupTest: () => {} });
     Object.assign(fixture, { resizeRequests: [], nativeResizeRequests: [], holdResize: false, releaseResize: () => {} });
     Object.assign(fixture, { pinned: false, nativeVisible: true, popupReveals: 0, nativeHideTransitions: 0 });
@@ -172,7 +175,14 @@ try {
           return;
         }
         if (command === 'set_api_key') { fixture.keyCalls++; const provider = fixture.settings.providers.find(item => item.id === args.providerId); if (provider) { translationKeys.set(scope(provider), args.key); fixture.translationCredentialWrites.push({ kind: provider.kind, key: args.key }); } return; }
-        if (command === 'open_service_link') { fixture.serviceLinks.push(args.url); return; }
+        if (command === 'get_update_status') { fixture.updateReads++; return updateSnapshot(); }
+        if (command === 'check_for_updates') {
+          fixture.updateChecks.push(structuredClone(args)); const snapshot = updateSnapshot();
+          if (fixture.holdUpdate) await new Promise(resolve => { fixture.releaseUpdate = resolve; });
+          if (fixture.failUpdate) throw new Error('QA private network failure details');
+          return snapshot;
+        }
+        if (command === 'open_service_link') { fixture.serviceLinks.push(args.url); if (fixture.holdServiceLink) await new Promise(resolve => { fixture.releaseServiceLink = resolve; }); if (fixture.failServiceLink) throw new Error('QA browser failure'); return; }
         if (command === 'delete_api_key') { fixture.keyDeleteCalls++; const provider = fixture.settings.providers.find(item => item.id === args.providerId); if (provider) translationKeys.delete(scope(provider)); return; }
         if (command === 'set_ocr_api_key') { fixture.ocrKeyCalls++; const provider = fixture.settings.ocrProviders.find(item => item.id === args.providerId); if (provider) { provider.hasKey = true; ocrKeys.set(scope(provider), args.key); fixture.credentialWrites.push({ providerId: provider.id, kind: provider.kind, key: args.key }); } return; }
         if (command === 'delete_ocr_api_key') { fixture.ocrDeleteCalls++; const provider = fixture.settings.ocrProviders.find(item => item.id === args.providerId); if (provider) { ocrKeys.delete(scope(provider)); provider.hasKey = false; } return; }
@@ -3120,6 +3130,73 @@ try {
   assert.deepEqual(await page.evaluate(() => window.__qa.systemPrepareCalls), []);
   assert.deepEqual(errors, []);
   console.log('PASS: same-ID cloud-to-system/rename and history-card retries refresh provider kind, visible name and accessible action labels, route to the resolved system-language setup without downloading, and preserve successful sibling DOM. Mock IPC only.');
+  // Free release notices: metadata-only startup, explicit networking, no dialogs,
+  // cached notice across navigation and no stale beta result after a channel change.
+  const updateFixtureUrl = new URL(process.env.ECHOLINGO_TEST_URL ?? 'http://127.0.0.1:1420/');
+  updateFixtureUrl.searchParams.set('updateNoticeFixture', '1');
+  await page.goto(updateFixtureUrl.href);
+  await page.waitForFunction(() => window.__qa.updateReads > 0);
+  await goView('settings');
+  assert.equal(await page.locator('#automatic-update-checks').isChecked(), false);
+  assert.equal(await page.locator('#include-prerelease-updates').isChecked(), true);
+  assert.deepEqual(await page.evaluate(() => window.__qa.updateChecks), []);
+  await page.evaluate(() => { window.__qa.holdUpdate = true; window.__qa.updateStatus = { available: { version: '10.0.0', prerelease: true }, checkedAt: Date.now(), failed: false }; });
+  await page.locator('#check-updates').evaluate(button => { button.click(); button.click(); });
+  await page.waitForFunction(() => window.__qa.updateChecks.length === 1);
+  assert.equal(await page.locator('#check-updates').isDisabled(), true);
+  const beforeUpdateShows = await page.evaluate(() => window.__qa.showPopupAttempts.length + window.__qa.managementShows.length);
+  await page.locator('#close-management').click();
+  await page.evaluate(() => { window.__qa.releaseUpdate(); });
+  await page.waitForFunction(() => !document.querySelector('#check-updates').disabled);
+  assert.equal(await page.evaluate(() => window.__qa.nativeVisible), false);
+  assert.equal(await page.evaluate(() => window.__qa.showPopupAttempts.length + window.__qa.managementShows.length), beforeUpdateShows);
+  await page.evaluate(() => { window.__qa.nativeShow(); });
+  await goView('translate'); await goView('settings');
+  assert.match(await page.locator('#update-status').textContent(), /10\.0\.0（内测版）/);
+  assert.equal(await page.locator('#more-toggle').getAttribute('data-update-available'), 'true');
+  assert.deepEqual(await page.evaluate(() => window.__qa.serviceLinks), []);
+  await page.locator('#check-updates').click();
+  await page.waitForFunction(() => window.__qa.updateChecks.length === 2);
+  await page.locator('#include-prerelease-updates').uncheck();
+  await page.waitForFunction(() => window.__qa.settings.includePrereleaseUpdates === false);
+  await page.evaluate(() => { window.__qa.holdUpdate = false; window.__qa.releaseUpdate(); });
+  await page.waitForFunction(() => !document.querySelector('#check-updates').disabled);
+  assert.doesNotMatch(await page.locator('#update-status').textContent(), /10\.0\.0/);
+  assert.equal(await page.locator('#more-toggle').getAttribute('data-update-available'), 'false');
+  await page.evaluate(() => { window.__qa.failUpdate = true; });
+  await page.locator('#check-updates').click();
+  await page.waitForFunction(() => document.querySelector('#update-status').textContent.includes('不影响翻译'));
+  assert.doesNotMatch(await page.locator('#update-status').textContent(), /private|QA/);
+  await page.evaluate(() => { window.__qa.holdServiceLink = true; });
+  await page.locator('#open-update-page').evaluate(button => { button.click(); button.click(); });
+  await page.waitForFunction(() => window.__qa.serviceLinks.length === 1);
+  assert.deepEqual(await page.evaluate(() => window.__qa.serviceLinks), ['https://github.com/Blueeeecho/EchoLingo/releases']);
+  await page.evaluate(() => { window.__qa.holdServiceLink = false; window.__qa.releaseServiceLink(); });
+  await page.waitForFunction(() => !document.querySelector('#open-update-page').disabled);
+  await page.evaluate(() => { window.__qa.failSave = true; });
+  await page.locator('#automatic-update-checks').check();
+  await page.waitForFunction(() => document.querySelector('#update-status').textContent.includes('保存失败'));
+  assert.equal(await page.locator('#automatic-update-checks').isChecked(), false);
+  await page.evaluate(() => { window.__qa.failSave = false; window.__qa.failUpdate = false; });
+  await page.clock.install();
+  await page.locator('#automatic-update-checks').check();
+  await page.waitForFunction(() => window.__qa.settings.automaticUpdateChecks === true);
+  const checksBeforeAuto = await page.evaluate(() => window.__qa.updateChecks.length);
+  await page.clock.fastForward(15_100);
+  await page.waitForFunction(count => window.__qa.updateChecks.length === count + 1, checksBeforeAuto);
+  assert.equal(await page.evaluate(() => window.__qa.updateChecks.at(-1).manual), false);
+  const savesBeforeDisable = await page.evaluate(() => window.__qa.saveCalls);
+  await page.evaluate(() => { window.__qa.holdSave = true; });
+  await page.locator('#automatic-update-checks').uncheck();
+  await page.waitForFunction(count => window.__qa.saveCalls > count, savesBeforeDisable);
+  await page.clock.fastForward(3_700_000);
+  assert.equal(await page.evaluate(() => window.__qa.updateChecks.length), checksBeforeAuto + 1);
+  await page.evaluate(() => { window.__qa.holdSave = false; window.__qa.releaseSave(); });
+  await page.waitForFunction(() => window.__qa.settings.automaticUpdateChecks === false);
+  await page.clock.fastForward(3_700_000);
+  assert.equal(await page.evaluate(() => window.__qa.updateChecks.length), checksBeforeAuto + 1);
+  assert.deepEqual(errors, []);
+  console.log('PASS: free update notice defaults offline; manual duplicate clicks, hidden/reopened windows, channel changes during pending requests, sanitized offline failures, exact allowlisted release-page opening, failed opt-in rollback and opt-in/off automatic timer. Mock IPC only.');
   console.log('PASS: persistent screenshot permission guidance prepared before presentation; click-only correct pane without authorization; retained sanitized link failure and manual path; first-use pending-open help navigation/focus; 800 px light and 420 px narrow/dark screenshots; dismiss/input/quiet Alt+D/Alt+A/stale-epoch recovery; deferred-modal permission payload and granted-status clearing; backend cancellation tickets on edit/clear/stop/Escape/close/native hide; native presentation epochs cover unallocated tickets, omitted/stale hide events, reopen overtaking pending begin and stale delayed popup fitting; backend-only cancellation clears old result state; late-ticket and replacement ordering; pending-save close/reentry guard; failure unlock; blank shortcuts; duplicate rejection; no countdown; theme/favorites and history bounds; OCR dual-key bundles/protocol isolation/no plaintext settings; documented vendor presets; origin-bound saved-key indications; minimal popup/menu/automatic source height; OCR configuration/privacy; empty-selection immediate typing; persistent source copy/speech; pin edge/icon/keyboard hit areas and drag isolation; captured source editing after completion and pending cancellation/retranslation; narrow-wrap source presentation; inconsistent permission feedback; automatic/fixed targets; Enter/ShiftEnter/IME/repeat; passive permissions; real capture and translation error preservation.');
 } finally {
   await browser.close();

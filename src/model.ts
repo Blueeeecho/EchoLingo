@@ -14,6 +14,7 @@ export const defaultSettings = (): Settings => ({
   providers: [], sourceLanguage: 'auto', targetLanguage: 'auto', languageDirectionVersion: 1,
   shortcutDefaultsVersion: 1,
   windowsSelectionStrategy: 'copy',
+  automaticUpdateChecks: false, includePrereleaseUpdates: true,
   shortcuts: { selection: 'Alt+D', capture: '', ocr: 'Alt+Shift+S', silentOcr: 'Alt+S', input: 'Alt+A' },
   saveHistory: true, theme: 'system', maxHistory: 20, autoHideSeconds: 0, ocrProviders: [], activeOcrProviderId: null,
 });
