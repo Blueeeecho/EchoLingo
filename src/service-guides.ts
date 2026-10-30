@@ -6,6 +6,10 @@ import type { OcrProvider } from './types';
 export interface ServiceGuide { steps: readonly string[]; links: ReadonlyArray<readonly [string, string]> }
 // Official public setup pages; no account access is needed to show this help.
 export const TRANSLATION_GUIDES: Record<ProviderPresetId, ServiceGuide> = {
+  "niutrans": { steps: ["注册小牛翻译平台账号，在控制台取得自己的 API Key。", "确认当日积分与请求速率，填入 Key 后测试连接。"], links: [["账号 / 开通", "https://niutrans.com/text_trans"], ["API 文档", "https://niutrans.com/documents/contents/trans_detection"]] },
+  "google-translate": { steps: ["创建 Google Cloud 项目，启用 Cloud Translation API 并开通结算。", "创建并限制用于 Cloud Translation 的 API Key；不使用 Gemini Key 或服务账号 JSON。"], links: [["账号 / 开通", "https://console.cloud.google.com/apis/credentials"], ["API 文档", "https://docs.cloud.google.com/translate/docs/reference/rest/v2/translate"]] },
+  "caiyun": { steps: ["注册彩云科技开放平台账号，申请正式小译 Token。", "确认试用有效期和计费，不能依赖公共测试 Token。"], links: [["账号 / 开通", "https://platform.caiyunapp.com/"], ["API 文档", "https://docs.caiyunapp.com/lingocloud-api/index.html"]] },
+
   system: { steps: ['在设置的“系统翻译 · 语言包”中检查语言对，按需点击“准备语言包”。', '可用性以当前系统检查结果为准；无需云账号或密钥。'], links: [['系统 API 文档', 'https://developer.apple.com/documentation/translation/translationsession/init(installedsource:target:)']] },
   offline: { steps: ['Windows 预览安装包包含中英离线模型，添加并启用即可。', '无需账号或密钥；其他语言请另选服务。'], links: [['项目与模型说明', 'https://github.com/mozilla/translations']] },
   baidu: { steps: ['登录百度翻译开放平台，注册开发者并开通“通用文本翻译 API”。', '从管理控制台取得 APP ID 和密钥，完整填写下方两项。百度 OCR 的 API Key 不能用于此处。'], links: [['注册 / 开通', 'https://fanyi-api.baidu.com/access/0/1'], ['管理控制台', 'https://fanyi-api.baidu.com/manage/developer'], ['API 文档', 'https://fanyi-api.baidu.com/doc/21']] },

@@ -4788,6 +4788,18 @@ mod tests {
     fn new_official_credential_namespaces_cover_all_added_adapters() {
         for (kind, url) in [
             (
+                "niutrans",
+                "https://api.niutrans.com/NiuTransServer/translation",
+            ),
+            (
+                "google-translate",
+                "https://translation.googleapis.com/language/translate/v2",
+            ),
+            (
+                "caiyun",
+                "https://api.interpreter.caiyunai.com/v1/translator",
+            ),
+            (
                 "baidu",
                 "https://fanyi-api.baidu.com/api/trans/vip/translate",
             ),

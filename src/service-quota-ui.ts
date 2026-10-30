@@ -8,7 +8,7 @@ const element = <K extends keyof HTMLElementTagNameMap>(tag: K, className: strin
 function allowanceLabel(value: ServiceAllowance): string {
   if (value.amount === null) return value.period === 'unmetered' ? '不按云调用量计费' : '按所选模型规则与限流使用';
   const unit = { characters: '字符', calls: '次', units: 'units', tokens: 'Token', CNY: '元', none: '' }[value.unit];
-  const period = { month: ' / 月', once: ' · 一次性', unmetered: '', variable: ' · 按服务规则' }[value.period];
+  const period = { day: ' / 日', month: ' / 月', once: ' · 一次性', unmetered: '', variable: ' · 按服务规则' }[value.period];
   return `${value.amount.toLocaleString('zh-CN')} ${unit}${period}`;
 }
 
@@ -51,7 +51,7 @@ export function populateProviderPresets(select: HTMLSelectElement, platform: str
   };
   select.replaceChildren();
   addGroup('推荐 · 从这些服务开始', recommended, true);
-  for (const [label, kinds] of [['本机翻译', ['system', 'offline']], ['官方机器翻译', ['baidu', 'youdao', 'microsoft', 'deepl', 'libretranslate', 'volcengine', 'aliyun']], ['大模型 · 兼容接口', ['openai']]] as const) {
+  for (const [label, kinds] of [['本机翻译', ['system', 'offline']], ['官方机器翻译', ['baidu', 'youdao', 'microsoft', 'deepl', 'libretranslate', 'volcengine', 'aliyun', 'niutrans', 'google-translate', 'caiyun']], ['大模型 · 兼容接口', ['openai']]] as const) {
     addGroup(label, PROVIDER_PRESETS.filter(value => (kinds as readonly string[]).includes(value.kind) && !recommended.includes(value.id)).map(value => value.id));
   }
   // Populating recommendations never changes an existing selected service.

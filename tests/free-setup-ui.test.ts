@@ -275,3 +275,16 @@ describe('independent role selection and setup', () => {
   });
 
 });
+
+describe('additional official translation setup', () => {
+  it.each(['niutrans', 'google-translate', 'caiyun'])('tests and enables only %s and keeps its Key out of settings', async (kind) => {
+    const f = fixture(); f.node(`free-region-${kind === 'google-translate' ? 'overseas' : 'cn'}`).emit();
+    const row = f.node('free-translation-list').children.find(item => item.attributes.get('data-free-service') === kind)!;
+    row.children[4]!.children[0]!.emit(); f.fill(); await f.submit();
+    expect(f.fresh()).toHaveLength(1);
+    expect(f.fresh()[0]).toMatchObject({ kind, enabled: true, model: '' });
+    expect(f.keys.get(f.fresh()[0]!.id)).toBe('private-test-key');
+    expect(JSON.stringify(f.settings())).not.toContain('private-test-key');
+    expect(f.settings().activeOcrProviderId).toBe('existing-ocr');
+  });
+});

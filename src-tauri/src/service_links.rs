@@ -4,6 +4,14 @@
 const RELEASES_PAGE: &str = "https://github.com/Blueeeecho/EchoLingo/releases";
 
 const ALLOWED: &[&str] = &[
+    "https://cloud.google.com/products/translate/pricing",
+    "https://docs.caiyunapp.com/lingocloud-api/index.html",
+    "https://docs.cloud.google.com/docs/authentication/api-keys-use",
+    "https://docs.cloud.google.com/translate/docs/reference/rest/v2/translate",
+    "https://niutrans.com/documents/contents/trans_detection",
+    "https://niutrans.com/text_trans",
+    "https://platform.caiyunapp.com/",
+
     "https://ai.baidu.com/ai-doc/OCR/fk3h7xu7h",
     "https://ai.youdao.com/",
     "https://ai.youdao.com/DOCSIRMA/html/ocr/api/tyocr/index.html",

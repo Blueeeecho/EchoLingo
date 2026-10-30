@@ -19,7 +19,7 @@ describe('service quota coverage and measurement', () => {
         if (allowance.amount !== null) {
           expect(Number.isFinite(allowance.amount)).toBe(true);
           expect(allowance.amount).toBeGreaterThan(0);
-          expect(['month', 'once']).toContain(allowance.period);
+          expect(['day', 'month', 'once']).toContain(allowance.period);
         }
       }
       for (const [, link] of entry.links) {
