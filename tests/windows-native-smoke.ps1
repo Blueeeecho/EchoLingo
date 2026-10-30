@@ -78,6 +78,9 @@ using System.Windows.Forms;
 
 public static class EchoLingoDesktopSmoke {
     [DllImport("user32.dll")] static extern IntPtr GetForegroundWindow();
+    [DllImport("kernel32.dll")] static extern uint GetCurrentThreadId();
+    [DllImport("user32.dll")] static extern IntPtr GetClipboardOwner();
+    [DllImport("user32.dll")] static extern uint GetWindowThreadProcessId(IntPtr window, out uint process);
     [DllImport("user32.dll")] static extern bool SetForegroundWindow(IntPtr window);
     [DllImport("user32.dll", SetLastError=true)] static extern IntPtr OpenInputDesktop(uint flags, bool inherit, uint access);
     [DllImport("user32.dll")] static extern bool CloseDesktop(IntPtr desktop);
@@ -140,6 +143,7 @@ public static class EchoLingoDesktopSmoke {
     sealed class CopyFallbackControl : Control {
         public int CopyCount;
         public bool DelayPublication;
+        public readonly List<Dictionary<string, object>> PublicationTimings = new List<Dictionary<string, object>>();
         System.Windows.Forms.Timer publicationTimer;
         public const string Selection = "EchoLingo real Ctrl+C fallback 97531";
         public CopyFallbackControl() {
@@ -152,16 +156,29 @@ public static class EchoLingoDesktopSmoke {
         protected override bool ProcessCmdKey(ref Message message, Keys keyData) {
             if (keyData == (Keys.Control | Keys.C)) {
                 CopyCount++;
+                Stopwatch publicationClock = Stopwatch.StartNew();
+                Dictionary<string, object> timing = new Dictionary<string, object> {
+                    { "copy", CopyCount }, { "delayed", DelayPublication },
+                    { "receivedUtcMs", DateTime.UtcNow.Ticks / TimeSpan.TicksPerMillisecond }
+                };
+                PublicationTimings.Add(timing);
                 if (DelayPublication) {
+                    timing["clearStartedMs"] = publicationClock.ElapsedMilliseconds;
                     Clipboard.Clear();
+                    timing["clearFinishedMs"] = publicationClock.ElapsedMilliseconds;
                     publicationTimer = new System.Windows.Forms.Timer();
                     publicationTimer.Interval = 80;
                     publicationTimer.Tick += delegate {
+                        timing["timerTickMs"] = publicationClock.ElapsedMilliseconds;
                         publicationTimer.Stop(); publicationTimer.Dispose(); publicationTimer = null;
                         Clipboard.SetText(Selection, TextDataFormat.UnicodeText);
+                        timing["publishedMs"] = publicationClock.ElapsedMilliseconds;
                     };
                     publicationTimer.Start();
-                } else Clipboard.SetText(Selection, TextDataFormat.UnicodeText);
+                } else {
+                    Clipboard.SetText(Selection, TextDataFormat.UnicodeText);
+                    timing["publishedMs"] = publicationClock.ElapsedMilliseconds;
+                }
                 return true;
             }
             return base.ProcessCmdKey(ref message, keyData);
@@ -338,6 +355,8 @@ public static class EchoLingoDesktopSmoke {
         using (TextBox password = new TextBox())
         using (CopyFallbackControl fallback = new CopyFallbackControl())
         using (System.Windows.Forms.Timer timeout = new System.Windows.Forms.Timer()) {
+            uint uiThread = GetCurrentThreadId();
+            report["copyPublicationTimings"] = fallback.PublicationTimings;
             form.Text = "EchoLingo temporary native smoke fixture";
             form.StartPosition = FormStartPosition.CenterScreen;
             form.ClientSize = new Size(560, 250);
@@ -400,6 +419,10 @@ public static class EchoLingoDesktopSmoke {
                         passed.Add("Real injected Ctrl+C observed once; Unicode/HTML/RTF clipboard restored");
 
                         FocusFixture(form, fallback, delegate { fallback.DelayPublication = true; });
+                        uint ownerProcess;
+                        uint ownerThread = GetWindowThreadProcessId(GetClipboardOwner(), out ownerProcess);
+                        report["delayedCaseOwnerIsWorker"] = ownerThread != 0 && ownerThread == GetCurrentThreadId();
+                        report["delayedCaseOwnerIsUi"] = ownerThread != 0 && ownerThread == uiThread;
                         AssertSuccess(CaptureFixtureSelection(form, helperPath), CopyFallbackControl.Selection, "Clear then delayed Ctrl+C publication");
                         OnUi(form, delegate { copyCount = fallback.CopyCount; fallback.DelayPublication = false; });
                         Assert(copyCount == 2, "Delayed publication must not resend Ctrl+C; received " + copyCount);

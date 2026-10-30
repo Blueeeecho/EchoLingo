@@ -404,6 +404,7 @@ public static class SelectionCopyPolicy {
         while (true) {
             if (requireCopyTicket != null) requireCopyTicket();
             uint before = sequence();
+            long readStarted = trace == null ? 0 : elapsedMilliseconds();
             string text;
             try { text = before == initial ? null : readText(); }
             catch (Exception error) {
@@ -415,6 +416,7 @@ public static class SelectionCopyPolicy {
                 }
                 throw new InvalidOperationException("CLIPBOARD_RESTORE_SKIPPED: Copied text could not be read safely. The original clipboard was not restored over this uncertain update; current contents were preserved.");
             }
+            long readFinished = trace == null ? 0 : elapsedMilliseconds();
             if (requireCopyTicket != null) requireCopyTicket();
             uint after = sequence();
             if (before == after && after != initial && !String.IsNullOrWhiteSpace(text) && requireCopyOwner != null) {
@@ -429,7 +431,8 @@ public static class SelectionCopyPolicy {
             if (trace != null) trace("SELECTION_TRACE before=" + before + " after=" + after
                 + " candidateBefore=" + (candidateBefore.HasValue ? candidateBefore.Value.ToString() : "none")
                 + " candidateAfter=" + (completion.CandidateSequence.HasValue ? completion.CandidateSequence.Value.ToString() : "none")
-                + " elapsedMs=" + elapsed + " observation=" + observation);
+                + " elapsedMs=" + elapsed + " observation=" + observation
+                + " initial=" + initial + " readStartedMs=" + readStarted + " readFinishedMs=" + readFinished);
             switch (observation) {
                 case Observation.Waiting: wait(); break;
                 case Observation.Completed:
@@ -461,6 +464,7 @@ public static class EchoLingoNative {
     [DllImport("user32.dll")] static extern IntPtr GetAncestor(IntPtr window, uint flags);
     [DllImport("user32.dll")] static extern short GetAsyncKeyState(int key);
     [DllImport("user32.dll")] static extern uint GetClipboardSequenceNumber();
+    [DllImport("user32.dll")] static extern bool IsClipboardFormatAvailable(uint format);
     [DllImport("user32.dll")] static extern IntPtr GetClipboardOwner();
     [DllImport("user32.dll", SetLastError=true)] static extern bool OpenClipboard(IntPtr owner);
     [DllImport("user32.dll", SetLastError=true)] static extern bool EmptyClipboard();
@@ -1028,6 +1032,22 @@ public static class EchoLingoNative {
         if (owner == IntPtr.Zero || GetWindowThreadProcessId(owner, out process) == 0 || !context.SourceProcesses.Contains(unchecked((int)process)))
             throw new InvalidOperationException("CLIPBOARD_CHANGED: The new clipboard data does not belong to the verified source; current contents were preserved.");
     }
+    static string ReadSelectionClipboardText() {
+        // Opt-in diagnostics for generated fixtures only. Do not change the
+        // existing OLE read, readiness decision, deadline or restoration policy.
+        if (Environment.GetEnvironmentVariable("ECHOLINGO_SELECTION_TRACE") != "1")
+            return Clipboard.ContainsText() ? Clipboard.GetText(TextDataFormat.UnicodeText) : null;
+        Stopwatch readClock = Stopwatch.StartNew();
+        Console.Error.WriteLine("CLIPBOARD_READ stage=start unicodeAvailable=" + (IsClipboardFormatAvailable(13) ? 1 : 0)
+            + " sequence=" + GetClipboardSequenceNumber() + " utcMs=" + (DateTime.UtcNow.Ticks / TimeSpan.TicksPerMillisecond));
+        bool contains = Clipboard.ContainsText();
+        Console.Error.WriteLine("CLIPBOARD_READ stage=contains present=" + (contains ? 1 : 0)
+            + " elapsedMs=" + readClock.ElapsedMilliseconds + " sequence=" + GetClipboardSequenceNumber());
+        string text = contains ? Clipboard.GetText(TextDataFormat.UnicodeText) : null;
+        Console.Error.WriteLine("CLIPBOARD_READ stage=finished textPresent=" + (!String.IsNullOrWhiteSpace(text) ? 1 : 0)
+            + " elapsedMs=" + readClock.ElapsedMilliseconds + " sequence=" + GetClipboardSequenceNumber());
+        return text;
+    }
     static object CloneClipboardValue(object value) {
         if (value == null) throw new InvalidOperationException("Clipboard format could not be materialized.");
         Bitmap bitmap = value as Bitmap;
@@ -1259,7 +1279,7 @@ public static class EchoLingoNative {
             }
             if (inserted >= 2) { observer.AwaitOwnInput(delegate { return clock.ElapsedMilliseconds; }); CaptureHealth.Set("copyOwnInputObserved", 1); }
             string text = SelectionCopyPolicy.CompleteCopy(initial, inserted, GetClipboardSequenceNumber,
-                delegate { return Clipboard.ContainsText() ? Clipboard.GetText(TextDataFormat.UnicodeText) : null; },
+                ReadSelectionClipboardText,
                 delegate(uint copied) {
                     SelectionCopyPolicy.RequireCurrentSequence(copied, GetClipboardSequenceNumber()); observer.RequireCurrent();
                     try {
@@ -1385,7 +1405,7 @@ public static class EchoLingoNative {
                     }
                     if (inserted >= 2) observer.AwaitOwnInput(delegate { return clock.ElapsedMilliseconds; });
                     string result = SelectionCopyPolicy.CompleteCopy(initial, inserted, GetClipboardSequenceNumber,
-                        delegate { return Clipboard.ContainsText() ? Clipboard.GetText(TextDataFormat.UnicodeText) : null; },
+                        ReadSelectionClipboardText,
                         delegate(uint copied) {
                             // Recheck immediately before the restoration write as well
                             // as before invoking this callback; a newer copy wins.
