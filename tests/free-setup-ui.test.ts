@@ -86,7 +86,7 @@ function fixture(desktop = true, blockingHint?: 'engine-hint' | 'core-guidance')
 }
 
 beforeEach(() => vi.clearAllMocks());
-afterEach(() => vi.unstubAllGlobals());
+afterEach(() => { vi.useRealTimers(); vi.unstubAllGlobals(); });
 
 describe('combined engine and signup guidance', () => {
   it.each(['engine-hint', 'core-guidance'] as const)('defers signup behind %s and reveals it only after the blocker is gone', (blocker) => {
@@ -274,4 +274,19 @@ describe('independent role selection and setup', () => {
     expect(f.node('free-setup-error').hidden).toBe(false); expect(f.fresh()).toEqual([]); expect(invoke).not.toHaveBeenCalled();
   });
 
+});
+
+describe('newcomer trial model confirmation', () => {
+  it.each(['qianfan', 'tokenhub', 'ark'])('requires an explicitly selected trial model for %s', async (id) => {
+    vi.useFakeTimers({ toFake: ['Date'] }); vi.setSystemTime(new Date('2026-10-30T00:00:00Z'));
+    const f = fixture(); f.node('free-region-cn').emit();
+    f.node('free-translation-list').children.find(row => row.attributes.get('data-free-service') === `${id}-trial`)!.children[4]!.children[0]!.emit();
+    f.fill(); await f.submit();
+    expect(f.fresh()).toHaveLength(0); expect(invoke).not.toHaveBeenCalled();
+    f.node('free-field-model').value = 'account-confirmed-model';
+    await f.submit();
+    expect(f.fresh()[0]).toMatchObject({ kind: 'openai', model: 'account-confirmed-model', enabled: true });
+    expect(f.settings().activeOcrProviderId).toBe('existing-ocr');
+    expect(JSON.stringify(f.settings())).not.toContain('private-test-key');
+  });
 });

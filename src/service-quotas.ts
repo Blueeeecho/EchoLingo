@@ -32,6 +32,10 @@ const youdao = verifiedQuota({
 });
 
 export const TRANSLATION_QUOTAS: Record<ProviderPresetId, ServiceQuota> = {
+  qianfan: verifiedQuota({ badge: '限时新人额度', summary: '千帆指定预置模型新人各 100 万 Token，有效期 3 个月。', details: ['首次开通才发放，指定模型分别有资格；不是全部模型长期免费，也不是每月刷新。', '只抵扣在线推理，不包括批量推理；实际模型版本、余额和到期日以账号控制台为准。'], allowances: [{ plan: '指定模型新人试用', amount: 1_000_000, unit: 'tokens', period: 'once', conditions: ['首次开通；仅官方清单中的预置模型在线推理。'], expires: '3 个月' }], links: [['官方新用户额度', 'https://cloud.baidu.com/doc/qianfan/s/Imi2rpirg']] }),
+  tokenhub: verifiedQuota({ badge: '限时新人体验', summary: 'TokenHub 新人语言模型体验 100 万 Token，有效期 1 年。', details: ['本期领取活动截至 2026-12-31；不是每月重置，限中国站规则。', '主账号维度生效，官方说明模型共享额度；每账号每模型仅领取一次，不可叠加计算。', '免费额度用完且未开启后付费时停止；开启后付费后可能继续收费。'], allowances: [{ plan: '语言模型新人体验', amount: 1_000_000, unit: 'tokens', period: 'once', conditions: ['主账号共享规则；每账号每模型仅领取一次，不可叠加。', '本期领取活动截至 2026-12-31，以官方后续公告为准。'], expires: '领取起 1 年' }], links: [['官方新人体验规则', 'https://cloud.tencent.com/document/product/1823/130053']] }),
+  ark: verifiedQuota({ badge: '新人试用 · 额度待账号确认', summary: '方舟新人模型试用：各模型数量和有效期以开通管理显示为准。', details: ['当前规则没有可统一承诺的所有模型 Token 数，不将旧活动数字冒充现行额度。', '先选择有可用免费额度的模型并确认试用模式；付费、批量推理及其他能力可能不适用。', '这是方舟模型额度，不是火山机器翻译每月字符免费层。'], allowances: [{ plan: '模型新人试用', amount: null, unit: 'tokens', period: 'variable', conditions: ['确认模型已开通且有剩余试用额度；按账号所示期限使用。'] }], links: [['官方新人试用规则', 'https://console.volcengine.com/ark/region:cn-beijing/docs/free-inference-quota']] }),
+
   system: quota({ badge: '本机免费', summary: '本机系统翻译，无云端调用额度。', details: ['适用于 macOS 26 及以上；先在设置中准备所需语言包。', 'Windows 请使用安装包内的中英离线翻译；其他平台以实际支持情况为准。'], allowances: localAllowance, links: [['Apple 系统翻译', 'https://developer.apple.com/documentation/translation/translationsession/init(installedsource:target:)']] }),
   offline: quota({ badge: '本机免费', summary: 'Windows 安装包内中英模型，无需账号、密钥或按次付费。', details: ['支持简体中文与英语互译；处理速度取决于电脑性能。'], allowances: localAllowance, links: [['离线模型项目', 'https://github.com/mozilla/translations']] }),
   microsoft: verifiedQuota({

@@ -185,6 +185,9 @@ export function installFreeSetup(context: SetupContext): { refresh: () => void; 
     } else if (piece.credential === 'microsoft') {
       fields.append(field(tx('资源密钥', 'Resource key'), 'free-field-key'), field(tx('地域，全球单服务可留空', 'Region, optional for a global resource'), 'free-field-region', false));
     } else fields.append(field('API Key', 'free-field-key'));
+    if (piece.editableModel) {
+      fields.append(field(tx('已确认有试用额度的模型 ID', 'Model ID with confirmed trial quota'), 'free-field-model', false));
+    }
     body.replaceChildren(quota, warning, privacy, open, fields);
     const next = document.querySelector<HTMLButtonElement>('#free-setup-next');
     if (next) next.textContent = piece.role === 'translation'
@@ -209,7 +212,7 @@ export function installFreeSetup(context: SetupContext): { refresh: () => void; 
   };
   const applyPiece = async (piece: FreePiece, current: () => boolean): Promise<boolean> => {
     const entered: Record<string, string> = {
-      ...values(['free-field-key', 'free-field-first', 'free-field-second', 'free-field-region']),
+      ...values(['free-field-model', 'free-field-key', 'free-field-first', 'free-field-second', 'free-field-region']),
       endpoint: (document.getElementById('free-field-endpoint') as HTMLInputElement | null)?.value.trim() ?? '',
     };
     const input = {
@@ -225,6 +228,10 @@ export function installFreeSetup(context: SetupContext): { refresh: () => void; 
     }
     const secret = credentialFor(piece, { key: input.key ?? '', first: input.first ?? '', second: input.second ?? '' });
     if (secret.error || !secret.key) { showError(secret.error || tx('请填写完整密钥。', 'Enter the complete key.')); return false; }
+    const chosenModel = piece.editableModel ? entered['free-field-model'] ?? '' : piece.model;
+    if (piece.editableModel && (!chosenModel || chosenModel.length > 200)) {
+      showError(tx('请先确认试用额度，再填写对应模型 ID（最长 200 字符）。', 'Confirm the trial quota and enter its model ID (up to 200 characters).')); return false;
+    }
     if (!context.desktop) { showError(tx('测试连接需要桌面应用。', 'Testing a connection requires the desktop app.')); return false; }
     const id = `free-${crypto.randomUUID()}`;
     const baseUrl = piece.credential === 'azureVision' ? (input.endpoint ?? '').replace(/\/+$/, '') : piece.baseUrl;
@@ -239,7 +246,7 @@ export function installFreeSetup(context: SetupContext): { refresh: () => void; 
     const translation = piece.role === 'translation';
     try {
       if (translation) {
-        const provider: Provider = { id, name: piece.name, kind: piece.kind as Provider['kind'], baseUrl, model: piece.model, enabled: false, prompt: '', region: input.region || piece.region || '' };
+        const provider: Provider = { id, name: piece.name, kind: piece.kind as Provider['kind'], baseUrl, model: chosenModel, enabled: false, prompt: '', region: input.region || piece.region || '' };
         await context.updateSettings((next) => { staged = true; next.providers.push(provider); }, current);
       } else {
         const provider: OcrProvider = {
