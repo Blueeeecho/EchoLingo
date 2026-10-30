@@ -4,6 +4,13 @@
 const RELEASES_PAGE: &str = "https://github.com/Blueeeecho/EchoLingo/releases";
 
 const ALLOWED: &[&str] = &[
+    "https://console.groq.com/docs/openai",
+    "https://console.groq.com/docs/billing-faqs",
+    "https://console.groq.com/docs/rate-limits",
+    "https://console.groq.com/keys",
+    "https://ollama.com/download",
+    "https://docs.ollama.com/api/openai-compatibility",
+
     "https://ai.baidu.com/ai-doc/OCR/fk3h7xu7h",
     "https://ai.youdao.com/",
     "https://ai.youdao.com/DOCSIRMA/html/ocr/api/tyocr/index.html",

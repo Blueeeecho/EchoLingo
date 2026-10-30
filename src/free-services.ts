@@ -1,7 +1,7 @@
 import { EXTRA_SERVICE_LINKS, TRANSLATION_QUOTAS, OCR_QUOTAS, type ServiceQuota } from './service-quotas';
 
 export type FreeRegion = 'cn' | 'overseas';
-export type FreeCredential = 'apiKey' | 'appPair' | 'ocrPair' | 'tencentOcr' | 'microsoft' | 'azureVision' | 'youdaoPair';
+export type FreeCredential = 'localOllama' | 'apiKey' | 'appPair' | 'ocrPair' | 'tencentOcr' | 'microsoft' | 'azureVision' | 'youdaoPair';
 export interface FreePiece {
   id: string;
   role: 'translation' | 'ocr';
@@ -29,6 +29,7 @@ const glmVisionQuota: ServiceQuota = {
 };
 
 export const FREE_SERVICES: readonly FreePiece[] = [
+
   { role: 'translation', name: '硅基流动', kind: 'openai', baseUrl: 'https://api.siliconflow.cn/v1', model: 'tencent/Hunyuan-MT-7B', signupUrl: 'https://cloud.siliconflow.cn/', credential: 'apiKey', id: 'siliconflow', nameEn: 'SiliconFlow', regionGroup: 'cn', allowance: TRANSLATION_QUOTAS.siliconflow, quotaEn: 'Named Hunyuan-MT-7B model: input/output price 0; no fixed monthly Token allowance.', conditionsEn: 'Other models may charge; rate/concurrency limits apply.' },
   { role: 'ocr', name: '百度 OCR', kind: 'baidu', baseUrl: 'https://aip.baidubce.com', model: 'general_basic', signupUrl: 'https://console.bce.baidu.com/ai/#/ai/ocr/overview/index', credential: 'ocrPair', id: 'baidu-ocr', nameEn: 'Baidu OCR', regionGroup: 'cn', allowance: OCR_QUOTAS.baidu, quotaEn: 'Personal verification: 1,000 calls/month per supported interface; enterprise: 2,000.', conditionsEn: 'Activate OCR and enter the console to receive the test resource automatically. Translation credentials are different.' },
   { role: 'translation', name: '百度翻译', kind: 'baidu', baseUrl: 'https://fanyi-api.baidu.com/api/trans/vip/translate', model: '', signupUrl: 'https://fanyi-api.baidu.com/manage/developer', credential: 'appPair', id: 'baidu', nameEn: 'Baidu Translate', regionGroup: 'cn', allowance: TRANSLATION_QUOTAS.baidu, quotaEn: 'Standard: 50,000 characters/month; verified Advanced: 1,000,000/month.', conditionsEn: 'Personal verification plus Advanced activation; tiers do not stack.' },
@@ -46,9 +47,12 @@ export const FREE_SERVICES: readonly FreePiece[] = [
   { id: 'youdao', role: 'translation', regionGroup: 'cn', name: '有道智云翻译 · 一次性体验金', nameEn: 'Youdao Translation · one-time credit', kind: 'youdao', baseUrl: 'https://openapi.youdao.com/api', model: '', signupUrl: 'https://ai.youdao.com/console/', credential: 'youdaoPair', allowance: TRANSLATION_QUOTAS.youdao, quotaEn: 'New account: CNY 10; identity verification: additional CNY 40, one time.', conditionsEn: 'Translation and OCR share the account credit, not separate monthly allowances. Eligibility and expiry follow your account.' },
   { id: 'youdao-ocr', role: 'ocr', regionGroup: 'cn', name: '有道智云 OCR · 一次性体验金', nameEn: 'Youdao OCR · one-time credit', kind: 'youdao', baseUrl: 'https://openapi.youdao.com/ocrapi', model: 'general', signupUrl: 'https://ai.youdao.com/console/', credential: 'youdaoPair', allowance: OCR_QUOTAS.youdao, quotaEn: 'New account: CNY 10; identity verification: additional CNY 40, one time.', conditionsEn: 'Same credit pool as Youdao Translation; do not count it twice. Check account expiry and eligible products.' },
 
+  { id: 'gemini', role: 'translation', regionGroup: 'overseas', name: "Gemini", nameEn: 'Gemini', kind: 'openai', baseUrl: 'https://generativelanguage.googleapis.com/v1beta/openai', model: 'gemini-3.8-flash', signupUrl: 'https://aistudio.google.com/apikey', credential: 'apiKey', allowance: TRANSLATION_QUOTAS.gemini, quotaEn: "Selected Gemini models have a free tier; account/model rate limits apply.", conditionsEn: "Free-tier content may improve products. Check region, model and account eligibility." },
+  { id: 'groq', role: 'translation', regionGroup: 'overseas', name: "Groq", nameEn: 'Groq', kind: 'openai', baseUrl: 'https://api.groq.com/openai/v1', model: 'openai/gpt-oss-20b', signupUrl: 'https://console.groq.com/keys', credential: 'apiKey', allowance: TRANSLATION_QUOTAS.groq, quotaEn: "Free tier with account/model request and Token rate limits.", conditionsEn: "No universal monthly Token allowance; check your console and plan." },
+  { id: 'ollama', role: 'translation', regionGroup: 'overseas', name: "Ollama 本机", nameEn: 'Ollama local', kind: 'openai', baseUrl: 'http://localhost:11434/v1', model: 'gpt-oss:20b', signupUrl: 'https://ollama.com/download', credential: 'localOllama', allowance: TRANSLATION_QUOTAS.ollama, quotaEn: "Local inference has no cloud API charge; install Ollama and download a model.", conditionsEn: "Uses local hardware, storage and electricity. Cloud models and remote hosts are not included." },
 ];
 export function servicesFor(region: FreeRegion, role: FreePiece['role']): readonly FreePiece[] {
-  return FREE_SERVICES.filter((item) => item.regionGroup === region && item.role === role);
+  return FREE_SERVICES.filter((item) => (item.regionGroup === region || item.id === 'ollama') && item.role === role);
 }
 export function serviceById(id: string): FreePiece | undefined {
   return FREE_SERVICES.find((item) => item.id === id);

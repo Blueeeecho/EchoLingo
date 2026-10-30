@@ -32,6 +32,10 @@ const youdao = verifiedQuota({
 });
 
 export const TRANSLATION_QUOTAS: Record<ProviderPresetId, ServiceQuota> = {
+  gemini: verifiedQuota({ badge: '指定模型免费层', summary: '指定 Gemini 模型有免费层；无统一月度 Token 额度。', details: ['按账号与模型限制请求频率和每日请求数，不是无限使用。', '免费层内容可能用于改进产品；支持地域、模型和额度以 Google AI Studio 为准。'], allowances: [], links: [['官方免费层与价格', 'https://ai.google.dev/gemini-api/docs/pricing']], recommendedModel: 'gemini-3.8-flash' }),
+  groq: verifiedQuota({ badge: '限速免费层', summary: 'Groq Free tier：受模型与账号的速率、每日用量限制。', details: ['不承诺统一月度 Token 数；具体 RPM/RPD/TPM/TPD 请查看账号控制台。', '免费计划与付费计划不同，示例模型可用性以账号为准。'], allowances: [], links: [['官方免费计划说明', 'https://console.groq.com/docs/billing-faqs'], ['官方限速规则', 'https://console.groq.com/docs/rate-limits']] }),
+  ollama: verifiedQuota({ badge: '本机推理', summary: 'Ollama 本机模型无云端调用费；需自行安装并下载模型。', details: ['没有平台月度 API 配额，但需要本机内存、存储、电力与算力。', '仅限本机运行的模型；cloud 模型和远程服务器不是本机免费处理。'], allowances: [{ plan: '本机模型', amount: null, unit: 'none', period: 'unmetered', conditions: ['本机 Ollama 正在运行，模型已经下载；模型性能取决于设备。'] }], links: [['官方本机接口', 'https://docs.ollama.com/api/openai-compatibility']] }),
+
   system: quota({ badge: '本机免费', summary: '本机系统翻译，无云端调用额度。', details: ['适用于 macOS 26 及以上；先在设置中准备所需语言包。', 'Windows 请使用安装包内的中英离线翻译；其他平台以实际支持情况为准。'], allowances: localAllowance, links: [['Apple 系统翻译', 'https://developer.apple.com/documentation/translation/translationsession/init(installedsource:target:)']] }),
   offline: quota({ badge: '本机免费', summary: 'Windows 安装包内中英模型，无需账号、密钥或按次付费。', details: ['支持简体中文与英语互译；处理速度取决于电脑性能。'], allowances: localAllowance, links: [['离线模型项目', 'https://github.com/mozilla/translations']] }),
   microsoft: verifiedQuota({

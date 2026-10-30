@@ -2986,7 +2986,7 @@ try {
   }
   await page.locator('#free-region-cn').click();
   assert.equal(await page.locator('#free-ocr-list .free-service').count(), 4);
-  assert.equal(await page.locator('#free-translation-list .free-service').count(), 7);
+  assert.equal(await page.locator('#free-translation-list .free-service').count(), 8);
   assert.equal(await page.locator('[data-free-service="baidu"] .free-service-quota').getByText(/100 万字符|1,000,000/).count() > 0, true);
   await page.locator('#free-setup-settings').click();
   assert.equal(await page.locator('#free-setup-dialog').isHidden(), true);
@@ -3021,7 +3021,7 @@ try {
   assert.equal(await page.evaluate(() => window.__qa.keyCalls), 1);
   await page.locator('#free-setup-close').click();
   await page.locator('#free-region-overseas').click();
-  assert.equal(await page.locator('#free-translation-list .free-service').count(), 2);
+  assert.equal(await page.locator('#free-translation-list .free-service').count(), 5);
   await page.locator('#free-translation-list .free-service-actions button:first-child').nth(1).click();
   const reopenedFreeStep = await page.locator('#free-setup-step').textContent();
   await page.evaluate(() => { window.__qa.holdFreeSetupTest = false; window.__qa.releaseFreeSetupTest(); });

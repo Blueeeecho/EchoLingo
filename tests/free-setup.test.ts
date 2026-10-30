@@ -7,12 +7,12 @@ describe('independent free service recommendations', () => {
     for (const region of ['cn', 'overseas'] as const) for (const role of ['translation', 'ocr'] as const) {
       const list = servicesFor(region, role);
       expect(list.length).toBeGreaterThan(1);
-      expect(list.every((item) => item.role === role && item.regionGroup === region)).toBe(true);
+      expect(list.every((item) => item.role === role && (item.regionGroup === region || item.id === 'ollama'))).toBe(true);
       expect(list.every((item) => !('pieces' in item))).toBe(true);
     }
     expect(new Set(FREE_SERVICES.map((item) => item.id)).size).toBe(FREE_SERVICES.length);
     expect(serviceById('missing')).toBeUndefined();
-    expect(JSON.stringify(FREE_SERVICES)).not.toMatch(/gemini|generativelanguage|tencent-mt/i);
+    expect(JSON.stringify(FREE_SERVICES)).not.toMatch(/tencent-mt|01\.ai|金山/i);
   });
   it('every recommendation has quota, period/conditions, date, official source and supported setup', () => {
     for (const item of FREE_SERVICES) {

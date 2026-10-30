@@ -11,7 +11,7 @@ import { HistoryCache } from './history-cache';
 import { mergeProviderRetry, sameTranslationSnapshot, type TranslationSnapshot } from './translation-retry';
 import { credentialScope } from './credential-scope';
 import { credentialMayExist, credentialStateOf, credentialStatusLabel } from './credential-state';
-import { inferProviderPreset, PROVIDER_PRESETS, qwenBaseUrl, qwenSettingsFromUrl } from './provider-presets';
+import { isLocalOllama, inferProviderPreset, PROVIDER_PRESETS, qwenBaseUrl, qwenSettingsFromUrl } from './provider-presets';
 import type { QwenRegion } from './provider-presets';
 import { installFreeSetup } from './free-setup-ui';
 import { buildTranslationCredential, isNativeTranslation, TRANSLATION_NATIVE_URLS } from './translation-credentials';
@@ -974,7 +974,7 @@ function renderProviders(): void {
     row.append(node('span', 'provider-avatar', provider.name.slice(0, 1).toUpperCase()));
     const info = node('div', 'provider-info');
     const title = node('div', 'provider-title', provider.name);
-    if (isLocalProvider(provider.kind)) title.append(node('span', 'provider-key-badge', '· 无需 API Key'));
+    if (isLocalProvider(provider.kind) || isLocalOllama(provider)) title.append(node('span', 'provider-key-badge', '· 无需 API Key'));
     else title.append(node('span', 'provider-key-badge', `· ${credentialStatusLabel(provider)}`));
     info.append(title, node('span', 'provider-details', provider.kind === 'offline' ? '内置中英模型 · 离线使用 · 无需配置' : provider.kind === 'system' ? '本机语言包 · 首次使用请检查下方准备状态' : `${providerKindLabel(provider.kind)}${provider.model ? ` · ${provider.model}` : ''} · ${provider.baseUrl}`));
     const controls = node('div', 'provider-controls');
