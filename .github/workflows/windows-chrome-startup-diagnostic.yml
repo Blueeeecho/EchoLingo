@@ -77,7 +77,7 @@ jobs:
         if: steps.source.outputs.eligible == 'true'
       - name: One fresh Chrome startup and unchanged native OCR workflow
         if: steps.source.outputs.eligible == 'true'
-        shell: pwsh
+        shell: powershell
         run: |
           & node tests/windows-browser-ocr-visibility-smoke.mjs --browser chrome --application '${{ steps.candidate.outputs.app }}' --expected-application-sha256 fc373c4a07c53270a4da6789be6113835420cfceb5579315edc7e99fb9652632 --expected-application-bytes 7512576 --native-capture '${{ steps.candidate.outputs.native }}' 2>&1 | Tee-Object "$env:RUNNER_TEMP/chrome-startup-diagnostic.log"
           exit $LASTEXITCODE
