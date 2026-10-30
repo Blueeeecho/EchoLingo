@@ -1,29 +1,37 @@
 import { describe, expect, it } from 'vitest';
-import { FREE_COMBOS, combosFor } from '../src/free-combos';
+import { FREE_SERVICES, servicesFor, serviceById } from '../src/free-services';
 import { tx } from '../src/ui-text';
 
-describe('free service combinations', () => {
-  it('offers the approved mainland and overseas sets without Tencent text translation', () => {
-    expect(combosFor('cn').map((combo) => combo.id)).toEqual([
-      'cn-siliconflow-baidu-ocr', 'cn-baidu-tencent-ocr', 'cn-zhipu',
-    ]);
-    expect(combosFor('overseas').map((combo) => combo.id)).toEqual([
-      'os-azure-google', 'os-deepl-azure-vision',
-    ]);
-    const kinds = FREE_COMBOS.flatMap((combo) => combo.pieces.map((piece) => piece.kind));
-    expect(kinds).not.toContain('tencent-mt');
-    expect(JSON.stringify(FREE_COMBOS)).not.toMatch(/gemini|generativelanguage/i);
-    expect(kinds.filter((kind) => kind === 'tencent')).toEqual(['tencent']);
+describe('independent free service recommendations', () => {
+  it('offers separate role lists with no pair or implicit second service', () => {
+    for (const region of ['cn', 'overseas'] as const) for (const role of ['translation', 'ocr'] as const) {
+      const list = servicesFor(region, role);
+      expect(list.length).toBeGreaterThan(1);
+      expect(list.every((item) => item.role === role && item.regionGroup === region)).toBe(true);
+      expect(list.every((item) => !('pieces' in item))).toBe(true);
+    }
+    expect(new Set(FREE_SERVICES.map((item) => item.id)).size).toBe(FREE_SERVICES.length);
+    expect(serviceById('missing')).toBeUndefined();
+    expect(JSON.stringify(FREE_SERVICES)).not.toMatch(/gemini|generativelanguage|tencent-mt/i);
   });
-
-  it('labels quotas as checked in 2026-10 and never promises permanent free use', () => {
-    const text = FREE_COMBOS.flatMap((combo) => [combo.detailZh, combo.detailEn, ...combo.pieces.flatMap((piece) => [piece.quotaZh, piece.quotaEn])]).join('\n');
-    expect(text).toContain('2026-10');
-    expect(text).toContain('Checked in 2026-10');
-    expect(text).not.toMatch(/永久免费|permanently free/i);
-    expect(text.toLowerCase()).not.toContain('helloworld');
+  it('every recommendation has quota, period/conditions, date, official source and supported setup', () => {
+    for (const item of FREE_SERVICES) {
+      expect(item.allowance.summary.length).toBeGreaterThan(10);
+      expect(item.allowance.details.length).toBeGreaterThan(0);
+      expect(item.allowance.checkedOn).toMatch(/^2026-10-\d\d$/);
+      expect(item.allowance.links.length).toBeGreaterThan(0);
+      expect(item.quotaEn.length).toBeGreaterThan(10);
+      expect(item.conditionsEn.length).toBeGreaterThan(10);
+      expect(item.signupUrl).toMatch(/^https:\/\//);
+      expect(item.allowance.links.every(([, url]) => url.startsWith('https://'))).toBe(true);
+      expect(item.allowance.summary).not.toContain('永久免费');
+    }
+    expect(serviceById('deepl')!.allowance.allowances[0]!.period).toBe('once');
+    expect(serviceById('microsoft')!.allowance.allowances[0]!.amount).toBe(2_000_000);
+    expect(serviceById('ocrspace')!.model).toBe('2');
+    expect(serviceById('aliyun')!.credential).toBe('appPair');
+    expect(serviceById('siliconflow')!.allowance.summary).toContain('0');
   });
-
   it('follows the active UI language', () => {
     expect(tx('中文', 'English', 'zh')).toBe('中文');
     expect(tx('中文', 'English', 'en')).toBe('English');

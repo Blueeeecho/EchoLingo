@@ -31,7 +31,7 @@ function deferred() {
 }
 const settle = async () => { for (let i = 0; i < 50; i++) await Promise.resolve(); };
 function fixture(desktop = true, blockingHint?: 'engine-hint' | 'core-guidance') {
-  const ids = ['free-setup-hint', 'free-setup-dialog', 'free-setup-body', 'free-setup-error', 'free-combo-list', 'free-region-cn', 'free-region-overseas', 'core-guidance', 'engine-hint', 'free-setup-step', 'free-setup-next', 'free-setup-back', 'free-setup-close', 'free-setup-settings', 'free-setup-open', 'free-setup-docs', 'free-setup-dismiss'];
+  const ids = ['free-setup-hint', 'free-setup-dialog', 'free-setup-body', 'free-setup-error', 'free-translation-list', 'free-ocr-list', 'free-region-cn', 'free-region-overseas', 'core-guidance', 'engine-hint', 'free-setup-step', 'free-setup-next', 'free-setup-back', 'free-setup-close', 'free-setup-settings', 'free-setup-open', 'free-setup-docs', 'free-setup-dismiss'];
   const roots = ids.map((id) => { const node = new Element(); node.id = id; node.hidden = id === 'free-setup-hint' || id === 'free-setup-dialog' || ((id === 'core-guidance' || id === 'engine-hint') && id !== blockingHint); return node; });
   const find = (id: string) => roots.map((root) => root.find(id)).find(Boolean) ?? null;
   const node = (id: string) => { const result = find(id); if (!result) throw new Error(`Missing fixture node: ${id}`); return result; };
@@ -75,9 +75,9 @@ function fixture(desktop = true, blockingHint?: 'engine-hint' | 'core-guidance')
     return operation;
   };
   const api = installFreeSetup({ desktop, settings: () => settings, updateSettings, toast, reportError, setView() {}, showModal(modal) { modal.hidden = false; }, closeModal(modal) { modal.hidden = true; } });
-  const open = (region: 'cn' | 'overseas' = 'cn', index = 0) => {
+  const open = (region: 'cn' | 'overseas' = 'cn', index = 0, role: 'translation' | 'ocr' = 'translation') => {
     node(`free-region-${region}`).emit();
-    node('free-combo-list').children[index]!.children[2]!.emit();
+    node(`free-${role}-list`).children[index]!.children[4]!.children[0]!.emit();
   };
   const fill = () => { for (const id of ['key', 'first', 'second']) { const input = find(`free-field-${id}`); if (input) input.value = 'private-test-key'; } if (find('free-field-endpoint')) node('free-field-endpoint').value = 'https://my-resource.cognitiveservices.azure.com'; };
   const submit = async () => { node('free-setup-next').emit(); await settle(); };
@@ -121,19 +121,18 @@ describe('free setup validation and step advancement', () => {
   });
   it('does not advance when a credential pair is incomplete or desktop testing is unavailable', async () => {
     let f = fixture(); f.open('cn', 1); f.node('free-field-first').value = 'one-half'; await f.submit();
-    expect(f.node('free-setup-step').textContent).toContain('Step 1'); expect(f.calls()).toBe(0);
+    expect(f.node('free-setup-step').textContent).toContain('Translation'); expect(f.calls()).toBe(0);
     f = fixture(false); f.open(); f.fill(); await f.submit();
-    expect(f.node('free-setup-step').textContent).toContain('Step 1'); expect(f.calls()).toBe(0);
+    expect(f.node('free-setup-step').textContent).toContain('Translation'); expect(f.calls()).toBe(0);
   });
   it('does not finish an invalid Azure endpoint, then completes only after a valid tested OCR', async () => {
-    const f = fixture(); f.open('overseas', 1); f.fill(); await f.submit();
-    expect(f.node('free-setup-step').textContent).toContain('Step 2');
+    const f = fixture(); f.open('overseas', 1, 'ocr');
     f.fill(); f.node('free-field-endpoint').value = 'https://example.invalid'; await f.submit();
-    expect(f.node('free-setup-dialog').hidden).toBe(false); expect(f.node('free-setup-step').textContent).toContain('Step 2');
+    expect(f.node('free-setup-dialog').hidden).toBe(false); expect(f.node('free-setup-step').textContent).toContain('OCR');
     expect(f.settings().activeOcrProviderId).toBe('existing-ocr');
     f.fill(); await f.submit();
     expect(f.node('free-setup-dialog').hidden).toBe(true); expect(f.find('free-field-key')).toBeNull();
-    expect(f.fresh()).toHaveLength(2); expect(f.settings().activeOcrProviderId).toMatch(/^free-/);
+    expect(f.fresh()).toHaveLength(1); expect(f.settings().activeOcrProviderId).toMatch(/^free-/);
     expect(vi.mocked(invoke).mock.calls.filter(([command]) => command === 'test_ocr_provider')).toHaveLength(1);
   });
 });
@@ -145,7 +144,7 @@ describe('free setup interrupted and repeated requests', () => {
     expect(f.node('free-setup-next').disabled).toBe(true); expect(f.fresh()).toHaveLength(1);
     expect(vi.mocked(invoke).mock.calls.filter(([command]) => command === 'test_provider')).toHaveLength(1);
     gate.resolve(); await settle();
-    expect(f.node('free-setup-step').textContent).toContain('Step 2'); expect(f.node('free-setup-next').disabled).toBe(false);
+    expect(f.node('free-setup-dialog').hidden).toBe(true); expect(f.node('free-setup-next').disabled).toBe(false);
     expect(f.fresh()).toHaveLength(1);
   });
   it.each(['queued-stage', 'in-flight-stage', 'key', 'test', 'queued-activation', 'in-flight-activation'] as const)('cancels %s without stale activation, secrets, or advancing a reopened wizard', async (stage) => {
@@ -167,7 +166,7 @@ describe('free setup interrupted and repeated requests', () => {
   });
   it.each(['back', 'escape', 'backdrop', 'open-new'] as const)('invalidates pending OCR on %s and preserves completed steps and existing OCR', async (action) => {
     const f = fixture(); f.open(); f.fill(); await f.submit();
-    const translator = f.fresh()[0]!.id; f.toast.mockClear();
+    const translator = f.fresh()[0]!.id; f.toast.mockClear(); f.open('cn', 0, 'ocr');
     const gate = deferred(); f.invokeGates.set('test_ocr_provider', gate);
     f.fill(); await f.submit();
     if (action === 'back') f.node('free-setup-back').emit();
@@ -178,12 +177,12 @@ describe('free setup interrupted and repeated requests', () => {
     expect(f.settings().activeOcrProviderId).toBe('existing-ocr'); expect(f.fresh().map((provider) => provider.id)).toEqual([translator]);
     expect([...f.keys.keys()]).toEqual(['existing-translation', 'existing-ocr', translator]);
     expect(f.toast).not.toHaveBeenCalled(); expect(f.reportError).not.toHaveBeenCalled();
-    if (action === 'back' || action === 'open-new') expect(f.node('free-setup-step').textContent).toContain('Step 1');
+    if (action === 'open-new') expect(f.node('free-setup-step').textContent).toContain('Translation');
     else expect(f.find('free-field-first')).toBeNull();
   });
   it('rolls back an OCR activation already in flight when Close occurs', async () => {
     const f = fixture(); f.open(); f.fill(); await f.submit();
-    const gate = deferred(); f.afterSave.set(4, gate); f.toast.mockClear();
+    const gate = deferred(); f.afterSave.set(4, gate); f.toast.mockClear(); f.open('cn', 0, 'ocr');
     f.fill(); await f.submit(); f.node('free-setup-close').emit(); gate.resolve(); await settle();
     expect(f.settings().activeOcrProviderId).toBe('existing-ocr'); expect(f.settings().ocrProviders.map((p) => p.id)).toEqual(['existing-ocr']);
     expect(f.toast).not.toHaveBeenCalled();
@@ -194,7 +193,7 @@ describe('free setup interrupted and repeated requests', () => {
     f.invokeGates.set('test_provider', newGate); f.open('overseas', 1); f.fill(); await f.submit();
     oldGate.resolve(); await settle(); expect(f.node('free-setup-next').disabled).toBe(true);
     newGate.resolve(); await settle(); expect(f.node('free-setup-next').disabled).toBe(false);
-    expect(f.node('free-setup-step').textContent).toContain('Step 2'); expect(f.fresh()).toHaveLength(1);
+    expect(f.node('free-setup-dialog').hidden).toBe(true); expect(f.fresh()).toHaveLength(1);
   });
 });
 
@@ -206,16 +205,73 @@ describe('free setup failed requests', () => {
     else f.invokeFailures.add(failure);
     f.open(); f.fill(); await f.submit();
     expect(f.fresh()).toEqual([]); expect([...f.keys.keys()]).toEqual(['existing-translation', 'existing-ocr']);
-    expect(f.node('free-setup-step').textContent).toContain('Step 1'); expect(f.node('free-setup-error').hidden).toBe(false);
+    expect(f.node('free-setup-step').textContent).toContain('Translation'); expect(f.node('free-setup-error').hidden).toBe(false);
     expect(f.node('free-setup-next').disabled).toBe(false); expect(f.toast).not.toHaveBeenCalled();
     f.invokeFailures.clear(); f.failSave.clear(); await f.submit();
-    expect(f.node('free-setup-step').textContent).toContain('Step 2'); expect(f.fresh()).toHaveLength(1);
+    expect(f.node('free-setup-dialog').hidden).toBe(true); expect(f.fresh()).toHaveLength(1);
   });
   it('retains a disabled removable provider and reports failed secret cleanup', async () => {
     const f = fixture(); f.invokeFailures.add('test_provider'); f.invokeFailures.add('delete_api_key');
     f.open(); f.fill(); await f.submit();
     expect(f.fresh()).toHaveLength(1); expect(f.settings().providers.at(-1)!.enabled).toBe(false);
     expect(f.reportError).toHaveBeenCalledOnce(); expect(f.toast).not.toHaveBeenCalled();
-    expect(f.node('free-setup-step').textContent).toContain('Step 1');
+    expect(f.node('free-setup-step').textContent).toContain('Translation');
   });
+});
+
+
+describe('independent role selection and setup', () => {
+  it('the general entry selects no provider and submits nothing', async () => {
+    const f = fixture(); f.node('free-setup-settings').emit(); await settle();
+    expect(f.node('free-setup-dialog').hidden).toBe(true);
+    expect(f.fresh()).toEqual([]); expect(invoke).not.toHaveBeenCalled();
+  });
+  it('translation completion never asks for OCR or changes its selection', async () => {
+    const f = fixture(); const before = structuredClone(f.settings().ocrProviders);
+    f.open(); f.fill(); await f.submit();
+    expect(f.node('free-setup-dialog').hidden).toBe(true);
+    expect(f.settings().ocrProviders).toEqual(before);
+    expect(f.settings().activeOcrProviderId).toBe('existing-ocr');
+    expect(vi.mocked(invoke).mock.calls.some(([command]) => command.includes('ocr'))).toBe(false);
+    expect(f.fresh()).toHaveLength(1);
+  });
+  it('OCR can be configured first without adding or changing any translation service', async () => {
+    const f = fixture(); const before = structuredClone(f.settings().providers);
+    f.open('cn', 0, 'ocr'); f.fill(); await f.submit();
+    expect(f.node('free-setup-dialog').hidden).toBe(true);
+    expect(f.settings().providers).toEqual(before);
+    expect(f.settings().activeOcrProviderId).toMatch(/^free-/);
+    expect(vi.mocked(invoke).mock.calls.some(([command]) => command === 'test_provider')).toBe(false);
+  });
+  it.each([['volcengine', 3, 'cn-beijing'], ['aliyun', 4, 'cn-hangzhou']] as const)('uses native credential shape and default region for %s', async (kind, index, region) => {
+    const f = fixture(); f.open('cn', index); f.fill(); await f.submit();
+    const provider = f.settings().providers.at(-1)!;
+    expect(provider.kind).toBe(kind); expect(provider.region).toBe(region);
+    const secret = JSON.parse(f.keys.get(provider.id)!);
+    expect(secret).toEqual({ accessKeyId: 'private-test-key', accessKeySecret: 'private-test-key' });
+    expect(JSON.stringify(provider)).not.toContain('private-test-key');
+    expect(f.settings().activeOcrProviderId).toBe('existing-ocr');
+  });
+  it('publishes verified quota summaries and source buttons in both role lists', () => {
+    const f = fixture();
+    expect(f.node('free-translation-list').children.length).toBeGreaterThan(1);
+    expect(f.node('free-ocr-list').children.length).toBeGreaterThan(1);
+    for (const list of ['free-translation-list', 'free-ocr-list']) for (const row of f.node(list).children) {
+      expect(row.children[1]!.textContent.length).toBeGreaterThan(10);
+      expect(row.children[3]!.textContent).toContain('2026-10-30');
+      expect(row.children[4]!.children).toHaveLength(2);
+    }
+  });
+  it.each([['translation', 6], ['ocr', 3]] as const)('stores Youdao %s credentials without sharing or saving secrets in settings', async (role, index) => {
+    const f = fixture(); f.open('cn', index, role); f.fill(); await f.submit();
+    const provider = f.fresh()[0]!;
+    expect(JSON.parse(f.keys.get(provider.id)!)).toEqual({ appKey: 'private-test-key', appSecret: 'private-test-key' });
+    expect(JSON.stringify(f.settings())).not.toContain('private-test-key');
+    expect(f.fresh()).toHaveLength(1);
+  });
+  it('rejects the public OCR.space sample key without staging a service', async () => {
+    const f = fixture(); f.open('overseas', 2, 'ocr'); f.node('free-field-key').value = 'helloworld'; await f.submit();
+    expect(f.node('free-setup-error').hidden).toBe(false); expect(f.fresh()).toEqual([]); expect(invoke).not.toHaveBeenCalled();
+  });
+
 });

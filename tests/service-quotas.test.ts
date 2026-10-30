@@ -12,7 +12,7 @@ describe('service quota coverage and measurement', () => {
   });
   it('keeps billing units, periods and conditional quantities explicit', () => {
     for (const entry of [...Object.values(TRANSLATION_QUOTAS), ...Object.values(OCR_QUOTAS)]) {
-      expect(entry.checkedOn).toBe(SERVICE_QUOTA_CHECKED_ON);
+      expect([SERVICE_QUOTA_CHECKED_ON, '2026-10-30']).toContain(entry.checkedOn);
       expect(entry.summary.length).toBeGreaterThan(0);
       for (const allowance of entry.allowances) {
         expect(allowance.conditions.length).toBeGreaterThan(0);

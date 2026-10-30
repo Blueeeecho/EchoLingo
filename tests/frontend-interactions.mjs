@@ -2785,7 +2785,12 @@ try {
     await page.locator('#cancel-provider-dialog').click();
   }
   await page.locator('#free-region-cn').click();
-  await page.locator('#free-combo-list .free-combo button').first().click();
+  assert.equal(await page.locator('#free-ocr-list .free-service').count(), 4);
+  assert.equal(await page.locator('#free-translation-list .free-service').count(), 7);
+  assert.equal(await page.locator('#free-translation-list').getByText(/100 万字符/).count() > 0, true);
+  await page.locator('#free-setup-settings').click();
+  assert.equal(await page.locator('#free-setup-dialog').isHidden(), true);
+  await page.locator('#free-translation-list .free-service-actions button:first-child').first().click();
   assert.equal(await page.locator('#free-setup-dialog').isVisible(), true);
   assert.equal(await page.locator('.app-shell').evaluate((element) => element.inert), true);
   const firstFreeStep = await page.locator('#free-setup-step').textContent();
@@ -2805,7 +2810,7 @@ try {
   assert.equal(await page.evaluate(() => window.__qa.hideCalls), freeBaseline.hides);
   assert.equal(await page.locator('#free-field-key').count(), 0);
 
-  await page.locator('#free-combo-list .free-combo button').first().click();
+  await page.locator('#free-translation-list .free-service-actions button:first-child').first().click();
   await page.locator('#free-field-key').fill('qa-wizard-private-key');
   await page.evaluate(() => { window.__qa.holdFreeSetupTest = true; });
   await page.locator('#free-setup-next').click();
@@ -2816,8 +2821,8 @@ try {
   assert.equal(await page.evaluate(() => window.__qa.keyCalls), 1);
   await page.locator('#free-setup-close').click();
   await page.locator('#free-region-overseas').click();
-  assert.equal(await page.locator('#free-combo-list .free-combo').count(), 2);
-  await page.locator('#free-combo-list .free-combo button').nth(1).click();
+  assert.equal(await page.locator('#free-translation-list .free-service').count(), 2);
+  await page.locator('#free-translation-list .free-service-actions button:first-child').nth(1).click();
   const reopenedFreeStep = await page.locator('#free-setup-step').textContent();
   await page.evaluate(() => { window.__qa.holdFreeSetupTest = false; window.__qa.releaseFreeSetupTest(); });
   await page.waitForFunction(() => window.__qa.keyDeleteCalls === 1 && !window.__qa.settings.providers.some((provider) => provider.id.startsWith('free-')));
@@ -2829,7 +2834,27 @@ try {
   assert.equal(await page.locator('.app-shell').evaluate((element) => element.inert), false);
   assert.equal(await page.evaluate(() => window.__qa.hideCalls), freeBaseline.hides);
   assert.deepEqual(errors, []);
-  console.log('PASS: free setup blank validation, modal inert/focus trap/shortcuts/Escape, duplicate submission, pending-test close/reopen, owned credential cleanup, and two non-Gemini overseas recommendations. Fake IPC only.');
+  const independentBefore = await page.evaluate(() => structuredClone(window.__qa.settings));
+  await page.locator('#free-region-cn').click();
+  await page.locator('[data-free-service="baidu-ocr"] .free-service-actions button').first().click();
+  await page.locator('#free-field-first').fill('qa-independent-ocr-key');
+  await page.locator('#free-field-second').fill('qa-independent-ocr-secret');
+  await page.locator('#free-setup-next').click();
+  await page.locator('#free-setup-dialog').waitFor({ state: 'hidden' });
+  const ocrOnly = await page.evaluate(() => structuredClone(window.__qa.settings));
+  assert.deepEqual(ocrOnly.providers, independentBefore.providers);
+  assert.equal(ocrOnly.ocrProviders.length, independentBefore.ocrProviders.length + 1);
+  assert.equal(ocrOnly.activeOcrProviderId.startsWith('free-'), true);
+  await page.locator('[data-free-service="siliconflow"] .free-service-actions button').first().click();
+  await page.locator('#free-field-key').fill('qa-independent-translation-key');
+  await page.locator('#free-setup-next').click();
+  await page.locator('#free-setup-dialog').waitFor({ state: 'hidden' });
+  const translationOnly = await page.evaluate(() => structuredClone(window.__qa.settings));
+  assert.deepEqual(translationOnly.ocrProviders, ocrOnly.ocrProviders);
+  assert.equal(translationOnly.activeOcrProviderId, ocrOnly.activeOcrProviderId);
+  assert.equal(translationOnly.providers.length, ocrOnly.providers.length + 1);
+  assert.equal(JSON.stringify(translationOnly).includes('qa-independent-'), false);
+  console.log('PASS: free setup blank validation, modal inert/focus trap/shortcuts/Escape, duplicate submission, pending-test close/reopen, owned credential cleanup, and independent translation/OCR recommendation lists. Fake IPC only.');
 
   const combinedHintsUrl = new URL(process.env.ECHOLINGO_TEST_URL ?? 'http://127.0.0.1:1420/');
   combinedHintsUrl.searchParams.set('combinedHintsFixture', '1');
