@@ -36,7 +36,7 @@ fn parse_niu(value: &Value, target: &str) -> Result<String, String> {
             .unwrap_or_else(|| code.to_string());
         return Err(match code.as_str() {
             "13001" => "小牛翻译流量不足或服务权限受限，请检查账户额度和权限",
-            "13002" => "小牛翻译密钥缺失或无效，请检查 API Key",
+            "13002" => "小牛翻译密钥参数缺失，请检查 API Key",
             "10001" => "小牛翻译请求频率受限，请稍后重试",
             "10003" => "小牛翻译拒绝了文本长度，请缩短输入",
             "13007" => "小牛翻译不支持当前语言方向",
