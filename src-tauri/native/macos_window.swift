@@ -398,6 +398,15 @@ public func echoLingoConfigureWindowFrame(_ pointer: UnsafeMutableRawPointer?, _
     guard let pointer = pointer,
           let window = Unmanaged<AnyObject>.fromOpaque(pointer).takeUnretainedValue() as? NSWindow else { return -2 }
     guard window.styleMask.contains([.titled, .resizable]) else { return -3 }
+    let topLeft = NSPoint(x: window.frame.minX, y: window.frame.maxY)
+    // AppKit may change the frame while adding/removing full-size content.
+    // Sizing afterwards preserves only its then-current origin, so anchor the
+    // style transition itself too, including an explicit responder failure.
+    defer {
+        let frame = window.frame
+        let origin = NSPoint(x: topLeft.x, y: topLeft.y - frame.height)
+        if frame.origin != origin { window.setFrameOrigin(origin) }
+    }
     let isPopup = popup != 0
     var mask = window.styleMask
     if isPopup { mask.insert(.fullSizeContentView) } else { mask.remove(.fullSizeContentView) }

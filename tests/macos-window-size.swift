@@ -61,6 +61,9 @@ final class KeyResponderProbe: NSView {
         for popup: Int32 in [1, 0, 1] {
             let presentationTopLeft = NSPoint(x: nativeFrameWindow.frame.minX, y: nativeFrameWindow.frame.maxY)
             precondition(echoLingoConfigureWindowFrame(framePointer, popup) == 0)
+            trace("native frame popup=\(popup) expected top=\(presentationTopLeft) configured frame=\(nativeFrameWindow.frame)")
+            precondition(abs(nativeFrameWindow.frame.minX - presentationTopLeft.x) <= 1
+                && abs(nativeFrameWindow.frame.maxY - presentationTopLeft.y) <= 1)
             precondition(nativeFrameWindow.firstResponder === keyResponder)
             let previousKeys = keyResponder.keyEvents
             let key = NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: [],
@@ -73,6 +76,7 @@ final class KeyResponderProbe: NSView {
             precondition(popupDragFrameAllowed(nativeFrameWindow) == (popup != 0))
             precondition(nativeFrameWindow.isMovable == (popup == 0))
             precondition(echoLingoSetContentSizeSync(framePointer, 713, 160) == 0)
+            trace("native frame sized frame=\(nativeFrameWindow.frame)")
             precondition(nativeFrameWindow.contentView!.bounds.height == 160)
             precondition(abs(nativeFrameWindow.frame.minX - presentationTopLeft.x) <= 1
                 && abs(nativeFrameWindow.frame.maxY - presentationTopLeft.y) <= 1)
