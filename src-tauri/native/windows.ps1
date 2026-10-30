@@ -1583,8 +1583,8 @@ public sealed class CaptureSelectionState {
         int topologyAssertions = CaptureTopologyPolicy.SelfTest();
         int outlineAssertions = CaptureOutlinePolicy.SelfTest();
         int hoverAssertions = CaptureHoverPolicy.SelfTest(), redrawAssertions = CaptureMoveMailbox.SelfTest(), healthAssertions = CaptureInputHealthPolicy.SelfTest();
-        int magnifierAssertions = CaptureMagnifierSample.SelfTest();
-        return new Dictionary<string, object> { { "captureStateFixturePassed", true }, { "fixtureAssertions", 11 + inputAssertions + topologyAssertions + outlineAssertions + hoverAssertions + redrawAssertions + healthAssertions + magnifierAssertions }, { "inputPolicyAssertions", inputAssertions }, { "topologyPolicyAssertions", topologyAssertions }, { "outlinePolicyAssertions", outlineAssertions }, { "hoverPolicyAssertions", hoverAssertions }, { "redrawPolicyAssertions", redrawAssertions }, { "inputHealthPolicyAssertions", healthAssertions }, { "magnifierSampleAssertions", magnifierAssertions }, { "hoverQueryMilliseconds", CaptureHoverPolicy.QueryMilliseconds }, { "releaseGraceMilliseconds", 500 }, { "screenCaptured", false }, { "clipboardChanged", false }, { "interactiveCaptureTested", false } };
+        int magnifierAssertions = CaptureMagnifierSample.SelfTest(), zOrderAssertions = CaptureZOrderPolicy.SelfTest();
+        return new Dictionary<string, object> { { "captureStateFixturePassed", true }, { "fixtureAssertions", 11 + inputAssertions + topologyAssertions + outlineAssertions + hoverAssertions + redrawAssertions + healthAssertions + magnifierAssertions + zOrderAssertions }, { "inputPolicyAssertions", inputAssertions }, { "topologyPolicyAssertions", topologyAssertions }, { "outlinePolicyAssertions", outlineAssertions }, { "hoverPolicyAssertions", hoverAssertions }, { "redrawPolicyAssertions", redrawAssertions }, { "inputHealthPolicyAssertions", healthAssertions }, { "magnifierSampleAssertions", magnifierAssertions }, { "zOrderPolicyAssertions", zOrderAssertions }, { "hoverQueryMilliseconds", CaptureHoverPolicy.QueryMilliseconds }, { "releaseGraceMilliseconds", 500 }, { "screenCaptured", false }, { "clipboardChanged", false }, { "interactiveCaptureTested", false } };
     }
 }
 
@@ -1898,6 +1898,79 @@ public static class CaptureOutlinePolicy {
     }
 }
 
+// Preserve edge > input-plane order at every native positioning step. Raising
+// a plane to HWND_TOPMOST before repairing each edge creates a visible inversion.
+// RenderHints returns the FIRST successfully raised visible edge across every
+// display: after the entire pass that HWND is the bottom of our raised hint set.
+public static class CaptureZOrderPolicy {
+    public static IntPtr FirstRaised(IntPtr first, IntPtr next) { return first == IntPtr.Zero ? next : first; }
+    public static bool Present(bool raise, Func<bool> ensureInput, Func<IntPtr> renderHints, Func<IntPtr,bool> repairInput) {
+        if (!ensureInput()) return false;
+        IntPtr bottomHint = renderHints();
+        if (raise) {
+            if (bottomHint == IntPtr.Zero)
+                throw new InvalidOperationException("CAPTURE_OVERLAY: No visible selection border could anchor the capture input windows; selection was cancelled.");
+            return repairInput(bottomHint);
+        }
+        return true;
+    }
+    public static int SelfTest() {
+        int assertions = 0;
+        Action<bool,string> check = delegate(bool value,string message) { assertions++; if (!value) throw new InvalidOperationException("SELF_TEST: " + message); };
+        List<int> order = new List<int>(); order.Add(90); // Foreign topmost window.
+        int[] allEdges = new int[] { 1, 2, 3, 4 }; // Two displays' visible hints.
+        int[] visibleEdges = allEdges, planes = new int[] { 11, 12 };
+        Action checkOrder = delegate {
+            foreach (int edge in allEdges) foreach (int plane in planes)
+                if (order.Contains(edge) && order.Contains(plane))
+                    check(order.IndexOf(edge) < order.IndexOf(plane), "Every visible edge stays above both displays' input planes after EACH position call");
+        };
+        Action<int,int> position = delegate(int window,int after) {
+            order.Remove(window); order.Insert(after == 0 ? 0 : order.IndexOf(after) + 1,window); checkOrder();
+        };
+        bool shown = false; int repairs = 0, renders = 0;
+        Func<bool> ensure = delegate {
+            if (!shown) { foreach (int plane in planes) position(plane,0); shown = true; }
+            return true;
+        };
+        Func<IntPtr> render = delegate {
+            renders++; IntPtr first = IntPtr.Zero;
+            foreach (int edge in allEdges) if (Array.IndexOf(visibleEdges,edge) < 0) order.Remove(edge);
+            foreach (int edge in visibleEdges) { position(edge,0); first = FirstRaised(first,new IntPtr(edge)); }
+            return first;
+        };
+        Func<IntPtr,bool> repair = delegate(IntPtr bottom) {
+            repairs++; foreach (int plane in planes) position(plane,bottom.ToInt32());
+            return true;
+        };
+        check(Present(true,ensure,render,repair), "First presentation shows planes before any hints exist, then anchors them below all visible hints");
+        foreach (int plane in planes) check(order.IndexOf(plane) < order.IndexOf(90), "Initial input planes cover the foreign topmost window");
+        position(90,0); // A foreign app subsequently enters the topmost group.
+        check(Present(true,ensure,render,repair), "Periodic repair retains edge order while restoring input coverage");
+        foreach (int plane in planes) check(order.IndexOf(plane) < order.IndexOf(90), "Periodic repair raises input above foreign windows, below all own edges");
+        visibleEdges = new int[] { 3, 4 }; // First display's hints became hidden.
+        check(Present(true,ensure,render,repair), "Hidden hints are not selected as the next frame's anchor");
+        check(!order.Contains(1) && !order.Contains(2), "Only currently visible hints remain in the z-order model");
+        int beforeRepairs = repairs;
+        check(Present(false,ensure,render,repair) && repairs == beforeRepairs, "Ordinary updates do not raise the input planes");
+        int beforeRenders = renders;
+        check(!Present(true,delegate { return false; },render,repair) && renders == beforeRenders && repairs == beforeRepairs, "An unarmed input gate shows neither hints nor repaired planes");
+        check(!Present(true,ensure,render,delegate(IntPtr bottom) { return false; }), "Losing the input gate during border rendering does not report successful presentation");
+        bool missingRejected = false;
+        try { Present(true,ensure,delegate { return IntPtr.Zero; },repair); }
+        catch (InvalidOperationException error) { missingRejected = error.Message.StartsWith("CAPTURE_OVERLAY:"); }
+        check(missingRejected && repairs == beforeRepairs, "A missing hint cancels instead of silently raising input above visuals");
+        bool renderRejected = false;
+        try { Present(true,ensure,delegate { throw new InvalidOperationException("synthetic edge failure"); },repair); }
+        catch (InvalidOperationException) { renderRejected = true; }
+        check(renderRejected && repairs == beforeRepairs, "A failed border pass cannot trigger a plane raise");
+        bool oldSequenceRejected = false;
+        try { position(planes[0],0); } catch (InvalidOperationException) { oldSequenceRejected = true; }
+        check(oldSequenceRejected, "The same per-step invariant rejects the old plane-first TOPMOST repair");
+        return assertions;
+    }
+}
+
 // Decorative metadata only. This policy cannot start/end a drag, alter its
 // freely selected ROI, capture pixels, inspect content or request activation.
 public struct CaptureHoverCandidate {
@@ -2111,8 +2184,8 @@ sealed class CaptureEdgeWindow : Form {
         if (message.Msg == 0x007E || (message.Msg == 0x02E0 && (uint)(message.WParam.ToInt64() & 0xFFFF) != expectedDpi)) invalidated();
         base.WndProc(ref message);
     }
-    public void Present(Rectangle edge, bool raise) {
-        if (edge.Width <= 0 || edge.Height <= 0) { if (Visible) Hide(); return; }
+    public IntPtr Present(Rectangle edge, bool raise) {
+        if (edge.Width <= 0 || edge.Height <= 0) { if (Visible) Hide(); return IntPtr.Zero; }
         bool changed = Bounds != edge, showing = !Visible;
         if (showing) { Bounds = edge; Show(); }
         // HWND_TOPMOST is a group, not permanent precedence over other topmost
@@ -2125,6 +2198,7 @@ sealed class CaptureEdgeWindow : Form {
             if (!SetWindowPos(Handle, new IntPtr(-1), edge.X, edge.Y, edge.Width, edge.Height, flags))
                 throw new InvalidOperationException("CAPTURE_OVERLAY: Windows could not display the selection border above ordinary windows.");
         }
+        return Handle;
     }
 }
 
@@ -2141,13 +2215,19 @@ sealed class CaptureOverlay : IDisposable {
             }
         } catch { Dispose(); throw; }
     }
-    public void Present(int highlighted, Rectangle selected, Rectangle hovered, bool raise) {
+    public IntPtr Present(int highlighted, Rectangle selected, Rectangle hovered, bool raise) {
         Rectangle[] border = CaptureOutlinePolicy.Edges(highlighted == index ? screen : Rectangle.Empty, screen);
         Rectangle outline = selected;
         if (outline.Width > 0 && outline.Height > 0) outline.Inflate(1, 1);
         Rectangle[] selection = CaptureOutlinePolicy.Edges(outline, screen);
         Rectangle[] window = CaptureOutlinePolicy.Edges(hovered, screen);
-        for (int i = 0; i < 4; i++) { edges[i].Present(border[i], raise); edges[i + 4].Present(selection[i], raise); edges[i + 8].Present(window[i], raise); }
+        IntPtr firstRaised = IntPtr.Zero;
+        for (int i = 0; i < 4; i++) {
+            firstRaised = CaptureZOrderPolicy.FirstRaised(firstRaised, edges[i].Present(border[i], raise));
+            firstRaised = CaptureZOrderPolicy.FirstRaised(firstRaised, edges[i + 4].Present(selection[i], raise));
+            firstRaised = CaptureZOrderPolicy.FirstRaised(firstRaised, edges[i + 8].Present(window[i], raise));
+        }
+        return firstRaised;
     }
     public void Hide() { foreach (CaptureEdgeWindow edge in edges) if (edge != null) edge.Hide(); }
     public void Dispose() { foreach (CaptureEdgeWindow edge in edges) if (edge != null) { edge.Close(); edge.Dispose(); } }
@@ -2276,14 +2356,20 @@ sealed class CaptureInputPlanes : IDisposable {
             }
         } catch { Dispose(); throw; }
     }
-    public bool Present(bool raise) {
+    public bool EnsurePresented() { return Present(false, new IntPtr(-1)); }
+    public bool PresentBelow(IntPtr bottomHint) {
+        if (bottomHint == IntPtr.Zero || !IsWindow(bottomHint) || !IsWindowVisible(bottomHint))
+            throw new InvalidOperationException("CAPTURE_OVERLAY: The visible border anchor disappeared; selection was cancelled.");
+        return Present(true, bottomHint);
+    }
+    bool Present(bool raise, IntPtr after) {
         if (disposed) throw new InvalidOperationException("CAPTURE_INPUT_PLANE: The capture input windows have already stopped.");
         lock (gate) if (!input.PlaneReady(state)) return false;
         if (shown && !raise) return true;
         foreach (IntPtr window in handles) {
             uint flags = 0x0001 | 0x0002 | 0x0010 | 0x0200; // NOSIZE/NOMOVE/NOACTIVATE/NOOWNERZORDER
             if (!shown) flags |= 0x0040;
-            if (!SetWindowPos(window, new IntPtr(-1), 0, 0, 0, 0, flags) || !IsWindowVisible(window) || !StylesMatch(window, true))
+            if (!SetWindowPos(window, after, 0, 0, 0, 0, flags) || !IsWindowVisible(window) || !StylesMatch(window, true))
                 throw new InvalidOperationException("CAPTURE_INPUT_PLANE: Windows could not show the capture input windows without activation.");
         }
         shown = true;
@@ -2884,12 +2970,17 @@ sealed class RegionPicker : ApplicationContext {
             renderedHighlight = highlighted; renderedSelection = selected; renderedHover = hovered;
             bool presented = false;
             try {
-                // Repair the input plane first, THEN the thin blue windows,
-                // so input coverage never covers the visual hints in Z order.
-                if (planes.Present(raise)) {
-                    foreach (CaptureOverlay overlay in overlays) overlay.Present(highlighted, selected, hovered, raise);
-                    presented = true;
-                }
+                // Initial show primes input before hints exist. Subsequent frames
+                // never lift a plane above visible hints: raise every display's
+                // edges first, then insert all planes below the FIRST raised edge.
+                presented = CaptureZOrderPolicy.Present(raise,
+                    planes.EnsurePresented,
+                    delegate {
+                        IntPtr firstRaised = IntPtr.Zero;
+                        foreach (CaptureOverlay overlay in overlays)
+                            firstRaised = CaptureZOrderPolicy.FirstRaised(firstRaised, overlay.Present(highlighted, selected, hovered, raise));
+                        return firstRaised;
+                    }, planes.PresentBelow);
             }
             catch (Exception error) {
                 failure = error is InvalidOperationException && error.Message.StartsWith("CAPTURE_", StringComparison.Ordinal)
