@@ -163,8 +163,9 @@ mod tests {
         ];
         let urls: std::collections::BTreeSet<_> = sources
             .iter()
-            .flat_map(|source| source.split("'https://").skip(1))
-            .map(|tail| format!("https://{}", tail.split('\'').next().unwrap()))
+            .flat_map(|source| source.split(['\'', '"']))
+            .filter(|literal| literal.starts_with("https://"))
+            .map(str::to_owned)
             .collect();
         let expected: std::collections::BTreeSet<_> =
             ALLOWED.iter().map(|url| (*url).to_owned()).collect();
