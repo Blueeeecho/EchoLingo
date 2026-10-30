@@ -368,7 +368,7 @@ jobs:
         run: |
           $ErrorActionPreference = 'Continue'
           $global:LASTEXITCODE = 1
-          $output = @(& powershell.exe -NoProfile -STA -ExecutionPolicy Bypass -File tests/windows-application-smoke.ps1 -ApplicationPath src-tauri/target/release/echolingo.exe -CustomShortcutsTests 2>&1)
+          $output = @(& powershell.exe -NoProfile -STA -ExecutionPolicy Bypass -File tests/windows-application-smoke.ps1 -ApplicationPath src-tauri/target/release/echolingo.exe -CustomShortcutsTests -DefaultCapture -NativeCapturePath '${{ steps.windows_native_candidate.outputs.capturePath }}' 2>&1)
           $fixtureExit = $LASTEXITCODE
           $output | Out-File "$env:RUNNER_TEMP/echolingo-custom-shortcuts.log" -Encoding utf8
           $output | Write-Output
@@ -405,7 +405,7 @@ jobs:
         timeout-minutes: 5
         shell: powershell
         run: |
-          $output = @(& powershell.exe -NoProfile -STA -ExecutionPolicy Bypass -File tests/windows-application-smoke.ps1 -ApplicationPath src-tauri/target/release/echolingo.exe -LatestIntentTests 2>&1)
+          $output = @(& powershell.exe -NoProfile -STA -ExecutionPolicy Bypass -File tests/windows-application-smoke.ps1 -ApplicationPath src-tauri/target/release/echolingo.exe -LatestIntentTests -DefaultCapture -NativeCapturePath '${{ steps.windows_native_candidate.outputs.capturePath }}' 2>&1)
           $fixtureExit = $LASTEXITCODE
           $output | Out-File "$env:RUNNER_TEMP/echolingo-application-latest-intent.log" -Encoding utf8
           $output | Write-Output
@@ -420,6 +420,18 @@ jobs:
           $output = @(& powershell.exe -NoProfile -STA -ExecutionPolicy Bypass -File tests/windows-application-smoke.ps1 -ApplicationPath src-tauri/target/release/echolingo.exe -LatestIntentTests -RustCapture -NativeCapturePath '${{ steps.windows_native_candidate.outputs.capturePath }}' 2>&1)
           $fixtureExit = $LASTEXITCODE
           $output | Out-File "$env:RUNNER_TEMP/echolingo-application-native-capture.log" -Encoding utf8
+          $output | Write-Output
+          exit $fixtureExit
+      - name: Windows actual application native capture from a real topmost modal
+        id: windows_application_native_modal
+        if: runner.os == 'Windows'
+        continue-on-error: true
+        timeout-minutes: 5
+        shell: powershell
+        run: |
+          $output = @(& powershell.exe -NoProfile -STA -ExecutionPolicy Bypass -File tests/windows-application-smoke.ps1 -ApplicationPath src-tauri/target/release/echolingo.exe -LatestIntentTests -DefaultCapture -NativeCapturePath '${{ steps.windows_native_candidate.outputs.capturePath }}' -SourceTopmostModal 2>&1)
+          $fixtureExit = $LASTEXITCODE
+          $output | Out-File "$env:RUNNER_TEMP/echolingo-application-native-modal.log" -Encoding utf8
           $output | Write-Output
           exit $fixtureExit
       - name: Windows topmost modal and actual NSIS initial-page capture
@@ -530,7 +542,7 @@ jobs:
           $outcomes = @{}
           foreach ($browserKind in @('edge','chrome')) {
             $global:LASTEXITCODE = 1
-            $output = @(& node tests/windows-browser-ocr-visibility-smoke.mjs --browser $browserKind --application $candidate --expected-application-sha256 $hash --expected-application-bytes $bytes 2>&1)
+            $output = @(& node tests/windows-browser-ocr-visibility-smoke.mjs --browser $browserKind --application $candidate --expected-application-sha256 $hash --expected-application-bytes $bytes --native-capture '${{ steps.windows_native_candidate.outputs.capturePath }}' 2>&1)
             $outcomes[$browserKind] = $LASTEXITCODE
             $output | Out-File "$env:RUNNER_TEMP/echolingo-browser-ocr-$browserKind.log" -Encoding utf8
             $output | Write-Output
@@ -570,7 +582,7 @@ jobs:
         continue-on-error: true
         timeout-minutes: 25
         shell: powershell
-        run: powershell.exe -NoProfile -STA -ExecutionPolicy Bypass -File scripts/windows-offline-translation-test.ps1
+        run: powershell.exe -NoProfile -STA -ExecutionPolicy Bypass -File scripts/windows-offline-translation-test.ps1 -NativeCapturePath '${{ steps.windows_native_candidate.outputs.capturePath }}'
       - name: Preserve offline acceptance and corresponding source evidence
         if: always() && runner.os == 'Windows'
         uses: actions/upload-artifact@v4
@@ -590,6 +602,7 @@ jobs:
             ${{ runner.temp }}/echolingo-selection-native-focus.log
             ${{ runner.temp }}/echolingo-application-latest-intent.log
             ${{ runner.temp }}/echolingo-application-native-capture.log
+            ${{ runner.temp }}/echolingo-application-native-modal.log
             ${{ runner.temp }}/echolingo-upper-window-capture.log
             ${{ runner.temp }}/echolingo-selection-rigorous.log
             ${{ runner.temp }}/echolingo-selection-budget.log
@@ -625,6 +638,7 @@ jobs:
             liveCapture = '${{ steps.windows_live_capture.outcome }}'
             applicationCore = '${{ steps.windows_application_core.outcome }}'
             applicationNativeCapture = '${{ steps.windows_application_native_capture.outcome }}'
+            applicationNativeModal = '${{ steps.windows_application_native_modal.outcome }}'
             upperWindowCapture = '${{ steps.windows_capture_upper_windows.outcome }}'
             popupVisibility = '${{ steps.windows_popup_visibility.outcome }}'
             popupResize = '${{ steps.windows_popup_resize.outcome }}'
@@ -1672,7 +1686,7 @@ jobs:
         run: |
           $ErrorActionPreference = 'Continue'
           $global:LASTEXITCODE = 1
-          $output = @(& node tests/windows-browser-ocr-visibility-smoke.mjs --browser '${{ matrix.browser }}' --application '${{ steps.candidate.outputs.path }}' --expected-application-sha256 8490a973c9e4f4568b851f61524a4ef8f554d8b3a506b12dd19ba34f0dd22a4b --expected-application-bytes 5825536 2>&1)
+          $output = @(& node tests/windows-browser-ocr-visibility-smoke.mjs --browser '${{ matrix.browser }}' --application '${{ steps.candidate.outputs.path }}' --expected-application-sha256 8490a973c9e4f4568b851f61524a4ef8f554d8b3a506b12dd19ba34f0dd22a4b --expected-application-bytes 5825536 --legacy-capture true 2>&1)
           $code = $LASTEXITCODE
           $output | Out-File "$env:RUNNER_TEMP/echolingo-browser-ocr-visibility.log" -Encoding utf8
           $output | Write-Output

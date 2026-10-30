@@ -257,9 +257,14 @@ public static class EchoLingoUpperWindowCaptureSmoke {
             Need(ThreadId!=GetCurrentThreadId()&&GetForegroundWindow()==AH,"Source is not the independent foreground UI thread.");
             uint pid;Need(GetWindowThreadProcessId(AH,out pid)==ThreadId&&pid==Process.GetCurrentProcess().Id,"Source PID/TID mismatch.");
             Need(Display.Contains(AFrame)&&Display.Contains(BFrame)&&!AFrame.IntersectsWith(BFrame)&&AFrame!=Display&&BFrame!=Display,"Generated peers are not independent non-fullscreen windows.");
-            Need(GetAncestor(WindowFromPoint(First),2)==AH&&GetAncestor(WindowFromPoint(Last),2)==BH,"Generated input endpoints are obscured.");
+            IntPtr firstRoot=GetAncestor(WindowFromPoint(First),2),lastRoot=GetAncestor(WindowFromPoint(Last),2);
+            Need(firstRoot==AH,"Generated active endpoint is obscured: scenario="+Scenario+" expected="+Id(AH)+" actual="+Id(firstRoot));
+            // ShowDialog disables sibling top-level windows on this UI thread.
+            // This matrix captures A only; B is never a drag endpoint here.
+            if(Scenario=="owned-modal")Need(!IsWindowEnabled(BH),"Real modal did not disable its generated sibling.");
+            else Need(lastRoot==BH,"Generated sibling endpoint is obscured: scenario="+Scenario+" expected="+Id(BH)+" actual="+Id(lastRoot));
             Send(new INPUT[]{Move(First)});Thread.Sleep(70);
-            }catch{Dispose();throw;}
+            }catch(Exception setup){Dispose();throw new InvalidOperationException("SOURCE_SETUP: "+Scenario+": "+setup.Message);}
         }
         void Prepare(Form form,Rectangle bounds,Color color) {
             form.Text="EchoLingo generated delegated-input peer";form.AutoScaleMode=AutoScaleMode.None;form.FormBorderStyle=FormBorderStyle.None;
@@ -508,7 +513,12 @@ public static class EchoLingoUpperWindowCaptureSmoke {
                             Need((bool)reply["ok"],"Installer drag did not complete.");
                             using(MemoryStream stream=new MemoryStream(Convert.FromBase64String((string)reply["imageBase64"])))using(Bitmap captured=new Bitmap(stream)){
                                 Need(captured.Size==baseline.Size,"Installer ROI geometry changed.");
-                                for(int y=0;y<captured.Height;y++)for(int x=0;x<captured.Width;x++)Need(captured.GetPixel(x,y).ToArgb()==baseline.GetPixel(x,y).ToArgb(),"Installer ROI differs from pre-capture initial-page pixels.");
+                                // Display DC alpha is not a defined screenshot color channel.
+                                // Compare every RGB value exactly and require opaque PNG output.
+                                for(int y=0;y<captured.Height;y++)for(int x=0;x<captured.Width;x++){
+                                    Color actual=captured.GetPixel(x,y),expected=baseline.GetPixel(x,y);
+                                    Need(actual.A==255&&actual.R==expected.R&&actual.G==expected.G&&actual.B==expected.B,"Installer ROI differs from pre-capture initial-page RGB pixels.");
+                                }
                             }
                             row["exactInitialPagePixelsMatched"]=true;
                         }
@@ -536,8 +546,9 @@ public static class EchoLingoUpperWindowCaptureSmoke {
     }
     public static Dictionary<string,object> Run(string helper,string harness) {
         Need(!helper.Contains("\"")&&!harness.Contains("\""),"Invalid fixture path.");SetProcessDpiAwarenessContext(new IntPtr(-4));Need(SetThreadDpiAwarenessContext(new IntPtr(-4))!=IntPtr.Zero,"Controller physical DPI context failed.");
-        List<Dictionary<string,object>> cases=new List<Dictionary<string,object>>();bool ok=true;Dictionary<string,object> stopped=null;
+        List<Dictionary<string,object>> cases=new List<Dictionary<string,object>>();bool ok=true;Dictionary<string,object> stopped=null;string setupFailure=null;
         using(Host host=new Host(harness,helper)){
+            try {
             foreach(string scenario in new string[]{"ordinary-topmost","owned-modal","installer-style"}){
                 using(Sources source=new Sources(scenario)) {
                     foreach(string kind in new string[]{"first-fresh-pair-immediate-release","escape-drains-owned-release","next-capture-after-escape","right-button-cancel","next-capture-after-right-cancel"}) {
@@ -546,10 +557,11 @@ public static class EchoLingoUpperWindowCaptureSmoke {
                 }
                 if(!host.Usable||host.Child!=0||host.Process.HasExited)break;
             }
+            }catch(Exception setup){ok=false;setupFailure=setup.Message;}
             if(host.Child==0&&!host.Process.HasExited){host.Shutdown();stopped=host.Read(4000);Need((string)stopped["event"]=="stopped"&&Convert.ToInt32(stopped["completedGenerations"])==cases.Count,"Host stop/generation mismatch.");Need(host.Process.WaitForExit(4000)&&host.Process.ExitCode==0,"Production observer host failed to exit.");}
             else ok=false;
         }
-        return new Dictionary<string,object>{{"ok",ok&&cases.Count==15},{"cases",cases},{"hostShutdown",stopped},{"productionModulesImported",true},{"requestedInputBackend","delegated-exact-production"},{"userContentCaptured",false},{"clipboardAccessed",false},{"scope","Exact production host and Rust picker; generated topmost, real owned-modal, installer-style SAME page retained across five actions. No actual installer, Tauri shortcut, cross-integrity or UAC secure-desktop acceptance claim."}};
+        return new Dictionary<string,object>{{"ok",ok&&cases.Count==15},{"setupFailure",setupFailure},{"cases",cases},{"hostShutdown",stopped},{"productionModulesImported",true},{"requestedInputBackend","delegated-exact-production"},{"userContentCaptured",false},{"clipboardAccessed",false},{"scope","Exact production host and Rust picker; generated topmost, real owned-modal, installer-style SAME page retained across five actions. No actual installer, Tauri shortcut, cross-integrity or UAC secure-desktop acceptance claim."}};
     }
 }
 '@

@@ -2,7 +2,7 @@
 # Program-specific firewall rules are temporary; no adapter/profile/default
 # policy is changed. This script never uses a translation HTTP mock or API key.
 [CmdletBinding()]
-param([string]$InstallerPath = '', [string]$ApplicationSmokePath = '')
+param([string]$InstallerPath = '', [string]$ApplicationSmokePath = '', [string]$NativeCapturePath = '')
 $ErrorActionPreference = 'Stop'
 [Console]::OutputEncoding = [Text.UTF8Encoding]::new($false)
 [Console]::InputEncoding = [Text.UTF8Encoding]::new($false)
@@ -250,7 +250,8 @@ public static class EchoLingoOwnedDirectory {
     $report.realModelExecuted = $true
     $report.realModelCases = $results
     $report.engineStderrBytes = [Text.Encoding]::UTF8.GetByteCount($stderr.Result)
-    $arguments = '-NoProfile -STA -ExecutionPolicy Bypass -File ' + (Quote-Argument $ApplicationSmokePath) + ' -ApplicationPath ' + (Quote-Argument $app) + ' -OfflineTranslation -InstalledPackage'
+    Assert-Fixture (-not [string]::IsNullOrWhiteSpace($NativeCapturePath) -and (Test-Path -LiteralPath $NativeCapturePath -PathType Leaf)) 'Exact built native capture executable is required for installed default acceptance.'
+    $arguments = '-NoProfile -STA -ExecutionPolicy Bypass -File ' + (Quote-Argument $ApplicationSmokePath) + ' -ApplicationPath ' + (Quote-Argument $app) + ' -OfflineTranslation -InstalledPackage -DefaultCapture -NativeCapturePath ' + (Quote-Argument $NativeCapturePath)
     $smoke = Start-Captured (Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe') $arguments
     $smoke.StandardInput.Close()
     $smokeOut = $smoke.StandardOutput.ReadToEndAsync()
@@ -258,6 +259,7 @@ public static class EchoLingoOwnedDirectory {
     Assert-Fixture ($smoke.WaitForExit(300000)) 'Installed app single-hotkey smoke exceeded its bounded deadline.'
     $report.installedApplication = $smokeOut.Result.Trim() | ConvertFrom-Json
     Assert-Fixture ($smoke.ExitCode -eq 0 -and $report.installedApplication.ok -and $report.installedApplication.translationBackend -eq 'real-bundled-offline-model' -and @($report.installedApplication.mockRequests).Count -eq 0) ('Installed app did not pass real offline core flows: ' + $smokeErr.Result)
+    Assert-Fixture ($report.installedApplication.defaultCaptureWithoutEnvironmentRequested -eq $true -and $report.installedApplication.captureBackendEnvironmentAbsent -eq $true -and $report.installedApplication.defaultNativeCaptureCompletion.nativeCaptureBackend -eq 1) 'Installed package did not verify the unset-environment native screenshot backend.'
     $report.installedPackageTested = $true
     $report.policyStillEffective = @(Assert-OfflinePolicy)
     Assert-Fixture ((Get-FileHash -Algorithm SHA256 -LiteralPath $engine).Hash.ToLowerInvariant() -eq $report.engineSha256 -and (Get-FileHash -Algorithm SHA256 -LiteralPath $app).Hash.ToLowerInvariant() -eq $report.applicationSha256) 'Installed executable changed during the real-model test.'

@@ -1576,7 +1576,9 @@ fn verify_native_assembly(path: &std::path::Path, expected: &[u8]) -> Result<(),
 
 #[cfg(target_os = "windows")]
 fn rust_capture_enabled() -> bool {
-    std::env::var_os("ECHOLINGO_RUST_CAPTURE").is_some_and(|value| value == "1")
+    // Only an explicit diagnostic opt-out selects the legacy backend.
+    // Native failures are returned unchanged; never retry capture via PowerShell.
+    std::env::var_os("ECHOLINGO_RUST_CAPTURE").is_none_or(|value| value != "0")
 }
 
 #[cfg(target_os = "windows")]

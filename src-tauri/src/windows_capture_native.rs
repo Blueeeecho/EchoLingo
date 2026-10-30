@@ -1147,6 +1147,10 @@ impl Picker {
         }
         input_desktop()?;
         let current = topology(&self.class, &self.inbox, &self.canvas)?;
+        self.health
+            .insert("displayObservedCount", current.displays().len() as u64);
+        self.health
+            .insert("displayObservedAwareness", current.awareness.max(0) as u64);
         if !self.topology.matches(&current) {
             self.invalidate(5, 0, 0);
             return Err(error("CAPTURE_DISPLAY_CHANGED"));
@@ -1664,6 +1668,14 @@ impl Picker {
                 released.elapsed().as_millis() as u64,
             );
         }
+        self.health
+            .insert("displayExpectedDpi", self.topology.before_dpi as u64);
+        self.health
+            .insert("displayObservedDpi", self.topology.after_dpi as u64);
+        self.health
+            .insert("displayAwareness", self.topology.awareness.max(0) as u64);
+        self.health
+            .insert("displayCount", self.topology.displays().len() as u64);
         self.health
             .insert("displayInvalidationReason", self.topology.reason as u64);
         self.health.insert(

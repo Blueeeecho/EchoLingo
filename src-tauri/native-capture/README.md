@@ -1,7 +1,9 @@
 # Native screenshot candidate (Windows)
 
-This isolated Rust child is a **non-default candidate**. Set
-`ECHOLINGO_RUST_CAPTURE=1` on the application process to select it. Only screenshot
+This isolated Rust child is the Windows screenshot backend by default. Only the
+explicit diagnostic opt-out `ECHOLINGO_RUST_CAPTURE=0` selects the legacy helper;
+unset or other values use Rust. Default installation validation must remove the
+environment override rather than set it to `1`. Only screenshot
 selection/capture and local OCR change; selected-text extraction retains the
 existing isolated UI Automation/password/clipboard helper. There is no automatic
 fallback capture after a native error.
@@ -33,9 +35,16 @@ Unknown or duplicate options fail closed. Output is one bounded JSON reply with
 this candidate ran. The application's capture `resultOk`/`attemptStage` describe
 image acquisition; the subsequent local WinRT OCR can independently fail.
 
-Required before any default switch: actual Windows linking, fixed-pixel crop and
+Release acceptance requirements (a configuration change is not evidence of passing): actual Windows linking, fixed-pixel crop and
 loupe, transparent plane/edge geometry and Z-order, nonactivation, mixed/negative
 monitor geometry, hover, cross-screen drag, cancellation/restart, true display
 invalidation/restart in the same app, preheld and owned input, hostile/missing
 endpoint, timeout/crash, resource cleanup, local/cloud OCR routing, and same-host
 interleaved shortcut-to-first-border measurements against the packaged baseline.
+
+Numeric DPI diagnostics keep the existing policy semantics: `displayExpectedDpi`
+and `displayObservedDpi` equal zero when no invalidating window-DPI value was
+observed, not when a monitor has zero DPI. `displayObservedCount` and
+`displayObservedAwareness` describe the most recent successful topology read;
+a later failed read does not fabricate replacement values. These are diagnostic
+samples, not an atomic display snapshot.
