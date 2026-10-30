@@ -346,6 +346,27 @@ jobs:
           $output | Out-File "$env:RUNNER_TEMP/echolingo-application-native-capture.log" -Encoding utf8
           $output | Write-Output
           exit $fixtureExit
+      - name: Windows topmost modal and actual NSIS initial-page capture
+        id: windows_capture_upper_windows
+        if: runner.os == 'Windows'
+        continue-on-error: true
+        timeout-minutes: 5
+        shell: powershell
+        run: |
+          $installers = @(Get-ChildItem src-tauri/target/release/bundle/nsis -File -Filter '*0.2.3*x64*setup.exe')
+          if ($installers.Count -ne 1) { throw 'Expected exactly one own versioned NSIS installer.' }
+          rustc --edition=2021 tests/windows-native-capture-harness.rs -O -o "$env:RUNNER_TEMP/echolingo-upper-capture-harness.exe"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $generated = @(& powershell.exe -NoProfile -STA -ExecutionPolicy Bypass -File tests/windows-capture-upper-window-smoke.ps1 -NativeCapturePath '${{ steps.windows_native_candidate.outputs.capturePath }}' -HarnessPath "$env:RUNNER_TEMP/echolingo-upper-capture-harness.exe" -IsolatedTestSession 2>&1)
+          $generatedExit = $LASTEXITCODE
+          $generated | Out-File "$env:RUNNER_TEMP/echolingo-upper-window-capture.log" -Encoding utf8
+          $generated | Write-Output
+          if ($generatedExit -ne 0) { exit $generatedExit }
+          $output = @(& powershell.exe -NoProfile -STA -ExecutionPolicy Bypass -File tests/windows-capture-upper-window-smoke.ps1 -NativeCapturePath '${{ steps.windows_native_candidate.outputs.capturePath }}' -HarnessPath "$env:RUNNER_TEMP/echolingo-upper-capture-harness.exe" -InstallerPath $installers[0].FullName -IsolatedTestSession 2>&1)
+          $fixtureExit = $LASTEXITCODE
+          $output | Out-File "$env:RUNNER_TEMP/echolingo-upper-window-capture.log" -Encoding utf8 -Append
+          $output | Write-Output
+          exit $fixtureExit
       - name: Windows popup outside-click and focus integration smoke
         id: windows_popup_visibility
         if: runner.os == 'Windows'
@@ -493,6 +514,7 @@ jobs:
             ${{ runner.temp }}/echolingo-selection-native-focus.log
             ${{ runner.temp }}/echolingo-application-latest-intent.log
             ${{ runner.temp }}/echolingo-application-native-capture.log
+            ${{ runner.temp }}/echolingo-upper-window-capture.log
             ${{ runner.temp }}/echolingo-selection-rigorous.log
             ${{ runner.temp }}/echolingo-selection-budget.log
             ${{ runner.temp }}/echolingo-selection-query.log
@@ -527,6 +549,7 @@ jobs:
             liveCapture = '${{ steps.windows_live_capture.outcome }}'
             applicationCore = '${{ steps.windows_application_core.outcome }}'
             applicationNativeCapture = '${{ steps.windows_application_native_capture.outcome }}'
+            upperWindowCapture = '${{ steps.windows_capture_upper_windows.outcome }}'
             popupVisibility = '${{ steps.windows_popup_visibility.outcome }}'
             popupResize = '${{ steps.windows_popup_resize.outcome }}'
             installedOffline = '${{ steps.windows_installed_offline.outcome }}'
