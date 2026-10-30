@@ -6,6 +6,10 @@ import type { OcrProvider } from './types';
 export interface ServiceGuide { steps: readonly string[]; links: ReadonlyArray<readonly [string, string]> }
 // Official public setup pages; no account access is needed to show this help.
 export const TRANSLATION_GUIDES: Record<ProviderPresetId, ServiceGuide> = {
+  "qianfan": { steps: ["在平台控制台开通标准 API，创建自己的 API Key；不要使用其他服务或订阅专属凭据。", "确认账号可用的试用模型、余额及到期日；在向导中手动填写已确认的模型 ID，再测试连接。"], links: [["控制台 / API Key", "https://console.bce.baidu.com/qianfan/overview"], ["官方协议", "https://ai.baidu.com/ai-doc/WENXINWORKSHOP/2m3fihw8s"]] },
+  "tokenhub": { steps: ["在平台控制台开通标准 API，创建自己的 API Key；不要使用其他服务或订阅专属凭据。", "确认账号可用的试用模型、余额及到期日；在向导中手动填写已确认的模型 ID，再测试连接。"], links: [["控制台 / API Key", "https://console.cloud.tencent.com/tokenhub"], ["官方协议", "https://cloud.tencent.com/document/product/1823/130079"]] },
+  "ark": { steps: ["在平台控制台开通标准 API，创建自己的 API Key；不要使用其他服务或订阅专属凭据。", "确认账号可用的试用模型、余额及到期日；在向导中手动填写已确认的模型 ID，再测试连接。"], links: [["控制台 / API Key", "https://ark.volcengine.com/region:cn-beijing/apikey"], ["官方协议", "https://docs.volcengine.com/docs/ark/text-generation"]] },
+
   system: { steps: ['在设置的“系统翻译 · 语言包”中检查语言对，按需点击“准备语言包”。', '可用性以当前系统检查结果为准；无需云账号或密钥。'], links: [['系统 API 文档', 'https://developer.apple.com/documentation/translation/translationsession/init(installedsource:target:)']] },
   offline: { steps: ['Windows 预览安装包包含中英离线模型，添加并启用即可。', '无需账号或密钥；其他语言请另选服务。'], links: [['项目与模型说明', 'https://github.com/mozilla/translations']] },
   baidu: { steps: ['登录百度翻译开放平台，注册开发者并开通“通用文本翻译 API”。', '从管理控制台取得 APP ID 和密钥，完整填写下方两项。百度 OCR 的 API Key 不能用于此处。'], links: [['注册 / 开通', 'https://fanyi-api.baidu.com/access/0/1'], ['管理控制台', 'https://fanyi-api.baidu.com/manage/developer'], ['API 文档', 'https://fanyi-api.baidu.com/doc/21']] },

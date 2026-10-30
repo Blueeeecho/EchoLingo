@@ -120,3 +120,21 @@ describe('credential origin binding', () => {
     expect(credentialScope('openai', 'not a URL')).toBeNull();
   });
 });
+
+describe('verified newcomer trial presets', () => {
+  it.each([
+    ['qianfan', 'https://qianfan.baidubce.com/v2', 'ernie-4.5-turbo-128k'],
+    ['tokenhub', 'https://tokenhub.tencentmaas.com/v1', 'hy3'],
+    ['ark', 'https://ark.cn-beijing.volces.com/api/v3', 'doubao-seed-2-1-pro-260915'],
+  ])('configures %s only on its standard API route', (id, baseUrl, model) => {
+    expect(PROVIDER_PRESETS.find(p => p.id === id)).toMatchObject({ kind: 'openai', baseUrl, exampleModel: model });
+    const provider: Provider = { id: 'saved', name: 'Custom', kind: 'openai', baseUrl, model: 'user-selected', enabled: false };
+    const before = structuredClone(provider);
+    expect(inferProviderPreset(provider)).toBe(id);
+    expect(provider).toEqual(before);
+    expect(inferProviderPreset({ ...provider, baseUrl: baseUrl + '/subscription' })).toBe('openai');
+  });
+  it('does not apply standard TokenHub trial wording to a subscription endpoint', () => {
+    expect(inferProviderPreset({ id: 'existing', name: 'Token plan', kind: 'openai', baseUrl: 'https://tokenhub.tencentmaas.com/plan/v3', model: 'hy3', enabled: true })).toBe('openai');
+  });
+});

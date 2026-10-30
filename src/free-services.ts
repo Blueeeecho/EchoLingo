@@ -11,6 +11,9 @@ export interface FreePiece {
   kind: string;
   baseUrl: string;
   model: string;
+  editableModel?: boolean;
+  // Enrollment date in China (UTC+8); only recommendations expire, never saved services.
+  recommendUntil?: string;
   region?: string;
   prompt?: string;
   signupUrl: string;
@@ -46,9 +49,12 @@ export const FREE_SERVICES: readonly FreePiece[] = [
   { id: 'youdao', role: 'translation', regionGroup: 'cn', name: '有道智云翻译 · 一次性体验金', nameEn: 'Youdao Translation · one-time credit', kind: 'youdao', baseUrl: 'https://openapi.youdao.com/api', model: '', signupUrl: 'https://ai.youdao.com/console/', credential: 'youdaoPair', allowance: TRANSLATION_QUOTAS.youdao, quotaEn: 'New account: CNY 10; identity verification: additional CNY 40, one time.', conditionsEn: 'Translation and OCR share the account credit, not separate monthly allowances. Eligibility and expiry follow your account.' },
   { id: 'youdao-ocr', role: 'ocr', regionGroup: 'cn', name: '有道智云 OCR · 一次性体验金', nameEn: 'Youdao OCR · one-time credit', kind: 'youdao', baseUrl: 'https://openapi.youdao.com/ocrapi', model: 'general', signupUrl: 'https://ai.youdao.com/console/', credential: 'youdaoPair', allowance: OCR_QUOTAS.youdao, quotaEn: 'New account: CNY 10; identity verification: additional CNY 40, one time.', conditionsEn: 'Same credit pool as Youdao Translation; do not count it twice. Check account expiry and eligible products.' },
 
+  { id: 'qianfan-trial', role: 'translation', regionGroup: 'cn', name: "百度千帆 · 新人试用", nameEn: "qianfan · introductory trial", kind: 'openai', baseUrl: 'https://qianfan.baidubce.com/v2', model: 'ernie-4.5-turbo-128k', editableModel: true, signupUrl: 'https://console.bce.baidu.com/qianfan/overview', credential: 'apiKey', allowance: TRANSLATION_QUOTAS.qianfan, quotaEn: "Eligible new Qianfan accounts: 1,000,000 Tokens per listed model, once, valid for 3 months.", conditionsEn: "Only named online-inference models; not batch inference or a recurring allowance." },
+  { id: 'tokenhub-trial', role: 'translation', regionGroup: 'cn', name: "腾讯 TokenHub · 新人试用", nameEn: "tokenhub · introductory trial", kind: 'openai', baseUrl: 'https://tokenhub.tencentmaas.com/v1', model: 'hy3', editableModel: true, recommendUntil: '2026-12-31', signupUrl: 'https://console.cloud.tencent.com/tokenhub', credential: 'apiKey', allowance: TRANSLATION_QUOTAS.tokenhub, quotaEn: "New language-model trial: 1,000,000 Tokens, valid for 1 year; current enrollment ends 2026-12-31.", conditionsEn: "Main-account sharing; one claim per account/model, not additive. Postpaid usage can charge." },
+  { id: 'ark-trial', role: 'translation', regionGroup: 'cn', name: "火山方舟 · 新人试用", nameEn: "ark · introductory trial", kind: 'openai', baseUrl: 'https://ark.cn-beijing.volces.com/api/v3', model: 'doubao-seed-2-1-pro-260915', editableModel: true, signupUrl: 'https://ark.volcengine.com/region:cn-beijing/apikey', credential: 'apiKey', allowance: TRANSLATION_QUOTAS.ark, quotaEn: "New-user model trials; exact quantity and expiry must be confirmed in the activation console.", conditionsEn: "Do not assume an old blanket Token allowance applies. Select a model with available trial quota." },
 ];
-export function servicesFor(region: FreeRegion, role: FreePiece['role']): readonly FreePiece[] {
-  return FREE_SERVICES.filter((item) => item.regionGroup === region && item.role === role);
+export function servicesFor(region: FreeRegion, role: FreePiece['role'], now = new Date()): readonly FreePiece[] {
+  return FREE_SERVICES.filter((item) => item.regionGroup === region && item.role === role && (!item.recommendUntil || new Date(now.getTime() + 8 * 60 * 60 * 1000).toISOString().slice(0, 10) <= item.recommendUntil));
 }
 export function serviceById(id: string): FreePiece | undefined {
   return FREE_SERVICES.find((item) => item.id === id);

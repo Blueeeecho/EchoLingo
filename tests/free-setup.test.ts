@@ -37,3 +37,17 @@ describe('independent free service recommendations', () => {
     expect(tx('中文', 'English', 'en')).toBe('English');
   });
 });
+
+describe('conditional newcomer trials', () => {
+  it('expires only the old enrollment recommendation, not the service/configuration', () => {
+    expect(servicesFor('cn', 'translation', new Date('2026-12-31T15:59:59Z')).some(p => p.id === 'tokenhub-trial')).toBe(true);
+    expect(servicesFor('cn', 'translation', new Date('2026-12-31T16:00:00Z')).some(p => p.id === 'tokenhub-trial')).toBe(false);
+    expect(serviceById('tokenhub-trial')).toBeDefined();
+  });
+  it('requires account-confirmed models and never invents a numeric Ark quota', () => {
+    for (const id of ['qianfan-trial', 'tokenhub-trial', 'ark-trial']) expect(serviceById(id)?.editableModel).toBe(true);
+    expect(serviceById('ark-trial')!.allowance.allowances[0]!.amount).toBeNull();
+    expect(serviceById('qianfan-trial')!.allowance.allowances[0]).toMatchObject({ amount: 1_000_000, period: 'once', expires: '3 个月' });
+    expect(serviceById('tokenhub-trial')!.allowance.details.join(' ')).toContain('共享');
+  });
+});
