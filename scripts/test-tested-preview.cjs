@@ -1,0 +1,30 @@
+const test=require('node:test');
+const assert=require('node:assert/strict');
+const fs=require('node:fs');
+const {publish,validateEvidence,SOURCE,TREE,BUILD,MERGE,RUN,LATER_RUN,ARTIFACTS,JOBS}=require('./publish-tested-preview.cjs');
+const evidence=()=>[
+ {id:RUN,head_sha:SOURCE,head_branch:'integrate/all-reviewed-fixes',event:'pull_request',status:'completed',conclusion:'success',run_attempt:1,repository:{full_name:'Blueeeecho/EchoLingo'}},
+ JOBS.map(([id,name])=>({id,name,run_id:RUN,head_sha:SOURCE,status:'completed',conclusion:'success'})),
+ ARTIFACTS.map(a=>({id:a.id,name:a.name,digest:a.digest,size_in_bytes:a.size,expired:false,workflow_run:{id:RUN,head_sha:SOURCE,head_repository_id:1432139657}}))
+];
+test('only exact successful source and all three artifacts accepted',()=>assert.doesNotThrow(()=>validateEvidence(...evidence())));
+for(const field of ['id','head_sha','head_branch','event','status','conclusion','run_attempt'])test(`reject run ${field}`,()=>{let e=evidence();e[0][field]='bad';assert.throws(()=>validateEvidence(...e));});
+for(let i=0;i<3;i++)for(const field of ['id','name','run_id','head_sha','status','conclusion'])test(`reject job ${i} ${field}`,()=>{let e=evidence();e[1][i][field]='bad';assert.throws(()=>validateEvidence(...e));});
+for(let i=0;i<3;i++)for(const field of ['id','name','digest','size_in_bytes','expired'])test(`reject artifact ${i} ${field}`,()=>{let e=evidence();e[2][i][field]=undefined;assert.throws(()=>validateEvidence(...e));});
+for(const field of ['id','head_sha','head_repository_id'])test(`reject artifact provenance ${field}`,()=>{let e=evidence();e[2][0].workflow_run[field]='bad';assert.throws(()=>validateEvidence(...e));});
+test('independent own-path workflow preserves standard gates and no build',()=>{let w=fs.readFileSync('.github/workflows/release-tested-preview.yml','utf8');assert.match(w,/paths: \[.github\/workflows\/release-tested-preview.yml\]/);assert.match(w,/persist-credentials: false/);assert.match(w,/contents: write\n      actions: read/);assert.doesNotMatch(w,/npm |cargo |secrets\./);assert.match(w,/checkout@[0-9a-f]{40}/);assert.match(w,/github-script@[0-9a-f]{40}/);});
+function lifecycle(failure){
+ const e=evidence(),calls=[],names=['EchoLingo_0.2.2_windows_x64-setup.exe','EchoLingo_0.2.2_macos_arm64.dmg','EchoLingo-offline-engine-source.zip','RELEASE-MANIFEST.json','SHA256SUMS.txt'].sort();
+ const context={repo:{owner:'Blueeeecho',repo:'EchoLingo'},ref:'refs/heads/main',sha:'a'.repeat(40)};
+ const later={id:LATER_RUN,head_sha:MERGE,status:'completed',conclusion:'failure',run_attempt:1,repository:{full_name:'Blueeeecho/EchoLingo'}};
+ const manifest={version:'0.2.2',commit:SOURCE,sourceCommit:SOURCE,publisherCommit:context.sha,sourceTree:TREE,buildCheckoutCommit:BUILD,validationRun:`https://github.com/Blueeeecho/EchoLingo/actions/runs/${RUN}`,windowsInstalledAcceptanceVerified:true,rebuiltAfterValidation:false,laterValidation:{runId:LATER_RUN,conclusion:'failure'}};
+ let mainCalls=0,tagCreated=false;
+ const github={rest:{git:{getRef:async({ref})=>{if(ref==='heads/main'){mainCalls++;return{data:{object:{sha:failure==='main'||(failure==='moved'&&mainCalls>=3)?'bad':context.sha}}};}if(failure==='newtag'&&!tagCreated)throw Object.assign(new Error('missing'),{status:404});return{data:{object:{type:'commit',sha:failure==='tag'?'bad':SOURCE}}};},createRef:async(a)=>{assert.equal(a.ref,'refs/tags/0.2.2');assert.equal(a.sha,SOURCE);tagCreated=true;calls.push(['tag',a]);},getCommit:async({commit_sha})=>({data:{sha:commit_sha,tree:{sha:failure==='tree'?'bad':TREE}}})},actions:{getWorkflowRun:async({run_id})=>({data:run_id===RUN?e[0]:{...later,conclusion:failure==='later'?'success':'failure'}}),listJobsForWorkflowRun:'jobs',getArtifact:async({artifact_id})=>({data:e[2].find(a=>a.id===artifact_id)}),downloadArtifact:async({artifact_id})=>({data:Buffer.alloc(ARTIFACTS.find(a=>a.id===artifact_id).size)})},repos:{getReleaseByTag:async()=>{if(failure==='exists')return{data:{id:1}};throw Object.assign(new Error('missing'),{status:404});},createRelease:async(a)=>{calls.push(['create',a]);return{data:{id:2}};},uploadReleaseAsset:async({name,data})=>{calls.push(['upload',name]);return{data:{state:'uploaded',size:data.length,digest:failure==='upload'?'bad':'sha256:asset'}};},listReleaseAssets:'assets',updateRelease:async(a)=>{calls.push(['publish',a]);return{data:{draft:false,prerelease:true,tag_name:'0.2.2',html_url:'https://github.com/Blueeeecho/EchoLingo/releases/tag/0.2.2'}};}}},paginate:async(api)=>api==='jobs'?e[1]:(failure==='inventory'?names.slice(1):names).map(name=>({name}))};
+ const io={sha256:b=>b.length===5?'asset':failure==='digest'?'bad':ARTIFACTS.find(a=>a.size===b.length).digest.slice(7),execFileSync:()=>{},fs:{mkdirSync:()=>{},writeFileSync:()=>{},readdirSync:()=>names,readFileSync:(p,enc)=>enc?(p.endsWith('.md')?'Known limits':JSON.stringify(manifest)):Buffer.from('asset')}};
+ const core={summary:{addLink(){return this;},write:async()=>{}}};
+ return {run:()=>publish({github,context,core},io),calls};
+}
+for(const f of ['exists','main','tag','tree','later','digest','upload','inventory','moved'])test(`lifecycle ${f} fails closed`,async()=>{const l=lifecycle(f);await assert.rejects(l.run());assert.equal(l.calls.some(c=>c[0]==='publish'),false);if(!['upload','inventory','moved'].includes(f))assert.equal(l.calls.some(c=>c[0]==='create'),false);});
+test('lifecycle publishes five verified assets only after draft upload',async()=>{const l=lifecycle();await l.run();assert.equal(l.calls[0][0],'create');assert.equal(l.calls[0][1].target_commitish,SOURCE);assert.equal(l.calls[0][1].draft,true);assert.match(l.calls[0][1].body,/MOCK_CONTROLLED_REPLY_NOT_RELEASED/);assert.equal(l.calls.filter(c=>c[0]==='upload').length,5);assert.equal(l.calls.at(-1)[0],'publish');});
+
+test('first publication creates exact source tag before draft',async()=>{const l=lifecycle('newtag');await l.run();assert.equal(l.calls[0][0],'tag');assert.equal(l.calls.filter(c=>c[0]==='publish').length,1);});
