@@ -8,10 +8,11 @@ describe('free service combinations', () => {
       'cn-siliconflow-baidu-ocr', 'cn-baidu-tencent-ocr', 'cn-zhipu',
     ]);
     expect(combosFor('overseas').map((combo) => combo.id)).toEqual([
-      'os-azure-google', 'os-deepl-azure-vision', 'os-gemini-ocrspace',
+      'os-azure-google', 'os-deepl-azure-vision',
     ]);
     const kinds = FREE_COMBOS.flatMap((combo) => combo.pieces.map((piece) => piece.kind));
     expect(kinds).not.toContain('tencent-mt');
+    expect(JSON.stringify(FREE_COMBOS)).not.toMatch(/gemini|generativelanguage/i);
     expect(kinds.filter((kind) => kind === 'tencent')).toEqual(['tencent']);
   });
 

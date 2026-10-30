@@ -70,7 +70,6 @@ You can also add Volcengine machine translation (about the first 2 million chara
 | --- | --- | --- | --- |
 | First choice | Azure Translator F0 | Google Cloud Vision | F0 about 2 million characters/month; about 1,000 units/month per text feature |
 | Alternate | DeepL API Developer | Azure AI Vision F0 | About 1 million characters total for new Developer accounts, not a monthly reset; Vision F0 about 5,000 calls/month, unavailable in some regions |
-| Low setup | Gemini free tier | OCR.space | Whichever Flash model the pricing page marks Free of charge; OCR.space Engine 1/2 about 25,000 calls/month plus a daily IP limit |
 
 DeepL, Google, and Gemini are often unreachable directly from mainland China, so they are not the mainland recommendations.
 
@@ -90,9 +89,13 @@ Open API Developer and use `https://api-free.deepl.com/v2`. The older monthly Fr
 
 Create an F0 resource and enter `https://your-resource.cognitiveservices.azure.com` plus the key. The app only accepts your own host under that suffix. It does not ship a shared key.
 
-### Gemini
+### Gemini (manual configuration only)
 
-Create a key in [Google AI Studio](https://aistudio.google.com/apikey). The wizard prefills the OpenAI-compatible URL and `gemini-2.0-flash`. If the pricing page names a different free model, change the model in Settings and test again.
+Gemini is not a recommended free combination. Check Google's current [eligibility and data-use terms](https://ai.google.dev/gemini-api/terms) before configuring an OpenAI-compatible service manually: the terms limit use to supported regions and professional/business purposes, include age restrictions, and require Paid Services when making API clients available to users in the EEA, Switzerland or UK. Whether your account and use qualify depends on Google's current terms, not on this app.
+
+Where the unpaid-service data terms apply, submitted content and responses may be used to improve Google's products and reviewed by people; do not send sensitive, confidential or personal data. Paid-service and some regional data terms differ. Review the linked terms for your situation.
+
+Select a currently available model in your own account using the [model lifecycle list](https://ai.google.dev/gemini-api/docs/deprecations) and [pricing page](https://ai.google.dev/gemini-api/docs/pricing); this guide does not preselect a model or promise free access.
 
 ### OCR.space
 

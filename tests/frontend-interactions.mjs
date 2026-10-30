@@ -32,6 +32,7 @@ try {
     Object.assign(fixture, { copies: [], spoken: [], permissionOverride: null, managementShows: [] });
     Object.assign(fixture, { diagnosticCalls: [], diagnosticReport: { warnings: [] }, holdDiagnostics: false, releaseDiagnostics: () => {} });
     Object.assign(fixture, { credentialStates: {}, credentialReadCalls: 0, translationTestCalls: 0, settingsReads: 0, translationCredentialWrites: [], serviceLinks: [] });
+    Object.assign(fixture, { holdFreeSetupTest: false, freeSetupTestWaits: 0, releaseFreeSetupTest: () => {} });
     Object.assign(fixture, { resizeRequests: [], nativeResizeRequests: [], holdResize: false, releaseResize: () => {} });
     Object.assign(fixture, { pinned: false, nativeVisible: true, popupReveals: 0, nativeHideTransitions: 0 });
     Object.assign(fixture, { holdPopupAck: false, popupAckWaits: 0, releasePopupAck: () => {}, sourceFocusCalls: 0 });
@@ -164,6 +165,7 @@ try {
         if (command === 'delete_api_key') { fixture.keyDeleteCalls++; const provider = fixture.settings.providers.find(item => item.id === args.providerId); if (provider) translationKeys.delete(scope(provider)); return; }
         if (command === 'set_ocr_api_key') { fixture.ocrKeyCalls++; const provider = fixture.settings.ocrProviders.find(item => item.id === args.providerId); if (provider) { provider.hasKey = true; ocrKeys.set(scope(provider), args.key); fixture.credentialWrites.push({ providerId: provider.id, kind: provider.kind, key: args.key }); } return; }
         if (command === 'delete_ocr_api_key') { fixture.ocrDeleteCalls++; const provider = fixture.settings.ocrProviders.find(item => item.id === args.providerId); if (provider) { ocrKeys.delete(scope(provider)); provider.hasKey = false; } return; }
+        if ((command === 'test_provider' || command === 'test_ocr_provider') && fixture.holdFreeSetupTest) { fixture.freeSetupTestWaits++; await new Promise((resolve) => { fixture.releaseFreeSetupTest = resolve; }); }
         if (command === 'test_provider') { fixture.translationTestCalls++; fixture.credentialReadCalls++; const provider = fixture.settings.providers.find(item => item.id === args.providerId); if (provider) fixture.setCredentialState(provider, 'ready'); return 'QA translation credential test succeeded'; }
         if (command === 'test_ocr_provider') { fixture.ocrTestCalls++; fixture.credentialReadCalls++; const provider = fixture.settings.ocrProviders.find(item => item.id === args.providerId); if (provider && fixture.credentialStates[scope(provider)]) fixture.setCredentialState(provider, 'ready'); return 'QA OCR test succeeded'; }
         if (command === 'hide_window') { fixture.hideCalls++; fixture.nativeHide(); return; }
@@ -2814,6 +2816,67 @@ try {
   assert.equal(await page.locator('#windows-selection-settings').isHidden(), true);
   assert.deepEqual(errors, []);
   console.log('PASS: isolated Windows strategy settings default compatibility for old payloads; strict and copy save without changing providers/shortcuts/theme, navigation retains strict, failed save rolls back, and macOS hides the setting. Fake IPC only.');
+  // The free-service wizard is a real modal, not a hidden settings panel. Test
+  // production handlers with held IPC and no external service or real secret.
+  await page.goto(process.env.ECHOLINGO_TEST_URL ?? 'http://127.0.0.1:1420/');
+  await page.waitForFunction(() => document.querySelector('#footer-status')?.textContent === '准备就绪');
+  await page.locator('#source-text').fill('Do not translate behind the setup modal');
+  await goView('settings');
+  for (const [kind, endpoint] of [['volcengine', 'https://translate.volcengineapi.com'], ['aliyun', 'https://mt.aliyuncs.com']]) {
+    await page.locator('#add-provider').click();
+    await page.locator('#provider-preset').selectOption(kind);
+    assert.equal(await page.locator('#provider-kind').inputValue(), kind);
+    assert.equal(await page.locator('#provider-url').inputValue(), endpoint);
+    assert.equal(await page.locator('#provider-baidu-credentials').isVisible(), true);
+    assert.equal(await page.locator('#provider-key-field').isHidden(), true);
+    await page.locator('#cancel-provider-dialog').click();
+  }
+  await page.locator('#free-region-cn').click();
+  await page.locator('#free-combo-list .free-combo button').first().click();
+  assert.equal(await page.locator('#free-setup-dialog').isVisible(), true);
+  assert.equal(await page.locator('.app-shell').evaluate((element) => element.inert), true);
+  const firstFreeStep = await page.locator('#free-setup-step').textContent();
+  const freeBaseline = await page.evaluate(() => ({ saves: window.__qa.saveCalls, hides: window.__qa.hideCalls, translations: window.__qa.translationRequests.length }));
+  await page.locator('#free-setup-next').click();
+  await page.locator('#free-setup-error').waitFor({ state: 'visible' });
+  assert.equal(await page.locator('#free-setup-step').textContent(), firstFreeStep);
+  assert.equal(await page.evaluate(() => window.__qa.saveCalls), freeBaseline.saves);
+  await page.locator('#free-setup-next').focus();
+  await page.keyboard.press('Tab');
+  assert.equal(await page.evaluate(() => document.activeElement.id), 'free-setup-close');
+  await page.keyboard.press('Control+Enter');
+  assert.equal(await page.evaluate(() => window.__qa.translationRequests.length), freeBaseline.translations);
+  await page.keyboard.press('Escape');
+  assert.equal(await page.locator('#free-setup-dialog').isHidden(), true);
+  assert.equal(await page.locator('.app-shell').evaluate((element) => element.inert), false);
+  assert.equal(await page.evaluate(() => window.__qa.hideCalls), freeBaseline.hides);
+  assert.equal(await page.locator('#free-field-key').count(), 0);
+
+  await page.locator('#free-combo-list .free-combo button').first().click();
+  await page.locator('#free-field-key').fill('qa-wizard-private-key');
+  await page.evaluate(() => { window.__qa.holdFreeSetupTest = true; });
+  await page.locator('#free-setup-next').click();
+  await page.waitForFunction(() => window.__qa.freeSetupTestWaits === 1);
+  assert.equal(await page.locator('#free-setup-next').isDisabled(), true);
+  // dispatchEvent intentionally bypasses disabled controls to exercise the fence.
+  await page.locator('#free-setup-next').dispatchEvent('click');
+  assert.equal(await page.evaluate(() => window.__qa.keyCalls), 1);
+  await page.locator('#free-setup-close').click();
+  await page.locator('#free-region-overseas').click();
+  assert.equal(await page.locator('#free-combo-list .free-combo').count(), 2);
+  await page.locator('#free-combo-list .free-combo button').nth(1).click();
+  const reopenedFreeStep = await page.locator('#free-setup-step').textContent();
+  await page.evaluate(() => { window.__qa.holdFreeSetupTest = false; window.__qa.releaseFreeSetupTest(); });
+  await page.waitForFunction(() => window.__qa.keyDeleteCalls === 1 && !window.__qa.settings.providers.some((provider) => provider.id.startsWith('free-')));
+  assert.equal(await page.locator('#free-setup-step').textContent(), reopenedFreeStep);
+  assert.equal(await page.locator('#free-setup-dialog').isVisible(), true);
+  assert.equal(await page.locator('#free-field-key').inputValue(), '');
+  assert.equal(await page.locator('#free-setup-next').isDisabled(), false);
+  await page.keyboard.press('Escape');
+  assert.equal(await page.locator('.app-shell').evaluate((element) => element.inert), false);
+  assert.equal(await page.evaluate(() => window.__qa.hideCalls), freeBaseline.hides);
+  assert.deepEqual(errors, []);
+  console.log('PASS: free setup blank validation, modal inert/focus trap/shortcuts/Escape, duplicate submission, pending-test close/reopen, owned credential cleanup, and two non-Gemini overseas recommendations. Fake IPC only.');
   console.log('PASS: persistent screenshot permission guidance prepared before presentation; click-only correct pane without authorization; retained sanitized link failure and manual path; first-use pending-open help navigation/focus; 800 px light and 420 px narrow/dark screenshots; dismiss/input/quiet Alt+D/Alt+A/stale-epoch recovery; deferred-modal permission payload and granted-status clearing; backend cancellation tickets on edit/clear/stop/Escape/close/native hide; native presentation epochs cover unallocated tickets, omitted/stale hide events, reopen overtaking pending begin and stale delayed popup fitting; backend-only cancellation clears old result state; late-ticket and replacement ordering; pending-save close/reentry guard; failure unlock; blank shortcuts; duplicate rejection; no countdown; theme/favorites and history bounds; OCR dual-key bundles/protocol isolation/no plaintext settings; documented vendor presets; origin-bound saved-key indications; minimal popup/menu/automatic source height; OCR configuration/privacy; empty-selection immediate typing; persistent source copy/speech; pin edge/icon/keyboard hit areas and drag isolation; captured source editing after completion and pending cancellation/retranslation; narrow-wrap source presentation; inconsistent permission feedback; automatic/fixed targets; Enter/ShiftEnter/IME/repeat; passive permissions; real capture and translation error preservation.');
 } finally {
   await browser.close();

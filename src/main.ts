@@ -34,7 +34,8 @@ const resultsContainer = $('#results');
 const providerDialog = $('#provider-dialog');
 const confirmDialog = $('#confirm-dialog');
 const ocrDialog = $('#ocr-provider-dialog');
-const allModals = [providerDialog, confirmDialog, ocrDialog];
+const freeSetupDialog = $('#free-setup-dialog');
+const allModals = [providerDialog, confirmDialog, ocrDialog, freeSetupDialog];
 const modalReturnFocus = new Map<HTMLElement, HTMLElement | null>();
 let settings = defaultSettings();
 let history: HistoryEntry[] = [];
@@ -1284,7 +1285,7 @@ function handleActionError(message: string): void {
   freeSetup.noteWeak(message);
 }
 
-let freeSetup: { refresh: () => void; noteWeak: (text?: string) => void } = { refresh() {}, noteWeak() {} };
+let freeSetup: { refresh: () => void; noteWeak: (text?: string) => void; close: () => void } = { refresh() {}, noteWeak() {}, close() {} };
 const ocrUi = createOcrUi({
   desktop, settings: () => settings, updateSettings,
   reloadSettings: async () => { settings = await invoke<Settings>('get_settings'); renderSettings(); },
@@ -1510,7 +1511,7 @@ document.addEventListener('keydown', (event) => {
   if (modal) {
     if (event.key === 'Escape') {
       event.preventDefault(); event.stopPropagation();
-      if (modal === confirmDialog) settleConfirm(false); else if (modal === ocrDialog) ocrUi.close(); else closeProviderDialog();
+      if (modal === confirmDialog) settleConfirm(false); else if (modal === ocrDialog) ocrUi.close(); else if (modal === freeSetupDialog) freeSetup.close(); else closeProviderDialog();
     } else if (event.key === 'Tab') {
       const focusable = modalFocusable(modal);
       const first = focusable[0], last = focusable[focusable.length - 1];
@@ -1592,6 +1593,6 @@ async function initialize(): Promise<void> {
   } finally { resizeSourceEditor(); }
 }
 freeSetup = installFreeSetup({
-  desktop, settings: () => settings, updateSettings, toast, setView, reportError,
+  desktop, settings: () => settings, updateSettings, toast, setView, reportError, showModal, closeModal,
 });
 void initialize();

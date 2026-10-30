@@ -70,7 +70,6 @@
 | --- | --- | --- | --- |
 | 首选 | Azure Translator F0 | Google Cloud Vision | F0 约 200 万字符/月；每个文字功能约 1000 units/月 |
 | 备选 | DeepL API Developer | Azure AI Vision F0 | 新客累计约 100 万字符，用完不按月恢复；Vision F0 约 5000 次/月，部分区域没有 |
-| 低门槛 | Gemini 免费层 | OCR.space | 以价格页标为 Free of charge 的模型为准；OCR.space Engine 1/2 约 25000 次/月，另有每日 IP 限制 |
 
 DeepL、Google、Gemini 在中国大陆经常无法直连，大陆组合里不把它们当首选。
 
@@ -90,9 +89,13 @@ DeepL、Google、Gemini 在中国大陆经常无法直连，大陆组合里不�
 
 创建 F0 资源，把 `https://你的资源名.cognitiveservices.azure.com` 和密钥填进 OCR 服务。应用只接受这个域名下你自己的资源，不会代你保存一份公共密钥。
 
-### Gemini
+### Gemini（仅手动配置）
 
-在 [Google AI Studio](https://aistudio.google.com/apikey) 创建 Key。向导预填 OpenAI 兼容地址和 `gemini-2.0-flash`。如果价格页上的免费模型名称不同，在设置里改模型后再测试。
+Gemini 不列入推荐免费组合。手动添加 OpenAI 兼容服务前，请核对 Google 当前的[使用资格和数据条款](https://ai.google.dev/gemini-api/terms)：条款限制可用地区、专业或商业用途及使用年龄；向欧洲经济区、瑞士或英国用户提供 API 客户端时，要求使用 Paid Services。账号和用途是否符合要求，应以 Google 当前条款为准，不由本应用保证。
+
+适用未付费服务数据条款时，提交的内容及回复可能用于改进 Google 产品，并可能经过人工审阅；不要提交敏感、机密或个人信息。付费服务及部分地区的数据条款不同，请按自己的情况核对上述原文。
+
+根据自己账号实际可用的模型，查阅[模型生命周期](https://ai.google.dev/gemini-api/docs/deprecations)及[价格页](https://ai.google.dev/gemini-api/docs/pricing)后填写模型名称；本指南不预填模型，也不承诺免费访问。
 
 ### OCR.space
 

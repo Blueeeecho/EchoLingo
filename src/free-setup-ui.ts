@@ -12,10 +12,12 @@ interface HintState { dismissed: boolean; shownAt: number; softAt: number }
 interface SetupContext {
   desktop: boolean;
   settings: () => Settings;
-  updateSettings: (mutator: (next: Settings) => void) => Promise<void>;
+  updateSettings: (mutator: (next: Settings) => void, canCommit?: () => boolean) => Promise<void>;
   toast: (message: string, tone?: 'info' | 'error', duration?: number) => void;
   setView: (view: string) => void;
   reportError: (error: unknown) => void;
+  showModal: (modal: HTMLElement) => void;
+  closeModal: (modal: HTMLElement) => void;
 }
 
 function readState(): HintState {
@@ -61,7 +63,7 @@ function credentialFor(piece: FreePiece, input: Record<string, string>): { key: 
   return buildOcrCredential(piece.kind as 'google', { genericKey: input.key }, true);
 }
 
-export function installFreeSetup(context: SetupContext): { refresh: () => void; noteWeak: (text?: string) => void; open: (region?: FreeRegion) => void } {
+export function installFreeSetup(context: SetupContext): { refresh: () => void; noteWeak: (text?: string) => void; open: (region?: FreeRegion) => void; close: () => void } {
   const hint = document.querySelector<HTMLElement>('#free-setup-hint');
   const dialog = document.querySelector<HTMLElement>('#free-setup-dialog');
   const body = document.querySelector<HTMLElement>('#free-setup-body');
@@ -71,6 +73,15 @@ export function installFreeSetup(context: SetupContext): { refresh: () => void; 
   let region: FreeRegion = (navigator.language || '').toLowerCase().startsWith('zh') ? 'cn' : 'overseas';
   let combo: FreeCombo | null = null;
   let pieceIndex = 0;
+  let revision = 0;
+  let busy = false;
+  const nextButton = document.querySelector<HTMLButtonElement>('#free-setup-next');
+  const setBusy = (value: boolean): void => {
+    busy = value;
+    if (nextButton) nextButton.disabled = value;
+    dialog?.setAttribute('aria-busy', String(value));
+  };
+  const invalidate = (): void => { revision += 1; setBusy(false); };
   const inTest = typeof window !== 'undefined' && '__qa' in window;
 
   const showError = (message: string): void => { if (!error) return; error.hidden = !message; error.textContent = message; };
@@ -150,17 +161,22 @@ export function installFreeSetup(context: SetupContext): { refresh: () => void; 
     if (next) next.textContent = tx('测试并设为当前', 'Test and set as current');
   };
   const openWizard = (id?: string): void => {
+    invalidate();
     combo = id ? comboById(id) ?? null : combosFor(region)[0] ?? null;
     pieceIndex = 0;
-    if (dialog) dialog.hidden = false;
     renderPiece();
+    if (dialog && dialog.hidden) context.showModal(dialog);
     document.querySelector<HTMLElement>('#free-setup-dialog')?.focus();
   };
-  const closeWizard = (): void => { if (dialog) dialog.hidden = true; showError(''); };
-  const applyPiece = async (): Promise<void> => {
-    if (!combo) return;
-    const piece = combo.pieces[pieceIndex];
-    if (!piece) return;
+  const closeWizard = (): void => {
+    invalidate();
+    // Remove password inputs as well as hiding the dialog.
+    body?.replaceChildren();
+    combo = null;
+    showError('');
+    if (dialog && !dialog.hidden) context.closeModal(dialog);
+  };
+  const applyPiece = async (piece: FreePiece, current: () => boolean): Promise<boolean> => {
     const entered: Record<string, string> = {
       ...values(['free-field-key', 'free-field-first', 'free-field-second', 'free-field-region']),
       endpoint: (document.getElementById('free-field-endpoint') as HTMLInputElement | null)?.value.trim() ?? '',
@@ -174,34 +190,77 @@ export function installFreeSetup(context: SetupContext): { refresh: () => void; 
     };
     if (piece.kind === 'ocrspace' && (input.key ?? '').toLowerCase() === 'helloworld') {
       showError(tx('不能使用 OCR.space 的公共示例密钥。', 'The public OCR.space sample key cannot be used.'));
-      return;
+      return false;
     }
     const secret = credentialFor(piece, { key: input.key ?? '', first: input.first ?? '', second: input.second ?? '' });
-    if (secret.error || !secret.key) { showError(secret.error || tx('请填写完整密钥。', 'Enter the complete key.')); return; }
-    if (!context.desktop) { showError(tx('测试连接需要桌面应用。', 'Testing a connection requires the desktop app.')); return; }
+    if (secret.error || !secret.key) { showError(secret.error || tx('请填写完整密钥。', 'Enter the complete key.')); return false; }
+    if (!context.desktop) { showError(tx('测试连接需要桌面应用。', 'Testing a connection requires the desktop app.')); return false; }
     const id = `free-${crypto.randomUUID()}`;
     const baseUrl = piece.credential === 'azureVision' ? (input.endpoint ?? '').replace(/\/+$/, '') : piece.baseUrl;
     if (piece.credential === 'azureVision' && !/^https:\/\/[a-z0-9-]+\.cognitiveservices\.azure\.com$/i.test(baseUrl)) {
       showError(tx('Azure 终结点必须是 https://你的资源名.cognitiveservices.azure.com', 'The Azure endpoint must look like https://your-resource.cognitiveservices.azure.com'));
-      return;
+      return false;
     }
-    if (piece.role === 'translation') {
-      const provider: Provider = { id, name: piece.name, kind: piece.kind as Provider['kind'], baseUrl, model: piece.model, enabled: false, prompt: '', region: input.region ?? '' };
-      await context.updateSettings((next) => { next.providers.push(provider); });
-      await invoke('set_api_key', { providerId: id, key: secret.key });
-      const message = await invoke<string>('test_provider', { providerId: id });
-      await context.updateSettings((next) => { const found = next.providers.find((item) => item.id === id); if (found) found.enabled = true; });
-      context.toast(message || tx('已启用这个翻译服务。本机服务仍然保留。', 'This translation service is enabled. The local service is still there.'));
-    } else {
-      const provider: OcrProvider = {
-        id, name: piece.name, kind: piece.kind as OcrProvider['kind'], baseUrl, model: piece.model, prompt: piece.prompt ?? '',
-        authHeader: 'Authorization', authPrefix: 'Bearer ', requestTemplate: '', responsePath: '', region: piece.region ?? '',
-      };
-      await context.updateSettings((next) => { next.ocrProviders.push(provider); });
-      await invoke('set_ocr_api_key', { providerId: id, key: secret.key });
-      const message = await invoke<string>('test_ocr_provider', { providerId: id });
-      await context.updateSettings((next) => { next.activeOcrProviderId = id; });
-      context.toast(message || tx('已把这个 OCR 设为当前识别方式。', 'This OCR service is now the current recognizer.'));
+    let staged = false;
+    let keyAttempted = false;
+    let committed = false;
+    let previousOcrId: string | null = null;
+    const translation = piece.role === 'translation';
+    try {
+      if (translation) {
+        const provider: Provider = { id, name: piece.name, kind: piece.kind as Provider['kind'], baseUrl, model: piece.model, enabled: false, prompt: '', region: input.region ?? '' };
+        await context.updateSettings((next) => { staged = true; next.providers.push(provider); }, current);
+      } else {
+        const provider: OcrProvider = {
+          id, name: piece.name, kind: piece.kind as OcrProvider['kind'], baseUrl, model: piece.model, prompt: piece.prompt ?? '',
+          authHeader: 'Authorization', authPrefix: 'Bearer ', requestTemplate: '', responsePath: '', region: piece.region ?? '',
+        };
+        await context.updateSettings((next) => { staged = true; next.ocrProviders.push(provider); }, current);
+      }
+      if (!current()) return false;
+      keyAttempted = true;
+      await invoke(translation ? 'set_api_key' : 'set_ocr_api_key', { providerId: id, key: secret.key });
+      if (!current()) return false;
+      const message = await invoke<string>(translation ? 'test_provider' : 'test_ocr_provider', { providerId: id });
+      if (!current()) return false;
+      await context.updateSettings((next) => {
+        if (translation) {
+          const found = next.providers.find((item) => item.id === id);
+          if (found) found.enabled = true;
+        } else {
+          previousOcrId = next.activeOcrProviderId;
+          next.activeOcrProviderId = id;
+        }
+      }, current);
+      if (!current()) return false;
+      committed = true;
+      context.toast(message || (translation
+        ? tx('已启用这个翻译服务。本机服务仍然保留。', 'This translation service is enabled. The local service is still there.')
+        : tx('已把这个 OCR 设为当前识别方式。', 'This OCR service is now the current recognizer.')));
+      return true;
+    } finally {
+      if (staged && !committed) {
+        // This operation owns only its fresh UUID. Never remove an existing service.
+        // Keep a disabled row if credential deletion fails so it remains removable
+        // from Settings rather than orphaning a secret in the credential store.
+        let removeProvider = true;
+        if (keyAttempted) {
+          try { await invoke(translation ? 'delete_api_key' : 'delete_ocr_api_key', { providerId: id }); }
+          catch (cleanupError) { removeProvider = false; context.reportError(cleanupError); }
+        }
+        try {
+          await context.updateSettings((next) => {
+            if (translation) {
+              const found = next.providers.find((item) => item.id === id);
+              if (found) found.enabled = false;
+              if (removeProvider) next.providers = next.providers.filter((item) => item.id !== id);
+            } else {
+              if (next.activeOcrProviderId === id) next.activeOcrProviderId = next.ocrProviders.some((item) => item.id === previousOcrId) ? previousOcrId : null;
+              if (removeProvider) next.ocrProviders = next.ocrProviders.filter((item) => item.id !== id);
+            }
+          });
+        } catch (cleanupError) { context.reportError(cleanupError); }
+      }
     }
   };
 
@@ -220,17 +279,30 @@ export function installFreeSetup(context: SetupContext): { refresh: () => void; 
   document.querySelector('#free-setup-close')?.addEventListener('click', closeWizard);
   dialog?.addEventListener('click', (event) => { if (event.target === dialog) closeWizard(); });
   document.querySelector('#free-setup-back')?.addEventListener('click', () => {
-    if (pieceIndex === 0) closeWizard(); else { pieceIndex -= 1; renderPiece(); }
+    if (pieceIndex === 0) closeWizard(); else { invalidate(); pieceIndex -= 1; renderPiece(); }
   });
-  document.querySelector('#free-setup-next')?.addEventListener('click', () => {
-    void applyPiece().then(() => {
-      if (!combo) return;
+  nextButton?.addEventListener('click', () => {
+    if (busy || !combo || dialog?.hidden) return;
+    const selected = combo, index = pieceIndex, intent = revision;
+    const piece = selected.pieces[index];
+    if (!piece) return;
+    const current = (): boolean => revision === intent && combo === selected && pieceIndex === index && dialog?.hidden === false;
+    setBusy(true);
+    void applyPiece(piece, current).then((success) => {
+      if (!success || !current()) return;
       pieceIndex += 1;
-      if (pieceIndex >= combo.pieces.length) {
+      if (pieceIndex >= selected.pieces.length) {
         closeWizard();
         context.toast(tx('这一组已经启用。本机引擎仍是默认兜底，可在设置里关掉不需要的服务。', 'This combination is enabled. The local engine remains available; turn off anything you do not want in Settings.'));
       } else renderPiece();
-    }).catch((error: unknown) => showError(typeof error === 'string' ? error : error instanceof Error ? error.message : tx('测试没有成功，请检查密钥、网络和是否已开通该服务。', 'The test did not succeed. Check the key, network, and that the service is enabled.')));
+    }).catch((failure: unknown) => {
+      if (current()) showError(typeof failure === 'string' ? failure : failure instanceof Error ? failure.message : tx('测试没有成功，请检查密钥、网络和是否已开通该服务。', 'The test did not succeed. Check the key, network, and that the service is enabled.'));
+    }).finally(() => { if (revision === intent) setBusy(false); });
+  });
+  dialog?.addEventListener('keydown', (event) => {
+    if (event.key === 'Escape' && !event.isComposing && event.keyCode !== 229) {
+      event.preventDefault(); event.stopPropagation(); closeWizard();
+    }
   });
   const cardTitle = document.querySelector('#free-setup-card-title');
   const cardSummary = document.querySelector('#free-setup-card-summary');
@@ -240,5 +312,5 @@ export function installFreeSetup(context: SetupContext): { refresh: () => void; 
     'The default stays local. These combinations use public quotas checked in 2026-10. They can change and are not permanently free.',
   );
   refresh();
-  return { refresh, noteWeak, open: (next) => { if (next) region = next; openWizard(); } };
+  return { refresh, noteWeak, close: closeWizard, open: (next) => { if (next) region = next; openWizard(); } };
 }

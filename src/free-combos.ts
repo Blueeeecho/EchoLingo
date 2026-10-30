@@ -83,16 +83,6 @@ export const FREE_COMBOS: readonly FreeCombo[] = [
       { role: 'ocr', name: 'Azure AI Vision', kind: 'azure-vision', baseUrl: '', model: 'read', signupUrl: EXTRA_SERVICE_LINKS.azureVisionOverview, credential: 'azureVision', quotaZh: `填写你自己的 *.cognitiveservices.azure.com 终结点。F0 约 5000 次/月，部分区域没有。${checked}`, quotaEn: `Use your own *.cognitiveservices.azure.com endpoint. F0 is about 5,000 calls/month and is missing in some regions. ${checkedEn}` },
     ],
   },
-  {
-    id: 'os-gemini-ocrspace', region: 'overseas',
-    titleZh: 'Gemini 免费层 + OCR.space', titleEn: 'Gemini free tier + OCR.space',
-    detailZh: `Gemini 部分 Flash 模型在价格页标为 Free of charge。OCR.space 必须用你自己的 Key。${checked}`,
-    detailEn: `Some Gemini Flash models are marked Free of charge on the pricing page. OCR.space requires your own key. ${checkedEn}`,
-    pieces: [
-      { role: 'translation', name: 'Gemini', kind: 'openai', baseUrl: 'https://generativelanguage.googleapis.com/v1beta/openai', model: 'gemini-2.0-flash', signupUrl: EXTRA_SERVICE_LINKS.geminiKey, credential: 'apiKey', quotaZh: `以 Gemini 价格页当时标为免费的模型为准，可稍后在设置里改模型名。${checked}`, quotaEn: `Use a model the Gemini pricing page currently marks as free. You can change the model name later. ${checkedEn}` },
-      { role: 'ocr', name: 'OCR.space', kind: 'ocrspace', baseUrl: 'https://api.ocr.space', model: '2', signupUrl: 'https://ocr.space/ocrapi', credential: 'apiKey', warningZh: '不要填写网站上的公共示例密钥。', warningEn: 'Do not paste the public sample key from the website.', quotaZh: `Engine 2 约 25000 次/月，另有每日 IP 限制。${checked}`, quotaEn: `Engine 2 is about 25,000 calls/month, plus a daily IP limit. ${checkedEn}` },
-    ],
-  },
 ];
 
 export function combosFor(region: FreeRegion): readonly FreeCombo[] {
