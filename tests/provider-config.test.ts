@@ -120,3 +120,55 @@ describe('credential origin binding', () => {
     expect(credentialScope('openai', 'not a URL')).toBeNull();
   });
 });
+
+describe('verified compatible presets', () => {
+  it.each([
+    ['gemini', 'https://generativelanguage.googleapis.com/v1beta/openai', 'gemini-3.8-flash'],
+    ['groq', 'https://api.groq.com/openai/v1', 'openai/gpt-oss-20b'],
+    ['ollama', 'http://localhost:11434/v1', 'gpt-oss:20b'],
+  ])('provides %s without changing existing stored providers', (id, baseUrl, model) => {
+    const preset = PROVIDER_PRESETS.find(item => item.id === id)!;
+    expect(preset).toMatchObject({ kind: 'openai', baseUrl, exampleModel: model });
+    const provider: Provider = { id: 'existing', name: 'Custom name', kind: 'openai', baseUrl, model: 'user-model', enabled: false };
+    const before = structuredClone(provider);
+    expect(inferProviderPreset(provider)).toBe(id);
+    expect(provider).toEqual(before);
+  });
+  it('does not classify remote or misleading URLs as local Ollama', () => {
+    for (const baseUrl of ['https://localhost:11434/v1', 'http://localhost:11435/v1', 'http://localhost.attacker.invalid:11434/v1', 'http://127.0.0.1:11434/other', 'http://user:password@localhost:11434/v1', 'http://localhost:11434/v1?remote=true']) {
+      expect(inferProviderPreset({ id: 'x', name: 'Ollama', kind: 'openai', baseUrl, model: 'x', enabled: true })).toBe('openai');
+    }
+  });
+});
+
+describe('new official free translation adapters', () => {
+  it.each(['niutrans', 'google-translate', 'caiyun'] as const)('pins %s to its documented URL without changing credentials', (kind) => {
+    const preset = PROVIDER_PRESETS.find(item => item.id === kind)!;
+    const provider: Provider = { id: 'new', name: preset.name, kind, baseUrl: preset.baseUrl, model: '', enabled: false };
+    expect(validateProvider(provider)).toBeNull();
+    expect(inferProviderPreset(provider)).toBe(kind);
+    for (const baseUrl of ['https://attacker.invalid', preset.baseUrl + '?key=secret', preset.baseUrl + '/wrong']) {
+      expect(validateProvider({ ...provider, baseUrl })).toBeTruthy();
+    }
+    expect(validateProvider({ ...provider, model: 'wrong' })).toBeTruthy();
+    expect(validateProvider({ ...provider, region: 'wrong' })).toBeTruthy();
+  });
+});
+
+describe('verified newcomer trial presets', () => {
+  it.each([
+    ['qianfan', 'https://qianfan.baidubce.com/v2', 'ernie-4.5-turbo-128k'],
+    ['tokenhub', 'https://tokenhub.tencentmaas.com/v1', 'hy3'],
+    ['ark', 'https://ark.cn-beijing.volces.com/api/v3', 'doubao-seed-2-1-pro-260915'],
+  ])('configures %s only on its standard API route', (id, baseUrl, model) => {
+    expect(PROVIDER_PRESETS.find(p => p.id === id)).toMatchObject({ kind: 'openai', baseUrl, exampleModel: model });
+    const provider: Provider = { id: 'saved', name: 'Custom', kind: 'openai', baseUrl, model: 'user-selected', enabled: false };
+    const before = structuredClone(provider);
+    expect(inferProviderPreset(provider)).toBe(id);
+    expect(provider).toEqual(before);
+    expect(inferProviderPreset({ ...provider, baseUrl: baseUrl + '/subscription' })).toBe('openai');
+  });
+  it('does not apply standard TokenHub trial wording to a subscription endpoint', () => {
+    expect(inferProviderPreset({ id: 'existing', name: 'Token plan', kind: 'openai', baseUrl: 'https://tokenhub.tencentmaas.com/plan/v3', model: 'hy3', enabled: true })).toBe('openai');
+  });
+});

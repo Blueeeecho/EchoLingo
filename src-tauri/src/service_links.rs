@@ -4,6 +4,29 @@
 const RELEASES_PAGE: &str = "https://github.com/Blueeeecho/EchoLingo/releases";
 
 const ALLOWED: &[&str] = &[
+    "https://console.groq.com/docs/openai",
+    "https://console.groq.com/docs/billing-faqs",
+    "https://console.groq.com/docs/rate-limits",
+    "https://console.groq.com/keys",
+    "https://ollama.com/download",
+    "https://docs.ollama.com/api/openai-compatibility",
+    "https://cloud.google.com/products/translate/pricing",
+    "https://docs.caiyunapp.com/lingocloud-api/index.html",
+    "https://docs.cloud.google.com/docs/authentication/api-keys-use",
+    "https://docs.cloud.google.com/translate/docs/reference/rest/v2/translate",
+    "https://niutrans.com/documents/contents/trans_detection",
+    "https://niutrans.com/text_trans",
+    "https://platform.caiyunapp.com/",
+    "https://ai.baidu.com/ai-doc/WENXINWORKSHOP/2m3fihw8s",
+    "https://ark.volcengine.com/region:cn-beijing/apikey",
+    "https://cloud.baidu.com/doc/qianfan/s/Imi2rpirg",
+    "https://cloud.tencent.com/document/product/1823/130053",
+    "https://cloud.tencent.com/document/product/1823/130079",
+    "https://console.bce.baidu.com/qianfan/overview",
+    "https://console.cloud.tencent.com/tokenhub",
+    "https://console.volcengine.com/ark/region:cn-beijing/docs/free-inference-quota",
+    "https://docs.volcengine.com/docs/ark/text-generation",
+
     "https://ai.baidu.com/ai-doc/OCR/fk3h7xu7h",
     "https://ai.youdao.com/",
     "https://ai.youdao.com/DOCSIRMA/html/ocr/api/tyocr/index.html",
@@ -155,8 +178,9 @@ mod tests {
         ];
         let urls: std::collections::BTreeSet<_> = sources
             .iter()
-            .flat_map(|source| source.split("'https://").skip(1))
-            .map(|tail| format!("https://{}", tail.split('\'').next().unwrap()))
+            .flat_map(|source| source.split(['\'', '"']))
+            .filter(|literal| literal.starts_with("https://"))
+            .map(str::to_owned)
             .collect();
         let expected: std::collections::BTreeSet<_> =
             ALLOWED.iter().map(|url| (*url).to_owned()).collect();

@@ -6,7 +6,7 @@ export interface ServiceAllowance {
   plan: string;
   amount: number | null;
   unit: 'characters' | 'calls' | 'units' | 'tokens' | 'CNY' | 'none';
-  period: 'month' | 'once' | 'unmetered' | 'variable';
+  period: 'day' | 'month' | 'once' | 'unmetered' | 'variable';
   conditions: readonly string[];
   expires?: string;
 }
@@ -32,6 +32,16 @@ const youdao = verifiedQuota({
 });
 
 export const TRANSLATION_QUOTAS: Record<ProviderPresetId, ServiceQuota> = {
+  gemini: verifiedQuota({ badge: '指定模型免费层', summary: '指定 Gemini 模型有免费层；无统一月度 Token 额度。', details: ['按账号与模型限制请求频率和每日请求数，不是无限使用。', '免费层内容可能用于改进产品；支持地域、模型和额度以 Google AI Studio 为准。'], allowances: [], links: [['官方免费层与价格', 'https://ai.google.dev/gemini-api/docs/pricing']], recommendedModel: 'gemini-3.8-flash' }),
+  groq: verifiedQuota({ badge: '限速免费层', summary: 'Groq Free tier：受模型与账号的速率、每日用量限制。', details: ['不承诺统一月度 Token 数；具体 RPM/RPD/TPM/TPD 请查看账号控制台。', '免费计划与付费计划不同，示例模型可用性以账号为准。'], allowances: [], links: [['官方免费计划说明', 'https://console.groq.com/docs/billing-faqs'], ['官方限速规则', 'https://console.groq.com/docs/rate-limits']] }),
+  ollama: verifiedQuota({ badge: '本机推理', summary: 'Ollama 本机模型无云端调用费；需自行安装并下载模型。', details: ['没有平台月度 API 配额，但需要本机内存、存储、电力与算力。', '仅限本机运行的模型；cloud 模型和远程服务器不是本机免费处理。'], allowances: [{ plan: '本机模型', amount: null, unit: 'none', period: 'unmetered', conditions: ['本机 Ollama 正在运行，模型已经下载；模型性能取决于设备。'] }], links: [['官方本机接口', 'https://docs.ollama.com/api/openai-compatibility']] }),
+  niutrans: verifiedQuota({ badge: '每日免费额度', summary: '小牛注册账户每日 20 万字符（100 积分）。', details: ['需注册自己的账号并取得 API Key；积分、限速及资格以控制台为准。', '不把每日额度累计为月额度；应用采用单次 5,000 UTF-8 字节的保守上限。'], allowances: [{ plan: '注册账户每日额度', amount: 200_000, unit: 'characters', period: 'day', conditions: ['注册账户；每日 100 积分对应 20 万字符，实际账户规则以平台为准。'] }], links: [['官方每日额度', 'https://niutrans.com/text_trans']] }),
+  'google-translate': verifiedQuota({ badge: '每月抵扣额度', summary: 'Google Cloud Translation NMT：每月前 50 万字符，按最多 10 美元抵扣。', details: ['Basic 与 Advanced 共用抵扣，不结转；此预设只调用 Basic NMT，不是所有翻译产品都免费。', '需启用 API 和结算；超额可能按量计费，API Key 应限制为 Cloud Translation。'], allowances: [{ plan: 'NMT 月度抵扣', amount: 500_000, unit: 'characters', period: 'month', conditions: ['Basic/Advanced 合计最多 10 美元抵扣；不结转。', '账号需开通 API 与结算；以当前价格和控制台为准。'] }], links: [['官方 NMT 价格', 'https://cloud.google.com/products/translate/pricing']] }),
+  caiyun: verifiedQuota({ badge: '限时一次性额度', summary: '彩云新用户一次 100 万字符，有效期 1 个月。', details: ['不是每月刷新；字符包含空格和标点，超过免费额度可能按量计费。', '必须申请自己的正式 Token，不使用公共测试 Token；仅支持官方列出的语言方向。'], allowances: [{ plan: '新用户试用', amount: 1_000_000, unit: 'characters', period: 'once', conditions: ['新注册账户申请小译 Token；按原文字符计量，包含空格和标点。'], expires: '1 个月' }], links: [['官方 API 与试用额度', 'https://docs.caiyunapp.com/lingocloud-api/index.html']] }),
+  qianfan: verifiedQuota({ badge: '限时新人额度', summary: '千帆指定预置模型新人各 100 万 Token，有效期 3 个月。', details: ['首次开通才发放，指定模型分别有资格；不是全部模型长期免费，也不是每月刷新。', '只抵扣在线推理，不包括批量推理；实际模型版本、余额和到期日以账号控制台为准。'], allowances: [{ plan: '指定模型新人试用', amount: 1_000_000, unit: 'tokens', period: 'once', conditions: ['首次开通；仅官方清单中的预置模型在线推理。'], expires: '3 个月' }], links: [['官方新用户额度', 'https://cloud.baidu.com/doc/qianfan/s/Imi2rpirg']] }),
+  tokenhub: verifiedQuota({ badge: '限时新人体验', summary: 'TokenHub 新人语言模型体验 100 万 Token，有效期 1 年。', details: ['本期领取活动截至 2026-12-31；不是每月重置，限中国站规则。', '主账号维度生效，官方说明模型共享额度；每账号每模型仅领取一次，不可叠加计算。', '免费额度用完且未开启后付费时停止；开启后付费后可能继续收费。'], allowances: [{ plan: '语言模型新人体验', amount: 1_000_000, unit: 'tokens', period: 'once', conditions: ['主账号共享规则；每账号每模型仅领取一次，不可叠加。', '本期领取活动截至 2026-12-31，以官方后续公告为准。'], expires: '领取起 1 年' }], links: [['官方新人体验规则', 'https://cloud.tencent.com/document/product/1823/130053']] }),
+  ark: verifiedQuota({ badge: '新人试用 · 额度待账号确认', summary: '方舟新人模型试用：各模型数量和有效期以开通管理显示为准。', details: ['当前规则没有可统一承诺的所有模型 Token 数，不将旧活动数字冒充现行额度。', '先选择有可用免费额度的模型并确认试用模式；付费、批量推理及其他能力可能不适用。', '这是方舟模型额度，不是火山机器翻译每月字符免费层。'], allowances: [{ plan: '模型新人试用', amount: null, unit: 'tokens', period: 'variable', conditions: ['确认模型已开通且有剩余试用额度；按账号所示期限使用。'] }], links: [['官方新人试用规则', 'https://console.volcengine.com/ark/region:cn-beijing/docs/free-inference-quota']] }),
+
   system: quota({ badge: '本机免费', summary: '本机系统翻译，无云端调用额度。', details: ['适用于 macOS 26 及以上；先在设置中准备所需语言包。', 'Windows 请使用安装包内的中英离线翻译；其他平台以实际支持情况为准。'], allowances: localAllowance, links: [['Apple 系统翻译', 'https://developer.apple.com/documentation/translation/translationsession/init(installedsource:target:)']] }),
   offline: quota({ badge: '本机免费', summary: 'Windows 安装包内中英模型，无需账号、密钥或按次付费。', details: ['支持简体中文与英语互译；处理速度取决于电脑性能。'], allowances: localAllowance, links: [['离线模型项目', 'https://github.com/mozilla/translations']] }),
   microsoft: verifiedQuota({

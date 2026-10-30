@@ -1,7 +1,7 @@
 import { EXTRA_SERVICE_LINKS, TRANSLATION_QUOTAS, OCR_QUOTAS, type ServiceQuota } from './service-quotas';
 
 export type FreeRegion = 'cn' | 'overseas';
-export type FreeCredential = 'apiKey' | 'appPair' | 'ocrPair' | 'tencentOcr' | 'microsoft' | 'azureVision' | 'youdaoPair';
+export type FreeCredential = 'localOllama' | 'apiKey' | 'appPair' | 'ocrPair' | 'tencentOcr' | 'microsoft' | 'azureVision' | 'youdaoPair';
 export interface FreePiece {
   id: string;
   role: 'translation' | 'ocr';
@@ -11,6 +11,9 @@ export interface FreePiece {
   kind: string;
   baseUrl: string;
   model: string;
+  editableModel?: boolean;
+  // Enrollment date in China (UTC+8); only recommendations expire, never saved services.
+  recommendUntil?: string;
   region?: string;
   prompt?: string;
   signupUrl: string;
@@ -29,6 +32,7 @@ const glmVisionQuota: ServiceQuota = {
 };
 
 export const FREE_SERVICES: readonly FreePiece[] = [
+
   { role: 'translation', name: '硅基流动', kind: 'openai', baseUrl: 'https://api.siliconflow.cn/v1', model: 'tencent/Hunyuan-MT-7B', signupUrl: 'https://cloud.siliconflow.cn/', credential: 'apiKey', id: 'siliconflow', nameEn: 'SiliconFlow', regionGroup: 'cn', allowance: TRANSLATION_QUOTAS.siliconflow, quotaEn: 'Named Hunyuan-MT-7B model: input/output price 0; no fixed monthly Token allowance.', conditionsEn: 'Other models may charge; rate/concurrency limits apply.' },
   { role: 'ocr', name: '百度 OCR', kind: 'baidu', baseUrl: 'https://aip.baidubce.com', model: 'general_basic', signupUrl: 'https://console.bce.baidu.com/ai/#/ai/ocr/overview/index', credential: 'ocrPair', id: 'baidu-ocr', nameEn: 'Baidu OCR', regionGroup: 'cn', allowance: OCR_QUOTAS.baidu, quotaEn: 'Personal verification: 1,000 calls/month per supported interface; enterprise: 2,000.', conditionsEn: 'Activate OCR and enter the console to receive the test resource automatically. Translation credentials are different.' },
   { role: 'translation', name: '百度翻译', kind: 'baidu', baseUrl: 'https://fanyi-api.baidu.com/api/trans/vip/translate', model: '', signupUrl: 'https://fanyi-api.baidu.com/manage/developer', credential: 'appPair', id: 'baidu', nameEn: 'Baidu Translate', regionGroup: 'cn', allowance: TRANSLATION_QUOTAS.baidu, quotaEn: 'Standard: 50,000 characters/month; verified Advanced: 1,000,000/month.', conditionsEn: 'Personal verification plus Advanced activation; tiers do not stack.' },
@@ -46,9 +50,18 @@ export const FREE_SERVICES: readonly FreePiece[] = [
   { id: 'youdao', role: 'translation', regionGroup: 'cn', name: '有道智云翻译 · 一次性体验金', nameEn: 'Youdao Translation · one-time credit', kind: 'youdao', baseUrl: 'https://openapi.youdao.com/api', model: '', signupUrl: 'https://ai.youdao.com/console/', credential: 'youdaoPair', allowance: TRANSLATION_QUOTAS.youdao, quotaEn: 'New account: CNY 10; identity verification: additional CNY 40, one time.', conditionsEn: 'Translation and OCR share the account credit, not separate monthly allowances. Eligibility and expiry follow your account.' },
   { id: 'youdao-ocr', role: 'ocr', regionGroup: 'cn', name: '有道智云 OCR · 一次性体验金', nameEn: 'Youdao OCR · one-time credit', kind: 'youdao', baseUrl: 'https://openapi.youdao.com/ocrapi', model: 'general', signupUrl: 'https://ai.youdao.com/console/', credential: 'youdaoPair', allowance: OCR_QUOTAS.youdao, quotaEn: 'New account: CNY 10; identity verification: additional CNY 40, one time.', conditionsEn: 'Same credit pool as Youdao Translation; do not count it twice. Check account expiry and eligible products.' },
 
+  { id: 'gemini', role: 'translation', regionGroup: 'overseas', name: "Gemini", nameEn: 'Gemini', kind: 'openai', baseUrl: 'https://generativelanguage.googleapis.com/v1beta/openai', model: 'gemini-3.8-flash', signupUrl: 'https://aistudio.google.com/apikey', credential: 'apiKey', allowance: TRANSLATION_QUOTAS.gemini, quotaEn: "Selected Gemini models have a free tier; account/model rate limits apply.", conditionsEn: "Free-tier content may improve products. Check region, model and account eligibility." },
+  { id: 'groq', role: 'translation', regionGroup: 'overseas', name: "Groq", nameEn: 'Groq', kind: 'openai', baseUrl: 'https://api.groq.com/openai/v1', model: 'openai/gpt-oss-20b', signupUrl: 'https://console.groq.com/keys', credential: 'apiKey', allowance: TRANSLATION_QUOTAS.groq, quotaEn: "Free tier with account/model request and Token rate limits.", conditionsEn: "No universal monthly Token allowance; check your console and plan." },
+  { id: 'ollama', role: 'translation', regionGroup: 'overseas', name: "Ollama 本机", nameEn: 'Ollama local', kind: 'openai', baseUrl: 'http://localhost:11434/v1', model: 'gpt-oss:20b', signupUrl: 'https://ollama.com/download', credential: 'localOllama', allowance: TRANSLATION_QUOTAS.ollama, quotaEn: "Local inference has no cloud API charge; install Ollama and download a model.", conditionsEn: "Uses local hardware, storage and electricity. Cloud models and remote hosts are not included." },
+  { id: 'niutrans', role: 'translation', regionGroup: 'cn', name: "小牛翻译", nameEn: "NiuTrans", kind: 'niutrans', baseUrl: 'https://api.niutrans.com/NiuTransServer/translation', model: '', signupUrl: 'https://niutrans.com/text_trans', credential: 'apiKey', allowance: TRANSLATION_QUOTAS["niutrans"], quotaEn: "Registered account: 200,000 characters (100 points) daily.", conditionsEn: "Own account/key required; daily points and rate limits follow the console." },
+  { id: 'google-translate', role: 'translation', regionGroup: 'overseas', name: "Google Cloud Translation", nameEn: "Google Cloud Translation NMT", kind: 'google-translate', baseUrl: 'https://translation.googleapis.com/language/translate/v2', model: '', signupUrl: 'https://console.cloud.google.com/apis/credentials', credential: 'apiKey', allowance: TRANSLATION_QUOTAS["google-translate"], quotaEn: "First 500,000 characters/month, represented as up to USD 10 credit.", conditionsEn: "Basic and Advanced share credit; no rollover. Billing and API activation required; overages billed." },
+  { id: 'caiyun', role: 'translation', regionGroup: 'cn', name: "彩云小译", nameEn: "Caiyun Translation", kind: 'caiyun', baseUrl: 'https://api.interpreter.caiyunai.com/v1/translator', model: '', signupUrl: 'https://platform.caiyunapp.com/', credential: 'apiKey', allowance: TRANSLATION_QUOTAS["caiyun"], quotaEn: "New users: 1,000,000 characters once, valid for one month.", conditionsEn: "Not a monthly allowance. Use your own Token; limited supported language directions." },
+  { id: 'qianfan-trial', role: 'translation', regionGroup: 'cn', name: "百度千帆 · 新人试用", nameEn: "qianfan · introductory trial", kind: 'openai', baseUrl: 'https://qianfan.baidubce.com/v2', model: 'ernie-4.5-turbo-128k', editableModel: true, signupUrl: 'https://console.bce.baidu.com/qianfan/overview', credential: 'apiKey', allowance: TRANSLATION_QUOTAS.qianfan, quotaEn: "Eligible new Qianfan accounts: 1,000,000 Tokens per listed model, once, valid for 3 months.", conditionsEn: "Only named online-inference models; not batch inference or a recurring allowance." },
+  { id: 'tokenhub-trial', role: 'translation', regionGroup: 'cn', name: "腾讯 TokenHub · 新人试用", nameEn: "tokenhub · introductory trial", kind: 'openai', baseUrl: 'https://tokenhub.tencentmaas.com/v1', model: 'hy3', editableModel: true, recommendUntil: '2026-12-31', signupUrl: 'https://console.cloud.tencent.com/tokenhub', credential: 'apiKey', allowance: TRANSLATION_QUOTAS.tokenhub, quotaEn: "New language-model trial: 1,000,000 Tokens, valid for 1 year; current enrollment ends 2026-12-31.", conditionsEn: "Main-account sharing; one claim per account/model, not additive. Postpaid usage can charge." },
+  { id: 'ark-trial', role: 'translation', regionGroup: 'cn', name: "火山方舟 · 新人试用", nameEn: "ark · introductory trial", kind: 'openai', baseUrl: 'https://ark.cn-beijing.volces.com/api/v3', model: 'doubao-seed-2-1-pro-260915', editableModel: true, signupUrl: 'https://ark.volcengine.com/region:cn-beijing/apikey', credential: 'apiKey', allowance: TRANSLATION_QUOTAS.ark, quotaEn: "New-user model trials; exact quantity and expiry must be confirmed in the activation console.", conditionsEn: "Do not assume an old blanket Token allowance applies. Select a model with available trial quota." },
 ];
-export function servicesFor(region: FreeRegion, role: FreePiece['role']): readonly FreePiece[] {
-  return FREE_SERVICES.filter((item) => item.regionGroup === region && item.role === role);
+export function servicesFor(region: FreeRegion, role: FreePiece['role'], now = new Date()): readonly FreePiece[] {
+  return FREE_SERVICES.filter((item) => (item.regionGroup === region || item.id === 'ollama') && item.role === role && (!item.recommendUntil || new Date(now.getTime() + 8 * 60 * 60 * 1000).toISOString().slice(0, 10) <= item.recommendUntil));
 }
 export function serviceById(id: string): FreePiece | undefined {
   return FREE_SERVICES.find((item) => item.id === id);

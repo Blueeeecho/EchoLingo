@@ -6,9 +6,13 @@ const deferred = <T>() => { let resolve!: (value: T) => void; const promise = ne
 function fixture() {
   let epoch = 7, shown = true;
   const host = { valid: (value: number) => shown && value === epoch,
-    begin: vi.fn(async (_value: DragPress) => 1), move: vi.fn(async (_id: number) => {}),
+    begin: vi.fn(async (_value: DragPress) => 1), move: vi.fn(async (_id: number): Promise<unknown> => {}),
     end: vi.fn(async (_id: number) => {}), settled: vi.fn(), active: vi.fn() };
-  return { host, drag: new PopupDragController(host), change: () => { epoch++; }, hide: () => { shown = false; } };
+  let nextFrame = 0;
+  const frames = new Map<number, () => void>();
+  const clock = { request: (callback: () => void) => { frames.set(++nextFrame, callback); return nextFrame; }, cancel: (id: number) => { frames.delete(id); } };
+  const frame = async () => { const callbacks = [...frames.values()]; frames.clear(); callbacks.forEach(callback => callback()); await tick(); };
+  return { host, drag: new PopupDragController(host, clock), frame, frames, change: () => { epoch++; }, hide: () => { shown = false; } };
 }
 describe('Mac popup drag uses a real gesture rather than an asynchronous currentEvent', () => {
   it('single click and slight hand jitter never start native dragging or move a window', async () => {
@@ -54,4 +58,57 @@ describe('Mac popup drag uses a real gesture rather than an asynchronous current
     drag.press(press); drag.move(1, -1100, 250, 1); await tick(); expect(drag.check()).toBe(false);
     drag.press(press); drag.release(1); await tick(); expect(host.move).toHaveBeenCalledTimes(1);
   });
+  it('keeps following the native cursor when a moved WebView stops sending pointermove', async () => {
+    const { drag, host, frame, frames } = fixture();
+    drag.press(press); drag.move(1, -1100, 250, 1); await tick();
+    expect(host.move).toHaveBeenCalledTimes(1);
+    await frame(); await frame();
+    expect(host.move).toHaveBeenCalledTimes(3); expect(frames.size).toBe(1);
+    drag.release(1); await frame(); expect(host.move).toHaveBeenCalledTimes(3); expect(frames.size).toBe(0);
+  });
+  it('retains lost DOM capture only after acquiring a native physical-press token', async () => {
+    const { drag, host, frame } = fixture(); const wait = deferred<number>(); host.begin.mockReturnValueOnce(wait.promise);
+    drag.press(press); expect(drag.retainsNativeGesture(1)).toBe(false);
+    drag.move(1, -1100, 250, 1); expect(drag.retainsNativeGesture(1)).toBe(false);
+    wait.resolve(1); await tick(); expect(drag.retainsNativeGesture(1)).toBe(true); expect(drag.retainsNativeGesture(2)).toBe(false);
+    await frame(); expect(host.move).toHaveBeenCalledTimes(2); drag.cancel();
+  });
+  it('keeps at most one move in flight and one scheduled frame under slow IPC', async () => {
+    const { drag, host, frame, frames } = fixture(); const wait = deferred<void>(); host.move.mockReturnValueOnce(wait.promise);
+    drag.press(press); drag.move(1, -1100, 250, 1); await tick();
+    for (let n = 0; n < 20; n++) drag.move(1, -1000 + n, 250, 1);
+    await frame(); expect(host.move).toHaveBeenCalledTimes(1); expect(frames.size).toBe(0);
+    wait.resolve(); await tick(); expect(frames.size).toBe(1);
+    await frame(); expect(host.move).toHaveBeenCalledTimes(2); expect(frames.size).toBe(1); drag.cancel();
+  });
+  it('native release/new-press rejection stops frame sampling even without a DOM mouse-up', async () => {
+    const { drag, host, frame, frames } = fixture();
+    drag.press(press); drag.move(1, -1100, 250, 1); await tick();
+    host.move.mockRejectedValueOnce(new Error('physical press identity changed'));
+    await frame(); expect(drag.check()).toBe(false); expect(frames.size).toBe(0); expect(host.end).toHaveBeenCalledWith(1);
+    await frame(); expect(host.move).toHaveBeenCalledTimes(2);
+  });
+  it.each(['hidden', 'epoch', 'cancel'] as const)('retires the scheduled tracker on %s', async reason => {
+    const { drag, host, frame, frames, hide, change } = fixture();
+    drag.press(press); drag.move(1, -1100, 250, 1); await tick();
+    if (reason === 'hidden') hide(); else if (reason === 'epoch') change(); else drag.cancel();
+    await frame(); expect(host.move).toHaveBeenCalledTimes(1); expect(frames.size).toBe(0); expect(drag.check()).toBe(false);
+  });
+
+  it('a new press retires all scheduled work before it can acquire a new anchor', async () => {
+    const { drag, host, frame, frames } = fixture();
+    drag.press(press); drag.move(1, -1100, 250, 1); await tick();
+    drag.press({ ...press, pointerId: 2, anchorX: 70 });
+    expect(frames.size).toBe(0); await frame(); expect(host.move).toHaveBeenCalledTimes(1);
+    expect(host.end).toHaveBeenCalledWith(1); expect(drag.retainsNativeGesture(2)).toBe(false);
+    drag.release(2);
+  });
+
+  it('an explicit native false result stops sampling rather than spinning', async () => {
+    const { drag, host, frame, frames } = fixture();
+    drag.press(press); drag.move(1, -1100, 250, 1); await tick();
+    host.move.mockResolvedValueOnce(false); await frame();
+    expect(drag.check()).toBe(false); expect(frames.size).toBe(0); expect(host.end).toHaveBeenCalledWith(1);
+  });
+
 });
