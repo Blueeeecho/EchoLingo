@@ -532,6 +532,139 @@ mod native_resize {
         result.await.map_err(|_| "窗口调整已中断".to_string())?
     }
 
+    // Bounded numeric diagnostics on this app's own HWND only. They never
+    // influence sizing, read user content, or retain message-owned pointers.
+    const DIAGNOSTIC_KEYS: &[&str] = &[
+        "version",
+        "revision",
+        "sizingCount",
+        "edge",
+        "enterX",
+        "enterY",
+        "messageX",
+        "messageY",
+        "captureAtEnter",
+        "enterTick",
+        "exitTick",
+        "requestedLeft",
+        "requestedTop",
+        "requestedRight",
+        "requestedBottom",
+        "returnedLeft",
+        "returnedTop",
+        "returnedRight",
+        "returnedBottom",
+    ];
+    #[repr(C)]
+    #[derive(Clone, Copy)]
+    struct DiagnosticRect {
+        left: i32,
+        top: i32,
+        right: i32,
+        bottom: i32,
+    }
+    #[link(name = "user32")]
+    unsafe extern "system" {
+        fn SetPropW(window: Handle, name: *const u16, value: Handle) -> i32;
+        fn GetPropW(window: Handle, name: *const u16) -> Handle;
+        fn RemovePropW(window: Handle, name: *const u16) -> Handle;
+        fn GetMessagePos() -> u32;
+        fn GetCapture() -> Handle;
+    }
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        fn GetTickCount64() -> u64;
+    }
+    fn diagnostic_key(name: &str) -> Vec<u16> {
+        format!("EchoLingo.Resize.{name}")
+            .encode_utf16()
+            .chain(Some(0))
+            .collect()
+    }
+    fn diagnostic_get(window: Handle, name: &str) -> isize {
+        unsafe { GetPropW(window, diagnostic_key(name).as_ptr()) as isize }
+    }
+    fn diagnostic_set(window: Handle, name: &str, value: isize) -> bool {
+        unsafe { SetPropW(window, diagnostic_key(name).as_ptr(), value as Handle) != 0 }
+    }
+    fn diagnostic_write(window: Handle, reset: bool, values: &[(&str, isize)]) {
+        let previous = diagnostic_get(window, "version");
+        // Only a full new ENTER snapshot can recover a failed partial write.
+        if !reset && (previous == 0 || previous & 1 != 0) {
+            return;
+        }
+        let version = previous.saturating_add(2) & !1;
+        if !diagnostic_set(window, "version", version - 1) {
+            return;
+        }
+        let mut complete = true;
+        for (name, value) in values {
+            complete &= diagnostic_set(window, name, *value);
+        }
+        // A failed partial write remains odd: readers must reject that snapshot.
+        if complete {
+            diagnostic_set(window, "version", version);
+        }
+    }
+    fn diagnostic_enter(window: Handle) {
+        let mut point = Point { x: 0, y: 0 };
+        if unsafe { GetCursorPos(&mut point) } == 0 {
+            diagnostic_set(window, "version", 0);
+            return;
+        }
+        let position = unsafe { GetMessagePos() };
+        diagnostic_write(
+            window,
+            true,
+            &[
+                ("revision", diagnostic_get(window, "revision") + 1),
+                ("sizingCount", 0),
+                ("edge", 0),
+                ("enterX", point.x as isize),
+                ("enterY", point.y as isize),
+                ("messageX", position as u16 as i16 as isize),
+                ("messageY", (position >> 16) as u16 as i16 as isize),
+                (
+                    "captureAtEnter",
+                    isize::from(unsafe { GetCapture() } == window),
+                ),
+                ("enterTick", unsafe { GetTickCount64() } as isize),
+                ("exitTick", 0),
+                ("requestedLeft", 0),
+                ("requestedTop", 0),
+                ("requestedRight", 0),
+                ("requestedBottom", 0),
+                ("returnedLeft", 0),
+                ("returnedTop", 0),
+                ("returnedRight", 0),
+                ("returnedBottom", 0),
+            ],
+        );
+    }
+    fn diagnostic_sizing(
+        window: Handle,
+        edge: usize,
+        requested: DiagnosticRect,
+        returned: DiagnosticRect,
+    ) {
+        diagnostic_write(
+            window,
+            false,
+            &[
+                ("sizingCount", diagnostic_get(window, "sizingCount") + 1),
+                ("edge", edge as isize),
+                ("requestedLeft", requested.left as isize),
+                ("requestedTop", requested.top as isize),
+                ("requestedRight", requested.right as isize),
+                ("requestedBottom", requested.bottom as isize),
+                ("returnedLeft", returned.left as isize),
+                ("returnedTop", returned.top as isize),
+                ("returnedRight", returned.right as isize),
+                ("returnedBottom", returned.bottom as isize),
+            ],
+        );
+    }
+
     #[derive(Clone, Serialize)]
     #[serde(rename_all = "camelCase")]
     struct SizingEvent {
@@ -586,12 +719,18 @@ mod native_resize {
             return unsafe { DefSubclassProc(window, message, word, parameter) };
         }
         let app = unsafe { &*(data as *const tauri::AppHandle) };
+        let requested = if message == 0x0214 && parameter != 0 {
+            Some(unsafe { *(parameter as *const DiagnosticRect) })
+        } else {
+            None
+        };
         // Keep a panic from crossing the Win32 ABI. The observer never consumes
         // the native message or performs painting, focus or geometry changes.
         let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             let state = app.state::<LayoutState>();
             if message == 0x0231 {
                 // WM_ENTERSIZEMOVE
+                diagnostic_enter(window);
                 if let Ok(presentation) = app
                     .state::<crate::AppState>()
                     .translation_requests
@@ -612,6 +751,11 @@ mod native_resize {
                 }
             } else if message == 0x0232 {
                 // WM_EXITSIZEMOVE
+                diagnostic_write(
+                    window,
+                    false,
+                    &[("exitTick", unsafe { GetTickCount64() } as isize)],
+                );
                 let token = state
                     .native_sizing
                     .lock()
@@ -636,6 +780,9 @@ mod native_resize {
                 };
             }));
             unsafe {
+                for key in DIAGNOSTIC_KEYS {
+                    RemovePropW(window, diagnostic_key(key).as_ptr());
+                }
                 RemoveWindowSubclass(window, Some(callback), ID);
             }
             let result = unsafe { DefSubclassProc(window, message, word, parameter) };
@@ -644,7 +791,14 @@ mod native_resize {
             }
             return result;
         }
-        unsafe { DefSubclassProc(window, message, word, parameter) }
+        let result = unsafe { DefSubclassProc(window, message, word, parameter) };
+        if let Some(requested) = requested {
+            let returned = unsafe { *(parameter as *const DiagnosticRect) };
+            let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                diagnostic_sizing(window, word, requested, returned);
+            }));
+        }
+        result
     }
 
     fn finish(app: &tauri::AppHandle, token: SizingToken) {
