@@ -262,6 +262,95 @@ sealed class SelectionCopyObserver : IDisposable {
     }
 }
 
+// Explicit generated-fixture diagnostics only. Never changes clipboard data or
+// the copy verdict; raw reads require the unpredictable fixture marker first.
+public sealed class ClipboardHtmlProbe {
+    [DllImport("user32.dll")] static extern uint GetClipboardSequenceNumber();
+    [DllImport("user32.dll")] static extern bool OpenClipboard(IntPtr owner);
+    [DllImport("user32.dll")] static extern bool CloseClipboard();
+    [DllImport("user32.dll")] static extern bool IsClipboardFormatAvailable(uint format);
+    [DllImport("user32.dll", CharSet=CharSet.Unicode)] static extern uint RegisterClipboardFormat(string name);
+    [DllImport("user32.dll")] static extern IntPtr GetClipboardData(uint format);
+    [DllImport("kernel32.dll")] static extern UIntPtr GlobalSize(IntPtr value);
+    [DllImport("kernel32.dll")] static extern IntPtr GlobalLock(IntPtr value);
+    [DllImport("kernel32.dll")] static extern bool GlobalUnlock(IntPtr value);
+    readonly string nonce; byte[] original;
+    ClipboardHtmlProbe(string value) { nonce = value; }
+    public static bool ValidNonce(string value) {
+        if (value == null || value.Length != 32) return false;
+        foreach (char c in value) if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f'))) return false;
+        return true;
+    }
+    static bool Equal(byte[] a, byte[] b) {
+        if (a == null || b == null || a.Length != b.Length) return false;
+        for (int i = 0; i < a.Length; i++) if (a[i] != b[i]) return false;
+        return true;
+    }
+    static bool MarkerMatches(byte[] marker, string nonce) {
+        if (!ValidNonce(nonce) || marker == null || marker.Length < 32) return false;
+        for (int i = 0; i < 32; i++) if (marker[i] != (byte)nonce[i]) return false;
+        return true;
+    }
+    static byte[] Payload(byte[] allocated) {
+        if (allocated == null || allocated.Length > 65536) throw new InvalidOperationException();
+        int length = Array.IndexOf<byte>(allocated, 0);
+        if (length < 0) throw new InvalidOperationException();
+        byte[] result = new byte[length + 1]; Array.Copy(allocated, result, result.Length); return result;
+    }
+    static byte[] Memory(uint format) {
+        IntPtr handle = GetClipboardData(format); if (handle == IntPtr.Zero) throw new InvalidOperationException();
+        ulong length = GlobalSize(handle).ToUInt64(); if (length == 0 || length > 65536) throw new InvalidOperationException();
+        IntPtr pointer = GlobalLock(handle); if (pointer == IntPtr.Zero) throw new InvalidOperationException();
+        try { byte[] bytes = new byte[(int)length]; Marshal.Copy(pointer, bytes, 0, bytes.Length); return bytes; }
+        finally { GlobalUnlock(handle); }
+    }
+    byte[] ReadBoundary(string phase) {
+        string prefix = "copyHtml" + phase; uint sequence = GetClipboardSequenceNumber(); bool opened = false;
+        try {
+            opened = OpenClipboard(IntPtr.Zero); if (!opened) { CaptureHealth.Set(prefix + "Error", 1); return null; }
+            uint marker = RegisterClipboardFormat("EchoLingo.ClipboardProbe." + nonce);
+            if (!IsClipboardFormatAvailable(marker)) { CaptureHealth.Set(prefix + "Error", 2); return null; }
+            if (!MarkerMatches(Memory(marker), nonce)) { CaptureHealth.Set(prefix + "Error", 3); return null; }
+            CaptureHealth.Set(prefix + "SeedVerified", 1);
+            uint html = RegisterClipboardFormat(DataFormats.Html);
+            bool present = IsClipboardFormatAvailable(html); CaptureHealth.Set(prefix + "Present", present ? 1 : 0);
+            if (!present) return null;
+            byte[] bytes = Memory(html); CaptureHealth.Set(prefix + "AllocatedBytes", bytes.Length);
+            byte[] payload = Payload(bytes); CaptureHealth.Set(prefix + "PayloadBytes", payload.Length); return payload;
+        } catch { CaptureHealth.Set(prefix + "Error", 4); return null; }
+        finally {
+            CaptureHealth.Set(prefix + "SequenceChanged", sequence == GetClipboardSequenceNumber() ? 0 : 1);
+            if (opened) CloseClipboard();
+        }
+    }
+    public static ClipboardHtmlProbe Begin() {
+        string nonce = Environment.GetEnvironmentVariable("ECHOLINGO_CLIPBOARD_DIAGNOSTIC_NONCE");
+        if (!ValidNonce(nonce)) return null;
+        foreach (string field in new string[] { "copyHtmlProbeEnabled", "copyHtmlSnapshotOlePresent", "copyHtmlSnapshotOleChars", "copyHtmlSnapshotEqual", "copyHtmlRestoreEqual", "copyHtmlSnapshotError", "copyHtmlSnapshotSeedVerified", "copyHtmlSnapshotPresent", "copyHtmlSnapshotAllocatedBytes", "copyHtmlSnapshotPayloadBytes", "copyHtmlSnapshotSequenceChanged", "copyHtmlRestoreError", "copyHtmlRestoreSeedVerified", "copyHtmlRestorePresent", "copyHtmlRestoreAllocatedBytes", "copyHtmlRestorePayloadBytes", "copyHtmlRestoreSequenceChanged" }) CaptureHealth.Set(field, 0);
+        ClipboardHtmlProbe probe = new ClipboardHtmlProbe(nonce); CaptureHealth.Set("copyHtmlProbeEnabled", 1);
+        probe.original = probe.ReadBoundary("Snapshot"); return probe;
+    }
+    public void SnapshotValue(object value) {
+        string text = value as string; CaptureHealth.Set("copyHtmlSnapshotOlePresent", text == null ? 0 : 1);
+        if (text == null) return;
+        CaptureHealth.Set("copyHtmlSnapshotOleChars", Math.Min(10000000, text.Length));
+        CaptureHealth.Set("copyHtmlSnapshotEqual", original != null && text.Length <= 65536 && Equal(original, Encoding.UTF8.GetBytes(text + '\0')) ? 1 : 0);
+    }
+    public void Restored() {
+        byte[] restored = ReadBoundary("Restore");
+        CaptureHealth.Set("copyHtmlRestoreEqual", Equal(original, restored) ? 1 : 0);
+    }
+    public static int SelfTest() {
+        string nonce = "0123456789abcdef0123456789abcdef"; int count = 0;
+        if (!ValidNonce(nonce) || ValidNonce(null) || ValidNonce(nonce + "a") || ValidNonce(nonce.ToUpperInvariant())) throw new Exception("PROBE_NONCE_POLICY"); count++;
+        if (!MarkerMatches(Encoding.ASCII.GetBytes(nonce + "padding"), nonce) || MarkerMatches(Encoding.ASCII.GetBytes(nonce.Substring(1)), nonce) || MarkerMatches(Encoding.ASCII.GetBytes(new string('a', 32)), nonce)) throw new Exception("PROBE_MARKER_POLICY"); count++;
+        if (!Equal(Payload(new byte[] { 65, 0, 99 }), new byte[] {65, 0}) || Equal(new byte[] {65, 0}, new byte[] {0}) || Equal(null, null)) throw new Exception("PROBE_PAYLOAD_POLICY"); count++;
+        bool rejected = false; try { Payload(new byte[] {65}); } catch (InvalidOperationException) { rejected = true; }
+        if (!rejected) throw new Exception("PROBE_TERMINATOR_POLICY"); count++;
+        return count + CaptureHealth.ResetSelectionSelfTest();
+    }
+}
+
 public static class SelectionCopyPolicy {
     public sealed class SelectionRuntimeIdChangedException : InvalidOperationException {
         public SelectionRuntimeIdChangedException() : base("SELECTION: The focused control changed or is outside the source window; select text and retry.") { }
@@ -471,95 +560,6 @@ public static class SelectionCopyPolicy {
                     throw new InvalidOperationException("CLIPBOARD_CHANGED: Another clipboard update occurred during selection capture; the newer clipboard was preserved. Retry.");
             }
         }
-    }
-}
-
-// Explicit generated-fixture diagnostics only. Never changes clipboard data or
-// the copy verdict; raw reads require the unpredictable fixture marker first.
-public sealed class ClipboardHtmlProbe {
-    [DllImport("user32.dll")] static extern uint GetClipboardSequenceNumber();
-    [DllImport("user32.dll")] static extern bool OpenClipboard(IntPtr owner);
-    [DllImport("user32.dll")] static extern bool CloseClipboard();
-    [DllImport("user32.dll")] static extern bool IsClipboardFormatAvailable(uint format);
-    [DllImport("user32.dll", CharSet=CharSet.Unicode)] static extern uint RegisterClipboardFormat(string name);
-    [DllImport("user32.dll")] static extern IntPtr GetClipboardData(uint format);
-    [DllImport("kernel32.dll")] static extern UIntPtr GlobalSize(IntPtr value);
-    [DllImport("kernel32.dll")] static extern IntPtr GlobalLock(IntPtr value);
-    [DllImport("kernel32.dll")] static extern bool GlobalUnlock(IntPtr value);
-    readonly string nonce; byte[] original;
-    ClipboardHtmlProbe(string value) { nonce = value; }
-    public static bool ValidNonce(string value) {
-        if (value == null || value.Length != 32) return false;
-        foreach (char c in value) if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f'))) return false;
-        return true;
-    }
-    static bool Equal(byte[] a, byte[] b) {
-        if (a == null || b == null || a.Length != b.Length) return false;
-        for (int i = 0; i < a.Length; i++) if (a[i] != b[i]) return false;
-        return true;
-    }
-    static bool MarkerMatches(byte[] marker, string nonce) {
-        if (!ValidNonce(nonce) || marker == null || marker.Length < 32) return false;
-        for (int i = 0; i < 32; i++) if (marker[i] != (byte)nonce[i]) return false;
-        return true;
-    }
-    static byte[] Payload(byte[] allocated) {
-        if (allocated == null || allocated.Length > 65536) throw new InvalidOperationException();
-        int length = Array.IndexOf<byte>(allocated, 0);
-        if (length < 0) throw new InvalidOperationException();
-        byte[] result = new byte[length + 1]; Array.Copy(allocated, result, result.Length); return result;
-    }
-    static byte[] Memory(uint format) {
-        IntPtr handle = GetClipboardData(format); if (handle == IntPtr.Zero) throw new InvalidOperationException();
-        ulong length = GlobalSize(handle).ToUInt64(); if (length == 0 || length > 65536) throw new InvalidOperationException();
-        IntPtr pointer = GlobalLock(handle); if (pointer == IntPtr.Zero) throw new InvalidOperationException();
-        try { byte[] bytes = new byte[(int)length]; Marshal.Copy(pointer, bytes, 0, bytes.Length); return bytes; }
-        finally { GlobalUnlock(handle); }
-    }
-    byte[] ReadBoundary(string phase) {
-        string prefix = "copyHtml" + phase; uint sequence = GetClipboardSequenceNumber(); bool opened = false;
-        try {
-            opened = OpenClipboard(IntPtr.Zero); if (!opened) { CaptureHealth.Set(prefix + "Error", 1); return null; }
-            uint marker = RegisterClipboardFormat("EchoLingo.ClipboardProbe." + nonce);
-            if (!IsClipboardFormatAvailable(marker)) { CaptureHealth.Set(prefix + "Error", 2); return null; }
-            if (!MarkerMatches(Memory(marker), nonce)) { CaptureHealth.Set(prefix + "Error", 3); return null; }
-            CaptureHealth.Set(prefix + "SeedVerified", 1);
-            uint html = RegisterClipboardFormat(DataFormats.Html);
-            bool present = IsClipboardFormatAvailable(html); CaptureHealth.Set(prefix + "Present", present ? 1 : 0);
-            if (!present) return null;
-            byte[] bytes = Memory(html); CaptureHealth.Set(prefix + "AllocatedBytes", bytes.Length);
-            byte[] payload = Payload(bytes); CaptureHealth.Set(prefix + "PayloadBytes", payload.Length); return payload;
-        } catch { CaptureHealth.Set(prefix + "Error", 4); return null; }
-        finally {
-            CaptureHealth.Set(prefix + "SequenceChanged", sequence == GetClipboardSequenceNumber() ? 0 : 1);
-            if (opened) CloseClipboard();
-        }
-    }
-    public static ClipboardHtmlProbe Begin() {
-        string nonce = Environment.GetEnvironmentVariable("ECHOLINGO_CLIPBOARD_DIAGNOSTIC_NONCE");
-        if (!ValidNonce(nonce)) return null;
-        foreach (string field in new string[] { "copyHtmlProbeEnabled", "copyHtmlSnapshotOlePresent", "copyHtmlSnapshotOleChars", "copyHtmlSnapshotEqual", "copyHtmlRestoreEqual", "copyHtmlSnapshotError", "copyHtmlSnapshotSeedVerified", "copyHtmlSnapshotPresent", "copyHtmlSnapshotAllocatedBytes", "copyHtmlSnapshotPayloadBytes", "copyHtmlSnapshotSequenceChanged", "copyHtmlRestoreError", "copyHtmlRestoreSeedVerified", "copyHtmlRestorePresent", "copyHtmlRestoreAllocatedBytes", "copyHtmlRestorePayloadBytes", "copyHtmlRestoreSequenceChanged" }) CaptureHealth.Set(field, 0);
-        ClipboardHtmlProbe probe = new ClipboardHtmlProbe(nonce); CaptureHealth.Set("copyHtmlProbeEnabled", 1);
-        probe.original = probe.ReadBoundary("Snapshot"); return probe;
-    }
-    public void SnapshotValue(object value) {
-        string text = value as string; CaptureHealth.Set("copyHtmlSnapshotOlePresent", text == null ? 0 : 1);
-        if (text == null) return;
-        CaptureHealth.Set("copyHtmlSnapshotOleChars", Math.Min(10000000, text.Length));
-        CaptureHealth.Set("copyHtmlSnapshotEqual", original != null && text.Length <= 65536 && Equal(original, Encoding.UTF8.GetBytes(text + '\0')) ? 1 : 0);
-    }
-    public void Restored() {
-        byte[] restored = ReadBoundary("Restore");
-        CaptureHealth.Set("copyHtmlRestoreEqual", Equal(original, restored) ? 1 : 0);
-    }
-    public static int SelfTest() {
-        string nonce = "0123456789abcdef0123456789abcdef"; int count = 0;
-        if (!ValidNonce(nonce) || ValidNonce(null) || ValidNonce(nonce + "a") || ValidNonce(nonce.ToUpperInvariant())) throw new Exception("PROBE_NONCE_POLICY"); count++;
-        if (!MarkerMatches(Encoding.ASCII.GetBytes(nonce + "padding"), nonce) || MarkerMatches(Encoding.ASCII.GetBytes(nonce.Substring(1)), nonce) || MarkerMatches(Encoding.ASCII.GetBytes(new string('a', 32)), nonce)) throw new Exception("PROBE_MARKER_POLICY"); count++;
-        if (!Equal(Payload(new byte[] { 65, 0, 99 }), new byte[] {65, 0}) || Equal(new byte[] {65, 0}, new byte[] {0}) || Equal(null, null)) throw new Exception("PROBE_PAYLOAD_POLICY"); count++;
-        bool rejected = false; try { Payload(new byte[] {65}); } catch (InvalidOperationException) { rejected = true; }
-        if (!rejected) throw new Exception("PROBE_TERMINATOR_POLICY"); count++;
-        return count + CaptureHealth.ResetSelectionSelfTest();
     }
 }
 
