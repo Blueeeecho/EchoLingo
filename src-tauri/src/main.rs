@@ -33,6 +33,8 @@ mod window_layout;
 mod windows_capture_input;
 #[cfg(target_os = "windows")]
 mod windows_mouse_shortcuts;
+#[cfg(windows)]
+mod windows_ocr;
 #[cfg(any(target_os = "windows", test))]
 mod windows_visibility;
 

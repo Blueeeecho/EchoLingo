@@ -1,0 +1,20 @@
+[package]
+name = "echolingo-native-capture"
+version = "0.2.3"
+edition = "2021"
+rust-version = "1.90"
+publish = false
+
+[workspace]
+
+[dependencies]
+serde_json = "1"
+base64 = "0.22.1"
+png = "0.18.1"
+
+[profile.release]
+panic = "abort"
+opt-level = "s"
+lto = true
+codegen-units = 1
+strip = true

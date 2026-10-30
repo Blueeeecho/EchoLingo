@@ -797,6 +797,7 @@ fn bounded_capture_health(value: &Value) -> Value {
         "desktopMatched",
         "mismatchKind",
         "hookRunningAfterStop",
+        "hookEscapeReleaseUnconfirmed",
         "inputBackend",
         "mouseHookInstalled",
         "inputPlaneDowns",
@@ -810,6 +811,7 @@ fn bounded_capture_health(value: &Value) -> Value {
         "releaseToCleanupMilliseconds",
         "releaseToReplyMilliseconds",
         "ocrDurationMilliseconds",
+        "nativeCaptureBackend",
         "nativeHostReady",
         "nativeHostArmed",
         "nativeHostDowns",
@@ -1142,6 +1144,24 @@ fn run_windows(
     input: Option<&str>,
     cancel: Option<NativeCancel>,
 ) -> Result<Value, String> {
+    if mode == "capture-ocr" && rust_capture_enabled() {
+        use base64::Engine;
+        let cancellation = cancel
+            .clone()
+            .unwrap_or_else(|| std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)));
+        let image = image_response(run_windows_selection(
+            "capture-image",
+            None,
+            Some(cancellation.clone()),
+            crate::model::WindowsSelectionStrategy::Auto,
+            None,
+        )?)?;
+        let bytes = base64::engine::general_purpose::STANDARD
+            .decode(image)
+            .map_err(|_| "NATIVE_PROTOCOL: Invalid native PNG encoding.".to_owned())?;
+        let text = crate::windows_ocr::recognize_png(&bytes, cancellation)?;
+        return Ok(json!({"ok":true,"text":text,"nativeBackend":"rust-win32-winrt"}));
+    }
     run_windows_selection(
         mode,
         input,
@@ -1211,7 +1231,7 @@ fn run_windows_selection(
     if selection {
         command.args(["-SelectionStrategy", strategy.native_argument()]);
     }
-    let mut cancellation = if cancel.is_some() {
+    let mut cancellation = if cancel.is_some() || (capture && rust_capture_enabled()) {
         Some(native_process::CancellationEvent::new()?)
     } else {
         None
@@ -1551,7 +1571,44 @@ fn verify_native_assembly(path: &std::path::Path, expected: &[u8]) -> Result<(),
 }
 
 #[cfg(target_os = "windows")]
+fn rust_capture_enabled() -> bool {
+    std::env::var_os("ECHOLINGO_RUST_CAPTURE").is_some_and(|value| value == "1")
+}
+
+#[cfg(target_os = "windows")]
+fn rust_capture_command() -> Result<std::process::Command, String> {
+    use sha2::{Digest, Sha256};
+    use std::os::windows::process::CommandExt;
+    static HELPER: std::sync::OnceLock<Result<std::path::PathBuf, String>> =
+        std::sync::OnceLock::new();
+    const BYTES: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/echolingo-native-capture.exe"));
+    let path = HELPER
+        .get_or_init(|| {
+            let local =
+                std::env::var_os("LOCALAPPDATA").ok_or("NATIVE: LOCALAPPDATA is unavailable.")?;
+            let folder = std::path::PathBuf::from(local).join("EchoLingo/native");
+            ensure_private_directory(&folder)?;
+            materialize(
+                &folder,
+                &format!("echolingo-capture-{:x}.exe", Sha256::digest(BYTES)),
+                BYTES,
+            )
+        })
+        .as_ref()
+        .map_err(Clone::clone)?;
+    verify_native_assembly(path,BYTES).map_err(|_|"NATIVE_BINARY: The packaged native capture executable changed or is unavailable. Restart or reinstall EchoLingo.".to_owned())?;
+    let mut command = std::process::Command::new(path);
+    command
+        .args(["-Mode", "capture-image"])
+        .creation_flags(0x08000000);
+    Ok(command)
+}
+
+#[cfg(target_os = "windows")]
 fn native_command(mode: &str) -> Result<std::process::Command, String> {
+    if mode == "capture-image" && rust_capture_enabled() {
+        return rust_capture_command();
+    }
     use sha2::{Digest, Sha256};
     use std::os::windows::process::CommandExt;
     use std::sync::OnceLock;
