@@ -50,6 +50,7 @@ export interface Settings {
   activeOcrProviderId: string | null;
 }
 export interface TranslationResult {
+  preserved?: boolean;
   providerId: string;
   providerName: string;
   text: string;

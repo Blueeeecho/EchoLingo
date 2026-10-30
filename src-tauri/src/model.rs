@@ -257,6 +257,9 @@ pub struct ResolvedLanguages {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TranslationResult {
+    /// True only when the bilingual input classifier bypassed every provider.
+    #[serde(default)]
+    pub preserved: bool,
     pub provider_id: String,
     pub provider_name: String,
     pub text: String,

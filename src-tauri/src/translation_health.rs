@@ -10,16 +10,16 @@ use std::{
 pub enum SourceResolution {
     Explicit,
     StandardDetection,
-    LocalMixedLog,
-    LocalMixedProse,
+    PreservedStructure,
+    BilingualMode,
 }
 impl SourceResolution {
     fn label(self) -> &'static str {
         match self {
             Self::Explicit => "explicit",
             Self::StandardDetection => "nativeOrFallback",
-            Self::LocalMixedLog => "localMixedLogHeuristic",
-            Self::LocalMixedProse => "localMixedProseHeuristic",
+            Self::PreservedStructure => "preservedStructure",
+            Self::BilingualMode => "bilingualMode",
         }
     }
 }
@@ -44,7 +44,6 @@ struct Snapshot {
     providers: Vec<ProviderHealth>,
     resolved_source: Option<&'static str>,
     resolved_target: Option<&'static str>,
-    mixed_local_fragments: usize,
     source_resolution: &'static str,
 }
 #[derive(Default)]
@@ -115,7 +114,6 @@ impl Health {
             providers: Vec::new(),
             resolved_source: None,
             resolved_target: None,
-            mixed_local_fragments: 0,
             source_resolution: "unresolved",
         });
         true
@@ -160,13 +158,6 @@ impl RequestTrace {
         if self.active {
             if let Ok(mut h) = health().lock() {
                 h.update(self.id, |s| s.source_resolution = resolution.label());
-            }
-        }
-    }
-    pub fn mixed_local_fragments(&self, count: usize) {
-        if self.active {
-            if let Ok(mut h) = health().lock() {
-                h.update(self.id, |s| s.mixed_local_fragments = count.min(8));
             }
         }
     }
@@ -235,6 +226,10 @@ impl ProviderTrace {
             finished: false,
         }
     }
+    pub fn preserved(&mut self) {
+        self.finished = true;
+        self.record("preservedWithoutProvider", None);
+    }
     pub fn finish(&mut self, error: Option<&str>) {
         self.finished = true;
         self.record(
@@ -278,8 +273,7 @@ mod tests {
             .map_or(1, |s| s.request_id + 1);
         let mut request = RequestTrace::start(id);
         request.languages("ca", "zh-Hans");
-        request.mixed_local_fragments(usize::MAX);
-        request.source_resolution(SourceResolution::LocalMixedProse);
+        request.source_resolution(SourceResolution::BilingualMode);
         let mut providers: Vec<_> = (0..30)
             .map(|i| ProviderTrace::start(id, i, "private provider key"))
             .collect();
@@ -292,17 +286,14 @@ mod tests {
         assert_eq!(value["phase"], "providerFailed");
         assert_eq!(value["providers"].as_array().unwrap().len(), 16);
         assert_eq!(value["resolvedSource"], "ca");
-        assert_eq!(value["mixedLocalFragments"], 8);
-        assert_eq!(value["sourceResolution"], "localMixedProseHeuristic");
+        assert_eq!(value["sourceResolution"], "bilingualMode");
         assert!(!value.to_string().contains("private"));
         let newer = RequestTrace::start(id + 1);
         request.finish(Some("private old failure"));
-        request.mixed_local_fragments(6);
-        request.source_resolution(SourceResolution::LocalMixedLog);
+        request.source_resolution(SourceResolution::PreservedStructure);
         providers[0].finish(None);
         assert_eq!(snapshot()["requestId"], id + 1);
         assert_eq!(snapshot()["phase"], "started");
-        assert_eq!(snapshot()["mixedLocalFragments"], 0);
         assert_eq!(snapshot()["sourceResolution"], "unresolved");
         drop(newer);
         assert_eq!(snapshot()["phase"], "cancelled");
@@ -318,13 +309,10 @@ mod tests {
             "nativeOrFallback"
         );
         assert_eq!(
-            SourceResolution::LocalMixedLog.label(),
-            "localMixedLogHeuristic"
+            SourceResolution::PreservedStructure.label(),
+            "preservedStructure"
         );
-        assert_eq!(
-            SourceResolution::LocalMixedProse.label(),
-            "localMixedProseHeuristic"
-        );
+        assert_eq!(SourceResolution::BilingualMode.label(), "bilingualMode");
     }
     #[test]
     fn older_completion_and_start_cannot_replace_newer_request() {

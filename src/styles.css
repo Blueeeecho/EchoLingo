@@ -387,3 +387,7 @@ body[data-view="translate"] #source-text, body[data-view="translate"] .result-te
 .result-text .result-text-run { display: inline; line-height: 1.75; }
 .result-text .result-paragraph-break { display: inline; line-height: .35; white-space: pre-wrap; }
 .free-service-warning { padding: 8px 10px; border-left: 3px solid var(--danger); color: var(--text); background: var(--surface-soft); font-size: 12px; line-height: 1.6; }
+
+/* A bypass result is not a provider translation; keep the notice readable in narrow popups. */
+.result-card-header { flex-wrap: wrap; }
+.result-preserved { color: var(--secondary); font-size: 10px; line-height: 1.5; }

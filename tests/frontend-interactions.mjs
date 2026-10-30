@@ -2705,6 +2705,40 @@ try {
   assert.equal(await page.evaluate(() => window.__qa.ocrTestCalls), credentialBaseline.ocrTests + 1);
   assert.equal(await page.evaluate(() => window.__qa.translationRequests.length), credentialBaseline.translations);
   assert.deepEqual(errors, []);
+  await page.setViewportSize({ width: 420, height: 820 });
+  // Both desktop presentations replace pending translation with an explicit
+  // structural bypass result, preserving whitespace through IPC, DOM and copy.
+  for (const platform of ['mac', 'windows']) {
+    const url = new URL(process.env.ECHOLINGO_TEST_URL ?? 'http://127.0.0.1:1420/');
+    url.searchParams.set('translationSetupFixture', platform === 'mac' ? 'system' : 'offline');
+    if (platform === 'windows') url.searchParams.set('windowsSelectionFixture', '1');
+    await page.goto(url.href);
+    await page.waitForFunction(() => document.querySelector('#footer-status')?.textContent === '准备就绪');
+    const raw = '  EchoLingo_0.2.1_macos_arm64.dmg\nEchoLingo_0.2.0_macos_arm64.dmg\n';
+    await page.evaluate((raw) => {
+      window.__qa.holdTranslation = true;
+      const provider = window.__qa.settings.providers[0];
+      window.__qa.translationResults = [{ providerId: provider.id, providerName: provider.name,
+        text: raw, preserved: true, elapsedMs: 0 }];
+    }, raw);
+    await page.locator('#source-text').fill(raw);
+    await page.locator('#translate-button').click();
+    await page.waitForFunction(() => window.__qa.translationRequests.length === 1);
+    assert.equal(await page.locator('.result-preserved').isVisible(), false);
+    const name = await page.locator('.result-provider').textContent();
+    await page.evaluate(() => { window.__qa.holdTranslation = false; window.__qa.releaseTranslation(); });
+    await page.waitForFunction(() => document.querySelector('#translation-state')?.textContent === '原文已保留');
+    assert.equal(await page.locator('.result-preserved').textContent(), '原文（无需翻译，未调用服务）');
+    assert.equal(await page.locator('.result-preserved').isVisible(), true);
+    assert.equal(await page.locator('.result-provider').textContent(), name);
+    assert.equal(await page.locator('.result-text').textContent(), raw);
+    assert.equal(await page.evaluate(() => window.__qa.translationRequests[0].text), raw);
+    assert.equal(await page.locator('.result-setup').isVisible(), false);
+    await page.getByRole('button', { name: '复制原文', exact: true }).click();
+    assert.equal(await page.evaluate(() => window.__qa.copies.at(-1)), raw);
+    assert.deepEqual(await page.evaluate(() => window.__qa.systemPrepareCalls), []);
+  }
+  await page.setViewportSize({ width: 800, height: 820 });
   // Result setup actions only navigate. They never authorize, download, read
   // credentials or silently retry; preparation remains a separate explicit act.
   for (const [platform, kind, appleAction] of [
