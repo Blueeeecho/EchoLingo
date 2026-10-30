@@ -421,6 +421,117 @@ mod native_resize {
         fn IsWindowVisible(window: Handle) -> i32;
     }
 
+    #[repr(C)]
+    struct Point {
+        x: i32,
+        y: i32,
+    }
+    #[link(name = "user32")]
+    unsafe extern "system" {
+        fn GetCursorPos(point: *mut Point) -> i32;
+        fn GetAsyncKeyState(key: i32) -> i16;
+        fn GetForegroundWindow() -> Handle;
+        fn ReleaseCapture() -> i32;
+        fn SendMessageW(window: Handle, message: u32, word: usize, parameter: isize) -> isize;
+        fn ScreenToClient(window: Handle, point: *mut Point) -> i32;
+    }
+
+    pub async fn start(
+        window: WebviewWindow,
+        epoch: u64,
+        management: bool,
+        direction: String,
+    ) -> Result<(), String> {
+        let (reply, result) = tokio::sync::oneshot::channel();
+        let app = window.app_handle().clone();
+        app.run_on_main_thread(move || {
+            let outcome = (|| {
+                let state = window.state::<LayoutState>();
+                let hwnd = window.hwnd().map_err(|_| "无法读取窗口句柄")?.0 as Handle;
+                let validate = || -> Result<(), String> {
+                    let presentation = window
+                        .state::<crate::AppState>()
+                        .translation_requests
+                        .presentation()?;
+                    if window.label() != "main"
+                        || hwnd.is_null()
+                        || !resize_presentation_allowed(
+                            epoch,
+                            presentation,
+                            state.is_popup(),
+                            window.is_visible().unwrap_or(false),
+                            management,
+                        )
+                        || state
+                            .native_sizing
+                            .lock()
+                            .map_err(|_| "窗口调整状态异常")?
+                            .current
+                            .is_some()
+                        || unsafe { GetForegroundWindow() != hwnd || GetAsyncKeyState(1) >= 0 }
+                    {
+                        return Err(crate::translation_requests::CANCELLED.into());
+                    }
+                    Ok(())
+                };
+                validate()?;
+                let hit = windows_resize_hit(&direction, management)?;
+                // Releasing capture may synchronously call back into the app.
+                unsafe {
+                    ReleaseCapture();
+                }
+                validate()?;
+                let mut point = Point { x: 0, y: 0 };
+                if unsafe { GetCursorPos(&mut point) } == 0 {
+                    return Err("无法读取拖动位置".into());
+                }
+                let parameter = packed_windows_point(point.x, point.y)?;
+                // WM_NCLBUTTONDOWN takes packed signed screen coordinates, NOT a
+                // pointer to POINTS (Tao 0.37.2's Windows resize path). Dispatch
+                // synchronously on the owning UI thread so no stale queued down
+                // can start a resize after release or a new presentation.
+                unsafe {
+                    if GetAsyncKeyState(1) >= 0 {
+                        return Err(crate::translation_requests::CANCELLED.into());
+                    }
+                    SendMessageW(hwnd, 0x00a1, hit, parameter);
+                }
+                // The OS modal sizing loop consumes release. Mirror the host's
+                // release cleanup, but never synthesize up during a newer press.
+                let same_presentation = window
+                    .state::<crate::AppState>()
+                    .translation_requests
+                    .presentation()
+                    .map(|value| value.presented && value.epoch == epoch)
+                    .unwrap_or(false);
+                let sizing_idle = state
+                    .native_sizing
+                    .lock()
+                    .map(|value| value.current.is_none())
+                    .unwrap_or(false);
+                if same_presentation
+                    && sizing_idle
+                    && window.is_visible().unwrap_or(false)
+                    && unsafe { GetAsyncKeyState(1) } >= 0
+                    && unsafe { GetCursorPos(&mut point) } != 0
+                    && unsafe { ScreenToClient(hwnd, &mut point) } != 0
+                {
+                    if let Ok(client) = packed_windows_point(point.x, point.y) {
+                        unsafe {
+                            if GetAsyncKeyState(1) >= 0 {
+                                SendMessageW(hwnd, 0x0202, 0, client);
+                            }
+                        }
+                    }
+                }
+                Ok(())
+            })();
+            let _ = reply.send(outcome);
+        })
+        .map_err(|_| "无法开始调整窗口大小")?;
+        result.await.map_err(|_| "窗口调整已中断".to_string())?
+    }
+
     #[derive(Clone, Serialize)]
     #[serde(rename_all = "camelCase")]
     struct SizingEvent {
@@ -1018,9 +1129,9 @@ fn resize_direction(direction: &str) -> Result<HorizontalResize, String> {
     }
 }
 #[tauri::command]
-pub fn start_window_resize(
+pub async fn start_window_resize(
     window: WebviewWindow,
-    state: State<LayoutState>,
+    state: State<'_, LayoutState>,
     direction: String,
     presentation_epoch: u64,
     management: Option<bool>,
@@ -1043,14 +1154,41 @@ pub fn start_window_resize(
     }
     // Tauri exposes this operation on Window, not WebviewWindow. Deserialize
     // only a direction valid for the exact current presentation.
-    let direction = native_resize_direction(&direction, management)?;
-    let direction =
-        serde_json::from_value(serde_json::json!(direction)).map_err(|_| "窗口调整方向无效")?;
-    let webview: &tauri::Webview = window.as_ref();
-    webview
-        .window()
-        .start_resize_dragging(direction)
-        .map_err(|_| "无法拖动调整窗口大小".into())
+    #[cfg(target_os = "windows")]
+    {
+        native_resize::start(window, presentation_epoch, management, direction).await
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let direction = native_resize_direction(&direction, management)?;
+        let direction =
+            serde_json::from_value(serde_json::json!(direction)).map_err(|_| "窗口调整方向无效")?;
+        let webview: &tauri::Webview = window.as_ref();
+        webview
+            .window()
+            .start_resize_dragging(direction)
+            .map_err(|_| "无法拖动调整窗口大小".into())
+    }
+}
+#[cfg(any(target_os = "windows", test))]
+fn packed_windows_point(x: i32, y: i32) -> Result<isize, String> {
+    let x = i16::try_from(x).map_err(|_| "窗口拖动坐标超出范围")?;
+    let y = i16::try_from(y).map_err(|_| "窗口拖动坐标超出范围")?;
+    Ok(((x as u16 as u32) | ((y as u16 as u32) << 16)) as isize)
+}
+#[cfg(any(target_os = "windows", test))]
+fn windows_resize_hit(direction: &str, management: bool) -> Result<usize, String> {
+    Ok(match native_resize_direction(direction, management)? {
+        "West" => 10,
+        "East" => 11,
+        "North" => 12,
+        "NorthWest" => 13,
+        "NorthEast" => 14,
+        "South" => 15,
+        "SouthWest" => 16,
+        "SouthEast" => 17,
+        _ => unreachable!(),
+    })
 }
 fn resize_edges(direction: &str) -> Result<(i8, i8), String> {
     match direction {
@@ -1340,6 +1478,44 @@ mod tests {
         }
     }
 
+    #[test]
+    fn windows_resize_message_uses_packed_signed_coordinates() {
+        for (x, y) in [
+            (180, 269),
+            (-1920, -1080),
+            (0, 0),
+            (-32768, 32767),
+            (32767, -32768),
+        ] {
+            let packed = packed_windows_point(x, y).unwrap();
+            assert_eq!((packed as u16 as i16) as i32, x);
+            assert_eq!(((packed as u32 >> 16) as u16 as i16) as i32, y);
+        }
+        for (x, y) in [(32768, 0), (-32769, 0), (0, 32768), (0, -32769)] {
+            assert!(packed_windows_point(x, y).is_err());
+        }
+        assert_eq!(packed_windows_point(180, 269).unwrap(), 0x010d00b4);
+    }
+    #[test]
+    fn windows_resize_hit_preserves_presentation_direction_policy() {
+        for (direction, hit) in [
+            ("west", 10),
+            ("east", 11),
+            ("north", 12),
+            ("north-west", 13),
+            ("north-east", 14),
+            ("south", 15),
+            ("south-west", 16),
+            ("south-east", 17),
+        ] {
+            assert_eq!(windows_resize_hit(direction, true).unwrap(), hit);
+            assert_eq!(
+                windows_resize_hit(direction, false).is_ok(),
+                hit == 10 || hit == 11
+            );
+        }
+        assert!(windows_resize_hit("caption", true).is_err());
+    }
     #[test]
     fn popup_drag_tokens_reject_old_moves_and_old_cancellation() {
         let mut drag = PopupDrag::default();
