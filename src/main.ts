@@ -1,4 +1,5 @@
 import './styles.css';
+import { installServiceManager } from './service-manager';
 import { renderTranslationParagraphs } from './translation-text-layout';
 import { installUpdateNotice } from './update-notice-ui';
 import { createOcrUi } from './ocr-ui';
@@ -176,13 +177,13 @@ function requireDesktop(): boolean {
 function reportError(error: unknown): void { toast(userFacingError(error), 'error', 6500); }
 function run(work: () => Promise<unknown>): void { void work().catch(reportError); }
 function setView(view: string, skipSystemStatusRefresh = false): void {
-  if (!['translate', 'history', 'settings'].includes(view)) return;
+  if (!['translate', 'history', 'settings', 'services'].includes(view)) return;
   if (view !== 'translate') endSourceInputSession();
   if (currentView === 'settings' && view !== 'settings') shortcutEditor.leave();
   if (view !== currentView) focusIntentRevision += 1;
   closeMoreMenu();
   currentView = view; document.body.dataset.view = view;
-  $('#management-title').textContent = view === 'history' ? '历史与收藏' : '设置';
+  $('#management-title').textContent = view === 'history' ? '历史与收藏' : view === 'services' ? '服务管理' : '设置';
   for (const section of document.querySelectorAll<HTMLElement>('.view')) section.hidden = section.id !== `view-${view}`;
   for (const button of document.querySelectorAll<HTMLButtonElement>('button[data-view]')) {
     const selected = button.dataset.view === view;
@@ -812,6 +813,7 @@ async function translate(providerId?: string): Promise<void> {
     await refreshHistory().catch(() => undefined);
   }
 }
+let serviceManager: { render: () => void } = { render() {} };
 let coreGuidanceProblem: CoreShortcutProblem | null = null;
 function renderCoreGuidance(): void {
   const guidance = $('#core-guidance');
@@ -966,6 +968,21 @@ function renderHistory(): void {
   }
 }
 function providerKindLabel(kind: ProviderKind): string { return { offline: '本机离线翻译', system: '系统翻译', baidu: '百度翻译', youdao: '有道翻译', microsoft: '微软翻译', openai: 'OpenAI 兼容', deepl: 'DeepL', libretranslate: 'LibreTranslate', volcengine: '火山引擎机器翻译', aliyun: '阿里云机器翻译' }[kind]; }
+const translationServiceTests = new Map<string, Promise<void>>();
+function testTranslationService(id: string): Promise<void> {
+  const current = translationServiceTests.get(id); if (current) return current;
+  const task = (async () => {
+    if (!requireDesktop()) return;
+    const provider = settings.providers.find(item => item.id === id); if (!provider) return;
+    toast(isLocalProvider(provider.kind) ? '正在使用本机服务翻译 Hello。' : '正在发送 Hello 测试连接，可能消耗少量 API 额度。');
+    try { toast(await invoke<string>('test_provider', { providerId: id }) || '服务连接成功。'); }
+    finally {
+      try { settings = await invoke<Settings>('get_settings'); renderSettings(); }
+      catch (error) { reportError(error); }
+    }
+  })().finally(() => { translationServiceTests.delete(id); });
+  translationServiceTests.set(id, task); return task;
+}
 function renderProviders(): void {
   const list = $('#provider-list'); list.replaceChildren();
   $<HTMLButtonElement>('#add-provider').disabled = !settingsReady || settings.providers.length >= 12;
@@ -975,7 +992,7 @@ function renderProviders(): void {
     list.append(empty); return;
   }
   for (const provider of settings.providers) {
-    const row = node('div', 'provider-row');
+    const row = node('div', 'provider-row'); row.dataset.serviceId = provider.id;
     row.append(node('span', 'provider-avatar', provider.name.slice(0, 1).toUpperCase()));
     const info = node('div', 'provider-info');
     const title = node('div', 'provider-title', provider.name);
@@ -993,25 +1010,21 @@ function renderProviders(): void {
     const test = node('button', 'text-button', testLabel);
     test.title = provider.kind === 'offline' ? '使用内置模型离线翻译 Hello' : provider.kind === 'system' ? '使用已准备的本机语言包翻译 Hello，不会自动下载' : '发送 Hello 测试服务，可能消耗少量 API 额度';
     test.addEventListener('click', () => run(async () => {
-      if (!requireDesktop()) return;
       test.disabled = true; test.textContent = '测试中…';
-      toast(provider.kind === 'offline' ? '正在使用内置模型离线翻译 Hello。' : provider.kind === 'system' ? '正在使用本机语言包翻译 Hello。' : '正在发送 Hello 测试连接，可能消耗少量 API 额度。');
-      try {
-        const message = await invoke<string>('test_provider', { providerId: provider.id });
-        toast(message || '服务连接成功。');
-      } finally {
-        test.disabled = false; test.textContent = testLabel;
-        try { settings = await invoke<Settings>('get_settings'); renderProviders(); }
-        catch (error) { reportError(error); }
-      }
+      try { await testTranslationService(provider.id); }
+      finally { test.disabled = false; test.textContent = testLabel; }
     }));
     const edit = node('button', 'text-button', '编辑'); edit.addEventListener('click', () => openProviderDialog(provider));
     const remove = actionButton(`删除 ${provider.name}`, 'trash', () => run(async () => {
+      if (isLocalProvider(provider.kind)) return;
       if (!await confirmAction('删除翻译服务？', isLocalProvider(provider.kind) ? `将移除“${provider.name}”配置。已安装的本机语言资源会保留。` : `将移除“${provider.name}”及其已保存的 API 密钥。`)) return;
       if (desktop && !isLocalProvider(provider.kind)) await invoke('delete_api_key', { providerId: provider.id });
       await updateSettings((next) => { next.providers = next.providers.filter((item) => item.id !== provider.id); });
       toast('翻译服务已删除。');
     }));
+    test.dataset.serviceAction = 'test'; edit.dataset.serviceAction = 'edit'; remove.dataset.serviceAction = 'remove';
+    // Built-in capabilities can be disabled but never removed from this UI.
+    remove.hidden = isLocalProvider(provider.kind); remove.disabled = isLocalProvider(provider.kind);
     controls.append(enabled, test, edit, remove); row.append(info, controls); list.append(row);
   }
 }
@@ -1106,7 +1119,7 @@ function renderSettings(): void {
   $('#app-version').hidden = !settings.appVersion;
   renderProviders(); renderPopupServices();
   renderSystemTranslationSetup();
-  ocrUi.render();
+  ocrUi.render(); serviceManager.render();
   shortcutEditor.render(settings.shortcuts, settingsReady, settings.shortcutRegistration);
   $('#windows-selection-settings').hidden = document.documentElement.dataset.platform !== 'windows';
   $<HTMLSelectElement>('#windows-selection-strategy').value = settings.windowsSelectionStrategy ?? 'copy';
@@ -1239,7 +1252,7 @@ function closeModal(modal: HTMLElement): void {
   }
   const previous = modalReturnFocus.get(modal);
   modalReturnFocus.delete(modal);
-  const fallback = anotherModal ? modalFocusable(anotherModal)[0] : document.querySelector<HTMLElement>('button[data-view].active');
+  const fallback = anotherModal ? modalFocusable(anotherModal)[0] : currentView === 'services' ? document.querySelector<HTMLElement>('#managed-service-detail h2') : document.querySelector<HTMLElement>('button[data-view].active');
   if (previous?.isConnected && previous.getClientRects().length > 0) previous.focus({ preventScroll: true });
   else fallback?.focus({ preventScroll: true });
   if (!anotherModal && queuedCapture) {
@@ -1468,6 +1481,29 @@ const ocrUi = createOcrUi({
   desktop, settings: () => settings, updateSettings,
   reloadSettings: async () => { settings = await invoke<Settings>('get_settings'); renderSettings(); },
   showModal, closeModal, confirm: confirmAction, toast, reportError,
+});
+
+$('#service-manager-advanced').addEventListener('click', () => setView('settings'));
+$('#open-service-manager').addEventListener('click', () => setView('services'));
+serviceManager = installServiceManager({
+  settings: () => settings, ready: () => settingsReady, reportError,
+  add: role => { if (role === 'translation') openProviderDialog(); else ocrUi.open(); },
+  operate: (role, id, operation) => {
+    const list = $(role === 'translation' ? '#provider-list' : '#ocr-provider-list');
+    const row = Array.from(list.children).find(item => (item as HTMLElement).dataset.serviceId === id);
+    row?.querySelector<HTMLButtonElement>(`[data-service-action="${operation}"]`)?.click();
+  },
+  test: (role, id) => role === 'translation' ? testTranslationService(id) : ocrUi.test(id),
+  enable: async (role, id, enabled) => {
+    if (role === 'ocr') { await ocrUi.activate(id || null); return; }
+    await updateSettings(next => { const provider = next.providers.find(p => p.id === id); if (!provider) throw new Error('服务已不存在，请重新选择。'); provider.enabled = enabled; });
+  },
+  recommend: role => {
+    setView('settings');
+    $<HTMLDetailsElement>(`#free-${role}-section`).open = true;
+    const summary = $(`#free-${role}-summary`);
+    summary.scrollIntoView({ block: 'start' }); summary.focus({ preventScroll: true });
+  },
 });
 
 for (const button of document.querySelectorAll<HTMLButtonElement>('button[data-view]')) button.addEventListener('click', () => setView(button.dataset.view ?? 'translate'));

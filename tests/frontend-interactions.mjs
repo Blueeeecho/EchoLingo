@@ -23,6 +23,10 @@ try {
       saveHistory: true, theme: 'light', maxHistory: 20, autoHideSeconds: 0, ocrProviders: [], activeOcrProviderId: null,
     };
     if (new URL(location.href).searchParams.has('twoShortcutDefaultsFixture')) state.shortcuts = { selection: 'Alt+D', capture: '', ocr: '', silentOcr: 'Alt+S', input: '' };
+    if (new URL(location.href).searchParams.has('serviceManagerFixture')) {
+      state.providers.push({ id: 'qa-local', name: 'QA built-in translation', kind: new URL(location.href).searchParams.has('windowsSelectionFixture') ? 'offline' : 'system', baseUrl: '', model: '', enabled: true, prompt: '' });
+      state.ocrProviders = [1, 2].map(n => ({ id: `qa-ocr-${n}`, name: `QA OCR ${n}`, kind: 'http-json', baseUrl: 'https://example.invalid/ocr', model: '', prompt: '', authHeader: '', authPrefix: '', requestTemplate: '{"image":"{imageBase64}"}', responsePath: '/text', region: '' }));
+    }
     const setupKind = new URL(location.href).searchParams.get('translationSetupFixture');
     if (new URL(location.href).searchParams.has('translationRetryFixture')) {
       state.providers.push({ ...state.providers[0], id: 'qa-retry', name: 'QA retry service' });
@@ -2049,7 +2053,6 @@ try {
   await page.locator('#enable-system-translation').click();
   await page.waitForFunction(() => window.__qa.settings.providers.some(p => p.kind === 'system' && p.enabled));
   assert.equal(await page.evaluate(() => window.__qa.settings.providers.find(p => p.id === 'qa-service').enabled), true);
-  const systemName = await page.evaluate(() => window.__qa.settings.providers.find(p => p.kind === 'system').name);
   const systemRow = page.locator('.provider-row').filter({ hasText: '无需 API Key' });
   await systemRow.getByRole('button', { name: '编辑', exact: true }).click();
   assert.equal(await page.locator('#provider-url').isVisible(), false);
@@ -2058,11 +2061,12 @@ try {
   await page.locator('#save-provider').click();
   await page.locator('#provider-dialog').waitFor({ state: 'hidden' });
   await page.locator('.app-shell').screenshot({ path: 'test-results/system-translation-settings.png' });
-  await systemRow.getByRole('button', { name: `删除 ${systemName}`, exact: true }).click();
-  await page.locator('#confirm-accept').click();
-  await page.waitForFunction(() => !window.__qa.settings.providers.some(p => p.kind === 'system'));
+  assert.equal(await systemRow.locator('[data-service-action=remove]').isHidden(), true);
+  assert.equal(await systemRow.locator('[data-service-action=remove]').isDisabled(), true);
+  await systemRow.getByRole('checkbox').uncheck();
+  await page.waitForFunction(() => window.__qa.settings.providers.some(p => p.kind === 'system' && !p.enabled));
   assert.deepEqual(await page.evaluate(() => ({ writes: window.__qa.keyCalls, deletes: window.__qa.keyDeleteCalls })), systemKeysBefore);
-  // Offline service edits/removal must not query, write or delete credentials.
+  // Built-in services remain installed; editing/disabling must not touch credentials.
   const offlineKeysBefore = await page.evaluate(() => ({ writes: window.__qa.keyCalls, deletes: window.__qa.keyDeleteCalls, reads: window.__qa.credentialReadCalls }));
   await page.locator('#add-provider').click();
   await page.locator('#provider-preset').selectOption('offline');
@@ -2077,9 +2081,10 @@ try {
   assert.equal(await page.locator('#provider-preset').inputValue(), 'offline');
   await page.locator('#save-provider').click();
   await page.locator('#provider-dialog').waitFor({ state: 'hidden' });
-  await offlineRow.getByRole('button', { name: '删除 本机离线翻译', exact: true }).click();
-  await page.locator('#confirm-accept').click();
-  await page.waitForFunction(() => !window.__qa.settings.providers.some(p => p.kind === 'offline'));
+  assert.equal(await offlineRow.locator('[data-service-action=remove]').isHidden(), true);
+  assert.equal(await offlineRow.locator('[data-service-action=remove]').isDisabled(), true);
+  await offlineRow.getByRole('checkbox').uncheck();
+  await page.waitForFunction(() => window.__qa.settings.providers.some(p => p.kind === 'offline' && !p.enabled));
   assert.deepEqual(await page.evaluate(() => ({ writes: window.__qa.keyCalls, deletes: window.__qa.keyDeleteCalls, reads: window.__qa.credentialReadCalls })), offlineKeysBefore);
   await page.locator('.app-shell').screenshot({ path: 'test-results/settings-main.png' });
   await goView('translate');
@@ -3696,6 +3701,99 @@ try {
     }
   }
   console.log('PASS: explicit input diagnostics contain only fixed stages, scalar guard flags and epochs, remain off by default, and do not alter Shift+Enter or ordinary Enter submission. Mock IPC only.');
+  for (const windows of [false, true]) {
+    for (const width of [900, 420]) {
+      await page.setViewportSize({ width, height: 850 });
+      await page.goto(`http://127.0.0.1:1420/?serviceManagerFixture=1${windows ? '&windowsSelectionFixture=1' : ''}`);
+      await page.waitForFunction(() => document.querySelector('#footer-status')?.textContent === '准备就绪');
+      await page.locator('#more-toggle').click();
+      await page.locator('#popup-more-menu [data-view="services"]').click();
+      const before = await page.evaluate(() => ({ reads: window.__qa.credentialReadCalls, keys: window.__qa.keyCalls, ocrKeys: window.__qa.ocrKeyCalls }));
+      assert.equal(await page.locator('#managed-service-list > li').count(), 2);
+      await page.locator('#managed-service-list [data-service-id="qa-local"] .managed-service-select').click();
+      assert.equal(await page.locator('#managed-service-detail').getByText('删除配置', { exact: true }).count(), 0);
+      assert.match(await page.locator('#managed-service-detail').innerText(), /内置.*无需密钥|内置服务/);
+      if (width === 900) await page.locator('.app-shell').screenshot({ path: `test-results/service-manager-${windows ? 'windows' : 'macos'}-translation.png` });
+      if (width === 420) {
+        await page.evaluate(() => { window.__qa.failSave = true; });
+        const savesBeforeDetail = await page.evaluate(() => window.__qa.saveCalls);
+        await page.locator('#managed-service-detail [data-manager-action="enable"]').click();
+        await page.waitForFunction(before => window.__qa.saveCalls > before && document.querySelector('#service-manager').getAttribute('aria-busy') === 'false', savesBeforeDetail);
+        assert.equal(await page.locator('#managed-service-detail [data-manager-action="enable"]').evaluate(el => el === document.activeElement), true);
+        assert.equal(await page.evaluate(() => window.__qa.settings.providers.find(p => p.id === 'qa-local').enabled), true);
+        await page.evaluate(() => { window.__qa.failSave = false; });
+        assert.equal(await page.locator('.service-manager-master').isVisible(), false);
+        await page.locator('.managed-service-back').click();
+        assert.equal(await page.locator('.service-manager-master').isVisible(), true);
+        assert.equal(await page.locator('#managed-service-list [data-service-id="qa-local"] .managed-service-select').evaluate(el => el === document.activeElement), true);
+      }
+      const qaEnabled = page.locator('#managed-service-list input[data-service-id="qa-service"]');
+      await qaEnabled.uncheck();
+      await page.waitForFunction(() => window.__qa.settings.providers.find(p => p.id === 'qa-service').enabled === false);
+      assert.equal(await page.evaluate(() => window.__qa.settings.providers.find(p => p.id === 'qa-local').enabled), true);
+      await qaEnabled.check();
+      await page.waitForFunction(() => window.__qa.settings.providers.find(p => p.id === 'qa-service').enabled === true);
+      await page.evaluate(() => { window.__qa.failSave = true; });
+      const failedSaveBefore = await page.evaluate(() => window.__qa.saveCalls);
+      // A rollback intentionally restores checked=true, so uncheck() would retry
+      // a successful click until timeout while expecting the rejected state.
+      await qaEnabled.click();
+      await page.waitForFunction(before => window.__qa.saveCalls > before && document.querySelector('#service-manager').getAttribute('aria-busy') === 'false', failedSaveBefore);
+      await page.locator('#toast').waitFor({ state: 'visible' });
+      assert.equal(await qaEnabled.isChecked(), true);
+      await page.evaluate(() => { window.__qa.failSave = false; });
+      await page.locator('[data-service-role="ocr"]').click();
+      assert.equal(await page.locator('#managed-service-list input[type="radio"]').count(), 3);
+      const translationBeforeOcr = await page.evaluate(() => structuredClone(window.__qa.settings.providers));
+      await page.locator('#managed-service-list input[data-service-id="qa-ocr-1"]').check();
+      await page.waitForFunction(() => window.__qa.settings.activeOcrProviderId === 'qa-ocr-1');
+      await page.locator('#managed-service-list input[data-service-id="qa-ocr-2"]').check();
+      await page.waitForFunction(() => window.__qa.settings.activeOcrProviderId === 'qa-ocr-2');
+      assert.equal(await page.locator('#managed-service-list input:checked').count(), 1);
+      assert.deepEqual(await page.evaluate(() => window.__qa.settings.providers), translationBeforeOcr);
+      await page.locator('#managed-service-list [data-service-id="qa-ocr-2"] .managed-service-select').click();
+      assert.deepEqual(await page.evaluate(() => ({ reads: window.__qa.credentialReadCalls, keys: window.__qa.keyCalls, ocrKeys: window.__qa.ocrKeyCalls })), before);
+      assert.match(await page.locator('#managed-service-detail').innerText(), /当前 OCR/);
+      if (width === 900) await page.locator('.app-shell').screenshot({ path: `test-results/service-manager-${windows ? 'windows' : 'macos'}-ocr.png` });
+      await page.evaluate(() => { window.__qa.holdFreeSetupTest = true; });
+      const testsBefore = await page.evaluate(() => window.__qa.freeSetupTestWaits);
+      await page.locator('#managed-service-detail [data-manager-action="test"]').click();
+      await page.waitForFunction(before => window.__qa.freeSetupTestWaits === before + 1, testsBefore);
+      assert.equal(await page.locator('#service-manager').getAttribute('aria-busy'), 'true');
+      assert.equal(await page.locator('#managed-service-list input').first().isDisabled(), true);
+      await page.locator('#managed-service-detail [data-manager-action="test"]').dispatchEvent('click');
+      // Even an advanced-view action uses the same per-provider in-flight task.
+      await page.evaluate(() => document.querySelector('#ocr-provider-list [data-service-id="qa-ocr-2"] [data-service-action="test"]').click());
+      assert.equal(await page.evaluate(() => window.__qa.freeSetupTestWaits), testsBefore + 1);
+      await page.evaluate(() => { window.__qa.holdFreeSetupTest = false; window.__qa.releaseFreeSetupTest(); });
+      await page.waitForFunction(() => document.querySelector('#service-manager').getAttribute('aria-busy') === 'false');
+      assert.equal(await page.locator('#managed-service-detail [data-manager-action="test"]').evaluate(el => el === document.activeElement), true);
+
+
+      await page.locator('#managed-service-detail').getByRole('button', { name: '编辑配置', exact: true }).click();
+      assert.equal(await page.locator('#ocr-provider-dialog').isVisible(), true);
+      assert.equal(await page.locator('#ocr-provider-key').inputValue(), '');
+      await page.locator('#ocr-provider-key').fill('private-cancelled-manager-key');
+      await page.keyboard.press('Escape');
+      assert.equal(await page.locator('#ocr-provider-key').inputValue(), '');
+      assert.equal(await page.evaluate(() => window.__qa.ocrKeyCalls), before.ocrKeys);
+      await page.locator('#managed-service-detail').getByRole('button', { name: '删除配置', exact: true }).click();
+      await page.locator('#confirm-cancel').click();
+      assert.equal(await page.evaluate(() => window.__qa.settings.ocrProviders.length), 2);
+      await page.locator('#managed-service-detail').getByRole('button', { name: '删除配置', exact: true }).click();
+      await page.locator('#confirm-accept').click();
+      await page.waitForFunction(() => window.__qa.settings.ocrProviders.length === 1 && window.__qa.settings.activeOcrProviderId === null);
+      assert.equal(await page.locator('#managed-service-list input:checked').count(), 1);
+      if (width === 420) await page.locator('.managed-service-back').click();
+      await page.locator('#managed-service-add').click();
+      assert.equal(await page.locator('#ocr-provider-dialog').isVisible(), true);
+      await page.keyboard.press('Escape');
+      assert.equal(await page.locator('#service-manager').evaluate(el => el.scrollWidth <= el.clientWidth), true);
+      assert.deepEqual(errors, []);
+    }
+  }
+  await page.setViewportSize({ width: 800, height: 820 });
+  console.log('PASS: dual-platform service workspace separates multi-enabled translation from one-current OCR, keeps native capabilities, preserves secure edit/cancel/confirmation flows and failed-toggle rollback, and supports 420px master/detail navigation without key reads. Mock IPC only.');
   console.log('PASS: persistent screenshot permission guidance prepared before presentation; click-only correct pane without authorization; retained sanitized link failure and manual path; first-use pending-open help navigation/focus; 800 px light and 420 px narrow/dark screenshots; dismiss/input/quiet Alt+D/Alt+A/stale-epoch recovery; deferred-modal permission payload and granted-status clearing; backend cancellation tickets on edit/clear/stop/Escape/close/native hide; native presentation epochs cover unallocated tickets, omitted/stale hide events, reopen overtaking pending begin and stale delayed popup fitting; backend-only cancellation clears old result state; late-ticket and replacement ordering; pending-save close/reentry guard; failure unlock; blank shortcuts; duplicate rejection; no countdown; theme/favorites and history bounds; OCR dual-key bundles/protocol isolation/no plaintext settings; documented vendor presets; origin-bound saved-key indications; minimal popup/menu/automatic source height; OCR configuration/privacy; empty-selection immediate typing; persistent source copy/speech; pin edge/icon/keyboard hit areas and drag isolation; captured source editing after completion and pending cancellation/retranslation; narrow-wrap source presentation; inconsistent permission feedback; automatic/fixed targets; Enter/ShiftEnter/IME/repeat; passive permissions; real capture and translation error preservation.');
 } finally {
   await browser.close();
