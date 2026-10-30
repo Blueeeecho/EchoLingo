@@ -3081,9 +3081,9 @@ fn windows_popup_focus_changed(app: &tauri::AppHandle, focused: bool) {
 
 // Keep the IPC name and the existing layout implementation. Only Windows mode
 // transitions invalidate queued dismissal observations; fitting never shows or
-// focuses a window. macOS continues to call the same layout function directly.
+// focuses a window. Await the UI transaction without blocking the UI event loop.
 #[tauri::command(rename = "fit_window")]
-fn fit_window_with_visibility(
+async fn fit_window_with_visibility(
     window: tauri::WebviewWindow,
     state: State<window_layout::LayoutState>,
     presentation: String,
@@ -3100,7 +3100,7 @@ fn fit_window_with_visibility(
     #[cfg(target_os = "windows")]
     let app = window.app_handle().clone();
     let result =
-        window_layout::fit_window(window, state, presentation, content_height, content_width);
+        window_layout::fit_window(window, state, presentation, content_height, content_width).await;
     #[cfg(target_os = "windows")]
     if mode_changed {
         wake_outside_watcher(&app);

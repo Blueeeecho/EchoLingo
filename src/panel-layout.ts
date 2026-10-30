@@ -166,6 +166,11 @@ export function installPanelLayout(desktop: boolean, getPresentation: () => Tran
     if (event instanceof PointerEvent && (!dragCapture || event.pointerId !== dragCapture.pointerId)) return;
     popupDrag.cancel(); clearDragCapture();
   };
+  const lostPopupCapture = (event: PointerEvent): void => {
+    // A moved WKWebView may lose DOM capture while the same physical press is
+    // still active. Only an established native token can keep tracking safely.
+    if (!popupDrag.retainsNativeGesture(event.pointerId)) cancelPopupDrag(event);
+  };
   const movePopupDrag = (event: PointerEvent): void => popupDrag.move(event.pointerId, event.screenX, event.screenY, event.buttons);
   const endPopupDrag = (event: PointerEvent): void => {
     if (!dragCapture || event.pointerId !== dragCapture.pointerId) return;
@@ -182,6 +187,8 @@ export function installPanelLayout(desktop: boolean, getPresentation: () => Tran
   widthViewObserver.observe(document.body, { attributes: true, attributeFilter: ['data-view', 'class'] });
   document.body.classList.add('popup-resize-enabled');
   const drag = (event: PointerEvent): void => {
+    // Any new press, including a button/input or secondary click, retires an old drag.
+    if (/Mac/.test(navigator.platform)) cancelPopupDrag();
     if (event.button !== 0 || !event.isPrimary || !(event.target instanceof Element)) return;
     const edge = event.target.closest<HTMLElement>('[data-window-resize]');
     if (edge) {
@@ -230,7 +237,7 @@ export function installPanelLayout(desktop: boolean, getPresentation: () => Tran
   document.addEventListener('pointermove', movePopupDrag);
   document.addEventListener('pointerup', endPopupDrag);
   document.addEventListener('pointercancel', cancelPopupDrag);
-  document.addEventListener('lostpointercapture', cancelPopupDrag);
+  document.addEventListener('lostpointercapture', lostPopupCapture);
   document.addEventListener('click', suppressDragClick, true);
   document.addEventListener('visibilitychange', checkDragPresentation);
   window.addEventListener('blur', cancelPopupDrag);
@@ -255,7 +262,7 @@ export function installPanelLayout(desktop: boolean, getPresentation: () => Tran
     document.removeEventListener('pointermove', movePopupDrag);
     document.removeEventListener('pointerup', endPopupDrag);
     document.removeEventListener('pointercancel', cancelPopupDrag);
-    document.removeEventListener('lostpointercapture', cancelPopupDrag);
+    document.removeEventListener('lostpointercapture', lostPopupCapture);
     document.removeEventListener('click', suppressDragClick, true);
     document.removeEventListener('visibilitychange', checkDragPresentation);
     window.removeEventListener('blur', cancelPopupDrag);

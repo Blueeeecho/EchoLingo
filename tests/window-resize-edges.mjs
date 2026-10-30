@@ -102,6 +102,7 @@ try {
   await page.evaluate(() => { document.body.dataset.view='translate'; document.body.classList.remove('modal-open');
     window.__resizeQA.presentation={epoch:30,presented:true}; window.__resizeQA.platform='MacIntel'; });
   for (const selector of ['#pin-button','#more-toggle','#close-popup','main']) await page.locator(selector).click();
+  await page.locator('[data-window-drag]').evaluate(element => element.addEventListener('gotpointercapture', event => { window.__resizeQA.dragPointerId = event.pointerId; }));
   const toolbar = await page.locator('[data-window-drag]').boundingBox();
   const tx = toolbar.x + toolbar.width / 2, ty = toolbar.y + toolbar.height / 2;
   await page.mouse.click(tx,ty); await page.evaluate(() => window.__resizeQA.frames());
@@ -113,6 +114,19 @@ try {
   await page.waitForFunction(() => window.__resizeQA.dragCommands.some(value=>value.command==='move_popup_drag'));
   assert.deepEqual(await page.evaluate(() => window.__resizeQA.dragCommands[0]),
     {command:'begin_popup_drag',presentationEpoch:30,anchorX:tx,anchorY:ty});
+  // No new browser pointer movement: native cursor sampling must continue.
+  const beforeQuietFrames = await page.evaluate(() => window.__resizeQA.dragCommands.filter(value=>value.command==='move_popup_drag').length);
+  await page.evaluate(() => window.__resizeQA.frames());
+  assert.ok(await page.evaluate(before => window.__resizeQA.dragCommands.filter(value=>value.command==='move_popup_drag').length > before, beforeQuietFrames));
+  // A real DOM capture loss during an established native gesture is not a
+  // physical release. The native token still owns button/press validation.
+  await page.locator('[data-window-drag]').evaluate(element => {
+    const id = window.__resizeQA.dragPointerId;
+    if (!element.hasPointerCapture(id)) throw new Error('fixture never captured the active drag pointer');
+    element.releasePointerCapture(id);
+  });
+  await page.evaluate(() => window.__resizeQA.frames());
+  assert.equal(await page.locator('body').evaluate(element=>element.classList.contains('popup-dragging')),true);
   await page.mouse.up(); await page.evaluate(() => window.__resizeQA.frames());
   assert.equal(await page.evaluate(() => window.__resizeQA.dragCommands.at(-1).command),'end_popup_drag');
   assert.equal(await page.locator('body').evaluate(e=>e.classList.contains('popup-dragging')),false);

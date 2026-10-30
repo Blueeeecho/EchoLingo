@@ -121,7 +121,7 @@ public func echoLingoPopupDrag(_ pointer: UnsafeMutableRawPointer?, _ anchorX: D
     let next = popupDragOrigin(frame: frame, pointer: mouse,
                                anchor: NSPoint(x: anchorX, y: anchorY), area: screen.visibleFrame)
     guard popupDragPressMatches(pressIdentity, popupDragPressIdentity(), NSEvent.pressedMouseButtons & 1 != 0) else { return -3 }
-    window.setFrameOrigin(next)
+    if next != frame.origin { window.setFrameOrigin(next) }
     return 0
 }
 
@@ -239,3 +239,36 @@ struct PopupBehaviorFixture {
     }
 }
 #endif
+
+// Keep Cocoa point coordinates; no manual backing-scale multiplication. This
+// preserves the top-left edge on negative-origin and mixed-DPI displays too.
+func popupSizedFrame(_ current: NSRect, frameSize: NSSize) -> NSRect {
+    NSRect(x: current.minX, y: current.maxY - frameSize.height,
+           width: frameSize.width, height: frameSize.height)
+}
+
+// Tauri/Tao queues setContentSize even from the UI thread. Layout's reply must
+// instead follow the actual mutation. This is geometry acknowledgement only:
+// it does not claim WebKit has committed a painted/composited frame.
+@_cdecl("echolingo_set_content_size_sync")
+public func echoLingoSetContentSizeSync(_ pointer: UnsafeMutableRawPointer?,
+                                      _ width: Double, _ height: Double) -> Int32 {
+    guard Thread.isMainThread else { return -1 }
+    guard width.isFinite, height.isFinite, width > 0, height > 0,
+          width <= 100_000, height <= 100_000 else { return -3 }
+    guard let pointer = pointer,
+          let window = Unmanaged<AnyObject>.fromOpaque(pointer).takeUnretainedValue() as? NSWindow else { return -2 }
+    let frameSize = window.frameRect(forContentRect: NSRect(x: 0, y: 0, width: width, height: height)).size
+    let frame = popupSizedFrame(window.frame, frameSize: frameSize)
+    window.setFrame(frame, display: false, animate: false)
+    let actual = window.contentRect(forFrameRect: window.frame).size
+    return abs(actual.width - width) <= 1 && abs(actual.height - height) <= 1 ? 0 : -4
+}
+
+// FIFO barrier behind Tao's queued style-mask change, not a delay or a paint
+// claim. Ownership of context returns exactly once to the supplied callback.
+@_cdecl("echolingo_after_window_changes")
+public func echoLingoAfterWindowChanges(_ callback: @escaping @convention(c) (UnsafeMutableRawPointer?) -> Void,
+                                       _ context: UnsafeMutableRawPointer?) {
+    DispatchQueue.main.async { callback(context) }
+}

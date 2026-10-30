@@ -19,11 +19,23 @@ const MIN_POPUP_WIDTH: f64 = 420.0;
 const MAX_INPUT_DIMENSION: f64 = 100_000.0;
 const LAYOUT_FILE: &str = "window-layout.json";
 
+#[cfg(any(target_os = "macos", test))]
+fn current_layout_request(
+    request: u64,
+    latest: u64,
+    expected_style: bool,
+    actual_style: Option<bool>,
+) -> bool {
+    request == latest && actual_style == Some(expected_style)
+}
+
 pub struct LayoutState {
     management: AtomicBool,
     popup: Arc<Mutex<PopupWidth>>,
     data_dir: Option<PathBuf>,
     constraints: Mutex<Option<Constraints>>,
+    #[cfg(target_os = "macos")]
+    layout_revision: std::sync::atomic::AtomicU64,
     #[cfg(target_os = "macos")]
     popup_drag: Mutex<PopupDrag>,
     #[cfg(target_os = "windows")]
@@ -38,6 +50,8 @@ impl Default for LayoutState {
             popup: Arc::new(Mutex::new(PopupWidth::new(None))),
             data_dir: None,
             constraints: Mutex::new(None),
+            #[cfg(target_os = "macos")]
+            layout_revision: std::sync::atomic::AtomicU64::new(0),
             #[cfg(target_os = "macos")]
             popup_drag: Mutex::new(PopupDrag::default()),
             #[cfg(target_os = "windows")]
@@ -710,7 +724,7 @@ mod native_resize {
     }
 }
 
-pub fn fit(
+pub async fn fit(
     window: &WebviewWindow,
     state: &LayoutState,
     management: bool,
@@ -722,25 +736,136 @@ pub fn fit(
         // Keep the sizing-loop test and all resulting HWND mutations on the
         // same UI thread. A worker-side test could enqueue SetSize just before
         // WM_ENTERSIZEMOVE and apply it in the middle of the user's gesture.
+        #[cfg(target_os = "macos")]
+        let revision = state
+            .layout_revision
+            .fetch_add(1, Ordering::SeqCst)
+            .wrapping_add(1);
         let _ = state;
         let native = window.clone();
         let app = window.app_handle().clone();
-        let (reply, result) = std::sync::mpsc::sync_channel(1);
+        #[cfg(target_os = "macos")]
+        let expected = app
+            .state::<crate::AppState>()
+            .translation_requests
+            .presentation();
+        let (reply, result) = tokio::sync::oneshot::channel();
         window
             .run_on_main_thread(move || {
                 let state = app.state::<LayoutState>();
                 #[cfg(target_os = "windows")]
                 let value = native_resize::install(&native, &state)
                     .and_then(|_| fit_inner(&native, &state, management, height, content_width));
-                #[cfg(target_os = "macos")]
-                let value = fit_inner(&native, &state, management, height, content_width);
+                #[cfg(target_os = "windows")]
                 let _ = reply.send(value);
+                #[cfg(target_os = "macos")]
+                {
+                    if state.layout_revision.load(Ordering::SeqCst) != revision
+                        || expected.is_err()
+                        || app
+                            .state::<crate::AppState>()
+                            .translation_requests
+                            .presentation()
+                            != expected
+                    {
+                        let _ = reply.send(Err(crate::translation_requests::CANCELLED.into()));
+                        return;
+                    }
+                    // Tao maintains its own decoration flag but applies the
+                    // AppKit style mask asynchronously. Queue our continuation
+                    // after that change, before measuring frame/content sizes.
+                    let preparation = native
+                        .is_decorated()
+                        .map_err(|_| "无法读取窗口外观")
+                        .and_then(|decorated| {
+                            if decorated != management {
+                                native
+                                    .set_decorations(management)
+                                    .map_err(|_| "无法调整窗口外观")
+                            } else {
+                                Ok(())
+                            }
+                        });
+                    if let Err(error) = preparation {
+                        let _ = reply.send(Err(error.into()));
+                        return;
+                    }
+                    after_mac_window_changes(move || {
+                        let current = app
+                            .state::<crate::AppState>()
+                            .translation_requests
+                            .presentation();
+                        if expected.is_err()
+                            || current != expected
+                            || !current_layout_request(
+                                revision,
+                                app.state::<LayoutState>()
+                                    .layout_revision
+                                    .load(Ordering::SeqCst),
+                                management,
+                                native.is_decorated().ok(),
+                            )
+                        {
+                            let _ = reply.send(Err(crate::translation_requests::CANCELLED.into()));
+                            return;
+                        }
+                        let state = app.state::<LayoutState>();
+                        let value = fit_inner(&native, &state, management, height, content_width);
+                        let _ = reply.send(value);
+                    });
+                }
             })
             .map_err(|_| "无法安排窗口布局")?;
-        return result.recv().map_err(|_| "窗口布局已中断")?;
+        return result.await.map_err(|_| "窗口布局已中断")?;
     }
     #[cfg(not(any(target_os = "windows", target_os = "macos")))]
     fit_inner(window, state, management, height, content_width)
+}
+
+#[cfg(target_os = "macos")]
+fn after_mac_window_changes(operation: impl FnOnce() + Send + 'static) {
+    type Operation = Box<dyn FnOnce() + Send>;
+    unsafe extern "C" fn complete(context: *mut std::ffi::c_void) {
+        // SAFETY: exactly one callback consumes the owned, double-boxed closure.
+        let operation = unsafe { Box::from_raw(context.cast::<Operation>()) };
+        operation();
+    }
+    unsafe extern "C" {
+        fn echolingo_after_window_changes(
+            callback: unsafe extern "C" fn(*mut std::ffi::c_void),
+            context: *mut std::ffi::c_void,
+        );
+    }
+    let operation: Box<Operation> = Box::new(Box::new(operation));
+    // SAFETY: Swift enqueues exactly one callback on the main queue. No UI
+    // thread waits for it; fit's worker receives its acknowledgement later.
+    unsafe { echolingo_after_window_changes(complete, Box::into_raw(operation).cast()) };
+}
+
+// Tao's macOS set_inner_size always dispatches asynchronously, even on the
+// main thread. A successful fit must not acknowledge only a queued resize.
+fn apply_content_size(window: &WebviewWindow, width: f64, height: f64) -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    {
+        unsafe extern "C" {
+            fn echolingo_set_content_size_sync(
+                window: *mut std::ffi::c_void,
+                width: f64,
+                height: f64,
+            ) -> i32;
+        }
+        let native = window.ns_window().map_err(|_| "窗口不可用")?;
+        // SAFETY: layout callers hold Tauri's borrowed NSWindow on its main
+        // thread. Swift independently checks the thread and numeric input.
+        if unsafe { echolingo_set_content_size_sync(native, width, height) } != 0 {
+            return Err("无法同步调整窗口大小".into());
+        }
+        Ok(())
+    }
+    #[cfg(not(target_os = "macos"))]
+    window
+        .set_size(LogicalSize::new(width, height))
+        .map_err(|_| "无法调整窗口大小".into())
 }
 
 fn fit_inner(
@@ -826,6 +951,7 @@ fn fit_inner(
                 available.1.max(1.0),
             )))
             .map_err(|_| "无法调整窗口最大大小")?;
+        #[cfg(not(target_os = "macos"))]
         if window.is_decorated().map_err(|_| "无法读取窗口外观")? != management {
             window
                 .set_decorations(management)
@@ -837,9 +963,7 @@ fn fit_inner(
         || (old_size.width - width).abs() > 1.0
         || (old_size.height - height).abs() > 1.0
     {
-        window
-            .set_size(LogicalSize::new(width, height))
-            .map_err(|_| "无法调整窗口大小")?;
+        apply_content_size(window, width, height)?;
     }
     let frame = if management { (16.0, 44.0) } else { (0.0, 0.0) };
     if let Ok(position) = window.outer_position() {
@@ -905,7 +1029,7 @@ fn fit_inner(
 }
 
 #[tauri::command]
-pub fn fit_window(
+pub async fn fit_window(
     window: WebviewWindow,
     state: State<LayoutState>,
     presentation: String,
@@ -920,7 +1044,7 @@ pub fn fit_window(
         "management" => true,
         _ => return Err("未知窗口模式".into()),
     };
-    fit(&window, &state, management, content_height, content_width)
+    fit(&window, &state, management, content_height, content_width).await
 }
 
 #[tauri::command]
@@ -1304,9 +1428,7 @@ pub async fn resize_popup_width(
                 available_size(area, scale, false),
             );
             let position = window.outer_position().map_err(|_| "无法读取窗口位置")?;
-            window
-                .set_size(LogicalSize::new(next_width, next_height))
-                .map_err(|_| "无法调整窗口大小")?;
+            apply_content_size(&window, next_width, next_height)?;
             let next = resize_position(
                 area,
                 (position.x, position.y),
@@ -1444,9 +1566,7 @@ pub async fn resize_management_window(
             if !valid() {
                 return Err(crate::translation_requests::CANCELLED.into());
             }
-            window
-                .set_size(LogicalSize::new(size.0, size.1))
-                .map_err(|_| "无法调整窗口大小")?;
+            apply_content_size(&window, size.0, size.1)?;
             if !valid() {
                 return Err(crate::translation_requests::CANCELLED.into());
             }
@@ -1947,5 +2067,23 @@ mod tests {
         let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(value, serde_json::json!({"version":1,"popupWidth":850.0}));
         std::fs::remove_dir_all(directory).unwrap();
+    }
+    #[test]
+    fn same_epoch_queued_layout_supersession_does_not_reapply_old_style() {
+        // A popup and B settings share a presentation epoch. Both preparation
+        // closures ran before A's queued continuation. Only B may apply size;
+        // A must not enqueue another style change after B's preparation.
+        let a = 1;
+        let b = 2;
+        let latest = b;
+        let cached_style = Some(true);
+        assert!(!current_layout_request(a, latest, false, cached_style));
+        assert!(current_layout_request(b, latest, true, cached_style));
+        // Even the latest request may not acknowledge a mismatched style.
+        assert!(!current_layout_request(b, latest, true, Some(false)));
+        assert!(!current_layout_request(b, latest, true, None));
+        // Reverse direction has the same property, without a new epoch.
+        assert!(!current_layout_request(b, 3, true, Some(false)));
+        assert!(current_layout_request(3, 3, false, Some(false)));
     }
 }
