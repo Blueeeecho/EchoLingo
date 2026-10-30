@@ -1563,7 +1563,8 @@ public sealed class CaptureSelectionState {
         int topologyAssertions = CaptureTopologyPolicy.SelfTest();
         int outlineAssertions = CaptureOutlinePolicy.SelfTest();
         int hoverAssertions = CaptureHoverPolicy.SelfTest(), redrawAssertions = CaptureMoveMailbox.SelfTest(), healthAssertions = CaptureInputHealthPolicy.SelfTest();
-        return new Dictionary<string, object> { { "captureStateFixturePassed", true }, { "fixtureAssertions", 11 + inputAssertions + topologyAssertions + outlineAssertions + hoverAssertions + redrawAssertions + healthAssertions }, { "inputPolicyAssertions", inputAssertions }, { "topologyPolicyAssertions", topologyAssertions }, { "outlinePolicyAssertions", outlineAssertions }, { "hoverPolicyAssertions", hoverAssertions }, { "redrawPolicyAssertions", redrawAssertions }, { "inputHealthPolicyAssertions", healthAssertions }, { "hoverQueryMilliseconds", CaptureHoverPolicy.QueryMilliseconds }, { "releaseGraceMilliseconds", 500 }, { "screenCaptured", false }, { "clipboardChanged", false }, { "interactiveCaptureTested", false } };
+        int magnifierAssertions = CaptureMagnifierSample.SelfTest();
+        return new Dictionary<string, object> { { "captureStateFixturePassed", true }, { "fixtureAssertions", 11 + inputAssertions + topologyAssertions + outlineAssertions + hoverAssertions + redrawAssertions + healthAssertions + magnifierAssertions }, { "inputPolicyAssertions", inputAssertions }, { "topologyPolicyAssertions", topologyAssertions }, { "outlinePolicyAssertions", outlineAssertions }, { "hoverPolicyAssertions", hoverAssertions }, { "redrawPolicyAssertions", redrawAssertions }, { "inputHealthPolicyAssertions", healthAssertions }, { "magnifierSampleAssertions", magnifierAssertions }, { "hoverQueryMilliseconds", CaptureHoverPolicy.QueryMilliseconds }, { "releaseGraceMilliseconds", 500 }, { "screenCaptured", false }, { "clipboardChanged", false }, { "interactiveCaptureTested", false } };
     }
 }
 
@@ -2538,12 +2539,48 @@ sealed class CaptureInputPump : IDisposable {
     public void Dispose() { if (Stop()) ready.Dispose(); }
 }
 
+// Keep the sample in physical pixels, including padding outside the desktop.
+// Cropping the backing bitmap would move the pointer away from its center and
+// stretch edge samples to a different zoom factor.
+public sealed class CaptureMagnifierSample {
+    public const int Side = 52;
+    public readonly Rectangle Bounds, Grabbed;
+    public readonly Point CopyOffset;
+    public readonly Size CanvasSize = new Size(Side, Side);
+    public CaptureMagnifierSample(Point pointer, Rectangle desktop) {
+        Bounds = new Rectangle(pointer.X - Side / 2, pointer.Y - Side / 2, Side, Side);
+        Grabbed = Rectangle.Intersect(Bounds, desktop);
+        CopyOffset = new Point(Grabbed.X - Bounds.X, Grabbed.Y - Bounds.Y);
+    }
+    static void Assert(bool value, string message) { if (!value) throw new InvalidOperationException("SELF_TEST: " + message); }
+    public static int SelfTest() {
+        int assertions = 0;
+        // All edges/corners, partial clipping, and an interior point, repeated
+        // for a virtual desktop with negative monitor coordinates.
+        foreach (Rectangle desktop in new Rectangle[] { new Rectangle(0, 0, 1920, 1080), new Rectangle(-2560, -1200, 4480, 2640) }) {
+            int[] xs = { desktop.Left, desktop.Left + 13, desktop.Left + desktop.Width / 2, desktop.Right - 14, desktop.Right - 1 };
+            int[] ys = { desktop.Top, desktop.Top + 13, desktop.Top + desktop.Height / 2, desktop.Bottom - 14, desktop.Bottom - 1 };
+            foreach (int x in xs) foreach (int y in ys) {
+                Point pointer = new Point(x, y);
+                CaptureMagnifierSample sample = new CaptureMagnifierSample(pointer, desktop);
+                Assert(sample.CanvasSize == new Size(52, 52) && sample.Bounds.Size == sample.CanvasSize, "Magnifier backing size must not shrink at desktop edges."); assertions++;
+                Assert(sample.Grabbed.Width > 0 && sample.Grabbed.Height > 0 && desktop.Contains(sample.Grabbed), "Magnifier may copy only available desktop pixels."); assertions++;
+                Rectangle destination = new Rectangle(sample.CopyOffset, sample.Grabbed.Size);
+                Assert(new Rectangle(Point.Empty, sample.CanvasSize).Contains(destination), "Magnifier edge padding must fit the fixed backing bitmap."); assertions++;
+                Assert(pointer.X - sample.Grabbed.X + sample.CopyOffset.X == Side / 2
+                    && pointer.Y - sample.Grabbed.Y + sample.CopyOffset.Y == Side / 2, "Magnifier crosshair must stay on the physical pointer pixel."); assertions++;
+            }
+        }
+        return assertions;
+    }
+}
+
 // A small topmost loupe beside the pointer. It is click-through but not layered,
 // so it is not one of the thin edges. Title EchoLingoCaptureMagnifier identifies it.
 // The window stays outside the sampled square so CopyFromScreen cannot see itself.
 sealed class CaptureMagnifier : Form {
     public const string WindowTitle = "EchoLingoCaptureMagnifier";
-    const int Sample = 52, Zoom = 3, View = Sample * Zoom, Caption = 18, Gap = 16;
+    const int Sample = CaptureMagnifierSample.Side, Zoom = 3, View = Sample * Zoom, Caption = 18, Gap = 16;
     [DllImport("user32.dll", SetLastError=true)] static extern bool SetWindowPos(IntPtr window, IntPtr after, int x, int y, int width, int height, uint flags);
     [DllImport("user32.dll")] static extern bool EnableWindow(IntPtr window, bool enable);
     readonly Bitmap canvas = new Bitmap(View, View + Caption);
@@ -2592,15 +2629,18 @@ sealed class CaptureMagnifier : Form {
         return placed;
     }
     public void Present(Point pointer, Rectangle selection) {
-        Rectangle sample = new Rectangle(pointer.X - Sample / 2, pointer.Y - Sample / 2, Sample, Sample);
+        CaptureMagnifierSample samplePlan = new CaptureMagnifierSample(pointer, SystemInformation.VirtualScreen);
+        Rectangle sample = samplePlan.Bounds;
         Rectangle place = Place(pointer, sample);
         if (Visible && Bounds.IntersectsWith(sample))
             SetWindowPos(Handle, new IntPtr(-1), place.X, place.Y, place.Width, place.Height, 0x0010 | 0x0200);
-        Rectangle grabbed = Rectangle.Intersect(sample, SystemInformation.VirtualScreen);
+        Rectangle grabbed = samplePlan.Grabbed;
         if (grabbed.Width < 4 || grabbed.Height < 4) { if (Visible) Hide(); return; }
-        using (Bitmap raw = new Bitmap(Math.Max(1, grabbed.Width), Math.Max(1, grabbed.Height))) {
-            using (Graphics source = Graphics.FromImage(raw))
-                source.CopyFromScreen(grabbed.Location, Point.Empty, grabbed.Size, CopyPixelOperation.SourceCopy);
+        using (Bitmap raw = new Bitmap(samplePlan.CanvasSize.Width, samplePlan.CanvasSize.Height)) {
+            using (Graphics source = Graphics.FromImage(raw)) {
+                source.Clear(Color.FromArgb(22, 26, 34));
+                source.CopyFromScreen(grabbed.Location, samplePlan.CopyOffset, grabbed.Size, CopyPixelOperation.SourceCopy);
+            }
             using (Graphics target = Graphics.FromImage(canvas)) {
                 target.Clear(Color.FromArgb(22, 26, 34));
                 target.InterpolationMode = System.Drawing.Drawing2D.InterpolationMode.NearestNeighbor;
