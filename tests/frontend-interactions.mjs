@@ -120,6 +120,8 @@ try {
           return 1;
         }
         if (command === 'plugin:event|unlisten') { listeners.delete(args.event); return; }
+        if (command === 'frontend_input_diagnostics_enabled') { fixture.inputDiagnosticRecords = []; return new URLSearchParams(location.search).has('inputDiagnosticsFixture'); }
+        if (command === 'record_frontend_input_diagnostic') { if (fixture.holdInputDiagnostics) await new Promise(resolve => { fixture.releaseInputDiagnostics = resolve; }); fixture.inputDiagnosticRecords.push(structuredClone(args.record)); return; }
         if (command === 'get_settings') { fixture.settingsReads++; if (sourceBoot === 'edit' && fixture.settingsReads === 1) { fixture.bootSettingsWaits++; await new Promise(resolve => { fixture.releaseBootSettings = resolve; }); } for (const provider of fixture.settings.providers) decorateCredential(provider, translationKeys); for (const provider of fixture.settings.ocrProviders) decorateCredential(provider, ocrKeys); const value = structuredClone(fixture.settings); if (fixture.registrationOverride !== undefined) value.shortcutRegistration = structuredClone(fixture.registrationOverride); return value; }
         if (command === 'get_history') {
           fixture.historyReads++;
@@ -3606,6 +3608,41 @@ try {
   }
   assert.deepEqual(errors, []);
   console.log('PASS: Windows/macOS capture, OCR and silent OCR quiet blank delivery clears earlier completed source/results, does not translate or copy, preserves pin, ignores repeats and old empty completions, and retains real provider/permission/clipboard error feedback. Mock IPC only.');
+  for (const enabled of [false, true]) {
+    await page.goto(`http://127.0.0.1:1420/${enabled ? '?inputDiagnosticsFixture=1' : ''}`);
+    await page.waitForFunction(() => document.querySelector('#footer-status')?.textContent === '准备就绪');
+    await page.locator('#source-text').fill('Private generated diagnostic marker');
+    await page.locator('#source-text').press('Shift+Enter');
+    assert.equal(await page.evaluate(() => window.__qa.translationRequests.length), 0);
+    await page.locator('#source-text').press('Enter');
+    await page.getByText('Isolated test translation fixture', { exact: true }).waitFor();
+    if (enabled) await page.waitForFunction(() => window.__qa.inputDiagnosticRecords.some(r => r.stage === 'complete'));
+    const records = await page.evaluate(() => window.__qa.inputDiagnosticRecords);
+    if (!enabled) assert.deepEqual(records, []);
+    else {
+      assert.equal(records[0].stage, 'ready');
+      assert.equal(records.some(r => r.stage === 'handler' && r.shift && r.sourceNonempty), true);
+      for (const stage of ['arrival', 'handler', 'translateStart', 'ticket', 'dispatch', 'complete']) assert.equal(records.some(r => r.stage === stage), true);
+      assert.equal(JSON.stringify(records).includes('Private generated'), false);
+      for (const record of records) assert.deepEqual(Object.keys(record).sort(), ['stage', 'sequence', 'timestamp', 'epoch', 'generation', 'requestEpoch', 'requestGeneration', 'composing', 'shift', 'alt', 'ctrl', 'meta', 'repeat', 'translating', 'sourceNonempty', 'sourceFocused', 'settingsReady'].sort());
+      assert.equal(records.every((r, i) => r.sequence === i + 1), true);
+      await page.evaluate(() => { window.__qa.holdInputDiagnostics = true; });
+      const requestsBeforeSlowObservation = await page.evaluate(() => window.__qa.translationRequests.length);
+      await page.locator('#source-text').fill('Another private diagnostic marker');
+      await page.locator('#source-text').press('Enter');
+      await page.waitForFunction(before => window.__qa.translationRequests.length === before + 1, requestsBeforeSlowObservation);
+      await page.waitForFunction(() => document.querySelector('#translate-button-label').textContent === '翻译');
+      await page.evaluate(() => {
+        const source = document.querySelector('#source-text');
+        for (let i = 0; i < 50; i++) source.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', shiftKey: true, bubbles: true }));
+        window.__qa.holdInputDiagnostics = false; window.__qa.releaseInputDiagnostics();
+      });
+      await page.waitForFunction(before => window.__qa.inputDiagnosticRecords.length === before + 32, records.length);
+      assert.equal(await page.evaluate(() => window.__qa.translationRequests.length), requestsBeforeSlowObservation + 1);
+
+    }
+  }
+  console.log('PASS: explicit input diagnostics contain only fixed stages, scalar guard flags and epochs, remain off by default, and do not alter Shift+Enter or ordinary Enter submission. Mock IPC only.');
   console.log('PASS: persistent screenshot permission guidance prepared before presentation; click-only correct pane without authorization; retained sanitized link failure and manual path; first-use pending-open help navigation/focus; 800 px light and 420 px narrow/dark screenshots; dismiss/input/quiet Alt+D/Alt+A/stale-epoch recovery; deferred-modal permission payload and granted-status clearing; backend cancellation tickets on edit/clear/stop/Escape/close/native hide; native presentation epochs cover unallocated tickets, omitted/stale hide events, reopen overtaking pending begin and stale delayed popup fitting; backend-only cancellation clears old result state; late-ticket and replacement ordering; pending-save close/reentry guard; failure unlock; blank shortcuts; duplicate rejection; no countdown; theme/favorites and history bounds; OCR dual-key bundles/protocol isolation/no plaintext settings; documented vendor presets; origin-bound saved-key indications; minimal popup/menu/automatic source height; OCR configuration/privacy; empty-selection immediate typing; persistent source copy/speech; pin edge/icon/keyboard hit areas and drag isolation; captured source editing after completion and pending cancellation/retranslation; narrow-wrap source presentation; inconsistent permission feedback; automatic/fixed targets; Enter/ShiftEnter/IME/repeat; passive permissions; real capture and translation error preservation.');
 } finally {
   await browser.close();

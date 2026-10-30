@@ -1,5 +1,6 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 mod credential_cache;
+mod frontend_input_diagnostics;
 mod language_detection;
 #[cfg(target_os = "macos")]
 mod macos_startup;
@@ -182,6 +183,31 @@ fn configure_shortcuts_requested(args: &[String]) -> bool {
     args.iter()
         .skip(1)
         .any(|argument| argument == CONFIGURE_SHORTCUTS_FLAG)
+}
+
+#[tauri::command]
+fn frontend_input_diagnostics_enabled() -> bool {
+    frontend_input_diagnostics::enabled()
+}
+
+#[tauri::command]
+fn record_frontend_input_diagnostic(
+    app: tauri::AppHandle,
+    record: frontend_input_diagnostics::Record,
+) -> Result<(), String> {
+    if !frontend_input_diagnostics::enabled() {
+        return Ok(());
+    }
+    static RECORDS: std::sync::OnceLock<Mutex<Vec<frontend_input_diagnostics::Record>>> =
+        std::sync::OnceLock::new();
+    let mut records = locked(RECORDS.get_or_init(|| Mutex::new(Vec::new())))?;
+    frontend_input_diagnostics::append(&mut records, record);
+    write_json(
+        &app.state::<AppState>()
+            .data_dir
+            .join("frontend-input-diagnostics.json"),
+        &serde_json::json!({"processId":std::process::id(),"recordedAtUnixMs":now(),"entries":&*records}),
+    )
 }
 
 const PERMISSION_DIAGNOSTICS_FLAG: &str = "--permission-diagnostics";
@@ -3573,6 +3599,8 @@ fn main() {
             set_pinned,
             hide_window,
             diagnostics,
+            frontend_input_diagnostics_enabled,
+            record_frontend_input_diagnostic,
             permission_status,
             get_system_translation_status,
             prepare_system_translation,

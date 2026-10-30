@@ -728,6 +728,7 @@ function restoreHistoryResults(entry: HistoryEntry): void {
   renderResults(entry.results);
 }
 async function translate(providerId?: string): Promise<void> {
+  recordInputDiagnostic('translateStart');
   const text = source.value.trim();
   if (!text || translating) return;
   if (!settingsReady) throw new Error('设置正在加载，请稍候。');
@@ -773,16 +774,20 @@ async function translate(providerId?: string): Promise<void> {
       progressViews.set(provider.id, view);
     }
     const requestId = await beginTranslation(presentationEpoch);
+    recordInputDiagnostic('ticket', undefined, { epoch: presentationEpoch, generation: token });
     if (token !== generation) { await invoke('cancel_translation', { requestId }); return; }
     activeTranslationId = requestId;
+    recordInputDiagnostic('dispatch', undefined, { epoch: presentationEpoch, generation: token });
     const results = await invoke<TranslationResult[]>('translate', { requestId, text, sourceLanguage: from, targetLanguage: to, ...(retrying ? { providerId } : {}) });
     if (token !== generation) return;
+    recordInputDiagnostic('complete', undefined, { epoch: presentationEpoch, generation: token });
     currentResults = retrying ? mergeProviderRetry(previousResults, providerId, results) : results;
     resultSource = text;
     resultSnapshot = snapshot;
     renderResults(currentResults);
     status(results.some((result) => !result.error) ? '翻译完成' : '服务返回错误');
   } catch (error) {
+    recordInputDiagnostic('error', undefined, { epoch: presentationEpoch, generation: token });
     if (token !== generation) return;
     if (errorMessage(error).startsWith('CANCELLED:')) { invalidateResults(true); status('翻译已取消'); return; }
     if (retrying) {
@@ -1472,7 +1477,27 @@ $('#speak-source').addEventListener('click', () => speak(source.value, sourceLan
 source.addEventListener('compositionstart', () => { sourceComposing = true; });
 source.addEventListener('compositionend', () => { sourceComposing = false; resizeSourceEditor(); });
 source.addEventListener('blur', () => { sourceComposing = false; });
+// Explicit acceptance-only mode; the ordinary app never persists this record.
+// Observe only Enter arrival and fixed request stages, never text/key sequences.
+let inputDiagnosticsEnabled = false, inputDiagnosticSequence = 0, inputDiagnosticsPending = 0;
+let inputDiagnosticQueue: Promise<unknown> = Promise.resolve();
+function recordInputDiagnostic(stage: 'ready' | 'arrival' | 'handler' | 'translateStart' | 'ticket' | 'dispatch' | 'complete' | 'error', event?: KeyboardEvent, request?: { epoch: number; generation: number }): void {
+  if (!inputDiagnosticsEnabled || inputDiagnosticsPending >= 32) return;
+  const record = { stage, sequence: ++inputDiagnosticSequence, timestamp: Date.now(), epoch: translationPresentation.epoch, generation, requestEpoch: request?.epoch ?? null, requestGeneration: request?.generation ?? null,
+    composing: sourceComposing || Boolean(event?.isComposing) || event?.keyCode === 229,
+    shift: Boolean(event?.shiftKey), alt: Boolean(event?.altKey), ctrl: Boolean(event?.ctrlKey), meta: Boolean(event?.metaKey), repeat: Boolean(event?.repeat),
+    translating, sourceNonempty: Boolean(source.value.trim()), sourceFocused: document.activeElement === source, settingsReady };
+  // Ordered, fire-and-forget observation must never delay or retry submission.
+  inputDiagnosticsPending += 1;
+  inputDiagnosticQueue = inputDiagnosticQueue.then(() => invoke('record_frontend_input_diagnostic', { record })).catch(() => {}).finally(() => { inputDiagnosticsPending -= 1; });
+}
+if (desktop) void invoke<boolean>('frontend_input_diagnostics_enabled').then(enabled => {
+  inputDiagnosticsEnabled = enabled === true;
+  recordInputDiagnostic('ready');
+}).catch(() => {});
+document.addEventListener('keydown', event => { if (event.key === 'Enter') recordInputDiagnostic('arrival', event); }, true);
 source.addEventListener('keydown', (event) => {
+  if (event.key === 'Enter') recordInputDiagnostic('handler', event);
   if (event.key !== 'Enter' || isCompositionKey(event)) return;
   if (event.shiftKey || event.altKey) return;
   event.preventDefault(); event.stopPropagation();
