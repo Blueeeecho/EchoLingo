@@ -3733,9 +3733,13 @@ try {
       await qaEnabled.check();
       await page.waitForFunction(() => window.__qa.settings.providers.find(p => p.id === 'qa-service').enabled === true);
       await page.evaluate(() => { window.__qa.failSave = true; });
-      await qaEnabled.uncheck();
+      const failedSaveBefore = await page.evaluate(() => window.__qa.saveCalls);
+      // A rollback intentionally restores checked=true, so uncheck() would retry
+      // a successful click until timeout while expecting the rejected state.
+      await qaEnabled.click();
+      await page.waitForFunction(before => window.__qa.saveCalls > before && document.querySelector('#service-manager').getAttribute('aria-busy') === 'false', failedSaveBefore);
       await page.locator('#toast').waitFor({ state: 'visible' });
-      await page.waitForFunction(() => document.querySelector('#managed-service-list input[data-service-id="qa-service"]').checked);
+      assert.equal(await qaEnabled.isChecked(), true);
       await page.evaluate(() => { window.__qa.failSave = false; });
       await page.locator('[data-service-role="ocr"]').click();
       assert.equal(await page.locator('#managed-service-list input[type="radio"]').count(), 3);
