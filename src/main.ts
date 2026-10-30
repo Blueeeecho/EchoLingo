@@ -960,7 +960,7 @@ function renderHistory(): void {
     item.append(reopen); list.append(item);
   }
 }
-function providerKindLabel(kind: ProviderKind): string { return { offline: '本机离线翻译', system: '系统翻译', baidu: '百度翻译', youdao: '有道翻译', microsoft: '微软翻译', openai: 'OpenAI 兼容', deepl: 'DeepL', libretranslate: 'LibreTranslate', volcengine: '火山引擎机器翻译', aliyun: '阿里云机器翻译' }[kind]; }
+function providerKindLabel(kind: ProviderKind): string { return { offline: '本机离线翻译', system: '系统翻译', baidu: '百度翻译', youdao: '有道翻译', microsoft: '微软翻译', openai: 'OpenAI 兼容', deepl: 'DeepL', libretranslate: 'LibreTranslate', volcengine: '火山引擎机器翻译', aliyun: '阿里云机器翻译', niutrans: '小牛翻译', 'google-translate': 'Google Cloud Translation', caiyun: '彩云小译' }[kind]; }
 function renderProviders(): void {
   const list = $('#provider-list'); list.replaceChildren();
   $<HTMLButtonElement>('#add-provider').disabled = !settingsReady || settings.providers.length >= 12;
@@ -1173,7 +1173,7 @@ function providerKindChanged(useDefaults = false): void {
   const system = isLocalProvider(kind);
   const native = isNativeTranslation(kind);
   $('#provider-url-field').hidden = system || native;
-  $('#provider-key-field').hidden = system || native;
+  $('#provider-key-field').hidden = system || (native && !['niutrans', 'google-translate', 'caiyun'].includes(kind));
   $('#provider-baidu-credentials').hidden = kind !== 'baidu' && kind !== 'volcengine' && kind !== 'aliyun';
   const baiduLabels = $('#provider-baidu-credentials').querySelectorAll('label');
   const pairLabels = kind === 'volcengine' ? ['AccessKey ID', 'Secret Access Key'] : kind === 'aliyun' ? ['AccessKey ID', 'AccessKey Secret'] : ['APP ID', '密钥'];
@@ -1200,6 +1200,7 @@ function providerKindChanged(useDefaults = false): void {
     system: '系统翻译无需 API 地址。',
     baidu: '使用百度翻译官方固定端点。', youdao: '使用有道文本翻译官方固定端点。', microsoft: '使用 Azure Translator 全球固定端点。',
     volcengine: '使用火山引擎机器翻译固定端点。额度说明核对于 2026-10，可能变化。', aliyun: '使用阿里云机器翻译固定端点，不是百炼。免费额度用完后可能按量计费。',
+    niutrans: '小牛官方固定 HTTPS 端点。', 'google-translate': 'Google Cloud Translation Basic 固定端点。', caiyun: '彩云官方固定 HTTPS 端点。',
     openai: '填写 API 基础地址，无需包含 /chat/completions。DeepSeek、Ollama 等请填写对应地址。',
     deepl: '免费账户通常使用 api-free.deepl.com，付费账户使用 api.deepl.com。无需包含 /v2/translate。',
     libretranslate: '填写你使用的 LibreTranslate 服务地址，无需包含 /translate。',

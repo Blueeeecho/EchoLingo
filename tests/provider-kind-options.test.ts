@@ -17,7 +17,7 @@ describe('translation preset protocol select contract', () => {
     expect([...new Set(values)].sort()).toEqual([...new Set(PROVIDER_PRESETS.map((preset) => preset.kind))].sort());
   });
 
-  it.each(['volcengine', 'aliyun'] as const)('keeps the %s native adapter selectable with its own endpoint', (kind) => {
+  it.each(['volcengine', 'aliyun', 'niutrans', 'google-translate', 'caiyun'] as const)('keeps the %s native adapter selectable with its own endpoint', (kind) => {
     expect(options.find((option) => option[1] === kind)?.[2].trim()).toBeTruthy();
     expect(PROVIDER_PRESETS.find((preset) => preset.id === kind)).toMatchObject({ kind, baseUrl: TRANSLATION_NATIVE_URLS[kind], exampleModel: '' });
   });

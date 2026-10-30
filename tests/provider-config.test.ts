@@ -120,3 +120,17 @@ describe('credential origin binding', () => {
     expect(credentialScope('openai', 'not a URL')).toBeNull();
   });
 });
+
+describe('new official free translation adapters', () => {
+  it.each(['niutrans', 'google-translate', 'caiyun'] as const)('pins %s to its documented URL without changing credentials', (kind) => {
+    const preset = PROVIDER_PRESETS.find(item => item.id === kind)!;
+    const provider: Provider = { id: 'new', name: preset.name, kind, baseUrl: preset.baseUrl, model: '', enabled: false };
+    expect(validateProvider(provider)).toBeNull();
+    expect(inferProviderPreset(provider)).toBe(kind);
+    for (const baseUrl of ['https://attacker.invalid', preset.baseUrl + '?key=secret', preset.baseUrl + '/wrong']) {
+      expect(validateProvider({ ...provider, baseUrl })).toBeTruthy();
+    }
+    expect(validateProvider({ ...provider, model: 'wrong' })).toBeTruthy();
+    expect(validateProvider({ ...provider, region: 'wrong' })).toBeTruthy();
+  });
+});

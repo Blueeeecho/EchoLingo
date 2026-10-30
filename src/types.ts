@@ -1,4 +1,4 @@
-export type ProviderKind = 'system' | 'offline' | 'baidu' | 'youdao' | 'microsoft' | 'openai' | 'deepl' | 'libretranslate' | 'volcengine' | 'aliyun';
+export type ProviderKind = 'system' | 'offline' | 'baidu' | 'youdao' | 'microsoft' | 'openai' | 'deepl' | 'libretranslate' | 'volcengine' | 'aliyun' | 'niutrans' | 'google-translate' | 'caiyun';
 export type CredentialState = 'ready' | 'missing' | 'blocked' | 'unloaded';
 export interface SystemTranslationStatus {
   supported: boolean;
