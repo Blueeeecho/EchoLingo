@@ -111,7 +111,7 @@ public func echoLingoPopupDrag(_ pointer: UnsafeMutableRawPointer?, _ anchorX: D
     guard Thread.isMainThread else { return -1 }
     guard let pointer,
           let window = Unmanaged<AnyObject>.fromOpaque(pointer).takeUnretainedValue() as? NSWindow else { return -2 }
-    guard window.isVisible, !window.isMiniaturized, !window.styleMask.contains(.titled),
+    guard window.isVisible, !window.isMiniaturized, popupDragFrameAllowed(window),
           popupDragPressMatches(pressIdentity, popupDragPressIdentity(), NSEvent.pressedMouseButtons & 1 != 0) else { return -3 }
     let frame = window.frame
     guard anchorX.isFinite, anchorY.isFinite, anchorX >= 0, anchorX <= frame.width,
@@ -381,4 +381,48 @@ public func echoLingoCancelStaleResizeWait(_ pointer: UnsafeMutableRawPointer?, 
           let task = objc_getAssociatedObject(window, &resizeIdleTaskKey) as? WindowResizeIdleTask,
           task.epoch != epoch else { return }
     task.finish(closing: true)
+}
+
+private var popupNativeFrameKey: UInt8 = 0
+func popupDragFrameAllowed(_ window: NSWindow) -> Bool {
+    !window.styleMask.contains(.titled)
+        || (objc_getAssociatedObject(window, &popupNativeFrameKey) as? NSNumber)?.boolValue == true
+}
+
+// A titled/resizable NSWindow retains AppKit's system edge resizing. Keep the
+// content full-size and title controls hidden instead of using borderless UI.
+// Rust sets Tao's decorations=true first, so its cache agrees with AppKit.
+@_cdecl("echolingo_configure_window_frame")
+public func echoLingoConfigureWindowFrame(_ pointer: UnsafeMutableRawPointer?, _ popup: Int32) -> Int32 {
+    guard Thread.isMainThread else { return -1 }
+    guard let pointer = pointer,
+          let window = Unmanaged<AnyObject>.fromOpaque(pointer).takeUnretainedValue() as? NSWindow else { return -2 }
+    guard window.styleMask.contains([.titled, .resizable]) else { return -3 }
+    let isPopup = popup != 0
+    var mask = window.styleMask
+    if isPopup { mask.insert(.fullSizeContentView) } else { mask.remove(.fullSizeContentView) }
+    if window.styleMask != mask {
+        let responder = window.firstResponder
+        window.styleMask = mask
+        // Tao likewise restores its WebView responder after changing style.
+        // Preserve the existing input responder; do not activate the window or
+        // redirect focus to some unrelated view/field on the user's behalf.
+        if let responder = responder {
+            if let view = responder as? NSView, view.window !== window { return -4 }
+            guard window.makeFirstResponder(responder) else { return -4 }
+        }
+    }
+    let visibility: NSWindow.TitleVisibility = isPopup ? .hidden : .visible
+    if window.titleVisibility != visibility { window.titleVisibility = visibility }
+    if window.titlebarAppearsTransparent != isPopup { window.titlebarAppearsTransparent = isPopup }
+    for kind: NSWindow.ButtonType in [.closeButton, .miniaturizeButton, .zoomButton] {
+        if let button = window.standardWindowButton(kind), button.isHidden != isPopup { button.isHidden = isPopup }
+    }
+    // The floating popup uses its explicit toolbar drag controller. Do not let
+    // native transparent-title dragging compete with its original press anchor.
+    if window.isMovable == isPopup { window.isMovable = !isPopup }
+    if (objc_getAssociatedObject(window, &popupNativeFrameKey) as? NSNumber)?.boolValue != isPopup {
+        objc_setAssociatedObject(window, &popupNativeFrameKey, NSNumber(value: isPopup), .OBJC_ASSOCIATION_RETAIN_NONATOMIC)
+    }
+    return 0
 }

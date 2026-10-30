@@ -12,12 +12,12 @@ final class WebViewFrameProbe: NSObject, WKNavigationDelegate, WKScriptMessageHa
                           styleMask: [.titled, .resizable, .fullSizeContentView], backing: .buffered, defer: false)
     var webView: ProbeWebView!
     var finished = false
+    var typing = false
     func start() {
         window.isReleasedWhenClosed = false
-        window.titleVisibility = .hidden; window.titlebarAppearsTransparent = true
-        for kind: NSWindow.ButtonType in [.closeButton, .miniaturizeButton, .zoomButton] {
-            window.standardWindowButton(kind)?.isHidden = true
-        }
+        let pointer = Unmanaged.passUnretained(window).toOpaque()
+        precondition(echoLingoConfigureWindowFrame(pointer, 1) == 0)
+        precondition(echoLingoSetContentSizeSync(pointer, 713, 469) == 0)
         let config = WKWebViewConfiguration()
         config.userContentController.add(self, name: "probe")
         webView = ProbeWebView(frame: window.contentView!.bounds, configuration: config)
@@ -31,11 +31,11 @@ final class WebViewFrameProbe: NSObject, WKNavigationDelegate, WKScriptMessageHa
         *{box-sizing:border-box}html,body{margin:0;background:white;font:14px -apple-system}
         header{height:36px;background:#f5f1ff}button{position:absolute;left:8px;top:4px;width:48px;height:28px}
         main{padding:8px}#result{border:1px solid #eee;padding:12px}
-        </style><header><button id="pin">固定</button></header><main>明白<div id="result">Clear</div></main>
-        <script>document.querySelector('#pin').addEventListener('click',()=>window.webkit.messageHandlers.probe.postMessage({clicked:true,width:innerWidth,height:innerHeight,top:document.querySelector('header').getBoundingClientRect().top}));</script>
+        </style><header><button id="pin">固定</button></header><main>明白<input id="typing" aria-label="Own keyboard fixture"><div id="result">Clear</div></main>
+        <script>document.querySelector('#pin').addEventListener('click',()=>window.webkit.messageHandlers.probe.postMessage({clicked:true,width:innerWidth,height:innerHeight,top:document.querySelector('header').getBoundingClientRect().top}));document.querySelector('#typing').addEventListener('input',event=>window.webkit.messageHandlers.probe.postMessage({typed:event.target.value}));</script>
         """, baseURL: nil)
         DispatchQueue.main.asyncAfter(deadline: .now() + 12) { [self] in
-            if !finished { fail("own-window native-dispatched toolbar click was not delivered; do not infer real edge support") }
+            if !finished { fail("own-window toolbar click or post-transition keyboard input was not delivered; do not infer real edge support") }
         }
     }
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
@@ -56,9 +56,34 @@ final class WebViewFrameProbe: NSObject, WKNavigationDelegate, WKScriptMessageHa
         }
     }
     func userContentController(_ userContentController: WKUserContentController, didReceive message: WKScriptMessage) {
-        guard let body = message.body as? [String: Any], body["clicked"] as? Bool == true else { return }
+        guard let body = message.body as? [String: Any] else { return }
+        if body["clicked"] as? Bool == true && !typing {
+            typing = true
+            // This phase models an explicit input action, unlike passive show.
+            window.makeKeyAndOrderFront(nil)
+            precondition(window.makeFirstResponder(webView))
+            webView.evaluateJavaScript("document.querySelector('#typing').focus()") { [self] _, error in
+                guard error == nil, let responder = window.firstResponder else { fail("input responder missing"); return }
+                let pointer = Unmanaged.passUnretained(window).toOpaque()
+                let top = NSPoint(x: window.frame.minX, y: window.frame.maxY)
+                for popup: Int32 in [0, 1] {
+                    guard echoLingoConfigureWindowFrame(pointer, popup) == 0,
+                          window.firstResponder === responder else { fail("style transition lost the original WebKit responder"); return }
+                }
+                precondition(echoLingoSetContentSizeSync(pointer, 713, 469) == 0)
+                precondition(abs(window.frame.minX - top.x) <= 1 && abs(window.frame.maxY - top.y) <= 1)
+                for type: NSEvent.EventType in [.keyDown, .keyUp] {
+                    let event = NSEvent.keyEvent(with: type, location: .zero, modifierFlags: [],
+                        timestamp: ProcessInfo.processInfo.systemUptime, windowNumber: window.windowNumber,
+                        context: nil, characters: "x", charactersIgnoringModifiers: "x", isARepeat: false, keyCode: 7)!
+                    NSApplication.shared.postEvent(event, atStart: false)
+                }
+            }
+            return
+        }
+        guard typing, body["typed"] as? String == "x" else { return }
         finished = true
-        print("PASS EXPERIMENT: WebKit viewport 713x469 starts at y=0; own-window native event reached toolbar button under transparent titled frame")
+        print("PASS EXPERIMENT: production native frame; WebKit viewport 713x469/header y0; own AppKit toolbar click and typed x survive management/popup style transitions")
         print("NOT VERIFIED: WindowServer external resize hit width, physical pointer dragging, installed-app first frame")
         webView.configuration.userContentController.removeScriptMessageHandler(forName: "probe")
         exit(0)

@@ -1172,10 +1172,8 @@ pub async fn fit(
                             .is_decorated()
                             .map_err(|_| "无法读取窗口外观")
                             .and_then(|decorated| {
-                                if decorated != management {
-                                    native
-                                        .set_decorations(management)
-                                        .map_err(|_| "无法调整窗口外观")
+                                if !decorated {
+                                    native.set_decorations(true).map_err(|_| "无法调整窗口外观")
                                 } else {
                                     Ok(())
                                 }
@@ -1218,7 +1216,7 @@ pub async fn fit(
                                         app.state::<LayoutState>()
                                             .layout_revision
                                             .load(Ordering::SeqCst),
-                                        management,
+                                        true,
                                         native.is_decorated().ok(),
                                     )
                                 {
@@ -1229,6 +1227,9 @@ pub async fn fit(
                                 let state = app.state::<LayoutState>();
                                 let value =
                                     finish_manual_resize_at_idle(&native, &state, gate_epoch)
+                                        .and_then(|_| {
+                                            configure_mac_window_frame(&native, management)
+                                        })
                                         .and_then(|_| {
                                             fit_inner(
                                                 &native,
@@ -1264,6 +1265,21 @@ fn finish_manual_resize_at_idle(
         manual.finish(epoch, size.to_logical::<f64>(scale).height);
     }
     Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn configure_mac_window_frame(window: &WebviewWindow, management: bool) -> Result<(), String> {
+    unsafe extern "C" {
+        fn echolingo_configure_window_frame(window: *mut std::ffi::c_void, popup: i32) -> i32;
+    }
+    let native = window.ns_window().map_err(|_| "窗口不可用")?;
+    // Tao's decoration cache and actual NSWindow both remain titled. Only
+    // native title presentation/full-size content change on the main thread.
+    if unsafe { echolingo_configure_window_frame(native, i32::from(!management)) } == 0 {
+        Ok(())
+    } else {
+        Err("无法设置窗口边框".into())
+    }
 }
 
 #[cfg(target_os = "macos")]

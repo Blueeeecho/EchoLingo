@@ -8,6 +8,12 @@ final class ResizeStateWindow: NSWindow {
     override var inLiveResize: Bool { fixtureLiveResize }
 }
 
+final class KeyResponderProbe: NSView {
+    var keyEvents = 0
+    override var acceptsFirstResponder: Bool { true }
+    override func keyDown(with event: NSEvent) { keyEvents += 1 }
+}
+
 @main struct WindowSizeChecks {
     static func trace(_ value: String) { FileHandle.standardError.write(Data(("geometry-check: " + value + "\n").utf8)) }
     static var observedPhases: [Int32] = []
@@ -45,6 +51,34 @@ final class ResizeStateWindow: NSWindow {
         }
         precondition(echoLingoSetContentSizeSync(nil, 680, 240) == -2)
         trace("create transition window")
+        let nativeFrameWindow = NSWindow(contentRect: NSRect(x: 100, y: 200, width: 680, height: 280),
+            styleMask: [.titled, .closable, .miniaturizable, .resizable], backing: .buffered, defer: false)
+        nativeFrameWindow.isReleasedWhenClosed = false
+        let framePointer = Unmanaged.passUnretained(nativeFrameWindow).toOpaque()
+        let keyResponder = KeyResponderProbe(frame: nativeFrameWindow.contentView!.bounds)
+        nativeFrameWindow.contentView!.addSubview(keyResponder)
+        precondition(nativeFrameWindow.makeFirstResponder(keyResponder))
+        for popup: Int32 in [1, 0, 1] {
+            let presentationTopLeft = NSPoint(x: nativeFrameWindow.frame.minX, y: nativeFrameWindow.frame.maxY)
+            precondition(echoLingoConfigureWindowFrame(framePointer, popup) == 0)
+            precondition(nativeFrameWindow.firstResponder === keyResponder)
+            let previousKeys = keyResponder.keyEvents
+            let key = NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: [],
+                timestamp: ProcessInfo.processInfo.systemUptime, windowNumber: nativeFrameWindow.windowNumber,
+                context: nil, characters: "x", charactersIgnoringModifiers: "x", isARepeat: false, keyCode: 7)!
+            nativeFrameWindow.sendEvent(key)
+            precondition(keyResponder.keyEvents == previousKeys + 1)
+            precondition(nativeFrameWindow.styleMask.contains([.titled, .resizable]))
+            precondition(nativeFrameWindow.styleMask.contains(.fullSizeContentView) == (popup != 0))
+            precondition(popupDragFrameAllowed(nativeFrameWindow) == (popup != 0))
+            precondition(nativeFrameWindow.isMovable == (popup == 0))
+            precondition(echoLingoSetContentSizeSync(framePointer, 713, 160) == 0)
+            precondition(nativeFrameWindow.contentView!.bounds.height == 160)
+            precondition(abs(nativeFrameWindow.frame.minX - presentationTopLeft.x) <= 1
+                && abs(nativeFrameWindow.frame.maxY - presentationTopLeft.y) <= 1)
+            precondition(nativeFrameWindow.standardWindowButton(.closeButton)?.isHidden == (popup != 0))
+            precondition(!nativeFrameWindow.isVisible && !nativeFrameWindow.isKeyWindow)
+        }
         let observedWindow = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 680, height: 280),
                                       styleMask: [.resizable], backing: .buffered, defer: false)
         let observedPointer = Unmanaged.passUnretained(observedWindow).toOpaque()
