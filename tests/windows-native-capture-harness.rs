@@ -114,6 +114,7 @@ mod desktop {
     }
     #[link(name = "kernel32")]
     unsafe extern "system" {
+        fn WaitForSingleObject(handle: *mut c_void, milliseconds: u32) -> u32;
         fn CreateEventW(
             attributes: *const c_void,
             manual_reset: i32,
@@ -284,6 +285,9 @@ mod desktop {
             let cancel = Event(unsafe { CreateEventW(std::ptr::null_mut(), 1, 0, wide.as_ptr()) });
             if cancel.0.is_null() {
                 return Err("FIXTURE_CANCEL_EVENT_CREATE".into());
+            }
+            if unsafe { WaitForSingleObject(cancel.0, 0) } != 258 {
+                return Err("FIXTURE_CANCEL_EVENT_NOT_UNSIGNALED".into());
             }
             let mut child = OwnedChild {
                 child: Command::new(&helper)

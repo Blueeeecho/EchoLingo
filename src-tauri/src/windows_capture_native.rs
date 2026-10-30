@@ -8,7 +8,7 @@ use std::{
     collections::{BTreeMap, HashSet, VecDeque},
     ptr::{null, null_mut},
     sync::{
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicU32, Ordering},
         Arc, Mutex,
     },
     time::{Duration, Instant},
@@ -69,17 +69,19 @@ enum Event {
     Mouse(u32, Point),
     Wire(u32, usize, isize),
     Escape(bool),
-    Cancel,
+    Cancel(u32),
 }
 struct Inbox {
     events: Mutex<VecDeque<Event>>,
     failed: AtomicBool,
+    decorative_cancellations: AtomicU32,
 }
 impl Default for Inbox {
     fn default() -> Self {
         Self {
             events: Mutex::new(VecDeque::with_capacity(256)),
             failed: AtomicBool::new(false),
+            decorative_cancellations: AtomicU32::new(0),
         }
     }
 }
@@ -147,7 +149,13 @@ unsafe extern "system" fn window_proc(hwnd: w::H, msg: u32, wp: usize, lp: isize
             return Some(0);
         }
         if msg == 0x1f || msg == 0x215 {
-            node.inbox.push(Event::Cancel);
+            if capture_window_cancels(matches!(node.role, Role::Plane(_)), msg) {
+                node.inbox.push(Event::Cancel(msg));
+            } else {
+                node.inbox
+                    .decorative_cancellations
+                    .fetch_add(1, Ordering::Relaxed);
+            }
             return Some(0);
         }
         if msg >= wire::READY_ACK && msg <= wire::PING_ACK {
@@ -1180,7 +1188,23 @@ impl Picker {
                         }
                     }
                 }
-                Event::Cancel => self.selection.cancel(),
+                Event::Cancel(message) => {
+                    self.health
+                        .insert("inputWindowCancellationMessage", message as u64);
+                    self.health.insert(
+                        "inputWindowCancellationPhase",
+                        if self.selection.finished {
+                            4
+                        } else if self.selection.dragging {
+                            3
+                        } else if self.shown {
+                            2
+                        } else {
+                            1
+                        },
+                    );
+                    self.selection.cancel();
+                }
                 Event::Escape(is_down) => {
                     self.increment(if is_down {
                         "hookEscapeDowns"
@@ -1603,6 +1627,10 @@ impl Picker {
                     + self.health.get("inputPlaneUps").copied().unwrap_or(0)
                     > 0,
             ),
+        );
+        self.health.insert(
+            "decorativeCancellationNotificationsIgnored",
+            self.inbox.decorative_cancellations.load(Ordering::Relaxed) as u64,
         );
         self.health.insert("inputPlaneVisibleCount", visible);
         self.health

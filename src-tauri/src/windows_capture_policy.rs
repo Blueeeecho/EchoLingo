@@ -1379,3 +1379,27 @@ mod escape_ownership_tests {
         }
     }
 }
+
+/// WM_CANCELMODE/WM_CAPTURECHANGED belong to the input surface, not decorative
+/// windows: disabling the noninteractive magnifier itself sends WM_CANCELMODE.
+pub fn capture_window_cancels(input_plane: bool, message: u32) -> bool {
+    input_plane && matches!(message, 0x001f | 0x0215)
+}
+#[cfg(test)]
+mod window_cancellation_tests {
+    use super::*;
+    #[test]
+    fn disabled_decoration_is_not_input_cancellation() {
+        for input_plane in [false, true] {
+            for message in [0x001f, 0x0215, 0x000a, 0x000f, 0x0200] {
+                assert_eq!(
+                    capture_window_cancels(input_plane, message),
+                    input_plane && (message == 0x001f || message == 0x0215)
+                );
+            }
+        }
+        assert!(!capture_window_cancels(false, 0x001f)); // EnableWindow(loupe,false)
+        assert!(capture_window_cancels(true, 0x001f)); // genuine input cancellation
+        assert!(capture_window_cancels(true, 0x0215)); // never activate to recapture
+    }
+}
