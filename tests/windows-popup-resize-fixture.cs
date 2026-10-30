@@ -65,7 +65,7 @@ public static partial class EchoLingoPopupVisibilitySmoke {
     static System.Collections.Generic.Dictionary<string, object> ResizeNativeObservation(Process app, System.IntPtr main) {
         RequireUniqueOwnedMainWindow(app, main);
         var result = new System.Collections.Generic.Dictionary<string, object>();
-        string[] fields = new string[] { "revision", "sizingCount", "edge", "enterX", "enterY", "messageX", "messageY", "captureAtEnter", "enterTick", "exitTick", "requestedLeft", "requestedTop", "requestedRight", "requestedBottom", "returnedLeft", "returnedTop", "returnedRight", "returnedBottom" };
+        string[] fields = new string[] { "revision", "sizingCount", "edge", "enterX", "enterY", "messageX", "messageY", "captureAtEnter", "enterTick", "exitTick", "requestedLeft", "requestedTop", "requestedRight", "requestedBottom", "returnedLeft", "returnedTop", "returnedRight", "returnedBottom", "filterInstalled", "filterRemoved", "barrierNonce", "barrierRevision", "filterMoves", "filterMoveX", "filterMoveY" };
         // A version bracket avoids treating cross-process partial writes as one
         // coherent native snapshot. Retries read metadata only, never replay input.
         for (int attempt = 1; attempt <= 3; attempt++) {
@@ -82,6 +82,46 @@ public static partial class EchoLingoPopupVisibilitySmoke {
         result["guiStateKnown"] = known; result["guiFlags"] = info.flags;
         result["captureIsMain"] = known && info.capture == main; result["moveSizeIsMain"] = known && info.move == main;
         return result;
+    }
+    [System.Runtime.InteropServices.DllImport("user32.dll", EntryPoint="RegisterWindowMessageW", CharSet=System.Runtime.InteropServices.CharSet.Unicode)]
+    static extern uint ResizeRegisterMarker(string name);
+    [System.Runtime.InteropServices.DllImport("user32.dll", EntryPoint="PostMessageW", SetLastError=true)]
+    static extern bool ResizePostMarker(System.IntPtr window, uint message, System.UIntPtr word, System.IntPtr parameter);
+    static int resizeMarkerSequence;
+    static void WaitResizeMessageLoop(Process app, System.IntPtr main, System.Collections.Generic.Dictionary<string, object> result) {
+        var barrier = new System.Collections.Generic.Dictionary<string, object> { { "markerPosts", 0 }, { "deadlineMilliseconds", 3000 }, { "contextRequired", "MSGF_SIZE" } };
+        result["nativeLoopBarrier"] = barrier;
+        var before = (System.Collections.Generic.Dictionary<string, object>)result["nativeBeforeGesture"];
+        long previousRevision = (long)before["revision"];
+        barrier["previousRevision"] = previousRevision;
+        System.Collections.Generic.Dictionary<string, object> native = null;
+        Wait(delegate {
+            native = ResizeNativeObservation(app, main); barrier["lastNative"] = native;
+            return (bool)native["coherent"] && (long)native["revision"] > previousRevision && (long)native["exitTick"] == 0 &&
+                (long)native["filterRemoved"] == 0 && (bool)native["captureIsMain"] && (bool)native["moveSizeIsMain"];
+        }, 3000, "No new coherent native ENTER/capture snapshot became available; no resize movement sent.");
+        Require((long)native["filterInstalled"] == 1, "Fixture-only native sizing filter unavailable; no resize movement sent.");
+        long revision = (long)native["revision"]; int nonce = System.Threading.Interlocked.Increment(ref resizeMarkerSequence);
+        Require(nonce > 0, "Fixture marker sequence overflow; no marker sent.");
+        uint message = ResizeRegisterMarker("EchoLingo.Resize.Readiness.v1"); Require(message != 0, "Native sizing marker registration failed.");
+        RequireUniqueOwnedMainWindow(app, main);
+        Require(GetForegroundWindow() == main && ResizeLoop(main) && (GetAsyncKeyState(1) & 0x8000) != 0, "Native sizing ended before the marker; no movement sent.");
+        Require(ResizePostMarker(main, message, new System.UIntPtr((uint)nonce), new System.IntPtr(revision)), "Native sizing marker could not be posted.");
+        barrier["markerPosts"] = 1; barrier["nonce"] = nonce; barrier["revision"] = revision;
+        Wait(delegate {
+            Require(GetForegroundWindow() == main && ResizeLoop(main) && (GetAsyncKeyState(1) & 0x8000) != 0, "Native sizing ended while awaiting modal message consumption.");
+            native = ResizeNativeObservation(app, main); barrier["lastNative"] = native;
+            return (bool)native["coherent"] && (long)native["revision"] == revision && (long)native["barrierRevision"] == revision && (long)native["barrierNonce"] == nonce;
+        }, 3000, "Native sizing context did not acknowledge the unique marker; no resize movement sent.");
+        barrier["acknowledged"] = true;
+    }
+    static void WaitResizeFilterRemoved(Process app, System.IntPtr main, System.Collections.Generic.Dictionary<string, object> result) {
+        var barrier = (System.Collections.Generic.Dictionary<string, object>)result["nativeLoopBarrier"];
+        long revision = (long)barrier["revision"];
+        Wait(delegate {
+            var native = ResizeNativeObservation(app, main); result["nativeAfterRelease"] = native;
+            return (bool)native["coherent"] && (long)native["revision"] == revision && (long)native["filterRemoved"] == 1;
+        }, 3000, "Fixture-only native sizing filter removal was not confirmed after release.");
     }
     static bool ResizeLoop(System.IntPtr main) {
         uint process; uint thread = GetWindowThreadProcessId(main, out process);
@@ -364,6 +404,7 @@ public static partial class EchoLingoPopupVisibilitySmoke {
             INPUT down = new INPUT(); down.type = 0; down.data.mouse.flags = 2; Send(new INPUT[] { down }); held = true;
             Wait(delegate { Require(IsWindowVisible(main), "Popup hid during edge-down."); return ResizeLoop(main); }, 3000, "Actual native WM move/size loop did not start; resize was not tested.");
             result["nativeSizingLoopObserved"] = true;
+            WaitResizeMessageLoop(app, main, result);
             POINT nativeAnchor; result["nativeLoopPointerKnown"] = GetPhysicalCursorPos(out nativeAnchor); result["nativeLoopPointer"] = new int[] { nativeAnchor.x, nativeAnchor.y };
             result["motionMethod"] = "SendInput absolute virtual desktop";
             for (int step = 1; step <= 8; step++) {
@@ -402,6 +443,7 @@ public static partial class EchoLingoPopupVisibilitySmoke {
             finally { if (held) { INPUT up = new INPUT(); up.type = 0; up.data.mouse.flags = 4; Send(new INPUT[] { up }); } }
         }
         Wait(delegate { return !ResizeLoop(main); }, 3000, "Native sizing loop did not end after the generated release.");
+        WaitResizeFilterRemoved(app, main, result);
         if (retainAfterRelease) {
             int expected = startWidth + distance;
             Wait(delegate { return System.Math.Abs(ResizeWidth(main) - expected) <= 5; }, 3000, "Released popup did not retain the actual resized width.");
@@ -437,6 +479,7 @@ public static partial class EchoLingoPopupVisibilitySmoke {
             INPUT down = new INPUT(); down.type = 0; down.data.mouse.flags = 2; Send(new INPUT[] { down }); held = true;
             Wait(delegate { Require(IsWindowVisible(main), "Settings hid during resize edge-down."); return ResizeLoop(main); }, 3000, "Settings never entered an actual native sizing loop.");
             result["nativeSizingLoopObserved"] = true;
+            WaitResizeMessageLoop(app, main, result);
             var desktop = System.Windows.Forms.SystemInformation.VirtualScreen;
             for (int step = 1; step <= 8; step++) {
                 Require(GetForegroundWindow() == main && IsWindowVisible(main), "Settings foreground changed during generated resize.");
@@ -459,6 +502,7 @@ public static partial class EchoLingoPopupVisibilitySmoke {
             finally { if (held) { INPUT up = new INPUT(); up.type = 0; up.data.mouse.flags = 4; Send(new INPUT[] { up }); } }
         }
         Wait(delegate { return !ResizeLoop(main); }, 3000, "Settings sizing loop did not end on mouse release.");
+        WaitResizeFilterRemoved(app, main, result);
         int finalHeight = height + distance;
         Wait(delegate { return System.Math.Abs(ResizeHeight(main) - finalHeight) <= 5; }, 3000, "Settings height rewound after the native sizing loop ended.");
         Stopwatch retention = Stopwatch.StartNew();
@@ -556,7 +600,7 @@ public static partial class EchoLingoPopupVisibilitySmoke {
         var owned = new System.Collections.Generic.List<string>(); Process app = null;
         var report = new System.Collections.Generic.Dictionary<string, object> {
             { "ok", false }, { "actualWindowsResizeTested", false }, { "fakeIpcUsed", false }, { "userContentRead", false },
-            { "clipboardRead", false }, { "externalApiUsed", false }, { "physicalWindows10Tested", false }, { "dwmFrameRateMeasured", false }
+            { "clipboardRead", false }, { "externalApiUsed", false }, { "physicalWindows10Tested", false }, { "dwmFrameRateMeasured", false }, { "fixtureNativeResizeProbe", true }, { "nativeSizingMarkerUsed", true }
         };
         ResizeViewportReadinessSelfTest(); report["viewportReadinessSelfTest"] = true;
         activeResizeObservation = null;
@@ -614,6 +658,7 @@ public static partial class EchoLingoPopupVisibilitySmoke {
                             var start = new ProcessStartInfo(executable); start.UseShellExecute = false; start.CreateNoWindow = true;
                             string temp = Path.Combine(root, "Temp"); Directory.CreateDirectory(temp);
                             start.EnvironmentVariables["TEMP"] = temp; start.EnvironmentVariables["TMP"] = temp;
+                            start.EnvironmentVariables["ECHOLINGO_NATIVE_RESIZE_PROBE"] = "1";
                             start.EnvironmentVariables["WEBVIEW2_USER_DATA_FOLDER"] = Path.Combine(local, "fixture-webview");
                             if (geometryPort != 0) {
                                 Require(string.IsNullOrEmpty(start.EnvironmentVariables["WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS"]), "Unexpected inherited WebView arguments; refused to change the diagnostic baseline.");
