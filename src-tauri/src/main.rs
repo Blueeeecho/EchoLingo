@@ -18,7 +18,10 @@ mod shortcut_probe;
 mod source_delivery;
 #[cfg(test)]
 mod storage_tests;
+#[cfg(any(target_os = "macos", test))]
+mod system_translation_gate;
 mod translation;
+mod translation_health;
 mod translation_requests;
 mod translation_selection;
 mod update_notice;
@@ -1482,105 +1485,119 @@ async fn translate(
     target_language: String,
     provider_id: Option<String>,
 ) -> Result<Vec<TranslationResult>, String> {
-    if text.trim().is_empty() {
-        return Err("请输入需要翻译的文本".into());
-    }
-    if text.chars().count() > 20000 {
-        return Err("单次最多翻译 20,000 字符".into());
-    }
-    if source_language.len() > 40 || target_language.len() > 40 || target_language.is_empty() {
-        return Err("语言参数无效".into());
-    }
-    let _permit = state
-        .translation_busy
-        .try_acquire()
-        .map_err(|_| "翻译任务较多，请等待当前请求完成")?;
-    let settings = locked(&state.settings)?.clone();
-    let providers =
-        translation_selection::request_providers(&settings.providers, provider_id.as_deref())?;
-    let (resolved_source, resolved_target, results) = state
-        .translation_requests
-        .execute(request_id, async {
-            let detected = if source_language == "auto" {
-                platform::detect_language(&text).await.ok()
-            } else {
-                None
-            };
-            let (resolved_source, resolved_target) =
-                language_detection::resolve_translation_languages(
-                    &text,
-                    &source_language,
-                    &target_language,
-                    detected.as_deref(),
-                )?;
-            let jobs = providers.iter().map(|p| {
-                let app = &app;
-                let state = &state;
-                let text = &text;
-                let resolved_source = &resolved_source;
-                let resolved_target = &resolved_target;
-                async move {
-                    let key =
-                        load_translation_key_async(app.clone(), p.clone(), Some(request_id)).await;
-                    let sequence = std::sync::atomic::AtomicU64::new(0);
-                    let started = std::time::Instant::now();
-                    let result = if p.kind == "offline" {
-                        state
-                            .offline
-                            .translate_result(p, text, resolved_source, resolved_target)
+    let mut trace = translation_health::RequestTrace::start(request_id);
+    let outcome = async {
+        if text.trim().is_empty() {
+            return Err("请输入需要翻译的文本".into());
+        }
+        if text.chars().count() > 20000 {
+            return Err("单次最多翻译 20,000 字符".into());
+        }
+        if source_language.len() > 40 || target_language.len() > 40 || target_language.is_empty() {
+            return Err("语言参数无效".into());
+        }
+        let _permit = state
+            .translation_busy
+            .try_acquire()
+            .map_err(|_| "翻译任务较多，请等待当前请求完成")?;
+        let settings = locked(&state.settings)?.clone();
+        let providers =
+            translation_selection::request_providers(&settings.providers, provider_id.as_deref())?;
+        let (resolved_source, resolved_target, results) = state
+            .translation_requests
+            .execute(request_id, async {
+                let detected = if source_language == "auto" {
+                    platform::detect_language(&text).await.ok()
+                } else {
+                    None
+                };
+                let (resolved_source, resolved_target) =
+                    language_detection::resolve_translation_languages(
+                        &text,
+                        &source_language,
+                        &target_language,
+                        detected.as_deref(),
+                    )?;
+                trace.languages(&resolved_source, &resolved_target);
+                let jobs = providers.iter().enumerate().map(|(provider_index, p)| {
+                    let app = &app;
+                    let state = &state;
+                    let text = &text;
+                    let resolved_source = &resolved_source;
+                    let resolved_target = &resolved_target;
+                    async move {
+                        let mut provider_trace = translation_health::ProviderTrace::start(
+                            request_id,
+                            provider_index,
+                            &p.kind,
+                        );
+                        let key =
+                            load_translation_key_async(app.clone(), p.clone(), Some(request_id))
+                                .await;
+                        let sequence = std::sync::atomic::AtomicU64::new(0);
+                        let started = std::time::Instant::now();
+                        let result = if p.kind == "offline" {
+                            state
+                                .offline
+                                .translate_result(p, text, resolved_source, resolved_target)
+                                .await
+                        } else {
+                            translation::translate_one_streaming(
+                                &state.client,
+                                p,
+                                key,
+                                &text,
+                                &resolved_source,
+                                &resolved_target,
+                                |partial| {
+                                    publish_translation_progress(
+                                        &app,
+                                        &state,
+                                        request_id,
+                                        sequence.fetch_add(1, Ordering::SeqCst) + 1,
+                                        false,
+                                        TranslationResult {
+                                            provider_id: p.id.clone(),
+                                            provider_name: p.name.clone(),
+                                            text: partial.to_owned(),
+                                            error: None,
+                                            elapsed_ms: started.elapsed().as_millis() as u64,
+                                            resolved_languages: None,
+                                        },
+                                    );
+                                },
+                            )
                             .await
-                    } else {
-                        translation::translate_one_streaming(
-                            &state.client,
-                            p,
-                            key,
-                            &text,
-                            &resolved_source,
-                            &resolved_target,
-                            |partial| {
-                                publish_translation_progress(
-                                    &app,
-                                    &state,
-                                    request_id,
-                                    sequence.fetch_add(1, Ordering::SeqCst) + 1,
-                                    false,
-                                    TranslationResult {
-                                        provider_id: p.id.clone(),
-                                        provider_name: p.name.clone(),
-                                        text: partial.to_owned(),
-                                        error: None,
-                                        elapsed_ms: started.elapsed().as_millis() as u64,
-                                        resolved_languages: None,
-                                    },
-                                );
-                            },
-                        )
-                        .await
-                    };
-                    publish_translation_progress(
-                        &app,
-                        &state,
-                        request_id,
-                        sequence.fetch_add(1, Ordering::SeqCst) + 1,
-                        true,
-                        result.clone(),
-                    );
-                    result
-                }
-            });
-            let results = futures_util::future::join_all(jobs).await;
-            Ok::<_, String>((resolved_source, resolved_target, results))
-        })
-        .await??;
-    finish_translation(
-        &state,
-        request_id,
-        text,
-        resolved_source,
-        resolved_target,
-        &results,
-    )?;
-    Ok(results)
+                        };
+                        provider_trace.finish(result.error.as_deref());
+                        publish_translation_progress(
+                            &app,
+                            &state,
+                            request_id,
+                            sequence.fetch_add(1, Ordering::SeqCst) + 1,
+                            true,
+                            result.clone(),
+                        );
+                        result
+                    }
+                });
+                let results = futures_util::future::join_all(jobs).await;
+                Ok::<_, String>((resolved_source, resolved_target, results))
+            })
+            .await??;
+        finish_translation(
+            &state,
+            request_id,
+            text,
+            resolved_source,
+            resolved_target,
+            &results,
+        )?;
+        Ok(results)
+    }
+    .await;
+    trace.finish(outcome.as_ref().err().map(String::as_str));
+    outcome
 }
 fn finish_translation(
     state: &AppState,
@@ -3092,6 +3109,7 @@ async fn diagnostics(
     value["shortcutRegistration"] = serde_json::json!(registrations);
     value["dataDirectory"] = serde_json::json!(state.data_dir.display().to_string());
     value["ocrUpload"] = serde_json::json!(false);
+    value["lastTranslation"] = translation_health::snapshot();
     value["popupDelivery"] =
         serde_json::to_value(&*locked(&state.popup_health)?).map_err(|_| "无法读取浮窗诊断")?;
     value["processId"] = serde_json::json!(std::process::id());

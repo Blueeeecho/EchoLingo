@@ -2691,7 +2691,7 @@ func systemLanguagesEquivalent(_ source: String, _ target: String) -> Bool {
 }
 
 @available(macOS 26.0, *)
-func translateWithSystem(_ request: SystemTranslationInput) async throws -> [String: Any] {
+func translateWithSystem(_ request: SystemTranslationInput, trace: SystemTranslationTrace) async throws -> [String: Any] {
     let (source, _) = try systemSourceLanguage(request, forTranslation: true)
     let text = request.text ?? ""
     // Preserve the requested Chinese script. Do not substitute generic zh or
@@ -2701,6 +2701,7 @@ func translateWithSystem(_ request: SystemTranslationInput) async throws -> [Str
     }
     // Availability is advisory in Settings and can be transient. This session
     // cannot request downloads; translate reports the actual installed state.
+    trace.phase("createSession")
     let session = TranslationSession(installedSource: Locale.Language(identifier: source), target: Locale.Language(identifier: request.target))
     guard !session.canRequestDownloads else {
         throw NativeError("SYSTEM_TRANSLATION_FAILED: 系统翻译未能进入本机语言模式。")
@@ -2708,6 +2709,7 @@ func translateWithSystem(_ request: SystemTranslationInput) async throws -> [Str
     do {
         return try await withTaskCancellationHandler(operation: {
             try Task.checkCancellation()
+            trace.phase("translate")
             let response = try await session.translate(text)
             try Task.checkCancellation()
             guard !response.targetText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
@@ -2719,7 +2721,7 @@ func translateWithSystem(_ request: SystemTranslationInput) async throws -> [Str
             return ["text": normalizeSystemTranslationOutput(source: text, translated: response.targetText),
                     "sourceLanguage": source, "targetLanguage": request.target]
         }, onCancel: { session.cancel() })
-    } catch { throw systemTranslationFailure(error) }
+    } catch { trace.failure(error); throw systemTranslationFailure(error) }
 }
 
 @available(macOS 26.0, *)
@@ -2853,9 +2855,13 @@ func systemTranslationResponse(mode: String, input: Data) throws -> [String: Any
         case "--system-translation-status":
             return ["ok": true, "systemTranslation": try awaitSystemTranslation(seconds: 15) { try await availableSystemTranslation(request) }]
         case "--system-translate":
-            var response = try awaitSystemTranslation(seconds: 45, operationId: request.operationId) { try await translateWithSystem(request) }
-            response["ok"] = true
-            return response
+            let trace = SystemTranslationTrace()
+            do {
+                var response = try awaitSystemTranslation(seconds: 45, operationId: request.operationId) { try await translateWithSystem(request, trace: trace) }
+                trace.phase("completed")
+                response["ok"] = true
+                return response
+            } catch { trace.failure(error); throw error }
         case "--prepare-system-translation":
             return ["ok": true, "systemTranslation": try prepareSystemTranslation(request)]
         default: break
@@ -2864,6 +2870,77 @@ func systemTranslationResponse(mode: String, input: Data) throws -> [String: Any
     #endif
     if mode == "--system-translation-status" { return ["ok": true, "systemTranslation": systemTranslationUnavailable()] }
     throw NativeError("SYSTEM_TRANSLATION_UNAVAILABLE: 当前免 API 系统翻译需要 macOS 26 或更新版本；也可以配置自己的翻译服务。")
+}
+
+// Latest Apple translation operation only. No source/target text, arbitrary
+// error descriptions/userInfo, clipboard data or credentials are retained.
+final class SystemTranslationTrace: @unchecked Sendable {
+    private static let lock = NSLock()
+    private static var next: UInt64 = 0
+    private static var latest: [String: Any] = [:]
+    private let id: UInt64
+    private let started = ProcessInfo.processInfo.systemUptime
+    init() {
+        Self.lock.lock()
+        Self.next &+= 1; id = Self.next
+        Self.latest = ["attemptId": id, "phase": "started", "elapsedMs": 0,
+                       "startedAtUnixMs": Int64(Date().timeIntervalSince1970 * 1000)]
+        Self.lock.unlock()
+    }
+    func phase(_ phase: String) {
+        Self.lock.lock(); defer { Self.lock.unlock() }
+        guard Self.latest["attemptId"] as? UInt64 == id,
+              !["failed", "completed"].contains(Self.latest["phase"] as? String ?? "") else { return }
+        Self.latest["phase"] = phase
+        Self.latest["elapsedMs"] = (ProcessInfo.processInfo.systemUptime - started) * 1000
+    }
+    func failure(_ error: Error) {
+        let native = error as NSError
+        let domain: String
+        switch native.domain {
+        case NSCocoaErrorDomain: domain = "cocoa"
+        case NSURLErrorDomain: domain = "url"
+        case NSPOSIXErrorDomain: domain = "posix"
+        default: domain = "other"
+        }
+        Self.lock.lock(); defer { Self.lock.unlock() }
+        guard Self.latest["attemptId"] as? UInt64 == id else { return }
+        // Keep the first underlying error instead of overwriting it with our
+        // user-facing NativeError wrapper after it crosses the C ABI boundary.
+        if Self.latest["nativeErrorCode"] == nil {
+            Self.latest["nativeErrorCode"] = native.code
+            Self.latest["nativeErrorDomain"] = domain
+            Self.latest["errorType"] = error is NativeError ? "native" : error is CancellationError ? "cancelled" : "framework"
+        }
+        if Self.latest["failurePhase"] == nil { Self.latest["failurePhase"] = Self.latest["phase"] }
+        Self.latest["phase"] = "failed"
+        Self.latest["elapsedMs"] = (ProcessInfo.processInfo.systemUptime - started) * 1000
+    }
+    static func snapshot() -> [String: Any] {
+        lock.lock(); defer { lock.unlock() }; return latest
+    }
+}
+
+func systemTranslationTraceSelfTest() throws {
+    let old = SystemTranslationTrace()
+    old.phase("translate")
+    old.failure(NSError(domain: "secret-user-data", code: 71, userInfo: [NSLocalizedDescriptionKey: "private source text"]))
+    old.phase("completed")
+    let failed = SystemTranslationTrace.snapshot()
+    let serialized = String(data: try JSONSerialization.data(withJSONObject: failed), encoding: .utf8) ?? ""
+    guard failed["phase"] as? String == "failed", failed["failurePhase"] as? String == "translate",
+          failed["nativeErrorDomain"] as? String == "other", failed["nativeErrorCode"] as? Int == 71,
+          !serialized.contains("secret"), !serialized.contains("private") else {
+        throw NativeError("SELF_TEST: Translation health retained content or lost failure.")
+    }
+    let current = SystemTranslationTrace()
+    current.phase("translate")
+    old.failure(NSError(domain: NSURLErrorDomain, code: 3))
+    guard SystemTranslationTrace.snapshot()["phase"] as? String == "translate",
+          SystemTranslationTrace.snapshot()["nativeErrorCode"] == nil else {
+        throw NativeError("SELF_TEST: Old translation overwrote newer diagnostics.")
+    }
+    current.phase("completed")
 }
 
 func diagnostics() -> [String: Any] {
@@ -2875,6 +2952,7 @@ func diagnostics() -> [String: Any] {
             "ocrLanguages": languages, "ocrEngine": "Apple Vision",
             "selection": "Accessibility selected text, then Cmd+C with clipboard restoration",
             "lastSelectionCapture": SelectionTrace.lastSnapshot(),
+            "lastSystemTranslation": SystemTranslationTrace.snapshot(),
             "screens": displayDiagnostics()]
 }
 
@@ -3023,6 +3101,7 @@ func nativeResponse(mode: String, input: Data = Data()) -> [String: Any] {
             return ["ok": true, "text": ""]
         case "--system-translation-self-test":
             try systemTranslationPolicySelfTest()
+            try systemTranslationTraceSelfTest()
             var cancellationTested = false
             var installedOnlyContractTested = false
             #if canImport(Translation) && compiler(>=6.2)

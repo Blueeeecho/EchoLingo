@@ -1,4 +1,5 @@
 import './styles.css';
+import { renderTranslationParagraphs } from './translation-text-layout';
 import { installUpdateNotice } from './update-notice-ui';
 import { createOcrUi } from './ocr-ui';
 import { installPanelLayout } from './panel-layout';
@@ -19,7 +20,7 @@ import { TRANSLATION_QUOTAS } from './service-quotas';
 import { populateProviderPresets } from './service-quota-ui';
 import { invoke, isTauri } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
-import { defaultSettings, errorMessage, userFacingError, filterHistory, LANGUAGES, languageName, MAX_TEXT_LENGTH, normalizeTimestamp, validateProvider, isLocalProvider } from './model';
+import { defaultSettings, errorMessage, userFacingError, filterHistory, LANGUAGES, languageName, systemTranslationSetupPair, MAX_TEXT_LENGTH, normalizeTimestamp, validateProvider, isLocalProvider } from './model';
 import { coreGuidanceMessage, coreShortcutProblems, emptyPopupPlaceholder, type CoreShortcutProblem } from './shortcut-guidance';
 import { engineLimitCopy, isWeakEngineSignal, shouldShowFirstRun, shouldShowSoftHint, type EngineHintState } from './engine-hint';
 import type { Action, CredentialState, HistoryEntry, PermissionKind, Provider, ProviderKind, Settings, ShortcutAction, SourceTextEvent, SystemTranslationStatus, TranslationProgress, TranslationResult } from './types';
@@ -598,9 +599,16 @@ function updateResultView(view: ResultView, result: TranslationResult, done: boo
   view.result = result; view.done = done;
   view.card.setAttribute('aria-busy', String(!done));
   view.body.className = result.error ? 'result-error' : !done && !result.text ? 'result-loading' : 'result-text';
-  const content = result.error ? userFacingError(result.error) : result.text;
+  const setupPair = needsSystemTranslationSetup(view) ? systemTranslationSetupPair(result.resolvedLanguages) : null;
+  const content = result.error ? userFacingError(result.error) + (setupPair
+    ? ` 本次语言组合：${languageName(setupPair.sourceLanguage)} → ${languageName(setupPair.targetLanguage)}。若原文语言识别不正确，请手动选择源语言后重试。` : '') : result.text;
   const previous = view.body.textContent ?? '';
-  if (content !== previous) {
+  const compact = done && !result.error;
+  const layoutChanged = view.body.dataset.paragraphLayout !== String(compact);
+  view.body.dataset.paragraphLayout = String(compact);
+  if (compact && (content !== previous || layoutChanged)) {
+    renderTranslationParagraphs(view.body, content);
+  } else if (!compact && (content !== previous || layoutChanged)) {
     if (view.body.childNodes.length === 1 && view.body.firstChild instanceof Text && content.startsWith(previous)) {
       view.body.firstChild.appendData(content.slice(previous.length));
     } else view.body.textContent = content;
@@ -617,22 +625,26 @@ function needsSystemTranslationSetup(view: ResultView): boolean {
     && view.result.error?.startsWith('SYSTEM_TRANSLATION_DOWNLOAD_REQUIRED:') === true;
 }
 function openResultSettings(view: ResultView): void {
-  if (!view.done || !view.result.error) return;
+  if (!view.card.isConnected || !view.done || !view.result.error) return;
   const systemSetup = needsSystemTranslationSetup(view);
   setView('settings', systemSetup);
   if (systemSetup) {
     if (systemTranslationPreparing) {
       toast('系统翻译正在准备，请完成或取消后再选择该语言对。');
     } else {
-      const pair = view.result.resolvedLanguages;
-      const supportedOption = (value: unknown): value is string => typeof value === 'string'
-        && value !== 'auto' && LANGUAGES.some(([option]) => option === value);
-      if (supportedOption(pair?.sourceLanguage) && supportedOption(pair?.targetLanguage)
-          && pair.sourceLanguage !== pair.targetLanguage) {
+      const pair = systemTranslationSetupPair(view.result.resolvedLanguages);
+      if (pair) {
         renderSystemTranslationSetup();
-        $<HTMLSelectElement>('#system-translation-source').value = pair.sourceLanguage;
-        $<HTMLSelectElement>('#system-translation-target').value = pair.targetLanguage;
+        for (const [selector, language] of [['#system-translation-source', pair.sourceLanguage], ['#system-translation-target', pair.targetLanguage]] as const) {
+          const select = $<HTMLSelectElement>(selector);
+          if (![...select.options].some((option) => option.value === language)) {
+            const option = document.createElement('option'); option.value = language; option.textContent = languageName(language); select.append(option);
+          }
+          select.value = language;
+        }
         systemTranslationStatus = null;
+      } else {
+        toast('无法确定本次失败的语言组合，请在下方手动选择后再准备系统翻译。');
       }
       void refreshSystemTranslationStatus();
     }

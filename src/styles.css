@@ -372,3 +372,9 @@ body[data-view="translate"] #source-text, body[data-view="translate"] .result-te
 #more-toggle { position: relative; }
 #update-settings .settings-card-heading > div { min-width: 0; }
 #check-updates { flex-shrink: 0; }
+
+/* Plain-text results retain exact provider text. Paragraph separators occupy a
+   modest gap, not one full 1.75-line-height blank row per newline. Shared by
+   macOS/Windows; literal code and all single line breaks retain their geometry. */
+.result-text .result-paragraph-break { display: block; height: .55em; overflow: hidden; line-height: 0; white-space: pre; }
+.result-text .result-paragraph-edge { height: 0; }

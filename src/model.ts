@@ -25,6 +25,18 @@ export function filterHistory(entries: HistoryEntry[], query: string, favoritesO
     entry.results.some((result) => result.text.toLocaleLowerCase().includes(normalized))));
 }
 export function languageName(code: string): string { return LANGUAGES.find(([value]) => value === code)?.[1] ?? code; }
+// Native automatic detection supports more languages than the short picker.
+// Preserve its validated failed pair when opening preparation, never silently
+// leave the starter English/Chinese pair selected instead.
+export function systemTranslationSetupPair(value: unknown): { sourceLanguage: string; targetLanguage: string } | null {
+  if (!value || typeof value !== 'object') return null;
+  const pair = value as Record<string, unknown>;
+  const valid = (code: unknown): code is string => typeof code === 'string' && code !== 'auto'
+    && /^[A-Za-z]{2,8}(?:-[A-Za-z0-9]{1,8}){0,3}$/.test(code)
+    && 'am ar hy bn bg my ca chr hr cs da nl en fi fr ka de el gu he hi hu is id it ja kn kk km ko lo ms ml mr mn no nb or ps fa pl pt pa ro ru sr si sk sl es sv ta te th bo tr uk ur vi zh'.split(' ').includes(code.split('-')[0].toLowerCase());
+  return valid(pair.sourceLanguage) && valid(pair.targetLanguage) && pair.sourceLanguage !== pair.targetLanguage
+    ? { sourceLanguage: pair.sourceLanguage, targetLanguage: pair.targetLanguage } : null;
+}
 export function errorMessage(error: unknown): string {
   if (typeof error === 'string') return error;
   if (error instanceof Error) return error.message;

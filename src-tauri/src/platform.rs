@@ -944,11 +944,13 @@ pub async fn system_translate(text: &str, source: &str, target: &str) -> Result<
         static SERIAL: OnceLock<Arc<tokio::sync::Semaphore>> = OnceLock::new();
         static NEXT: AtomicU64 = AtomicU64::new(0);
         // Keep capacity in the blocking worker even if its JoinHandle is dropped.
-        let permit = SERIAL
-            .get_or_init(|| Arc::new(tokio::sync::Semaphore::new(1)))
-            .clone()
-            .try_acquire_owned()
-            .map_err(|_| "上一次系统翻译正在结束，请稍后重试".to_string())?;
+        let permit = crate::system_translation_gate::acquire(
+            SERIAL
+                .get_or_init(|| Arc::new(tokio::sync::Semaphore::new(1)))
+                .clone(),
+            std::time::Duration::from_millis(1500),
+        )
+        .await?;
         let operation_id = format!(
             "rust-{}-{}",
             std::process::id(),

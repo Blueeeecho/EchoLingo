@@ -2745,6 +2745,37 @@ try {
       assert.deepEqual(await page.evaluate(() => window.__qa.systemPrepareCalls), [{ sourceLanguage: 'zh-Hant', targetLanguage: 'en' }]);
     }
   }
+  for (const language of ['ca', 'da', 'pt-BR']) {
+    const url = new URL(process.env.ECHOLINGO_TEST_URL ?? 'http://127.0.0.1:1420/');
+    url.searchParams.set('translationSetupFixture', 'system');
+    await page.goto(url.href);
+    await page.waitForFunction(() => document.querySelector('#footer-status')?.textContent === '准备就绪');
+    await page.evaluate((language) => {
+      window.__qa.translationResultError = 'SYSTEM_TRANSLATION_DOWNLOAD_REQUIRED: fixture';
+      window.__qa.translationResultLanguages = { sourceLanguage: language, targetLanguage: 'zh-Hans' };
+    }, language);
+    await page.locator('#source-text').fill('Generated auto-detected language outside short picker');
+    await page.locator('#source-text').press('Enter');
+    await page.locator('.result-setup').waitFor({ state: 'visible' });
+    assert.match(await page.locator('.result-error').textContent(), new RegExp(`本次语言组合：${language}`));
+    const preferences = await page.evaluate(() => ({ source: window.__qa.settings.sourceLanguage, target: window.__qa.settings.targetLanguage, writes: window.__qa.saveCalls }));
+    await page.evaluate(() => { window.__staleSetupButton = document.querySelector('.result-setup'); });
+    await page.locator('#source-text').fill('New input retires the previous setup action');
+    await page.evaluate(() => { window.__staleSetupButton.click(); delete window.__staleSetupButton; });
+    assert.equal(await page.evaluate(() => document.body.dataset.view), 'translate');
+    assert.deepEqual(await page.evaluate(() => window.__qa.systemPrepareCalls), []);
+    await page.locator('#source-text').press('Enter');
+    await page.locator('.result-setup').waitFor({ state: 'visible' });
+    await page.locator('.result-setup').click();
+    assert.equal(await page.locator('#system-translation-source').inputValue(), language);
+    assert.equal(await page.locator('#system-translation-target').inputValue(), 'zh-Hans');
+    assert.deepEqual(await page.evaluate(() => window.__qa.systemPrepareCalls), []);
+    assert.deepEqual(await page.evaluate(() => ({ source: window.__qa.settings.sourceLanguage, target: window.__qa.settings.targetLanguage, writes: window.__qa.saveCalls })), preferences);
+    await page.waitForFunction(() => !document.querySelector('#prepare-system-translation').disabled);
+    await page.locator('#prepare-system-translation').click();
+    await page.waitForFunction(() => window.__qa.systemPrepareCalls.length === 1);
+    assert.deepEqual(await page.evaluate(() => window.__qa.systemPrepareCalls), [{ sourceLanguage: language, targetLanguage: 'zh-Hans' }]);
+  }
   for (const pair of [null, { sourceLanguage: 'auto', targetLanguage: 'en' }, { sourceLanguage: 'xx-unknown', targetLanguage: 'en' }, { sourceLanguage: 'en', targetLanguage: 'en' }, { sourceLanguage: 7, targetLanguage: 'en' }]) {
     const url = new URL(process.env.ECHOLINGO_TEST_URL ?? 'http://127.0.0.1:1420/');
     url.searchParams.set('translationSetupFixture', 'system');
@@ -2761,6 +2792,7 @@ try {
     const baseline = await page.evaluate(() => ({ translations: window.__qa.translationRequests.length, keys: window.__qa.credentialReadCalls, writes: window.__qa.saveCalls }));
     await page.evaluate(() => { window.__qa.systemStatusCalls = []; });
     await page.locator('.result-setup').click();
+    await page.getByText('无法确定本次失败的语言组合，请在下方手动选择后再准备系统翻译。', { exact: true }).waitFor();
     assert.equal(await page.locator('#system-translation-source').inputValue(), 'fr');
     assert.equal(await page.locator('#system-translation-target').inputValue(), 'de');
     assert.deepEqual(await page.evaluate(() => window.__qa.systemStatusCalls), [{ sourceLanguage: 'fr', targetLanguage: 'de' }]);
@@ -3178,6 +3210,40 @@ try {
     await page.locator('#copy-source').click();
     await page.getByRole('button', { name: '复制译文', exact: true }).click();
     assert.deepEqual(await page.evaluate(() => window.__qa.copies.slice(-2)), [preservedText, preservedText]);
+    assert.equal(await page.locator('.result-paragraph-break').count(), 0, 'indented literal text keeps original whitespace geometry');
+    const paragraphText = 'First paragraph with a normal line.\nSecond line remains in the paragraph.\n\n\nSecond paragraph.\n\n- List one\n- List two\n\n<b>Literal markup stays text.</b>';
+    await page.evaluate((text) => { window.__qa.translationResultText = text; }, paragraphText);
+    await page.locator('#source-text').fill(paragraphText);
+    await page.locator('#source-text').press('Enter');
+    await page.waitForFunction((text) => {
+      const result = document.querySelector('.result-text');
+      return result?.textContent === text && result.dataset.paragraphLayout === 'true';
+    }, paragraphText);
+    const paragraphLayout = await page.locator('.result-text').evaluate((element) => {
+      const style = getComputedStyle(element);
+      const reference = element.cloneNode(false);
+      reference.textContent = element.textContent;
+      reference.style.cssText = `position:absolute;visibility:hidden;width:${element.getBoundingClientRect().width}px`;
+      element.parentElement.append(reference);
+      const rawHeight = reference.getBoundingClientRect().height;
+      reference.remove();
+      const selection = window.getSelection();
+      const range = document.createRange(); range.selectNodeContents(element);
+      selection.removeAllRanges(); selection.addRange(range);
+      const selected = selection.toString(); selection.removeAllRanges();
+      return { height: element.getBoundingClientRect().height, rawHeight, lineHeight: Number.parseFloat(style.lineHeight),
+        gaps: [...element.querySelectorAll('.result-paragraph-break')].map(gap => gap.getBoundingClientRect().height),
+        literalMarkup: element.querySelector('b') === null, selected };
+    });
+    assert.equal(paragraphLayout.gaps.length, 3);
+    assert.ok(paragraphLayout.gaps.every(gap => gap > 0 && gap < paragraphLayout.lineHeight / 2));
+    assert.ok(paragraphLayout.height < paragraphLayout.rawHeight - paragraphLayout.lineHeight, `${platform}: paragraph gaps should reduce actual layout height`);
+    assert.equal(paragraphLayout.literalMarkup, true);
+    assert.equal(paragraphLayout.selected, paragraphText, 'manual text selection retains exact provider whitespace');
+    await page.getByRole('button', { name: '复制译文', exact: true }).click();
+    assert.equal(await page.evaluate(() => window.__qa.copies.at(-1)), paragraphText);
+    assert.equal(await page.locator('#source-text').inputValue(), paragraphText);
+    await page.locator('.result-card').screenshot({ path: `test-results/result-paragraph-spacing-${platform}.png` });
   }
   assert.deepEqual(errors, []);
   console.log('PASS: macOS/Windows shared UI copies only the displayed Chinese multiline diagnostics without rerunning checks/credentials/translation; absent, pending and empty reports stay disabled. Source/result justify with left final lines, preserved code/URL/long-token text and independent action styling. Mock IPC and computed CSS only.');
