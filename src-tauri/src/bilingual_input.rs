@@ -176,10 +176,10 @@ mod tests {
         for text in [
             "EchoLingo_0.2.1_macos_arm64.dmg\nEchoLingo_0.2.0_macos_arm64.dmg",
             "  EchoLingo_0.2.1_macos_arm64.dmg\r\n\r\n报告.txt\t\n",
-            "/Users/name/report.txt",
-            "C:\\Users\\name\\report.txt",
+            "/tmp/fixtures/report.txt",
+            "C:\\Temp\\fixtures\\report.txt",
             "src/main.rs",
-            "\"/Users/name/My report.txt\"",
+            "\"/tmp/fixtures/My report.txt\"",
             "\"My report.txt\"",
             "https://example.com/path?q=1",
             "gpt-4.1-mini",
