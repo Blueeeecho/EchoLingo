@@ -3279,6 +3279,59 @@ try {
     assert.equal(await page.evaluate(() => window.__qa.copies.at(-1)), paragraphText);
     assert.equal(await page.locator('#source-text').inputValue(), paragraphText);
     await page.locator('.result-card').screenshot({ path: `test-results/result-paragraph-spacing-${platform}.png` });
+    // Reading density is shared across platform fonts and source/result panels.
+    // Text is never normalized to achieve visual compactness.
+    const densityCases = [
+      { name: 'short', text: '中文与 English stay readable. Ág gjpq 中文。' },
+      { name: 'paragraphs', text: `${'中文正文保持完整 English body text remains intact. '.repeat(8)}\n\n${'Second paragraph 第二段原文。 '.repeat(6)}` },
+      { name: 'literal-list', text: '- 第一项 First item\n- 第二项 Second item\n\nconst values = [1, 2];\n  return values.map(value => value + 1);\n\nLongToken_' + 'abcdefghijklmnopqrstuvwxyz'.repeat(8) },
+    ];
+    for (const width of [520, 1000]) {
+      await page.setViewportSize({ width, height: 820 });
+      for (const fixture of densityCases) {
+        await page.evaluate(text => { window.__qa.translationResultText = text; }, fixture.text);
+        await page.locator('#source-text').fill(fixture.text);
+        await page.locator('#source-text').press('Enter');
+        await page.waitForFunction(text => {
+          const result = document.querySelector('.result-text');
+          return result?.textContent === text && result.dataset.paragraphLayout === 'true';
+        }, fixture.text);
+        const geometry = await page.evaluate(() => {
+          const source = document.querySelector('#source-text');
+          const result = document.querySelector('.result-text');
+          const run = result.querySelector('.result-text-run') ?? result;
+          const sourceStyle = getComputedStyle(source), resultStyle = getComputedStyle(run);
+          const old = result.cloneNode(true);
+          old.style.cssText = `position:absolute;visibility:hidden;width:${result.getBoundingClientRect().width}px`;
+          if (!old.querySelector('.result-text-run')) old.style.lineHeight = '1.75';
+          for (const textRun of old.querySelectorAll('.result-text-run')) textRun.style.lineHeight = '1.75';
+          result.parentElement.append(old);
+          const oldHeight = old.getBoundingClientRect().height; old.remove();
+          const selection = window.getSelection(), range = document.createRange();
+          range.selectNodeContents(result); selection.removeAllRanges(); selection.addRange(range);
+          const selected = selection.toString(); selection.removeAllRanges();
+          return { sourceRatio: parseFloat(sourceStyle.lineHeight) / parseFloat(sourceStyle.fontSize),
+            resultRatio: parseFloat(resultStyle.lineHeight) / parseFloat(resultStyle.fontSize),
+            resultHeight: result.getBoundingClientRect().height, oldHeight, selected,
+            resultOverflow: result.scrollWidth > result.clientWidth + 1,
+            sourceOverflow: source.scrollWidth > source.clientWidth + 1,
+            runLineHeight: parseFloat(resultStyle.lineHeight), fontSize: parseFloat(resultStyle.fontSize) };
+        });
+        assert.ok(Math.abs(geometry.sourceRatio - 1.45) < .01, `${platform}/${width}/${fixture.name}: source line height`);
+        assert.ok(Math.abs(geometry.resultRatio - 1.45) < .01, `${platform}/${width}/${fixture.name}: result line height`);
+        assert.ok(geometry.runLineHeight > geometry.fontSize, 'keep glyph ascent/descent breathing room');
+        assert.ok(geometry.resultHeight < geometry.oldHeight - 1, 'actual text geometry is tighter than the old 1.75 setting');
+        assert.equal(geometry.resultOverflow, false); assert.equal(geometry.sourceOverflow, false);
+        assert.equal(geometry.selected, fixture.text);
+        assert.equal(await page.locator('#source-text').inputValue(), fixture.text);
+        await page.getByRole('button', { name: '复制译文', exact: true }).click();
+        await page.getByRole('button', { name: '朗读译文', exact: true }).click();
+        assert.equal(await page.evaluate(() => window.__qa.copies.at(-1)), fixture.text);
+        assert.equal(await page.evaluate(() => window.__qa.spoken.at(-1).text), fixture.text);
+      }
+      await page.locator('.result-card').screenshot({ path: `test-results/reading-density-${platform}-${width}.png` });
+    }
+    await page.setViewportSize({ width: 800, height: 820 });
   }
   assert.deepEqual(errors, []);
   console.log('PASS: macOS/Windows shared UI copies only the displayed Chinese multiline diagnostics without rerunning checks/credentials/translation; absent, pending and empty reports stay disabled. Source/result justify with left final lines, preserved code/URL/long-token text and independent action styling. Mock IPC and computed CSS only.');
