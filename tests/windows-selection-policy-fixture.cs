@@ -402,6 +402,8 @@ public static class WindowsSelectionPolicyFixture {
             Assert(metadataTrace[0].Contains("before=11 after=12 candidateBefore=none candidateAfter=none")
                 && metadataTrace[0].Contains("observation=Waiting"), "Numeric trace proves the torn first snapshot was discarded");
             Assert(metadataTrace.TrueForAll(delegate(string trace) { return !trace.Contains("discarded torn text") && !trace.Contains("coherent text"); }), "Diagnostic trace contains no copied content");
+            Assert(metadataTrace[0].Contains("initial=10 readStartedMs=0 readFinishedMs=0")
+                && metadataTrace[1].Contains("readStartedMs=10 readFinishedMs=10"), "Copy timing distinguishes time before polling from a blocking text read without extending the deadline");
             Assert(SelectionCopyPolicy.ReadAutomation(false,true,true,delegate{return new string[0];},delegate(string x){return x;},true)==null,"Document-scoped empty provider may seek a verified parent selection or single-copy fallback");
             Error(delegate {SelectionCopyPolicy.ReadAutomation(false,true,true,delegate{return new string[]{(string)null};},delegate(string x){return x;},true);},"SELECTION:");
             Error(delegate {SelectionCopyPolicy.ReadAutomation(false,true,true,delegate{return new string[]{"range"};},delegate(string x){throw new InvalidOperationException("SELECTION: stale range");},true);},"SELECTION:");

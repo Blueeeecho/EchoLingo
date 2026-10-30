@@ -61,6 +61,23 @@ const ALLOWED: &[&str] = &[
     "https://support.deepl.com/hc/en-us/articles/360021200939-DeepL-API-plans",
     "https://www.siliconflow.cn/pricing",
     "https://www.rfc-editor.org/rfc/rfc6901",
+    "https://ai.google.dev/gemini-api/docs/openai",
+    "https://ai.google.dev/gemini-api/docs/pricing",
+    "https://aistudio.google.com/apikey",
+    "https://azure.microsoft.com/en-us/pricing/details/cognitive-services/computer-vision/",
+    "https://console.volcengine.com/iam/keymanage/",
+    "https://docs.bigmodel.cn/cn/guide/models/free/glm-4-flash-250414",
+    "https://docs.bigmodel.cn/cn/guide/models/free/glm-4v-flash",
+    "https://docs.volcengine.com/docs/machine-translation/product-billing",
+    "https://docs.volcengine.com/docs/machine-translation/text-translation-api",
+    "https://github.com/Blueeeecho/EchoLingo/blob/main/docs/free-setup.md",
+    "https://github.com/Blueeeecho/EchoLingo/blob/main/docs/free-setup.zh-CN.md",
+    "https://help.aliyun.com/zh/machine-translation/developer-reference/api-reference-machine-translation-universal-version-call-guide",
+    "https://help.aliyun.com/zh/machine-translation/product-overview/billing-overview",
+    "https://learn.microsoft.com/azure/ai-services/computer-vision/overview",
+    "https://ocr.space/",
+    "https://ocr.space/ocrapi",
+    "https://ram.console.aliyun.com/manage/ak",
 ];
 
 fn approved(url: &str) -> Result<&str, String> {

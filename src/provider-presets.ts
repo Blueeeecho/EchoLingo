@@ -1,7 +1,7 @@
 import type { Provider, ProviderKind } from './types';
 import { isNativeTranslation, TRANSLATION_NATIVE_URLS } from './translation-credentials';
 
-export type ProviderPresetId = 'system' | 'offline' | 'baidu' | 'youdao' | 'microsoft' | 'openai' | 'minimax' | 'deepseek' | 'zhipu' | 'siliconflow' | 'qwen' | 'deepl' | 'libretranslate';
+export type ProviderPresetId = 'system' | 'offline' | 'baidu' | 'youdao' | 'microsoft' | 'openai' | 'minimax' | 'deepseek' | 'zhipu' | 'siliconflow' | 'qwen' | 'deepl' | 'libretranslate' | 'volcengine' | 'aliyun';
 export type QwenRegion = 'beijing' | 'singapore';
 export interface ProviderPreset {
   id: ProviderPresetId; label: string; name: string; kind: ProviderKind; baseUrl: string; exampleModel: string; help: string; docs: string;
@@ -21,6 +21,8 @@ export const PROVIDER_PRESETS: readonly ProviderPreset[] = [
   { id: 'siliconflow', label: '硅基流动 · SiliconFlow', name: '硅基流动', kind: 'openai', baseUrl: 'https://api.siliconflow.cn/v1', exampleModel: 'tencent/Hunyuan-MT-7B', help: '硅基流动中国站接口。默认翻译模型 tencent/Hunyuan-MT-7B 当前输入与输出单价为 0，仍受平台限流；其他模型按各自价格计费。已有服务保留原模型。', docs: 'https://docs.siliconflow.cn/docs/api/chat-completions-post' },
   { id: 'qwen', label: '通义千问 · 阿里云百炼', name: '通义千问', kind: 'openai', baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1', exampleModel: 'qwen-plus', help: '百炼大模型通过 OpenAI 兼容协议完成翻译。API Key 必须匹配地域；可填写业务空间 ID 使用专属域名。此预设不接入阿里机器翻译 RPC 服务。', docs: 'https://help.aliyun.com/zh/model-studio/compatibility-of-openai-with-dashscope' },
   { id: 'deepl', label: 'DeepL API', name: 'DeepL', kind: 'deepl', baseUrl: 'https://api-free.deepl.com/v2', exampleModel: '', help: '此地址用于 DeepL API Free；API Pro 请改为 https://api.deepl.com/v2。无需填写模型。', docs: 'https://developers.deepl.com/api-reference/translate/request-translation' },
+  { id: 'volcengine', label: '火山引擎 · 机器翻译', name: '火山引擎翻译', kind: 'volcengine', baseUrl: TRANSLATION_NATIVE_URLS.volcengine, exampleModel: '', help: '火山引擎文本翻译。每月前 200 万字符的免费层以 2026-10 的公开说明为准，可能变化。需要 AccessKey，不是大模型 Key。', docs: 'https://docs.volcengine.com/docs/machine-translation/text-translation-api' },
+  { id: 'aliyun', label: '阿里云 · 机器翻译', name: '阿里云机器翻译', kind: 'aliyun', baseUrl: TRANSLATION_NATIVE_URLS.aliyun, exampleModel: '', help: '阿里云机器翻译通用版，不是百炼通义千问。通用版约 100 万字符/月的说明核对于 2026-10，额度用完后可能按量计费。', docs: 'https://help.aliyun.com/zh/machine-translation/developer-reference/api-reference-machine-translation-universal-version-call-guide' },
   { id: 'libretranslate', label: 'LibreTranslate · 自托管', name: 'LibreTranslate', kind: 'libretranslate', baseUrl: 'http://127.0.0.1:5000', exampleModel: '', help: '填写自己的 LibreTranslate 实例地址。示例为本机服务；远程服务需 HTTPS，密钥按实例要求填写。', docs: 'https://docs.libretranslate.com/guides/api_usage/' },
 ];
 export function inferProviderPreset(provider: Provider): ProviderPresetId {

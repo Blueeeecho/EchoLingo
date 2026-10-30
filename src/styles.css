@@ -351,6 +351,16 @@ body[data-view="translate"] .result-provider { font-size: 10px; }
 .service-guide-links { display: flex; flex-wrap: wrap; gap: 6px 14px; margin-top: 8px; }
 .service-guide-links a { color: var(--accent); text-decoration: none; overflow-wrap: anywhere; }
 .service-guide-links a:hover { text-decoration: underline; }
+.free-region { display: flex; gap: 8px; margin: 0 0 12px; }
+.free-region button { border: 1px solid var(--border); border-radius: 999px; padding: 4px 10px; font-size: 11px; color: var(--secondary); }
+.free-region button[aria-pressed="true"] { background: var(--accent-soft); color: var(--accent); border-color: transparent; }
+.free-combo-list { display: flex; flex-direction: column; gap: 10px; }
+.free-combo { border: 1px solid var(--border); border-radius: 10px; padding: 12px 14px; background: var(--surface-soft); }
+.free-combo h3 { margin: 0 0 6px; font-size: 13px; }
+.free-combo p { margin: 0 0 8px; font-size: 11px; line-height: 1.6; color: var(--secondary); }
+.free-setup-fields { display: flex; flex-direction: column; gap: 10px; }
+.free-setup-fields label { display: flex; flex-direction: column; gap: 4px; font-size: 11px; }
+.free-setup-fields input { font-size: 12px; border: 1px solid var(--border); border-radius: 7px; padding: 8px 10px; background: var(--surface-soft); }
 
 /* Keep prose aligned while preserving explicit lines and long technical text. */
 body[data-view="translate"] #source-text, body[data-view="translate"] .result-text { text-align: justify; text-align-last: left; text-justify: inter-word; white-space: pre-wrap; word-break: normal; overflow-wrap: anywhere; }

@@ -35,6 +35,7 @@ try {
     Object.assign(fixture, { copies: [], spoken: [], permissionOverride: null, managementShows: [] });
     Object.assign(fixture, { diagnosticCalls: [], diagnosticReport: { warnings: [] }, holdDiagnostics: false, releaseDiagnostics: () => {} });
     Object.assign(fixture, { credentialStates: {}, credentialReadCalls: 0, translationTestCalls: 0, settingsReads: 0, translationCredentialWrites: [], serviceLinks: [] });
+    Object.assign(fixture, { holdFreeSetupTest: false, freeSetupTestWaits: 0, releaseFreeSetupTest: () => {} });
     Object.assign(fixture, { resizeRequests: [], nativeResizeRequests: [], holdResize: false, releaseResize: () => {} });
     Object.assign(fixture, { pinned: false, nativeVisible: true, popupReveals: 0, nativeHideTransitions: 0 });
     Object.assign(fixture, { holdPopupAck: false, popupAckWaits: 0, releasePopupAck: () => {}, sourceFocusCalls: 0 });
@@ -175,6 +176,7 @@ try {
         if (command === 'delete_api_key') { fixture.keyDeleteCalls++; const provider = fixture.settings.providers.find(item => item.id === args.providerId); if (provider) translationKeys.delete(scope(provider)); return; }
         if (command === 'set_ocr_api_key') { fixture.ocrKeyCalls++; const provider = fixture.settings.ocrProviders.find(item => item.id === args.providerId); if (provider) { provider.hasKey = true; ocrKeys.set(scope(provider), args.key); fixture.credentialWrites.push({ providerId: provider.id, kind: provider.kind, key: args.key }); } return; }
         if (command === 'delete_ocr_api_key') { fixture.ocrDeleteCalls++; const provider = fixture.settings.ocrProviders.find(item => item.id === args.providerId); if (provider) { ocrKeys.delete(scope(provider)); provider.hasKey = false; } return; }
+        if ((command === 'test_provider' || command === 'test_ocr_provider') && fixture.holdFreeSetupTest) { fixture.freeSetupTestWaits++; await new Promise((resolve) => { fixture.releaseFreeSetupTest = resolve; }); }
         if (command === 'test_provider') { fixture.translationTestCalls++; fixture.credentialReadCalls++; const provider = fixture.settings.providers.find(item => item.id === args.providerId); if (provider) fixture.setCredentialState(provider, 'ready'); return 'QA translation credential test succeeded'; }
         if (command === 'test_ocr_provider') { fixture.ocrTestCalls++; fixture.credentialReadCalls++; const provider = fixture.settings.ocrProviders.find(item => item.id === args.providerId); if (provider && fixture.credentialStates[scope(provider)]) fixture.setCredentialState(provider, 'ready'); return 'QA OCR test succeeded'; }
         if (command === 'hide_window') { fixture.hideCalls++; fixture.nativeHide(); return; }
@@ -225,6 +227,12 @@ try {
         throw new Error(`Unimplemented QA command: ${command}`);
       },
     };
+    if (new URL(location.href).searchParams.has('combinedHintsFixture')) {
+      // Exercise production hint visibility rather than the normal QA opt-out.
+      delete window.__qa;
+      localStorage.removeItem('echolingo.engine-hint');
+      localStorage.removeItem('echolingo.free-setup');
+    }
   });
   const sourceFixtureUrl = (mode) => {
     const url = new URL(process.env.ECHOLINGO_TEST_URL ?? 'http://127.0.0.1:1420/');
@@ -2751,6 +2759,82 @@ try {
   console.log('PASS: marked visible-popup OCR updates cannot navigate away from settings/history, overwrite newer edits or Alt+A typing, or cancel a newer manual translation; accepted marked capture still auto-translates; ordinary unmarked source workflows remain covered.');
   console.log('PASS: show_popup IPC explicitly requests reuseVisiblePopup=false for ordinary blank/input/selection, including an already visible pinned popup; only marked pinned OCR sends true. Payload dispatch only; no native physical raise/z-order acceptance is claimed.');
   console.log('PASS: popup left/right pointer-captured width requests; native Windows resize dispatch fixture; pin/input/toolbar drag isolation; bounded actual viewport width participates in same-height680→850 layout fits; later height fits retain850; coalesced pending resize invalidated by hide/epoch; management edges hidden/inert;680px light/dark long-prose screenshots inspected separately.');
+  // The free-service wizard is a real modal, not a hidden settings panel. Test
+  // production handlers with held IPC and no external service or real secret.
+  await page.goto(process.env.ECHOLINGO_TEST_URL ?? 'http://127.0.0.1:1420/');
+  await page.waitForFunction(() => document.querySelector('#footer-status')?.textContent === '准备就绪');
+  await page.locator('#source-text').fill('Do not translate behind the setup modal');
+  await goView('settings');
+  for (const [kind, endpoint] of [['volcengine', 'https://translate.volcengineapi.com'], ['aliyun', 'https://mt.aliyuncs.com']]) {
+    await page.locator('#add-provider').click();
+    await page.locator('#provider-preset').selectOption(kind);
+    assert.equal(await page.locator('#provider-kind').inputValue(), kind);
+    assert.equal(await page.locator('#provider-url').inputValue(), endpoint);
+    assert.equal(await page.locator('#provider-baidu-credentials').isVisible(), true);
+    assert.equal(await page.locator('#provider-key-field').isHidden(), true);
+    await page.locator('#cancel-provider-dialog').click();
+  }
+  await page.locator('#free-region-cn').click();
+  await page.locator('#free-combo-list .free-combo button').first().click();
+  assert.equal(await page.locator('#free-setup-dialog').isVisible(), true);
+  assert.equal(await page.locator('.app-shell').evaluate((element) => element.inert), true);
+  const firstFreeStep = await page.locator('#free-setup-step').textContent();
+  const freeBaseline = await page.evaluate(() => ({ saves: window.__qa.saveCalls, hides: window.__qa.hideCalls, translations: window.__qa.translationRequests.length }));
+  await page.locator('#free-setup-next').click();
+  await page.locator('#free-setup-error').waitFor({ state: 'visible' });
+  assert.equal(await page.locator('#free-setup-step').textContent(), firstFreeStep);
+  assert.equal(await page.evaluate(() => window.__qa.saveCalls), freeBaseline.saves);
+  await page.locator('#free-setup-next').focus();
+  await page.keyboard.press('Tab');
+  assert.equal(await page.evaluate(() => document.activeElement.id), 'free-setup-close');
+  await page.keyboard.press('Control+Enter');
+  assert.equal(await page.evaluate(() => window.__qa.translationRequests.length), freeBaseline.translations);
+  await page.keyboard.press('Escape');
+  assert.equal(await page.locator('#free-setup-dialog').isHidden(), true);
+  assert.equal(await page.locator('.app-shell').evaluate((element) => element.inert), false);
+  assert.equal(await page.evaluate(() => window.__qa.hideCalls), freeBaseline.hides);
+  assert.equal(await page.locator('#free-field-key').count(), 0);
+
+  await page.locator('#free-combo-list .free-combo button').first().click();
+  await page.locator('#free-field-key').fill('qa-wizard-private-key');
+  await page.evaluate(() => { window.__qa.holdFreeSetupTest = true; });
+  await page.locator('#free-setup-next').click();
+  await page.waitForFunction(() => window.__qa.freeSetupTestWaits === 1);
+  assert.equal(await page.locator('#free-setup-next').isDisabled(), true);
+  // dispatchEvent intentionally bypasses disabled controls to exercise the fence.
+  await page.locator('#free-setup-next').dispatchEvent('click');
+  assert.equal(await page.evaluate(() => window.__qa.keyCalls), 1);
+  await page.locator('#free-setup-close').click();
+  await page.locator('#free-region-overseas').click();
+  assert.equal(await page.locator('#free-combo-list .free-combo').count(), 2);
+  await page.locator('#free-combo-list .free-combo button').nth(1).click();
+  const reopenedFreeStep = await page.locator('#free-setup-step').textContent();
+  await page.evaluate(() => { window.__qa.holdFreeSetupTest = false; window.__qa.releaseFreeSetupTest(); });
+  await page.waitForFunction(() => window.__qa.keyDeleteCalls === 1 && !window.__qa.settings.providers.some((provider) => provider.id.startsWith('free-')));
+  assert.equal(await page.locator('#free-setup-step').textContent(), reopenedFreeStep);
+  assert.equal(await page.locator('#free-setup-dialog').isVisible(), true);
+  assert.equal(await page.locator('#free-field-key').inputValue(), '');
+  assert.equal(await page.locator('#free-setup-next').isDisabled(), false);
+  await page.keyboard.press('Escape');
+  assert.equal(await page.locator('.app-shell').evaluate((element) => element.inert), false);
+  assert.equal(await page.evaluate(() => window.__qa.hideCalls), freeBaseline.hides);
+  assert.deepEqual(errors, []);
+  console.log('PASS: free setup blank validation, modal inert/focus trap/shortcuts/Escape, duplicate submission, pending-test close/reopen, owned credential cleanup, and two non-Gemini overseas recommendations. Fake IPC only.');
+
+  const combinedHintsUrl = new URL(process.env.ECHOLINGO_TEST_URL ?? 'http://127.0.0.1:1420/');
+  combinedHintsUrl.searchParams.set('combinedHintsFixture', '1');
+  await page.goto(combinedHintsUrl.toString());
+  await page.waitForFunction(() => document.querySelector('#footer-status')?.textContent === '准备就绪');
+  assert.equal(await page.locator('#engine-hint').isVisible(), true);
+  assert.equal(await page.locator('#free-setup-hint').isHidden(), true);
+  await page.locator('#engine-hint-dismiss').click();
+  await page.locator('#free-setup-hint').waitFor({ state: 'visible' });
+  assert.equal(await page.locator('#engine-hint').isHidden(), true);
+  await page.locator('#free-setup-dismiss').click();
+  assert.equal(await page.locator('#free-setup-hint').isHidden(), true);
+  assert.deepEqual(errors, []);
+  console.log('PASS: merged local-engine/privacy explanation precedes optional signup guidance; dismissal reveals the deferred card without stacking banners.');
+
   // Windows-only choice: legacy payload defaults to compatibility, saves only
   // the chosen field, survives management navigation, and rolls back failed saves.
   const windowsSelectionUrl = new URL(process.env.ECHOLINGO_TEST_URL ?? 'http://127.0.0.1:1420/');

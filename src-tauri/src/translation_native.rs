@@ -21,6 +21,9 @@ use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+#[path = "translation_cloud.rs"]
+mod cloud;
+
 const BAIDU_ENDPOINT: &str = "https://fanyi-api.baidu.com/api/trans/vip/translate";
 const YOUDAO_ENDPOINT: &str = "https://openapi.youdao.com/api";
 const MICROSOFT_ROOT: &str = "https://api.cognitive.microsofttranslator.com/";
@@ -48,7 +51,10 @@ struct MicrosoftCredentials {
 }
 
 pub fn is_native(kind: &str) -> bool {
-    matches!(kind, "baidu" | "youdao" | "microsoft")
+    matches!(
+        kind,
+        "baidu" | "youdao" | "microsoft" | "volcengine" | "aliyun"
+    )
 }
 
 pub fn endpoint(p: &Provider) -> Result<&'static str, String> {
@@ -56,6 +62,8 @@ pub fn endpoint(p: &Provider) -> Result<&'static str, String> {
         "baidu" => BAIDU_ENDPOINT,
         "youdao" => YOUDAO_ENDPOINT,
         "microsoft" => MICROSOFT_ROOT,
+        "volcengine" => cloud::VOLC_ENDPOINT,
+        "aliyun" => cloud::ALIYUN_ENDPOINT,
         _ => return Err("不支持的官方翻译服务类型".into()),
     };
     let url = validate_url(&p.base_url)?;
@@ -141,6 +149,8 @@ pub fn validate_credentials(kind: &str, secret: &str) -> Result<(), String> {
         "baidu" => baidu_credentials(secret).map(|_| ()),
         "youdao" => youdao_credentials(secret).map(|_| ()),
         "microsoft" => microsoft_credentials(secret).map(|_| ()),
+        "volcengine" => cloud::validate_access_key(secret, "火山引擎机器翻译"),
+        "aliyun" => cloud::validate_access_key(secret, "阿里云机器翻译"),
         _ => Err("不支持的官方翻译凭证类型".into()),
     }
 }
@@ -163,6 +173,9 @@ fn language(kind: &str, value: &str, source: bool) -> Result<String, String> {
         ("youdao", "zh" | "zh-Hans") => "zh-CHS",
         ("youdao", "zh-Hant") => "zh-CHT",
         ("microsoft", "zh") => "zh-Hans",
+        ("volcengine" | "aliyun", "zh" | "zh-Hans") => "zh",
+        ("volcengine", "zh-Hant") => "zh-Hant",
+        ("aliyun", "zh-Hant") => "zh-tw",
         (_, "en" | "fr" | "de" | "es" | "ru" | "pt" | "it" | "ja" | "ko") => value,
         ("microsoft", "zh-Hans" | "zh-Hant") => value,
         _ => return Err("该官方翻译适配器尚未配置所选语言；请选择受支持语言或其他服务".into()),
@@ -178,7 +191,7 @@ fn validate_text(kind: &str, text: &str) -> Result<(), String> {
     // UTF-8 byte ceiling; the user's actual plan may impose a smaller limit.
     let exceeds = match kind {
         "baidu" => text.len() > 6000,
-        "youdao" => text.chars().count() > 5000,
+        "youdao" | "volcengine" | "aliyun" => text.chars().count() > 5000,
         "microsoft" => text.encode_utf16().count() > 50_000,
         _ => true,
     };
@@ -188,6 +201,8 @@ fn validate_text(kind: &str, text: &str) -> Result<(), String> {
                 "百度通用翻译单次保守限制为 6,000 UTF-8 字节，请缩短输入；实际套餐还可能更小".into()
             }
             "youdao" => "有道文本翻译单次最多 5,000 字符，请缩短输入".into(),
+            "volcengine" => "火山引擎机器翻译单次最多 5,000 字符，请缩短输入".into(),
+            "aliyun" => "阿里云机器翻译单次最多 5,000 字符，请缩短输入".into(),
             _ => "Microsoft 翻译单次最多 50,000 字符，请缩短输入".into(),
         });
     }
@@ -509,6 +524,8 @@ pub async fn translate(
             )
             .await
         }
+        "volcengine" => cloud::translate_volcengine(client, secret, text, &source, &target).await,
+        "aliyun" => cloud::translate_aliyun(client, secret, text, &source, &target).await,
         _ => Err("不支持的官方翻译服务类型".into()),
     }
 }

@@ -16,8 +16,14 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 #[path = "ocr_additional.rs"]
 mod additional;
 
+#[path = "ocr_cloud.rs"]
+mod cloud;
+
 pub fn is_native(kind: &str) -> bool {
-    matches!(kind, "baidu" | "tencent" | "youdao" | "google")
+    matches!(
+        kind,
+        "baidu" | "tencent" | "youdao" | "google" | "azure-vision" | "ocrspace"
+    )
 }
 
 const BAIDU_ROOT: &str = "https://aip.baidubce.com/";
@@ -46,6 +52,9 @@ struct TencentCredentials {
 pub fn validate_provider(p: &OcrProvider) -> Result<(), String> {
     if matches!(p.kind.as_str(), "youdao" | "google") {
         return additional::validate_provider(p);
+    }
+    if matches!(p.kind.as_str(), "azure-vision" | "ocrspace") {
+        return cloud::validate_provider(p);
     }
     let (root, actions): (&str, &[&str]) = match p.kind.as_str() {
         "baidu" => (BAIDU_ROOT, &["general_basic", "accurate_basic"]),
@@ -132,6 +141,14 @@ pub fn validate_credentials(kind: &str, secret: &str) -> Result<(), String> {
         "baidu" => baidu_credentials(secret).map(|_| ()),
         "tencent" => tencent_credentials(secret).map(|_| ()),
         "youdao" | "google" => additional::validate_credentials(kind, secret),
+        "azure-vision" => {
+            if secret.trim().is_empty() || secret.len() > 256 {
+                Err("Azure AI Vision 需要资源密钥".into())
+            } else {
+                Ok(())
+            }
+        }
+        "ocrspace" => cloud::reject_shared_ocrspace_key(secret),
         _ => Err("不支持的原生 OCR 服务类型".into()),
     }
 }
@@ -433,6 +450,8 @@ pub async fn recognize(
     validate_image(&p.kind, image)?;
     match p.kind.as_str() {
         "youdao" | "google" => additional::recognize(client, p, secret, image).await,
+        "azure-vision" => cloud::recognize_azure(client, p, secret, image).await,
+        "ocrspace" => cloud::recognize_ocrspace(client, p, secret, image).await,
         "baidu" => {
             baidu_at(
                 client,

@@ -45,7 +45,8 @@ export function createOcrUi(context: UiContext): { render: () => void; close: ()
     'ocr-youdao-app-key': '应用 ID（AppKey）', 'ocr-youdao-app-secret': '应用密钥（AppSecret）',
   };
   const clearSecrets = (): void => { for (const id of secretIds) input(id).value = ''; };
-  const kindLabel = (kind: OcrProvider['kind']): string => ({ baidu: '百度 OCR', tencent: '腾讯云 OCR', youdao: '有道 OCR', google: 'Google Cloud Vision OCR', 'openai-vision': '视觉模型', 'http-json': 'HTTP JSON' })[kind];
+  const kindLabel = (kind: OcrProvider['kind']): string => ({ baidu: '百度 OCR', tencent: '腾讯云 OCR', youdao: '有道 OCR', google: 'Google Cloud Vision OCR', 'azure-vision': 'Azure AI Vision', ocrspace: 'OCR.space', 'openai-vision': '视觉模型', 'http-json': 'HTTP JSON' })[kind];
+  const nativeBase = (kind: OcrProvider['kind'], entered: string): string => kind !== 'azure-vision' && isNativeOcr(kind) ? OCR_NATIVE_URLS[kind] : entered;
   const run = (work: () => Promise<unknown>): void => { void work().catch(context.reportError); };
   const setSaving = (value: boolean): void => {
     saving = value; modal.setAttribute('aria-busy', String(value));
@@ -59,7 +60,7 @@ export function createOcrUi(context: UiContext): { render: () => void; close: ()
   const updateCredentialState = (clearOnChange = true): void => {
     const kind = select('ocr-provider-kind').value as OcrProvider['kind'];
     const native = isNativeOcr(kind);
-    const scope = credentialScope(kind, native ? OCR_NATIVE_URLS[kind] : input('ocr-provider-url').value);
+    const scope = credentialScope(kind, nativeBase(kind, input('ocr-provider-url').value));
     if (clearOnChange && scope !== lastInputScope) clearSecrets();
     lastInputScope = scope;
     const changed = originalScope !== null && scope !== originalScope;
@@ -81,6 +82,7 @@ export function createOcrUi(context: UiContext): { render: () => void; close: ()
   const kindChanged = (resetDefaults = false): void => {
     const kind = select('ocr-provider-kind').value as OcrProvider['kind'];
     const native = isNativeOcr(kind);
+    const azure = kind === 'azure-vision';
     renderServiceGuide($('ocr-service-guide'), OCR_GUIDES[kind], OCR_QUOTAS[kind]);
     const vision = kind === 'openai-vision';
     if (resetDefaults) {
@@ -88,9 +90,9 @@ export function createOcrUi(context: UiContext): { render: () => void; close: ()
       const nameInput = input('ocr-provider-name');
       if (!nameInput.value.trim() || ['百度 OCR', '腾讯云 OCR', '有道 OCR', 'Google Cloud Vision OCR', '视觉模型 OCR', 'JSON 网关 OCR'].includes(nameInput.value)) nameInput.value = native ? kindLabel(kind) : vision ? '视觉模型 OCR' : 'JSON 网关 OCR';
       input('ocr-provider-model').value = vision ? 'gpt-4o-mini' : '';
-      input('ocr-provider-url').value = native ? OCR_NATIVE_URLS[kind] : vision ? 'https://api.openai.com/v1' : '';
+      input('ocr-provider-url').value = native ? nativeBase(kind, '') : vision ? 'https://api.openai.com/v1' : '';
     }
-    $('ocr-provider-url-field').hidden = native;
+    $('ocr-provider-url-field').hidden = native && !azure;
     $('ocr-provider-native-action-field').hidden = !native;
     $('ocr-provider-region-field').hidden = kind !== 'tencent';
     $('ocr-provider-baidu-credentials').hidden = kind !== 'baidu';
@@ -98,19 +100,22 @@ export function createOcrUi(context: UiContext): { render: () => void; close: ()
     $('ocr-provider-youdao-credentials').hidden = kind !== 'youdao';
     $('ocr-provider-model-field').hidden = !vision;
     $('ocr-provider-prompt-field').hidden = !vision;
-    $('ocr-provider-key-field').hidden = native && kind !== 'google';
+    $('ocr-provider-key-field').hidden = native && kind !== 'google' && kind !== 'ocrspace' && !azure;
     $('ocr-provider-auth-header-field').hidden = native;
     $('ocr-provider-auth-prefix-field').hidden = native;
     $('ocr-provider-template-field').hidden = kind !== 'http-json';
     $('ocr-provider-response-field').hidden = kind !== 'http-json';
     input('ocr-provider-model').required = vision;
-    input('ocr-provider-url').required = !native;
+    input('ocr-provider-url').required = !native || azure;
     if (native) {
-      input('ocr-provider-url').value = OCR_NATIVE_URLS[kind];
+      if (!azure) input('ocr-provider-url').value = nativeBase(kind, '');
+      else input('ocr-provider-url').placeholder = 'https://your-resource.cognitiveservices.azure.com';
       const actions = select('ocr-provider-native-action'); actions.replaceChildren();
       for (const [value, label] of OCR_NATIVE_ACTIONS[kind]) { const option = el('option', '', label); option.value = value; actions.append(option); }
       const savedAction = input('ocr-provider-model').value;
       if (!resetDefaults && Array.from(actions.options).some((option) => option.value === savedAction)) actions.value = savedAction;
+      else actions.value = actions.options[0]?.value ?? '';
+      if (resetDefaults || !savedAction) input('ocr-provider-model').value = actions.value;
     }
     updateCredentialState(false);
     $('ocr-provider-url-help').textContent = vision ? '填写 OpenAI 兼容视觉 API 基础地址，例如 https://api.openai.com/v1。' : '高级配置：填写你信任的 OCR JSON 网关完整请求地址，例如 https://ocr.example.com/recognize。';
@@ -226,7 +231,7 @@ export function createOcrUi(context: UiContext): { render: () => void; close: ()
       const native = isNativeOcr(kind);
       const provider: OcrProvider = {
         id: editingId ?? `ocr-${crypto.randomUUID()}`, name: input('ocr-provider-name').value.trim(),
-        kind, baseUrl: native ? OCR_NATIVE_URLS[kind] : input('ocr-provider-url').value.trim().replace(/\/+$/, ''),
+        kind, baseUrl: nativeBase(kind, input('ocr-provider-url').value.trim().replace(/\/+$/, '')),
         model: native ? select('ocr-provider-native-action').value : input('ocr-provider-model').value.trim(), prompt: native ? '' : textArea('ocr-provider-prompt').value.trim(),
         authHeader: native ? 'Authorization' : input('ocr-provider-auth-header').value.trim(), authPrefix: native ? 'Bearer ' : input('ocr-provider-auth-prefix').value,
         requestTemplate: native ? '' : textArea('ocr-provider-template').value.trim(), responsePath: native ? '/text' : input('ocr-provider-response-path').value.trim(), region: kind === 'tencent' ? select('ocr-provider-region').value : '',
