@@ -900,6 +900,8 @@ dependencies = [
  "hmac",
  "keyring",
  "md-5",
+ "png",
+ "regex",
  "reqwest 0.12.28",
  "semver",
  "serde",
@@ -910,6 +912,8 @@ dependencies = [
  "tauri-plugin-global-shortcut",
  "tauri-plugin-single-instance",
  "tokio",
+ "windows",
+ "windows-future",
 ]
 
 [[package]]

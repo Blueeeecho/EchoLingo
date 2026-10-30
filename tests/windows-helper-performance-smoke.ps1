@@ -49,7 +49,14 @@ try {
             $exit = $LASTEXITCODE
             $result = ($raw -join "`n") | ConvertFrom-Json
             $runs.Add(@{ variant = $variant; iteration = $i; report = $result })
-            if ($exit -ne 0 -or -not $result.ok -or @($result.trials).Count -ne 8 -or -not $result.crossPeerCapturePassed -or -not $result.crossPeerCapture.passed) { throw "PERFORMANCE_FIXTURE: $variant did not pass all eight actual live/input/cancel/next-capture cases plus independent ordinary-peer long drag." }
+            $expectedModes = if ($variant -eq 'baseline') {
+                'capture,capture-burst,topmost-capture,escape-short,escape,right,capture,hover-window-follow'
+            } else {
+                'capture,capture-burst,topmost-capture,escape-short,escape,right,capture,dpi-notification,display-change,capture,hover-window-follow'
+            }
+            $actualModes = (@($result.trials | ForEach-Object { $_.mode }) -join ',')
+            if ($exit -ne 0 -or -not $result.ok -or $actualModes -ne $expectedModes -or @($result.trials | Where-Object { -not $_.passed }).Count -ne 0 -or -not $result.crossPeerCapturePassed -or -not $result.crossPeerCapture.passed) { throw "PERFORMANCE_FIXTURE: $variant did not pass every required live/input/cancel/next-capture case in order plus independent ordinary-peer long drag." }
+            if ($variant -ne 'baseline' -and (-not $result.benignDpiNotificationsPassed -or -not $result.displayChangeCancelledAndNextCapturePassed)) { throw 'DISPLAY_GATE: Candidate did not prove benign DPI continuation and display-change cancellation followed by fresh capture.' }
             if ($variant -ne 'baseline') {
                 $planeOnly = $variant -eq 'candidate-planeOnly'
                 $expectedBackend = if ($planeOnly) { 2 } else { 1 }
@@ -58,8 +65,10 @@ try {
                 foreach ($trial in @($result.trials) + @($result.crossPeerCapture)) {
                     if ($trial.nativeBackend -ne 'precompiled-framework-dll' -or $null -eq $trial.helperPerformance -or $null -eq $trial.captureHealth) { throw 'PRECOMPILED_GATE: A candidate session did not use the exact explicit native DLL or provide safe timing/input metadata.' }
                     if ($trial.captureHealth.inputBackend -ne $expectedBackend -or $trial.captureHealth.mouseHookInstalled -ne $expectedMouseHook -or $trial.captureHealth.inputPlaneCount -le 0 -or $trial.captureHealth.inputPlaneRemainingAfterCleanup -ne 0) { throw 'PLANE_GATE: Real helper backend/allocation/cleanup metadata did not match the requested mode.' }
-                    if ($planeOnly -and $trial.mode -notin @('escape-short','escape','right') -and ($trial.captureHealth.inputPlaneDowns -le 0 -or $trial.captureHealth.inputPlaneUps -le 0 -or $trial.captureHealth.inputPlaneFallbackUsed -ne 1)) { throw 'FALLBACK_GATE: Forced no-hook capture did not prove actual input plane down/up delivery.' }
+                    if ($planeOnly -and $trial.mode -notin @('escape-short','escape','right','display-change') -and ($trial.captureHealth.inputPlaneDowns -le 0 -or $trial.captureHealth.inputPlaneUps -le 0 -or $trial.captureHealth.inputPlaneFallbackUsed -ne 1)) { throw 'FALLBACK_GATE: Forced no-hook capture did not prove actual input plane down/up delivery.' }
                 }
+                $displayCancelled = @($result.trials | Where-Object { $_.mode -eq 'display-change' })[0]
+                if ($displayCancelled.captureHealth.inputPlaneDowns -ne 0 -or $displayCancelled.captureHealth.inputPlaneUps -ne 0 -or $displayCancelled.captureHealth.hookMouseDowns -ne 0 -or $displayCancelled.captureHealth.hookMouseUps -ne 0) { throw 'DISPLAY_GATE: The no-input display-cancellation case unexpectedly consumed mouse input.' }
                 $burst = @($result.trials | Where-Object { $_.mode -eq 'capture-burst' })[0]
                 if ($burst.capturePerformance.moveFrameCount -le 0) { throw 'INPUT_GATE: Candidate did not prove actual coalesced UI move frames.' }
                 if (-not $planeOnly -and ($burst.captureHealth.hookMouseMoves -le 0 -or $burst.captureHealth.hookMouseDowns -le 0 -or $burst.captureHealth.hookMouseUps -le 0)) { throw 'INPUT_GATE: Hybrid candidate did not prove actual hook movement/down/up.' }

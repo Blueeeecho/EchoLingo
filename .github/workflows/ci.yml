@@ -151,6 +151,17 @@ jobs:
         if: runner.os == 'Windows'
         shell: powershell
         run: powershell.exe -NoProfile -STA -ExecutionPolicy Bypass -File tests/windows-native-smoke.ps1
+      - name: Native Windows WinRT OCR candidate runtime (no fallback)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        timeout-minutes: 5
+        run: |
+          $output = & cargo test --manifest-path tests/windows-ocr-native/Cargo.toml --locked -- --test-threads=1 2>&1
+          $result = $LASTEXITCODE
+          $output | ForEach-Object { Write-Host $_ }
+          if ($result -ne 0) { exit $result }
+          $text = $output -join "`n"
+          if ($text -notmatch 'test result: ok\. 12 passed; 0 failed; 0 ignored' -or $text -notmatch 'native_generated_image_repeated_recognition_and_empty_semantics \.\.\. ok') { throw 'NATIVE_OCR_GATE: Expected all 12 Windows tests and real generated-image OCR to execute without skip.' }
       - name: Rust tests
         run: cargo test --manifest-path src-tauri/Cargo.toml
       - name: Rust formatting

@@ -525,21 +525,36 @@ public static class EchoLingoApplicationSmoke {
     static long CaptureNumber(Dictionary<string,object> health,string name) {
         Assert(health.ContainsKey(name),"Missing capture health field: "+name);return BoundedDiagnosticNumber(health[name],Int64.MaxValue);
     }
-    static Dictionary<string,object> CompletedCaptureSnapshot(Process app,ProcessStartInfo start,string executable,string roaming,string token,long afterAttempt) {
+    static Dictionary<string,object> CompletedCaptureSnapshot(Process app,ProcessStartInfo start,string executable,string roaming,string token,long afterAttempt,Dictionary<string,object> report) {
         Dictionary<string,object> health=null;
-        WaitFor(delegate {
+        int snapshots=0;
+        try { WaitFor(delegate {
             health=CaptureSnapshot(app,start,executable,roaming,token);
+            snapshots++;
             if(!health.ContainsKey("attemptId")||!health.ContainsKey("attemptStage")||CaptureNumber(health,"attemptId")<=afterAttempt||CaptureNumber(health,"attemptStage")!=4)return false;
-            foreach(string field in new string[]{"currentHostSessionReserved","currentHostOwnedButtons","currentHostSessionClosing","currentHostEndRequested"})
+            // Availability is published by token=0 AFTER owned pairs drain.
+            // closing/endRequested are terminal generation evidence, reset only
+            // by the NEXT begin(), not outstanding resource counts.
+            foreach(string field in new string[]{"currentHostSessionReserved","currentHostOwnedButtons"})
                 if(!health.ContainsKey(field)||CaptureNumber(health,field)!=0)return false;
+            foreach(string field in new string[]{"currentHostSessionClosing","currentHostEndRequested"})
+                Assert(CaptureNumber(health,field)<=1,"Capture terminal state is not a bounded boolean.");
             return true;
         },10,"Capture completion and live host release were not observed; no capture was retried.",app);
+        } catch {
+            // Reuse ONLY the last identity-checked, allowlisted numeric snapshot.
+            // No extra export, input, helper launch, or acceptance-budget extension.
+            report["captureCompletionFailureObservation"]=new Dictionary<string,object>{{"afterAttempt",afterAttempt},{"verifiedSnapshots",snapshots},{"lastVerifiedNumericSnapshot",health},{"captureRetried",false}};
+            throw;
+        }
         return health;
     }
     static void RequireCaptureReleased(Dictionary<string,object> health) {
         Assert(CaptureNumber(health,"attemptStage")==4&&CaptureNumber(health,"helperResponseReceived")==1,"Capture did not complete its helper reply stage.");
-        foreach(string field in new string[]{"hookRunningAfterStop","inputPlaneRemainingAfterCleanup","currentHostSessionReserved","currentHostOwnedButtons","currentHostSessionClosing","currentHostEndRequested"})
+        foreach(string field in new string[]{"hookRunningAfterStop","inputPlaneRemainingAfterCleanup","currentHostSessionReserved","currentHostOwnedButtons"})
             Assert(CaptureNumber(health,field)==0,"Capture resource is still owned: "+field);
+        foreach(string field in new string[]{"currentHostSessionClosing","currentHostEndRequested"})
+            Assert(CaptureNumber(health,field)<=1,"Capture terminal state is not a bounded boolean.");
         Assert(CaptureNumber(health,"nativeHostStopped")==1,"Capture native host did not acknowledge STOP.");
     }
     static long BoundedDiagnosticNumber(object value,long maximum) {
@@ -915,7 +930,7 @@ public static class EchoLingoApplicationSmoke {
                                     WaitFor(delegate{return AppOcrReady(form,app.Id,ocrSource,ocrSourceFrame,first,pointerDisplay,cancelledReady);},25,"Actual Alt+S did not arm the display-cancellation generation.",app);
                                     cancelledDisplayHelper=InvalidateOwnedCaptureDisplay(app.Id);
                                     WaitFor(delegate{return RemainingOwnedCaptureWindows(cancelledDisplayHelper)==0&&AppInputPlanes(app.Id,false).Count==0&&AppOverlays(app.Id)==0;},8,"Display cancellation left owned picker windows behind.",app);
-                                    displayCancellation=CompletedCaptureSnapshot(app,start,executable,roaming,token,previousAttempt);
+                                    displayCancellation=CompletedCaptureSnapshot(app,start,executable,roaming,token,previousAttempt,report);
                                     Assert(app.Id==sameApplication&&CaptureNumber(displayCancellation,"attemptId")>previousAttempt,"Display cancellation was not a new attempt in the same app.");
                                     Assert(CaptureNumber(displayCancellation,"displayChangedError")==1&&CaptureNumber(displayCancellation,"resultOk")==0,"Owned display notification did not produce the exact failed capture outcome.");
                                     RequireCaptureReleased(displayCancellation);
@@ -934,7 +949,7 @@ public static class EchoLingoApplicationSmoke {
                                 RequireForeground(form); INPUT up = new INPUT(); up.data.mouse.flags = 4; Send(new INPUT[] { up });
                                 WaitFor(delegate { if (server != null && server.Error != null) throw new InvalidOperationException(server.Error); return HasHistory(history, OcrText, "ocr", providerId) && (!customBindings || AppSourceMatches(app.Id, OcrText, true)); }, 50, "Actual " + silentOcrShortcut + " left-drag OCR did not fill/translate exact generated text.", app);
                                 if(displayCancellation!=null) {
-                                    Dictionary<string,object> recovered=CompletedCaptureSnapshot(app,start,executable,roaming,token,CaptureNumber(displayCancellation,"attemptId"));
+                                    Dictionary<string,object> recovered=CompletedCaptureSnapshot(app,start,executable,roaming,token,CaptureNumber(displayCancellation,"attemptId"),report);
                                     Assert(CaptureNumber(recovered,"attemptId")>CaptureNumber(displayCancellation,"attemptId")&&CaptureNumber(recovered,"resultOk")==1&&CaptureNumber(recovered,"displayChangedError")==0,"The next actual Alt+S did not complete a newer successful capture attempt.");
                                     Assert(Convert.ToUInt32(ocrReady["helperProcessId"])!=cancelledDisplayHelper,"Recovery reused the cancelled helper process.");
                                     RequireCaptureReleased(recovered);
