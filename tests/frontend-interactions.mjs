@@ -1809,8 +1809,9 @@ try {
   assert.equal(await page.evaluate(() => window.__qa.translationRequests.length), emptyRequestCount);
   await page.evaluate(() => window.__qa.emit('source-text', { text: '', mode: 'input' }));
   assert.equal(await page.locator('#toast').isHidden(), true);
-  // Real screenshot permission/NO_TEXT/OCR failures remain visible and explain
-  // where the user can inspect permissions; translating API errors are separate.
+  // Real permission/provider failures remain visible. An unscoped raw NO_TEXT
+  // error is not trusted as an OCR-empty event: the backend must instead send
+  // its guarded blank source payload, exercised in the cross-platform suite below.
   await page.evaluate(() => window.__qa.emit('action-error', 'PERMISSION: Screen capture is not granted'));
   await page.locator('#toast').getByText('Screen capture is not granted', { exact: false }).waitFor();
   assert.match(await page.locator('#toast').textContent(), /更多 → 设置 → 系统权限/);
@@ -2287,8 +2288,8 @@ try {
   await page.keyboard.press('Enter');
   await page.getByText('Isolated test translation fixture', { exact: true }).waitFor();
   assert.equal(await page.evaluate(() => window.__qa.translationRequests.at(-1).text), 'QA OCR captured words corrected');
-  // A second capture keeps an already pinned, completed result readable. Only
-  // successful recognition replaces source text; cancel/error sends no source.
+  // A second capture keeps an already pinned, completed result readable. Normal
+  // cancellation/provider failures retain content; confirmed empty OCR is tested separately.
   await pin.click();
   await page.waitForFunction(() => document.querySelector('#pin-button').getAttribute('aria-pressed') === 'true');
   const pinnedCaptureBaseline = await page.evaluate(() => {
@@ -2299,7 +2300,7 @@ try {
       oldRequest: window.__qa.translationRequests.at(-1), oldEpoch: window.__qa.presentation.epoch };
   });
   let previousPinnedEpoch = pinnedCaptureBaseline.oldEpoch;
-  for (const failure of [null, 'NO_TEXT: QA no text in this region', 'OCR: QA recognition failed', 'PERMISSION: QA screen capture is not granted']) {
+  for (const failure of [null, 'OCR: QA recognition failed', 'PERMISSION: QA screen capture is not granted']) {
     const capture = await page.evaluate(() => window.__qa.nativePinnedCaptureStart());
     assert.ok(capture.epoch > previousPinnedEpoch); previousPinnedEpoch = capture.epoch;
     assert.equal(capture.presented, true);
@@ -2965,7 +2966,7 @@ try {
   assert.deepEqual(errors, []);
   console.log('PASS: native input focus events require exact backend-verified presentation metadata; an observed epoch keeps its original intent baseline across duplicate announcements, edits and navigation; fresh explicit input works while visible or in management; stale complete events, missing/malformed/future payloads and delayed verification cannot rebind focus; hidden Alt+A works with either presentation-event order. Fake IPC only.');
   console.log('PASS: accepted popup acknowledgments, explicit input animation frames and modal queues cannot revive focus after a newer selection epoch, edit or management-view roundtrip; current empty-selection typing and current input focus remain available. Isolated DOM/IPC only, not a native WPS root-cause claim.');
-  console.log('PASS: repeated pinned capture epochs keep completed source/result DOM visible through cancel/no-text/OCR/permission errors; successful OCR replaces source and auto-translates without a modeled hide/reveal; pin remains active; stale source/presentation/progress cannot overwrite; in-flight partial results are cancelled and removed. Fake IPC only, no real capture or native visibility pass.');
+  console.log('PASS: repeated pinned capture epochs keep completed source/result DOM visible through cancel/OCR/permission errors; successful OCR replaces source and auto-translates without a modeled hide/reveal; pin remains active; stale source/presentation/progress cannot overwrite; in-flight partial results are cancelled and removed. Fake IPC only, no real capture or native visibility pass.');
   console.log('PASS: marked visible-popup OCR updates cannot navigate away from settings/history, overwrite newer edits or Alt+A typing, or cancel a newer manual translation; accepted marked capture still auto-translates; ordinary unmarked source workflows remain covered.');
   console.log('PASS: show_popup IPC explicitly requests reuseVisiblePopup=false for ordinary blank/input/selection, including an already visible pinned popup; only marked pinned OCR sends true. Payload dispatch only; no native physical raise/z-order acceptance is claimed.');
   console.log('PASS: popup left/right pointer-captured width requests; native Windows resize dispatch fixture; pin/input/toolbar drag isolation; bounded actual viewport width participates in same-height680→850 layout fits; later height fits retain850; coalesced pending resize invalidated by hide/epoch; management edges hidden/inert;680px light/dark long-prose screenshots inspected separately.');
@@ -3546,6 +3547,65 @@ try {
   }
   assert.deepEqual(errors, []);
   console.log('PASS: macOS and Windows toolbar restored/programmatic and pointer focus stay quiet; Tab/Shift+Tab and keyboard activation retain accessible focus rings without changing pin or moving focus. Mock IPC only.');
+  // Backend NO_TEXT and empty successful recognition map to this exact blank
+  // input delivery (Rust policy tests exercise both native result forms). Never
+  // fake an OCR engine success or globally silence arbitrary provider errors.
+  for (const platform of ['mac', 'windows']) {
+    for (const action of ['capture', 'ocr', 'silentOcr']) {
+      for (const retained of [false, true]) {
+        const url = new URL(process.env.ECHOLINGO_TEST_URL ?? 'http://127.0.0.1:1420/');
+        if (platform === 'windows') url.searchParams.set('windowsSelectionFixture', '1');
+        await page.goto(url.href);
+        await page.waitForFunction(() => document.querySelector('#footer-status')?.textContent === '准备就绪');
+        await page.locator('#source-text').fill(`Completed source before ${action}`);
+        await page.locator('#source-text').press('Enter');
+        await page.getByText('Isolated test translation fixture', { exact: true }).waitFor();
+        if (retained) {
+          await page.locator('#pin-button').click();
+          await page.waitForFunction(() => window.__qa.pinned);
+        }
+        const baseline = await page.evaluate(() => ({ requests: window.__qa.translationRequests.length, permissions: window.__qa.permissionRequests.length, copies: window.__qa.copies.length }));
+        await page.evaluate(({ retained }) => {
+          const fixture = window.__qa;
+          const task = retained ? fixture.nativePinnedCaptureStart() : fixture.nativeHide();
+          const payload = { text: '', mode: 'input', captureOrigin: 'ocr', deliveryId: 901, presentationEpoch: task.epoch,
+            updateVisiblePopup: retained, reuseVisiblePopup: retained };
+          fixture.emptyOcrPayload = payload;
+          fixture.pendingSource = structuredClone(payload);
+          fixture.emit('source-text', structuredClone(payload));
+        }, { retained });
+        await page.waitForFunction(() => document.querySelector('#source-text').value === '' && window.__qa.sourceAcks.includes(901));
+        assert.equal(await page.locator('.result-card').count(), 0);
+        assert.equal(await page.locator('.results-column').isHidden(), true);
+        assert.equal(await page.locator('#toast').isHidden(), true);
+        assert.equal(await page.locator('#translation-state').textContent(), '');
+        assert.equal(await page.locator('#pin-button').getAttribute('aria-pressed'), String(retained));
+        await page.evaluate(() => window.__qa.emit('source-text', { ...window.__qa.emptyOcrPayload, deliveryRetry: true }));
+        assert.equal(await page.locator('#source-text').inputValue(), '');
+        assert.deepEqual(await page.evaluate(() => ({ requests: window.__qa.translationRequests.length, permissions: window.__qa.permissionRequests.length, copies: window.__qa.copies.length })), baseline);
+        // A delayed older no-text completion must not erase a newer capture.
+        await page.evaluate(() => {
+          const fixture = window.__qa, task = fixture.nativeInputShow();
+          const payload = { text: 'Newer captured words', mode: 'input', deliveryId: 902, presentationEpoch: task.epoch };
+          fixture.pendingSource = payload; fixture.emit('source-text', payload);
+        });
+        await page.waitForFunction(() => document.querySelector('#source-text').value === 'Newer captured words' && window.__qa.sourceAcks.includes(902));
+        await page.evaluate(() => window.__qa.emit('source-text', { ...window.__qa.emptyOcrPayload, deliveryRetry: true }));
+        assert.equal(await page.locator('#source-text').inputValue(), 'Newer captured words');
+        assert.equal(await page.locator('#toast').isHidden(), true);
+        assert.deepEqual(await page.evaluate(() => ({ requests: window.__qa.translationRequests.length, permissions: window.__qa.permissionRequests.length, copies: window.__qa.copies.length })), baseline);
+        // Neither the quiet outcome nor its retries mask unrelated safety or
+        // provider errors, and those errors cannot blank the newer source.
+        for (const message of ['OCR: HTTP 503', 'PERMISSION: Screen capture denied', 'CLIPBOARD_RESTORE_FAILED: original unavailable']) {
+          await page.evaluate((message) => window.__qa.emit('action-error', message), message);
+          await page.locator('#toast').waitFor({ state: 'visible' });
+          assert.equal(await page.locator('#source-text').inputValue(), 'Newer captured words');
+        }
+      }
+    }
+  }
+  assert.deepEqual(errors, []);
+  console.log('PASS: Windows/macOS capture, OCR and silent OCR quiet blank delivery clears earlier completed source/results, does not translate or copy, preserves pin, ignores repeats and old empty completions, and retains real provider/permission/clipboard error feedback. Mock IPC only.');
   console.log('PASS: persistent screenshot permission guidance prepared before presentation; click-only correct pane without authorization; retained sanitized link failure and manual path; first-use pending-open help navigation/focus; 800 px light and 420 px narrow/dark screenshots; dismiss/input/quiet Alt+D/Alt+A/stale-epoch recovery; deferred-modal permission payload and granted-status clearing; backend cancellation tickets on edit/clear/stop/Escape/close/native hide; native presentation epochs cover unallocated tickets, omitted/stale hide events, reopen overtaking pending begin and stale delayed popup fitting; backend-only cancellation clears old result state; late-ticket and replacement ordering; pending-save close/reentry guard; failure unlock; blank shortcuts; duplicate rejection; no countdown; theme/favorites and history bounds; OCR dual-key bundles/protocol isolation/no plaintext settings; documented vendor presets; origin-bound saved-key indications; minimal popup/menu/automatic source height; OCR configuration/privacy; empty-selection immediate typing; persistent source copy/speech; pin edge/icon/keyboard hit areas and drag isolation; captured source editing after completion and pending cancellation/retranslation; narrow-wrap source presentation; inconsistent permission feedback; automatic/fixed targets; Enter/ShiftEnter/IME/repeat; passive permissions; real capture and translation error preservation.');
 } finally {
   await browser.close();

@@ -1447,8 +1447,10 @@ function handleActionError(message: string): void {
     toast(userFacingError(message), 'error', 8000);
     return;
   }
-  // Selection/cancellation compatibility only. Screenshot permission, NO_TEXT,
-  // OCR service failures and translation failures remain actionable errors.
+  // Only selection/cancellation compatibility is suppressed here. The backend
+  // converts a confirmed empty OCR into an epoch-bound blank source, rather
+  // than emitting an unscoped NO_TEXT error that could clear unrelated input.
+  // Permission, provider and clipboard-safety errors remain actionable.
   if (/^(?:NO_SELECTION|SELECTION_EMPTY|CANCELLED):/i.test(message.trim()) || /^未取得选区/.test(message.trim())) return;
   const guidance = /^PERMISSION:/i.test(message.trim()) ? '\n可在“更多 → 设置 → 系统权限”中检查或授权。' : '';
   toast(`${message}${guidance}`, 'error', 8000);
