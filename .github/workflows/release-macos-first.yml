@@ -1,0 +1,33 @@
+name: Publish tested macOS 0.2.1 only
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths: [.github/workflows/release-macos-first.yml]
+permissions:
+  contents: read
+concurrency:
+  group: echolingo-prerelease-0.2.1
+  cancel-in-progress: false
+jobs:
+  publish-tested-macos:
+    if: github.repository == 'Blueeeecho/EchoLingo' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      actions: read
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4, verified 2026-10-30
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Verify publication policy and preparation tests
+        run: |
+          node --test scripts/test-macos-first-release.cjs
+          python3 -m unittest discover -s scripts -p 'test_prepare_macos_first_release.py' -v
+      - name: Verify immutable tested artifact and publish macOS only
+        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7, verified 2026-10-30
+        with:
+          script: |
+            const { publish } = require('./scripts/publish-macos-first-release.cjs');
+            await publish({ github, context, core });
