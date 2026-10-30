@@ -9,7 +9,6 @@ const ALLOWED: &[&str] = &[
     "https://ai.youdao.com/DOCSIRMA/html/ocr/api/tyocr/index.html",
     "https://ai.youdao.com/DOCSIRMA/html/trans/api/wbfy/index.html",
     "https://ai.youdao.com/console/",
-    "https://ai.youdao.com/new/price-center.s",
     "https://ai.youdao.com/new/newuser-promotion.s",
     "https://api-docs.deepseek.com/",
     "https://api-docs.deepseek.com/zh-cn/quick_start/pricing/",
