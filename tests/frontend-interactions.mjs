@@ -3173,10 +3173,19 @@ try {
   assert.deepEqual(await page.evaluate(() => window.__qa.serviceLinks), ['https://github.com/Blueeeecho/EchoLingo/releases']);
   await page.evaluate(() => { window.__qa.holdServiceLink = false; window.__qa.releaseServiceLink(); });
   await page.waitForFunction(() => !document.querySelector('#open-update-page').disabled);
+  const beforeFailedOptIn = await page.evaluate(() => ({ saves: window.__qa.saveCalls, checks: window.__qa.updateChecks.length }));
   await page.evaluate(() => { window.__qa.failSave = true; });
-  await page.locator('#automatic-update-checks').check();
+  // .check() asserts the final checked state itself, which contradicts this
+  // intentional failed save. Click normally, then verify the committed rollback.
+  await page.locator('#automatic-update-checks').click();
   await page.waitForFunction(() => document.querySelector('#update-status').textContent.includes('保存失败'));
   assert.equal(await page.locator('#automatic-update-checks').isChecked(), false);
+  assert.equal(await page.locator('#automatic-update-checks').isEnabled(), true);
+  assert.deepEqual(await page.evaluate(() => ({
+    saves: window.__qa.saveCalls, checks: window.__qa.updateChecks.length,
+    attempted: window.__qa.settingsWrites.at(-1).automaticUpdateChecks,
+    committed: window.__qa.settings.automaticUpdateChecks,
+  })), { saves: beforeFailedOptIn.saves + 1, checks: beforeFailedOptIn.checks, attempted: true, committed: false });
   await page.evaluate(() => { window.__qa.failSave = false; window.__qa.failUpdate = false; });
   await page.clock.install();
   await page.locator('#automatic-update-checks').check();
@@ -3187,12 +3196,20 @@ try {
   assert.equal(await page.evaluate(() => window.__qa.updateChecks.at(-1).manual), false);
   const savesBeforeDisable = await page.evaluate(() => window.__qa.saveCalls);
   await page.evaluate(() => { window.__qa.holdSave = true; });
-  await page.locator('#automatic-update-checks').uncheck();
+  // Pending preference saves retain the committed checkbox state and disable
+  // it. .uncheck() would incorrectly require the uncommitted state to be visible.
+  await page.locator('#automatic-update-checks').click();
   await page.waitForFunction(count => window.__qa.saveCalls > count, savesBeforeDisable);
+  assert.equal(await page.locator('#automatic-update-checks').isChecked(), true);
+  assert.equal(await page.locator('#automatic-update-checks').isDisabled(), true);
+  assert.equal(await page.evaluate(() => window.__qa.settingsWrites.at(-1).automaticUpdateChecks), false);
+  assert.equal(await page.evaluate(() => window.__qa.settings.automaticUpdateChecks), true);
   await page.clock.fastForward(3_700_000);
   assert.equal(await page.evaluate(() => window.__qa.updateChecks.length), checksBeforeAuto + 1);
   await page.evaluate(() => { window.__qa.holdSave = false; window.__qa.releaseSave(); });
-  await page.waitForFunction(() => window.__qa.settings.automaticUpdateChecks === false);
+  await page.waitForFunction(() => window.__qa.settings.automaticUpdateChecks === false && !document.querySelector('#automatic-update-checks').disabled);
+  assert.equal(await page.locator('#automatic-update-checks').isChecked(), false);
+  assert.equal(await page.evaluate(() => window.__qa.saveCalls), savesBeforeDisable + 1);
   await page.clock.fastForward(3_700_000);
   assert.equal(await page.evaluate(() => window.__qa.updateChecks.length), checksBeforeAuto + 1);
   assert.deepEqual(errors, []);
