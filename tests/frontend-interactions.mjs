@@ -1504,12 +1504,26 @@ try {
   await page.evaluate(() => { window.__qa.holdShortcutBegin = true; });
   await page.locator('[data-shortcut-record="selection"]').click();
   await page.evaluate(() => {
-    const now = performance.now.bind(performance);
+    // Playwright's installed clock may own this property. Deleting our override
+    // would also erase that clock's original own function instead of restoring it.
+    const descriptor = Object.getOwnPropertyDescriptor(performance, 'now');
+    const originalNow = performance.now;
+    const now = originalNow.bind(performance);
+    window.__qa.restorePerformanceNow = () => {
+      if (descriptor) Object.defineProperty(performance, 'now', descriptor);
+      else delete performance.now;
+      return { callable: typeof performance.now === 'function', sameFunction: performance.now === originalNow,
+        sameOwnership: Object.hasOwn(performance, 'now') === Boolean(descriptor), finite: Number.isFinite(performance.now()) };
+    };
     Object.defineProperty(performance, 'now', { configurable: true, value: () => now() + 15000 });
     window.__qa.holdShortcutBegin = false; window.__qa.releaseShortcutBegin();
   });
-  await page.locator('#shortcut-feedback').getByText('录制准备已超时', { exact: false }).waitFor();
-  await page.evaluate(() => { delete performance.now; });
+  try {
+    await page.locator('#shortcut-feedback').getByText('录制准备已超时', { exact: false }).waitFor();
+  } finally {
+    assert.deepEqual(await page.evaluate(() => window.__qa.restorePerformanceNow()),
+      { callable: true, sameFunction: true, sameOwnership: true, finite: true });
+  }
   assert.equal(await page.evaluate(() => window.__qa.shortcutLeases.at(-1).active), false);
   assert.equal(await page.locator('#shortcut-selection').inputValue(), 'Ctrl+Shift+T');
   await page.locator('#shortcut-advanced > summary').click();
