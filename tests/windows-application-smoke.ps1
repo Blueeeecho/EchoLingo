@@ -3,7 +3,7 @@
 # It creates generated source content, a loopback mock and empty owned app dirs.
 # CustomShortcutsTests exercises loaded custom bindings, not Settings UI saving.
 [CmdletBinding()]
-param([string]$ApplicationPath = '', [switch]$OfflineTranslation, [switch]$InstalledPackage, [switch]$LatestIntentTests, [switch]$CustomShortcutsTests)
+param([string]$ApplicationPath = '', [switch]$OfflineTranslation, [switch]$InstalledPackage, [switch]$LatestIntentTests, [switch]$CustomShortcutsTests, [switch]$RustCapture, [string]$NativeCapturePath = '')
 $ErrorActionPreference = 'Stop'
 [Console]::OutputEncoding = [Text.UTF8Encoding]::new($false)
 try {
@@ -21,6 +21,10 @@ try {
     if ($LatestIntentTests -and $OfflineTranslation) { throw 'LATEST_INTENT_MOCK_ONLY: Existing three offline-model flows are unchanged.' }
     if ($CustomShortcutsTests -and ($OfflineTranslation -or $LatestIntentTests)) { throw 'CUSTOM_SHORTCUTS_MOCK_ONLY: Run the three loaded-custom-bindings workflows separately from offline/latest-intent modes.' }
     $ApplicationPath = (Resolve-Path -LiteralPath $ApplicationPath).Path
+    if ($RustCapture) {
+        if (-not $LatestIntentTests -or [string]::IsNullOrWhiteSpace($NativeCapturePath)) { throw 'RUST_CAPTURE_SCOPE: Candidate requires LatestIntentTests and an exact built native executable.' }
+        $NativeCapturePath = (Resolve-Path -LiteralPath $NativeCapturePath).Path
+    }
     Add-Type -AssemblyName System.Windows.Forms
     Add-Type -AssemblyName System.Drawing
     Add-Type -AssemblyName System.Web.Extensions
@@ -48,6 +52,39 @@ using System.Windows.Automation;
 public static class EchoLingoApplicationSmoke {
     const string Identifier = "io.github.blueeeecho.echolingo";
     static bool Offline;
+    static bool RustCapture;
+    static string NativeCaptureHash,NativeCaptureCache;
+    static readonly Dictionary<uint,long> VerifiedNativeChildren=new Dictionary<uint,long>();
+    static string NativeHash(string path) {
+        FileInfo info=new FileInfo(path);Assert(info.Exists&&(info.Attributes&FileAttributes.ReparsePoint)==0&&info.Length>0&&info.Length<=32L*1024*1024,"Native capture executable is missing, redirected or oversized.");
+        using(FileStream stream=new FileStream(path,FileMode.Open,FileAccess.Read,FileShare.ReadWrite|FileShare.Delete))
+        using(System.Security.Cryptography.SHA256 hash=System.Security.Cryptography.SHA256.Create()) {
+            Assert(stream.Length==info.Length,"Opened native executable length changed.");byte[] bytes=new byte[checked((int)info.Length+1)];int used=0,count;
+            while(used<bytes.Length&&(count=stream.Read(bytes,used,bytes.Length-used))>0)used+=count;
+            Assert(used==info.Length&&stream.ReadByte()==-1,"Native executable changed during bounded verification.");
+            return BitConverter.ToString(hash.ComputeHash(bytes,0,used)).Replace("-","").ToLowerInvariant();
+        }
+    }
+    static bool NativeWindowDisappeared(uint pid,IntPtr window,Process child) {
+        uint current;GetWindowThreadProcessId(window,out current);
+        if(!IsWindow(window)||current!=pid)return true;
+        return child!=null&&child.HasExited;
+    }
+    static bool RequireNativeChild(uint pid,IntPtr window) {
+        if(!RustCapture)return true;
+        Process child;
+        try {child=Process.GetProcessById((int)pid);}catch(ArgumentException){if(NativeWindowDisappeared(pid,window,null))return false;throw;}
+        using(child) {
+            long started,known;
+            try {started=child.StartTime.ToUniversalTime().Ticks;}catch(InvalidOperationException){if(NativeWindowDisappeared(pid,window,child))return false;throw;}catch(System.ComponentModel.Win32Exception){if(NativeWindowDisappeared(pid,window,child))return false;throw;}
+            if(VerifiedNativeChildren.TryGetValue(pid,out known)&&known==started)return true;
+            string expected=Path.Combine(NativeCaptureCache,"echolingo-capture-"+NativeCaptureHash+".exe");
+            string actual;
+            try {actual=Path.GetFullPath(child.MainModule.FileName);}catch(InvalidOperationException){if(NativeWindowDisappeared(pid,window,child))return false;throw;}catch(System.ComponentModel.Win32Exception){if(NativeWindowDisappeared(pid,window,child))return false;throw;}
+            Assert(String.Equals(actual,expected,StringComparison.OrdinalIgnoreCase)&&NativeHash(actual)==NativeCaptureHash,"Capture child is not the exact built Rust executable in the owned application's native cache.");
+            VerifiedNativeChildren[pid]=started;return true;
+        }
+    }
     static readonly Dictionary<string, object> ActualTranslations = new Dictionary<string, object>();
     static string Selected { get { return Offline ? "Hello world. This is a translation test." : "EchoLingo application selection 97531"; } }
     static string Typed { get { return Offline ? "\u4f60\u597d\uff0c\u4e16\u754c\u3002\u8fd9\u662f\u4e00\u6b21\u7ffb\u8bd1\u6d4b\u8bd5\u3002" : "EchoLingo typed input 86420"; } }
@@ -195,6 +232,7 @@ public static class EchoLingoApplicationSmoke {
             int parent;
             if (!helperParents.TryGetValue(owner, out parent)) { parent = ParentPid((int)owner); helperParents.Add(owner, parent); }
             if (parent == appId) {
+                if(!RequireNativeChild(owner,window))return true;
                 // A capture can finish while this scan is running. A destroyed edge is not a live border.
                 if (!IsWindow(window)) return true;
                 RECT rectangle; if (!GetWindowRect(window, out rectangle) || !IsWindow(window)) return true;
@@ -209,6 +247,7 @@ public static class EchoLingoApplicationSmoke {
     }
     static bool IsInputPlane(IntPtr window, uint processId) {
         StringBuilder name = new StringBuilder(256); GetClassName(window,name,name.Capacity);
+        if(RustCapture) return name.ToString()=="EchoLingoNativeCapture-"+processId && (GetWindowLongPtr(window,-20).ToInt64()&0x00200000L)!=0;
         return name.ToString() == "EchoLingoCaptureInputPlane-" + processId;
     }
     static bool IsCaptureLoupe(IntPtr window) {
@@ -230,6 +269,7 @@ public static class EchoLingoApplicationSmoke {
             if (!IsInputPlane(window,owner) || (visibleOnly && !IsWindowVisible(window))) return true;
             int parent; if (!parents.TryGetValue(owner,out parent)) { parent=ParentPid((int)owner); parents.Add(owner,parent); }
             if (parent != appId) return true;
+            if(!RequireNativeChild(owner,window))return true;
             // Production verifies hidden construction before Present() adds
             // HWND_TOPMOST. A new picker can be observed in that valid phase
             // while the previous helper is stopping. Visible planes, including
@@ -480,7 +520,7 @@ public static class EchoLingoApplicationSmoke {
         return count;
     }
     static readonly HashSet<string> CaptureFields=new HashSet<string>(new string[]{
-        "attemptId","attemptStage","resultOk","displayChangedError","helperResponseReceived","helperElapsedMilliseconds",
+        "nativeCaptureBackend","attemptId","attemptStage","resultOk","displayChangedError","helperResponseReceived","helperElapsedMilliseconds",
         "nativeHostReady","nativeHostStopped","nativeHostFailed","hookRunningAfterStop","inputPlaneRemainingAfterCleanup",
         "hostSessionReserved","hostOwnedButtons","hostSessionClosing","hostEndRequested","cancellationRequested","displayInvalidationReason","currentHostSessionReserved","currentHostOwnedButtons","currentHostSessionClosing","currentHostEndRequested"});
     static string ReadBoundedCaptureFile(string path) {
@@ -532,6 +572,7 @@ public static class EchoLingoApplicationSmoke {
             health=CaptureSnapshot(app,start,executable,roaming,token);
             snapshots++;
             if(!health.ContainsKey("attemptId")||!health.ContainsKey("attemptStage")||CaptureNumber(health,"attemptId")<=afterAttempt||CaptureNumber(health,"attemptStage")!=4)return false;
+            if(RustCapture)Assert(CaptureNumber(health,"nativeCaptureBackend")==1,"Actual application silently used the legacy screenshot backend.");
             // Availability is published by token=0 AFTER owned pairs drain.
             // closing/endRequested are terminal generation evidence, reset only
             // by the NEXT begin(), not outstanding resource counts.
@@ -788,12 +829,15 @@ public static class EchoLingoApplicationSmoke {
         using (Process command = Process.Start(stop)) { command.StandardOutput.ReadToEnd(); command.StandardError.ReadToEnd(); Assert(command.WaitForExit(10000), "Own process-tree cleanup timed out."); }
         Assert(app.WaitForExit(5000), "Own application did not exit during cleanup.");
     }
-    public static Dictionary<string, object> Run(string executable, bool offline, bool installed, bool latest, bool customBindings) {
+    public static Dictionary<string, object> Run(string executable, bool offline, bool installed, bool latest, bool customBindings, bool rustCapture, string nativeCapturePath) {
+        RustCapture=rustCapture;VerifiedNativeChildren.Clear();NativeCaptureHash=rustCapture?NativeHash(nativeCapturePath):null;
+        Assert(!rustCapture||(latest&&!offline&&!customBindings),"Rust candidate requires the complete mock latest-intent workflows.");
         Assert(!latest||!offline,"Latest-intent extra tests are mock-only.");
         Assert(!customBindings||(!offline&&!latest),"Loaded-custom-bindings workflows require their own mock-only run.");
         Offline = offline; ActualTranslations.Clear(); hiddenPlaneStyleChecks=hiddenPlaneWithoutTopmostChecks=visiblePlaneStyleChecks=0;
         Dictionary<string, object> report = new Dictionary<string, object>(); List<string> passed = new List<string>();
         report["ok"] = false; report["passed"] = passed; report["actualApplicationTested"] = false;
+        report["rustCaptureRequested"]=RustCapture;report["expectedNativeCaptureSha256"]=NativeCaptureHash;
         report["latestIntentTestsRequested"]=latest; report["singleHotkeyPerAction"] = true;
         report["displayChangeRecoveryRequired"]=!offline&&!customBindings; report["uiAutomationSelectorsUsed"] = false;
         report["credentialsCreated"] = false; report["credentialAccessScope"] = offline ? "None: bundled offline provider" : "One random absent provider account; no existing credential or key supplied";
@@ -826,6 +870,7 @@ public static class EchoLingoApplicationSmoke {
             ClaimDirectory(roaming, token, owned); ClaimDirectory(local, token, owned);
             ClaimDirectory(root, token, owned);
             string childLocal = Path.Combine(root, "LocalAppData"); Directory.CreateDirectory(childLocal);
+            NativeCaptureCache=Path.GetFullPath(Path.Combine(childLocal,"EchoLingo","native"));
             string childTemp = Path.Combine(root, "Temp"); Directory.CreateDirectory(childTemp);
             string history = Path.Combine(roaming, "history.json");
             using (MockServer server = offline ? null : new MockServer()) {
@@ -859,6 +904,7 @@ public static class EchoLingoApplicationSmoke {
                                 start = new ProcessStartInfo(executable); start.UseShellExecute = false; start.CreateNoWindow = true;
                                 start.EnvironmentVariables["APPDATA"] = Path.Combine(root, "UnusedRoamingEnvironment");
                                 start.EnvironmentVariables["LOCALAPPDATA"] = childLocal;
+                                start.EnvironmentVariables["ECHOLINGO_RUST_CAPTURE"]=RustCapture?"1":"0";
                                 start.EnvironmentVariables["TEMP"] = childTemp; start.EnvironmentVariables["TMP"] = childTemp;
                                 start.EnvironmentVariables["WEBVIEW2_USER_DATA_FOLDER"] = Path.Combine(local, "webview-fixture");
                                 if (customBindings) hotkeys["beforeApplicationStart"] = new object[] {
@@ -976,6 +1022,7 @@ public static class EchoLingoApplicationSmoke {
                                     Assert(ActualTranslations.Count == 3 && new JavaScriptSerializer().Deserialize<object[]>(File.ReadAllText(history)).Length == 3, "Offline flows did not produce exactly three successful synthetic histories.");
                                 }
                                 if(!offline&&!customBindings) Assert(report.ContainsKey("displayChangeCancellation")&&report.ContainsKey("displayChangeRecovery"),"Required same-application display cancellation/recovery evidence is missing.");
+                                if(RustCapture){Assert(VerifiedNativeChildren.Count>=5,"Candidate did not exercise distinct verified native child generations.");report["verifiedNativeCaptureGenerations"]=VerifiedNativeChildren.Count;}
                                 report["actualOfflineTranslations"] = ActualTranslations; report["ok"] = true;
                             } catch (Exception error) { report["failedStage"]=stage;report["error"] = error.Message;InputPlaneStyleException planeError=error as InputPlaneStyleException;if(planeError!=null)report["inputPlaneStyleFailure"]=planeError.ScalarMetadata;if(app!=null&&!app.HasExited){try{report["ownMainFailureMetadata"]=MainMetadata(app);}catch(Exception diagnostic){report["mainMetadataErrorType"]=diagnostic.GetType().Name;}ObserveFailedWorkflow(report,app,start,executable,roaming,token,form,server);} }
                             finally {
@@ -1012,7 +1059,7 @@ public static class EchoLingoApplicationSmoke {
         [Web.Script.Serialization.JavaScriptSerializer].Assembly.Location, [Management.ManagementObject].Assembly.Location, [Windows.Automation.AutomationElement].Assembly.Location,
         [Windows.Automation.ControlType].Assembly.Location, [Windows.DependencyObject].Assembly.Location) | Select-Object -Unique
     Add-Type -TypeDefinition $source -ReferencedAssemblies $references
-    $result = [EchoLingoApplicationSmoke]::Run($ApplicationPath, [bool]$OfflineTranslation, [bool]$InstalledPackage, [bool]$LatestIntentTests, [bool]$CustomShortcutsTests)
+    $result = [EchoLingoApplicationSmoke]::Run($ApplicationPath, [bool]$OfflineTranslation, [bool]$InstalledPackage, [bool]$LatestIntentTests, [bool]$CustomShortcutsTests, [bool]$RustCapture, $NativeCapturePath)
     $result['powerShellVersion'] = $PSVersionTable.PSVersion.ToString()
     $result['applicationSha256'] = (Get-FileHash -Algorithm SHA256 -LiteralPath $ApplicationPath).Hash.ToLowerInvariant()
     [Console]::Out.WriteLine(($result | ConvertTo-Json -Depth 12 -Compress))

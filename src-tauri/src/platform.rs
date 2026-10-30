@@ -781,6 +781,7 @@ fn bounded_capture_health(value: &Value) -> Value {
         "assembliesLoadedMilliseconds",
         "nativeTypesReadyMilliseconds",
         "firstBordersVisibleMilliseconds",
+        "firstPickerFrameCompleteMilliseconds",
         "hookMouseDowns",
         "hookMouseUps",
         "hookMouseMoves",

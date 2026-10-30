@@ -642,6 +642,8 @@ struct EscapeState {
     inbox: Arc<Inbox>,
     initial: AtomicBool,
     ownership: EscOwnership,
+    downs: AtomicU32,
+    ups: AtomicU32,
 }
 thread_local! {static ESCAPE:std::cell::RefCell<Option<Arc<EscapeState>>>=const{std::cell::RefCell::new(None)};}
 unsafe extern "system" fn escape_hook(code: i32, wp: usize, lp: isize) -> isize {
@@ -663,9 +665,11 @@ unsafe extern "system" fn escape_hook(code: i32, wp: usize, lp: isize) -> isize 
                         return false;
                     }
                     if down && state.ownership.down() {
+                        state.downs.fetch_add(1, Ordering::Relaxed);
                         state.inbox.push(Event::Escape(true));
                         true
                     } else if up && state.ownership.up() {
+                        state.ups.fetch_add(1, Ordering::Relaxed);
                         state.inbox.push(Event::Escape(false));
                         true
                     } else {
@@ -696,6 +700,8 @@ impl EscapeListener {
             inbox,
             initial: AtomicBool::new(down(0x1b)),
             ownership: EscOwnership::default(),
+            downs: AtomicU32::new(0),
+            ups: AtomicU32::new(0),
         });
         let stopping = Arc::new(AtomicBool::new(false));
         let thread_stopping = stopping.clone();
@@ -1353,10 +1359,16 @@ impl Picker {
             }
             self.last_raise = elapsed;
         }
-        self.render_loupe(p)?;
         if self.first {
             self.health.insert(
                 "firstBordersVisibleMilliseconds",
+                self.started.elapsed().as_millis() as u64,
+            );
+        }
+        self.render_loupe(p)?;
+        if self.first {
+            self.health.insert(
+                "firstPickerFrameCompleteMilliseconds",
                 self.started.elapsed().as_millis() as u64,
             );
             self.first = false;
@@ -1516,7 +1528,10 @@ impl Picker {
                     }
                 }
                 if self.input.may_stop(true, elapsed) {
-                    if self.input.release_grace_exceeded && self.failure.is_none() {
+                    if self.input.release_grace_exceeded
+                        && (self.input.left_swallowed || self.input.right_swallowed)
+                        && self.failure.is_none()
+                    {
                         self.failure = Some(error("CAPTURE_INPUT_RELEASE"));
                     }
                     break;
@@ -1591,6 +1606,14 @@ impl Picker {
         if !self.escape.stop() {
             self.failure = Some(error("CAPTURE_INPUT"));
         }
+        self.health.insert(
+            "hookEscapeDowns",
+            self.escape.state.downs.load(Ordering::Relaxed) as u64,
+        );
+        self.health.insert(
+            "hookEscapeUps",
+            self.escape.state.ups.load(Ordering::Relaxed) as u64,
+        );
         self.health.insert(
             "hookRunningAfterStop",
             u64::from(self.escape.join.is_some()),

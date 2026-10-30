@@ -53,6 +53,31 @@ public static class EchoLingoNativeCaptureSmoke {
         IntPtr result;Need(SendOwnedDisplayChange(target,message,IntPtr.Zero,IntPtr.Zero,2,1500,out result)!=IntPtr.Zero,"Owned display-change notification timed out.");
     }
     static void InvalidateOwnedPickerDisplay(int helper){SendOwnedPickerMessage(helper,0x007e);}
+    [DllImport("user32.dll")] static extern uint GetDpiForWindow(IntPtr window);
+    [DllImport("user32.dll",EntryPoint="SendMessageTimeoutW",SetLastError=true)] static extern IntPtr SendOwnedDpi(IntPtr window,uint message,IntPtr wparam,ref RECT bounds,uint flags,uint timeout,out IntPtr result);
+    static void ProbeBenignDpi(int helper,Dictionary<string,object> report) {
+        IntPtr plane=IntPtr.Zero,edge=IntPtr.Zero;
+        EnumWindows(delegate(IntPtr window,IntPtr unused) {
+            uint pid;GetWindowThreadProcessId(window,out pid);
+            if(pid!=helper||!IsWindowVisible(window))return true;
+            if(Plane(window,helper))plane=window;
+            else if(Class(window)=="EchoLingoNativeCapture-"+helper&&!Loupe(window))edge=window;
+            return true;
+        },IntPtr.Zero);
+        Need(plane!=IntPtr.Zero&&edge!=IntPtr.Zero,"DPI notification requires exact owned visible plane and edge.");
+        foreach(bool changed in new bool[]{false,true})foreach(IntPtr target in new IntPtr[]{plane,edge}) {
+            uint pid;GetWindowThreadProcessId(target,out pid);Need(pid==helper&&IsWindowVisible(target),"DPI target ownership changed.");
+            uint actual=GetDpiForWindow(target);Need(actual>=96&&actual<=768,"Invalid actual window DPI.");
+            uint notified=changed?(actual==144?192u:144u):actual;
+            RECT bounds;Need(GetWindowRect(target,out bounds),"Cannot obtain valid owned DPI RECT.");
+            Rectangle before=Bounds(target);IntPtr result;
+            Need(SendOwnedDpi(target,0x02e0,new IntPtr((long)(notified|(notified<<16))),ref bounds,2,1500,out result)!=IntPtr.Zero,"Owned DPI notification timeout.");
+            Need(GetDpiForWindow(target)==actual&&Bounds(target)==before,"Synthetic DPI notification altered fixed physical overlay bounds.");
+        }
+        report["benignDpiMessagesSent"]=4;
+        report["actualSystemDisplayConfigurationChanged"]=false;
+    }
+
     [DllImport("user32.dll")] static extern IntPtr WindowFromPoint(Point point);
     [DllImport("user32.dll")] static extern IntPtr GetDesktopWindow();
     [DllImport("user32.dll")] static extern bool ScreenToClient(IntPtr window,ref Point point);
@@ -310,6 +335,11 @@ public static class EchoLingoNativeCaptureSmoke {
                 }
                 if(Ready(helper,source.AH,source.AFrame,source.Display,source.First,observed)){ready=true;break;}Thread.Sleep(10);}
             Need(ready,"Exact delegated helper screen/hover/plane readiness was not observed within25000ms.");report["helperReadyMilliseconds"]=clock.Elapsed.TotalMilliseconds;report["requestToFullPickerReadyObservedMilliseconds"]=requestToBorder.Elapsed.TotalMilliseconds;
+            if(kind=="benign-dpi-notifications-then-capture") {
+                ProbeBenignDpi(helper,report);
+                Need(Alive(helper)&&Ready(helper,source.AH,source.AFrame,source.Display,source.First,observed),"Benign DPI messages cancelled or changed the ready picker.");
+                report["benignDpiPickerContinued"]=true;
+            }
             bool planeCancel=kind=="own-plane-cancelmode-no-input";bool heldEscape=kind=="escape-held900ms-drains-real-key-up";bool displayInvalid=kind=="display-change-before-input";bool late=kind=="escape-held-release-after-helper-close";Dictionary<string,object> reply=null;bool cross=kind=="cross-peer-held900ms";if(cross)source.OnUi(delegate {source.Background.BackColor=Color.FromArgb(75,115,165);source.Background.Refresh();});Point last=cross?source.Last:new Point(source.First.X+35,source.First.Y+15);bool cancel=kind=="escape-drains-owned-release";
             if(planeCancel){
                 SendOwnedPickerMessage(helper,0x001f);report["ownedPlaneCancelModeMessage"]=0x001f;
@@ -349,6 +379,7 @@ public static class EchoLingoNativeCaptureSmoke {
             if(reply==null){reply=host.Finish(report,12000);finished=true;}
             Need(zero,"UNDERLYING_INPUT: Generated source received a fresh capture down/up/click.");
             Dictionary<string,object> health=(Dictionary<string,object>)reply["captureHealth"];
+            if(kind=="benign-dpi-notifications-then-capture")Need(health.ContainsKey("displayWindowDpiNotificationsVerified")&&Convert.ToInt64(health["displayWindowDpiNotificationsVerified"])>=2,"Changed DPI notifications did not complete both real monitor topology rechecks.");
             // Host down/up counters are sparse: production creates them only when an event occurs.
             // Only this intentionally no-input display-cancellation case may omit them.
             foreach(string key in new string[]{"inputBackend","nativeHostReady","nativeHostArmed","nativeHostDowns","mouseHookInstalled","hookMouseDowns","hookMouseUps","inputPlaneDowns","inputPlaneUps","inputPlaneRemainingAfterCleanup"})Need((displayInvalid&&key=="nativeHostDowns")||health.ContainsKey(key),"Missing delegated health field: "+key);
@@ -363,8 +394,9 @@ public static class EchoLingoNativeCaptureSmoke {
             }else if(heldEscape){
                 source.Drain();Need(source.EscapeDowns==1&&source.EscapeUps==1,"Owned Escape leaked after completed child teardown.");
                 Need(!(bool)reply["ok"]&&!reply.ContainsKey("imageBase64")&&reply.ContainsKey("error"),"Held Escape cancellation produced pixels or success.");
-                Need(Convert.ToString(reply["error"]).StartsWith("CANCELLED:",StringComparison.Ordinal)||Convert.ToString(reply["error"]).StartsWith("CAPTURE_INPUT_RELEASE:",StringComparison.Ordinal),"Held Escape failed for an unrelated native error.");
+                Need(Convert.ToString(reply["error"]).StartsWith("CANCELLED:",StringComparison.Ordinal),"Held Escape failed for an unrelated native error.");
                 Need(health.ContainsKey("nativeHostStopped")&&Convert.ToInt64(health["nativeHostStopped"])==1&&Convert.ToInt64(health["nativeHostDowns"])==0&&Convert.ToInt64(health["nativeHostUps"])==0,"Escape-only session fabricated a mouse pair or missed STOP.");
+                Need(Convert.ToInt64(health["hookEscapeDowns"])>=2&&Convert.ToInt64(health["hookEscapeUps"])==1,"Held Escape down/repeat/up was not actually observed.");
                 Need(health.ContainsKey("hookEscapeReleaseUnconfirmed")&&Convert.ToInt64(health["hookEscapeReleaseUnconfirmed"])==0&&Convert.ToInt64(health["hookRunningAfterStop"])==0,"Escape hook exited without proving owned key-up drained.");
             }else if(displayInvalid){
                 Need(health.ContainsKey("nativeHostStopped")&&Convert.ToInt64(health["nativeHostStopped"])==1
@@ -421,13 +453,13 @@ public static class EchoLingoNativeCaptureSmoke {
         Need(!helper.Contains("\"")&&!harness.Contains("\""),"Invalid fixture path.");SetProcessDpiAwarenessContext(new IntPtr(-4));Need(SetThreadDpiAwarenessContext(new IntPtr(-4))!=IntPtr.Zero,"Controller physical DPI context failed.");
         List<Dictionary<string,object>> cases=new List<Dictionary<string,object>>();bool ok=true;Dictionary<string,object> stopped=null;
         using(Host host=new Host(harness,helper)){
-            foreach(string kind in new string[]{"first-fresh-pair-immediate-release","topmost-self-raise-immediate-first-pair","foreign-thread-native-capture","cross-peer-held900ms","preheld-source-release-then-first-fresh-pair","escape-drains-owned-release","escape-held-release-after-helper-close","next-capture-after-escape","display-change-before-input","next-capture-after-display-change","escape-held900ms-drains-real-key-up","next-capture-after-held-escape","own-plane-cancelmode-no-input","next-capture-after-plane-cancelmode"}){
+            foreach(string kind in new string[]{"first-fresh-pair-immediate-release","topmost-self-raise-immediate-first-pair","foreign-thread-native-capture","cross-peer-held900ms","preheld-source-release-then-first-fresh-pair","escape-drains-owned-release","escape-held-release-after-helper-close","next-capture-after-escape","display-change-before-input","next-capture-after-display-change","escape-held900ms-drains-real-key-up","next-capture-after-held-escape","own-plane-cancelmode-no-input","next-capture-after-plane-cancelmode","benign-dpi-notifications-then-capture"}){
                 Dictionary<string,object> result=Case(host,kind);cases.Add(result);ok=ok&&(bool)result["ok"];if(!host.Usable||host.Child!=0||host.Process.HasExited)break;
             }
             if(host.Child==0&&!host.Process.HasExited){host.Shutdown();stopped=host.Read(4000);Need((string)stopped["event"]=="stopped"&&Convert.ToInt32(stopped["completedGenerations"])==cases.Count,"Host stop/generation mismatch.");Need(host.Process.WaitForExit(4000)&&host.Process.ExitCode==0,"Production observer host failed to exit.");}
             else ok=false;
         }
-        return new Dictionary<string,object>{{"ok",ok&&cases.Count==14},{"cases",cases},{"hostShutdown",stopped},{"productionModulesImported",true},{"requestedInputBackend","delegated-exact-production"},{"userContentCaptured",false},{"clipboardAccessed",false},{"scope","Exact production hook pump/session and Rust candidate picker with generated same-integrity peers only; no Tauri/engine, physical app, elevated boundary or universal acceptance claim."}};
+        return new Dictionary<string,object>{{"ok",ok&&cases.Count==15},{"cases",cases},{"hostShutdown",stopped},{"productionModulesImported",true},{"requestedInputBackend","delegated-exact-production"},{"userContentCaptured",false},{"clipboardAccessed",false},{"scope","Exact production hook pump/session and Rust candidate picker with generated same-integrity peers only; no Tauri/engine, physical app, elevated boundary or universal acceptance claim."}};
     }
 }
 '@

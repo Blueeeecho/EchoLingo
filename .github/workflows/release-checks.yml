@@ -170,6 +170,12 @@ jobs:
           if ($launcherOffset -lt 0) { throw 'The complete candidate launcher is not embedded byte-for-byte in the actual application.' }
           [ordered]@{ launcherBytes = $launcherBytes.Length; launcherSha256 = (Get-FileHash $launcher -Algorithm SHA256).Hash.ToLowerInvariant(); completeLauncherEmbedded = $true; exactLauncherOffset = $launcherOffset } | ConvertTo-Json -Compress
           "path=$($dll.FullName)" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+          $capture = Join-Path $dll.DirectoryName 'echolingo-native-capture.exe'
+          $captureBytes = [IO.File]::ReadAllBytes($capture)
+          $captureOffset = [EchoLingoExactPayload]::Find($appBytes, $captureBytes)
+          if ($captureOffset -lt 0) { throw 'The complete Rust capture child is not embedded byte-for-byte in the actual application.' }
+          "capturePath=$capture" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+          [ordered]@{ nativeCaptureBytes = $captureBytes.Length; nativeCaptureSha256 = (Get-FileHash $capture -Algorithm SHA256).Hash.ToLowerInvariant(); completeNativeCaptureEmbedded = $true; exactNativeCaptureOffset = $captureOffset } | ConvertTo-Json -Compress
           [ordered]@{ dllBytes = $dllBytes.Length; dllSha256 = (Get-FileHash $dll.FullName -Algorithm SHA256).Hash.ToLowerInvariant(); completePayloadEmbedded = $true; exactPayloadOffset = $payloadOffset } | ConvertTo-Json -Compress
       - name: Verify generated Windows launcher boundaries and same-DLL performance
         if: runner.os == 'Windows'
@@ -328,6 +334,18 @@ jobs:
           $output | Out-File "$env:RUNNER_TEMP/echolingo-application-latest-intent.log" -Encoding utf8
           $output | Write-Output
           exit $fixtureExit
+      - name: Windows actual application Rust capture and OCR candidate
+        id: windows_application_native_capture
+        if: runner.os == 'Windows'
+        continue-on-error: true
+        timeout-minutes: 5
+        shell: powershell
+        run: |
+          $output = @(& powershell.exe -NoProfile -STA -ExecutionPolicy Bypass -File tests/windows-application-smoke.ps1 -ApplicationPath src-tauri/target/release/echolingo.exe -LatestIntentTests -RustCapture -NativeCapturePath '${{ steps.windows_native_candidate.outputs.capturePath }}' 2>&1)
+          $fixtureExit = $LASTEXITCODE
+          $output | Out-File "$env:RUNNER_TEMP/echolingo-application-native-capture.log" -Encoding utf8
+          $output | Write-Output
+          exit $fixtureExit
       - name: Windows popup outside-click and focus integration smoke
         id: windows_popup_visibility
         if: runner.os == 'Windows'
@@ -474,6 +492,7 @@ jobs:
             ${{ runner.temp }}/echolingo-selection-compat.log
             ${{ runner.temp }}/echolingo-selection-native-focus.log
             ${{ runner.temp }}/echolingo-application-latest-intent.log
+            ${{ runner.temp }}/echolingo-application-native-capture.log
             ${{ runner.temp }}/echolingo-selection-rigorous.log
             ${{ runner.temp }}/echolingo-selection-budget.log
             ${{ runner.temp }}/echolingo-selection-query.log
@@ -507,6 +526,7 @@ jobs:
           $taskOutcomes = @{
             liveCapture = '${{ steps.windows_live_capture.outcome }}'
             applicationCore = '${{ steps.windows_application_core.outcome }}'
+            applicationNativeCapture = '${{ steps.windows_application_native_capture.outcome }}'
             popupVisibility = '${{ steps.windows_popup_visibility.outcome }}'
             popupResize = '${{ steps.windows_popup_resize.outcome }}'
             installedOffline = '${{ steps.windows_installed_offline.outcome }}'

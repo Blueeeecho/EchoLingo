@@ -235,6 +235,16 @@ public static class EchoLingoDelegatedCaptureSmoke {
             Need(ui.Join(5000),"Generated peer UI thread did not clean up.");ready.Dispose();
         }
     }
+    static bool HasVisibleOwnedBorder(int helper) {
+        bool seen=false;
+        EnumWindows(delegate(IntPtr window,IntPtr unused){
+            uint pid;GetWindowThreadProcessId(window,out pid);
+            if(pid!=helper||!IsWindowVisible(window))return true;
+            long style=GetWindowLongPtr(window,-20).ToInt64();const long edge=0x08000000L|0x80000L|0x20L|8;
+            if((style&edge)==edge){Rectangle r=Bounds(window);if(r.Width>0&&r.Height>0&&Math.Min(r.Width,r.Height)<=2){seen=true;return false;}}
+            return true;
+        },IntPtr.Zero);return seen;
+    }
     static int VisiblePlanes(int helper) {
         int count=0;EnumWindows(delegate(IntPtr window,IntPtr unused){uint pid;GetWindowThreadProcessId(window,out pid);if(pid==helper&&Plane(window,helper)&&IsWindowVisible(window))count++;return true;},IntPtr.Zero);return count;
     }
@@ -253,6 +263,7 @@ public static class EchoLingoDelegatedCaptureSmoke {
             source=new Sources();int oldDown=0,oldUp=0,oldClick=0;
             bool preheld=kind=="preheld-source-release-then-first-fresh-pair";
             if(preheld){Send(new INPUT[]{Mouse(2)});source.Partial=true;Thread.Sleep(80);source.Drain();Need(source.Downs==1&&source.Ups==0,"Preheld setup did not deliver exactly one source down.");}
+            Stopwatch requestToBorder=Stopwatch.StartNew();
             int helper=host.Begin();report["helperProcessId"]=helper;report["hostProcessId"]=host.Process.Id;report["generation"]=host.Generation;report["firstCommandBomRemoved"]=host.FirstCommandBomRemoved;report["ordinaryHelperAndAssemblyPathsVerified"]=host.OrdinaryPathsVerified;
             report["sourceAHwnd"]=Id(source.AH);report["sourceBHwnd"]=Id(source.BH);report["sourceUiThreadId"]=source.ThreadId;report["controllerThreadId"]=GetCurrentThreadId();
             report["sourcePhysicalDwmBounds"]=Rect(source.AFrame);report["sourceForegroundBefore"]=Id(GetForegroundWindow());
@@ -266,8 +277,13 @@ public static class EchoLingoDelegatedCaptureSmoke {
                 report["preheldSourceDowns"]=oldDown;report["preheldSourceUps"]=oldUp;report["preheldSourceClicks"]=oldClick;report["preheldPlanesHidden"]=true;
             }
             Dictionary<string,object> observed=new Dictionary<string,object>();report["readyObservation"]=observed;Stopwatch clock=Stopwatch.StartNew();bool ready=false;
-            while(clock.ElapsedMilliseconds<25000&&Alive(helper)){if(Ready(helper,source.AH,source.AFrame,source.Display,source.First,observed)){ready=true;break;}Thread.Sleep(10);}
-            Need(ready,"Exact delegated helper screen/hover/plane readiness was not observed within25000ms.");report["helperReadyMilliseconds"]=clock.Elapsed.TotalMilliseconds;
+            while(clock.ElapsedMilliseconds<25000&&Alive(helper)){
+                if(!report.ContainsKey("requestToFirstBorderObservedMilliseconds")&&HasVisibleOwnedBorder(helper)) {
+                    report["requestToFirstBorderObservedMilliseconds"]=requestToBorder.Elapsed.TotalMilliseconds;
+                    report["borderTimingScope"]="Parent fixture capture command through child launch to first observed visible border; 10ms polling upper bound, NOT application Alt+S latency";
+                }
+                if(Ready(helper,source.AH,source.AFrame,source.Display,source.First,observed)){ready=true;break;}Thread.Sleep(10);}
+            Need(ready,"Exact delegated helper screen/hover/plane readiness was not observed within25000ms.");report["helperReadyMilliseconds"]=clock.Elapsed.TotalMilliseconds;report["requestToFullPickerReadyObservedMilliseconds"]=requestToBorder.Elapsed.TotalMilliseconds;
             bool displayInvalid=kind=="display-change-before-input";bool late=kind=="escape-held-release-after-helper-close";Dictionary<string,object> reply=null;bool cross=kind=="cross-peer-held900ms";if(cross)source.OnUi(delegate {source.Background.BackColor=Color.FromArgb(75,115,165);source.Background.Refresh();});Point last=cross?source.Last:new Point(source.First.X+35,source.First.Y+15);bool cancel=kind=="escape-drains-owned-release";
             if(displayInvalid){
                 InvalidateOwnedPickerDisplay(helper);report["actualDisplayConfigurationChanged"]=false;

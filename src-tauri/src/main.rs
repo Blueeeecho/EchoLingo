@@ -262,6 +262,7 @@ fn capture_diagnostics_requested(args: &[String]) -> bool {
 fn capture_diagnostic_payload(diagnostics: serde_json::Value) -> serde_json::Value {
     let mut safe = serde_json::Map::new();
     for field in [
+        "nativeCaptureBackend",
         "attemptId",
         "attemptStage",
         "resultOk",
@@ -3693,13 +3694,13 @@ mod tests {
             "--capture-diagnostics=other.json".into()
         ]));
         let payload = super::capture_diagnostic_payload(serde_json::json!({
-            "attemptId": 7, "resultOk": 0, "hostOwnedButtons": 0,
+            "attemptId": 7, "resultOk": 0, "hostOwnedButtons": 0, "nativeCaptureBackend": 1,
             "displayChangedError": "private", "sourceText": "private", "imageBase64": "private",
         }));
         assert_eq!(payload["diagnostic"], "last-capture-attempt");
         assert_eq!(
             payload["diagnostics"],
-            serde_json::json!({"attemptId": 7, "resultOk": 0, "hostOwnedButtons": 0})
+            serde_json::json!({"attemptId": 7, "resultOk": 0, "hostOwnedButtons": 0, "nativeCaptureBackend": 1})
         );
         assert!(!payload.to_string().contains("private"));
     }
