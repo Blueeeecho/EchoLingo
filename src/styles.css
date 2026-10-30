@@ -355,10 +355,16 @@ body[data-view="translate"] .result-provider { font-size: 10px; }
 .free-region { display: flex; gap: 8px; margin: 0 0 12px; }
 .free-region button { border: 1px solid var(--border); border-radius: 999px; padding: 4px 10px; font-size: 11px; color: var(--secondary); }
 .free-region button[aria-pressed="true"] { background: var(--accent-soft); color: var(--accent); border-color: transparent; }
-.free-combo-list { display: flex; flex-direction: column; gap: 10px; }
-.free-combo { border: 1px solid var(--border); border-radius: 10px; padding: 12px 14px; background: var(--surface-soft); }
-.free-combo h3 { margin: 0 0 6px; font-size: 13px; }
-.free-combo p { margin: 0 0 8px; font-size: 11px; line-height: 1.6; color: var(--secondary); }
+.free-service-list { list-style: none; margin: 0; padding: 0; }
+.free-service-section { margin-top: 18px; }
+.free-service-section > h3 { font-size: 13px; margin: 0 0 8px; }
+.free-service { padding: 12px 0; border-top: 1px solid var(--border); overflow-wrap: anywhere; }
+.free-service h4 { margin: 0 0 6px; font-size: 13px; }
+.free-service p { margin: 0 0 6px; font-size: 12px; line-height: 1.6; }
+.free-service-conditions, .free-service small { color: var(--secondary); }
+.free-service small { font-size: 10px; }
+.free-service-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 6px; }
+
 .free-setup-fields { display: flex; flex-direction: column; gap: 10px; }
 .free-setup-fields label { display: flex; flex-direction: column; gap: 4px; font-size: 11px; }
 .free-setup-fields input { font-size: 12px; border: 1px solid var(--border); border-radius: 7px; padding: 8px 10px; background: var(--surface-soft); }
@@ -380,3 +386,4 @@ body[data-view="translate"] #source-text, body[data-view="translate"] .result-te
 :root body[data-view] .result-text[data-paragraph-spacing="compact"] { line-height: .35; }
 .result-text .result-text-run { display: inline; line-height: 1.75; }
 .result-text .result-paragraph-break { display: inline; line-height: .35; white-space: pre-wrap; }
+.free-service-warning { padding: 8px 10px; border-left: 3px solid var(--danger); color: var(--text); background: var(--surface-soft); font-size: 12px; line-height: 1.6; }
