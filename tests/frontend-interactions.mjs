@@ -2053,7 +2053,6 @@ try {
   await page.locator('#enable-system-translation').click();
   await page.waitForFunction(() => window.__qa.settings.providers.some(p => p.kind === 'system' && p.enabled));
   assert.equal(await page.evaluate(() => window.__qa.settings.providers.find(p => p.id === 'qa-service').enabled), true);
-  const systemName = await page.evaluate(() => window.__qa.settings.providers.find(p => p.kind === 'system').name);
   const systemRow = page.locator('.provider-row').filter({ hasText: '无需 API Key' });
   await systemRow.getByRole('button', { name: '编辑', exact: true }).click();
   assert.equal(await page.locator('#provider-url').isVisible(), false);
@@ -2062,11 +2061,12 @@ try {
   await page.locator('#save-provider').click();
   await page.locator('#provider-dialog').waitFor({ state: 'hidden' });
   await page.locator('.app-shell').screenshot({ path: 'test-results/system-translation-settings.png' });
-  await systemRow.getByRole('button', { name: `删除 ${systemName}`, exact: true }).click();
-  await page.locator('#confirm-accept').click();
-  await page.waitForFunction(() => !window.__qa.settings.providers.some(p => p.kind === 'system'));
+  assert.equal(await systemRow.locator('[data-service-action=remove]').isHidden(), true);
+  assert.equal(await systemRow.locator('[data-service-action=remove]').isDisabled(), true);
+  await systemRow.getByRole('checkbox').uncheck();
+  await page.waitForFunction(() => window.__qa.settings.providers.some(p => p.kind === 'system' && !p.enabled));
   assert.deepEqual(await page.evaluate(() => ({ writes: window.__qa.keyCalls, deletes: window.__qa.keyDeleteCalls })), systemKeysBefore);
-  // Offline service edits/removal must not query, write or delete credentials.
+  // Built-in services remain installed; editing/disabling must not touch credentials.
   const offlineKeysBefore = await page.evaluate(() => ({ writes: window.__qa.keyCalls, deletes: window.__qa.keyDeleteCalls, reads: window.__qa.credentialReadCalls }));
   await page.locator('#add-provider').click();
   await page.locator('#provider-preset').selectOption('offline');
@@ -2081,9 +2081,10 @@ try {
   assert.equal(await page.locator('#provider-preset').inputValue(), 'offline');
   await page.locator('#save-provider').click();
   await page.locator('#provider-dialog').waitFor({ state: 'hidden' });
-  await offlineRow.getByRole('button', { name: '删除 本机离线翻译', exact: true }).click();
-  await page.locator('#confirm-accept').click();
-  await page.waitForFunction(() => !window.__qa.settings.providers.some(p => p.kind === 'offline'));
+  assert.equal(await offlineRow.locator('[data-service-action=remove]').isHidden(), true);
+  assert.equal(await offlineRow.locator('[data-service-action=remove]').isDisabled(), true);
+  await offlineRow.getByRole('checkbox').uncheck();
+  await page.waitForFunction(() => window.__qa.settings.providers.some(p => p.kind === 'offline' && !p.enabled));
   assert.deepEqual(await page.evaluate(() => ({ writes: window.__qa.keyCalls, deletes: window.__qa.keyDeleteCalls, reads: window.__qa.credentialReadCalls })), offlineKeysBefore);
   await page.locator('.app-shell').screenshot({ path: 'test-results/settings-main.png' });
   await goView('translate');
