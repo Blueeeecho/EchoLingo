@@ -3506,6 +3506,46 @@ try {
   }
   assert.deepEqual(errors, []);
   console.log('PASS: Windows and macOS two-default shortcut UI permits changing core bindings, explicitly opting in optional actions, rejecting duplicates and clearing all bindings. Mock IPC only.');
+  for (const windows of [false, true]) {
+    await page.goto(`http://127.0.0.1:1420/?twoShortcutDefaultsFixture=1${windows ? '&windowsSelectionFixture=1' : ''}`);
+    const pin = page.locator('#pin-button'), more = page.locator('#more-toggle');
+    await pin.waitFor();
+    await pin.evaluate(element => element.focus({ preventScroll: true }));
+    assert.equal(await pin.evaluate(element => document.activeElement === element), true);
+    assert.equal(await pin.evaluate(element => getComputedStyle(element).outlineStyle), 'none', 'restored/programmatic pin focus has no purple ring');
+    await pin.click();
+    assert.equal(await pin.getAttribute('aria-pressed'), 'true', 'pointer pin activation is preserved');
+    assert.equal(await pin.evaluate(element => getComputedStyle(element).outlineStyle), 'none');
+    await more.evaluate(element => element.focus({ preventScroll: true }));
+    await page.keyboard.press('Shift+Tab');
+    assert.equal(await pin.evaluate(element => document.activeElement === element), true);
+    assert.equal(await pin.evaluate(element => getComputedStyle(element).outlineStyle), 'solid', 'Shift+Tab keeps keyboard ring');
+    await page.keyboard.press('Tab');
+    assert.equal(await more.evaluate(element => document.activeElement === element), true);
+    assert.equal(await more.evaluate(element => getComputedStyle(element).outlineStyle), 'solid', 'Tab keeps keyboard ring');
+    await page.keyboard.press('Shift+Tab');
+    await page.keyboard.press('Space');
+    await page.waitForFunction(() => document.querySelector('#pin-button').getAttribute('aria-pressed') === 'false');
+    assert.equal(await pin.evaluate(element => getComputedStyle(element).outlineStyle), 'solid', 'keyboard pin activation retains ring');
+    await pin.click();
+    assert.equal(await pin.evaluate(element => getComputedStyle(element).outlineStyle), 'none', 'pointer interaction clears prior keyboard ring');
+    await page.keyboard.press('Tab');
+    await page.evaluate(() => new Promise(resolve => setTimeout(resolve, 0)));
+    await pin.evaluate(element => element.focus({ preventScroll: true }));
+    assert.equal(await pin.evaluate(element => getComputedStyle(element).outlineStyle), 'none', 'later programmatic focus does not inherit an old Tab');
+    await page.keyboard.press('Tab');
+    await page.evaluate(() => window.dispatchEvent(new Event('blur')));
+    assert.equal(await more.evaluate(element => document.activeElement === element), true, 'clearing restoration ring never blurs or redirects focus');
+    assert.equal(await more.evaluate(element => getComputedStyle(element).outlineStyle), 'none');
+    await page.keyboard.press('Shift+Tab');
+    await page.evaluate(() => {
+      delete document.body.dataset.popupFocusManaged;
+      document.querySelector('#pin-button').removeAttribute('data-keyboard-focus');
+    });
+    assert.equal(await pin.evaluate(element => getComputedStyle(element).outlineStyle), 'solid', 'unmanaged browser/demo toolbar keeps the browser keyboard focus cue');
+  }
+  assert.deepEqual(errors, []);
+  console.log('PASS: macOS and Windows toolbar restored/programmatic and pointer focus stay quiet; Tab/Shift+Tab and keyboard activation retain accessible focus rings without changing pin or moving focus. Mock IPC only.');
   console.log('PASS: persistent screenshot permission guidance prepared before presentation; click-only correct pane without authorization; retained sanitized link failure and manual path; first-use pending-open help navigation/focus; 800 px light and 420 px narrow/dark screenshots; dismiss/input/quiet Alt+D/Alt+A/stale-epoch recovery; deferred-modal permission payload and granted-status clearing; backend cancellation tickets on edit/clear/stop/Escape/close/native hide; native presentation epochs cover unallocated tickets, omitted/stale hide events, reopen overtaking pending begin and stale delayed popup fitting; backend-only cancellation clears old result state; late-ticket and replacement ordering; pending-save close/reentry guard; failure unlock; blank shortcuts; duplicate rejection; no countdown; theme/favorites and history bounds; OCR dual-key bundles/protocol isolation/no plaintext settings; documented vendor presets; origin-bound saved-key indications; minimal popup/menu/automatic source height; OCR configuration/privacy; empty-selection immediate typing; persistent source copy/speech; pin edge/icon/keyboard hit areas and drag isolation; captured source editing after completion and pending cancellation/retranslation; narrow-wrap source presentation; inconsistent permission feedback; automatic/fixed targets; Enter/ShiftEnter/IME/repeat; passive permissions; real capture and translation error preservation.');
 } finally {
   await browser.close();

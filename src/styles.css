@@ -389,3 +389,7 @@ body[data-view="translate"] #source-text, body[data-view="translate"] .result-te
 .result-text .result-text-run { display: inline; line-height: 1.75; }
 .result-text .result-paragraph-break { display: inline; line-height: .35; white-space: pre-wrap; }
 .free-service-warning { padding: 8px 10px; border-left: 3px solid var(--danger); color: var(--text); background: var(--surface-soft); font-size: 12px; line-height: 1.6; }
+
+/* Native popup restoration is not keyboard navigation. Do not move focus or
+   suppress keyboard cues on source fields, menus, or management controls. */
+body[data-popup-focus-managed="true"] .popup-toolbar > .icon-button:focus-visible:not([data-keyboard-focus]) { outline: none; }
