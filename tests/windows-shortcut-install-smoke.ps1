@@ -32,8 +32,9 @@ function Probe([int]$Expected, [string]$ExpectedOutput, [string]$Name) {
         $process.Dispose()
     }
 }
-function Set-Bindings([string]$Selection, [string]$Ocr) {
-    @{ shortcutDefaultsVersion=1; shortcuts=@{ selection=$Selection; silentOcr=$Ocr; capture=''; ocr=''; input='' } } |
+function Set-Bindings([string]$Selection, [string]$Ocr, [string]$ManualInput = '', [string]$Recognition = '') {
+    # Optional bindings are explicit current-schema choices, never legacy defaults.
+    @{ shortcutDefaultsVersion=2; shortcuts=@{ selection=$Selection; silentOcr=$Ocr; capture=''; ocr=$Recognition; input=$ManualInput } } |
         ConvertTo-Json -Depth 4 -Compress | ForEach-Object { [IO.File]::WriteAllText($script:settings, $_, [Text.UTF8Encoding]::new($false)) }
 }
 try {
@@ -64,8 +65,18 @@ public static class EchoLingoShortcutOwner {
     Probe 0 "selection=Alt+D`nsilentOcr=Alt+S`n" 'available-after-owner-release'
     Require ([EchoLingoShortcutOwner]::RegisterHotKey([IntPtr]::Zero, 17031, 1, 0x41)) 'Cannot own the fixture compatible-input conflict.'
     $held = $true
-    Probe 2 "input=Alt+A`n" 'compatible-enabled-binding-conflict-not-missed'
+    Probe 0 "selection=Alt+D`nsilentOcr=Alt+S`n" 'fresh-disabled-input-does-not-conflict'
+    Set-Bindings 'Alt+D' 'Alt+S' 'Alt+A'
+    Probe 2 "input=Alt+A`n" 'explicit-compatible-input-conflict-not-missed'
     Require ([EchoLingoShortcutOwner]::UnregisterHotKey([IntPtr]::Zero, 17031)) 'Cannot release compatible fixture hotkey.'
+    $held = $false
+    Set-Bindings 'Alt+D' 'Alt+S'
+    Require ([EchoLingoShortcutOwner]::RegisterHotKey([IntPtr]::Zero, 17031, 5, 0x53)) 'Cannot own the fixture optional OCR conflict.'
+    $held = $true
+    Probe 0 "selection=Alt+D`nsilentOcr=Alt+S`n" 'disabled-optional-ocr-does-not-conflict'
+    Set-Bindings 'Alt+D' 'Alt+S' '' 'Alt+Shift+S'
+    Probe 2 "ocr=Alt+Shift+S`n" 'explicit-optional-ocr-conflict-not-missed'
+    Require ([EchoLingoShortcutOwner]::UnregisterHotKey([IntPtr]::Zero, 17031)) 'Cannot release optional OCR fixture hotkey.'
     $held = $false
     Set-Bindings 'Ctrl+Alt+Shift+F9' 'Ctrl+Alt+Shift+F10'
     Probe 0 "selection=Ctrl+Alt+Shift+F9`nsilentOcr=Ctrl+Alt+Shift+F10`n" 'existing-custom-settings'

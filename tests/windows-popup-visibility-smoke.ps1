@@ -446,7 +446,7 @@ public static class EchoLingoPopupVisibilitySmoke {
                 { "providers", new object[] { new Dictionary<string, object> { { "id", "offline-translation" }, { "name", "Generated visibility fixture offline" },
                     { "kind", "offline" }, { "baseUrl", "" }, { "model", "" }, { "enabled", true }, { "prompt", "" } } } },
                 { "ocrProviders", new object[0] }, { "activeOcrProviderId", null }, { "sourceLanguage", "auto" }, { "targetLanguage", "auto" },
-                { "languageDirectionVersion", 1 }, { "shortcutDefaultsVersion", 1 }, { "saveHistory", false }, { "maxHistory", 20 },
+                { "languageDirectionVersion", 1 }, { "shortcutDefaultsVersion", 2 }, { "saveHistory", false }, { "maxHistory", 20 },
                 { "theme", "light" }, { "autoHideSeconds", 0 }, { "shortcuts", new Dictionary<string, object> {
                     { "selection", "Alt+D" }, { "capture", "Alt+S" }, { "ocr", "Alt+Shift+S" }, { "silentOcr", "Alt+C" }, { "input", "Alt+A" } } }
             };

@@ -17,9 +17,12 @@ try {
       automaticUpdateChecks: false, includePrereleaseUpdates: true,
       providers: [{ id: 'qa-service', name: 'QA IPC fixture', kind: 'openai', baseUrl: 'https://example.invalid/v1', model: 'test-model', enabled: true, prompt: '', hasKey: true }],
       sourceLanguage: 'auto', targetLanguage: 'zh-Hans',
+      // Explicit custom bindings test every entry point; these are not product defaults.
+      shortcutDefaultsVersion: 2,
       shortcuts: { selection: 'Alt+D', capture: 'Alt+S', ocr: 'Alt+Shift+S', silentOcr: 'Alt+C', input: 'Alt+A' },
       saveHistory: true, theme: 'light', maxHistory: 20, autoHideSeconds: 0, ocrProviders: [], activeOcrProviderId: null,
     };
+    if (new URL(location.href).searchParams.has('twoShortcutDefaultsFixture')) state.shortcuts = { selection: 'Alt+D', capture: '', ocr: '', silentOcr: 'Alt+S', input: '' };
     const setupKind = new URL(location.href).searchParams.get('translationSetupFixture');
     if (new URL(location.href).searchParams.has('translationRetryFixture')) {
       state.providers.push({ ...state.providers[0], id: 'qa-retry', name: 'QA retry service' });
@@ -3448,6 +3451,35 @@ try {
   assert.equal(await page.evaluate(() => window.__qa.updateChecks.length), checksBeforeAuto + 1);
   assert.deepEqual(errors, []);
   console.log('PASS: free update notice defaults offline; manual duplicate clicks, hidden/reopened windows, channel changes during pending requests, sanitized offline failures, exact allowlisted release-page opening, failed opt-in rollback and opt-in/off automatic timer. Mock IPC only.');
+  for (const windows of [false, true]) {
+    await page.goto(`http://127.0.0.1:1420/?twoShortcutDefaultsFixture=1${windows ? '&windowsSelectionFixture=1' : ''}`);
+    await page.locator('#more-toggle').click();
+    await page.locator('button[data-view="settings"]').click();
+    await page.locator('#shortcut-selection').waitFor();
+    assert.equal(await page.locator('#shortcut-selection').inputValue(), 'Alt+D');
+    assert.equal(await page.locator('#shortcut-silentOcr').inputValue(), 'Alt+S');
+    assert.deepEqual(await page.evaluate(() => Object.values(window.__qa.settings.shortcuts).filter(Boolean)), ['Alt+D', 'Alt+S']);
+    await page.locator('#shortcut-advanced > summary').click();
+    assert.equal(await page.locator('input[name="input"]').inputValue(), '');
+    assert.equal(await page.locator('input[name="ocr"]').inputValue(), '');
+    await page.locator('input[name="selection"]').fill('Ctrl+Alt+T');
+    await page.locator('input[name="silentOcr"]').fill('Ctrl+Alt+R');
+    await page.locator('input[name="input"]').fill('Alt+A');
+    await page.locator('input[name="ocr"]').fill('Alt+Shift+S');
+    await page.locator('#save-shortcuts').click();
+    await page.waitForFunction(() => window.__qa.settings.shortcuts.input === 'Alt+A' && window.__qa.settings.shortcuts.selection === 'Ctrl+Alt+T');
+    assert.equal(await page.evaluate(() => window.__qa.settings.shortcutDefaultsVersion), 2);
+    const saves = await page.evaluate(() => window.__qa.saveCalls);
+    await page.locator('input[name="input"]').fill('Ctrl+Alt+T');
+    await page.locator('#save-shortcuts').click();
+    await page.locator('#shortcut-feedback').getByText('不同操作不能使用相同的快捷键。', { exact: false }).waitFor();
+    assert.equal(await page.evaluate(() => window.__qa.saveCalls), saves);
+    for (const key of ['selection', 'silentOcr', 'input', 'ocr']) await page.locator(`input[name="${key}"]`).fill('');
+    await page.locator('#save-shortcuts').click();
+    await page.waitForFunction(() => Object.values(window.__qa.settings.shortcuts).every(value => value === ''));
+  }
+  assert.deepEqual(errors, []);
+  console.log('PASS: Windows and macOS two-default shortcut UI permits changing core bindings, explicitly opting in optional actions, rejecting duplicates and clearing all bindings. Mock IPC only.');
   console.log('PASS: persistent screenshot permission guidance prepared before presentation; click-only correct pane without authorization; retained sanitized link failure and manual path; first-use pending-open help navigation/focus; 800 px light and 420 px narrow/dark screenshots; dismiss/input/quiet Alt+D/Alt+A/stale-epoch recovery; deferred-modal permission payload and granted-status clearing; backend cancellation tickets on edit/clear/stop/Escape/close/native hide; native presentation epochs cover unallocated tickets, omitted/stale hide events, reopen overtaking pending begin and stale delayed popup fitting; backend-only cancellation clears old result state; late-ticket and replacement ordering; pending-save close/reentry guard; failure unlock; blank shortcuts; duplicate rejection; no countdown; theme/favorites and history bounds; OCR dual-key bundles/protocol isolation/no plaintext settings; documented vendor presets; origin-bound saved-key indications; minimal popup/menu/automatic source height; OCR configuration/privacy; empty-selection immediate typing; persistent source copy/speech; pin edge/icon/keyboard hit areas and drag isolation; captured source editing after completion and pending cancellation/retranslation; narrow-wrap source presentation; inconsistent permission feedback; automatic/fixed targets; Enter/ShiftEnter/IME/repeat; passive permissions; real capture and translation error preservation.');
 } finally {
   await browser.close();

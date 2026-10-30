@@ -509,7 +509,7 @@ public static partial class EchoLingoPopupVisibilitySmoke {
             Claim(roaming, token, owned); Claim(local, token, owned); Claim(root, token, owned);
             var settings = new System.Collections.Generic.Dictionary<string, object> {
                 { "providers", new object[0] }, { "ocrProviders", new object[0] }, { "saveHistory", false }, { "theme", "light" },
-                { "autoHideSeconds", 0 }, { "maxHistory", 20 }, { "shortcutDefaultsVersion", 1 },
+                { "autoHideSeconds", 0 }, { "maxHistory", 20 }, { "shortcutDefaultsVersion", 2 },
                 { "shortcuts", new System.Collections.Generic.Dictionary<string, object> {
                     { "selection", "Alt+D" }, { "capture", "Alt+S" }, { "ocr", "Alt+Shift+S" }, { "silentOcr", "Alt+C" }, { "input", "Alt+A" } } }
             };

@@ -1,8 +1,23 @@
+import { defaultSettings } from './model';
 import { describe, expect, it, vi } from 'vitest';
 import { displayShortcut, normalizeShortcut, normalizeShortcuts, recordedShortcut, recordedMouseShortcut } from './shortcuts';
 const keys = { selection: 'Alt+D', silentOcr: 'Alt+S', capture: '', ocr: 'Alt+Shift+S', input: 'Alt+A' };
 const event = (values: Partial<KeyboardEvent> = {}): Parameters<typeof recordedShortcut>[0] => ({ key: 't', code: 'KeyT', ctrlKey: true, altKey: false, shiftKey: false, metaKey: false, repeat: false, isComposing: false, keyCode: 84, ...values });
 describe('shortcut configuration', () => {
+  it('defaults to exactly two editable bindings on both platforms, with optional actions opt-in', () => {
+    for (const mac of [false, true]) {
+      const settings = defaultSettings();
+      expect(settings.shortcutDefaultsVersion).toBe(2);
+      const defaults = normalizeShortcuts(settings.shortcuts, mac, !mac);
+      expect(Object.values(defaults).filter(Boolean)).toEqual(['Alt+D', 'Alt+S']);
+      const changed = normalizeShortcuts({ ...defaults, selection: 'Ctrl+Alt+T', silentOcr: 'Ctrl+Alt+R', input: 'Alt+A', ocr: 'Alt+Shift+S' }, mac, !mac);
+      expect(changed.input).toBe('Alt+A');
+      expect(changed.ocr).toBe('Alt+Shift+S');
+      expect(normalizeShortcuts({ ...changed, selection: '', silentOcr: '' }, mac, !mac).selection).toBe('');
+      expect(() => normalizeShortcuts({ ...changed, input: changed.selection }, mac, !mac)).toThrow();
+    }
+  });
+
   it('accepts opt-in unmodified Windows side buttons and rejects cross-platform or modified bindings', () => {
     expect(normalizeShortcut('xbutton1', false, true)).toBe('MouseX1');
     expect(normalizeShortcut('MouseForward', false, true)).toBe('MouseX2');

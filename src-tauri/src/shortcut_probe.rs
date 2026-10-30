@@ -574,7 +574,7 @@ mod tests {
         let (code, output) = check(&mut registry, bindings(None).unwrap()).protocol();
         assert_eq!((code, output), (2, "selection=Alt+D\n".into()));
         assert!(registry.active.is_empty());
-        assert_eq!(registry.removed.len(), 3);
+        assert_eq!(registry.removed.len(), 1);
     }
     #[test]
     fn ambiguous_native_failure_takes_precedence_over_known_conflict() {
@@ -586,7 +586,7 @@ mod tests {
             check(&mut registry, bindings(None).unwrap()).protocol(),
             (3, String::new())
         );
-        assert_eq!(registry.removed.len(), 2);
+        assert_eq!(registry.removed.len(), 0);
     }
     #[test]
     fn cleanup_failure_is_unknown_and_all_remaining_releases_are_attempted() {
@@ -595,12 +595,14 @@ mod tests {
             check(&mut registry, bindings(None).unwrap()).protocol(),
             (3, String::new())
         );
-        assert_eq!(registry.removed.len(), 4);
+        assert_eq!(registry.removed.len(), 2);
     }
 
     #[test]
-    fn legacy_input_conflict_is_reported_instead_of_false_core_success() {
-        let rows = bindings(None).unwrap();
+    fn opted_in_input_conflict_is_reported_instead_of_false_core_success() {
+        let mut settings = Settings::default();
+        settings.shortcuts.input = "Alt+A".into();
+        let rows = bindings(Some(&serde_json::to_vec(&settings).unwrap())).unwrap();
         let id = rows
             .iter()
             .find(|row| row.action == "input")
@@ -615,7 +617,7 @@ mod tests {
             (2, "input=Alt+A\n".into())
         );
         assert!(registry.active.is_empty());
-        assert_eq!(registry.removed.len(), 3);
+        assert_eq!(registry.removed.len(), 2);
         assert!(!registry.removed.contains(&id));
     }
 
@@ -623,6 +625,8 @@ mod tests {
     fn all_five_enabled_bindings_are_checked_and_released_on_success() {
         let mut settings = Settings::default();
         settings.shortcuts.capture = "Ctrl+F1".into();
+        settings.shortcuts.input = "Alt+A".into();
+        settings.shortcuts.ocr = "Alt+Shift+S".into();
         let rows = bindings(Some(&serde_json::to_vec(&settings).unwrap())).unwrap();
         let mut registry = FakeRegistry::new(vec![], false);
         assert_eq!(
