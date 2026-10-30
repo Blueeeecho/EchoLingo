@@ -157,6 +157,79 @@ fn ascii_technical_label(text: &str) -> bool {
         || text.starts_with("\u{25aa} ")
 }
 
+/// Stabilize the default local bilingual direction only when mixed prose has
+/// several independent Chinese sentence cues. This is not language proof and
+/// never changes the text, explicit choices, cloud requests, or JA/KO results.
+pub fn local_mixed_prose_direction<'a>(
+    text: &str,
+    source: &str,
+    target: &str,
+    detected: Option<&str>,
+    provider_kinds: impl IntoIterator<Item = &'a str>,
+) -> Option<(String, String)> {
+    let mut any_provider = false;
+    let local_only = provider_kinds.into_iter().all(|kind| {
+        any_provider = true;
+        matches!(kind, "system" | "offline")
+    });
+    if !any_provider
+        || !local_only
+        || source != "auto"
+        || target != "auto"
+        || detected.is_some_and(|language| {
+            language.split('-').next().is_some_and(|root| {
+                root.eq_ignore_ascii_case("ja") || root.eq_ignore_ascii_case("ko")
+            })
+        })
+        || !text.chars().any(|c| c.is_ascii_alphabetic())
+        || text
+            .chars()
+            .any(|c| c.is_alphabetic() && !c.is_ascii_alphabetic() && !is_han(c))
+    {
+        return None;
+    }
+    let han_count = text.chars().filter(|c| is_han(*c)).count();
+    let prose_runs = text
+        .split(|c: char| !is_han(c))
+        .filter(|run| run.chars().count() >= 4)
+        .count();
+    if han_count < 12 || prose_runs < 2 {
+        return None;
+    }
+    // Simplified/traditional aliases count as one cue. Repeating one cue cannot
+    // turn names, short labels, or isolated Han terms into Chinese prose.
+    const CUES: &[&[&str]] = &[
+        &["如果"],
+        &["因为", "因為"],
+        &["但是"],
+        &["所以"],
+        &["需要"],
+        &["可以"],
+        &["已经", "已經"],
+        &["我们", "我們"],
+        &["你们", "你們"],
+        &["他们", "他們"],
+        &["这个", "這個"],
+        &["这些", "這些"],
+        &["为了", "為了"],
+        &["并且", "並且"],
+        &["之后", "之後"],
+        &["之前"],
+        &["导致", "導致"],
+        &["申请", "申請"],
+        &["当前", "當前"],
+    ];
+    if CUES
+        .iter()
+        .filter(|aliases| aliases.iter().any(|cue| text.contains(cue)))
+        .count()
+        < 2
+    {
+        return None;
+    }
+    Some((chinese_script_hint(text).to_owned(), "en".to_owned()))
+}
+
 pub fn resolve_translation_languages(
     text: &str,
     source: &str,
@@ -215,6 +288,64 @@ pub fn resolve_translation_languages(
 mod tests {
     use super::*;
 
+    #[test]
+    fn local_mixed_prose_uses_chinese_script_and_preserves_whole_input() {
+        let text = "主题可以用：\n\nGrOk Bot 停止云端代理后仍继续运行，导致 CUISOr 周额度耗尽，申请核查与补\n\n如果想让对方更快看懂，也可以用英文： Cloud agent Kept running after stop request, used up my weekly Cursor quota - request for review and compensation";
+        let before = text.to_owned();
+        for detector in [Some("en"), Some("ca"), Some("zh-Hant"), None] {
+            assert_eq!(
+                local_mixed_prose_direction(text, "auto", "auto", detector, ["system"]),
+                Some(("zh-Hans".into(), "en".into()))
+            );
+        }
+        assert_eq!(text, before);
+        let traditional = "我們已經完成了這個功能，並且可以使用 Apple 翻譯；如果需要更多資料，請查看 English documentation。";
+        assert_eq!(
+            local_mixed_prose_direction(traditional, "auto", "auto", Some("en"), ["offline"]),
+            Some(("zh-Hant".into(), "en".into()))
+        );
+        let prose = "如果使用 DeepSeek 翻译，需要先配置自己的服务；我们已经说明了相关步骤，英文 API documentation 可以保留。";
+        assert_eq!(
+            local_mixed_prose_direction(prose, "auto", "auto", None, ["system", "offline"]),
+            Some(("zh-Hans".into(), "en".into()))
+        );
+    }
+    #[test]
+    fn mixed_prose_never_overrides_manual_cloud_or_japanese_korean() {
+        let text = "我们已经完成了这个功能，如果需要更多说明，可以查看 English documentation。";
+        for detected in [Some("ja"), Some("ja-JP"), Some("ko"), Some("ko-KR")] {
+            assert!(
+                local_mixed_prose_direction(text, "auto", "auto", detected, ["system"]).is_none()
+            );
+        }
+        for (source, target) in [("zh-Hans", "auto"), ("auto", "en"), ("en", "zh-Hans")] {
+            assert!(
+                local_mixed_prose_direction(text, source, target, Some("en"), ["system"]).is_none()
+            );
+        }
+        for providers in [vec![], vec!["openai"], vec!["system", "openai"]] {
+            assert!(local_mixed_prose_direction(text, "auto", "auto", None, providers).is_none());
+        }
+    }
+    #[test]
+    fn mixed_prose_requires_distinct_sentence_cues_not_only_han_or_names() {
+        for text in [
+            "Cloud agent kept running after the stop request.",
+            "中国 日本 汉字 北京 上海 深圳 南京 Apple Translate", // labels/names
+            "我们 Apple",
+            "如果可以 Apple",                                   // insufficient prose
+            "可以继续执行，可以继续执行，可以继续执行 English", // repeated one cue
+            "因为继续执行，因為繼續執行，English",              // same cue in two scripts
+            "我们已经完成了这个功能，もし必要なら English を確認してください。", // kana
+            "我们已经完成了这个功能，如果需要 한국어 documentation。", // hangul
+            "如果需要更多说明，可以查看 français documentation。", // other letters
+        ] {
+            assert!(
+                local_mixed_prose_direction(text, "auto", "auto", Some("en"), ["system"]).is_none(),
+                "{text}"
+            );
+        }
+    }
     #[test]
     fn auto_direction_covers_english_chinese_and_short_shared_han() {
         for (text, detected, expected) in [

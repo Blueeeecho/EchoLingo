@@ -11,13 +11,20 @@ try {
   await page.route(`${origin}/__resize_edges`, route => route.fulfill({ contentType: 'text/html', body: `<!doctype html><link rel="stylesheet" href="/src/styles.css"><body data-view="translate">${directions.map(direction => `<div class="popup-resize-edge" data-window-resize="${direction}" aria-hidden="true"></div>`).join('')}<div class="app-shell"><div class="main-shell"><header class="popup-toolbar"><button class="icon-button" id="pin-button">P</button><div class="popup-drag-space" data-window-drag></div><button class="icon-button" id="more-toggle">M</button><button class="icon-button" id="close-popup">X</button></header><header class="management-header"><button class="icon-button" id="back">B</button><span class="management-spacer"></span><button class="icon-button" id="close-management">X</button></header><main><section class="view">Content</section></main></div></div></body>` }));
   await page.addInitScript(() => {
     Object.defineProperty(navigator, 'platform', { configurable: true, get: () => window.__resizeQA?.platform ?? 'MacIntel' });
-    window.__resizeQA = { platform: 'MacIntel', presentation: { epoch: 1, presented: true }, requests: [], commands: [], hold: false,
+    window.__resizeQA = { platform: 'MacIntel', presentation: { epoch: 1, presented: true }, requests: [], commands: [], dragCommands: [], hold: false, nextDrag: 0,
       frames: async () => { for (let n = 0; n < 4; n++) await new Promise(requestAnimationFrame); } };
     window.__TAURI_INTERNALS__ = { invoke: async (command, args) => {
       const q = window.__resizeQA; q.commands.push(command);
       if (['resize_popup_width', 'resize_management_window', 'start_window_resize'].includes(command)) {
         q.requests.push({ command, ...structuredClone(args) });
         if (q.hold) await new Promise(resolve => { q.release = resolve; });
+      } else if (['begin_popup_drag', 'move_popup_drag', 'end_popup_drag'].includes(command)) {
+        q.dragCommands.push({ command, ...structuredClone(args) });
+        if (command === 'begin_popup_drag') {
+          const token = ++q.nextDrag;
+          if (q.holdDrag) await new Promise(resolve => { q.releaseDrag = resolve; });
+          return token;
+        }
       } else if (command !== 'fit_window') throw new Error(`Unexpected command ${command}`);
     }};
   });
@@ -87,9 +94,46 @@ try {
   await page.evaluate(() => { document.body.dataset.view='translate'; document.body.classList.add('modal-open'); });
   assert.equal(await edge('east').isVisible(),false);
   assert.equal(await edge('south-east').isVisible(),false);
+  // Layout and edge resizing may never show/focus/hide or start a drag.
+  const deliberateDragStart = await page.evaluate(() => window.__resizeQA.commands.length);
+  assert.equal(await page.evaluate(() => window.__resizeQA.commands.some(command => /show|focus|hide|drag$/.test(command))), false);
+  // A Mac toolbar click must be a click, not an asynchronous native drag. The
+  // original press anchor is retained only after a deliberate movement.
+  await page.evaluate(() => { document.body.dataset.view='translate'; document.body.classList.remove('modal-open');
+    window.__resizeQA.presentation={epoch:30,presented:true}; window.__resizeQA.platform='MacIntel'; });
+  for (const selector of ['#pin-button','#more-toggle','#close-popup','main']) await page.locator(selector).click();
+  const toolbar = await page.locator('[data-window-drag]').boundingBox();
+  const tx = toolbar.x + toolbar.width / 2, ty = toolbar.y + toolbar.height / 2;
+  await page.mouse.click(tx,ty); await page.evaluate(() => window.__resizeQA.frames());
+  assert.equal(await page.evaluate(() => window.__resizeQA.dragCommands.length),0);
+  await page.mouse.move(tx,ty); await page.mouse.down(); await page.mouse.move(tx+2,ty+1);
+  await page.evaluate(() => window.__resizeQA.frames());
+  assert.equal(await page.evaluate(() => window.__resizeQA.dragCommands.length),0);
+  await page.mouse.move(tx+40,ty+20,{steps:3});
+  await page.waitForFunction(() => window.__resizeQA.dragCommands.some(value=>value.command==='move_popup_drag'));
+  assert.deepEqual(await page.evaluate(() => window.__resizeQA.dragCommands[0]),
+    {command:'begin_popup_drag',presentationEpoch:30,anchorX:tx,anchorY:ty});
+  await page.mouse.up(); await page.evaluate(() => window.__resizeQA.frames());
+  assert.equal(await page.evaluate(() => window.__resizeQA.dragCommands.at(-1).command),'end_popup_drag');
+  assert.equal(await page.locator('body').evaluate(e=>e.classList.contains('popup-dragging')),false);
+  // Mouse release beats a delayed native begin: finish its token, never replay
+  // a move at the pointer's later location (e.g. over another control).
+  await page.evaluate(() => { window.__resizeQA.dragCommands=[]; window.__resizeQA.holdDrag=true; });
+  await page.mouse.move(tx,ty); await page.mouse.down(); await page.mouse.move(tx+20,ty+10);
+  await page.waitForFunction(() => Boolean(window.__resizeQA.releaseDrag)); await page.mouse.up();
+  await page.evaluate(() => { window.__resizeQA.holdDrag=false; window.__resizeQA.releaseDrag(); });
+  await page.evaluate(() => window.__resizeQA.frames());
+  assert.deepEqual(await page.evaluate(() => window.__resizeQA.dragCommands.map(value=>value.command)),['begin_popup_drag','end_popup_drag']);
   await page.evaluate(() => window.__resizeQA.layout.dispose());
   assert.equal(await page.locator('body').evaluate(element=>element.classList.contains('popup-resize-enabled')),false);
-  assert.equal(await page.evaluate(()=>window.__resizeQA.commands.some(command=>/show|focus|hide|drag$/.test(command))),false);
+  // Only the deliberate Mac drag section may use the three tokenized drag
+  // commands. Layout still cannot reveal/focus/hide or use start_window_drag.
+  assert.equal(await page.evaluate(() => window.__resizeQA.commands.some(command => /show|focus|hide/.test(command) || command === 'start_window_drag')), false);
+  const deliberateCommands = await page.evaluate(start => window.__resizeQA.commands.slice(start), deliberateDragStart);
+  assert.ok(deliberateCommands.every(command => ['fit_window','begin_popup_drag','move_popup_drag','end_popup_drag'].includes(command)));
+  assert.equal(deliberateCommands.filter(command => command === 'begin_popup_drag').length, 2);
+  assert.ok(deliberateCommands.filter(command => command === 'move_popup_drag').length >= 1);
+  assert.equal(deliberateCommands.filter(command => command === 'end_popup_drag').length, 2);
   assert.deepEqual(errors,[]);
   // Mount the layout module over the actual application DOM in browser-preview
   // mode, then open the real Add API form. IPC stays mocked; pointer capture,
@@ -127,6 +171,7 @@ try {
     if(initiallyOpen)await page.locator('#add-provider').click();
   }
   await page.evaluate(()=>window.__resizeQA.layout.dispose());
+  assert.equal(await page.evaluate(() => window.__resizeQA.commands.some(command => /show|focus|hide|drag$/.test(command))), false, 'Real modal layout/resize must not initiate any drag or presentation operation.');
   assert.deepEqual(errors,[]);
   console.log(JSON.stringify({ok:true,scope:'real browser pointer capture + production CSS/layout; mocked native IPC only',managementDirections:8,managementModalDirections:8,popupEdgeLogicalPixels:10,physicalPlatformAcceptance:false}));
 } finally { await browser.close(); }

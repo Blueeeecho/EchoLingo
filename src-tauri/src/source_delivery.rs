@@ -58,6 +58,13 @@ impl<T: Clone> SourceDeliveries<T> {
             })
     }
 
+    pub fn retry(&self, id: u64, epoch: u64, current_epoch: u64) -> Option<Delivery<T>> {
+        if current_epoch != epoch {
+            return None;
+        }
+        self.peek(epoch).filter(|delivery| delivery.id == id)
+    }
+
     pub fn acknowledge(&mut self, id: u64) -> bool {
         if self.pending.as_ref().is_some_and(|item| item.id == id) {
             self.pending = None;
@@ -108,6 +115,25 @@ mod tests {
         assert!(queue.peek(4).is_none());
         assert!(queue.publish(4, "stale").is_err());
         assert!(queue.publish(6, "unannounced future").is_err());
+    }
+
+    #[test]
+    fn runtime_retry_reuses_identity_and_stops_after_ack_hide_or_newer_delivery() {
+        let mut queue = SourceDeliveries::default();
+        queue.advance(4);
+        let old = queue.publish(4, "old").unwrap();
+        let retry = queue.retry(old.id, 4, 4).unwrap();
+        assert_eq!(retry.id, old.id);
+        assert_eq!(retry.payload, "old");
+        assert!(queue.retry(old.id, 4, 5).is_none());
+        let new = queue.publish(4, "new").unwrap();
+        assert!(queue.retry(old.id, 4, 4).is_none());
+        assert!(queue.retry(new.id, 4, 4).is_some());
+        assert!(queue.acknowledge(new.id));
+        assert!(queue.retry(new.id, 4, 4).is_none());
+        let last = queue.publish(4, "last").unwrap();
+        queue.advance(5);
+        assert!(queue.retry(last.id, 4, 5).is_none());
     }
 
     #[test]

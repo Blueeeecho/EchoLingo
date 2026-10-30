@@ -1,5 +1,6 @@
 import AppKit
 import Foundation
+import CoreGraphics
 
 // Metadata from this process only. Callers use NSApplication's synchronous
 // getter rather than treating a cached NSRunningApplication value as proof of
@@ -78,6 +79,52 @@ public func echoLingoEnsurePopupBehavior(_ pointer: UnsafeMutableRawPointer?) ->
     return window.level.rawValue > NSWindow.Level.normal.rawValue && window.collectionBehavior == behavior ? 0 : -3
 }
 
+// Cocoa screen and window frames are both in points with a bottom-left origin.
+// Keep the original top-left-local press anchor, never an unrelated currentEvent
+// or a global coordinate mistaken for an NSWindow-local mouse event.
+func popupDragOrigin(frame: NSRect, pointer: NSPoint, anchor: NSPoint, area: NSRect) -> NSPoint {
+    let x = pointer.x - anchor.x
+    let y = pointer.y - (frame.height - anchor.y)
+    return NSPoint(x: min(max(x, area.minX), max(area.minX, area.maxX - frame.width)),
+                   y: min(max(y, area.minY), max(area.minY, area.maxY - frame.height)))
+}
+
+// Event counters identify one physical press. A release followed by a new
+// press must not make an old queued drag valid again merely because left is down.
+func popupDragPressIdentity() -> UInt64 {
+    let down = CGEventSource.counterForEventType(.combinedSessionState, eventType: .leftMouseDown)
+    let up = CGEventSource.counterForEventType(.combinedSessionState, eventType: .leftMouseUp)
+    return (UInt64(down) << 32) | UInt64(up)
+}
+func popupDragPressMatches(_ expected: UInt64, _ current: UInt64, _ leftDown: Bool) -> Bool {
+    leftDown && expected == current
+}
+@_cdecl("echolingo_popup_drag_press_identity")
+public func echoLingoPopupDragPressIdentity() -> UInt64 { popupDragPressIdentity() }
+
+// checkOnly starts a gesture without moving anything. Every actual move checks
+// the physical button again, so an IPC arriving after release cannot move UI.
+@_cdecl("echolingo_popup_drag")
+public func echoLingoPopupDrag(_ pointer: UnsafeMutableRawPointer?, _ anchorX: Double,
+                               _ anchorY: Double, _ pressIdentity: UInt64, _ checkOnly: Int32) -> Int32 {
+    guard Thread.isMainThread else { return -1 }
+    guard let pointer,
+          let window = Unmanaged<AnyObject>.fromOpaque(pointer).takeUnretainedValue() as? NSWindow else { return -2 }
+    guard window.isVisible, !window.isMiniaturized, !window.styleMask.contains(.titled),
+          popupDragPressMatches(pressIdentity, popupDragPressIdentity(), NSEvent.pressedMouseButtons & 1 != 0) else { return -3 }
+    let frame = window.frame
+    guard anchorX.isFinite, anchorY.isFinite, anchorX >= 0, anchorX <= frame.width,
+          anchorY >= 0, anchorY <= min(48, frame.height) else { return -4 }
+    guard checkOnly == 0 else { return 0 }
+    let mouse = NSEvent.mouseLocation
+    guard let screen = NSScreen.screens.first(where: { $0.frame.contains(mouse) }) ?? window.screen else { return -5 }
+    let next = popupDragOrigin(frame: frame, pointer: mouse,
+                               anchor: NSPoint(x: anchorX, y: anchorY), area: screen.visibleFrame)
+    guard popupDragPressMatches(pressIdentity, popupDragPressIdentity(), NSEvent.pressedMouseButtons & 1 != 0) else { return -3 }
+    window.setFrameOrigin(next)
+    return 0
+}
+
 #if ECHOLINGO_WINDOW_FIXTURE
 // Compile only for the explicit standalone fixture. It creates its own hidden
 // window and calls the production C ABI above, never any user's app window.
@@ -108,8 +155,32 @@ struct PopupBehaviorFixture {
                 echoLingoApplicationPolicyMetadata($0.baseAddress, 7) == -3
             }
         let unrelated: NSWindow.CollectionBehavior = [.stationary, .ignoresCycle, .fullScreenDisallowsTiling]
+        // These are Cocoa points, not physical pixels or a synthetic event's
+        // local coordinates. Retina scale does not enter this transformation.
+        let dragFrame = NSRect(x: -1200, y: 200, width: 680, height: 300)
+        let dragArea = NSRect(x: -1920, y: -200, width: 1920, height: 1080)
+        let anchor = NSPoint(x: 140, y: 18)
+        let dragGeometryPassed = popupDragOrigin(frame: dragFrame,
+            pointer: NSPoint(x: -1060, y: 482), anchor: anchor, area: dragArea) == dragFrame.origin
+            && popupDragOrigin(frame: dragFrame, pointer: NSPoint(x: -1000, y: 512),
+                anchor: anchor, area: dragArea) == NSPoint(x: -1140, y: 230)
+            && popupDragOrigin(frame: dragFrame, pointer: NSPoint(x: -2500, y: -400),
+                anchor: anchor, area: dragArea) == NSPoint(x: -1920, y: -200)
+            && popupDragOrigin(frame: dragFrame, pointer: NSPoint(x: 100, y: 1000),
+                anchor: anchor, area: dragArea) == NSPoint(x: -680, y: 580)
+            && popupDragOrigin(frame: dragFrame, pointer: NSPoint(x: 2400, y: 900),
+                anchor: anchor, area: NSRect(x: 1920, y: 0, width: 2560, height: 1440)) == NSPoint(x: 2260, y: 618)
+            && echoLingoPopupDrag(pointer, 100, 18, 0, 1) == -3 // hidden windows never move
+            && echoLingoPopupDrag(nil, 100, 18, 0, 0) == -2
+        let originalPress: UInt64 = (10 << 32) | 9
+        let released: UInt64 = (10 << 32) | 10
+        let newPress: UInt64 = (11 << 32) | 10
+        let dragPressPassed = popupDragPressMatches(originalPress, originalPress, true)
+            && !popupDragPressMatches(originalPress, originalPress, false)
+            && !popupDragPressMatches(originalPress, released, false)
+            && !popupDragPressMatches(originalPress, newPress, true)
         var steps = 0
-        var passed = !visible && !key && !main && metadataPassed
+        var passed = !visible && !key && !main && metadataPassed && dragGeometryPassed && dragPressPassed
         for style: NSWindow.StyleMask in [[.borderless, .resizable], [.titled, .closable, .resizable], [.borderless, .resizable]] {
             window.styleMask = style
             // A native full-screen cycle can leave normal level behind. Seed
@@ -142,6 +213,8 @@ struct PopupBehaviorFixture {
         passed = passed && finished.wait(timeout: .now() + 2) == .success && rejectedBackgroundCall
         let report: [String: Any] = [
             "popupBehaviorFixturePassed": passed,
+            "popupDragGeometryPassed": dragGeometryPassed,
+            "popupDragPressIdentityPassed": dragPressPassed,
             "fixtureSteps": steps,
             "levelAboveNormal": window.level.rawValue > NSWindow.Level.normal.rawValue,
             "windowVisible": window.isVisible,

@@ -509,10 +509,10 @@ mod tests {
         let defaults = normalized(&Shortcuts::default()).unwrap();
         assert_eq!(defaults.selection, "Alt+D");
         assert_eq!(defaults.silent_ocr, "Alt+S");
-        assert_eq!(defaults.ocr, "Alt+Shift+S");
-        assert_eq!(defaults.input, "Alt+A");
+        assert!(defaults.ocr.is_empty());
+        assert!(defaults.input.is_empty());
         assert!(defaults.capture.is_empty());
-        assert_eq!(parsed(&defaults).unwrap().len(), 4);
+        assert_eq!(parsed(&defaults).unwrap().len(), 2);
     }
 
     #[test]

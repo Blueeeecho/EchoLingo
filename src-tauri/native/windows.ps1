@@ -397,7 +397,7 @@ public static class SelectionCopyPolicy {
     public static string CompleteCopy(uint initial, uint inserted, Func<uint> sequence, Func<string> readText,
                                       Action<uint> restore, Func<long> elapsedMilliseconds, Action wait,
                                       Action<string> trace = null, Action requireContextAfterRestore = null, Action requireCopyOwner = null,
-                                      Action requireCopyTicket = null) {
+                                      Action requireCopyTicket = null, Action<int, long> recordObservation = null) {
         bool inputFailed = inserted != 4;
         if (inserted < 2) throw new InvalidOperationException(InputBlocked);
         Completion completion = new Completion(initial);
@@ -426,6 +426,9 @@ public static class SelectionCopyPolicy {
             long elapsed = elapsedMilliseconds();
             uint? candidateBefore = completion.CandidateSequence;
             Observation observation = completion.Observe(before, text, after, elapsed);
+            // Numeric metadata only: 1 waiting, 2 completed, 3 unchanged timeout,
+            // 4 incomplete publication timeout, 5 superseded. No clipboard content.
+            if (recordObservation != null) recordObservation((int)observation + 1, elapsed);
             // Explicit synthetic-desktop diagnostics only: no copied text,
             // window titles, application identities or clipboard formats.
             if (trace != null) trace("SELECTION_TRACE before=" + before + " after=" + after
@@ -448,7 +451,7 @@ public static class SelectionCopyPolicy {
                     if (requireCopyTicket != null) requireCopyTicket();
                     return completion.CompletedText;
                 case Observation.UnchangedTimeout:
-                    throw new InvalidOperationException(inputFailed ? InputBlocked : "NO_SELECTION: No text was copied. Try screenshot OCR for nonselectable text or apps running as administrator.");
+                    throw new InvalidOperationException(inputFailed ? InputBlocked : "COPY_NO_UPDATE: The copy shortcut was sent, but the clipboard did not update before the deadline. Test manual Ctrl+C in the source app or use screenshot OCR.");
                 case Observation.UnfinishedTimeout:
                     throw new InvalidOperationException("CLIPBOARD_RESTORE_SKIPPED: Copy did not finish before the deadline, so the original clipboard could not be restored safely. Current contents were preserved; retry or use screenshot OCR.");
                 default:
@@ -1195,6 +1198,7 @@ public static class EchoLingoNative {
             "copyNativeGuardReason", "copyNativeEditable", "copyNativeProtection", "copyNativeSelectionKnown", "copyNativeSelectionNonempty",
             "copyProtectionProbe", "copyProtectionProbeMilliseconds", "copyProtectionUnknown", "copySnapshotOutcome", "copyDispatchInserted",
             "copyOwnInputObserved", "copyOwnerOutcome", "copyClipboardRestored", "copyTerminalReason",
+            "copyClipboardOutcome", "copyWaitElapsedMilliseconds",
             "copyNativeInvalidReason", "copyNativeGtiSucceeded", "copyNativeGtiFlags", "copyNativeFocusPresent",
             "copyNativeFocusProcessMatchesForeground", "copyNativeFocusRootMatchesForeground", "copyNativeActivePresent",
             "copyNativeActiveRootMatchesForeground" }) CaptureHealth.Set(name, 0);
@@ -1208,6 +1212,7 @@ public static class EchoLingoNative {
                 int reason = error is SelectionBudgetExceededException ? 13
                     : message.StartsWith("PROTECTED:", StringComparison.Ordinal) ? 2
                     : message.StartsWith("NO_SELECTION:", StringComparison.Ordinal) ? 3
+                    : message.StartsWith("COPY_NO_UPDATE:", StringComparison.Ordinal) ? 14
                     : message.StartsWith("CANCELLED:", StringComparison.Ordinal) ? 6
                     : message.StartsWith("CLIPBOARD_RESTORE_", StringComparison.Ordinal) ? 9
                     : message.StartsWith("CLIPBOARD_CHANGED:", StringComparison.Ordinal) ? 10
@@ -1300,7 +1305,11 @@ public static class EchoLingoNative {
                 delegate {
                     try { RequireCopiedSourceOwner(context); CaptureHealth.Set("copyOwnerOutcome", 1); }
                     catch { CaptureHealth.Set("copyOwnerOutcome", 2); throw; }
-                }, observer.RequireCurrent);
+                }, observer.RequireCurrent,
+                delegate(int outcome, long elapsed) {
+                    CaptureHealth.Set("copyClipboardOutcome", outcome);
+                    CaptureHealth.Set("copyWaitElapsedMilliseconds", Math.Max(0, Math.Min(10000000, elapsed)));
+                });
             observer.Finish(); return text;
         }
     }

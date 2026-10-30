@@ -29,3 +29,10 @@ export class SourceDeliveryInbox<T extends SourceDeliveryIdentity> {
     return { ...item, apply: item.intentRevision === intentRevision && item.payload.presentationEpoch === epoch };
   }
 }
+
+/** Late transport retries and failure feedback require an already-known
+ * request boundary. They must not manufacture new intent over later edits. */
+export function hasCurrentPresentationIntent(epoch: number | undefined, currentEpoch: number,
+  bound: { epoch: number; intentRevision: number } | null, intentRevision: number): boolean {
+  return epoch === currentEpoch && bound?.epoch === epoch && bound.intentRevision === intentRevision;
+}

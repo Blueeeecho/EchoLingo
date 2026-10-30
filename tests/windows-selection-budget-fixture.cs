@@ -99,6 +99,7 @@ public static class WindowsSelectionBudgetFixture {
                 if ((bool)ticketType.GetProperty("Superseded").GetValue(ticket, null)) throw new InvalidOperationException("CANCELLED: generated newer copy");
             };
             MethodInfo completeCopy = PolicyType.GetMethod("CompleteCopy");
+            Assert(completeCopy != null && completeCopy.GetParameters().Length == 12, "Reflective fixture must pass every production CompleteCopy parameter, including optional observation metadata");
             object budget = Budget(100), session = Session(budget);
             Stopwatch clock = new Stopwatch();
             try {
@@ -120,7 +121,7 @@ public static class WindowsSelectionBudgetFixture {
                                 published = true; generation = 11;
                                 if (newCopy) { Call(observe, ticket, 0xA2, true, false, (ulong)0); Call(observe, ticket, 0x43, true, false, (ulong)0); }
                             } else Thread.Sleep(1);
-                        }, null, (Action)Require, null, ticketGuard);
+                        }, null, (Action)Require, null, ticketGuard, null);
                 }, newCopy ? "CANCELLED:" : failRestore ? "CLIPBOARD_RESTORE_FAILED:" : "SELECTION:");
                 if (!newCopy && !failRestore) Assert(outcome.GetType().Name == "SelectionBudgetExceededException", "Post-restore rejection is specifically the expired shared budget");
                 Assert(published, "Deadline expired only after the synthetic copy was issued");

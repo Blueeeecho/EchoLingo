@@ -626,6 +626,7 @@ fn selection_error_kind(error: Option<&str>) -> u64 {
     match error {
         None => 0,
         Some(error) if error.starts_with("CANCELLED:") => 1,
+        Some(error) if error.starts_with("COPY_NO_UPDATE:") => 9,
         Some(error) if error.starts_with("NO_SELECTION:") || error.starts_with("SELECTION:") => 2,
         Some(error) if error.starts_with("NATIVE_START:") => 3,
         Some(error) if error.starts_with("NATIVE_PROTOCOL:") => 4,
@@ -709,6 +710,8 @@ fn bounded_selection_health(value: &Value) -> Value {
         "copyOwnerOutcome",
         "copyClipboardRestored",
         "copyTerminalReason",
+        "copyClipboardOutcome",
+        "copyWaitElapsedMilliseconds",
     ] {
         retain(field);
     }
@@ -941,11 +944,13 @@ pub async fn system_translate(text: &str, source: &str, target: &str) -> Result<
         static SERIAL: OnceLock<Arc<tokio::sync::Semaphore>> = OnceLock::new();
         static NEXT: AtomicU64 = AtomicU64::new(0);
         // Keep capacity in the blocking worker even if its JoinHandle is dropped.
-        let permit = SERIAL
-            .get_or_init(|| Arc::new(tokio::sync::Semaphore::new(1)))
-            .clone()
-            .try_acquire_owned()
-            .map_err(|_| "上一次系统翻译正在结束，请稍后重试".to_string())?;
+        let permit = crate::system_translation_gate::acquire(
+            SERIAL
+                .get_or_init(|| Arc::new(tokio::sync::Semaphore::new(1)))
+                .clone(),
+            std::time::Duration::from_millis(1500),
+        )
+        .await?;
         let operation_id = format!(
             "rust-{}-{}",
             std::process::id(),
@@ -1826,12 +1831,15 @@ mod tests {
             "copyProtectionUnknown": 1, "copySnapshotOutcome": 1,
             "copyDispatchInserted": 4, "copyOwnInputObserved": 1,
             "copyOwnerOutcome": 1, "copyClipboardRestored": 1, "copyTerminalReason": 0,
+            "copyClipboardOutcome": 3, "copyWaitElapsedMilliseconds": 1200,
             "copyText": "private", "copyTitle": "private", "attemptId": 1,
             "copyNativeFocusProcess": 2468, "copyNativeForeground": 1234,
             "actionResultNonempty": 1
         }));
-        assert_eq!(safe.as_object().unwrap().len(), 26);
+        assert_eq!(safe.as_object().unwrap().len(), 28);
         assert_eq!(safe["copyDispatchInserted"], 4);
+        assert_eq!(safe["copyClipboardOutcome"], 3);
+        assert_eq!(safe["copyWaitElapsedMilliseconds"], 1200);
         for invalid in [
             json!(-1),
             json!(10_000_001),
@@ -1841,7 +1849,9 @@ mod tests {
             json!([1]),
         ] {
             assert_eq!(
-                super::bounded_selection_health(&json!({"copyTerminalReason": invalid})),
+                super::bounded_selection_health(
+                    &json!({"copyTerminalReason": invalid, "copyClipboardOutcome": invalid, "copyWaitElapsedMilliseconds": invalid})
+                ),
                 json!({})
             );
         }
@@ -1871,6 +1881,7 @@ mod tests {
             (None, 0),
             (Some("CANCELLED: synthetic source changed"), 1),
             (Some("NO_SELECTION: synthetic empty"), 2),
+            (Some("COPY_NO_UPDATE: synthetic clipboard timeout"), 9),
             (Some("SELECTION: synthetic empty"), 2),
             (Some("NATIVE_START: synthetic startup"), 3),
             (Some("NATIVE_PROTOCOL: synthetic malformed reply"), 4),

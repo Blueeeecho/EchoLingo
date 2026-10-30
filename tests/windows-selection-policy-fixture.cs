@@ -31,6 +31,8 @@ public static class WindowsSelectionPolicyFixture {
         public bool FailRead;
         public bool BusyFirstRead, ForeignOwner;
         public int OwnerChecks;
+        public int LastOutcome, ObservationCount;
+        public long LastElapsed;
         public bool LoseContextWhileReading, CancelAfterCopy;
         public int PostContextChecks;
         public readonly List<string> Order = new List<string>();
@@ -53,7 +55,8 @@ public static class WindowsSelectionPolicyFixture {
                     if (CancelAfterCopy) throw new OperationCanceledException("CANCELLED: synthetic newer task");
                     if (LoseContextWhileReading && ReadCount > 0)
                         throw new InvalidOperationException("SELECTION: synthetic source context changed while copy waited");
-                }, delegate {OwnerChecks++;if(ForeignOwner)throw new InvalidOperationException("CLIPBOARD_CHANGED: synthetic non-source owner");});
+                }, delegate {OwnerChecks++;if(ForeignOwner)throw new InvalidOperationException("CLIPBOARD_CHANGED: synthetic non-source owner");}, null,
+                delegate(int outcome, long elapsed) { LastOutcome = outcome; LastElapsed = elapsed; ObservationCount++; });
         }
     }
     static CopyFixture Stable() {
@@ -332,6 +335,7 @@ public static class WindowsSelectionPolicyFixture {
 
             CopyFixture normal = Stable();
             Assert(normal.Run(4) == "synthetic selected text 中文" && normal.Index == 2, "Clear then first coherent source-owned Unicode publication completes without a fixed stability sleep");
+            Assert(normal.LastOutcome == 2 && normal.LastElapsed == 10 && normal.ObservationCount == 3, "Successful copy records observed completion without extending the deadline");
             Assert(normal.RestoreCount == 1 && normal.Clipboard == "original-rich-fixture", "Completed copy restores original data once");
             Assert(normal.PostContextChecks == 1 && normal.Order.IndexOf("restore") < normal.Order.IndexOf("post-context"), "Source context is checked after restoration before a normal result returns");
             foreach (string changed in new string[] { "foreground", "focused control" }) {
@@ -360,6 +364,7 @@ public static class WindowsSelectionPolicyFixture {
             CopyFixture clearOnly = new CopyFixture();
             clearOnly.Frames.Add(new Frame(0, 11, null)); clearOnly.Frames.Add(new Frame(1200, 11, null));
             Error(delegate { clearOnly.Run(4); }, "CLIPBOARD_RESTORE_SKIPPED:");
+            Assert(clearOnly.LastOutcome == 4 && clearOnly.LastElapsed == 1200, "Incomplete publication differs from an unchanged timeout");
             Assert(clearOnly.RestoreCount == 0, "An incomplete clear cannot be restored over a later publish");
             CopyFixture late = new CopyFixture();
             late.Frames.Add(new Frame(1200, 12, "late text"));
@@ -380,7 +385,13 @@ public static class WindowsSelectionPolicyFixture {
             Error(delegate { readFailure.Run(4); }, "CLIPBOARD_RESTORE_SKIPPED:");
             Assert(readFailure.RestoreCount == 0, "Unreadable clipboard data never causes an unsafe restoration");
             CopyFixture unchanged = new CopyFixture(); unchanged.Frames.Add(new Frame(1200, 10, null));
-            Error(delegate { unchanged.Run(4); }, "NO_SELECTION:");
+            Error(delegate { unchanged.Run(4); }, "COPY_NO_UPDATE:");
+            Assert(unchanged.LastOutcome == 3 && unchanged.LastElapsed == 1200 && unchanged.ObservationCount == 1, "Unchanged clipboard timeout is distinct from a confirmed empty selection and records numeric outcome/deadline");
+            foreach (uint partial in new uint[] { 2, 3 }) {
+                CopyFixture incompleteInput = new CopyFixture(); incompleteInput.Frames.Add(new Frame(1200, 10, null));
+                Error(delegate { incompleteInput.Run(partial); }, "SELECTION:");
+                Assert(incompleteInput.RestoreCount == 0, "Partial input timeout retains input failure precedence and never restores an unchanged clipboard");
+            }
             Assert(unchanged.RestoreCount == 0 && unchanged.ReadCount == 0, "No clipboard change means no restoration");
 
             SelectionCopyPolicy.Completion torn = new SelectionCopyPolicy.Completion(10);

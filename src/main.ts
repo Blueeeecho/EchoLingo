@@ -1,11 +1,12 @@
 import './styles.css';
+import { renderTranslationParagraphs } from './translation-text-layout';
 import { installUpdateNotice } from './update-notice-ui';
 import { createOcrUi } from './ocr-ui';
 import { installPanelLayout } from './panel-layout';
 import type { TranslationPresentation } from './panel-layout';
 import { normalizeCapturedText, normalizeOcrCapturedText } from './text-normalization';
 import { createShortcutEditor, type NativeRecordedShortcut } from './shortcut-editor';
-import { SourceDeliveryInbox, type SourceDeliveryIdentity } from './source-delivery';
+import { SourceDeliveryInbox, hasCurrentPresentationIntent, type SourceDeliveryIdentity } from './source-delivery';
 import { HistoryCache } from './history-cache';
 import { mergeProviderRetry, sameTranslationSnapshot, type TranslationSnapshot } from './translation-retry';
 import { credentialScope } from './credential-scope';
@@ -19,7 +20,7 @@ import { TRANSLATION_QUOTAS } from './service-quotas';
 import { populateProviderPresets } from './service-quota-ui';
 import { invoke, isTauri } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
-import { defaultSettings, errorMessage, userFacingError, filterHistory, LANGUAGES, languageName, MAX_TEXT_LENGTH, normalizeTimestamp, validateProvider, isLocalProvider } from './model';
+import { defaultSettings, errorMessage, userFacingError, filterHistory, LANGUAGES, languageName, systemTranslationSetupPair, MAX_TEXT_LENGTH, normalizeTimestamp, validateProvider, isLocalProvider } from './model';
 import { coreGuidanceMessage, coreShortcutProblems, emptyPopupPlaceholder, type CoreShortcutProblem } from './shortcut-guidance';
 import { engineLimitCopy, isWeakEngineSignal, shouldShowFirstRun, shouldShowSoftHint, type EngineHintState } from './engine-hint';
 import type { Action, CredentialState, HistoryEntry, PermissionKind, Provider, ProviderKind, Settings, ShortcutAction, SourceTextEvent, SystemTranslationStatus, TranslationProgress, TranslationResult } from './types';
@@ -329,8 +330,8 @@ function clearOriginalCapture(): void {
   originalCapture = null;
   $('#restore-original-breaks').hidden = true;
 }
-async function acknowledgeSource(id: number): Promise<void> {
-  await invoke('ack_source_delivery', { deliveryId: id });
+async function acknowledgeSource(id: number, presentationEpoch?: number): Promise<void> {
+  await invoke('ack_source_delivery', { deliveryId: id, presentationEpoch });
 }
 async function flushSourceDeliveries(): Promise<void> {
   let item = sourceDeliveryInbox.peek();
@@ -344,7 +345,7 @@ async function flushSourceDeliveries(): Promise<void> {
     if (!sourceDeliveryInbox.isLatest(id)) return;
     if (item.intentRevision !== focusIntentRevision || current.epoch !== item.payload.presentationEpoch) {
       sourceDeliveryInbox.discard(id);
-      await acknowledgeSource(id);
+      await acknowledgeSource(id, item.payload.presentationEpoch);
       return;
     }
     applyTranslationPresentation(current, item.intentRevision);
@@ -361,12 +362,21 @@ async function flushSourceDeliveries(): Promise<void> {
     await receiveCapturedText(payload);
   } finally {
     // A delayed ACK can only clear this ID, never a newer task's pending text.
-    await acknowledgeSource(payload.deliveryId);
+    await acknowledgeSource(payload.deliveryId, payload.presentationEpoch);
   }
 }
+function recordPopupStage(epoch: number, phase: 'sourceReceived' | 'sourceRetryDiscarded' | 'domPrepared' | 'presentationComplete' | 'presentationFailed'): void {
+  if (desktop) void invoke('record_popup_stage', { presentationEpoch: epoch, phase }).catch(() => {});
+}
 async function receiveNativeSource(payload: SourceTextEvent, replay = false): Promise<void> {
+  recordPopupStage(payload.presentationEpoch ?? translationPresentation.epoch, 'sourceReceived');
   // Browser previews and older synthetic fixtures have no transport identity.
   if (payload.deliveryId === undefined) { await receiveCapturedText(payload); return; }
+  if (payload.deliveryRetry && settingsReady && !hasCurrentPresentationIntent(payload.presentationEpoch, translationPresentation.epoch, sourceDeliveryIntent, focusIntentRevision)) {
+    recordPopupStage(translationPresentation.epoch, 'sourceRetryDiscarded');
+    await acknowledgeSource(payload.deliveryId, payload.presentationEpoch);
+    return;
+  }
   const intent = !settingsReady || replay ? startupSourceIntentRevision
     : sourceDeliveryIntent !== null && sourceDeliveryIntent.epoch === payload.presentationEpoch ? sourceDeliveryIntent.intentRevision : focusIntentRevision;
   sourceDeliveryInbox.offer(payload as NativeSourceDelivery, intent);
@@ -403,9 +413,10 @@ async function receiveCapturedText(payload: SourceTextEvent): Promise<void> {
   let presentedEpoch = presentationEpoch;
   endSourceInputSession();
   const inputSession = payload.focusInput ? beginSourceInputSession() : 0;
+  recordPopupStage(presentationEpoch, 'domPrepared');
   try {
     const presentation = await panelLayout.presentPopup(presentationEpoch, Boolean(payload.focusInput), Boolean(payload.reuseVisiblePopup ?? payload.updateVisiblePopup));
-    if (presentation) { applyTranslationPresentation(presentation); presentedEpoch = presentation.epoch; }
+    if (presentation) { applyTranslationPresentation(presentation); presentedEpoch = presentation.epoch; recordPopupStage(presentedEpoch, 'presentationComplete'); }
     else if (desktop) {
       if (inputSession) endSourceInputSession(inputSession);
       return;
@@ -413,6 +424,7 @@ async function receiveCapturedText(payload: SourceTextEvent): Promise<void> {
   } catch (error) {
     if (inputSession) endSourceInputSession(inputSession);
     if (errorMessage(error).startsWith('CANCELLED:')) return;
+    recordPopupStage(translationPresentation.epoch, 'presentationFailed');
     throw error;
   }
   // A valid native show acknowledgment can arrive after a newer selection has
@@ -423,6 +435,9 @@ async function receiveCapturedText(payload: SourceTextEvent): Promise<void> {
     if (inputSession) endSourceInputSession(inputSession);
     return;
   }
+  // Source-bound failure guidance must follow successful presentation and the
+  // same generation/intent guard above, never a separate racing toast event.
+  if (payload.actionError) handleActionError(payload.actionError);
   if (payload.mode === 'translate') { if (settingsReady) run(translate); else pendingTranslate = true; }
   else if (payload.mode === 'ocr') {
     status('文字识别完成');
@@ -584,9 +599,17 @@ function updateResultView(view: ResultView, result: TranslationResult, done: boo
   view.result = result; view.done = done;
   view.card.setAttribute('aria-busy', String(!done));
   view.body.className = result.error ? 'result-error' : !done && !result.text ? 'result-loading' : 'result-text';
-  const content = result.error ? userFacingError(result.error) : result.text;
+  const setupPair = needsSystemTranslationSetup(view) ? systemTranslationSetupPair(result.resolvedLanguages) : null;
+  const content = result.error ? userFacingError(result.error) + (setupPair
+    ? ` 本次语言组合：${languageName(setupPair.sourceLanguage)} → ${languageName(setupPair.targetLanguage)}。若原文语言识别不正确，请手动选择源语言后重试。` : '') : result.text;
   const previous = view.body.textContent ?? '';
-  if (content !== previous) {
+  const compact = done && !result.error;
+  const layoutChanged = view.body.dataset.paragraphLayout !== String(compact);
+  view.body.dataset.paragraphLayout = String(compact);
+  if (compact && (content !== previous || layoutChanged)) {
+    renderTranslationParagraphs(view.body, content);
+  } else if (!compact && (content !== previous || layoutChanged)) {
+    delete view.body.dataset.paragraphSpacing;
     if (view.body.childNodes.length === 1 && view.body.firstChild instanceof Text && content.startsWith(previous)) {
       view.body.firstChild.appendData(content.slice(previous.length));
     } else view.body.textContent = content;
@@ -603,22 +626,26 @@ function needsSystemTranslationSetup(view: ResultView): boolean {
     && view.result.error?.startsWith('SYSTEM_TRANSLATION_DOWNLOAD_REQUIRED:') === true;
 }
 function openResultSettings(view: ResultView): void {
-  if (!view.done || !view.result.error) return;
+  if (!view.card.isConnected || !view.done || !view.result.error) return;
   const systemSetup = needsSystemTranslationSetup(view);
   setView('settings', systemSetup);
   if (systemSetup) {
     if (systemTranslationPreparing) {
       toast('系统翻译正在准备，请完成或取消后再选择该语言对。');
     } else {
-      const pair = view.result.resolvedLanguages;
-      const supportedOption = (value: unknown): value is string => typeof value === 'string'
-        && value !== 'auto' && LANGUAGES.some(([option]) => option === value);
-      if (supportedOption(pair?.sourceLanguage) && supportedOption(pair?.targetLanguage)
-          && pair.sourceLanguage !== pair.targetLanguage) {
+      const pair = systemTranslationSetupPair(view.result.resolvedLanguages);
+      if (pair) {
         renderSystemTranslationSetup();
-        $<HTMLSelectElement>('#system-translation-source').value = pair.sourceLanguage;
-        $<HTMLSelectElement>('#system-translation-target').value = pair.targetLanguage;
+        for (const [selector, language] of [['#system-translation-source', pair.sourceLanguage], ['#system-translation-target', pair.targetLanguage]] as const) {
+          const select = $<HTMLSelectElement>(selector);
+          if (![...select.options].some((option) => option.value === language)) {
+            const option = document.createElement('option'); option.value = language; option.textContent = languageName(language); select.append(option);
+          }
+          select.value = language;
+        }
         systemTranslationStatus = null;
+      } else {
+        toast('无法确定本次失败的语言组合，请在下方手动选择后再准备系统翻译。');
       }
       void refreshSystemTranslationStatus();
     }
@@ -1406,7 +1433,20 @@ async function refreshPermissionStatus(): Promise<void> {
   catch (error) { $('#permission-error').textContent = errorMessage(error); $('#permission-error').hidden = false; }
   finally { setPermissionBusy(false); }
 }
+interface PresentedActionError { presentationEpoch: number; message: string }
+function receiveActionError(payload: string | PresentedActionError): void {
+  if (typeof payload === 'string') { handleActionError(payload); return; }
+  if (!payload || typeof payload.message !== 'string'
+    || !hasCurrentPresentationIntent(payload.presentationEpoch, translationPresentation.epoch, sourceDeliveryIntent, focusIntentRevision)) return;
+  handleActionError(payload.message);
+}
 function handleActionError(message: string): void {
+  // A copy with no clipboard update is not evidence of an empty selection.
+  // Surface the actionable failure, without suggesting a different cloud service.
+  if (/^(?:COPY_NO_UPDATE|SELECTION_UNAVAILABLE):/i.test(message.trim())) {
+    toast(userFacingError(message), 'error', 8000);
+    return;
+  }
   // Selection/cancellation compatibility only. Screenshot permission, NO_TEXT,
   // OCR service failures and translation failures remain actionable errors.
   if (/^(?:NO_SELECTION|SELECTION_EMPTY|CANCELLED):/i.test(message.trim()) || /^未取得选区/.test(message.trim())) return;
@@ -1704,7 +1744,7 @@ async function initialize(): Promise<void> {
     cleanupListeners.push(await listen<NativeSettingsRequest>('open-settings', (event) => run(() => openSettingsFromNative(event.payload))));
     cleanupListeners.push(await listen<TranslationPresentation>('translation-presentation', (event) => applyTranslationPresentation(event.payload)));
     cleanupListeners.push(await listen<TranslationProgress>('translation-progress', (event) => receiveTranslationProgress(event.payload)));
-    cleanupListeners.push(await listen<string>('action-error', (event) => handleActionError(event.payload)));
+    cleanupListeners.push(await listen<string | PresentedActionError>('action-error', (event) => receiveActionError(event.payload)));
     cleanupListeners.push(await listen<string>('shortcut-error', (event) => toast(event.payload, 'error', 8000)));
     cleanupListeners.push(await listen('shortcut-registration-changed', () => run(async () => {
       settings = await invoke<Settings>('get_settings');

@@ -202,7 +202,8 @@ body:not([data-view="translate"]) .popup-resize-edge[data-window-resize="east"],
 .popup-resize-edge[data-window-resize$="-east"] { right: 0; }
 .popup-resize-edge[data-window-resize="north-west"], .popup-resize-edge[data-window-resize="south-east"] { cursor: nwse-resize; }
 .popup-resize-edge[data-window-resize="north-east"], .popup-resize-edge[data-window-resize="south-west"] { cursor: nesw-resize; }
-body.popup-resizing, body.popup-resizing * { user-select: none; }
+body.popup-resizing, body.popup-resizing *, body.popup-dragging, body.popup-dragging * { user-select: none; }
+body.popup-dragging, body.popup-dragging * { cursor: grabbing !important; }
 body.popup-resizing[data-resize-direction="west"], body.popup-resizing[data-resize-direction="east"], body.popup-resizing[data-resize-direction="west"] *, body.popup-resizing[data-resize-direction="east"] * { cursor: ew-resize !important; }
 body.popup-resizing[data-resize-direction="north"], body.popup-resizing[data-resize-direction="south"], body.popup-resizing[data-resize-direction="north"] *, body.popup-resizing[data-resize-direction="south"] * { cursor: ns-resize !important; }
 body.popup-resizing[data-resize-direction="north-west"], body.popup-resizing[data-resize-direction="south-east"], body.popup-resizing[data-resize-direction="north-west"] *, body.popup-resizing[data-resize-direction="south-east"] * { cursor: nwse-resize !important; }
@@ -378,4 +379,11 @@ body[data-view="translate"] #source-text, body[data-view="translate"] .result-te
 #update-settings .settings-card-heading > div { min-width: 0; }
 #check-updates { flex-shrink: 0; }
 
+/* Inline-only paragraph layout keeps both the raw text and browser-selected
+   text unchanged. The small parent strut compacts blank lines; normal text
+   runs restore readable line height on both macOS and Windows. No block boxes
+   or generated content may be introduced between runs (they add copy newlines). */
+:root body[data-view] .result-text[data-paragraph-spacing="compact"] { line-height: .35; }
+.result-text .result-text-run { display: inline; line-height: 1.75; }
+.result-text .result-paragraph-break { display: inline; line-height: .35; white-space: pre-wrap; }
 .free-service-warning { padding: 8px 10px; border-left: 3px solid var(--danger); color: var(--text); background: var(--surface-soft); font-size: 12px; line-height: 1.6; }

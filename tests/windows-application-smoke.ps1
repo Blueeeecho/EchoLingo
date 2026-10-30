@@ -731,10 +731,11 @@ public static class EchoLingoApplicationSmoke {
             string history = Path.Combine(roaming, "history.json");
             using (MockServer server = offline ? null : new MockServer()) {
                 JavaScriptSerializer json = new JavaScriptSerializer();
+                // Current-schema fixture explicitly opts into the optional input/OCR shortcuts.
                 Dictionary<string, object> settings = new Dictionary<string, object> {
                     { "providers", new object[] { new Dictionary<string, object> { { "id", providerId }, { "name", offline ? "Real bundled offline model" : "Loopback generated fixture" }, { "kind", offline ? "offline" : "libretranslate" }, { "baseUrl", offline ? "" : server.Url }, { "model", "" }, { "enabled", true }, { "prompt", "" } } } },
                     { "ocrProviders", new object[0] }, { "activeOcrProviderId", null }, { "sourceLanguage", "auto" }, { "targetLanguage", "auto" },
-                    { "languageDirectionVersion", 1 }, { "shortcutDefaultsVersion", 1 }, { "saveHistory", true }, { "maxHistory", 20 }, { "theme", "light" }, { "autoHideSeconds", 0 },
+                    { "languageDirectionVersion", 1 }, { "shortcutDefaultsVersion", 2 }, { "saveHistory", true }, { "maxHistory", 20 }, { "theme", "light" }, { "autoHideSeconds", 0 },
                     { "shortcuts", new Dictionary<string, object> { { "selection", selectionShortcut }, { "capture", "" }, { "ocr", "Alt+Shift+S" }, { "silentOcr", silentOcrShortcut }, { "input", "Alt+A" } } }
                 };
                 File.WriteAllText(Path.Combine(roaming, "settings.json"), json.Serialize(settings), new UTF8Encoding(false));

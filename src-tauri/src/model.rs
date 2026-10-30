@@ -134,9 +134,9 @@ impl Default for Shortcuts {
         Self {
             selection: "Alt+D".into(),
             capture: String::new(),
-            ocr: "Alt+Shift+S".into(),
+            ocr: String::new(),
             silent_ocr: "Alt+S".into(),
-            input: "Alt+A".into(),
+            input: String::new(),
         }
     }
 }
@@ -188,7 +188,7 @@ impl Default for Settings {
             source_language: "auto".into(),
             target_language: "auto".into(),
             language_direction_version: 1,
-            shortcut_defaults_version: 1,
+            shortcut_defaults_version: 2,
             shortcuts: Shortcuts::default(),
             windows_selection_strategy: WindowsSelectionStrategy::Copy,
             save_history: true,
@@ -223,6 +223,17 @@ pub fn migrate_shortcut_defaults(settings: &mut Settings) {
             settings.shortcuts.silent_ocr = "Alt+S".into();
         }
         settings.shortcut_defaults_version = 1;
+    }
+    if settings.shortcut_defaults_version == 1 {
+        // Only retire exact legacy defaults. Custom bindings and explicitly
+        // cleared fields remain available; version 2 never rewrites new saves.
+        if settings.shortcuts.input == "Alt+A" {
+            settings.shortcuts.input.clear();
+        }
+        if settings.shortcuts.ocr == "Alt+Shift+S" {
+            settings.shortcuts.ocr.clear();
+        }
+        settings.shortcut_defaults_version = 2;
     }
 }
 
@@ -379,7 +390,7 @@ mod tests {
         assert!(validate_settings(&Settings::default()).is_ok());
         assert_eq!(Settings::default().target_language, "auto");
         assert_eq!(Settings::default().language_direction_version, 1);
-        assert_eq!(Settings::default().shortcut_defaults_version, 1);
+        assert_eq!(Settings::default().shortcut_defaults_version, 2);
         assert_eq!(Settings::default().max_history, 20);
         assert!(Shortcuts::default().capture.is_empty());
         assert_eq!(Shortcuts::default().silent_ocr, "Alt+S");
@@ -529,7 +540,7 @@ mod tests {
         migrate_shortcut_defaults(&mut settings);
         assert!(settings.shortcuts.capture.is_empty());
         assert_eq!(settings.shortcuts.silent_ocr, "Alt+S");
-        assert_eq!(settings.shortcut_defaults_version, 1);
+        assert_eq!(settings.shortcut_defaults_version, 2);
         settings.shortcuts.capture = "Alt+S".into();
         settings.shortcuts.silent_ocr = "Alt+C".into();
         migrate_shortcut_defaults(&mut settings);
@@ -556,7 +567,49 @@ mod tests {
                 ),
                 (capture, silent)
             );
-            assert_eq!(settings.shortcut_defaults_version, 1);
+            assert_eq!(settings.shortcut_defaults_version, 2);
+        }
+    }
+    #[test]
+    fn two_default_shortcut_migration_is_exact_and_idempotent() {
+        for version in [0, 1] {
+            for (input, ocr) in [
+                ("Alt+A", "Alt+Shift+S"),
+                ("Ctrl+Alt+I", "Ctrl+Alt+O"),
+                ("", ""),
+                ("Alt+A", "Ctrl+Alt+O"),
+                ("Ctrl+Alt+I", "Alt+Shift+S"),
+            ] {
+                let mut settings = Settings::default();
+                settings.shortcut_defaults_version = version;
+                settings.shortcuts.selection = "Ctrl+Alt+D".into();
+                settings.shortcuts.silent_ocr = "Ctrl+Alt+S".into();
+                settings.shortcuts.capture = "Ctrl+Alt+C".into();
+                settings.shortcuts.input = input.into();
+                settings.shortcuts.ocr = ocr.into();
+                migrate_shortcut_defaults(&mut settings);
+                assert_eq!(settings.shortcut_defaults_version, 2);
+                assert_eq!(
+                    settings.shortcuts.input,
+                    if input == "Alt+A" { "" } else { input }
+                );
+                assert_eq!(
+                    settings.shortcuts.ocr,
+                    if ocr == "Alt+Shift+S" { "" } else { ocr }
+                );
+                assert_eq!(settings.shortcuts.selection, "Ctrl+Alt+D");
+                assert_eq!(settings.shortcuts.silent_ocr, "Ctrl+Alt+S");
+                assert_eq!(settings.shortcuts.capture, "Ctrl+Alt+C");
+                let before = serde_json::to_string(&settings).unwrap();
+                migrate_shortcut_defaults(&mut settings);
+                assert_eq!(serde_json::to_string(&settings).unwrap(), before);
+                // Explicit opt-in after migration is never silently removed.
+                settings.shortcuts.input = "Alt+A".into();
+                settings.shortcuts.ocr = "Alt+Shift+S".into();
+                migrate_shortcut_defaults(&mut settings);
+                assert_eq!(settings.shortcuts.input, "Alt+A");
+                assert_eq!(settings.shortcuts.ocr, "Alt+Shift+S");
+            }
         }
     }
     #[test]

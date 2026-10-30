@@ -19,8 +19,8 @@ class ReleaseAssetsTests(unittest.TestCase):
         self.root = Path(self.temp.name)
         self.artifacts = self.root / "artifacts"
         self.output = self.root / "public"
-        self.windows = self.artifacts / "EchoLingo-Windows/nsis/EchoLingo_0.2.0_x64-setup.exe"
-        self.macos = self.artifacts / "EchoLingo-macOS/dmg/EchoLingo_0.2.0_aarch64.dmg"
+        self.windows = self.artifacts / "EchoLingo-Windows/nsis/EchoLingo_0.2.1_x64-setup.exe"
+        self.macos = self.artifacts / "EchoLingo-macOS/dmg/EchoLingo_0.2.1_aarch64.dmg"
         self.report_path = self.artifacts / "EchoLingo-Windows-offline-evidence/temp/echolingo-offline-validation.json"
         for path, data in [(self.windows, b"accepted Windows installer"), (self.macos, b"tested Mac installer")]:
             path.parent.mkdir(parents=True)
@@ -65,6 +65,20 @@ class ReleaseAssetsTests(unittest.TestCase):
         self.assertEqual(release.split("jobs:\n", 1)[1].strip(), expected.strip())
         self.assertNotIn("actions: read", release)
 
+    def test_publication_is_main_or_version_tag_only_and_keeps_prerelease_gate(self):
+        root = Path(__file__).resolve().parents[1]
+        workflow = (root / ".github/workflows/release.yml").read_text()
+        self.assertNotIn("pull_request:", workflow)
+        self.assertIn(f"tags: ['{RELEASE.VERSION}']", workflow)
+        self.assertIn(f"refs/tags/{RELEASE.VERSION}", workflow)
+        self.assertIn("branches: [main]", workflow)
+        self.assertIn("needs: [release-inputs, verify]", workflow)
+        self.assertIn("draft: true, prerelease: true", workflow)
+        self.assertIn("main.object.sha !== context.sha", workflow)
+        self.assertIn("already exists; inspect it instead of overwriting", workflow)
+        self.assertIn(f"docs/releases/{RELEASE.VERSION}.zh-CN.md", workflow)
+        self.assertTrue((root / f"docs/releases/{RELEASE.VERSION}.zh-CN.md").is_file())
+
     def test_versions_are_consistent(self):
         RELEASE.check_version()
 
@@ -73,7 +87,7 @@ class ReleaseAssetsTests(unittest.TestCase):
         self.assertFalse(manifest["rebuiltAfterValidation"])
         self.assertEqual(len(manifest["files"]), 3)
         self.assertEqual(len(list(self.output.iterdir())), 5)
-        self.assertEqual((self.output / "EchoLingo_0.2.0_windows_x64-setup.exe").read_bytes(), self.windows.read_bytes())
+        self.assertEqual((self.output / "EchoLingo_0.2.1_windows_x64-setup.exe").read_bytes(), self.windows.read_bytes())
         self.assertNotIn(str(self.root), (self.output / "RELEASE-MANIFEST.json").read_text())
         for line in (self.output / "SHA256SUMS.txt").read_text().splitlines():
             digest, name = line.split("  ", 1)

@@ -111,7 +111,30 @@ public static class WindowsBrowserSelectionBridge {
     static DataObject Seed(){
         DataObject data=new DataObject();data.SetData(DataFormats.UnicodeText,false,"Generated browser clipboard original 24680");data.SetData(DataFormats.Html,false,"<p>Generated browser rich original 24680</p>");data.SetData(DataFormats.Rtf,false,"{\\rtf1 Generated browser rich original 24680}");Clipboard.SetDataObject(data,true,0,0);ownedClipboard=GetClipboardSequenceNumber();seeded=true;return data;
     }
-    static bool Restored(DataObject expected){IDataObject actual=Clipboard.GetDataObject();if(actual==null)return false;foreach(string format in expected.GetFormats(false))if(!Object.Equals(expected.GetData(format,false),actual.GetData(format,false)))return false;return true;}
+    static bool Restored(DataObject expected){return Restored(expected,null);}
+    static bool Restored(DataObject expected,Dictionary<string,object> observation){
+        uint before=GetClipboardSequenceNumber();IDataObject actual=Clipboard.GetDataObject();
+        bool matches=actual!=null;var formats=new List<Dictionary<string,object>>();
+        // Compare the original fixed synthetic formats exactly once. Record no
+        // content or arbitrary format names and never convert a failed read into
+        // a retry/pass. The failure verdict remains the original observation.
+        foreach(string format in expected.GetFormats(false)){
+            object wanted=expected.GetData(format,false),received=actual==null?null:actual.GetData(format,false);
+            bool equal=Object.Equals(wanted,received);matches=matches&&equal;
+            if(observation!=null)formats.Add(new Dictionary<string,object>{
+                {"format",format},{"expectedType",wanted==null?null:wanted.GetType().FullName},
+                {"actualType",received==null?null:received.GetType().FullName},
+                {"expectedStringLength",wanted is string?((string)wanted).Length:-1},
+                {"actualStringLength",received is string?((string)received).Length:-1},
+                {"present",received!=null},{"exactEqual",equal}});
+        }
+        if(observation!=null){uint owner;GetWindowThreadProcessId(GetClipboardOwner(),out owner);
+            observation["sequenceBeforeRead"]=before;observation["sequenceAfterRead"]=GetClipboardSequenceNumber();
+            observation["ownerProcessAfterRead"]=owner;observation["dataObjectAvailable"]=actual!=null;
+            observation["formats"]=formats;observation["originalVerdict"]=matches;
+            observation["retryAttempts"]=0;observation["clipboardWritten"]=false;
+        }return matches;
+    }
     static Dictionary<string,object> QueryDiagnostics(Dictionary<string,object> reply){
         Dictionary<string,object> numeric=new Dictionary<string,object>();object raw;
         if(reply.TryGetValue("capturePerformance",out raw)){
@@ -363,10 +386,10 @@ public static class WindowsBrowserSelectionBridge {
             if(HostedApplication.Visible){try{Dictionary<string,object> source=HostedApplication.ReadSource((int)Math.Max(1,30000-clock.ElapsedMilliseconds));string value=source["value"] as string;metadata["sourceEditorVisibleCount"]=source["sourceEditorVisibleCount"];metadata["actualSourceLength"]=value==null?-1:value.Length;metadata["actualSourceEmpty"]=value!=null&&value.Length==0;metadata["exactSelectedTextMatched"]=value==expected;metadata["historyExactCountAfter"]=HostedApplication.HistoryCount(expected,translation);exact=value==expected&&Convert.ToInt32(metadata["historyExactCountAfter"])==before+1;if(exact)break;}catch(ElementNotAvailableException){staleReads++;metadata["staleAppSourceReadObservations"]=staleReads;}}
             Application.DoEvents();Thread.Sleep(10);
         }
-        metadata["hotkeyToExactSourceAndHistoryMilliseconds"]=clock.Elapsed.TotalMilliseconds;metadata["shortcutKeysReleasedAfterAction"]=(GetAsyncKeyState(0x12)&0x8000)==0&&(GetAsyncKeyState(0x44)&0x8000)==0;Stage="app-clipboard-and-foreground-check";metadata["richClipboardRestored"]=Restored(seed);if(Convert.ToBoolean(metadata["richClipboardRestored"]))ownedClipboard=GetClipboardSequenceNumber();
+        metadata["hotkeyToExactSourceAndHistoryMilliseconds"]=clock.Elapsed.TotalMilliseconds;metadata["shortcutKeysReleasedAfterAction"]=(GetAsyncKeyState(0x12)&0x8000)==0&&(GetAsyncKeyState(0x44)&0x8000)==0;Stage="app-clipboard-and-foreground-check";var clipboardObservation=new Dictionary<string,object>();metadata["richClipboardRestored"]=Restored(seed,clipboardObservation);metadata["clipboardRestorationObservation"]=clipboardObservation;if(Convert.ToBoolean(metadata["richClipboardRestored"]))ownedClipboard=GetClipboardSequenceNumber();
         metadata["sourceForegroundPreserved"]=GetForegroundWindow()==main;metadata["browserBoundRootPreserved"]=BrowserMain(Convert.ToInt32(command["browserPid"]))==main;metadata["safeToContinue"]=Convert.ToBoolean(metadata["richClipboardRestored"])&&Convert.ToBoolean(metadata["sourceForegroundPreserved"]);
         metadata["ok"]=exact&&foregroundAlways&&Convert.ToBoolean(metadata["richClipboardRestored"])&&Convert.ToBoolean(metadata["sourceForegroundPreserved"])&&Convert.ToBoolean(metadata["browserBoundRootPreserved"])&&Convert.ToBoolean(metadata["shortcutKeysReleasedAfterAction"]);metadata["safeToContinue"]=metadata["ok"];metadata["acquisitionExpectationPassed"]=metadata["ok"];metadata["failureClassification"]=Convert.ToBoolean(metadata["ok"])?null:"actual-app-hotkey-acquisition";if(!Convert.ToBoolean(metadata["ok"])){
-            metadata["error"]="ACTUAL_APP_EXACT_SOURCE_NEW_HISTORY_OR_FOREGROUND_FAILED";
+            metadata["error"]=!Convert.ToBoolean(metadata["richClipboardRestored"])?"ACTUAL_APP_ORIGINAL_RICH_CLIPBOARD_MISMATCH":"ACTUAL_APP_EXACT_SOURCE_NEW_HISTORY_OR_FOREGROUND_FAILED";
             metadata["failureOnlySelectionObservation"]=HostedApplication.FailureSelectionHealth();
             if(HostedApplication.Diagnostics)try{metadata["ownAppFailureDiagnostics"]=HostedApplication.FailureDiagnostics();}catch(Exception e){metadata["ownAppFailureDiagnosticErrorType"]=e.GetType().Name;metadata["ownAppFailureDiagnosticErrorHResult"]=e.HResult;}
         }return metadata;
