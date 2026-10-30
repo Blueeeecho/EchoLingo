@@ -823,47 +823,110 @@ pub async fn fit(
                         let _ = reply.send(Err(crate::translation_requests::CANCELLED.into()));
                         return;
                     }
-                    // Tao maintains its own decoration flag but applies the
-                    // AppKit style mask asynchronously. Queue our continuation
-                    // after that change, before measuring frame/content sizes.
-                    let preparation = native
-                        .is_decorated()
-                        .map_err(|_| "无法读取窗口外观")
-                        .and_then(|decorated| {
-                            if decorated != management {
-                                native
-                                    .set_decorations(management)
-                                    .map_err(|_| "无法调整窗口外观")
-                            } else {
-                                Ok(())
-                            }
-                        });
-                    if let Err(error) = preparation {
-                        let _ = reply.send(Err(error.into()));
-                        return;
-                    }
-                    after_mac_window_changes(move || {
-                        let current = app
-                            .state::<crate::AppState>()
-                            .translation_requests
-                            .presentation();
-                        if expected.is_err()
-                            || current != expected
-                            || !current_layout_request(
-                                revision,
-                                app.state::<LayoutState>()
-                                    .layout_revision
-                                    .load(Ordering::SeqCst),
-                                management,
-                                native.is_decorated().ok(),
-                            )
+                    let gate_window = native.clone();
+                    let gate_epoch = expected.as_ref().map(|value| value.epoch).unwrap_or(0);
+                    after_mac_live_resize(&gate_window, gate_epoch, move |closing| {
+                        let state = app.state::<LayoutState>();
+                        if closing {
+                            let _ = reply.send(Err(crate::translation_requests::CANCELLED.into()));
+                            return;
+                        }
+                        if state.layout_revision.load(Ordering::SeqCst) != revision
+                            || expected.is_err()
+                            || app
+                                .state::<crate::AppState>()
+                                .translation_requests
+                                .presentation()
+                                != expected
                         {
                             let _ = reply.send(Err(crate::translation_requests::CANCELLED.into()));
                             return;
                         }
-                        let state = app.state::<LayoutState>();
-                        let value = fit_inner(&native, &state, management, height, content_width);
-                        let _ = reply.send(value);
+                        // A missed end notification cannot leave a stale active
+                        // token blocking future layouts. The native idle gate has
+                        // already read inLiveResize=false on this UI thread.
+                        if let Err(error) =
+                            finish_manual_resize_at_idle(&native, &state, gate_epoch)
+                        {
+                            let _ = reply.send(Err(error));
+                            return;
+                        }
+                        // Tao maintains its own decoration flag but applies the
+                        // AppKit style mask asynchronously. Queue our continuation
+                        // after that change, before measuring frame/content sizes.
+                        let preparation = native
+                            .is_decorated()
+                            .map_err(|_| "无法读取窗口外观")
+                            .and_then(|decorated| {
+                                if decorated != management {
+                                    native
+                                        .set_decorations(management)
+                                        .map_err(|_| "无法调整窗口外观")
+                                } else {
+                                    Ok(())
+                                }
+                            });
+                        if let Err(error) = preparation {
+                            let _ = reply.send(Err(error.into()));
+                            return;
+                        }
+                        after_mac_window_changes(move || {
+                            if app
+                                .state::<LayoutState>()
+                                .layout_revision
+                                .load(Ordering::SeqCst)
+                                != revision
+                                || app
+                                    .state::<crate::AppState>()
+                                    .translation_requests
+                                    .presentation()
+                                    != expected
+                            {
+                                let _ =
+                                    reply.send(Err(crate::translation_requests::CANCELLED.into()));
+                                return;
+                            }
+                            let gate_window = native.clone();
+                            after_mac_live_resize(&gate_window, gate_epoch, move |closing| {
+                                if closing {
+                                    let _ = reply
+                                        .send(Err(crate::translation_requests::CANCELLED.into()));
+                                    return;
+                                }
+                                let current = app
+                                    .state::<crate::AppState>()
+                                    .translation_requests
+                                    .presentation();
+                                if expected.is_err()
+                                    || current != expected
+                                    || !current_layout_request(
+                                        revision,
+                                        app.state::<LayoutState>()
+                                            .layout_revision
+                                            .load(Ordering::SeqCst),
+                                        management,
+                                        native.is_decorated().ok(),
+                                    )
+                                {
+                                    let _ = reply
+                                        .send(Err(crate::translation_requests::CANCELLED.into()));
+                                    return;
+                                }
+                                let state = app.state::<LayoutState>();
+                                let value =
+                                    finish_manual_resize_at_idle(&native, &state, gate_epoch)
+                                        .and_then(|_| {
+                                            fit_inner(
+                                                &native,
+                                                &state,
+                                                management,
+                                                height,
+                                                content_width,
+                                            )
+                                        });
+                                let _ = reply.send(value);
+                            });
+                        });
                     });
                 }
             })
@@ -872,6 +935,21 @@ pub async fn fit(
     }
     #[cfg(not(any(target_os = "windows", target_os = "macos")))]
     fit_inner(window, state, management, height, content_width)
+}
+
+#[cfg(target_os = "macos")]
+fn finish_manual_resize_at_idle(
+    window: &WebviewWindow,
+    state: &LayoutState,
+    epoch: u64,
+) -> Result<(), String> {
+    let mut manual = state.manual_height.lock().map_err(|_| "窗口布局状态异常")?;
+    if manual.active.is_some() {
+        let scale = window.scale_factor().map_err(|_| "无法读取窗口比例")?;
+        let size = window.inner_size().map_err(|_| "无法读取窗口大小")?;
+        manual.finish(epoch, size.to_logical::<f64>(scale).height);
+    }
+    Ok(())
 }
 
 #[cfg(target_os = "macos")]
@@ -927,6 +1005,61 @@ fn install_mac_resize_observer(window: &WebviewWindow) -> Result<(), String> {
         return Err("无法观察窗口调整".into());
     }
     Ok(())
+}
+
+#[cfg(target_os = "macos")]
+pub fn cancel_stale_native_layout(app: &tauri::AppHandle) {
+    let app = app.clone();
+    let dispatcher = app.clone();
+    let _ = dispatcher.run_on_main_thread(move || {
+        let (Some(window), Ok(current)) = (
+            app.get_webview_window("main"),
+            app.state::<crate::AppState>()
+                .translation_requests
+                .presentation(),
+        ) else {
+            return;
+        };
+        let Ok(native) = window.ns_window() else {
+            return;
+        };
+        unsafe extern "C" {
+            fn echolingo_cancel_stale_resize_wait(window: *mut std::ffi::c_void, epoch: u64);
+        }
+        // Read the current epoch when executing, not an older queued announcement.
+        unsafe { echolingo_cancel_stale_resize_wait(native, current.epoch) };
+    });
+}
+
+#[cfg(target_os = "macos")]
+fn after_mac_live_resize(
+    window: &WebviewWindow,
+    epoch: u64,
+    operation: impl FnOnce(bool) + Send + 'static,
+) {
+    type Operation = Box<dyn FnOnce(bool) + Send>;
+    unsafe extern "C" fn complete(context: *mut std::ffi::c_void, closing: i32) {
+        let operation = unsafe { Box::from_raw(context.cast::<Operation>()) };
+        operation(closing != 0);
+    }
+    unsafe extern "C" {
+        fn echolingo_after_live_resize(
+            window: *mut std::ffi::c_void,
+            epoch: u64,
+            callback: unsafe extern "C" fn(*mut std::ffi::c_void, i32),
+            context: *mut std::ffi::c_void,
+        );
+    }
+    let Ok(native) = window.ns_window() else {
+        operation(true);
+        return;
+    };
+    let operation: Box<Operation> = Box::new(Box::new(operation));
+    // Exactly one callback owns the operation. Swift uses AppKit notifications,
+    // never blocks its main thread and never waits on a guessed fixed delay.
+    unsafe {
+        echolingo_after_live_resize(native, epoch, complete, Box::into_raw(operation).cast())
+    };
 }
 
 #[cfg(target_os = "macos")]
@@ -1031,12 +1164,6 @@ fn fit_inner(
         height
     } else {
         let manual = state.manual_height.lock().map_err(|_| "窗口布局状态异常")?;
-        if manual
-            .active
-            .is_some_and(|(epoch, _)| epoch == presentation.epoch)
-        {
-            return Ok(());
-        }
         manual.height(presentation.epoch, height)
     };
     let previous = state.management.load(Ordering::SeqCst);
@@ -2233,5 +2360,20 @@ mod tests {
         manual.begin(3, 300.0);
         manual.finish(3, f64::NAN);
         assert_eq!(manual.height(3, 400.0), 400.0);
+    }
+    #[test]
+    fn second_idle_gate_recovers_a_new_resize_with_missing_end() {
+        let mut manual = ManualPopupHeight::default();
+        manual.finish(5, 280.0); // first gate already idle
+                                 // A real gesture starts between style preparation and final size gate.
+        manual.begin(5, 280.0);
+        // Missing didEnd: final actual-idle recovery must save before fitting.
+        manual.finish(5, 469.0);
+        assert_eq!(manual.height(5, 280.0), 469.0);
+        assert!(manual.active.is_none());
+        manual.begin(5, 469.0);
+        manual.finish(6, 160.0); // a newer source does not inherit old height
+        assert_eq!(manual.height(6, 280.0), 280.0);
+        assert!(manual.active.is_none());
     }
 }

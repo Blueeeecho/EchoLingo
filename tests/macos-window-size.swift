@@ -1,10 +1,18 @@
 import AppKit
 import Foundation
 
+// Deterministic own-window fixture: exercise notification ordering while
+// overriding only AppKit's read-only live-resize state, not production code.
+final class ResizeStateWindow: NSWindow {
+    var fixtureLiveResize = false
+    override var inLiveResize: Bool { fixtureLiveResize }
+}
+
 @main struct WindowSizeChecks {
     static func trace(_ value: String) { FileHandle.standardError.write(Data(("geometry-check: " + value + "\n").utf8)) }
     static var observedPhases: [Int32] = []
     static var releasedContexts = 0
+    static var idleResults: [Int32] = []
     static func main() {
         trace("before NSApplication.shared")
         _ = NSApplication.shared
@@ -56,6 +64,34 @@ import Foundation
         NotificationCenter.default.post(name: NSWindow.willStartLiveResizeNotification, object: observedWindow)
         NotificationCenter.default.post(name: NSWindow.didEndLiveResizeNotification, object: observedWindow)
         precondition(observedPhases == [0, 1])
+        let idleWindow = ResizeStateWindow(contentRect: NSRect(x: 0, y: 0, width: 680, height: 280),
+                                           styleMask: [.resizable], backing: .buffered, defer: false)
+        let idlePointer = Unmanaged.passUnretained(idleWindow).toOpaque()
+        idleWindow.fixtureLiveResize = true
+        echoLingoAfterLiveResize(idlePointer, 10, { _, status in WindowSizeChecks.idleResults.append(status) }, nil)
+        NotificationCenter.default.post(name: NSApplication.didUpdateNotification, object: NSApplication.shared)
+        precondition(idleResults.isEmpty)
+        // Latest same-epoch layout replaces, cancels and releases the former.
+        echoLingoAfterLiveResize(idlePointer, 10, { _, status in WindowSizeChecks.idleResults.append(status) }, nil)
+        precondition(idleResults == [1])
+        // A hidden/closed/new-source epoch cancels without waiting for an end.
+        echoLingoCancelStaleResizeWait(idlePointer, 11)
+        precondition(idleResults == [1, 1])
+        echoLingoAfterLiveResize(idlePointer, 11, { _, status in WindowSizeChecks.idleResults.append(status) }, nil)
+        // Lost didEnd is recovered from actual state on the next AppKit update.
+        idleWindow.fixtureLiveResize = false
+        NotificationCenter.default.post(name: NSApplication.didUpdateNotification, object: NSApplication.shared)
+        precondition(idleResults == [1, 1, 0])
+        NotificationCenter.default.post(name: NSWindow.didEndLiveResizeNotification, object: idleWindow)
+        precondition(idleResults == [1, 1, 0], "Completion is exactly once")
+        idleWindow.fixtureLiveResize = true
+        echoLingoAfterLiveResize(idlePointer, 12, { _, status in WindowSizeChecks.idleResults.append(status) }, nil)
+        NotificationCenter.default.post(name: NSWindow.willCloseNotification, object: idleWindow)
+        precondition(idleResults == [1, 1, 0, 1])
+        // An already idle window does not install a permanent waiter.
+        idleWindow.fixtureLiveResize = false
+        echoLingoAfterLiveResize(idlePointer, 13, { _, status in WindowSizeChecks.idleResults.append(status) }, nil)
+        precondition(idleResults == [1, 1, 0, 1, 0])
         let transitionWindow = NSWindow(contentRect: NSRect(x: -500, y: 140, width: 680, height: 480),
                                         styleMask: [.titled, .resizable], backing: .buffered, defer: false)
         let context = Unmanaged.passRetained(transitionWindow).toOpaque()

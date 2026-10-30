@@ -231,7 +231,7 @@ body.popup-resizing[data-resize-direction="north-east"], body.popup-resizing[dat
 .popup-menu button { display: flex; align-items: center; gap: 9px; width: 100%; min-height: 28px; padding: 6px 9px; text-align: left; border-radius: 4px; font-size: 11px; color: var(--secondary); }
 .popup-menu button .icon { width: 14px; height: 14px; }.popup-menu button:hover, .popup-menu button:focus-visible { background: var(--accent-soft); color: var(--accent); outline: none; }
 .menu-separator { height: 1px; margin: 4px 6px; background: var(--border); }
-body[data-view="translate"] { background: var(--surface); overflow: hidden; }
+body[data-view="translate"] { background: var(--surface); min-height: 100vh; overflow: hidden; }
 body[data-view="translate"] .app-shell { min-height: 0; height: auto; background: var(--surface); }
 body[data-view="translate"] .app-shell.menu-open { min-height: var(--popup-menu-height, 370px); }
 body[data-view="translate"] .main-shell { min-height: 0; height: auto; }

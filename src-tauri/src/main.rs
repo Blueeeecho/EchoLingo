@@ -1456,6 +1456,8 @@ fn cancel_translation(state: State<AppState>, request_id: u64) -> Result<(), Str
     Ok(())
 }
 fn announce_presentation(app: &tauri::AppHandle, presentation: translation_requests::Presentation) {
+    #[cfg(target_os = "macos")]
+    window_layout::cancel_stale_native_layout(app);
     if let Ok(mut deliveries) = app.state::<AppState>().source_deliveries.lock() {
         deliveries.advance(presentation.epoch);
     }

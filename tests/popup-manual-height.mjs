@@ -15,8 +15,9 @@ try {
         const view = document.querySelector('.view'); view.scrollTop = view.scrollHeight;
         const end = document.querySelector('#result-end').getBoundingClientRect();
         const box = view.getBoundingClientRect();
-        return { viewport: innerHeight, bottom: box.bottom, resultBottom: end.bottom, resultTop: end.top, viewTop: box.top };
+        return { bodyHeight: document.body.getBoundingClientRect().height, viewport: innerHeight, bottom: box.bottom, resultBottom: end.bottom, resultTop: end.top, viewTop: box.top };
       });
+      assert.ok(geometry.bodyHeight >= height, `${platform}: popup background fills the manually expanded viewport`);
       assert.ok(geometry.bottom <= height, `${platform}: scroll viewport must fit inside native window`);
       assert.ok(geometry.resultBottom <= height && geometry.resultTop >= geometry.viewTop, `${platform}: result actions must remain reachable at ${height}px`);
       await page.locator('#pin-button').evaluate(button => button.setAttribute('aria-pressed', 'true'));

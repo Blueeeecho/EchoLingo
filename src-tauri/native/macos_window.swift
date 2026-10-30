@@ -314,3 +314,71 @@ public func echoLingoObserveLiveResize(_ pointer: UnsafeMutableRawPointer?,
     objc_setAssociatedObject(window, &liveResizeObserverKey, observer, .OBJC_ASSOCIATION_RETAIN_NONATOMIC)
     return 0
 }
+
+// One-shot coordination with a genuine AppKit live resize. A didUpdate probe
+// recovers a missed end notification by reading actual window state; closing
+// releases the waiter as cancelled rather than applying geometry to a dead UI.
+private var resizeIdleTaskKey: UInt8 = 0
+private final class WindowResizeIdleTask {
+    weak var window: NSWindow?
+    let epoch: UInt64
+    let callback: @convention(c) (UnsafeMutableRawPointer?, Int32) -> Void
+    let context: UnsafeMutableRawPointer?
+    var tokens: [NSObjectProtocol] = []
+    var finished = false
+    init(window: NSWindow, epoch: UInt64, callback: @escaping @convention(c) (UnsafeMutableRawPointer?, Int32) -> Void,
+         context: UnsafeMutableRawPointer?) {
+        self.window = window; self.epoch = epoch; self.callback = callback; self.context = context
+    }
+    func start() {
+        precondition(Thread.isMainThread)
+        let center = NotificationCenter.default
+        tokens.append(center.addObserver(forName: NSWindow.didEndLiveResizeNotification, object: window, queue: .main) { [self] _ in probe() })
+        tokens.append(center.addObserver(forName: NSApplication.didUpdateNotification, object: NSApplication.shared, queue: .main) { [self] _ in probe() })
+        tokens.append(center.addObserver(forName: NSWindow.willCloseNotification, object: window, queue: .main) { [self] _ in finish(closing: true) })
+        probe()
+    }
+    func probe() {
+        precondition(Thread.isMainThread)
+        guard let window = window else { finish(closing: true); return }
+        if !window.inLiveResize { finish(closing: false) }
+    }
+    func finish(closing: Bool) {
+        guard !finished else { return }; finished = true
+        for token in tokens { NotificationCenter.default.removeObserver(token) }; tokens.removeAll()
+        if let window = window, objc_getAssociatedObject(window, &resizeIdleTaskKey) as? WindowResizeIdleTask === self {
+            objc_setAssociatedObject(window, &resizeIdleTaskKey, nil, .OBJC_ASSOCIATION_RETAIN_NONATOMIC)
+        }
+        let callback = callback, context = context
+        // Invoke while the observed AppKit state is still current. Scheduling
+        // another block would let a new live resize start before the callback.
+        callback(context, closing ? 1 : 0)
+    }
+}
+
+@_cdecl("echolingo_after_live_resize")
+public func echoLingoAfterLiveResize(_ pointer: UnsafeMutableRawPointer?, _ epoch: UInt64,
+    _ callback: @escaping @convention(c) (UnsafeMutableRawPointer?, Int32) -> Void,
+    _ context: UnsafeMutableRawPointer?) {
+    precondition(Thread.isMainThread)
+    guard let pointer = pointer,
+          let window = Unmanaged<AnyObject>.fromOpaque(pointer).takeUnretainedValue() as? NSWindow else {
+        callback(context, 1); return
+    }
+    (objc_getAssociatedObject(window, &resizeIdleTaskKey) as? WindowResizeIdleTask)?.finish(closing: true)
+    // Normal streamed layout allocates no waiter or notification subscriptions.
+    if !window.inLiveResize { callback(context, 0); return }
+    let task = WindowResizeIdleTask(window: window, epoch: epoch, callback: callback, context: context)
+    objc_setAssociatedObject(window, &resizeIdleTaskKey, task, .OBJC_ASSOCIATION_RETAIN_NONATOMIC)
+    task.start()
+}
+
+@_cdecl("echolingo_cancel_stale_resize_wait")
+public func echoLingoCancelStaleResizeWait(_ pointer: UnsafeMutableRawPointer?, _ epoch: UInt64) {
+    precondition(Thread.isMainThread)
+    guard let pointer = pointer,
+          let window = Unmanaged<AnyObject>.fromOpaque(pointer).takeUnretainedValue() as? NSWindow,
+          let task = objc_getAssociatedObject(window, &resizeIdleTaskKey) as? WindowResizeIdleTask,
+          task.epoch != epoch else { return }
+    task.finish(closing: true)
+}
