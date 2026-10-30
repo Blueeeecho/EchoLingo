@@ -430,7 +430,10 @@ public static class EchoLingoApplicationSmoke {
         exactPlanes=exactPlanes && planeBounds.Count==0 && thinAllocated==12*Screen.AllScreens.Length;
         long rawStyle=GetWindowLongPtr(target,-20).ToInt64();
         bool rawLoupe=IsCaptureLoupe(target)&&(rawStyle&0x20L)!=0&&(rawStyle&0x00080000L)==0;
-        bool ready = validSource && screen.Count == 4 && hover.Count == 4 && oneHelper && exactGeometry && remaining.Count == 0
+        // A superseded picker can remain fully presented during cancellation.
+        // Reject it here, before the ready-only timing assertion: the caller's
+        // identity check cannot run until this method returns.
+        bool ready = helper != 0 && helper != rejectedHelper && validSource && screen.Count == 4 && hover.Count == 4 && oneHelper && exactGeometry && remaining.Count == 0
             && exactPlanes && throughPlane && (rawPlane || rawThin || rawLoupe);
         probe["requiredInputPlane"]=true; probe["allocatedInputPlaneCount"]=allPlanes.Count; probe["visibleInputPlaneCount"]=planes.Count;
         probe["allocatedThinWindowCount"]=thinAllocated; probe["physicalInputPlaneMultisetMatches"]=exactPlanes;
