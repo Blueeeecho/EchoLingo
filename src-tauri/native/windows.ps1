@@ -134,17 +134,17 @@ public static class CaptureHealth {
     public static void Increment(string name) { long value;values.TryGetValue(name,out value);values[name]=value+1; }
     public static void ResetSelection() {
         List<string> old = new List<string>();
-        foreach (string key in values.Keys) if (key.StartsWith("selectionQuery", StringComparison.Ordinal) || key.StartsWith("copyHtml", StringComparison.Ordinal)) old.Add(key);
+        foreach (string key in values.Keys) if (key.StartsWith("selectionQuery", StringComparison.Ordinal) || (key.StartsWith("copyHtml", StringComparison.Ordinal) || key.StartsWith("copyUnicode", StringComparison.Ordinal) || key.StartsWith("copyRtf", StringComparison.Ordinal))) old.Add(key);
         foreach (string key in old) values.Remove(key);
         values["selectionQueryCount"] = 0;
     }
     public static int ResetSelectionSelfTest() {
         Dictionary<string, long> previous = Snapshot();
         try {
-            values.Clear(); values["copyHtmlSnapshotSeedVerified"] = 1; values["copyHtmlRestoreEqual"] = 1;
+            values.Clear(); values["copyHtmlSnapshotSeedVerified"] = 1; values["copyHtmlRestoreEqual"] = 1; values["copyUnicodeSnapshotEqual"] = 1; values["copyRtfRestoreEqual"] = 1;
             values["selectionQuery1Stage"] = 11; values["unrelatedFixtureCounter"] = 7;
             ResetSelection();
-            if (values.ContainsKey("copyHtmlSnapshotSeedVerified") || values.ContainsKey("copyHtmlRestoreEqual") || values.ContainsKey("selectionQuery1Stage")) throw new Exception("PROBE_EARLY_FAILURE_STALE_HEALTH");
+            if (values.ContainsKey("copyHtmlSnapshotSeedVerified") || values.ContainsKey("copyHtmlRestoreEqual") || values.ContainsKey("copyUnicodeSnapshotEqual") || values.ContainsKey("copyRtfRestoreEqual") || values.ContainsKey("selectionQuery1Stage")) throw new Exception("PROBE_EARLY_FAILURE_STALE_HEALTH");
             if (values["selectionQueryCount"] != 0 || values["unrelatedFixtureCounter"] != 7 || values.Count != 2) throw new Exception("PROBE_RESET_CHANGED_OTHER_HEALTH");
             ResetSelection();
             if (values.Count != 2) throw new Exception("PROBE_DISABLED_ATTEMPT_ADDED_HEALTH");
@@ -281,8 +281,10 @@ public sealed class ClipboardHtmlProbe {
     [DllImport("kernel32.dll")] static extern UIntPtr GlobalSize(IntPtr value);
     [DllImport("kernel32.dll")] static extern IntPtr GlobalLock(IntPtr value);
     [DllImport("kernel32.dll")] static extern bool GlobalUnlock(IntPtr value);
-    readonly string nonce; byte[] original;
-    ClipboardHtmlProbe(string value) { nonce = value; }
+    readonly string nonce, format, prefix; byte[] original; uint snapshotSequence; bool snapshotVerified;
+    ClipboardHtmlProbe unicode, rtf;
+    ClipboardHtmlProbe(string value) : this(value, DataFormats.Html, "copyHtml") { }
+    ClipboardHtmlProbe(string value, string dataFormat, string diagnosticPrefix) { nonce = value; format = dataFormat; prefix = diagnosticPrefix; }
     public static bool ValidNonce(string value) {
         if (value == null || value.Length != 32) return false;
         foreach (char c in value) if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f'))) return false;
@@ -304,6 +306,21 @@ public sealed class ClipboardHtmlProbe {
         if (length < 0) throw new InvalidOperationException();
         byte[] result = new byte[length + 1]; Array.Copy(allocated, result, result.Length); return result;
     }
+    static byte[] UnicodePayload(byte[] allocated) {
+        if (allocated == null || allocated.Length > 65536) throw new InvalidOperationException();
+        for (int i = 0; i + 1 < allocated.Length; i += 2) if (allocated[i] == 0 && allocated[i + 1] == 0) {
+            byte[] result = new byte[i + 2]; Array.Copy(allocated, result, result.Length); return result;
+        }
+        throw new InvalidOperationException();
+    }
+    byte[] EncodedValue(string text) {
+        if (text == null || text.Length > (format == DataFormats.UnicodeText ? 32767 : 65535)) return null;
+        if (format == DataFormats.UnicodeText) return Encoding.Unicode.GetBytes(text + '\0');
+        // The generated RTF seed is ASCII. Do not invent an ANSI code-page
+        // interpretation for arbitrary RTF; unsupported input is not comparable.
+        if (format == DataFormats.Rtf) { foreach (char c in text) if (c > 127) return null; return Encoding.ASCII.GetBytes(text + '\0'); }
+        return Encoding.UTF8.GetBytes(text + '\0');
+    }
     static byte[] Memory(uint format) {
         IntPtr handle = GetClipboardData(format); if (handle == IntPtr.Zero) throw new InvalidOperationException();
         ulong length = GlobalSize(handle).ToUInt64(); if (length == 0 || length > 65536) throw new InvalidOperationException();
@@ -312,18 +329,20 @@ public sealed class ClipboardHtmlProbe {
         finally { GlobalUnlock(handle); }
     }
     byte[] ReadBoundary(string phase) {
-        string prefix = "copyHtml" + phase; uint sequence = GetClipboardSequenceNumber(); bool opened = false;
+        string prefix = this.prefix + phase; uint sequence = GetClipboardSequenceNumber(); bool opened = false;
         try {
             opened = OpenClipboard(IntPtr.Zero); if (!opened) { CaptureHealth.Set(prefix + "Error", 1); return null; }
             uint marker = RegisterClipboardFormat("EchoLingo.ClipboardProbe." + nonce);
             if (!IsClipboardFormatAvailable(marker)) { CaptureHealth.Set(prefix + "Error", 2); return null; }
             if (!MarkerMatches(Memory(marker), nonce)) { CaptureHealth.Set(prefix + "Error", 3); return null; }
             CaptureHealth.Set(prefix + "SeedVerified", 1);
-            uint html = RegisterClipboardFormat(DataFormats.Html);
+            uint html = format == DataFormats.UnicodeText ? 13u : RegisterClipboardFormat(format);
             bool present = IsClipboardFormatAvailable(html); CaptureHealth.Set(prefix + "Present", present ? 1 : 0);
             if (!present) return null;
             byte[] bytes = Memory(html); CaptureHealth.Set(prefix + "AllocatedBytes", bytes.Length);
-            byte[] payload = Payload(bytes); CaptureHealth.Set(prefix + "PayloadBytes", payload.Length); return payload;
+            byte[] payload = format == DataFormats.UnicodeText ? UnicodePayload(bytes) : Payload(bytes); CaptureHealth.Set(prefix + "PayloadBytes", payload.Length);
+            if (phase == "Snapshot") { snapshotSequence = sequence; snapshotVerified = sequence == GetClipboardSequenceNumber(); }
+            return payload;
         } catch { CaptureHealth.Set(prefix + "Error", 4); return null; }
         finally {
             CaptureHealth.Set(prefix + "SequenceChanged", sequence == GetClipboardSequenceNumber() ? 0 : 1);
@@ -333,19 +352,36 @@ public sealed class ClipboardHtmlProbe {
     public static ClipboardHtmlProbe Begin() {
         string nonce = Environment.GetEnvironmentVariable("ECHOLINGO_CLIPBOARD_DIAGNOSTIC_NONCE");
         if (!ValidNonce(nonce)) return null;
-        foreach (string field in new string[] { "copyHtmlProbeEnabled", "copyHtmlSnapshotOlePresent", "copyHtmlSnapshotOleChars", "copyHtmlSnapshotEqual", "copyHtmlRestoreEqual", "copyHtmlSnapshotError", "copyHtmlSnapshotSeedVerified", "copyHtmlSnapshotPresent", "copyHtmlSnapshotAllocatedBytes", "copyHtmlSnapshotPayloadBytes", "copyHtmlSnapshotSequenceChanged", "copyHtmlRestoreError", "copyHtmlRestoreSeedVerified", "copyHtmlRestorePresent", "copyHtmlRestoreAllocatedBytes", "copyHtmlRestorePayloadBytes", "copyHtmlRestoreSequenceChanged" }) CaptureHealth.Set(field, 0);
-        ClipboardHtmlProbe probe = new ClipboardHtmlProbe(nonce); CaptureHealth.Set("copyHtmlProbeEnabled", 1);
-        probe.original = probe.ReadBoundary("Snapshot"); return probe;
+        ClipboardHtmlProbe probe = new ClipboardHtmlProbe(nonce);
+        probe.unicode = new ClipboardHtmlProbe(nonce, DataFormats.UnicodeText, "copyUnicode");
+        probe.rtf = new ClipboardHtmlProbe(nonce, DataFormats.Rtf, "copyRtf");
+        // Fixture-only pre-OLE acquisition observations. GetClipboardData can
+        // force delayed rendering, so these measurements are not nonperturbing.
+        // Each format validates the synthetic nonce in its own held clipboard
+        // lock. The original OLE enumeration/read order and verdict are untouched.
+        probe.Initialize(); probe.unicode.Initialize(); probe.rtf.Initialize(); return probe;
     }
-    public void SnapshotValue(object value) {
-        string text = value as string; CaptureHealth.Set("copyHtmlSnapshotOlePresent", text == null ? 0 : 1);
+    void Initialize() {
+        foreach (string suffix in new string[] { "ProbeEnabled", "SnapshotOlePresent", "SnapshotOleChars", "SnapshotEqual", "RestoreEqual", "SnapshotError", "SnapshotSeedVerified", "SnapshotPresent", "SnapshotAllocatedBytes", "SnapshotPayloadBytes", "SnapshotSequenceChanged", "RestoreError", "RestoreSeedVerified", "RestorePresent", "RestoreAllocatedBytes", "RestorePayloadBytes", "RestoreSequenceChanged" }) CaptureHealth.Set(prefix + suffix, 0);
+        CaptureHealth.Set(prefix + "ProbeEnabled", 1); original = ReadBoundary("Snapshot");
+    }
+    static bool MayObserveOle(bool verified, byte[] original, uint snapshot, uint current) { return verified && original != null && snapshot == current; }
+    public void SnapshotValue(string dataFormat, object value) {
+        if (dataFormat != format) { if (unicode != null) unicode.SnapshotValue(dataFormat, value); if (rtf != null) rtf.SnapshotValue(dataFormat, value); return; }
+        // The ordinary snapshot may contain non-fixture data. Do not observe
+        // its value unless this same format's nonce and generation were proved.
+        if (!MayObserveOle(snapshotVerified, original, snapshotSequence, GetClipboardSequenceNumber())) { CaptureHealth.Set(prefix + "SnapshotError", 6); return; }
+        string text = value as string; CaptureHealth.Set(prefix + "SnapshotOlePresent", text == null ? 0 : 1);
         if (text == null) return;
-        CaptureHealth.Set("copyHtmlSnapshotOleChars", Math.Min(10000000, text.Length));
-        CaptureHealth.Set("copyHtmlSnapshotEqual", original != null && text.Length <= 65536 && Equal(original, Encoding.UTF8.GetBytes(text + '\0')) ? 1 : 0);
+        CaptureHealth.Set(prefix + "SnapshotOleChars", Math.Min(10000000, text.Length));
+        byte[] encoded = EncodedValue(text);
+        if (encoded == null) { CaptureHealth.Set(prefix + "SnapshotError", 5); return; }
+        CaptureHealth.Set(prefix + "SnapshotEqual", Equal(original, encoded) ? 1 : 0);
     }
     public void Restored() {
         byte[] restored = ReadBoundary("Restore");
-        CaptureHealth.Set("copyHtmlRestoreEqual", Equal(original, restored) ? 1 : 0);
+        CaptureHealth.Set(prefix + "RestoreEqual", Equal(original, restored) ? 1 : 0);
+        if (unicode != null) unicode.Restored(); if (rtf != null) rtf.Restored();
     }
     public static int SelfTest() {
         string nonce = "0123456789abcdef0123456789abcdef"; int count = 0;
@@ -354,6 +390,12 @@ public sealed class ClipboardHtmlProbe {
         if (!Equal(Payload(new byte[] { 65, 0, 99 }), new byte[] {65, 0}) || Equal(new byte[] {65, 0}, new byte[] {0}) || Equal(null, null)) throw new Exception("PROBE_PAYLOAD_POLICY"); count++;
         bool rejected = false; try { Payload(new byte[] {65}); } catch (InvalidOperationException) { rejected = true; }
         if (!rejected) throw new Exception("PROBE_TERMINATOR_POLICY"); count++;
+        if (!Equal(UnicodePayload(new byte[] {65,0,66,0,0,0,99}), new byte[] {65,0,66,0,0,0})) throw new Exception("PROBE_UNICODE_ALIGNED_TERMINATOR"); count++;
+        rejected = false; try { UnicodePayload(new byte[] {65,0,0}); } catch (InvalidOperationException) { rejected = true; }
+        if (!rejected) throw new Exception("PROBE_UNICODE_ODD_TERMINATOR"); count++;
+        ClipboardHtmlProbe unicode = new ClipboardHtmlProbe(nonce, DataFormats.UnicodeText, "copyUnicode"), rtf = new ClipboardHtmlProbe(nonce, DataFormats.Rtf, "copyRtf");
+        if (!Equal(unicode.EncodedValue("A\u4e2d"),new byte[]{65,0,45,78,0,0}) || rtf.EncodedValue("\u4e2d") != null || !Equal(rtf.EncodedValue("A"),new byte[]{65,0})) throw new Exception("PROBE_FORMAT_ENCODING"); count++;
+        if (MayObserveOle(false,new byte[]{0},1,1) || MayObserveOle(true,null,1,1) || MayObserveOle(true,new byte[]{0},1,2) || !MayObserveOle(true,new byte[]{0},1,1)) throw new Exception("PROBE_NONCE_GENERATION_OBSERVATION_GATE"); count++;
         return count + CaptureHealth.ResetSelectionSelfTest();
     }
 }
@@ -1183,7 +1225,7 @@ public static class EchoLingoNative {
         if (existing == null) return saved;
         foreach (string format in existing.GetFormats(false)) {
             object value = CloneClipboardValue(existing.GetData(format, false));
-            if (probe != null && format == DataFormats.Html) probe.SnapshotValue(value);
+            if (probe != null) probe.SnapshotValue(format, value);
             IDisposable disposable = value as IDisposable;
             if (disposable != null) resources.Add(disposable);
             saved.SetData(format, false, value);

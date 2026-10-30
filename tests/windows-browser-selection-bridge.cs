@@ -119,37 +119,81 @@ public static class WindowsBrowserSelectionBridge {
     }
     // Read only our nonce-tagged synthetic clipboard, under one clipboard lock.
     // No raw content, token or arbitrary format names are returned to diagnostics.
-    static byte[] LockedBytes(uint format,int maximum){
-        IntPtr handle=GetClipboardData(format);if(handle==IntPtr.Zero)return null;
-        ulong size=GlobalSize(handle).ToUInt64();if(size==0||size>(ulong)maximum)return null;
-        IntPtr memory=GlobalLock(handle);if(memory==IntPtr.Zero)return null;
+    // Error codes: 1 clipboard lock, 2 marker, 3 handle, 4 allocation bound,
+    // 5 memory lock, 6 terminator, 7 non-ASCII RTF expectation, 8 exception.
+    // AllocationBytes is capped at maximum+1; that sentinel is never read.
+    static byte[] LockedBytes(uint format,int maximum,out long allocation,out int error){
+        allocation=-1;error=0;
+        IntPtr handle=GetClipboardData(format);if(handle==IntPtr.Zero){error=3;return null;}
+        ulong size=GlobalSize(handle).ToUInt64();allocation=(long)Math.Min(size,(ulong)maximum+1);
+        if(size==0||size>(ulong)maximum){error=4;return null;}
+        IntPtr memory=GlobalLock(handle);if(memory==IntPtr.Zero){error=5;return null;}
         try{byte[] bytes=new byte[(int)size];Marshal.Copy(memory,bytes,0,bytes.Length);return bytes;}
         finally{GlobalUnlock(handle);}
     }
-    static Dictionary<string,object> ObserveSyntheticHtml(string expected){
-        var result=new Dictionary<string,object>{{"lockAcquired",false},{"nonceVerified",false},{"htmlExactEqual",false},{"clipboardWritten",false}};
-        result["sequenceBeforeLock"]=GetClipboardSequenceNumber();
-        if(!OpenClipboard(IntPtr.Zero))return result;
-        result["lockAcquired"]=true;
+    static int TerminatedBytes(byte[] bytes,bool unicode){
+        if(bytes==null||bytes.Length>65536)return -1;
+        if(unicode){for(int i=0;i+1<bytes.Length;i+=2)if(bytes[i]==0&&bytes[i+1]==0)return i+2;return -1;}
+        int end=Array.IndexOf(bytes,(byte)0);return end<0?-1:end+1;
+    }
+    static bool ExactPayload(byte[] bytes,byte[] wanted,bool unicode){
+        int length=TerminatedBytes(bytes,unicode);if(wanted==null||length!=wanted.Length)return false;
+        for(int i=0;i<length;i++)if(bytes[i]!=wanted[i])return false;return true;
+    }
+    public static void RawPayloadSelfTest(){
+        Need(TerminatedBytes(new byte[]{65,0,0,0,99},true)==4,"RAW_UNICODE_ALIGNED_TERMINATOR");
+        Need(TerminatedBytes(new byte[]{65,0,0,66,0},true)==-1,"RAW_UNICODE_UNALIGNED_ZERO_REJECTED");
+        Need(TerminatedBytes(new byte[]{0,1,0,0},true)==4,"RAW_UNICODE_LOW_ZERO_NOT_TERMINATOR");
+        Need(TerminatedBytes(new byte[]{65,0,0},true)==-1,"RAW_UNICODE_TRUNCATED_TERMINATOR");
+        Need(TerminatedBytes(new byte[]{65,0,99},false)==2,"RAW_BYTE_TERMINATOR_PADDING");
+        Need(TerminatedBytes(new byte[65537],false)==-1,"RAW_ALLOCATION_BOUND");
+        Need(ExactPayload(new byte[]{65,0,0,0,99},Encoding.Unicode.GetBytes("A\0"),true),"RAW_UNICODE_EXACT_WITH_PADDING");
+        Need(!ExactPayload(new byte[]{65,0,0,0},Encoding.Unicode.GetBytes("B\0"),true),"RAW_UNICODE_MISMATCH");
+        Need(!ExactPayload(null,Encoding.ASCII.GetBytes("A\0"),false),"RAW_MISSING_PAYLOAD");
+    }
+    static void ObserveLockedFormat(Dictionary<string,object> result,string prefix,uint format,string expected,Encoding encoding,bool unicode){
         try{
-            byte[] nonce=LockedBytes(RegisterClipboardFormat(ProbeFormat),256),wantedNonce=Encoding.ASCII.GetBytes(ProbeNonce);
+            // WinForms SaveStringToHandle(false) uses CP_ACP; ASCII seed bytes
+            // are identical. Only this fixture's ASCII RTF is comparable. Do not infer
+            // an encoding or inspect arbitrary RTF from another application.
+            if(prefix=="rtf")foreach(char c in expected)if(c>127){result[prefix+"Error"]=7;return;}
+            byte[] wanted=encoding.GetBytes(expected+"\0");result[prefix+"ExpectedBytes"]=wanted.Length;
+            if(wanted.Length>65536){result[prefix+"Error"]=4;return;}
+            long allocation;int error;byte[] bytes=LockedBytes(format,65536,out allocation,out error);
+            result[prefix+"AllocationBytes"]=allocation;result[prefix+"Error"]=error;
+            if(bytes==null)return;
+            result[prefix+"TerminatedBytes"]=TerminatedBytes(bytes,unicode);
+            if(Convert.ToInt32(result[prefix+"TerminatedBytes"])<0){result[prefix+"Error"]=6;return;}
+            result[prefix+"ExactEqual"]=ExactPayload(bytes,wanted,unicode)?1:0;
+        }catch{result[prefix+"Error"]=8;}
+    }
+    static Dictionary<string,object> ObserveSyntheticFormats(DataObject expected){
+        var result=new Dictionary<string,object>{{"lockAcquired",0},{"nonceVerified",0},{"clipboardWritten",0},{"error",0}};
+        foreach(string prefix in new string[]{"unicode","rtf","html"})foreach(string suffix in new string[]{"AllocationBytes","ExpectedBytes","TerminatedBytes","ExactEqual","Error"})result[prefix+suffix]=suffix=="AllocationBytes"||suffix=="TerminatedBytes"?-1:0;
+        result["sequenceBeforeLock"]=GetClipboardSequenceNumber();
+        if(!OpenClipboard(IntPtr.Zero)){result["error"]=1;return result;}
+        result["lockAcquired"]=1;
+        try{
+            long allocation;int error;byte[] nonce=LockedBytes(RegisterClipboardFormat(ProbeFormat),256,out allocation,out error),wantedNonce=Encoding.ASCII.GetBytes(ProbeNonce);
             bool verified=nonce!=null&&nonce.Length>=wantedNonce.Length;
             if(verified){for(int i=0;i<wantedNonce.Length;i++)if(nonce[i]!=wantedNonce[i]){verified=false;break;}}
-            result["nonceVerified"]=verified;if(!verified)return result;
-            byte[] html=LockedBytes(RegisterClipboardFormat(DataFormats.Html),65536),wanted=Encoding.UTF8.GetBytes(expected+"\0");
-            result["htmlAllocationBytes"]=html==null?-1:html.Length;result["htmlExpectedBytes"]=wanted.Length;
-            int end=html==null?-1:Array.IndexOf(html,(byte)0);result["htmlTerminatedBytes"]=end<0?-1:end+1;
-            bool equal=end>=0&&end+1==wanted.Length;
-            if(equal)for(int i=0;i<wanted.Length;i++)if(html[i]!=wanted[i]){equal=false;break;}
-            result["htmlExactEqual"]=equal;return result;
-        }finally{result["sequenceWhileLocked"]=GetClipboardSequenceNumber();CloseClipboard();result["sequenceAfterUnlock"]=GetClipboardSequenceNumber();}
+            result["nonceVerified"]=verified?1:0;if(!verified){result["error"]=2;return result;}
+            // The marker check and all three <=64 KiB reads share this lock.
+            // CF_UNICODETEXT is UTF-16LE with an aligned two-byte terminator.
+            ObserveLockedFormat(result,"unicode",13,(string)expected.GetData(DataFormats.UnicodeText,false),Encoding.Unicode,true);
+            ObserveLockedFormat(result,"rtf",RegisterClipboardFormat(DataFormats.Rtf),(string)expected.GetData(DataFormats.Rtf,false),Encoding.ASCII,false);
+            ObserveLockedFormat(result,"html",RegisterClipboardFormat(DataFormats.Html),(string)expected.GetData(DataFormats.Html,false),Encoding.UTF8,false);
+            return result;
+        }catch{result["error"]=8;return result;}
+        finally{result["sequenceWhileLocked"]=GetClipboardSequenceNumber();CloseClipboard();result["sequenceAfterUnlock"]=GetClipboardSequenceNumber();}
     }
     static DataObject Seed(){
         DataObject data=new DataObject();data.SetData(DataFormats.UnicodeText,false,"Generated browser clipboard original 24680");data.SetData(DataFormats.Html,false,"<p>Generated browser rich original 24680</p>");data.SetData(DataFormats.Rtf,false,"{\\rtf1 Generated browser rich original 24680}");data.SetData(ProbeFormat,false,new MemoryStream(Encoding.ASCII.GetBytes(ProbeNonce)));Clipboard.SetDataObject(data,true,0,0);ownedClipboard=GetClipboardSequenceNumber();seeded=true;
-        var seedObservation=ObserveSyntheticHtml((string)data.GetData(DataFormats.Html,false));
-        if(LastMetadata!=null)LastMetadata["seedHtmlPublicationObservation"]=seedObservation;
-        if(!Convert.ToBoolean(seedObservation["htmlExactEqual"])&&LastMetadata!=null)LastMetadata["failureClassification"]="fixture-seed-publication";
-        Need(Convert.ToBoolean(seedObservation["htmlExactEqual"]),"SEED_HTML_PUBLISH_MISMATCH");return data;
+        var seedObservation=ObserveSyntheticFormats(data);
+        bool valid=Convert.ToBoolean(seedObservation["unicodeExactEqual"])&&Convert.ToBoolean(seedObservation["rtfExactEqual"])&&Convert.ToBoolean(seedObservation["htmlExactEqual"]);
+        if(LastMetadata!=null)LastMetadata["seedPublicationObservation"]=seedObservation;
+        if(!valid&&LastMetadata!=null)LastMetadata["failureClassification"]="fixture-seed-publication";
+        Need(valid,"SEED_FORMAT_PUBLICATION_MISMATCH");return data;
     }
     static bool Restored(DataObject expected){return Restored(expected,null);}
     static bool Restored(DataObject expected,Dictionary<string,object> observation){
@@ -175,7 +219,9 @@ public static class WindowsBrowserSelectionBridge {
             observation["formats"]=formats;observation["originalVerdict"]=matches;
             observation["retryAttempts"]=0;observation["clipboardWritten"]=false;
             // Supplement only: never turn the original OLE failure into a pass.
-            if(!matches)observation["rawHtmlAfterOleFailure"]=ObserveSyntheticHtml((string)expected.GetData(DataFormats.Html,false));
+            // GetClipboardData may trigger delayed rendering: this later raw
+            // read is not proof of the representation at the original OLE read.
+            if(!matches)observation["rawFormatsAfterOleFailure"]=ObserveSyntheticFormats(expected);
         }return matches;
     }
     static Dictionary<string,object> QueryDiagnostics(Dictionary<string,object> reply){
@@ -323,7 +369,7 @@ public static class WindowsBrowserSelectionBridge {
             var fields=new HashSet<string>(new string[]{"attemptId","attemptPhase","nativeBoundaryStage","configuredCopyStrategy","actionErrorKind","actionResultOk","actionResultNonempty","sourceSnapshotOutcome","sourceCurrentAtWorker","selectionQueryCount","helperResponseReceived","helperElapsedMilliseconds","helperResultNonempty","cancellationRequested","cancellationSignalled","cancellationSignalFailed"});
             foreach(string key in new string[]{"copyStrategy","copyPhase","copyNativeContextValid","copyNativeContextChecks","copyNativeGuardReason","copyNativeInvalidReason","copyNativeGtiSucceeded","copyNativeGtiFlags","copyNativeFocusPresent","copyNativeFocusProcessMatchesForeground","copyNativeFocusRootMatchesForeground","copyNativeActivePresent","copyNativeActiveRootMatchesForeground","copyNativeEditable","copyNativeProtection","copyNativeSelectionKnown","copyNativeSelectionNonempty","copyProtectionProbe","copyProtectionProbeMilliseconds","copyProtectionUnknown","copySnapshotOutcome","copyDispatchInserted","copyOwnInputObserved","copyOwnerOutcome","copyClipboardRestored","copyTerminalReason"})fields.Add(key);
             foreach(string suffix in new string[]{"Stage","Depth","IdentityCompared","IdentityEqual","RootWalkReason","ExceptionKind","Milliseconds"})for(int index=1;index<=16;index++)fields.Add("selectionQuery"+index+suffix);
-            foreach(string key in new string[]{"copyHtmlProbeEnabled","copyHtmlSnapshotOlePresent","copyHtmlSnapshotOleChars","copyHtmlSnapshotEqual","copyHtmlRestoreEqual","copyHtmlSnapshotError","copyHtmlSnapshotSeedVerified","copyHtmlSnapshotPresent","copyHtmlSnapshotAllocatedBytes","copyHtmlSnapshotPayloadBytes","copyHtmlSnapshotSequenceChanged","copyHtmlRestoreError","copyHtmlRestoreSeedVerified","copyHtmlRestorePresent","copyHtmlRestoreAllocatedBytes","copyHtmlRestorePayloadBytes","copyHtmlRestoreSequenceChanged"})fields.Add(key);
+            foreach(string prefix in new string[]{"copyHtml","copyUnicode","copyRtf"})foreach(string suffix in new string[]{"ProbeEnabled","SnapshotOlePresent","SnapshotOleChars","SnapshotEqual","RestoreEqual","SnapshotError","SnapshotSeedVerified","SnapshotPresent","SnapshotAllocatedBytes","SnapshotPayloadBytes","SnapshotSequenceChanged","RestoreError","RestoreSeedVerified","RestorePresent","RestoreAllocatedBytes","RestorePayloadBytes","RestoreSequenceChanged"})fields.Add(prefix+suffix);
             return fields;
         }
         // Observe only after acceptance has already failed. The existing CLI
@@ -439,6 +485,7 @@ public static class WindowsBrowserSelectionBridge {
         }return metadata;
     }
     public static void Run(string helper,string assembly,string browser,string application,string mockUrl,string provider,string hash,long bytes,bool diagnostics,string shortcutGesture){
+        RawPayloadSelfTest();
         Need(shortcutGesture=="instant"||shortcutGesture=="paced","SHORTCUT_GESTURE_INVALID");Need(shortcutGesture=="instant"||!String.IsNullOrEmpty(application),"PACED_GESTURE_REQUIRES_APPLICATION");ShortcutGesture=shortcutGesture;
         Helper=String.IsNullOrEmpty(helper)?null:Path.GetFullPath(helper);Assembly=String.IsNullOrEmpty(assembly)?null:Path.GetFullPath(assembly);Browser=Path.GetFullPath(browser);Need(Helper==null||!Helper.Contains("\"")&&!Assembly.Contains("\""),"INVALID_FIXTURE_PATH");
         IDataObject existing=Clipboard.GetDataObject();Need(existing==null||existing.GetFormats(false).Length==0,"FRESH_EMPTY_CLIPBOARD_REQUIRED");

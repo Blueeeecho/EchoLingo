@@ -729,6 +729,40 @@ fn bounded_selection_health(value: &Value) -> Value {
         "copyHtmlRestoreAllocatedBytes",
         "copyHtmlRestorePayloadBytes",
         "copyHtmlRestoreSequenceChanged",
+        "copyUnicodeProbeEnabled",
+        "copyUnicodeSnapshotOlePresent",
+        "copyUnicodeSnapshotOleChars",
+        "copyUnicodeSnapshotEqual",
+        "copyUnicodeRestoreEqual",
+        "copyUnicodeSnapshotError",
+        "copyUnicodeSnapshotSeedVerified",
+        "copyUnicodeSnapshotPresent",
+        "copyUnicodeSnapshotAllocatedBytes",
+        "copyUnicodeSnapshotPayloadBytes",
+        "copyUnicodeSnapshotSequenceChanged",
+        "copyUnicodeRestoreError",
+        "copyUnicodeRestoreSeedVerified",
+        "copyUnicodeRestorePresent",
+        "copyUnicodeRestoreAllocatedBytes",
+        "copyUnicodeRestorePayloadBytes",
+        "copyUnicodeRestoreSequenceChanged",
+        "copyRtfProbeEnabled",
+        "copyRtfSnapshotOlePresent",
+        "copyRtfSnapshotOleChars",
+        "copyRtfSnapshotEqual",
+        "copyRtfRestoreEqual",
+        "copyRtfSnapshotError",
+        "copyRtfSnapshotSeedVerified",
+        "copyRtfSnapshotPresent",
+        "copyRtfSnapshotAllocatedBytes",
+        "copyRtfSnapshotPayloadBytes",
+        "copyRtfSnapshotSequenceChanged",
+        "copyRtfRestoreError",
+        "copyRtfRestoreSeedVerified",
+        "copyRtfRestorePresent",
+        "copyRtfRestoreAllocatedBytes",
+        "copyRtfRestorePayloadBytes",
+        "copyRtfRestoreSequenceChanged",
     ] {
         retain(field);
     }
@@ -1866,11 +1900,14 @@ mod tests {
             "copyHtmlProbeEnabled": 1, "copyHtmlSnapshotPayloadBytes": 45,
             "copyHtmlSnapshotOleChars": 0, "copyHtmlRestoreEqual": 0,
             "copyHtmlSnapshot": "private", "copyHtmlNonce": "private",
-            "copyHtmlRestorePayloadBytes": -1, "copyHtmlSnapshotEqual": "private"
+            "copyHtmlRestorePayloadBytes": -1, "copyHtmlSnapshotEqual": "private",
+            "copyUnicodeSnapshotOleChars": 42, "copyUnicodeRestoreEqual": 0,
+            "copyRtfRestorePayloadBytes": 46, "copyUnicodeNonce": "private",
+            "copyRtfPayload": "private", "copyUnicodeRestoreError": -1
         }));
         assert_eq!(
             safe,
-            json!({"copyHtmlProbeEnabled":1,"copyHtmlSnapshotPayloadBytes":45,"copyHtmlSnapshotOleChars":0,"copyHtmlRestoreEqual":0})
+            json!({"copyHtmlProbeEnabled":1,"copyHtmlSnapshotPayloadBytes":45,"copyHtmlSnapshotOleChars":0,"copyHtmlRestoreEqual":0,"copyUnicodeSnapshotOleChars":42,"copyUnicodeRestoreEqual":0,"copyRtfRestorePayloadBytes":46})
         );
     }
 
