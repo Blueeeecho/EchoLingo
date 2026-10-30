@@ -700,6 +700,13 @@ mod native_priority_probe_tests {
         let mut probe = Probe(0);
         let outcome = check_windows(&mut probe, bindings(None).unwrap());
         assert_eq!(outcome.protocol().0, 0);
+        assert_eq!(probe.0, 0);
+        // Optional opt-in actions still use the native registrar.
+        let mut settings = Settings::default();
+        settings.shortcuts.input = "Alt+A".into();
+        settings.shortcuts.ocr = "Alt+Shift+S".into();
+        let rows = bindings(Some(&serde_json::to_vec(&settings).unwrap())).unwrap();
+        assert_eq!(check_windows(&mut probe, rows).protocol().0, 0);
         assert_eq!(probe.0, 2);
     }
 }

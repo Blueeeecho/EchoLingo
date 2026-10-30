@@ -4455,6 +4455,7 @@ mod tests {
     #[test]
     fn shortcut_diagnostics_clear_recovered_and_removed_startup_failures() {
         let mut settings = Settings::default();
+        settings.shortcuts.input = "Alt+A".into();
         let bindings = parsed_shortcuts(&settings.shortcuts).unwrap();
         let registered: Vec<_> = bindings.iter().map(|(_, binding)| *binding).collect();
         let mut failures = std::collections::BTreeMap::new();
@@ -4942,6 +4943,7 @@ mod tests {
     #[test]
     fn empty_shortcut_disables_action() {
         let mut s = Shortcuts::default();
+        s.ocr = "Alt+Shift+S".into();
         let before = parsed_shortcuts(&s).unwrap().len();
         s.ocr.clear();
         assert_eq!(parsed_shortcuts(&s).unwrap().len(), before - 1);
