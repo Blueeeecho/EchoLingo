@@ -2743,7 +2743,7 @@ try {
     assert.equal(await page.locator('.result-text').textContent(), raw);
     assert.equal(await page.evaluate(() => window.__qa.translationRequests[0].text), raw);
     assert.equal(await page.locator('.result-setup').isVisible(), false);
-    await page.getByRole('button', { name: '复制原文', exact: true }).click();
+    await page.locator('.result-card').getByRole('button', { name: '复制原文', exact: true }).click();
     assert.equal(await page.evaluate(() => window.__qa.copies.at(-1)), raw);
     assert.deepEqual(await page.evaluate(() => window.__qa.systemPrepareCalls), []);
   }
