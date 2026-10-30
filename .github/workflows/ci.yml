@@ -92,8 +92,11 @@ jobs:
       - name: Check synchronous macOS window sizing
         if: runner.os == 'macOS'
         run: |
-          swiftc src-tauri/native/macos_window.swift tests/macos-window-size.swift -o "$RUNNER_TEMP/echolingo-window-size-check"
-          "$RUNNER_TEMP/echolingo-window-size-check"
+          swiftc -g src-tauri/native/macos_window.swift tests/macos-window-size.swift -o "$RUNNER_TEMP/echolingo-window-size-check"
+          if ! "$RUNNER_TEMP/echolingo-window-size-check"; then
+            lldb --batch -o run -o 'thread backtrace all' -- "$RUNNER_TEMP/echolingo-window-size-check" || true
+            exit 1
+          fi
       - run: npm ci
       - run: npm run check
       - run: npm test
