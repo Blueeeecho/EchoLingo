@@ -3,7 +3,7 @@ use super::*;
 use std::io::{Read, Write};
 use std::net::TcpListener;
 use std::sync::mpsc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 fn client() -> Client {
     Client::builder()
@@ -18,9 +18,23 @@ fn server(
 ) -> (String, mpsc::Receiver<String>, std::thread::JoinHandle<()>) {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let url = format!("http://{}/translate", listener.local_addr().unwrap());
+    listener.set_nonblocking(true).unwrap();
     let (send, receive) = mpsc::channel();
     let task = std::thread::spawn(move || {
-        let (mut socket, _) = listener.accept().unwrap();
+        let deadline = Instant::now() + Duration::from_secs(3);
+        let (mut socket, _) = loop {
+            match listener.accept() {
+                Ok(connection) => break connection,
+                Err(error)
+                    if error.kind() == std::io::ErrorKind::WouldBlock
+                        && Instant::now() < deadline =>
+                {
+                    std::thread::sleep(Duration::from_millis(5))
+                }
+                Err(error) => panic!("fixture accept failed or timed out: {error}"),
+            }
+        };
+        socket.set_nonblocking(false).unwrap();
         socket
             .set_read_timeout(Some(Duration::from_secs(3)))
             .unwrap();
@@ -55,6 +69,15 @@ fn server(
     });
     (url, receive, task)
 }
+async fn finish(task: std::thread::JoinHandle<()>) {
+    tokio::time::timeout(
+        Duration::from_secs(12),
+        tokio::task::spawn_blocking(move || task.join().unwrap()),
+    )
+    .await
+    .expect("fixture join timed out")
+    .expect("fixture thread failed");
+}
 fn body(request: &str) -> Value {
     serde_json::from_str(request.split_once("\r\n\r\n").unwrap().1).unwrap()
 }
@@ -77,9 +100,7 @@ async fn niu_posts_form_key_and_source_without_query_secrets() {
         "Hello"
     );
     let request = got.recv().unwrap();
-    tokio::task::spawn_blocking(move || task.join().unwrap())
-        .await
-        .unwrap();
+    finish(task).await;
     assert!(request.starts_with("POST /translate HTTP/1.1"));
     let form = reqwest::Url::parse(&format!(
         "http://fixture/?{}",
@@ -115,9 +136,7 @@ async fn google_uses_header_key_plain_nmt_and_omits_auto_source() {
             "你好"
         );
         let request = got.recv().unwrap();
-        tokio::task::spawn_blocking(move || task.join().unwrap())
-            .await
-            .unwrap();
+        finish(task).await;
         assert!(request.starts_with("POST /translate HTTP/1.1"));
         assert!(request
             .to_ascii_lowercase()
@@ -152,9 +171,7 @@ async fn caiyun_sends_own_token_and_one_text_with_auto_detection() {
         "你好"
     );
     let request = got.recv().unwrap();
-    tokio::task::spawn_blocking(move || task.join().unwrap())
-        .await
-        .unwrap();
+    finish(task).await;
     assert!(request
         .to_ascii_lowercase()
         .contains("x-authorization: token fixture-key"));
@@ -243,9 +260,7 @@ async fn http_errors_redirects_and_invalid_json_stay_sanitized() {
             if kind == "google-translate" && status == 403 {
                 assert!(error.contains("额度"));
             }
-            tokio::task::spawn_blocking(move || task.join().unwrap())
-                .await
-                .unwrap();
+            finish(task).await;
         }
     }
 }
@@ -265,9 +280,7 @@ async fn bounded_response_and_dropped_future_do_not_retry() {
     .await
     .unwrap_err()
     .contains("上限"));
-    tokio::task::spawn_blocking(move || task.join().unwrap())
-        .await
-        .unwrap();
+    finish(task).await;
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let url = format!("http://{}/translate", listener.local_addr().unwrap());
     let c = client();
