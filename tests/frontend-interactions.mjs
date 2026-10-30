@@ -2724,6 +2724,15 @@ try {
     await page.locator('#source-text').fill(raw);
     await page.locator('#translate-button').click();
     await page.waitForFunction(() => window.__qa.translationRequests.length === 1);
+    // Pending cards are intentionally mounted only when the first progress
+    // event arrives. Exercise reuse rather than assuming eager DOM mounting.
+    await page.evaluate(() => {
+      const provider = window.__qa.settings.providers[0];
+      window.__qa.emit('translation-progress', { requestId: window.__qa.translationRequests[0].requestId,
+        presentationEpoch: window.__qa.presentation.epoch, sequence: 1, done: false,
+        result: { providerId: provider.id, providerName: provider.name, text: '', elapsedMs: 0 } });
+    });
+    await page.locator('.result-provider').waitFor();
     assert.equal(await page.locator('.result-preserved').isVisible(), false);
     const name = await page.locator('.result-provider').textContent();
     await page.evaluate(() => { window.__qa.holdTranslation = false; window.__qa.releaseTranslation(); });
