@@ -13,6 +13,7 @@ final class NativeEdgeProbe {
     var pendingMouseUp = false
     var settlingCase: Int?
     var idleObservers: [NSObjectProtocol] = []
+    var observedDowns = 0, observedDrags = 0, observedUps = 0, lastEventNumber = -1
     let cases: [(String, NSPoint, NSPoint)] = [
         ("west-inside-1", NSPoint(x: 1, y: 150), NSPoint(x: -20, y: 150)),
         ("west-exact", NSPoint(x: 0, y: 150), NSPoint(x: -20, y: 150)),
@@ -30,8 +31,13 @@ final class NativeEdgeProbe {
         window.orderFrontRegardless()
         // Local application event monitor, never a global input hook. AppKit
         // tracking loops may consume mouse-up without calling NSWindow.sendEvent.
-        monitor = NSEvent.addLocalMonitorForEvents(matching: .leftMouseUp) { [weak self] event in
-            guard let self, self.pendingMouseUp, event.windowNumber == self.window.windowNumber,
+        monitor = NSEvent.addLocalMonitorForEvents(matching: [.leftMouseDown, .leftMouseDragged, .leftMouseUp]) { [weak self] event in
+            guard let self, event.windowNumber == self.window.windowNumber else { return event }
+            self.lastEventNumber = event.eventNumber
+            if event.type == .leftMouseDown { self.observedDowns += 1 }
+            if event.type == .leftMouseDragged { self.observedDrags += 1 }
+            if event.type == .leftMouseUp { self.observedUps += 1 }
+            guard event.type == .leftMouseUp, self.pendingMouseUp,
                   event.eventNumber == self.index * 3 + 2 else { return event }
             self.pendingMouseUp = false
             let expectedIndex = self.index
@@ -48,7 +54,13 @@ final class NativeEdgeProbe {
         DispatchQueue.main.async { self.runCase() }
         DispatchQueue.main.asyncAfter(deadline: .now() + 12) { [self] in
             if !completed {
-                FileHandle.standardError.write(Data("FAIL edge probe: own-window event sequence did not finish\n".utf8))
+                let state: [String: Any] = ["status": "inconclusive", "reason": "own-window synthetic event sequence did not finish",
+                    "caseIndex": index, "pendingMouseUp": pendingMouseUp, "settlingCase": settlingCase ?? -1,
+                    "inLiveResize": window.inLiveResize, "observedDowns": observedDowns,
+                    "observedDrags": observedDrags, "observedUps": observedUps, "lastEventNumber": lastEventNumber,
+                    "physicalOutsideTargetingVerified": false]
+                let data = try! JSONSerialization.data(withJSONObject: state, options: [.sortedKeys])
+                FileHandle.standardError.write(data + Data("\n".utf8))
                 exit(1)
             }
         }

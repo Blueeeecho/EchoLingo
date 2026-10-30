@@ -21,8 +21,25 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           persist-credentials: false
-      - name: Inspect hidden-window style and geometry only
+      - name: Verify native geometry and WebKit input
         run: bash tests/macos-popup-native-frame-experiment.sh
+      - name: Optional routed-edge diagnostic (not physical-edge acceptance)
+        id: native-edge-diagnostic
+        continue-on-error: true
+        run: |
+          set -o pipefail
+          bash tests/macos-popup-native-edge-experiment.sh 2>&1 | tee "$RUNNER_TEMP/native-edge-diagnostic.log"
+      - name: Report diagnostic scope and outcome
+        if: always()
+        run: |
+          echo 'Routed-edge diagnostic outcome: ${{ steps.native-edge-diagnostic.outcome }}. This is not physical outside-edge acceptance; an incomplete sequence remains inconclusive.' >> "$GITHUB_STEP_SUMMARY"
+      - name: Preserve routed-edge observations and inconclusive status
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: macOS-routed-edge-diagnostic
+          path: ${{ runner.temp }}/native-edge-diagnostic.log
+          if-no-files-found: warn
   desktop:
     if: github.event.inputs.mode != 'windows-popup-diagnostics' && github.event.inputs.mode != 'windows-popup-current-diagnostics' && github.event.inputs.mode != 'windows-application-diagnostics' && github.event.inputs.mode != 'windows-input-plane-experiment' && github.event.inputs.mode != 'windows-native-diagnostics' && github.event.inputs.mode != 'windows-shortcuts-ui-diagnostics' && github.event.inputs.mode != 'windows-shortcuts-ui-medium-diagnostics' && github.event.inputs.mode != 'windows-shortcuts-current-diagnostics' && github.event.inputs.mode != 'windows-shortcuts-workflows-diagnostics' && github.event.inputs.mode != 'windows-delegated-diagnostics' && github.event.inputs.mode != 'windows-browser-diagnostics' && github.event.inputs.mode != 'windows-selection-same-page-diagnostics' && github.event.inputs.mode != 'windows-selection-browser-app-diagnostics' && github.event.inputs.mode != 'windows-browser-ocr-visibility-diagnostics' && github.event.inputs.mode != 'windows-selection-cold-edge-diagnostics' && github.event.inputs.mode != 'windows-selection-paced-edge-diagnostics' && github.event.inputs.mode != 'windows-selection-nonbrowser-app-diagnostics' && github.event.inputs.mode != 'windows-latest-intent-diagnostics' && github.event.inputs.mode != 'windows-selection-application-diagnostics' && github.event.inputs.mode != 'windows-selection-clipboard-diagnostics' && github.event.inputs.mode != 'windows-selection-notepad-diagnostics' && github.event.inputs.mode != 'windows-selection-budget-diagnostics' && github.event.inputs.mode != 'windows-selection-context-diagnostics' && github.event.inputs.mode != 'windows-wps-selection-diagnostics' && github.event.inputs.mode != 'windows-focus-resize-current-diagnostics' && github.event.inputs.mode != 'windows-priority-input-diagnostics' && github.event.inputs.mode != 'windows-priority-candidate-diagnostics'
     strategy:

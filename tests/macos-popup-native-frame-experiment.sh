@@ -7,5 +7,3 @@ swiftc -g src-tauri/native/macos_window.swift tests/macos-popup-native-frame-exp
 "$binary"
 swiftc -parse-as-library -g src-tauri/native/macos_window.swift tests/macos-popup-webview-frame-experiment.swift -o "$binary-webview"
 "$binary-webview"
-swiftc -parse-as-library -g src-tauri/native/macos_window.swift tests/macos-popup-native-edge-experiment.swift -o "$binary-edge"
-"$binary-edge"
