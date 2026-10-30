@@ -1,5 +1,6 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 mod credential_cache;
+mod frontend_input_diagnostics;
 mod language_detection;
 #[cfg(target_os = "macos")]
 mod macos_startup;
@@ -9,6 +10,7 @@ mod mouse_shortcuts;
 mod native_tasks;
 mod ocr;
 mod ocr_native;
+mod ocr_outcome;
 mod offline_translation;
 mod platform;
 mod popup_health;
@@ -181,6 +183,31 @@ fn configure_shortcuts_requested(args: &[String]) -> bool {
     args.iter()
         .skip(1)
         .any(|argument| argument == CONFIGURE_SHORTCUTS_FLAG)
+}
+
+#[tauri::command]
+fn frontend_input_diagnostics_enabled() -> bool {
+    frontend_input_diagnostics::enabled()
+}
+
+#[tauri::command]
+fn record_frontend_input_diagnostic(
+    app: tauri::AppHandle,
+    record: frontend_input_diagnostics::Record,
+) -> Result<(), String> {
+    if !frontend_input_diagnostics::enabled() {
+        return Ok(());
+    }
+    static RECORDS: std::sync::OnceLock<Mutex<Vec<frontend_input_diagnostics::Record>>> =
+        std::sync::OnceLock::new();
+    let mut records = locked(RECORDS.get_or_init(|| Mutex::new(Vec::new())))?;
+    frontend_input_diagnostics::append(&mut records, record);
+    write_json(
+        &app.state::<AppState>()
+            .data_dir
+            .join("frontend-input-diagnostics.json"),
+        &serde_json::json!({"processId":std::process::id(),"recordedAtUnixMs":now(),"entries":&*records}),
+    )
 }
 
 const PERMISSION_DIAGNOSTICS_FLAG: &str = "--permission-diagnostics";
@@ -2318,6 +2345,9 @@ fn actionable_capture_hint(action: &str, error: &str) -> Option<String> {
 }
 
 fn visible_action_error(action: &str, error: &str) -> Option<String> {
+    if ocr_outcome::is_empty_error(action, error) {
+        return None;
+    }
     if let Some(hint) = actionable_capture_hint(action, error) {
         return Some(hint);
     }
@@ -2683,6 +2713,13 @@ fn start_action(app: tauri::AppHandle, action: String) {
                     result.as_ref().err().map(String::as_str),
                 );
             }
+            // The request/epoch guard above owns this publication. Empty OCR
+            // replaces old source/results even in a pinned popup; cancellation
+            // and genuine failures below retain their existing behavior.
+            if ocr_outcome::is_empty(&action, &result) {
+                emit_source_text(&app, empty_ocr_payload(presentation.epoch, keep_popup));
+                return;
+            }
             match result {
                 Ok(text) if !text.trim().is_empty() => {
                     emit_source_text(
@@ -2813,6 +2850,12 @@ fn captured_source_payload(
         payload["captureOrigin"] = serde_json::json!("ocr");
     }
     payload
+}
+fn empty_ocr_payload(epoch: u64, retained: bool) -> serde_json::Value {
+    // Input mode clears source/results but does not translate empty text, show
+    // weak-result guidance, focus the editor or request any permissions.
+    serde_json::json!({"text":"", "mode":"input", "captureOrigin":"ocr",
+        "presentationEpoch":epoch, "updateVisiblePopup":retained, "reuseVisiblePopup":retained})
 }
 fn is_capture_action(action: &str) -> bool {
     matches!(action, "capture" | "ocr" | "silentOcr")
@@ -3556,6 +3599,8 @@ fn main() {
             set_pinned,
             hide_window,
             diagnostics,
+            frontend_input_diagnostics_enabled,
+            record_frontend_input_diagnostic,
             permission_status,
             get_system_translation_status,
             prepare_system_translation,
@@ -4576,6 +4621,38 @@ mod tests {
             "CLIPBOARD_RESTORE_SKIPPED: Copy completion is uncertain"
         )
         .is_some());
+    }
+    #[test]
+    fn empty_ocr_is_blank_quiet_and_does_not_focus_or_translate() {
+        for action in ["capture", "ocr", "silentOcr"] {
+            let error = "NO_TEXT: No text was recognized";
+            assert_eq!(visible_action_error(action, error), None);
+            let failed = action_failure_presentation(action, error, 42).unwrap();
+            assert_eq!(failed.error, None);
+            assert_eq!(failed.source["text"], "");
+            assert_eq!(failed.source["mode"], "input");
+            for retained in [false, true] {
+                let payload = empty_ocr_payload(42, retained);
+                assert_eq!(payload["text"], "");
+                assert_eq!(payload["mode"], "input");
+                assert_eq!(payload["captureOrigin"], "ocr");
+                assert_eq!(payload["presentationEpoch"], 42);
+                assert_eq!(payload["updateVisiblePopup"], retained);
+                assert_eq!(payload["reuseVisiblePopup"], retained);
+                for key in ["actionError", "permissionRequired", "focusInput"] {
+                    assert!(payload.get(key).is_none());
+                }
+            }
+        }
+        assert!(visible_action_error("clipboard", "NO_TEXT: unrelated failure").is_some());
+        for error in [
+            "OCR: provider request failed",
+            "PERMISSION: screen capture denied",
+            "CLIPBOARD_RESTORE_FAILED: preserve warning",
+        ] {
+            assert!(visible_action_error("ocr", error).is_some());
+        }
+        assert!(action_failure_presentation("ocr", "CANCELLED: user cancelled", 42).is_none());
     }
     #[test]
     fn blocked_capture_presents_permission_guidance_in_one_source_event() {

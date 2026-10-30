@@ -278,11 +278,52 @@ public static class WindowsSelectionApplicationFixture {
     }
     sealed class FailedBlankObservation { public Dictionary<string,object> Metadata;public int Complete; }
     static void PublishBlankObservation(FailedBlankObservation result,Dictionary<string,object> value){Interlocked.Exchange(ref result.Metadata,new Dictionary<string,object>(value));}
+    static List<Dictionary<string,object>> ValidatedFrontendInputEntries(Dictionary<string,object> payload,int pid,long latest){
+        Need(payload.Count==3&&DiagnosticNumber(payload["processId"],Int32.MaxValue)==pid,"INPUT_DIAGNOSTIC_PRIMARY_SCHEMA");
+        long recorded=DiagnosticNumber(payload["recordedAtUnixMs"],latest);
+        var entries=payload["entries"] as IEnumerable;Need(entries!=null&&!(entries is string),"INPUT_DIAGNOSTIC_ENTRIES");
+        var result=new List<Dictionary<string,object>>();long previous=0;
+        var stages=new HashSet<string>(new string[]{"ready","arrival","handler","translateStart","ticket","dispatch","complete","error"});
+        foreach(object item in entries){
+            Need(result.Count<32,"INPUT_DIAGNOSTIC_ENTRY_BOUND");var row=item as Dictionary<string,object>;Need(row!=null&&row.Count==17,"INPUT_DIAGNOSTIC_RECORD_SCHEMA");
+            string stage=row["stage"] as string;Need(stage!=null&&stages.Contains(stage),"INPUT_DIAGNOSTIC_STAGE");
+            var copy=new Dictionary<string,object>{{"stage",stage}};
+            foreach(string key in new string[]{"sequence","timestamp","epoch","generation"})copy[key]=DiagnosticNumber(row[key],key=="timestamp"?recorded:9007199254740991L);
+            foreach(string key in new string[]{"requestEpoch","requestGeneration"})copy[key]=row[key]==null?null:(object)DiagnosticNumber(row[key],9007199254740991L);
+            long sequence=(long)copy["sequence"];Need(sequence>previous,"INPUT_DIAGNOSTIC_SEQUENCE");previous=sequence;
+            foreach(string key in new string[]{"composing","shift","alt","ctrl","meta","repeat","translating","sourceNonempty","sourceFocused","settingsReady"}){Need(row[key] is bool,"INPUT_DIAGNOSTIC_FLAG");copy[key]=(bool)row[key];}
+            result.Add(copy);
+        }
+        return result;
+    }
+    static int FrontendInputObservationSelfTests(){
+        var row=new Dictionary<string,object>{{"stage","handler"},{"sequence",1},{"timestamp",100},{"epoch",2},{"generation",3},{"requestEpoch",null},{"requestGeneration",null}};
+        foreach(string key in new string[]{"composing","shift","alt","ctrl","meta","repeat","translating","sourceNonempty","sourceFocused","settingsReady"})row[key]=false;
+        var payload=new Dictionary<string,object>{{"processId",7},{"recordedAtUnixMs",101},{"entries",new object[]{row}}};
+        Need(ValidatedFrontendInputEntries(payload,7,102).Count==1,"INPUT_DIAGNOSTIC_VALID_RECORD_REJECTED");
+        row["content"]="must not escape";bool rejected=false;try{ValidatedFrontendInputEntries(payload,7,102);}catch(InvalidOperationException){rejected=true;}Need(rejected,"INPUT_DIAGNOSTIC_EXTRA_CONTENT_ACCEPTED");row.Remove("content");
+        row["stage"]="arbitrary text";rejected=false;try{ValidatedFrontendInputEntries(payload,7,102);}catch(InvalidOperationException){rejected=true;}Need(rejected,"INPUT_DIAGNOSTIC_FREE_STAGE_ACCEPTED");row["stage"]="handler";
+        rejected=false;try{ValidatedFrontendInputEntries(payload,8,102);}catch(InvalidOperationException){rejected=true;}Need(rejected,"INPUT_DIAGNOSTIC_WRONG_PRIMARY_ACCEPTED");
+        return 4;
+    }
+    static void ObserveFrontendInputFailure(Dictionary<string,object> trace){
+        var observation=new Dictionary<string,object>{{"failureOnly",true},{"inputRetried",false}};trace["frontendInputObservation"]=observation;
+        try{
+            Need(App!=null&&!App.HasExited,"INPUT_DIAGNOSTIC_PRIMARY_UNAVAILABLE");
+            Need((File.GetAttributes(DiagnosticRoaming)&FileAttributes.ReparsePoint)==0&&File.ReadAllText(Path.Combine(DiagnosticRoaming,Marker))==DiagnosticToken,"INPUT_DIAGNOSTIC_DIRECTORY_NOT_OWNED");
+            Need(String.Equals(Path.GetFullPath(App.MainModule.FileName),Path.GetFullPath(DiagnosticExecutable),StringComparison.OrdinalIgnoreCase),"INPUT_DIAGNOSTIC_EXE_MISMATCH");
+            string file=Path.Combine(DiagnosticRoaming,"frontend-input-diagnostics.json");observation["fileAvailable"]=File.Exists(file);if(!File.Exists(file))return;
+            Need((File.GetAttributes(file)&FileAttributes.ReparsePoint)==0,"INPUT_DIAGNOSTIC_FILE_REPARSE");
+            Need(new FileInfo(file).Length>0&&new FileInfo(file).Length<=32768,"INPUT_DIAGNOSTIC_FILE_BOUND");byte[] bytes=File.ReadAllBytes(file);Need(bytes.Length>0&&bytes.Length<=32768,"INPUT_DIAGNOSTIC_FILE_BOUND");
+            var payload=Json.Deserialize<Dictionary<string,object>>(Encoding.UTF8.GetString(bytes));long latest=(long)(DateTime.UtcNow-new DateTime(1970,1,1,0,0,0,DateTimeKind.Utc)).TotalMilliseconds;
+            observation["entries"]=ValidatedFrontendInputEntries(payload,App.Id,latest);observation["primaryIdentityVerified"]=true;observation["strictNoContentSchema"]=true;
+        }catch{observation["observationFailed"]=true;}
+    }
     static void ObserveFailedBlank(Dictionary<string,object> trace,string typed){
         // This runs only after the original failure. A background UIA call may
         // outlive the budget, but it cannot hold up the original own-app cleanup.
         Dictionary<string,object> report=new Dictionary<string,object>{{"takenAfterCaseFailure",true},{"budgetMilliseconds",2000},{"inputRetried",false},{"frontendRequestEpochExportAvailable",false}};
-        trace["failureOnlyObservation"]=report;Stopwatch budget=Stopwatch.StartNew();FailedBlankObservation observation=new FailedBlankObservation();
+        trace["failureOnlyObservation"]=report;ObserveFrontendInputFailure(trace);Stopwatch budget=Stopwatch.StartNew();FailedBlankObservation observation=new FailedBlankObservation();
         Thread reader=new Thread(delegate(){Dictionary<string,object> value=new Dictionary<string,object>();try{
             Need(App!=null&&!App.HasExited&&Main!=IntPtr.Zero,"BLANK_OBSERVATION_APP_UNAVAILABLE");
             uint owner;GetWindowThreadProcessId(Main,out owner);Need(owner==App.Id&&GetAncestor(Main,2)==Main,"BLANK_OBSERVATION_MAIN_NOT_OWNED");
@@ -409,7 +450,7 @@ public static class WindowsSelectionApplicationFixture {
     public static Dictionary<string,object> Run(string executable,string expectedApplicationVersion){
         Need(!String.IsNullOrWhiteSpace(expectedApplicationVersion)&&expectedApplicationVersion.Length<=128,"EXPECTED_APPLICATION_VERSION_REQUIRED");ExpectedApplicationVersion=expectedApplicationVersion;
         Cases.Clear();SourceVersions.Clear();MouseDownCounts.Clear();MouseUpCounts.Clear();PreviousSelectionDown.Clear();MouseSelectionPlacement=0;ForbiddenFocusB=null;FocusRaceCase=null;ExplicitFocusBAllowed=0;UnexpectedFocusB=0;Hotkeys=0;Report=new Dictionary<string,object>{{"ok",false},{"cases",Cases},{"actualApplicationTested",false},{"actualRegisteredAltD",true},{"fakeIpcUsed",false},{"translationBackend","loopback-mock"},{"userContentRead",false},{"physicalWindows11Tested",false},{"browserTested",false},{"fullscreenTested",false},{"multiMonitorTested",false},{"credentialsCreated",false},{"credentialScope","One random absent mock provider; no existing credentials"},{"sameHotkeyRetries",0}};
-        Report["configuredWindowsSelectionStrategy"]=ConfiguredWindowsSelectionStrategy;Report["defaultWindowsSelectionStrategyUnderTest"]=false;Report["expectedApplicationVersion"]=ExpectedApplicationVersion;DiagnosticPrimaryStart=null;DiagnosticExecutable=executable;
+        Report["frontendInputObservationSelfTests"]=FrontendInputObservationSelfTests();Report["configuredWindowsSelectionStrategy"]=ConfiguredWindowsSelectionStrategy;Report["defaultWindowsSelectionStrategyUnderTest"]=false;Report["expectedApplicationVersion"]=ExpectedApplicationVersion;DiagnosticPrimaryStart=null;DiagnosticExecutable=executable;
         string token=Guid.NewGuid().ToString("N"),root=Path.Combine(Path.GetTempPath(),"echolingo-selection-app-"+token),roaming=Path.Combine(KnownFolder("3EB685DB-65F9-4CF6-A03A-E3EF65729F3D"),Identifier),local=Path.Combine(KnownFolder("F1B32785-6FBA-4FCF-9D55-7B8E7F157091"),Identifier);List<string> owned=new List<string>();
         foreach(Process p in Process.GetProcessesByName(Path.GetFileNameWithoutExtension(executable)))using(p)Need(p.HasExited,"EXISTING_APPLICATION_REFUSED");
         try{
@@ -421,7 +462,7 @@ public static class WindowsSelectionApplicationFixture {
                     form.Text="Generated selection source A";form.StartPosition=FormStartPosition.Manual;form.Bounds=new Rectangle(12,8,740,150);form.FormBorderStyle=FormBorderStyle.FixedDialog;form.MaximizeBox=false;other.Text="Generated selection source B";other.StartPosition=FormStartPosition.Manual;other.FormBorderStyle=FormBorderStyle.FixedDialog;other.MaximizeBox=false;
                     multi.Multiline=true;rich.Multiline=true;multi.WordWrap=false;rich.WordWrap=false;foreach(TextBoxBase c in new TextBoxBase[]{edit,multi,rich,second,otherEdit}){c.Font=new Font("Consolas",11);TextBoxBase captured=c;SourceVersions[c]=0;MouseDownCounts[c]=0;MouseUpCounts[c]=0;c.TextChanged+=delegate{SourceVersions[captured]++;};c.MouseDown+=delegate{MouseDownCounts[captured]++;};c.MouseUp+=delegate{MouseUpCounts[captured]++;};}form.Controls.AddRange(new Control[]{edit,multi,rich,second});other.Controls.Add(otherEdit);Control[] controls=new Control[]{edit,multi,rich,second};bool finished=false;form.FormClosing+=delegate(object sender,FormClosingEventArgs e){if(!finished)e.Cancel=true;};
                     form.Shown+=delegate{Thread worker=new Thread(delegate(){try{
-                        Need(SetThreadDpiAwarenessContext(new IntPtr(-4))!=IntPtr.Zero,"WORKER_PHYSICAL_COORDINATES_REQUIRED");ProcessStartInfo start=new ProcessStartInfo(executable);start.UseShellExecute=false;start.CreateNoWindow=true;string childLocal=Path.Combine(root,"Local"),childTemp=Path.Combine(root,"Temp");Directory.CreateDirectory(childLocal);Directory.CreateDirectory(childTemp);start.EnvironmentVariables["LOCALAPPDATA"]=childLocal;start.EnvironmentVariables["TEMP"]=childTemp;start.EnvironmentVariables["TMP"]=childTemp;start.EnvironmentVariables["WEBVIEW2_USER_DATA_FOLDER"]=Path.Combine(local,"webview-selection-fixture");DiagnosticPrimaryStart=start;App=Process.Start(start);Report["applicationProcessId"]=App.Id;Report["actualApplicationTested"]=true;Need(App.WaitForInputIdle(15000),"APP_INPUT_IDLE");Wait(delegate{return (Main=MainWindow(App.Id))!=IntPtr.Zero;},20000,"UNIQUE_ACTUAL_TAURI_WINDOW");
+                        Need(SetThreadDpiAwarenessContext(new IntPtr(-4))!=IntPtr.Zero,"WORKER_PHYSICAL_COORDINATES_REQUIRED");ProcessStartInfo start=new ProcessStartInfo(executable);start.UseShellExecute=false;start.CreateNoWindow=true;string childLocal=Path.Combine(root,"Local"),childTemp=Path.Combine(root,"Temp");Directory.CreateDirectory(childLocal);Directory.CreateDirectory(childTemp);start.EnvironmentVariables["LOCALAPPDATA"]=childLocal;start.EnvironmentVariables["TEMP"]=childTemp;start.EnvironmentVariables["TMP"]=childTemp;start.EnvironmentVariables["WEBVIEW2_USER_DATA_FOLDER"]=Path.Combine(local,"webview-selection-fixture");start.EnvironmentVariables["ECHOLINGO_INPUT_DIAGNOSTICS"]="1";DiagnosticPrimaryStart=start;App=Process.Start(start);Report["applicationProcessId"]=App.Id;Report["actualApplicationTested"]=true;Need(App.WaitForInputIdle(15000),"APP_INPUT_IDLE");Wait(delegate{return (Main=MainWindow(App.Id))!=IntPtr.Zero;},20000,"UNIQUE_ACTUAL_TAURI_WINDOW");
                         // First shortcut follows observable native host/tray readiness, with no fixed frontend warmup.
                         // Their existence proves neither successful OS registration nor JS subscriptions.
                         Dictionary<string,object> readiness=null;Wait(delegate{readiness=NativeReadiness();return Convert.ToInt32(readiness["globalHotkeyWindowCount"])>0&&Convert.ToInt32(readiness["trayWindowCount"])>0;},15000,"NATIVE_REGISTRATION_HOST_AND_TRAY");readiness["waitForInputIdleSucceeded"]=true;readiness["fixedFrontendWarmupMilliseconds"]=0;Report["beforeFirstHotkeyReadiness"]=readiness;

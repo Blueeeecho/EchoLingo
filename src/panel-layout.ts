@@ -2,6 +2,7 @@ import { invoke } from '@tauri-apps/api/core';
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 import { nextPopupContentHeight } from './popup-growth';
 import { PopupDragController } from './popup-drag';
+import { installPopupFocusRing } from './popup-focus';
 
 export interface TranslationPresentation { epoch: number; presented: boolean }
 
@@ -9,6 +10,7 @@ export interface TranslationPresentation { epoch: number; presented: boolean }
 // can shrink again after a long result. Requests are coalesced and serialized.
 export function installPanelLayout(desktop: boolean, getPresentation: () => TranslationPresentation): { dispose: () => void; presentPopup: (presentationEpoch: number, focusInput?: boolean, reuseVisiblePopup?: boolean) => Promise<TranslationPresentation | null>; presentManagement: (presentationEpoch: number) => Promise<TranslationPresentation | null> } {
   if (!desktop) return { dispose: () => {}, presentPopup: async () => null, presentManagement: async () => null };
+  const disposeFocusRing = installPopupFocusRing();
   let frame = 0, pending = false, disposed = false, last = '';
   let committedPopupHeight = 0;
   let inFlight: Promise<void> | null = null;
@@ -243,6 +245,7 @@ export function installPanelLayout(desktop: boolean, getPresentation: () => Tran
   window.addEventListener('echolingo:layout', checkWidthPresentation);
   schedule();
   const dispose = (): void => {
+    disposeFocusRing();
     disposed = true; cancelPopupDrag(); clearGesture(); widthViewObserver.disconnect(); observer.disconnect(); cancelAnimationFrame(frame);
     unlistenSizing?.(); unlistenSizing = null;
     document.body.classList.remove('popup-resize-enabled');

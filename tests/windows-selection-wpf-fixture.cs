@@ -73,6 +73,9 @@ public static class WindowsSelectionWpfFixture {
         if(sequence()!=observed)return "generation-changed-preserved";
         return clear()?"verified-seed-cleared":"clear-failed-preserved";
     }
+    static Dictionary<string,object> ClipboardValueObservation(int format,object value,bool equal){
+        return new Dictionary<string,object>{{"formatKind",format},{"valueKind",value==null?0:value is string?1:value is Stream?2:value is byte[]?3:4},{"stringLength",value is string?((string)value).Length:-1},{"equal",equal}};
+    }
     static bool SameBytes(byte[] expected,byte[] actual){if(expected.Length!=actual.Length)return false;for(int i=0;i<expected.Length;i++)if(expected[i]!=actual[i])return false;return true;}
     static bool MarkerMatches(byte[] expected,byte[] allocated){
         // Our marker has a fixed semantic length. GlobalSize is capacity and
@@ -101,6 +104,9 @@ public static class WindowsSelectionWpfFixture {
         Need(SameBytes(TextPayload(new byte[]{65,0,44},1),TextPayload(new byte[]{65,0},1))&&!SameBytes(TextPayload(new byte[]{65,0},1),TextPayload(new byte[]{66,0},1)),"POLICY_TEXT_PAYLOAD_COMPARISON");tested++;
         Need(MarkerMatches(new byte[]{1,2,3},new byte[]{1,2,3,99})&&!MarkerMatches(new byte[]{1,2,3},new byte[]{1,2})&&!MarkerMatches(new byte[]{1,2,3},new byte[]{1,2,4}),"POLICY_NONCE_COMPARISON");tested++;
         bool rejected=false;try{TextPayload(new byte[]{65,66},1);}catch(InvalidOperationException){rejected=true;}Need(rejected,"POLICY_UNTERMINATED_TEXT_ACCEPTED");tested++;
+        var observed=ClipboardValueObservation(2,"fixture",false);
+        Need((int)observed["formatKind"]==2&&(int)observed["valueKind"]==1&&(int)observed["stringLength"]==7&&!(bool)observed["equal"]&&observed.Count==4,"POLICY_OLE_OBSERVATION_CHANGED_VERDICT_OR_EXPORTED_CONTENT");tested++;
+        Need((int)ClipboardValueObservation(1,null,false)["valueKind"]==0&&(int)ClipboardValueObservation(3,new byte[]{1},false)["valueKind"]==3,"POLICY_OLE_OBSERVATION_TYPE");tested++;
         return tested;
     }
     sealed class UiWorker {
@@ -185,7 +191,45 @@ public static class WindowsSelectionWpfFixture {
                 delegate{if(!seedFormats.SetEquals(ClipboardFormats()))return false;foreach(var pair in seedContent)if(!SameBytes(pair.Value,TextPayload(ClipboardBytes(pair.Key),pair.Key==13?2:1)))return false;return true;},EmptyClipboard);
             }finally{CloseClipboard();}
         }
-        bool ClipboardMatches(){return Ui(delegate{var actual=Forms.Clipboard.GetDataObject();if(actual==null)return false;foreach(string format in clipboard.GetFormats(false))if(!Object.Equals(clipboard.GetData(format,false),actual.GetData(format,false)))return false;return true;});}
+        // Keep the original single OLE read and first-mismatch verdict. The
+        // native cross-check only runs after failure; it never retries OLE or
+        // changes acceptance. No clipboard content or arbitrary names escape.
+        bool ClipboardMatches(Dictionary<string,object> observation){return Ui(delegate{
+            Stopwatch elapsed=Stopwatch.StartNew();uint before=GetClipboardSequenceNumber();
+            observation["sequenceBeforeOle"]=before;observation["oleReadRetried"]=false;
+            bool matches=true;var rows=new List<Dictionary<string,object>>();observation["formats"]=rows;
+            var actual=Forms.Clipboard.GetDataObject();observation["oleObjectAvailable"]=actual!=null;
+            if(actual==null)matches=false;
+            else foreach(string format in clipboard.GetFormats(false)){
+                object expected=clipboard.GetData(format,false),value=actual.GetData(format,false);
+                bool equal=Object.Equals(expected,value);
+                rows.Add(ClipboardValueObservation(format==Forms.DataFormats.UnicodeText?1:format==Forms.DataFormats.Html?2:3,value,equal));
+                if(!equal){matches=false;break;}
+            }
+            observation["sequenceAfterOle"]=GetClipboardSequenceNumber();observation["originalVerdict"]=matches;
+            if(!matches){
+                observation["nativeCrossCheckAfterFailure"]=true;
+                bool opened=OpenClipboard(sourceHwnd);observation["nativeClipboardOpened"]=opened;
+                if(opened)try{
+                    observation["sequenceAtNativeRead"]=GetClipboardSequenceNumber();
+                    bool marker=IsClipboardFormatAvailable(clipboardMarker)&&MarkerMatches(markerBytes,ClipboardBytes(clipboardMarker));
+                    observation["nativeSeedMarkerMatches"]=marker;
+                    // Only our nonce-verified generated clipboard may be read.
+                    if(marker){
+                        observation["nativeFormatSetMatches"]=seedFormats.SetEquals(ClipboardFormats());
+                        var native=new List<Dictionary<string,object>>();observation["nativeFormats"]=native;
+                        foreach(var pair in seedContent){
+                            bool available=IsClipboardFormatAvailable(pair.Key);byte[] payload=available?TextPayload(ClipboardBytes(pair.Key),pair.Key==13?2:1):null;
+                            native.Add(new Dictionary<string,object>{{"formatKind",pair.Key==13?1:pair.Key==RegisterClipboardFormat(Forms.DataFormats.Html)?2:3},{"available",available},{"payloadBytes",payload==null?-1:payload.Length},{"matches",payload!=null&&SameBytes(pair.Value,payload)}});
+                        }
+                    }
+                    observation["sequenceAfterNativeRead"]=GetClipboardSequenceNumber();
+                }catch{observation["nativeObservationFailed"]=true;}
+                finally{CloseClipboard();}
+            }
+            observation["elapsedMilliseconds"]=elapsed.ElapsedMilliseconds;
+            return matches;
+        });}
         static long DiagnosticNumber(object value,long maximum){
             Need(value is int||value is long,"FAILURE_DIAGNOSTIC_INTEGER_REQUIRED");long number=Convert.ToInt64(value);Need(number>=0&&number<=maximum,"FAILURE_DIAGNOSTIC_NUMBER_BOUND");return number;
         }
@@ -260,7 +304,7 @@ public static class WindowsSelectionWpfFixture {
                     }catch(ElementNotAvailableException){row["transientOwnAppElementUnavailableObserved"]=true;}
                     Thread.Sleep(10);
                 }
-                row["richClipboardRestored"]=ClipboardMatches();row["documentUnchanged"]=Ui(delegate{return new TextRange(editor.Document.ContentStart,editor.Document.ContentEnd).Text==documentBefore&&changes==0&&editor.Selection.Text==texts[index];});
+                var clipboardObservation=new Dictionary<string,object>();row["clipboardRestorationObservation"]=clipboardObservation;row["richClipboardRestored"]=ClipboardMatches(clipboardObservation);row["documentUnchanged"]=Ui(delegate{return new TextRange(editor.Document.ContentStart,editor.Document.ContentEnd).Text==documentBefore&&changes==0&&editor.Selection.Text==texts[index];});
                 Need(exact,"ACTUAL_APP_EXACT_SOURCE_NEW_HISTORY_OR_MOCK_FAILED");Need(foreground&&GetForegroundWindow()==sourceHwnd&&Convert.ToBoolean(row["richClipboardRestored"])&&Convert.ToBoolean(row["documentUnchanged"]),"WPF_SOURCE_FOREGROUND_DOCUMENT_OR_CLIPBOARD_CHANGED");
                 Need(mock.Error==null,"MOCK_REQUEST_FAILURE");for(int future=index+1;future<texts.Length;future++)Need(mock.Count(texts[future])==0&&HistoryCount(texts[future])==0,"UNTRIGGERED_FUTURE_WPF_SOURCE_TRANSLATED");
                 if(pinned)Need(visibleAlways&&IsWindowVisible(main),"PINNED_POPUP_HIDDEN_DURING_OR_AFTER_NEW_SELECTION");row["ok"]=true;

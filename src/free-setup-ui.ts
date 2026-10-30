@@ -100,8 +100,13 @@ export function installFreeSetup(context: SetupContext): { refresh: () => void; 
     for (const role of ['translation', 'ocr'] as const) {
       const list = document.querySelector<HTMLElement>(`#free-${role}-list`);
       if (!list) continue;
+      const services = servicesFor(region, role);
+      const count = document.querySelector(`#free-${role}-count`);
+      if (count) count.textContent = tx(`（${services.length} 项）`, `(${services.length})`);
+      // Keep the native details element intact: refreshes and region changes
+      // must retain each role's user-selected expansion state.
       list.replaceChildren();
-      for (const item of servicesFor(region, role)) {
+      for (const item of services) {
         const row = document.createElement('li'); row.className = 'free-service';
         row.setAttribute('data-free-service', item.id);
         const title = document.createElement('h4'); title.textContent = tx(item.name, item.nameEn);
@@ -297,7 +302,9 @@ export function installFreeSetup(context: SetupContext): { refresh: () => void; 
 
   const chooseService = (): void => {
     closeWizard(); context.setView('settings'); renderCards();
-    const section = document.querySelector<HTMLElement>('#free-translation-heading');
+    const group = document.querySelector<HTMLDetailsElement>('#free-translation-section');
+    if (group) group.open = true;
+    const section = document.querySelector<HTMLElement>('#free-translation-summary');
     section?.scrollIntoView?.({ block: 'start' }); section?.focus();
   };
   document.querySelector('#free-region-cn')?.addEventListener('click', () => { region = 'cn'; renderCards(); });

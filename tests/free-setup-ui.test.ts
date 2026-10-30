@@ -10,7 +10,7 @@ vi.mock('@tauri-apps/api/core', () => ({ invoke: vi.fn() }));
 // Minimal DOM fixture for the production wizard's event handlers. No network,
 // browser process, real account, credential store, or installed app is involved.
 class Element {
-  id = ''; hidden = false; disabled = false; value = ''; textContent = '';
+  id = ''; open = false; hidden = false; disabled = false; value = ''; textContent = '';
   children: Element[] = [];
   attributes = new Map<string, string>();
   listeners = new Map<string, ((event: { target: Element; key?: string; preventDefault: () => void; stopPropagation: () => void }) => void)[]>();
@@ -31,7 +31,7 @@ function deferred() {
 }
 const settle = async () => { for (let i = 0; i < 50; i++) await Promise.resolve(); };
 function fixture(desktop = true, blockingHint?: 'engine-hint' | 'core-guidance') {
-  const ids = ['free-setup-hint', 'free-setup-dialog', 'free-setup-body', 'free-setup-error', 'free-translation-list', 'free-ocr-list', 'free-region-cn', 'free-region-overseas', 'core-guidance', 'engine-hint', 'free-setup-step', 'free-setup-next', 'free-setup-back', 'free-setup-close', 'free-setup-settings', 'free-setup-open', 'free-setup-docs', 'free-setup-dismiss'];
+  const ids = ['free-translation-section', 'free-ocr-section', 'free-translation-summary', 'free-ocr-summary', 'free-translation-count', 'free-ocr-count', 'free-setup-hint', 'free-setup-dialog', 'free-setup-body', 'free-setup-error', 'free-translation-list', 'free-ocr-list', 'free-region-cn', 'free-region-overseas', 'core-guidance', 'engine-hint', 'free-setup-step', 'free-setup-next', 'free-setup-back', 'free-setup-close', 'free-setup-settings', 'free-setup-open', 'free-setup-docs', 'free-setup-dismiss'];
   const roots = ids.map((id) => { const node = new Element(); node.id = id; node.hidden = id === 'free-setup-hint' || id === 'free-setup-dialog' || ((id === 'core-guidance' || id === 'engine-hint') && id !== blockingHint); return node; });
   const find = (id: string) => roots.map((root) => root.find(id)).find(Boolean) ?? null;
   const node = (id: string) => { const result = find(id); if (!result) throw new Error(`Missing fixture node: ${id}`); return result; };
@@ -251,6 +251,24 @@ describe('independent role selection and setup', () => {
     expect(secret).toEqual({ accessKeyId: 'private-test-key', accessKeySecret: 'private-test-key' });
     expect(JSON.stringify(provider)).not.toContain('private-test-key');
     expect(f.settings().activeOcrProviderId).toBe('existing-ocr');
+  });
+  it('preserves independent disclosure states through region switches and refreshes', () => {
+    const f = fixture();
+    expect(f.node('free-translation-section').open).toBe(false);
+    expect(f.node('free-ocr-section').open).toBe(false);
+    f.node('free-ocr-section').open = true;
+    f.node('free-region-cn').emit(); f.api.refresh();
+    expect(f.node('free-translation-section').open).toBe(false);
+    expect(f.node('free-ocr-section').open).toBe(true);
+    expect(f.node('free-translation-count').textContent).toContain('7');
+    expect(f.node('free-ocr-count').textContent).toContain('4');
+    f.node('free-setup-settings').emit();
+    expect(f.node('free-translation-section').open).toBe(true);
+    expect(f.node('free-ocr-section').open).toBe(true);
+    f.node('free-translation-section').open = false;
+    f.node('free-region-overseas').emit(); f.api.refresh();
+    expect(f.node('free-translation-section').open).toBe(false);
+    expect(f.node('free-ocr-count').textContent).toContain('3');
   });
   it('publishes verified quota summaries and source buttons in both role lists', () => {
     const f = fixture();
