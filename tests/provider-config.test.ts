@@ -120,3 +120,23 @@ describe('credential origin binding', () => {
     expect(credentialScope('openai', 'not a URL')).toBeNull();
   });
 });
+
+describe('verified compatible presets', () => {
+  it.each([
+    ['gemini', 'https://generativelanguage.googleapis.com/v1beta/openai', 'gemini-3.8-flash'],
+    ['groq', 'https://api.groq.com/openai/v1', 'openai/gpt-oss-20b'],
+    ['ollama', 'http://localhost:11434/v1', 'gpt-oss:20b'],
+  ])('provides %s without changing existing stored providers', (id, baseUrl, model) => {
+    const preset = PROVIDER_PRESETS.find(item => item.id === id)!;
+    expect(preset).toMatchObject({ kind: 'openai', baseUrl, exampleModel: model });
+    const provider: Provider = { id: 'existing', name: 'Custom name', kind: 'openai', baseUrl, model: 'user-model', enabled: false };
+    const before = structuredClone(provider);
+    expect(inferProviderPreset(provider)).toBe(id);
+    expect(provider).toEqual(before);
+  });
+  it('does not classify remote or misleading URLs as local Ollama', () => {
+    for (const baseUrl of ['https://localhost:11434/v1', 'http://localhost:11435/v1', 'http://localhost.attacker.invalid:11434/v1', 'http://127.0.0.1:11434/other', 'http://user:password@localhost:11434/v1', 'http://localhost:11434/v1?remote=true']) {
+      expect(inferProviderPreset({ id: 'x', name: 'Ollama', kind: 'openai', baseUrl, model: 'x', enabled: true })).toBe('openai');
+    }
+  });
+});

@@ -49,6 +49,7 @@ function values(ids: string[]): Record<string, string> {
 }
 
 function credentialFor(piece: FreePiece, input: Record<string, string>): { key: string | null; error: string | null } {
+  if (piece.credential === 'localOllama') return { key: null, error: null };
   if (piece.credential === 'youdaoPair') return piece.role === 'translation'
     ? buildTranslationCredential('youdao', { appKey: input.first, appSecret: input.second })
     : buildOcrCredential('youdao', { appKey: input.first, appSecret: input.second }, true);
@@ -166,17 +167,20 @@ export function installFreeSetup(context: SetupContext): { refresh: () => void; 
     const fields = document.createElement('div'); fields.className = 'free-setup-fields';
     const quota = document.createElement('p'); quota.className = 'field-help'; quota.textContent = tx(piece.allowance.summary, piece.quotaEn) + tx(` 核对日期：${piece.allowance.checkedOn}。`, ` Checked: ${piece.allowance.checkedOn}.`);
     const privacy = document.createElement('p'); privacy.className = 'field-help';
-    privacy.textContent = piece.role === 'ocr'
+    privacy.textContent = piece.credential === 'localOllama' ? tx('测试会向本机 Ollama 发送内置短句，无需密钥。请选择已下载的本机模型，不要使用 cloud 模型；其他已启用翻译服务仍保留。', 'The test sends a built-in sentence to local Ollama without a key. Use a downloaded local model, not a cloud model. Other enabled translation services remain enabled.') : piece.role === 'ocr'
       ? tx('测试会发送内置示例图；启用后的识别会把你的选区图片发给这个服务商。密钥只写入系统凭据库。', 'The test sends a built-in sample image. Later recognition sends your selected image to this provider. The key is stored only in the system credential store.')
       : tx('测试会发送内置短句；启用后的翻译会把原文发给这个服务商。密钥只写入系统凭据库。启用会保留现有翻译服务；如不需要并行翻译，请在设置中关闭其他服务。', 'The test sends a built-in short sentence; later translation sends your source text to this provider. The key stays in the system credential store. Existing translation services remain enabled; disable others in Settings if you do not want parallel translation.');
     const warning = document.createElement('p'); warning.className = 'free-service-warning';
-    warning.textContent = tx('费用提醒：免费额度用完后可能继续计费，请先确认控制台的计费与停止使用方式；应用不会保证自动停用。', 'Billing notice: usage above the free allowance may be billed. Check the vendor billing and stop-usage controls; this app does not guarantee an automatic stop.');
+    warning.textContent = piece.credential === 'localOllama' ? tx('本机模型需要硬件、存储和电力；云模型不属于本机免费处理。', 'Local models use hardware, storage and electricity; cloud models are not local free inference.') : tx('费用提醒：免费额度用完后可能继续计费，请先确认控制台的计费与停止使用方式；应用不会保证自动停用。', 'Billing notice: usage above the free allowance may be billed. Check the vendor billing and stop-usage controls; this app does not guarantee an automatic stop.');
     const open = document.createElement('button'); open.type = 'button'; open.className = 'text-button'; open.textContent = tx('打开申请页', 'Open signup page');
     open.addEventListener('click', () => {
       if (context.desktop) void invoke('open_service_link', { url: piece.signupUrl }).catch(context.reportError);
       else window.open(piece.signupUrl, '_blank', 'noopener');
     });
-    if (piece.credential === 'appPair' || piece.credential === 'ocrPair' || piece.credential === 'tencentOcr' || piece.credential === 'youdaoPair') {
+    if (piece.credential === 'localOllama') {
+      const modelField = field(tx('已下载的本机模型名', 'Downloaded local model name'), 'free-field-model', false);
+      fields.append(modelField);
+    } else if (piece.credential === 'appPair' || piece.credential === 'ocrPair' || piece.credential === 'tencentOcr' || piece.credential === 'youdaoPair') {
       const firstLabel = piece.credential === 'youdaoPair' ? 'AppKey' : piece.kind === 'volcengine' || piece.kind === 'aliyun' ? 'AccessKey ID' : piece.credential === 'tencentOcr' ? 'SecretId' : piece.role === 'translation' ? 'APP ID' : 'API Key';
       const secondLabel = piece.credential === 'youdaoPair' ? 'AppSecret' : piece.kind === 'volcengine' ? 'Secret Access Key' : piece.kind === 'aliyun' ? 'AccessKey Secret' : piece.credential === 'tencentOcr' ? 'SecretKey' : piece.role === 'ocr' ? 'Secret Key' : tx('密钥', 'Secret');
       fields.append(field(firstLabel, 'free-field-first'), field(secondLabel, 'free-field-second'));
@@ -209,7 +213,7 @@ export function installFreeSetup(context: SetupContext): { refresh: () => void; 
   };
   const applyPiece = async (piece: FreePiece, current: () => boolean): Promise<boolean> => {
     const entered: Record<string, string> = {
-      ...values(['free-field-key', 'free-field-first', 'free-field-second', 'free-field-region']),
+      ...values(['free-field-model', 'free-field-key', 'free-field-first', 'free-field-second', 'free-field-region']),
       endpoint: (document.getElementById('free-field-endpoint') as HTMLInputElement | null)?.value.trim() ?? '',
     };
     const input = {
@@ -224,7 +228,11 @@ export function installFreeSetup(context: SetupContext): { refresh: () => void; 
       return false;
     }
     const secret = credentialFor(piece, { key: input.key ?? '', first: input.first ?? '', second: input.second ?? '' });
-    if (secret.error || !secret.key) { showError(secret.error || tx('请填写完整密钥。', 'Enter the complete key.')); return false; }
+    const localModel = entered['free-field-model'] ?? '';
+    if (piece.credential === 'localOllama' && (!localModel || /cloud/i.test(localModel))) {
+      showError(tx('请填写已下载的本机模型名，不要使用 cloud 模型。', 'Enter a downloaded local model name, not a cloud model.')); return false;
+    }
+    if (secret.error || (!secret.key && piece.credential !== 'localOllama')) { showError(secret.error || tx('请填写完整密钥。', 'Enter the complete key.')); return false; }
     if (!context.desktop) { showError(tx('测试连接需要桌面应用。', 'Testing a connection requires the desktop app.')); return false; }
     const id = `free-${crypto.randomUUID()}`;
     const baseUrl = piece.credential === 'azureVision' ? (input.endpoint ?? '').replace(/\/+$/, '') : piece.baseUrl;
@@ -239,7 +247,7 @@ export function installFreeSetup(context: SetupContext): { refresh: () => void; 
     const translation = piece.role === 'translation';
     try {
       if (translation) {
-        const provider: Provider = { id, name: piece.name, kind: piece.kind as Provider['kind'], baseUrl, model: piece.model, enabled: false, prompt: '', region: input.region || piece.region || '' };
+        const provider: Provider = { id, name: piece.name, kind: piece.kind as Provider['kind'], baseUrl, model: piece.credential === 'localOllama' ? localModel : piece.model, enabled: false, prompt: '', region: input.region || piece.region || '' };
         await context.updateSettings((next) => { staged = true; next.providers.push(provider); }, current);
       } else {
         const provider: OcrProvider = {
@@ -249,8 +257,10 @@ export function installFreeSetup(context: SetupContext): { refresh: () => void; 
         await context.updateSettings((next) => { staged = true; next.ocrProviders.push(provider); }, current);
       }
       if (!current()) return false;
-      keyAttempted = true;
-      await invoke(translation ? 'set_api_key' : 'set_ocr_api_key', { providerId: id, key: secret.key });
+      if (secret.key) {
+        keyAttempted = true;
+        await invoke(translation ? 'set_api_key' : 'set_ocr_api_key', { providerId: id, key: secret.key });
+      }
       if (!current()) return false;
       const message = await invoke<string>(translation ? 'test_provider' : 'test_ocr_provider', { providerId: id });
       if (!current()) return false;

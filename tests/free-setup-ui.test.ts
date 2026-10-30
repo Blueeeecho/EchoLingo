@@ -275,3 +275,37 @@ describe('independent role selection and setup', () => {
   });
 
 });
+
+describe('local Ollama setup', () => {
+  const openLocal = () => {
+    const f = fixture();
+    f.node('free-region-overseas').emit();
+    const rows = f.node('free-translation-list').children;
+    rows.find(row => row.attributes.get('data-free-service') === 'ollama')!.children[4]!.children[0]!.emit();
+    return f;
+  };
+  it('tests a downloaded local model without writing a placeholder key', async () => {
+    const f = openLocal();
+    expect(f.find('free-field-key')).toBeNull();
+    f.node('free-field-model').value = 'qwen3:8b';
+    await f.submit();
+    expect(f.fresh()).toHaveLength(1);
+    expect(f.fresh()[0]).toMatchObject({ baseUrl: 'http://localhost:11434/v1', model: 'qwen3:8b', enabled: true });
+    expect(vi.mocked(invoke).mock.calls.some(([command]) => command === 'set_api_key')).toBe(false);
+    expect(vi.mocked(invoke).mock.calls.some(([command]) => command === 'test_provider')).toBe(true);
+  });
+  it('does not silently choose a cloud model or stage an empty model', async () => {
+    const f = openLocal();
+    await f.submit(); expect(f.fresh()).toHaveLength(0);
+    f.node('free-field-model').value = 'gpt-oss:120b-cloud';
+    await f.submit(); expect(f.fresh()).toHaveLength(0);
+    expect(invoke).not.toHaveBeenCalled();
+  });
+  it('removes the fresh disabled row after a failed local test, without deleting a key', async () => {
+    const f = openLocal(); f.node('free-field-model').value = 'qwen3:8b';
+    f.invokeFailures.add('test_provider'); await f.submit();
+    expect(f.fresh()).toHaveLength(0);
+    expect(vi.mocked(invoke).mock.calls.some(([command]) => command === 'delete_api_key')).toBe(false);
+    expect(f.settings().providers.some(p => p.id === 'existing-translation')).toBe(true);
+  });
+});
