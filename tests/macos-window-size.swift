@@ -6,6 +6,7 @@ import Foundation
     static func main() {
         trace("before NSApplication.shared")
         _ = NSApplication.shared
+        NSApplication.shared.setActivationPolicy(.accessory)
         trace("after NSApplication.shared")
         precondition(Thread.isMainThread)
         for style: NSWindow.StyleMask in [[], [.titled, .resizable]] {
@@ -38,7 +39,7 @@ import Foundation
                                         styleMask: [.titled, .resizable], backing: .buffered, defer: false)
         let context = Unmanaged.passRetained(transitionWindow).toOpaque()
         // Reproduce Tao's FIFO style change rather than testing a fixed style.
-        DispatchQueue.main.async { transitionWindow.styleMask = [.resizable] }
+        DispatchQueue.main.async { precondition(Thread.isMainThread); transitionWindow.styleMask = [.resizable] }
         echoLingoAfterWindowChanges({ context in
             WindowSizeChecks.trace("first FIFO continuation main=\(Thread.isMainThread)")
             let window = Unmanaged<NSWindow>.fromOpaque(context!).takeUnretainedValue()
@@ -48,7 +49,7 @@ import Foundation
             precondition(window.contentRect(forFrameRect: window.frame).height == 160)
             precondition(window.frame.minX == topLeft.x && window.frame.maxY == topLeft.y)
             precondition(!window.isVisible && !window.isKeyWindow)
-            DispatchQueue.main.async { window.styleMask = [.titled, .resizable] }
+            DispatchQueue.main.async { precondition(Thread.isMainThread); window.styleMask = [.titled, .resizable] }
             echoLingoAfterWindowChanges({ context in
                 WindowSizeChecks.trace("second FIFO continuation main=\(Thread.isMainThread)")
                 let window = Unmanaged<NSWindow>.fromOpaque(context!).takeRetainedValue()
@@ -62,7 +63,10 @@ import Foundation
                 exit(0)
             }, context)
         }, context)
-        trace("enter dispatchMain")
-        dispatchMain()
+        // dispatchMain terminates the main thread on this macOS runtime;
+        // AppKit's next style update then runs on a libdispatch worker. Use the
+        // same live application run loop as Tauri, not a command-line drain.
+        trace("enter NSApplication.run")
+        NSApplication.shared.run()
     }
 }
