@@ -41,6 +41,7 @@ using System.Windows.Forms;
 public static class EchoLingoLiveCaptureSmoke {
     static string nativeArguments = "";
     static bool requireInputPlanes = true;
+    static bool requireCaptureLoupe = true;
     static string inputBackend = "hybrid";
     static int activeHelperProcessId;
     static Dictionary<string,object> failedPlaneComposition;
@@ -69,6 +70,7 @@ public static class EchoLingoLiveCaptureSmoke {
     [DllImport("user32.dll")] static extern bool EnumWindows(EnumWindow callback, IntPtr parameter);
     [DllImport("user32.dll")] static extern uint GetWindowThreadProcessId(IntPtr window, out uint process);
     [DllImport("user32.dll", CharSet=CharSet.Unicode)] static extern int GetClassName(IntPtr window, StringBuilder name, int capacity);
+    [DllImport("user32.dll", CharSet=CharSet.Unicode)] static extern int GetWindowText(IntPtr window, StringBuilder text, int capacity);
     [DllImport("user32.dll")] static extern bool IsWindowVisible(IntPtr window);
     [DllImport("user32.dll")] static extern bool IsWindow(IntPtr window);
     [DllImport("user32.dll")] static extern bool IsWindowEnabled(IntPtr window);
@@ -183,6 +185,32 @@ public static class EchoLingoLiveCaptureSmoke {
         StringBuilder name = new StringBuilder(256); GetClassName(window, name, name.Capacity);
         return name.ToString() == "EchoLingoCaptureInputPlane-" + processId;
     }
+    static bool IsCaptureLoupe(IntPtr window) {
+        StringBuilder title = new StringBuilder(64);
+        return GetWindowText(window, title, title.Capacity) > 0 && title.ToString() == "EchoLingoCaptureMagnifier";
+    }
+    static bool CaptureLoupeReady(int processId, Point pointer, Dictionary<string, object> metadata) {
+        int seen = 0; bool matched = false; Rectangle bounds = Rectangle.Empty;
+        EnumWindows(delegate(IntPtr window, IntPtr unused) {
+            uint owner; GetWindowThreadProcessId(window, out owner);
+            if (owner != processId || !IsWindowVisible(window) || !IsCaptureLoupe(window)) return true;
+            seen++;
+            long style = GetWindowLongPtr(window, -20).ToInt64();
+            RECT value; if (!GetWindowRect(window, out value)) return true;
+            Rectangle candidate = Rectangle.FromLTRB(value.left, value.top, value.right, value.bottom);
+            int dx = candidate.Left + candidate.Width / 2 - pointer.X, dy = candidate.Top + candidate.Height / 2 - pointer.Y;
+            // Click-through so a loupe that has not yet followed the pointer cannot steal the plane hit. Not layered, so it is not a thin edge.
+            bool styleOk = (style & 0x08000000L) != 0 && (style & 0x20L) != 0 && (style & 0x00080000L) == 0;
+            bool sizeOk = candidate.Width >= 140 && candidate.Width <= 360 && candidate.Height >= 150 && candidate.Height <= 420;
+            bool near = (long)dx * dx + (long)dy * dy <= 500L * 500L && !candidate.Contains(pointer);
+            if (styleOk && sizeOk && near) { matched = true; bounds = candidate; }
+            return true;
+        }, IntPtr.Zero);
+        metadata["captureMagnifierCount"] = seen;
+        metadata["captureMagnifierNearPointer"] = matched && seen == 1;
+        if (seen == 1) metadata["captureMagnifierBounds"] = RectValue(bounds);
+        return seen == 1 && matched;
+    }
     static List<EdgeWindow> InputPlanes(int processId, bool visibleOnly) {
         List<EdgeWindow> result = new List<EdgeWindow>();
         EnumWindows(delegate(IntPtr window, IntPtr unused) {
@@ -237,10 +265,15 @@ public static class EchoLingoLiveCaptureSmoke {
         bool rawPlane = visible.Exists(delegate(EdgeWindow plane) { return plane.Handle == rawRoot && plane.Bounds.Contains(pointer); });
         bool rawEdge = edges.Exists(delegate(EdgeWindow edge) { return edge.Handle == rawRoot && edge.Bounds.Contains(pointer); });
         bool actualPlane = visible.Exists(delegate(EdgeWindow plane) { return plane.Handle == through && plane.Bounds.Contains(pointer); });
+        // WindowFromPoint still returns a disabled click-through loupe. The skip-transparent
+        // hit is the window that receives the pointer, and that must be the input plane.
+        long rawStyle = GetWindowLongPtr(rawRoot, -20).ToInt64();
+        bool rawLoupe = IsCaptureLoupe(rawRoot) && (rawStyle & 0x20L) != 0 && (rawStyle & 0x00080000L) == 0;
         metadata["rawPointerRootHwnd"] = WindowId(rawRoot); metadata["transparentSkippingPointerRootHwnd"] = WindowId(through);
         metadata["rawPointerIsExactPlane"] = rawPlane; metadata["rawPointerIsVerifiedThinEdge"] = rawEdge;
+        metadata["rawPointerIsClickThroughLoupe"] = rawLoupe;
         metadata["transparentSkippingHitIsExactPlane"] = actualPlane;
-        bool matched = geometry && actualPlane && (rawPlane || rawEdge);
+        bool matched = geometry && actualPlane && (rawPlane || rawEdge || rawLoupe);
         if (failureDetails && !matched) {
             // Observe only the failing check. No new move, input, capture,
             // repeated hit test, settling wait or window-order mutation.
@@ -346,7 +379,7 @@ public static class EchoLingoLiveCaptureSmoke {
         List<EdgeWindow> result = new List<EdgeWindow>();
         EnumWindows(delegate(IntPtr window, IntPtr unused) {
             uint owner; GetWindowThreadProcessId(window, out owner);
-            if (owner != processId || !IsWindowVisible(window) || IsInputPlane(window,processId)) return true;
+            if (owner != processId || !IsWindowVisible(window) || IsInputPlane(window,processId) || IsCaptureLoupe(window)) return true;
             long style = GetWindowLongPtr(window, -20).ToInt64();
             long required = 0x08000000L | 0x00080000L | 0x00000020L | 0x00000008L;
             Assert((style & required) == required, "Capture overlay lacks layered/transparent/no-activate/topmost styles.");
@@ -403,7 +436,9 @@ public static class EchoLingoLiveCaptureSmoke {
             context.LastEdges = EdgeMetadata(context, actual, stage, elapsed.Elapsed.TotalMilliseconds);
             Point pointer; bool pointerKnown = GetPhysicalCursorPos(out pointer);
             bool planesReady = pointerKnown && PlaneComposition(process.Id,actual,pointer,context.LastEdges);
-            if (!process.HasExited && Matches(actual, expected) && planesReady) return actual;
+            // The frozen ab4405c baseline has no magnifier. Only the current helper must show one.
+            bool loupeReady = !requireCaptureLoupe || (pointerKnown && CaptureLoupeReady(process.Id, pointer, context.LastEdges));
+            if (!process.HasExited && Matches(actual, expected) && planesReady && loupeReady) return actual;
             if (process.HasExited) break;
             Thread.Sleep(20);
         } while (elapsed.ElapsedMilliseconds < budget);
@@ -430,7 +465,7 @@ public static class EchoLingoLiveCaptureSmoke {
         int count = 0; long area = 0, maximum = 0;
         EnumWindows(delegate(IntPtr window, IntPtr unused) {
             uint owner; GetWindowThreadProcessId(window, out owner);
-            if (owner == processId && IsWindowVisible(window) && !IsInputPlane(window,processId)) {
+            if (owner == processId && IsWindowVisible(window) && !IsInputPlane(window,processId) && !IsCaptureLoupe(window)) {
                 long style = GetWindowLongPtr(window, -20).ToInt64();
                 long required = 0x08000000L | 0x00080000L | 0x00000020L | 0x00000008L;
                 Assert((style & required) == required, "Capture overlay lacks layered/transparent/no-activate/topmost styles.");
@@ -451,7 +486,7 @@ public static class EchoLingoLiveCaptureSmoke {
         int borders = 0, steps = 0;
         for (IntPtr window = GetWindow(source, 3); window != IntPtr.Zero && steps++ < 4096; window = GetWindow(window, 3)) {
             uint owner; GetWindowThreadProcessId(window, out owner);
-            if (owner == processId && IsWindowVisible(window) && !IsInputPlane(window,processId)) borders++;
+            if (owner == processId && IsWindowVisible(window) && !IsInputPlane(window,processId) && !IsCaptureLoupe(window)) borders++;
         }
         return borders == expectedCount;
     }
@@ -1093,7 +1128,7 @@ public static class EchoLingoLiveCaptureSmoke {
         }
     }
     public static Dictionary<string, object> Run(string helper, string assembly, bool performance, bool legacy, string backend) {
-        requireInputPlanes = !legacy; inputBackend = backend; failedPlaneComposition = null;
+        requireInputPlanes = !legacy; requireCaptureLoupe = !legacy; inputBackend = backend; failedPlaneComposition = null;
         Assert(!assembly.Contains("\""), "Invalid native DLL path.");
         nativeArguments = String.IsNullOrEmpty(assembly) ? "" : " -NativeAssemblyPath \"" + assembly + "\"";
         if (performance) nativeArguments += " -PerformanceDiagnostics";

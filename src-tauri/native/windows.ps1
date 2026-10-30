@@ -1563,7 +1563,8 @@ public sealed class CaptureSelectionState {
         int topologyAssertions = CaptureTopologyPolicy.SelfTest();
         int outlineAssertions = CaptureOutlinePolicy.SelfTest();
         int hoverAssertions = CaptureHoverPolicy.SelfTest(), redrawAssertions = CaptureMoveMailbox.SelfTest(), healthAssertions = CaptureInputHealthPolicy.SelfTest();
-        return new Dictionary<string, object> { { "captureStateFixturePassed", true }, { "fixtureAssertions", 11 + inputAssertions + topologyAssertions + outlineAssertions + hoverAssertions + redrawAssertions + healthAssertions }, { "inputPolicyAssertions", inputAssertions }, { "topologyPolicyAssertions", topologyAssertions }, { "outlinePolicyAssertions", outlineAssertions }, { "hoverPolicyAssertions", hoverAssertions }, { "redrawPolicyAssertions", redrawAssertions }, { "inputHealthPolicyAssertions", healthAssertions }, { "hoverQueryMilliseconds", CaptureHoverPolicy.QueryMilliseconds }, { "releaseGraceMilliseconds", 500 }, { "screenCaptured", false }, { "clipboardChanged", false }, { "interactiveCaptureTested", false } };
+        int magnifierAssertions = CaptureMagnifierSample.SelfTest();
+        return new Dictionary<string, object> { { "captureStateFixturePassed", true }, { "fixtureAssertions", 11 + inputAssertions + topologyAssertions + outlineAssertions + hoverAssertions + redrawAssertions + healthAssertions + magnifierAssertions }, { "inputPolicyAssertions", inputAssertions }, { "topologyPolicyAssertions", topologyAssertions }, { "outlinePolicyAssertions", outlineAssertions }, { "hoverPolicyAssertions", hoverAssertions }, { "redrawPolicyAssertions", redrawAssertions }, { "inputHealthPolicyAssertions", healthAssertions }, { "magnifierSampleAssertions", magnifierAssertions }, { "hoverQueryMilliseconds", CaptureHoverPolicy.QueryMilliseconds }, { "releaseGraceMilliseconds", 500 }, { "screenCaptured", false }, { "clipboardChanged", false }, { "interactiveCaptureTested", false } };
     }
 }
 
@@ -2538,6 +2539,133 @@ sealed class CaptureInputPump : IDisposable {
     public void Dispose() { if (Stop()) ready.Dispose(); }
 }
 
+// Keep the sample in physical pixels, including padding outside the desktop.
+// Cropping the backing bitmap would move the pointer away from its center and
+// stretch edge samples to a different zoom factor.
+public sealed class CaptureMagnifierSample {
+    public const int Side = 52;
+    public readonly Rectangle Bounds, Grabbed;
+    public readonly Point CopyOffset;
+    public readonly Size CanvasSize = new Size(Side, Side);
+    public CaptureMagnifierSample(Point pointer, Rectangle desktop) {
+        Bounds = new Rectangle(pointer.X - Side / 2, pointer.Y - Side / 2, Side, Side);
+        Grabbed = Rectangle.Intersect(Bounds, desktop);
+        CopyOffset = new Point(Grabbed.X - Bounds.X, Grabbed.Y - Bounds.Y);
+    }
+    static void Assert(bool value, string message) { if (!value) throw new InvalidOperationException("SELF_TEST: " + message); }
+    public static int SelfTest() {
+        int assertions = 0;
+        // All edges/corners, partial clipping, and an interior point, repeated
+        // for a virtual desktop with negative monitor coordinates.
+        foreach (Rectangle desktop in new Rectangle[] { new Rectangle(0, 0, 1920, 1080), new Rectangle(-2560, -1200, 4480, 2640) }) {
+            int[] xs = { desktop.Left, desktop.Left + 13, desktop.Left + desktop.Width / 2, desktop.Right - 14, desktop.Right - 1 };
+            int[] ys = { desktop.Top, desktop.Top + 13, desktop.Top + desktop.Height / 2, desktop.Bottom - 14, desktop.Bottom - 1 };
+            foreach (int x in xs) foreach (int y in ys) {
+                Point pointer = new Point(x, y);
+                CaptureMagnifierSample sample = new CaptureMagnifierSample(pointer, desktop);
+                Assert(sample.CanvasSize == new Size(52, 52) && sample.Bounds.Size == sample.CanvasSize, "Magnifier backing size must not shrink at desktop edges."); assertions++;
+                Assert(sample.Grabbed.Width > 0 && sample.Grabbed.Height > 0 && desktop.Contains(sample.Grabbed), "Magnifier may copy only available desktop pixels."); assertions++;
+                Rectangle destination = new Rectangle(sample.CopyOffset, sample.Grabbed.Size);
+                Assert(new Rectangle(Point.Empty, sample.CanvasSize).Contains(destination), "Magnifier edge padding must fit the fixed backing bitmap."); assertions++;
+                Assert(pointer.X - sample.Grabbed.X + sample.CopyOffset.X == Side / 2
+                    && pointer.Y - sample.Grabbed.Y + sample.CopyOffset.Y == Side / 2, "Magnifier crosshair must stay on the physical pointer pixel."); assertions++;
+            }
+        }
+        return assertions;
+    }
+}
+
+// A small topmost loupe beside the pointer. It is click-through but not layered,
+// so it is not one of the thin edges. Title EchoLingoCaptureMagnifier identifies it.
+// The window stays outside the sampled square so CopyFromScreen cannot see itself.
+sealed class CaptureMagnifier : Form {
+    public const string WindowTitle = "EchoLingoCaptureMagnifier";
+    const int Sample = CaptureMagnifierSample.Side, Zoom = 3, View = Sample * Zoom, Caption = 18, Gap = 16;
+    [DllImport("user32.dll", SetLastError=true)] static extern bool SetWindowPos(IntPtr window, IntPtr after, int x, int y, int width, int height, uint flags);
+    [DllImport("user32.dll")] static extern bool EnableWindow(IntPtr window, bool enable);
+    readonly Bitmap canvas = new Bitmap(View, View + Caption);
+    bool canvasDisposed;
+    public CaptureMagnifier() {
+        AutoScaleMode = AutoScaleMode.None;
+        FormBorderStyle = FormBorderStyle.None;
+        ControlBox = false;
+        StartPosition = FormStartPosition.Manual;
+        ShowInTaskbar = false;
+        TopMost = true;
+        Enabled = false; // WindowFromPoint skips disabled windows; the loupe must not cover the input plane.
+        Text = WindowTitle;
+        ClientSize = new Size(View, View + Caption);
+        BackColor = Color.FromArgb(22, 26, 34);
+        DoubleBuffered = true;
+    }
+    protected override bool ShowWithoutActivation { get { return true; } }
+    protected override CreateParams CreateParams {
+        get {
+            CreateParams value = base.CreateParams;
+            value.ExStyle |= 0x08000000 | 0x00000080 | 0x00000008 | 0x00000020; // NOACTIVATE/TOOLWINDOW/TOPMOST/TRANSPARENT
+            return value;
+        }
+    }
+    protected override void OnPaint(PaintEventArgs e) { e.Graphics.DrawImageUnscaled(canvas, 0, 0); }
+    protected override void WndProc(ref Message message) {
+        if (message.Msg == 0x0021) { message.Result = new IntPtr(3); return; } // MA_NOACTIVATE
+        if (message.Msg == 0x0084) { message.Result = new IntPtr(-1); return; } // HTTRANSPARENT: clicks and WindowFromPoint pass through to the input plane
+        base.WndProc(ref message);
+    }
+    static Rectangle Place(Point pointer, Rectangle sample) {
+        Rectangle area = Screen.FromPoint(pointer).Bounds;
+        int x = sample.Right + Gap, y = sample.Top;
+        if (x + View > area.Right) x = sample.Left - Gap - View;
+        if (y + View + Caption > area.Bottom) y = area.Bottom - (View + Caption);
+        if (x < area.Left) x = area.Left;
+        if (y < area.Top) y = area.Top;
+        Rectangle placed = new Rectangle(x, y, View, View + Caption);
+        if (placed.IntersectsWith(sample) || placed.Contains(pointer)) {
+            bool left = pointer.X < area.Left + area.Width / 2, above = pointer.Y < area.Top + area.Height / 2;
+            x = left ? area.Right - View : area.Left;
+            y = above ? area.Bottom - (View + Caption) : area.Top;
+            placed = new Rectangle(x, y, View, View + Caption);
+        }
+        return placed;
+    }
+    public void Present(Point pointer, Rectangle selection) {
+        CaptureMagnifierSample samplePlan = new CaptureMagnifierSample(pointer, SystemInformation.VirtualScreen);
+        Rectangle sample = samplePlan.Bounds;
+        Rectangle place = Place(pointer, sample);
+        if (Visible && Bounds.IntersectsWith(sample))
+            SetWindowPos(Handle, new IntPtr(-1), place.X, place.Y, place.Width, place.Height, 0x0010 | 0x0200);
+        Rectangle grabbed = samplePlan.Grabbed;
+        if (grabbed.Width < 4 || grabbed.Height < 4) { if (Visible) Hide(); return; }
+        using (Bitmap raw = new Bitmap(samplePlan.CanvasSize.Width, samplePlan.CanvasSize.Height)) {
+            using (Graphics source = Graphics.FromImage(raw)) {
+                source.Clear(Color.FromArgb(22, 26, 34));
+                source.CopyFromScreen(grabbed.Location, samplePlan.CopyOffset, grabbed.Size, CopyPixelOperation.SourceCopy);
+            }
+            using (Graphics target = Graphics.FromImage(canvas)) {
+                target.Clear(Color.FromArgb(22, 26, 34));
+                target.InterpolationMode = System.Drawing.Drawing2D.InterpolationMode.NearestNeighbor;
+                target.PixelOffsetMode = System.Drawing.Drawing2D.PixelOffsetMode.Half;
+                target.DrawImage(raw, new Rectangle(0, 0, View, View));
+                using (Pen hair = new Pen(Color.FromArgb(230, 70, 70), 1)) {
+                    target.DrawLine(hair, View / 2, 0, View / 2, View);
+                    target.DrawLine(hair, 0, View / 2, View, View / 2);
+                }
+                using (Pen frame = new Pen(Color.FromArgb(90, 150, 255), 2)) target.DrawRectangle(frame, 1, 1, View - 3, View - 3);
+                string label = selection.Width > 1 && selection.Height > 1 ? selection.Width + " × " + selection.Height : "3×";
+                target.DrawString(label, SystemFonts.MessageBoxFont, Brushes.White, 4, View + 1);
+            }
+        }
+        if (!Visible) { Bounds = place; Show(); }
+        if (!SetWindowPos(Handle, new IntPtr(-1), place.X, place.Y, place.Width, place.Height, 0x0010 | 0x0200)) { Hide(); return; }
+        EnableWindow(Handle, false);
+        Refresh();
+    }
+    protected override void Dispose(bool disposing) {
+        if (disposing && !canvasDisposed) { canvasDisposed = true; canvas.Dispose(); }
+        base.Dispose(disposing);
+    }
+}
+
 sealed class RegionPicker : ApplicationContext {
     [DllImport("user32.dll")] static extern short GetAsyncKeyState(int key);
     [DllImport("user32.dll")] static extern bool GetPhysicalCursorPos(out Point point);
@@ -2575,6 +2703,8 @@ sealed class RegionPicker : ApplicationContext {
     int renderedHighlight = -2;
     Rectangle renderedSelection;
     Rectangle renderedHover;
+    Point renderedLoupePointer;
+    CaptureMagnifier magnifier;
     long lastRaise = -250;
     string failure;
     public RegionPicker(bool useMouseHook, uint nativeHostThread, long nativeHostToken) {
@@ -2597,6 +2727,7 @@ sealed class RegionPicker : ApplicationContext {
             CaptureHealth.Set("inputPlaneCount", planes.Count);
             for (int i = 0; i < rectangles.Length; i++) overlays.Add(new CaptureOverlay(rectangles[i], i, displays[i].Dpi, InvalidateEnvironment,
                 delegate(IntPtr handle) { handles.Add(handle); hintHandles.Add(handle); }));
+            magnifier = new CaptureMagnifier();
             hoverResolver = new CaptureHoverResolver(hintHandles, planes.Handles);
         } catch { Dispose(); throw; }
         timer.Interval = 16;
@@ -2718,6 +2849,7 @@ sealed class RegionPicker : ApplicationContext {
         // Recheck only phase under its short lock; native queries stay outside.
         lock (selectionGate) if (state.Dragging || state.Finished) { hovered = Rectangle.Empty; hoverPolicy.Clear(); }
         if (finished) {
+            if (magnifier != null && magnifier.Visible) magnifier.Hide();
             if (!stopping) { stopping = true; CaptureHealth.Mark("releaseAtMilliseconds");CapturePerformance.Mark("selectionFinishedMilliseconds"); foreach (CaptureOverlay overlay in overlays) overlay.Hide(); }
             // Keep a short bounded drain for matching mouse/Escape releases.
             if (mayStop) {
@@ -2725,7 +2857,9 @@ sealed class RegionPicker : ApplicationContext {
                     failure = "CAPTURE_INPUT_RELEASE: Selection stopped while a button or Escape was still held. Release it before retrying; no screenshot was taken.";
                 ExitThread();
             }
-        } else if (armed && redrawDue && (raise || renderedHighlight != highlighted || renderedSelection != selected || renderedHover != hovered)) {
+        } else if (!armed) {
+            if (magnifier != null && magnifier.Visible) magnifier.Hide();
+        } else if (armed && redrawDue && (raise || renderedHighlight != highlighted || renderedSelection != selected || renderedHover != hovered || renderedLoupePointer != pointer)) {
             redraw.Presented(elapsed);
             renderedHighlight = highlighted; renderedSelection = selected; renderedHover = hovered;
             bool presented = false;
@@ -2741,6 +2875,10 @@ sealed class RegionPicker : ApplicationContext {
                 failure = error is InvalidOperationException && error.Message.StartsWith("CAPTURE_", StringComparison.Ordinal)
                     ? error.Message : "CAPTURE_OVERLAY: Windows could not update the selection border; no screenshot was taken.";
                 lock (selectionGate) state.Cancel();
+            }
+            if (presented) {
+                try { magnifier.Present(pointer, selected); renderedLoupePointer = pointer; }
+                catch { if (magnifier != null) magnifier.Hide(); }
             }
             if (presented && raise) lastRaise = elapsed;
             if (presented) CapturePerformance.Mark("firstBordersVisibleMilliseconds");
@@ -2780,6 +2918,7 @@ sealed class RegionPicker : ApplicationContext {
             CaptureHealth.Set("inputPlaneRemainingAfterCleanup", planes.RemainingCount);
             if (planes.Failure != null) failure = planes.Failure;
         }
+        if (magnifier != null) { magnifier.Dispose(); magnifier = null; }
         foreach (CaptureOverlay overlay in overlays) overlay.Dispose();
         if (moves != null) { CapturePerformance.Set("movesPublished", moves.Moves); CapturePerformance.Set("moveWakesPosted", moves.Posts); CapturePerformance.Set("movePostFailures", moves.Failures); }
         if (moves != null) { CaptureHealth.Set("hookMouseMoves", moves.Moves); CaptureHealth.Set("moveWakesPosted", moves.Posts); CaptureHealth.Set("movePostFailures", moves.Failures); }

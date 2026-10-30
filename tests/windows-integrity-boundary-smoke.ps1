@@ -51,6 +51,7 @@ public static class EchoLingoIntegrityBoundarySmoke {
     [DllImport("user32.dll")] static extern IntPtr ChildWindowFromPointEx(IntPtr window,Point point,uint flags);
     [DllImport("user32.dll")] static extern uint GetWindowThreadProcessId(IntPtr window,out uint process);
     [DllImport("user32.dll",CharSet=CharSet.Unicode)] static extern int GetClassName(IntPtr window,StringBuilder value,int count);
+    [DllImport("user32.dll",CharSet=CharSet.Unicode)] static extern int GetWindowText(IntPtr window,StringBuilder text,int count);
     [DllImport("user32.dll",EntryPoint="GetWindowLongPtrW")] static extern IntPtr GetWindowLongPtr(IntPtr window,int index);
     [DllImport("user32.dll",SetLastError=true)] static extern bool SetWindowPos(IntPtr window,IntPtr after,int x,int y,int width,int height,uint flags);
     [DllImport("user32.dll")] static extern IntPtr SetCapture(IntPtr window);
@@ -183,6 +184,7 @@ public static class EchoLingoIntegrityBoundarySmoke {
     static Rectangle Frame(IntPtr window) { RECT value;Need(DwmGetWindowAttribute(window,9,out value,Marshal.SizeOf(typeof(RECT)))==0,"Cannot read source DWM frame.");return Rectangle.FromLTRB(value.left,value.top,value.right,value.bottom); }
     static string Class(IntPtr window) { StringBuilder value=new StringBuilder(256);GetClassName(window,value,value.Capacity);return value.ToString(); }
     static bool Plane(IntPtr window,int pid) { return Class(window)=="EchoLingoCaptureInputPlane-"+pid; }
+    static bool Loupe(IntPtr window) { StringBuilder title=new StringBuilder(64); return GetWindowText(window,title,title.Capacity)>0 && title.ToString()=="EchoLingoCaptureMagnifier"; }
     static INPUT Move(Point point) {
         Rectangle desktop=SystemInformation.VirtualScreen;INPUT value=new INPUT();
         value.data.mouse.x=(int)Math.Round((point.X-desktop.X)*65535.0/(desktop.Width-1));
@@ -197,7 +199,7 @@ public static class EchoLingoIntegrityBoundarySmoke {
     }
     static bool Ready(int helper,IntPtr source,Rectangle frame,Rectangle display,Point point,Dictionary<string,object> observed) {
         Need(GetForegroundWindow()==source && Frame(source)==frame,"Source foreground/DWM changed before adversarial action.");
-        List<WindowInfo> thin=new List<WindowInfo>(),planes=new List<WindowInfo>();int allocated=0;
+        List<WindowInfo> thin=new List<WindowInfo>(),planes=new List<WindowInfo>();int allocated=0,loupes=0;bool loupeNear=false;
         EnumWindows(delegate(IntPtr window,IntPtr unused) {
             uint pid;GetWindowThreadProcessId(window,out pid);if (pid!=helper) return true;
             long style=GetWindowLongPtr(window,-20).ToInt64();
@@ -206,6 +208,15 @@ public static class EchoLingoIntegrityBoundarySmoke {
                 const long required=0x00200000L|0x08000000L|0x80L|8;
                 Need((style&required)==required&&(style&(0x80000L|0x20L))==0,"Input plane styles invalid.");
                 planes.Add(new WindowInfo { Handle=window,Bounds=Bounds(window) });return true;
+            }
+            if (Loupe(window)) {
+                if (!IsWindowVisible(window)) return true;
+                loupes++; Rectangle candidate=Bounds(window);
+                int dx=candidate.Left+candidate.Width/2-point.X, dy=candidate.Top+candidate.Height/2-point.Y;
+                bool styleOk=(style&0x08000000L)!=0 && (style&0x20L)!=0 && (style&0x80000L)==0;
+                bool sizeOk=candidate.Width>=140 && candidate.Width<=360 && candidate.Height>=150 && candidate.Height<=420;
+                if (styleOk && sizeOk && (long)dx*dx+(long)dy*dy<=500L*500L && !candidate.Contains(point)) loupeNear=true;
+                return true;
             }
             long edges=0x08000000L|0x80000L|0x20L;
             if ((style&edges)==edges) allocated++;
@@ -221,11 +232,15 @@ public static class EchoLingoIntegrityBoundarySmoke {
         foreach (WindowInfo plane in planes) {int index=monitors.IndexOf(plane.Bounds);if(index<0)planeGeometry=false;else monitors.RemoveAt(index);}
         IntPtr raw=GetAncestor(WindowFromPoint(point),2);Point client=point;IntPtr desktop=GetDesktopWindow();
         IntPtr through=ScreenToClient(desktop,ref client)?GetAncestor(ChildWindowFromPointEx(desktop,client,5),2):IntPtr.Zero;
+        long rawStyle=GetWindowLongPtr(raw,-20).ToInt64();
+        bool rawLoupe=Loupe(raw)&&(rawStyle&0x20L)!=0&&(rawStyle&0x80000L)==0;
         bool hit=planes.Exists(delegate(WindowInfo p){return p.Handle==through&&p.Bounds.Contains(point);})
-            && (planes.Exists(delegate(WindowInfo p){return p.Handle==raw;})||thin.Exists(delegate(WindowInfo e){return e.Handle==raw&&e.Bounds.Contains(point);}));
+            && (planes.Exists(delegate(WindowInfo p){return p.Handle==raw;})||thin.Exists(delegate(WindowInfo e){return e.Handle==raw&&e.Bounds.Contains(point);})||rawLoupe);
+        bool loupeReady=loupes==1 && loupeNear;
         observed["thinVisibleCount"]=thin.Count;observed["thinAllocatedCount"]=allocated;observed["planeVisibleCount"]=planes.Count;
+        observed["captureMagnifierCount"]=loupes;observed["captureMagnifierNearPointer"]=loupeReady;
         observed["rawPointerRootHwnd"]=Id(raw);observed["transparentSkippingRootHwnd"]=Id(through);
-        observed["exactPlanePointerHit"]=hit;return exact&&wanted.Count==0&&planeGeometry&&monitors.Count==0&&hit;
+        observed["exactPlanePointerHit"]=hit;return exact&&wanted.Count==0&&planeGeometry&&monitors.Count==0&&hit&&loupeReady;
     }
     static Dictionary<string,object> SafeReply(Dictionary<string,object> reply) {
         Dictionary<string,object> safe=new Dictionary<string,object>();

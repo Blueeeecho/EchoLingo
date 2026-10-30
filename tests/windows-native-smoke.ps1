@@ -44,6 +44,7 @@ try {
     if ($LASTEXITCODE -ne 0) { throw 'CAPTURE_STATE_TEST: Native capture-state helper failed.' }
     $captureState = ($captureStateOutput -join "`n") | ConvertFrom-Json
     if (-not $captureState.ok -or -not $captureState.diagnostics.captureStateFixturePassed -or
+        $captureState.diagnostics.magnifierSampleAssertions -ne 200 -or
         $captureState.diagnostics.screenCaptured -or $captureState.diagnostics.clipboardChanged) {
         throw 'CAPTURE_STATE_TEST: Capture-state fixture did not report a safe pass.'
     }

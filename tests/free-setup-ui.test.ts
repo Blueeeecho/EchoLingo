@@ -30,15 +30,15 @@ function deferred() {
   return { promise, resolve };
 }
 const settle = async () => { for (let i = 0; i < 50; i++) await Promise.resolve(); };
-function fixture(desktop = true) {
-  const ids = ['free-setup-hint', 'free-setup-dialog', 'free-setup-body', 'free-setup-error', 'free-combo-list', 'free-region-cn', 'free-region-overseas', 'core-guidance', 'free-setup-step', 'free-setup-next', 'free-setup-back', 'free-setup-close', 'free-setup-settings', 'free-setup-open', 'free-setup-docs', 'free-setup-dismiss'];
-  const roots = ids.map((id) => { const node = new Element(); node.id = id; node.hidden = id === 'free-setup-dialog' || id === 'core-guidance'; return node; });
+function fixture(desktop = true, blockingHint?: 'engine-hint' | 'core-guidance') {
+  const ids = ['free-setup-hint', 'free-setup-dialog', 'free-setup-body', 'free-setup-error', 'free-combo-list', 'free-region-cn', 'free-region-overseas', 'core-guidance', 'engine-hint', 'free-setup-step', 'free-setup-next', 'free-setup-back', 'free-setup-close', 'free-setup-settings', 'free-setup-open', 'free-setup-docs', 'free-setup-dismiss'];
+  const roots = ids.map((id) => { const node = new Element(); node.id = id; node.hidden = id === 'free-setup-hint' || id === 'free-setup-dialog' || ((id === 'core-guidance' || id === 'engine-hint') && id !== blockingHint); return node; });
   const find = (id: string) => roots.map((root) => root.find(id)).find(Boolean) ?? null;
   const node = (id: string) => { const result = find(id); if (!result) throw new Error(`Missing fixture node: ${id}`); return result; };
   vi.stubGlobal('document', { querySelector: (selector: string) => find(selector.slice(1)), getElementById: find, createElement: () => new Element(), createTextNode: () => new Element() });
-  vi.stubGlobal('window', { __qa: true });
+  vi.stubGlobal('window', blockingHint ? {} : { __qa: true });
   vi.stubGlobal('navigator', { language: 'en-US' });
-  vi.stubGlobal('localStorage', { getItem: () => null, setItem() {} });
+  vi.stubGlobal('localStorage', { getItem: () => null, setItem: vi.fn() });
   vi.stubGlobal('crypto', { randomUUID });
   let settings = defaultSettings();
   settings.providers.push({ id: 'existing-translation', name: 'Existing', kind: 'openai', baseUrl: 'https://example.invalid/v1', model: 'existing', enabled: true });
@@ -87,6 +87,26 @@ function fixture(desktop = true) {
 
 beforeEach(() => vi.clearAllMocks());
 afterEach(() => vi.unstubAllGlobals());
+
+describe('combined engine and signup guidance', () => {
+  it.each(['engine-hint', 'core-guidance'] as const)('defers signup behind %s and reveals it only after the blocker is gone', (blocker) => {
+    const f = fixture(true, blocker);
+    expect(f.node('free-setup-hint').hidden).toBe(true);
+    expect(localStorage.setItem).not.toHaveBeenCalled();
+    f.api.refresh();
+    expect(localStorage.setItem).not.toHaveBeenCalled();
+    f.api.noteWeak('翻译失败');
+    expect(f.node('free-setup-hint').hidden).toBe(true);
+    f.node(blocker).hidden = true; f.api.refresh();
+    expect(f.node('free-setup-hint').hidden).toBe(false);
+    f.node(blocker).hidden = false; f.api.refresh();
+    expect(f.node('free-setup-hint').hidden).toBe(true);
+    f.node(blocker).hidden = true; f.api.refresh();
+    f.node('free-setup-dismiss').emit();
+    f.api.noteWeak('翻译失败'); f.api.refresh();
+    expect(f.node('free-setup-hint').hidden).toBe(true);
+  });
+});
 
 describe('free setup validation and step advancement', () => {
   it.each([['cn', 0], ['cn', 1], ['cn', 2], ['overseas', 0], ['overseas', 1]] as const)('keeps blank %s/%s credentials on the same step', async (region, index) => {

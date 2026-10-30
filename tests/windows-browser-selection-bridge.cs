@@ -246,6 +246,53 @@ public static class WindowsBrowserSelectionBridge {
             wake.Set();Stopwatch clock=Stopwatch.StartNew();int limit=Math.Max(1,Math.Min(5000,remainingMilliseconds));while(!done.Task.IsCompleted&&clock.ElapsedMilliseconds<limit){Application.DoEvents();Thread.Sleep(2);}if(!done.Task.IsCompleted){uiPoisoned=true;throw new InvalidOperationException("APP_SOURCE_UIA_CALL_DEADLINE");}if(done.Task.IsFaulted)throw done.Task.Exception.InnerException;return done.Task.Result;
         }
         public int HistoryCount(string expected,string translation){CheckRoot(Path.GetDirectoryName(history));if(!File.Exists(history))return 0;Need(new FileInfo(history).Length<=1048576,"APP_HISTORY_BOUND");try{object[] rows=Json.Deserialize<object[]>(File.ReadAllText(history));Need(rows.Length<=100,"APP_HISTORY_COUNT_BOUND");int count=0;foreach(object item in rows){var row=(Dictionary<string,object>)item;if(Convert.ToString(row["text"])!=expected)continue;foreach(object raw in (IEnumerable)row["results"]){var r=(Dictionary<string,object>)raw;if(Convert.ToString(r["providerId"])==provider&&!r.ContainsKey("error")&&Convert.ToString(r["text"])==translation){count++;break;}}}return count;}catch(IOException){return 0;}catch(ArgumentException){return 0;}}
+        static long DiagnosticNumber(object value,long maximum){
+            Need(value is int||value is long,"FAILURE_DIAGNOSTIC_INTEGER_REQUIRED");long number=Convert.ToInt64(value);Need(number>=0&&number<=maximum,"FAILURE_DIAGNOSTIC_NUMBER_BOUND");return number;
+        }
+        static string DiagnosticFailureCategory(string message){
+            if(String.IsNullOrEmpty(message)||message.Length>100)return "UNCLASSIFIED_FAILURE_DIAGNOSTIC";
+            foreach(char value in message)if((value<'A'||value>'Z')&&value!='_')return "UNCLASSIFIED_FAILURE_DIAGNOSTIC";return message;
+        }
+        static HashSet<string> FailureHealthFields(){
+            var fields=new HashSet<string>(new string[]{"attemptId","attemptPhase","nativeBoundaryStage","configuredCopyStrategy","actionErrorKind","actionResultOk","actionResultNonempty","sourceSnapshotOutcome","sourceCurrentAtWorker","selectionQueryCount","helperResponseReceived","helperElapsedMilliseconds","helperResultNonempty","cancellationRequested","cancellationSignalled","cancellationSignalFailed"});
+            foreach(string key in new string[]{"copyStrategy","copyPhase","copyNativeContextValid","copyNativeContextChecks","copyNativeGuardReason","copyNativeInvalidReason","copyNativeGtiSucceeded","copyNativeGtiFlags","copyNativeFocusPresent","copyNativeFocusProcessMatchesForeground","copyNativeFocusRootMatchesForeground","copyNativeActivePresent","copyNativeActiveRootMatchesForeground","copyNativeEditable","copyNativeProtection","copyNativeSelectionKnown","copyNativeSelectionNonempty","copyProtectionProbe","copyProtectionProbeMilliseconds","copyProtectionUnknown","copySnapshotOutcome","copyDispatchInserted","copyOwnInputObserved","copyOwnerOutcome","copyClipboardRestored","copyTerminalReason"})fields.Add(key);
+            foreach(string suffix in new string[]{"Stage","Depth","IdentityCompared","IdentityEqual","RootWalkReason","ExceptionKind","Milliseconds"})for(int index=1;index<=16;index++)fields.Add("selectionQuery"+index+suffix);
+            return fields;
+        }
+        // Observe only after acceptance has already failed. The existing CLI
+        // exports numeric health; it does not capture, copy, retry, focus, or
+        // extend the original 30-second source/history acceptance deadline.
+        public Dictionary<string,object> FailureSelectionHealth(){
+            var result=new Dictionary<string,object>{{"takenAfterFailure",true},{"originalFailureUnchanged",true},{"budgetMilliseconds",2000},{"captureOrKeyRequests",0},{"sourceOrClipboardContentRead",false}};
+            Stopwatch budget=Stopwatch.StartNew();Process secondary=null;uint clipboard=GetClipboardSequenceNumber();IntPtr foreground=GetForegroundWindow();bool visible=Visible;
+            try{
+                Need(app!=null&&!app.HasExited&&!closed&&OwnMain()==main,"FAILURE_DIAGNOSTIC_PRIMARY_UNAVAILABLE");string roaming=Path.GetDirectoryName(history);CheckRoot(roaming);
+                string executable=Path.GetFullPath(app.StartInfo.FileName);Need(String.Equals(Path.GetFullPath(app.MainModule.FileName),executable,StringComparison.OrdinalIgnoreCase),"FAILURE_DIAGNOSTIC_PRIMARY_IDENTITY");
+                string file=Path.Combine(roaming,"selection-diagnostics.json");Need(!File.Exists(file)&&!Directory.Exists(file),"FAILURE_DIAGNOSTIC_FILE_ALREADY_EXISTS");
+                ProcessStartInfo start=new ProcessStartInfo(executable,"--selection-diagnostics");start.UseShellExecute=false;start.CreateNoWindow=true;
+                foreach(string key in new string[]{"LOCALAPPDATA","TEMP","TMP","WEBVIEW2_USER_DATA_FOLDER"})start.EnvironmentVariables[key]=app.StartInfo.EnvironmentVariables[key];
+                long earliest=(long)(DateTime.UtcNow-new DateTime(1970,1,1,0,0,0,DateTimeKind.Utc)).TotalMilliseconds;secondary=Process.Start(start);Need(secondary!=null&&secondary.Id!=app.Id,"FAILURE_DIAGNOSTIC_SECONDARY_IDENTITY");
+                while(budget.ElapsedMilliseconds<2000){if(secondary.HasExited&&File.Exists(file))break;Application.DoEvents();Thread.Sleep((int)Math.Min(10,Math.Max(1,2000-budget.ElapsedMilliseconds)));}
+                result["secondaryExitObserved"]=secondary.HasExited;Need(secondary.HasExited&&secondary.ExitCode==0&&File.Exists(file)&&budget.ElapsedMilliseconds<2000,"FAILURE_DIAGNOSTIC_EXPORT_DEADLINE");
+                CheckRoot(roaming);Need((File.GetAttributes(file)&FileAttributes.ReparsePoint)==0&&new FileInfo(file).Length>0&&new FileInfo(file).Length<=16384,"FAILURE_DIAGNOSTIC_FILE_BOUND");
+                var payload=Json.Deserialize<Dictionary<string,object>>(File.ReadAllText(file));Need(Convert.ToString(payload["diagnostic"])=="last-selection-attempt"&&DiagnosticNumber(payload["processId"],Int32.MaxValue)==app.Id&&String.Equals(Convert.ToString(payload["executablePath"]),executable,StringComparison.OrdinalIgnoreCase),"FAILURE_DIAGNOSTIC_EXPORTED_IDENTITY");
+                long recorded=DiagnosticNumber(payload["recordedAtUnixMs"],Int64.MaxValue),latest=(long)(DateTime.UtcNow-new DateTime(1970,1,1,0,0,0,DateTimeKind.Utc)).TotalMilliseconds;Need(recorded>=earliest&&recorded<=latest,"FAILURE_DIAGNOSTIC_STALE_EXPORT");
+                var health=payload["diagnostics"] as Dictionary<string,object>;Need(health!=null,"FAILURE_DIAGNOSTIC_HEALTH_MISSING");var numeric=new Dictionary<string,object>();var allowed=FailureHealthFields();
+                foreach(var pair in health)if(allowed.Contains(pair.Key))numeric[pair.Key]=DiagnosticNumber(pair.Value,10000000);
+                result["primaryIdentityVerified"]=true;result["nativeHealth"]=numeric;
+            }catch(Exception error){result["observationErrorCategory"]=DiagnosticFailureCategory(error.Message);result["observationErrorType"]=error.GetType().Name;result["observationErrorHResult"]=error.HResult;}
+            finally{
+                if(secondary!=null){try{if(!secondary.HasExited&&secondary.Id!=app.Id){
+                    // The primary could exit between verification and launch.
+                    // In that race this owned secondary may have WebView children.
+                    ProcessStartInfo stop=new ProcessStartInfo("taskkill.exe","/PID "+secondary.Id+" /T /F");stop.UseShellExecute=false;stop.CreateNoWindow=true;stop.RedirectStandardOutput=true;stop.RedirectStandardError=true;
+                    using(Process killer=Process.Start(stop)){var output=killer.StandardOutput.ReadToEndAsync();var error=killer.StandardError.ReadToEndAsync();if(!killer.WaitForExit(1000)){killer.Kill();killer.WaitForExit(200);}result["secondaryTreeCleanupExited"]=killer.HasExited;}
+                    result["timedOutSecondaryStopped"]=secondary.HasExited;
+                }}catch(Exception error){result["secondaryCleanupErrorType"]=error.GetType().Name;}finally{secondary.Dispose();}}
+                result["clipboardSequenceUnchanged"]=GetClipboardSequenceNumber()==clipboard;result["foregroundUnchanged"]=GetForegroundWindow()==foreground;result["popupVisibilityUnchanged"]=Visible==visible;
+            }
+            return result;
+        }
         static object RectMetadata(System.Windows.Rect r){if(Double.IsNaN(r.X)||Double.IsNaN(r.Y)||Double.IsNaN(r.Width)||Double.IsNaN(r.Height)||Double.IsInfinity(r.X)||Double.IsInfinity(r.Y)||Double.IsInfinity(r.Width)||Double.IsInfinity(r.Height)||Math.Abs(r.X)>100000||Math.Abs(r.Y)>100000||r.Width<0||r.Width>100000||r.Height<0||r.Height>100000)return null;return new double[]{r.X,r.Y,r.Width,r.Height};}
         Dictionary<string,object> SourceMetadataOnly(){
             Need(!uiPoisoned&&!closed,"DIAGNOSTIC_UIA_WORKER_UNAVAILABLE");var done=new TaskCompletionSource<Dictionary<string,object>>();
@@ -320,6 +367,7 @@ public static class WindowsBrowserSelectionBridge {
         metadata["sourceForegroundPreserved"]=GetForegroundWindow()==main;metadata["browserBoundRootPreserved"]=BrowserMain(Convert.ToInt32(command["browserPid"]))==main;metadata["safeToContinue"]=Convert.ToBoolean(metadata["richClipboardRestored"])&&Convert.ToBoolean(metadata["sourceForegroundPreserved"]);
         metadata["ok"]=exact&&foregroundAlways&&Convert.ToBoolean(metadata["richClipboardRestored"])&&Convert.ToBoolean(metadata["sourceForegroundPreserved"])&&Convert.ToBoolean(metadata["browserBoundRootPreserved"])&&Convert.ToBoolean(metadata["shortcutKeysReleasedAfterAction"]);metadata["safeToContinue"]=metadata["ok"];metadata["acquisitionExpectationPassed"]=metadata["ok"];metadata["failureClassification"]=Convert.ToBoolean(metadata["ok"])?null:"actual-app-hotkey-acquisition";if(!Convert.ToBoolean(metadata["ok"])){
             metadata["error"]="ACTUAL_APP_EXACT_SOURCE_NEW_HISTORY_OR_FOREGROUND_FAILED";
+            metadata["failureOnlySelectionObservation"]=HostedApplication.FailureSelectionHealth();
             if(HostedApplication.Diagnostics)try{metadata["ownAppFailureDiagnostics"]=HostedApplication.FailureDiagnostics();}catch(Exception e){metadata["ownAppFailureDiagnosticErrorType"]=e.GetType().Name;metadata["ownAppFailureDiagnosticErrorHResult"]=e.HResult;}
         }return metadata;
     }

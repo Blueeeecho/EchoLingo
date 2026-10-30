@@ -84,6 +84,9 @@ export function installFreeSetup(context: SetupContext): { refresh: () => void; 
   const invalidate = (): void => { revision += 1; setBusy(false); };
   const inTest = typeof window !== 'undefined' && '__qa' in window;
 
+  // Keep the existing engine/privacy explanation and shortcut errors ahead of
+  // optional signup guidance; never stack multiple onboarding banners.
+  const hintBlocked = (): boolean => ['#core-guidance', '#engine-hint'].some((selector) => document.querySelector<HTMLElement>(selector)?.hidden === false);
   const showError = (message: string): void => { if (!error) return; error.hidden = !message; error.textContent = message; };
   const renderCards = (): void => {
     const list = document.querySelector<HTMLElement>('#free-combo-list');
@@ -104,7 +107,7 @@ export function installFreeSetup(context: SetupContext): { refresh: () => void; 
   const refresh = (): void => {
     renderCards();
     if (!hint || inTest) return;
-    const blocked = document.querySelector<HTMLElement>('#core-guidance')?.hidden === false;
+    const blocked = hintBlocked();
     if (mode === null && !state.dismissed && state.shownAt <= 0 && !blocked) {
       mode = 'first'; state = { ...state, shownAt: Date.now() }; writeState(state);
     }
@@ -124,7 +127,7 @@ export function installFreeSetup(context: SetupContext): { refresh: () => void; 
   const noteWeak = (text?: string): void => {
     if (inTest || state.dismissed || mode === 'first') return;
     if (text !== undefined && !/没有识别|翻译失败|NO_TEXT:|OCR_|识别失败|服务返回错误/.test(text)) return;
-    if (document.querySelector<HTMLElement>('#core-guidance')?.hidden === false) return;
+    if (hintBlocked()) return;
     const now = Date.now();
     if (state.softAt > 0 && now - state.softAt < DAY_MS) return;
     mode = 'soft'; state = { ...state, softAt: now }; writeState(state); refresh();
@@ -311,6 +314,8 @@ export function installFreeSetup(context: SetupContext): { refresh: () => void; 
     '默认仍是本机翻译和本机识别。下面的组合来自 2026-10 的公开额度，会变，不代表永久免费。',
     'The default stays local. These combinations use public quotas checked in 2026-10. They can change and are not permanently free.',
   );
-  refresh();
+  // The host refreshes hints after rendering its existing engine/privacy state.
+  // Do not consume the first-run timestamp before that banner can block this one.
+  renderCards();
   return { refresh, noteWeak, close: closeWizard, open: (next) => { if (next) region = next; openWizard(); } };
 }
