@@ -1,6 +1,8 @@
 //! Opens only the bundled, reviewed public service guides in the OS browser.
 //! The frontend cannot navigate the app WebView or pass arbitrary shell input.
 
+const RELEASES_PAGE: &str = "https://github.com/Blueeeecho/EchoLingo/releases";
+
 const ALLOWED: &[&str] = &[
     "https://ai.baidu.com/ai-doc/OCR/fk3h7xu7h",
     "https://ai.youdao.com/",
@@ -81,10 +83,10 @@ const ALLOWED: &[&str] = &[
 ];
 
 fn approved(url: &str) -> Result<&str, String> {
-    if ALLOWED.contains(&url) {
+    if url == RELEASES_PAGE || ALLOWED.contains(&url) {
         Ok(url)
     } else {
-        Err("只能打开应用内提供的官方服务文档链接".into())
+        Err("只能打开应用内提供的官方链接".into())
     }
 }
 
@@ -161,6 +163,23 @@ mod tests {
         for url in ALLOWED {
             assert_eq!(approved(url).unwrap(), *url);
         }
+    }
+
+    #[test]
+    fn release_page_is_exactly_allowlisted_without_asset_or_tag_urls() {
+        assert!(approved(RELEASES_PAGE).is_ok());
+        for suffix in [
+            "/latest",
+            "/tag/0.2.0",
+            "/download/0.2.0/setup.exe",
+            "?redirect=evil",
+            "#other",
+            "/",
+            "\n",
+        ] {
+            assert!(approved(&format!("{RELEASES_PAGE}{suffix}")).is_err());
+        }
+        assert!(approved("https://github.com.evil/Blueeeecho/EchoLingo/releases").is_err());
     }
 
     #[test]

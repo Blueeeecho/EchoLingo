@@ -28,6 +28,10 @@ Press `Alt+D` with nothing selected to type directly. The source stays editable.
 
 Open Settings from the tray menu to configure services, manage keys, or change shortcuts. See the [service setup notes](docs/official-services.zh-CN.md) (Chinese). For optional free cloud quotas while keeping the local default, see the [free setup guide](docs/free-setup.md). Quotas change and are not permanently free.
 
+## Free update notices
+
+Use **Check for updates** and **Open download page** in Settings. Automatic checks are off by default; opt in for at most one public GitHub metadata request per day. No text or keys are sent. This internal 0.2.0 build includes prereleases by default; you can select stable releases only. Downloads and installation remain manual, with no paid updater or signing purchase required.
+
 ## Privacy and data
 
 Local OCR and offline translation run on your computer. Text or images are sent out only after you choose a cloud service. Keys stay in the system credential store, and history stays on the device. The app has no telemetry and does not keep polling the clipboard. [Read the privacy note](docs/privacy.md) (Chinese).

@@ -173,6 +173,8 @@ pub struct Settings {
     pub shortcuts: Shortcuts,
     pub windows_selection_strategy: WindowsSelectionStrategy,
     pub save_history: bool,
+    pub automatic_update_checks: bool,
+    pub include_prerelease_updates: bool,
     pub max_history: usize,
     pub theme: String,
     pub auto_hide_seconds: u32,
@@ -190,6 +192,10 @@ impl Default for Settings {
             shortcuts: Shortcuts::default(),
             windows_selection_strategy: WindowsSelectionStrategy::Copy,
             save_history: true,
+            automatic_update_checks: false,
+            // Explicit channel preference for the 0.2.0 internal build, whose
+            // GitHub prerelease flag is true despite its plain SemVer tag.
+            include_prerelease_updates: true,
             max_history: 20,
             theme: "system".into(),
             auto_hide_seconds: 0,
@@ -692,6 +698,28 @@ mod tests {
             settings.providers[0].base_url = "https://proxy.invalid/translate".into();
             assert!(validate_settings(&settings).is_err());
         }
+    }
+}
+
+#[cfg(test)]
+mod update_preference_tests {
+    use super::*;
+
+    #[test]
+    fn old_settings_keep_network_off_and_explicit_channel_choice_survives() {
+        let old: Settings = serde_json::from_str("{}").unwrap();
+        assert!(!old.automatic_update_checks);
+        assert!(old.include_prerelease_updates);
+        let chosen: Settings = serde_json::from_str(
+            r#"{"automaticUpdateChecks":true,"includePrereleaseUpdates":false}"#,
+        )
+        .unwrap();
+        assert!(chosen.automatic_update_checks);
+        assert!(!chosen.include_prerelease_updates);
+        let reloaded: Settings =
+            serde_json::from_value(serde_json::to_value(chosen).unwrap()).unwrap();
+        assert!(reloaded.automatic_update_checks);
+        assert!(!reloaded.include_prerelease_updates);
     }
 }
 

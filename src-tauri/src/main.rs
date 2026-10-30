@@ -20,6 +20,7 @@ mod storage_tests;
 mod translation;
 mod translation_requests;
 mod translation_selection;
+mod update_notice;
 mod window_layout;
 #[cfg(target_os = "windows")]
 mod windows_capture_input;
@@ -60,6 +61,7 @@ struct AppState {
     translation_requests: translation_requests::TranslationRequests,
     data_dir: PathBuf,
     client: reqwest::Client,
+    update_notice: update_notice::Controller,
     offline: offline_translation::OfflineTranslation,
     startup_warnings: Mutex<Vec<String>>,
     outside_thread: Mutex<Option<std::thread::Thread>>,
@@ -2931,6 +2933,40 @@ async fn open_service_link(url: String) -> Result<(), String> {
         .map_err(|_| "无法打开服务配置文档".to_string())?
 }
 
+// No endpoint, current version, user content or credentials can be supplied by
+// the WebView. Preferences come from the persisted native settings.
+#[tauri::command]
+async fn get_update_status(state: State<'_, AppState>) -> Result<update_notice::Status, String> {
+    let include_prereleases = locked(&state.settings)?.include_prerelease_updates;
+    Ok(state
+        .update_notice
+        .status(env!("CARGO_PKG_VERSION"), include_prereleases)
+        .await)
+}
+
+#[tauri::command]
+async fn check_for_updates(
+    state: State<'_, AppState>,
+    manual: bool,
+) -> Result<update_notice::Status, String> {
+    let (automatic, include_prereleases) = {
+        let settings = locked(&state.settings)?;
+        (
+            settings.automatic_update_checks,
+            settings.include_prerelease_updates,
+        )
+    };
+    Ok(state
+        .update_notice
+        .check(
+            env!("CARGO_PKG_VERSION"),
+            include_prereleases,
+            manual,
+            automatic,
+        )
+        .await)
+}
+
 fn tray(app: &tauri::AppHandle) -> tauri::Result<()> {
     use tauri::menu::{Menu, MenuItem, PredefinedMenuItem};
     let definitions = [
@@ -3072,6 +3108,9 @@ fn main() {
                 translation_requests: translation_requests::TranslationRequests::default(),
                 data_dir,
                 client,
+                update_notice: update_notice::Controller::new(
+                    layout_data_dir.join("update-notice.json"),
+                ),
                 offline: offline_translation::OfflineTranslation::new(
                     app.path().resource_dir()?.join("offline-translation"),
                 ),
@@ -3184,7 +3223,9 @@ fn main() {
             prepare_system_translation,
             request_permission,
             open_permission_settings,
-            open_service_link
+            open_service_link,
+            get_update_status,
+            check_for_updates
         ])
         .build(tauri::generate_context!())
         .expect("EchoLingo could not start");
@@ -3946,6 +3987,7 @@ mod tests {
             translation_requests: translation_requests::TranslationRequests::default(),
             data_dir: directory.clone(),
             client: reqwest::Client::new(),
+            update_notice: update_notice::Controller::new(directory.join("update-notice.json")),
             offline: offline_translation::OfflineTranslation::new(
                 directory.join("offline-translation"),
             ),

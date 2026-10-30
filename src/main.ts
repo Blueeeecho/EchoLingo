@@ -1,4 +1,5 @@
 import './styles.css';
+import { installUpdateNotice } from './update-notice-ui';
 import { createOcrUi } from './ocr-ui';
 import { installPanelLayout } from './panel-layout';
 import type { TranslationPresentation } from './panel-layout';
@@ -1066,7 +1067,9 @@ const shortcutEditor = createShortcutEditor({
   save: (values, canCommit, retryActions) => updateSettings((next) => { next.shortcuts = values; }, canCommit, retryActions),
   error: userFacingError, changed: notifyLayout,
 });
+const updateNotice = installUpdateNotice({ desktop, settings: () => settings, ready: () => settingsReady, updateSettings });
 function renderSettings(): void {
+  updateNotice.refresh();
   $('#app-version').textContent = settings.appVersion ? 'EchoLingo ' + settings.appVersion : '';
   $('#app-version').hidden = !settings.appVersion;
   renderProviders(); renderPopupServices();
@@ -1680,7 +1683,7 @@ document.addEventListener('keydown', (event) => {
     else if (currentView !== 'translate') setView('translate');
   }
 });
-window.addEventListener('beforeunload', () => { shortcutEditor.dispose(); cancelActiveTranslation(); panelLayout.dispose(); for (const unlisten of cleanupListeners) unlisten(); if ('speechSynthesis' in window) window.speechSynthesis.cancel(); });
+window.addEventListener('beforeunload', () => { updateNotice.dispose(); shortcutEditor.dispose(); cancelActiveTranslation(); panelLayout.dispose(); for (const unlisten of cleanupListeners) unlisten(); if ('speechSynthesis' in window) window.speechSynthesis.cancel(); });
 
 async function initialize(): Promise<void> {
   populateProviderPresets($<HTMLSelectElement>('#provider-preset'), document.documentElement.dataset.platform ?? 'other');
