@@ -2,6 +2,101 @@
 // RunResize executes: its other visibility/OCR/clipboard cases are not run.
 public static partial class EchoLingoPopupVisibilitySmoke {
     static System.Collections.Generic.Dictionary<string, object> activeResizeObservation;
+    [System.Runtime.InteropServices.DllImport("dwmapi.dll")]
+    static extern int DwmGetWindowAttribute(System.IntPtr window, uint attribute, out RECT bounds, uint size);
+    [System.Runtime.InteropServices.DllImport("user32.dll")]
+    static extern int GetSystemMetricsForDpi(int index, uint dpi);
+    static System.IntPtr ResizeHitParameter(int x, int y) {
+        Require(x >= short.MinValue && x <= short.MaxValue && y >= short.MinValue && y <= short.MaxValue,
+            "Owned edge probe coordinate exceeds WM_NCHITTEST signed words; no query sent.");
+        return new System.IntPtr(unchecked((int)((uint)(ushort)x | ((uint)(ushort)y << 16))));
+    }
+    static POINT ResizeExactEdgePoint(RECT bounds, string edge, int inwardPhysical) {
+        POINT point = new POINT();
+        // RECT right/bottom are exclusive. offset=0 is the last visible physical
+        // pixel on those edges, offset=-1 is the first outside pixel.
+        point.x = edge.Contains("west") ? bounds.left + inwardPhysical :
+            edge.Contains("east") ? bounds.right - 1 - inwardPhysical : bounds.left + (bounds.right - bounds.left) / 2;
+        point.y = edge.Contains("north") ? bounds.top + inwardPhysical :
+            edge.Contains("south") ? bounds.bottom - 1 - inwardPhysical : bounds.top + (bounds.bottom - bounds.top) / 2;
+        return point;
+    }
+    static void ResizeExactEdgeSelfTest() {
+        RECT bounds = new RECT(); bounds.left = -1500; bounds.top = -900; bounds.right = -220; bounds.bottom = 404;
+        POINT edge = ResizeExactEdgePoint(bounds, "south-east", 0);
+        Require(edge.x == -221 && edge.y == 403, "Exclusive native edge convention regressed.");
+        POINT outside = ResizeExactEdgePoint(bounds, "north-west", -1);
+        Require(outside.x == -1501 && outside.y == -901, "Negative-screen outside edge regressed.");
+        POINT inside = ResizeExactEdgePoint(bounds, "east", (int)System.Math.Round(10 * 192 / 96.0));
+        Require(inside.x == -241 && inside.y == -248, "HiDPI CSS-to-physical edge sample regressed.");
+        long packed = ResizeHitParameter(-1501, -901).ToInt64();
+        Require(unchecked((short)(packed & 65535)) == -1501 && unchecked((short)((packed >> 16) & 65535)) == -901,
+            "Signed screen-coordinate packing regressed.");
+    }
+    static System.Collections.Generic.Dictionary<string, object> ResizeExactEdgeObservation(Process app, System.IntPtr main) {
+        var result = new System.Collections.Generic.Dictionary<string, object> {
+            { "scope", "read-only-WM_NCHITTEST-to-owned-main-only" },
+            { "physicalOutsideEventDispatchProven", false }, { "mouseInputSent", false },
+            { "edgeConvention", "offset-zero-last-visible-pixel; negative-outside; positive-inward" },
+            { "domFallbackInsetCssPixels", 10 }
+        };
+        WaitResizeLayoutReady(app, main, result);
+        RequireUniqueOwnedMainWindow(app, main);
+        RECT before = ResizeBounds(main), visible, client;
+        int hr = DwmGetWindowAttribute(main, 9, out visible, (uint)System.Runtime.InteropServices.Marshal.SizeOf(typeof(RECT)));
+        Require(hr == 0 && visible.right > visible.left && visible.bottom > visible.top, "DWM visible frame unavailable; do not substitute shadow bounds.");
+        Require(GetClientRect(main, out client), "Owned exact-edge client unavailable.");
+        POINT tl = new POINT(), br = new POINT(); tl.x = client.left; tl.y = client.top; br.x = client.right; br.y = client.bottom;
+        Require(ClientToScreen(main, ref tl) && ClientToScreen(main, ref br), "Owned exact-edge screen conversion unavailable.");
+        uint dpi = GetDpiForWindow(main); Require(dpi >= 96 && dpi <= 384, "Unsupported probe DPI.");
+        result["dpi"] = dpi;
+        result["outerPhysicalBounds"] = new int[] { before.left, before.top, before.right, before.bottom };
+        result["dwmVisiblePhysicalBounds"] = new int[] { visible.left, visible.top, visible.right, visible.bottom };
+        result["clientPhysicalBounds"] = new int[] { tl.x, tl.y, br.x, br.y };
+        result["frameMetricsPhysical"] = new int[] { GetSystemMetricsForDpi(32, dpi), GetSystemMetricsForDpi(33, dpi), GetSystemMetricsForDpi(92, dpi) };
+        var samples = new System.Collections.Generic.List<object>(); result["samples"] = samples;
+        string[] edges = new string[] { "west", "east", "north", "south", "north-west", "north-east", "south-west", "south-east" };
+        int[] offsets = new int[] { -2, -1, 0, 1, (int)System.Math.Round(4 * dpi / 96.0), (int)System.Math.Round(10 * dpi / 96.0) };
+        foreach (string edge in edges) foreach (int offset in offsets) {
+            RequireUniqueOwnedMainWindow(app, main);
+            Require(IsWindowVisible(main) && GetForegroundWindow() == main && !ResizeLoop(main) && (GetAsyncKeyState(1) & 0x8000) == 0,
+                "Owned exact-edge observation interrupted; no input or foreign-window query sent.");
+            POINT point = ResizeExactEdgePoint(visible, edge, offset);
+            // WindowFromPoint only records ownership. Never send to the returned
+            // HWND (which may be another app outside our frame).
+            System.IntPtr target = WindowFromPoint(point); uint owner = 0;
+            if (target != System.IntPtr.Zero) GetWindowThreadProcessId(target, out owner);
+            bool ownTarget = target != System.IntPtr.Zero && owner == (uint)app.Id && GetAncestor(target, 2) == main;
+            System.UIntPtr value;
+            bool answered = SendMessageTimeout(main, 0x0084, System.UIntPtr.Zero, ResizeHitParameter(point.x, point.y),
+                0x0001 | 0x0002 | 0x0020, 500, out value) != System.IntPtr.Zero;
+            long hit = unchecked((int)value.ToUInt64());
+            samples.Add(new System.Collections.Generic.Dictionary<string, object> {
+                { "edge", edge }, { "inwardPhysicalOffset", offset }, { "point", new int[] { point.x, point.y } },
+                { "windowFromPointOwned", ownTarget }, { "answered", answered }, { "hitCode", hit },
+                { "nativeResizeCode", answered && hit >= 10 && hit <= 17 },
+                { "insideClient", point.x >= tl.x && point.x < br.x && point.y >= tl.y && point.y < br.y }
+            });
+            Require(answered, "Owned WM_NCHITTEST timed out; matrix incomplete.");
+        }
+        RECT after = ResizeBounds(main);
+        Require(before.left == after.left && before.top == after.top && before.right == after.right && before.bottom == after.bottom && dpi == GetDpiForWindow(main),
+            "Window geometry/DPI changed during exact-edge observation; matrix is not coherent.");
+        RECT afterVisible, afterClient = new RECT();
+        Require(DwmGetWindowAttribute(main, 9, out afterVisible, (uint)System.Runtime.InteropServices.Marshal.SizeOf(typeof(RECT))) == 0 &&
+            GetClientRect(main, out afterClient), "Owned frame/client disappeared after exact-edge observation.");
+        POINT afterTl = new POINT(), afterBr = new POINT();
+        afterTl.x = afterClient.left; afterTl.y = afterClient.top; afterBr.x = afterClient.right; afterBr.y = afterClient.bottom;
+        Require(ClientToScreen(main, ref afterTl) && ClientToScreen(main, ref afterBr) &&
+            afterVisible.left == visible.left && afterVisible.top == visible.top && afterVisible.right == visible.right && afterVisible.bottom == visible.bottom &&
+            afterTl.x == tl.x && afterTl.y == tl.y && afterBr.x == br.x && afterBr.y == br.y,
+            "Visible/client frame changed during exact-edge observation; matrix is not coherent.");
+        result["geometryUnchanged"] = true; result["sampleCount"] = samples.Count;
+        // Do not assert all forced outside queries hit resize: that would conflate
+        // window-procedure answers with OS routing and hide platform differences.
+        return result;
+    }
+
     [System.Runtime.InteropServices.DllImport("user32.dll")] static extern uint GetDpiForWindow(System.IntPtr window);
     [System.Runtime.InteropServices.DllImport("user32.dll")] static extern bool GetClientRect(System.IntPtr window, out RECT bounds);
     [System.Runtime.InteropServices.DllImport("user32.dll")] static extern bool ClientToScreen(System.IntPtr window, ref POINT point);
@@ -603,6 +698,7 @@ public static partial class EchoLingoPopupVisibilitySmoke {
             { "clipboardRead", false }, { "externalApiUsed", false }, { "physicalWindows10Tested", false }, { "dwmFrameRateMeasured", false }, { "fixtureNativeResizeProbe", true }, { "nativeSizingMarkerUsed", true }
         };
         ResizeViewportReadinessSelfTest(); report["viewportReadinessSelfTest"] = true;
+        ResizeExactEdgeSelfTest(); report["exactEdgeSelfTest"] = true;
         activeResizeObservation = null;
         int geometryPort = 0;
         if (geometryProbeScript != null) {
@@ -748,6 +844,7 @@ public static partial class EchoLingoPopupVisibilitySmoke {
                             Require(work.Width >= (before.right - before.left) + 240, "Fixture desktop is too narrow for both generated edge drags; no product failure inferred.");
                             Require(SetWindowPos(main, System.IntPtr.Zero, work.Left + (work.Width - ResizeWidth(main)) / 2, work.Top + 20, 0, 0, 0x1 | 0x4 | 0x10), "Could not position the own popup before test gestures.");
                             report["nativePreparationMovesOnly"] = true;
+                            stage = "popup-exact-edge-observation"; report["popupExactEdges"] = ResizeExactEdgeObservation(app, main);
                             stage = "actual-east-drag"; report["east"] = DragResize(app, main, false, 96, true);
                             stage = "actual-west-drag"; report["west"] = DragResize(app, main, true, 64, true);
                             int finalWidth = ResizeWidth(main); RECT client;
@@ -762,6 +859,7 @@ public static partial class EchoLingoPopupVisibilitySmoke {
                             Wait(delegate { var back = Element(main, "\u8fd4\u56de\u7ffb\u8bd1"); return back != null && !back.Current.IsOffscreen; }, 5000, "Actual settings presentation did not open.");
                             stage = "management-native-resize-frame";
                             report["managementResizeFrame"] = ManagementResizeFrame(app, main);
+                            stage = "management-exact-edge-observation"; report["managementExactEdges"] = ResizeExactEdgeObservation(app, main);
                             stage = "management-width-retention";
                             report["managementDrag"] = DragResize(app, main, false, -64, true);
                             RECT managementClient; Require(GetClientRect(main, out managementClient), "Settings client bounds are unavailable.");
