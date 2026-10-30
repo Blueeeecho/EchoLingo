@@ -33,7 +33,8 @@ try {
     await page.locator('#free-region-overseas').click();
     assert.equal(await page.locator('#free-translation-section').evaluate(el => el.open), true);
     assert.equal(await page.locator('#free-ocr-section').evaluate(el => el.open), false);
-    assert.match(await page.locator('#free-translation-count').innerText(), /2/);
+    assert.equal(await page.locator('#free-translation-count').innerText(), '(6)');
+    assert.equal(await page.locator('#free-translation-list .free-service').count(), 6);
     assert.match(await page.locator('#free-ocr-count').innerText(), /3/);
     await page.locator('#free-translation-summary').focus();
     await page.keyboard.press('Space');
@@ -115,5 +116,5 @@ try {
     assert.deepEqual(errors,[]); assert.deepEqual(externalRequests,[]);
     await page.close();
   }
-  console.log(JSON.stringify({ok:true,platforms:['macOS','Windows'],translationPresets:13,ocrKinds:7,scope:'production browser settings DOM; read-only local quota data; no account/API calls'}));
+  console.log(JSON.stringify({ok:true,platforms:['macOS','Windows'],allCurrentTranslationPresets:true,allCurrentOcrKinds:true,scope:'production browser settings DOM; read-only local quota data; no account/API calls'}));
 } finally { await browser.close(); }
