@@ -3222,6 +3222,7 @@ try {
     const paragraphLayout = await page.locator('.result-text').evaluate((element) => {
       const style = getComputedStyle(element);
       const reference = element.cloneNode(false);
+      reference.removeAttribute('data-paragraph-spacing');
       reference.textContent = element.textContent;
       reference.style.cssText = `position:absolute;visibility:hidden;width:${element.getBoundingClientRect().width}px`;
       element.parentElement.append(reference);
@@ -3231,13 +3232,15 @@ try {
       const range = document.createRange(); range.selectNodeContents(element);
       selection.removeAllRanges(); selection.addRange(range);
       const selected = selection.toString(); selection.removeAllRanges();
-      return { height: element.getBoundingClientRect().height, rawHeight, lineHeight: Number.parseFloat(style.lineHeight),
-        gaps: [...element.querySelectorAll('.result-paragraph-break')].map(gap => gap.getBoundingClientRect().height),
+      return { height: element.getBoundingClientRect().height, rawHeight, lineHeight: Number.parseFloat(getComputedStyle(element.querySelector('.result-text-run')).lineHeight),
+        gaps: [...element.querySelectorAll('.result-paragraph-break')].map(gap => Number.parseFloat(getComputedStyle(gap).lineHeight)),
+        inlineOnly: [...element.children].every(run => getComputedStyle(run).display === 'inline'),
         literalMarkup: element.querySelector('b') === null, selected };
     });
     assert.equal(paragraphLayout.gaps.length, 3);
     assert.ok(paragraphLayout.gaps.every(gap => gap > 0 && gap < paragraphLayout.lineHeight / 2));
     assert.ok(paragraphLayout.height < paragraphLayout.rawHeight - paragraphLayout.lineHeight, `${platform}: paragraph gaps should reduce actual layout height`);
+    assert.equal(paragraphLayout.inlineOnly, true, 'block separators must not synthesize selection newlines');
     assert.equal(paragraphLayout.literalMarkup, true);
     assert.equal(paragraphLayout.selected, paragraphText, 'manual text selection retains exact provider whitespace');
     await page.getByRole('button', { name: '复制译文', exact: true }).click();

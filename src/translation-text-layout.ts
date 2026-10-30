@@ -30,13 +30,21 @@ export function translationTextParts(text: string): TranslationTextPart[] {
 }
 
 export function renderTranslationParagraphs(element: HTMLElement, text: string): void {
-  const nodes = translationTextParts(text).map((part): Node => {
-    if (!part.paragraphBreak) return document.createTextNode(part.text);
-    const separator = document.createElement('span');
-    separator.className = `result-paragraph-break${part.edge ? ' result-paragraph-edge' : ''}`;
-    // Keeping the separator as text preserves textContent, selection and accessibility.
-    separator.textContent = part.text;
-    return separator;
+  const parts = translationTextParts(text);
+  const compact = parts.some(part => part.paragraphBreak);
+  element.dataset.paragraphSpacing = compact ? 'compact' : 'literal';
+  if (!compact) {
+    element.textContent = text;
+    return;
+  }
+  // Every fragment stays inline: block boxes synthesize extra newlines when the
+  // browser serializes a mouse selection for copying. A small parent strut lets
+  // blank lines shrink, while actual text runs keep the normal reading height.
+  const nodes = parts.map((part): Node => {
+    const span = document.createElement('span');
+    span.className = part.paragraphBreak ? 'result-paragraph-break' : 'result-text-run';
+    span.textContent = part.text;
+    return span;
   });
   element.replaceChildren(...nodes);
 }

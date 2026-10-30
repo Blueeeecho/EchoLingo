@@ -45,6 +45,7 @@ try {
     $captureState = ($captureStateOutput -join "`n") | ConvertFrom-Json
     if (-not $captureState.ok -or -not $captureState.diagnostics.captureStateFixturePassed -or
         $captureState.diagnostics.magnifierSampleAssertions -ne 200 -or
+        $captureState.diagnostics.zOrderPolicyAssertions -lt 20 -or
         $captureState.diagnostics.screenCaptured -or $captureState.diagnostics.clipboardChanged) {
         throw 'CAPTURE_STATE_TEST: Capture-state fixture did not report a safe pass.'
     }

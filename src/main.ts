@@ -609,6 +609,7 @@ function updateResultView(view: ResultView, result: TranslationResult, done: boo
   if (compact && (content !== previous || layoutChanged)) {
     renderTranslationParagraphs(view.body, content);
   } else if (!compact && (content !== previous || layoutChanged)) {
+    delete view.body.dataset.paragraphSpacing;
     if (view.body.childNodes.length === 1 && view.body.firstChild instanceof Text && content.startsWith(previous)) {
       view.body.firstChild.appendData(content.slice(previous.length));
     } else view.body.textContent = content;

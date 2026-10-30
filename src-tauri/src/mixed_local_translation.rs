@@ -6,6 +6,7 @@ use std::{collections::HashMap, future::Future, ops::Range};
 const MAX_FRAGMENTS: usize = 8;
 const MAX_FRAGMENT_CHARS: usize = 512;
 const MAX_INPUT_BYTES: usize = 20_000;
+const MAX_OUTPUT_BYTES: usize = 2 * 1024 * 1024;
 
 #[derive(Debug)]
 pub struct Plan {
@@ -291,9 +292,15 @@ impl Plan {
         let mut result = String::with_capacity(self.original.len());
         let mut end = 0;
         for (span, index) in &self.spans {
+            if result.len() + (span.start - end) + answers[*index].len() > MAX_OUTPUT_BYTES {
+                return Err("本机混合文本译文超过大小上限，请缩短原文后重试".into());
+            }
             result.push_str(&self.original[end..span.start]);
             result.push_str(&answers[*index]);
             end = span.end;
+        }
+        if result.len() + self.original.len() - end > MAX_OUTPUT_BYTES {
+            return Err("本机混合文本译文超过大小上限，请缩短原文后重试".into());
         }
         result.push_str(&self.original[end..]);
         Ok(result)
@@ -462,6 +469,14 @@ mod tests {
             result,
             text.replace("系统注册失败", "System registration failed")
         );
+    }
+    #[tokio::test]
+    async fn repeated_fragments_cannot_expand_output_without_bound() {
+        let text = format!("HotKey {{ key: KeyA, note: {} }}", "错误；".repeat(1000));
+        let plan = get(&text);
+        assert_eq!(plan.fragment_count(), 1);
+        let result = plan.translate(|_| async { Ok("x".repeat(16_000)) }).await;
+        assert!(result.unwrap_err().contains("大小上限"));
     }
     #[tokio::test]
     async fn fragment_failure_aborts_without_retries_or_partial_answer() {

@@ -39,6 +39,27 @@ public static partial class EchoLingoPopupVisibilitySmoke {
         public System.IntPtr active, focus, capture, menu, move, caret;
         public RECT caretBounds;
     }
+    [System.Runtime.InteropServices.StructLayout(System.Runtime.InteropServices.LayoutKind.Sequential)]
+    struct ResizeMinMaxInfo {
+        public POINT reserved, maximumSize, maximumPosition, minimumTrackSize, maximumTrackSize;
+    }
+    [System.Runtime.InteropServices.DllImport("user32.dll", EntryPoint="SendMessageTimeoutW", SetLastError=true)]
+    static extern System.IntPtr ResizeQueryMinMax(System.IntPtr window, uint message, System.UIntPtr wParam,
+        ref ResizeMinMaxInfo info, uint flags, uint timeout, out System.UIntPtr result);
+    static System.Collections.Generic.Dictionary<string, object> ResizeTrackConstraints(Process app, System.IntPtr main) {
+        RequireUniqueOwnedMainWindow(app, main);
+        // WM_GETMINMAXINFO is a system message: User32 marshals this structure
+        // to the owned HWND process. Query only; no geometry or constraints are changed.
+        ResizeMinMaxInfo info = new ResizeMinMaxInfo(); System.UIntPtr result;
+        bool responded = ResizeQueryMinMax(main, 0x0024, System.UIntPtr.Zero, ref info,
+            0x0001 | 0x0002 | 0x0020, 500, out result) != System.IntPtr.Zero;
+        return new System.Collections.Generic.Dictionary<string, object> {
+            { "responded", responded }, { "lastError", responded ? 0 : System.Runtime.InteropServices.Marshal.GetLastWin32Error() },
+            { "minimumTrackPhysicalSize", new int[] { info.minimumTrackSize.x, info.minimumTrackSize.y } },
+            { "maximumTrackPhysicalSize", new int[] { info.maximumTrackSize.x, info.maximumTrackSize.y } },
+            { "maximumPhysicalSize", new int[] { info.maximumSize.x, info.maximumSize.y } }
+        };
+    }
     static bool ResizeLoop(System.IntPtr main) {
         uint process; uint thread = GetWindowThreadProcessId(main, out process);
         ResizeGuiInfo info = new ResizeGuiInfo(); info.size = (uint)System.Runtime.InteropServices.Marshal.SizeOf(typeof(ResizeGuiInfo));
@@ -254,6 +275,7 @@ public static partial class EchoLingoPopupVisibilitySmoke {
         Require(IsWindowVisible(main) && GetForegroundWindow() == main, "Only the exact foreground app HWND may receive the generated resize.");
         RECT before = ResizeBounds(main); int startWidth = before.right - before.left;
         result["initialPhysicalWidth"] = startWidth;
+        result["trackConstraintsBeforeDrag"] = ResizeTrackConstraints(app, main);
         POINT point = ResizeClientEdgePoint(main, west, false);
         if (!west) point = ResizeLayoutViewportPoint(app, main, point, result);
         int x = point.x, y = point.y;
