@@ -13,6 +13,43 @@ try {
     await page.goto(origin);
     await page.locator('#more-toggle').click(); await page.locator('#popup-more-menu button[data-view="settings"]').click();
     await page.locator('#add-provider').waitFor({ state:'visible' });
+    // Native disclosures share production markup on both platforms. Hidden
+    // service actions must not occupy layout or enter the keyboard tab order.
+    await page.locator('#free-region-cn').click();
+    for (const role of ['translation', 'ocr']) {
+      assert.equal(await page.locator(`#free-${role}-section`).evaluate(el => el.open), false);
+      assert.equal(await page.locator(`#free-${role}-list button`).first().isVisible(), false);
+      assert.equal(await page.locator(`#free-${role}-list`).evaluate(el => el.getBoundingClientRect().height), 0);
+    }
+    const collapsedHeight = await page.locator('#free-setup-card').evaluate(el => el.getBoundingClientRect().height);
+    await page.locator('#free-translation-summary').focus();
+    await page.keyboard.press('Tab');
+    assert.equal(await page.evaluate(() => document.activeElement.id), 'free-ocr-summary');
+    await page.keyboard.press('Shift+Tab');
+    await page.keyboard.press('Enter');
+    assert.equal(await page.locator('#free-translation-section').evaluate(el => el.open), true);
+    assert.equal(await page.locator('#free-ocr-section').evaluate(el => el.open), false);
+    assert.ok(await page.locator('#free-setup-card').evaluate(el => el.getBoundingClientRect().height) > collapsedHeight + 200);
+    await page.locator('#free-region-overseas').click();
+    assert.equal(await page.locator('#free-translation-section').evaluate(el => el.open), true);
+    assert.equal(await page.locator('#free-ocr-section').evaluate(el => el.open), false);
+    assert.equal(await page.locator('#free-translation-count').innerText(), '(6)');
+    assert.equal(await page.locator('#free-translation-list .free-service').count(), 6);
+    assert.match(await page.locator('#free-ocr-count').innerText(), /3/);
+    await page.locator('#free-translation-summary').focus();
+    await page.keyboard.press('Space');
+    assert.equal(await page.locator('#free-translation-section').evaluate(el => el.open), false);
+    await page.locator('#free-setup-settings').click();
+    assert.equal(await page.locator('#free-translation-section').evaluate(el => el.open), true);
+    assert.equal(await page.evaluate(() => document.activeElement.id), 'free-translation-summary');
+    await page.locator('#free-translation-list button').first().click();
+    assert.equal(await page.locator('#free-setup-dialog').isVisible(), true);
+    await page.keyboard.press('Escape');
+    assert.equal(await page.locator('#free-translation-section').evaluate(el => el.open), true);
+    await page.locator('#free-translation-summary').click();
+    await page.locator('#free-region-cn').click();
+    assert.equal(await page.locator('#free-translation-section').evaluate(el => el.open), false);
+    assert.equal(await page.locator('#free-ocr-section').evaluate(el => el.open), false);
     assert.match(await page.locator('#ocr-quota-card').innerText(), /本机免费/);
     assert.equal(await page.locator('#active-ocr-provider').inputValue(),'');
     assert.match(await page.locator('#active-ocr-provider option').textContent(),/免费/);
@@ -79,5 +116,5 @@ try {
     assert.deepEqual(errors,[]); assert.deepEqual(externalRequests,[]);
     await page.close();
   }
-  console.log(JSON.stringify({ok:true,platforms:['macOS','Windows'],translationPresets:13,ocrKinds:7,scope:'production browser settings DOM; read-only local quota data; no account/API calls'}));
+  console.log(JSON.stringify({ok:true,platforms:['macOS','Windows'],allCurrentTranslationPresets:true,allCurrentOcrKinds:true,scope:'production browser settings DOM; read-only local quota data; no account/API calls'}));
 } finally { await browser.close(); }

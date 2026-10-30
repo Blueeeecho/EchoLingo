@@ -1,14 +1,16 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+mod bilingual_input;
 mod credential_cache;
+mod frontend_input_diagnostics;
 mod language_detection;
 #[cfg(target_os = "macos")]
 mod macos_startup;
-mod mixed_local_translation;
 mod model;
 mod mouse_shortcuts;
 mod native_tasks;
 mod ocr;
 mod ocr_native;
+mod ocr_outcome;
 mod offline_translation;
 mod platform;
 mod popup_health;
@@ -181,6 +183,31 @@ fn configure_shortcuts_requested(args: &[String]) -> bool {
     args.iter()
         .skip(1)
         .any(|argument| argument == CONFIGURE_SHORTCUTS_FLAG)
+}
+
+#[tauri::command]
+fn frontend_input_diagnostics_enabled() -> bool {
+    frontend_input_diagnostics::enabled()
+}
+
+#[tauri::command]
+fn record_frontend_input_diagnostic(
+    app: tauri::AppHandle,
+    record: frontend_input_diagnostics::Record,
+) -> Result<(), String> {
+    if !frontend_input_diagnostics::enabled() {
+        return Ok(());
+    }
+    static RECORDS: std::sync::OnceLock<Mutex<Vec<frontend_input_diagnostics::Record>>> =
+        std::sync::OnceLock::new();
+    let mut records = locked(RECORDS.get_or_init(|| Mutex::new(Vec::new())))?;
+    frontend_input_diagnostics::append(&mut records, record);
+    write_json(
+        &app.state::<AppState>()
+            .data_dir
+            .join("frontend-input-diagnostics.json"),
+        &serde_json::json!({"processId":std::process::id(),"recordedAtUnixMs":now(),"entries":&*records}),
+    )
 }
 
 const PERMISSION_DIAGNOSTICS_FLAG: &str = "--permission-diagnostics";
@@ -1456,6 +1483,8 @@ fn cancel_translation(state: State<AppState>, request_id: u64) -> Result<(), Str
     Ok(())
 }
 fn announce_presentation(app: &tauri::AppHandle, presentation: translation_requests::Presentation) {
+    #[cfg(target_os = "macos")]
+    window_layout::cancel_stale_native_layout(app);
     if let Ok(mut deliveries) = app.state::<AppState>().source_deliveries.lock() {
         deliveries.advance(presentation.epoch);
     }
@@ -1497,156 +1526,127 @@ async fn translate(
         if source_language.len() > 40 || target_language.len() > 40 || target_language.is_empty() {
             return Err("语言参数无效".into());
         }
-        let _permit = state
-            .translation_busy
-            .try_acquire()
-            .map_err(|_| "翻译任务较多，请等待当前请求完成")?;
+        let input_plan = bilingual_input::resolve(&text, &source_language, &target_language)?;
+        let _permit = if input_plan == Some(bilingual_input::Plan::Preserve) {
+            None
+        } else {
+            Some(
+                state
+                    .translation_busy
+                    .try_acquire()
+                    .map_err(|_| "翻译任务较多，请等待当前请求完成")?,
+            )
+        };
         let settings = locked(&state.settings)?.clone();
         let providers =
             translation_selection::request_providers(&settings.providers, provider_id.as_deref())?;
-        let mixed_plan = mixed_local_translation::for_local_providers(
-            &text,
-            &source_language,
-            &target_language,
-            providers.iter().map(|provider| provider.kind.as_str()),
-        );
         let (resolved_source, resolved_target, results) = state
             .translation_requests
             .execute(request_id, async {
-                let detected = if source_language == "auto" && mixed_plan.is_none() {
-                    platform::detect_language(&text).await.ok()
-                } else {
-                    None
-                };
-                let prose_direction = if mixed_plan.is_none() {
-                    language_detection::local_mixed_prose_direction(
-                        &text,
-                        &source_language,
-                        &target_language,
-                        detected.as_deref(),
-                        providers.iter().map(|provider| provider.kind.as_str()),
-                    )
-                } else {
-                    None
-                };
-                let source_resolution = if mixed_plan.is_some() {
-                    translation_health::SourceResolution::LocalMixedLog
-                } else if prose_direction.is_some() {
-                    translation_health::SourceResolution::LocalMixedProse
-                } else if source_language != "auto" {
-                    translation_health::SourceResolution::Explicit
-                } else {
-                    translation_health::SourceResolution::StandardDetection
-                };
-                let (resolved_source, resolved_target) = if let Some(plan) = &mixed_plan {
-                    (plan.source.to_string(), "en".to_string())
-                } else if let Some(direction) = prose_direction {
-                    direction
-                } else {
-                    language_detection::resolve_translation_languages(
-                        &text,
-                        &source_language,
-                        &target_language,
-                        detected.as_deref(),
-                    )?
+                let detected =
+                    bilingual_input::detect_if_needed(input_plan, &source_language, || {
+                        platform::detect_language(&text)
+                    })
+                    .await;
+                let (resolved_source, resolved_target, source_resolution) = match input_plan {
+                    Some(bilingual_input::Plan::Preserve) => (
+                        "auto".to_string(),
+                        "auto".to_string(),
+                        translation_health::SourceResolution::PreservedStructure,
+                    ),
+                    Some(bilingual_input::Plan::Translate { source, target }) => (
+                        source.to_string(),
+                        target.to_string(),
+                        translation_health::SourceResolution::BilingualMode,
+                    ),
+                    None => {
+                        let (source, target) = language_detection::resolve_translation_languages(
+                            &text,
+                            &source_language,
+                            &target_language,
+                            detected.as_deref(),
+                        )?;
+                        (
+                            source,
+                            target,
+                            if source_language != "auto" {
+                                translation_health::SourceResolution::Explicit
+                            } else {
+                                translation_health::SourceResolution::StandardDetection
+                            },
+                        )
+                    }
                 };
                 trace.languages(&resolved_source, &resolved_target);
                 trace.source_resolution(source_resolution);
-                if let Some(plan) = &mixed_plan {
-                    trace.mixed_local_fragments(plan.fragment_count());
-                }
                 let jobs = providers.iter().enumerate().map(|(provider_index, p)| {
                     let app = &app;
                     let state = &state;
                     let text = &text;
                     let resolved_source = &resolved_source;
                     let resolved_target = &resolved_target;
-                    let mixed_plan = mixed_plan.as_ref();
                     async move {
                         let mut provider_trace = translation_health::ProviderTrace::start(
                             request_id,
                             provider_index,
                             &p.kind,
                         );
-                        let key =
-                            load_translation_key_async(app.clone(), p.clone(), Some(request_id))
-                                .await;
                         let sequence = std::sync::atomic::AtomicU64::new(0);
                         let started = std::time::Instant::now();
-                        let result = if let Some(plan) = mixed_plan {
-                            let answer = plan
-                                .translate(|fragment| {
-                                    let key = key.clone();
-                                    async move {
-                                        let result = if p.kind == "offline" {
-                                            state
-                                                .offline
-                                                .translate_result(
-                                                    p,
-                                                    &fragment,
-                                                    resolved_source,
-                                                    resolved_target,
-                                                )
-                                                .await
-                                        } else {
-                                            translation::translate_one(
-                                                &state.client,
-                                                p,
-                                                key,
-                                                &fragment,
-                                                resolved_source,
-                                                resolved_target,
-                                            )
-                                            .await
-                                        };
-                                        match result.error {
-                                            Some(error) => Err(error),
-                                            None => Ok(result.text),
-                                        }
-                                    }
-                                })
+                        let result = bilingual_input::dispatch(
+                            input_plan,
+                            text,
+                            |raw| translation::preserved_result(p, raw),
+                            || async {
+                                let key = load_translation_key_async(
+                                    app.clone(),
+                                    p.clone(),
+                                    Some(request_id),
+                                )
                                 .await;
-                            translation::local_mixed_result(
-                                p,
-                                answer,
-                                resolved_source,
-                                resolved_target,
-                                started.elapsed().as_millis() as u64,
-                            )
-                        } else if p.kind == "offline" {
-                            state
-                                .offline
-                                .translate_result(p, text, resolved_source, resolved_target)
-                                .await
-                        } else {
-                            translation::translate_one_streaming(
-                                &state.client,
-                                p,
-                                key,
-                                &text,
-                                &resolved_source,
-                                &resolved_target,
-                                |partial| {
-                                    publish_translation_progress(
-                                        &app,
-                                        &state,
-                                        request_id,
-                                        sequence.fetch_add(1, Ordering::SeqCst) + 1,
-                                        false,
-                                        TranslationResult {
-                                            provider_id: p.id.clone(),
-                                            provider_name: p.name.clone(),
-                                            text: partial.to_owned(),
-                                            error: None,
-                                            elapsed_ms: started.elapsed().as_millis() as u64,
-                                            resolved_languages: None,
+                                if p.kind == "offline" {
+                                    state
+                                        .offline
+                                        .translate_result(p, text, resolved_source, resolved_target)
+                                        .await
+                                } else {
+                                    translation::translate_one_streaming(
+                                        &state.client,
+                                        p,
+                                        key,
+                                        &text,
+                                        &resolved_source,
+                                        &resolved_target,
+                                        |partial| {
+                                            publish_translation_progress(
+                                                &app,
+                                                &state,
+                                                request_id,
+                                                sequence.fetch_add(1, Ordering::SeqCst) + 1,
+                                                false,
+                                                TranslationResult {
+                                                    preserved: false,
+                                                    provider_id: p.id.clone(),
+                                                    provider_name: p.name.clone(),
+                                                    text: partial.to_owned(),
+                                                    error: None,
+                                                    elapsed_ms: started.elapsed().as_millis()
+                                                        as u64,
+                                                    resolved_languages: None,
+                                                },
+                                            );
                                         },
-                                    );
-                                },
-                            )
-                            .await
-                        };
-                        provider_trace.finish(result.error.as_deref());
+                                    )
+                                    .await
+                                }
+                            },
+                        )
+                        .await;
+                        if input_plan == Some(bilingual_input::Plan::Preserve) {
+                            provider_trace.preserved();
+                        } else {
+                            provider_trace.finish(result.error.as_deref());
+                        }
                         publish_translation_progress(
                             &app,
                             &state,
@@ -2318,6 +2318,9 @@ fn actionable_capture_hint(action: &str, error: &str) -> Option<String> {
 }
 
 fn visible_action_error(action: &str, error: &str) -> Option<String> {
+    if ocr_outcome::is_empty_error(action, error) {
+        return None;
+    }
     if let Some(hint) = actionable_capture_hint(action, error) {
         return Some(hint);
     }
@@ -2683,6 +2686,13 @@ fn start_action(app: tauri::AppHandle, action: String) {
                     result.as_ref().err().map(String::as_str),
                 );
             }
+            // The request/epoch guard above owns this publication. Empty OCR
+            // replaces old source/results even in a pinned popup; cancellation
+            // and genuine failures below retain their existing behavior.
+            if ocr_outcome::is_empty(&action, &result) {
+                emit_source_text(&app, empty_ocr_payload(presentation.epoch, keep_popup));
+                return;
+            }
             match result {
                 Ok(text) if !text.trim().is_empty() => {
                     emit_source_text(
@@ -2813,6 +2823,12 @@ fn captured_source_payload(
         payload["captureOrigin"] = serde_json::json!("ocr");
     }
     payload
+}
+fn empty_ocr_payload(epoch: u64, retained: bool) -> serde_json::Value {
+    // Input mode clears source/results but does not translate empty text, show
+    // weak-result guidance, focus the editor or request any permissions.
+    serde_json::json!({"text":"", "mode":"input", "captureOrigin":"ocr",
+        "presentationEpoch":epoch, "updateVisiblePopup":retained, "reuseVisiblePopup":retained})
 }
 fn is_capture_action(action: &str) -> bool {
     matches!(action, "capture" | "ocr" | "silentOcr")
@@ -3081,11 +3097,11 @@ fn windows_popup_focus_changed(app: &tauri::AppHandle, focused: bool) {
 
 // Keep the IPC name and the existing layout implementation. Only Windows mode
 // transitions invalidate queued dismissal observations; fitting never shows or
-// focuses a window. macOS continues to call the same layout function directly.
+// focuses a window. Await the UI transaction without blocking the UI event loop.
 #[tauri::command(rename = "fit_window")]
-fn fit_window_with_visibility(
+async fn fit_window_with_visibility(
     window: tauri::WebviewWindow,
-    state: State<window_layout::LayoutState>,
+    state: State<'_, window_layout::LayoutState>,
     presentation: String,
     content_height: f64,
     content_width: Option<f64>,
@@ -3100,7 +3116,7 @@ fn fit_window_with_visibility(
     #[cfg(target_os = "windows")]
     let app = window.app_handle().clone();
     let result =
-        window_layout::fit_window(window, state, presentation, content_height, content_width);
+        window_layout::fit_window(window, state, presentation, content_height, content_width).await;
     #[cfg(target_os = "windows")]
     if mode_changed {
         wake_outside_watcher(&app);
@@ -3556,6 +3572,8 @@ fn main() {
             set_pinned,
             hide_window,
             diagnostics,
+            frontend_input_diagnostics_enabled,
+            record_frontend_input_diagnostic,
             permission_status,
             get_system_translation_status,
             prepare_system_translation,
@@ -4355,6 +4373,7 @@ mod tests {
         };
         let result = vec![
             TranslationResult {
+                preserved: false,
                 provider_id: "fixture".into(),
                 provider_name: "fixture".into(),
                 text: "fixture translation".into(),
@@ -4363,6 +4382,7 @@ mod tests {
                 resolved_languages: None,
             },
             TranslationResult {
+                preserved: false,
                 provider_id: "system-fixture".into(),
                 provider_name: "System fixture".into(),
                 text: String::new(),
@@ -4578,6 +4598,38 @@ mod tests {
         .is_some());
     }
     #[test]
+    fn empty_ocr_is_blank_quiet_and_does_not_focus_or_translate() {
+        for action in ["capture", "ocr", "silentOcr"] {
+            let error = "NO_TEXT: No text was recognized";
+            assert_eq!(visible_action_error(action, error), None);
+            let failed = action_failure_presentation(action, error, 42).unwrap();
+            assert_eq!(failed.error, None);
+            assert_eq!(failed.source["text"], "");
+            assert_eq!(failed.source["mode"], "input");
+            for retained in [false, true] {
+                let payload = empty_ocr_payload(42, retained);
+                assert_eq!(payload["text"], "");
+                assert_eq!(payload["mode"], "input");
+                assert_eq!(payload["captureOrigin"], "ocr");
+                assert_eq!(payload["presentationEpoch"], 42);
+                assert_eq!(payload["updateVisiblePopup"], retained);
+                assert_eq!(payload["reuseVisiblePopup"], retained);
+                for key in ["actionError", "permissionRequired", "focusInput"] {
+                    assert!(payload.get(key).is_none());
+                }
+            }
+        }
+        assert!(visible_action_error("clipboard", "NO_TEXT: unrelated failure").is_some());
+        for error in [
+            "OCR: provider request failed",
+            "PERMISSION: screen capture denied",
+            "CLIPBOARD_RESTORE_FAILED: preserve warning",
+        ] {
+            assert!(visible_action_error("ocr", error).is_some());
+        }
+        assert!(action_failure_presentation("ocr", "CANCELLED: user cancelled", 42).is_none());
+    }
+    #[test]
     fn blocked_capture_presents_permission_guidance_in_one_source_event() {
         for action in ["capture", "ocr", "silentOcr"] {
             for error in [
@@ -4787,6 +4839,18 @@ mod tests {
     #[test]
     fn new_official_credential_namespaces_cover_all_added_adapters() {
         for (kind, url) in [
+            (
+                "niutrans",
+                "https://api.niutrans.com/NiuTransServer/translation",
+            ),
+            (
+                "google-translate",
+                "https://translation.googleapis.com/language/translate/v2",
+            ),
+            (
+                "caiyun",
+                "https://api.interpreter.caiyunai.com/v1/translator",
+            ),
             (
                 "baidu",
                 "https://fanyi-api.baidu.com/api/trans/vip/translate",

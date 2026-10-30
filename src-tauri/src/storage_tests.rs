@@ -161,6 +161,7 @@ fn history_byte_limit_evicts_oldest_nonfavorite_and_preserves_order() {
     recent.text = "x".repeat(3 * 1024 * 1024);
     let mut old = entry("old", false);
     old.results.push(TranslationResult {
+        preserved: false,
         provider_id: "fixture".into(),
         provider_name: "fixture".into(),
         text: "y".repeat(3 * 1024 * 1024),

@@ -23,6 +23,11 @@ try {
       saveHistory: true, theme: 'light', maxHistory: 20, autoHideSeconds: 0, ocrProviders: [], activeOcrProviderId: null,
     };
     if (new URL(location.href).searchParams.has('twoShortcutDefaultsFixture')) state.shortcuts = { selection: 'Alt+D', capture: '', ocr: '', silentOcr: 'Alt+S', input: '' };
+    if (new URL(location.href).searchParams.has('serviceManagerFixture')) {
+      state.providers.push({ id: 'qa-local', name: 'QA built-in translation', kind: new URL(location.href).searchParams.has('windowsSelectionFixture') ? 'offline' : 'system', baseUrl: '', model: '', enabled: true, prompt: '' });
+      state.ocrProviders = [1, 2].map(n => ({ id: `qa-ocr-${n}`, name: `QA OCR ${n}`, kind: 'http-json', baseUrl: 'https://example.invalid/ocr', model: '', prompt: '', authHeader: '', authPrefix: '', requestTemplate: '{"image":"{imageBase64}"}', responsePath: '/text', region: '' }));
+    }
+    if (new URL(location.href).searchParams.has('managerOllamaFixture')) state.providers.push({ id: 'qa-ollama', name: 'QA local Ollama', kind: 'openai', baseUrl: 'http://localhost:11434/v1', model: 'downloaded-test-model', enabled: false, prompt: '' });
     const setupKind = new URL(location.href).searchParams.get('translationSetupFixture');
     if (new URL(location.href).searchParams.has('translationRetryFixture')) {
       state.providers.push({ ...state.providers[0], id: 'qa-retry', name: 'QA retry service' });
@@ -120,6 +125,8 @@ try {
           return 1;
         }
         if (command === 'plugin:event|unlisten') { listeners.delete(args.event); return; }
+        if (command === 'frontend_input_diagnostics_enabled') { fixture.inputDiagnosticRecords = []; return new URLSearchParams(location.search).has('inputDiagnosticsFixture'); }
+        if (command === 'record_frontend_input_diagnostic') { if (fixture.holdInputDiagnostics) await new Promise(resolve => { fixture.releaseInputDiagnostics = resolve; }); fixture.inputDiagnosticRecords.push(structuredClone(args.record)); return; }
         if (command === 'get_settings') { fixture.settingsReads++; if (sourceBoot === 'edit' && fixture.settingsReads === 1) { fixture.bootSettingsWaits++; await new Promise(resolve => { fixture.releaseBootSettings = resolve; }); } for (const provider of fixture.settings.providers) decorateCredential(provider, translationKeys); for (const provider of fixture.settings.ocrProviders) decorateCredential(provider, ocrKeys); const value = structuredClone(fixture.settings); if (fixture.registrationOverride !== undefined) value.shortcutRegistration = structuredClone(fixture.registrationOverride); return value; }
         if (command === 'get_history') {
           fixture.historyReads++;
@@ -197,7 +204,7 @@ try {
         if (command === 'test_ocr_provider') { fixture.ocrTestCalls++; fixture.credentialReadCalls++; const provider = fixture.settings.ocrProviders.find(item => item.id === args.providerId); if (provider && fixture.credentialStates[scope(provider)]) fixture.setCredentialState(provider, 'ready'); return 'QA OCR test succeeded'; }
         if (command === 'hide_window') { fixture.hideCalls++; fixture.nativeHide(); return; }
         if (command === 'wait_for_window_sizing') return 0;
-        if (command === 'fit_window') { fixture.layoutCalls.push(args); if (fixture.holdFit) { fixture.fitWaits++; await new Promise((resolve) => { fixture.releaseFit = resolve; }); } return; }
+        if (command === 'fit_window') { fixture.layoutCalls.push(args); if (fixture.manualHeightQA) { const manual = fixture.manualHeightQA; (fixture.appliedHeightQA ??= []).push(manual.epoch === fixture.presentation.epoch ? manual.height : args.contentHeight); } if (fixture.holdFit) { fixture.fitWaits++; await new Promise((resolve) => { fixture.releaseFit = resolve; }); } return; }
         if (command === 'start_window_drag') { fixture.dragCalls++; return; }
         if (command === 'begin_popup_drag') {
           if (args.presentationEpoch !== fixture.presentation.epoch || !fixture.presentation.presented) throw new Error('CANCELLED: stale popup drag');
@@ -1809,8 +1816,9 @@ try {
   assert.equal(await page.evaluate(() => window.__qa.translationRequests.length), emptyRequestCount);
   await page.evaluate(() => window.__qa.emit('source-text', { text: '', mode: 'input' }));
   assert.equal(await page.locator('#toast').isHidden(), true);
-  // Real screenshot permission/NO_TEXT/OCR failures remain visible and explain
-  // where the user can inspect permissions; translating API errors are separate.
+  // Real permission/provider failures remain visible. An unscoped raw NO_TEXT
+  // error is not trusted as an OCR-empty event: the backend must instead send
+  // its guarded blank source payload, exercised in the cross-platform suite below.
   await page.evaluate(() => window.__qa.emit('action-error', 'PERMISSION: Screen capture is not granted'));
   await page.locator('#toast').getByText('Screen capture is not granted', { exact: false }).waitFor();
   assert.match(await page.locator('#toast').textContent(), /更多 → 设置 → 系统权限/);
@@ -2046,7 +2054,6 @@ try {
   await page.locator('#enable-system-translation').click();
   await page.waitForFunction(() => window.__qa.settings.providers.some(p => p.kind === 'system' && p.enabled));
   assert.equal(await page.evaluate(() => window.__qa.settings.providers.find(p => p.id === 'qa-service').enabled), true);
-  const systemName = await page.evaluate(() => window.__qa.settings.providers.find(p => p.kind === 'system').name);
   const systemRow = page.locator('.provider-row').filter({ hasText: '无需 API Key' });
   await systemRow.getByRole('button', { name: '编辑', exact: true }).click();
   assert.equal(await page.locator('#provider-url').isVisible(), false);
@@ -2055,11 +2062,12 @@ try {
   await page.locator('#save-provider').click();
   await page.locator('#provider-dialog').waitFor({ state: 'hidden' });
   await page.locator('.app-shell').screenshot({ path: 'test-results/system-translation-settings.png' });
-  await systemRow.getByRole('button', { name: `删除 ${systemName}`, exact: true }).click();
-  await page.locator('#confirm-accept').click();
-  await page.waitForFunction(() => !window.__qa.settings.providers.some(p => p.kind === 'system'));
+  assert.equal(await systemRow.locator('[data-service-action=remove]').isHidden(), true);
+  assert.equal(await systemRow.locator('[data-service-action=remove]').isDisabled(), true);
+  await systemRow.getByRole('checkbox').uncheck();
+  await page.waitForFunction(() => window.__qa.settings.providers.some(p => p.kind === 'system' && !p.enabled));
   assert.deepEqual(await page.evaluate(() => ({ writes: window.__qa.keyCalls, deletes: window.__qa.keyDeleteCalls })), systemKeysBefore);
-  // Offline service edits/removal must not query, write or delete credentials.
+  // Built-in services remain installed; editing/disabling must not touch credentials.
   const offlineKeysBefore = await page.evaluate(() => ({ writes: window.__qa.keyCalls, deletes: window.__qa.keyDeleteCalls, reads: window.__qa.credentialReadCalls }));
   await page.locator('#add-provider').click();
   await page.locator('#provider-preset').selectOption('offline');
@@ -2074,9 +2082,10 @@ try {
   assert.equal(await page.locator('#provider-preset').inputValue(), 'offline');
   await page.locator('#save-provider').click();
   await page.locator('#provider-dialog').waitFor({ state: 'hidden' });
-  await offlineRow.getByRole('button', { name: '删除 本机离线翻译', exact: true }).click();
-  await page.locator('#confirm-accept').click();
-  await page.waitForFunction(() => !window.__qa.settings.providers.some(p => p.kind === 'offline'));
+  assert.equal(await offlineRow.locator('[data-service-action=remove]').isHidden(), true);
+  assert.equal(await offlineRow.locator('[data-service-action=remove]').isDisabled(), true);
+  await offlineRow.getByRole('checkbox').uncheck();
+  await page.waitForFunction(() => window.__qa.settings.providers.some(p => p.kind === 'offline' && !p.enabled));
   assert.deepEqual(await page.evaluate(() => ({ writes: window.__qa.keyCalls, deletes: window.__qa.keyDeleteCalls, reads: window.__qa.credentialReadCalls })), offlineKeysBefore);
   await page.locator('.app-shell').screenshot({ path: 'test-results/settings-main.png' });
   await goView('translate');
@@ -2287,8 +2296,8 @@ try {
   await page.keyboard.press('Enter');
   await page.getByText('Isolated test translation fixture', { exact: true }).waitFor();
   assert.equal(await page.evaluate(() => window.__qa.translationRequests.at(-1).text), 'QA OCR captured words corrected');
-  // A second capture keeps an already pinned, completed result readable. Only
-  // successful recognition replaces source text; cancel/error sends no source.
+  // A second capture keeps an already pinned, completed result readable. Normal
+  // cancellation/provider failures retain content; confirmed empty OCR is tested separately.
   await pin.click();
   await page.waitForFunction(() => document.querySelector('#pin-button').getAttribute('aria-pressed') === 'true');
   const pinnedCaptureBaseline = await page.evaluate(() => {
@@ -2299,7 +2308,7 @@ try {
       oldRequest: window.__qa.translationRequests.at(-1), oldEpoch: window.__qa.presentation.epoch };
   });
   let previousPinnedEpoch = pinnedCaptureBaseline.oldEpoch;
-  for (const failure of [null, 'NO_TEXT: QA no text in this region', 'OCR: QA recognition failed', 'PERMISSION: QA screen capture is not granted']) {
+  for (const failure of [null, 'OCR: QA recognition failed', 'PERMISSION: QA screen capture is not granted']) {
     const capture = await page.evaluate(() => window.__qa.nativePinnedCaptureStart());
     assert.ok(capture.epoch > previousPinnedEpoch); previousPinnedEpoch = capture.epoch;
     assert.equal(capture.presented, true);
@@ -2705,6 +2714,49 @@ try {
   assert.equal(await page.evaluate(() => window.__qa.ocrTestCalls), credentialBaseline.ocrTests + 1);
   assert.equal(await page.evaluate(() => window.__qa.translationRequests.length), credentialBaseline.translations);
   assert.deepEqual(errors, []);
+  await page.setViewportSize({ width: 420, height: 820 });
+  // Both desktop presentations replace pending translation with an explicit
+  // structural bypass result, preserving whitespace through IPC, DOM and copy.
+  for (const platform of ['mac', 'windows']) {
+    const url = new URL(process.env.ECHOLINGO_TEST_URL ?? 'http://127.0.0.1:1420/');
+    url.searchParams.set('translationSetupFixture', platform === 'mac' ? 'system' : 'offline');
+    if (platform === 'windows') url.searchParams.set('windowsSelectionFixture', '1');
+    await page.goto(url.href);
+    await page.waitForFunction(() => document.querySelector('#footer-status')?.textContent === '准备就绪');
+    const raw = '  EchoLingo_0.2.1_macos_arm64.dmg\nEchoLingo_0.2.0_macos_arm64.dmg\n';
+    await page.evaluate((raw) => {
+      window.__qa.holdTranslation = true;
+      const provider = window.__qa.settings.providers[0];
+      window.__qa.translationResults = [{ providerId: provider.id, providerName: provider.name,
+        text: raw, preserved: true, elapsedMs: 0 }];
+    }, raw);
+    await page.locator('#source-text').fill(raw);
+    await page.locator('#translate-button').click();
+    await page.waitForFunction(() => window.__qa.translationRequests.length === 1);
+    // Pending cards are intentionally mounted only when the first progress
+    // event arrives. Exercise reuse rather than assuming eager DOM mounting.
+    await page.evaluate(() => {
+      const provider = window.__qa.settings.providers[0];
+      window.__qa.emit('translation-progress', { requestId: window.__qa.translationRequests[0].requestId,
+        presentationEpoch: window.__qa.presentation.epoch, sequence: 1, done: false,
+        result: { providerId: provider.id, providerName: provider.name, text: '', elapsedMs: 0 } });
+    });
+    await page.locator('.result-provider').waitFor();
+    assert.equal(await page.locator('.result-preserved').isVisible(), false);
+    const name = await page.locator('.result-provider').textContent();
+    await page.evaluate(() => { window.__qa.holdTranslation = false; window.__qa.releaseTranslation(); });
+    await page.waitForFunction(() => document.querySelector('#translation-state')?.textContent === '原文已保留');
+    assert.equal(await page.locator('.result-preserved').textContent(), '原文（无需翻译，未调用服务）');
+    assert.equal(await page.locator('.result-preserved').isVisible(), true);
+    assert.equal(await page.locator('.result-provider').textContent(), name);
+    assert.equal(await page.locator('.result-text').textContent(), raw);
+    assert.equal(await page.evaluate(() => window.__qa.translationRequests[0].text), raw);
+    assert.equal(await page.locator('.result-setup').isVisible(), false);
+    await page.locator('.result-card').getByRole('button', { name: '复制原文', exact: true }).click();
+    assert.equal(await page.evaluate(() => window.__qa.copies.at(-1)), raw);
+    assert.deepEqual(await page.evaluate(() => window.__qa.systemPrepareCalls), []);
+  }
+  await page.setViewportSize({ width: 800, height: 820 });
   // Result setup actions only navigate. They never authorize, download, read
   // credentials or silently retry; preparation remains a separate explicit act.
   for (const [platform, kind, appleAction] of [
@@ -2965,7 +3017,7 @@ try {
   assert.deepEqual(errors, []);
   console.log('PASS: native input focus events require exact backend-verified presentation metadata; an observed epoch keeps its original intent baseline across duplicate announcements, edits and navigation; fresh explicit input works while visible or in management; stale complete events, missing/malformed/future payloads and delayed verification cannot rebind focus; hidden Alt+A works with either presentation-event order. Fake IPC only.');
   console.log('PASS: accepted popup acknowledgments, explicit input animation frames and modal queues cannot revive focus after a newer selection epoch, edit or management-view roundtrip; current empty-selection typing and current input focus remain available. Isolated DOM/IPC only, not a native WPS root-cause claim.');
-  console.log('PASS: repeated pinned capture epochs keep completed source/result DOM visible through cancel/no-text/OCR/permission errors; successful OCR replaces source and auto-translates without a modeled hide/reveal; pin remains active; stale source/presentation/progress cannot overwrite; in-flight partial results are cancelled and removed. Fake IPC only, no real capture or native visibility pass.');
+  console.log('PASS: repeated pinned capture epochs keep completed source/result DOM visible through cancel/OCR/permission errors; successful OCR replaces source and auto-translates without a modeled hide/reveal; pin remains active; stale source/presentation/progress cannot overwrite; in-flight partial results are cancelled and removed. Fake IPC only, no real capture or native visibility pass.');
   console.log('PASS: marked visible-popup OCR updates cannot navigate away from settings/history, overwrite newer edits or Alt+A typing, or cancel a newer manual translation; accepted marked capture still auto-translates; ordinary unmarked source workflows remain covered.');
   console.log('PASS: show_popup IPC explicitly requests reuseVisiblePopup=false for ordinary blank/input/selection, including an already visible pinned popup; only marked pinned OCR sends true. Payload dispatch only; no native physical raise/z-order acceptance is claimed.');
   console.log('PASS: popup left/right pointer-captured width requests; native Windows resize dispatch fixture; pin/input/toolbar drag isolation; bounded actual viewport width participates in same-height680→850 layout fits; later height fits retain850; coalesced pending resize invalidated by hide/epoch; management edges hidden/inert;680px light/dark long-prose screenshots inspected separately.');
@@ -2986,7 +3038,7 @@ try {
   }
   await page.locator('#free-region-cn').click();
   assert.equal(await page.locator('#free-ocr-list .free-service').count(), 4);
-  assert.equal(await page.locator('#free-translation-list .free-service').count(), 7);
+  assert.equal(await page.locator('#free-translation-list .free-service').count(), new Date(Date.now() + 8 * 60 * 60 * 1000).toISOString().slice(0, 10) <= '2026-12-31' ? 13 : 12);
   assert.equal(await page.locator('[data-free-service="baidu"] .free-service-quota').getByText(/100 万字符|1,000,000/).count() > 0, true);
   await page.locator('#free-setup-settings').click();
   assert.equal(await page.locator('#free-setup-dialog').isHidden(), true);
@@ -3021,7 +3073,7 @@ try {
   assert.equal(await page.evaluate(() => window.__qa.keyCalls), 1);
   await page.locator('#free-setup-close').click();
   await page.locator('#free-region-overseas').click();
-  assert.equal(await page.locator('#free-translation-list .free-service').count(), 2);
+  assert.equal(await page.locator('#free-translation-list .free-service').count(), 6);
   await page.locator('#free-translation-list .free-service-actions button:first-child').nth(1).click();
   const reopenedFreeStep = await page.locator('#free-setup-step').textContent();
   await page.evaluate(() => { window.__qa.holdFreeSetupTest = false; window.__qa.releaseFreeSetupTest(); });
@@ -3036,6 +3088,7 @@ try {
   assert.deepEqual(errors, []);
   const independentBefore = await page.evaluate(() => structuredClone(window.__qa.settings));
   await page.locator('#free-region-cn').click();
+  await page.locator('#free-ocr-summary').click();
   await page.locator('[data-free-service="baidu-ocr"] .free-service-actions button').first().click();
   await page.locator('#free-field-first').fill('qa-independent-ocr-key');
   await page.locator('#free-field-second').fill('qa-independent-ocr-secret');
@@ -3275,6 +3328,59 @@ try {
     assert.equal(await page.evaluate(() => window.__qa.copies.at(-1)), paragraphText);
     assert.equal(await page.locator('#source-text').inputValue(), paragraphText);
     await page.locator('.result-card').screenshot({ path: `test-results/result-paragraph-spacing-${platform}.png` });
+    // Reading density is shared across platform fonts and source/result panels.
+    // Text is never normalized to achieve visual compactness.
+    const densityCases = [
+      { name: 'short', text: '中文与 English stay readable. Ág gjpq 中文。' },
+      { name: 'paragraphs', text: `${'中文正文保持完整 English body text remains intact. '.repeat(8)}\n\n${'Second paragraph 第二段原文。 '.repeat(6)}` },
+      { name: 'literal-list', text: '- 第一项 First item\n- 第二项 Second item\n\nconst values = [1, 2];\n  return values.map(value => value + 1);\n\nLongToken_' + 'abcdefghijklmnopqrstuvwxyz'.repeat(8) },
+    ];
+    for (const width of [520, 1000]) {
+      await page.setViewportSize({ width, height: 820 });
+      for (const fixture of densityCases) {
+        await page.evaluate(text => { window.__qa.translationResultText = text; }, fixture.text);
+        await page.locator('#source-text').fill(fixture.text);
+        await page.locator('#source-text').press('Enter');
+        await page.waitForFunction(text => {
+          const result = document.querySelector('.result-text');
+          return result?.textContent === text && result.dataset.paragraphLayout === 'true';
+        }, fixture.text);
+        const geometry = await page.evaluate(() => {
+          const source = document.querySelector('#source-text');
+          const result = document.querySelector('.result-text');
+          const run = result.querySelector('.result-text-run') ?? result;
+          const sourceStyle = getComputedStyle(source), resultStyle = getComputedStyle(run);
+          const old = result.cloneNode(true);
+          old.style.cssText = `position:absolute;visibility:hidden;width:${result.getBoundingClientRect().width}px`;
+          if (!old.querySelector('.result-text-run')) old.style.lineHeight = '1.75';
+          for (const textRun of old.querySelectorAll('.result-text-run')) textRun.style.lineHeight = '1.75';
+          result.parentElement.append(old);
+          const oldHeight = old.getBoundingClientRect().height; old.remove();
+          const selection = window.getSelection(), range = document.createRange();
+          range.selectNodeContents(result); selection.removeAllRanges(); selection.addRange(range);
+          const selected = selection.toString(); selection.removeAllRanges();
+          return { sourceRatio: parseFloat(sourceStyle.lineHeight) / parseFloat(sourceStyle.fontSize),
+            resultRatio: parseFloat(resultStyle.lineHeight) / parseFloat(resultStyle.fontSize),
+            resultHeight: result.getBoundingClientRect().height, oldHeight, selected,
+            resultOverflow: result.scrollWidth > result.clientWidth + 1,
+            sourceOverflow: source.scrollWidth > source.clientWidth + 1,
+            runLineHeight: parseFloat(resultStyle.lineHeight), fontSize: parseFloat(resultStyle.fontSize) };
+        });
+        assert.ok(Math.abs(geometry.sourceRatio - 1.45) < .01, `${platform}/${width}/${fixture.name}: source line height`);
+        assert.ok(Math.abs(geometry.resultRatio - 1.45) < .01, `${platform}/${width}/${fixture.name}: result line height`);
+        assert.ok(geometry.runLineHeight > geometry.fontSize, 'keep glyph ascent/descent breathing room');
+        assert.ok(geometry.resultHeight < geometry.oldHeight - 1, 'actual text geometry is tighter than the old 1.75 setting');
+        assert.equal(geometry.resultOverflow, false); assert.equal(geometry.sourceOverflow, false);
+        assert.equal(geometry.selected, fixture.text);
+        assert.equal(await page.locator('#source-text').inputValue(), fixture.text);
+        await page.getByRole('button', { name: '复制译文', exact: true }).click();
+        await page.getByRole('button', { name: '朗读译文', exact: true }).click();
+        assert.equal(await page.evaluate(() => window.__qa.copies.at(-1)), fixture.text);
+        assert.equal(await page.evaluate(() => window.__qa.spoken.at(-1).text), fixture.text);
+      }
+      await page.locator('.result-card').screenshot({ path: `test-results/reading-density-${platform}-${width}.png` });
+    }
+    await page.setViewportSize({ width: 800, height: 820 });
   }
   assert.deepEqual(errors, []);
   console.log('PASS: macOS/Windows shared UI copies only the displayed Chinese multiline diagnostics without rerunning checks/credentials/translation; absent, pending and empty reports stay disabled. Source/result justify with left final lines, preserved code/URL/long-token text and independent action styling. Mock IPC and computed CSS only.');
@@ -3503,8 +3609,300 @@ try {
     await page.locator('#save-shortcuts').click();
     await page.waitForFunction(() => Object.values(window.__qa.settings.shortcuts).every(value => value === ''));
   }
+  // Production main.ts/panel-layout and real pin handler, with native resize
+  // events at the IPC boundary. Native policy itself has Rust/AppKit fixtures.
+  for (const platform of ['macos', 'windows']) {
+    await page.goto(`${process.env.ECHOLINGO_TEST_URL ?? 'http://127.0.0.1:1420/'}${platform === 'windows' ? '?windowsSelectionFixture=1' : ''}`);
+    await page.waitForFunction(() => document.querySelector('#core-guidance').hidden);
+    await page.locator('#source-text').fill('明白');
+    await page.locator('#translate-button').click();
+    await page.getByText('Isolated test translation fixture', { exact: true }).waitFor();
+    for (const height of [469, 160]) {
+      await page.setViewportSize({ width: 713, height });
+      const before = await page.evaluate(({ height, platform }) => {
+        const q = window.__qa; q.manualHeightQA = { epoch: q.presentation.epoch, height };
+        const before = q.layoutCalls.length;
+        if (platform === 'macos') q.emit('popup-user-resize-ended', q.presentation.epoch);
+        else q.emit('popup-native-sizing', { revision: height === 469 ? 7001 : 7002, active: false, presentationEpoch: q.presentation.epoch });
+        return before;
+      }, { height, platform });
+      await page.waitForFunction(count => window.__qa.layoutCalls.length > count, before);
+      assert.equal(await page.evaluate(() => window.__qa.appliedHeightQA.at(-1)), height);
+      const pinCalls = await page.evaluate(() => (window.__qa.pinRequests ?? []).length);
+      await page.locator('#pin-button').click();
+      await page.waitForFunction(count => (window.__qa.pinRequests ?? []).length > count, pinCalls);
+      assert.equal(await page.evaluate(() => innerHeight), height);
+      const visibleResultEnd = await page.locator('.view:not([hidden])').evaluate(view => {
+        view.scrollTop = view.scrollHeight;
+        const result = document.querySelector('.result-card');
+        const rect = result.getBoundingClientRect();
+        return rect.bottom <= innerHeight && view.getBoundingClientRect().bottom <= innerHeight;
+      });
+      assert.ok(visibleResultEnd, `${platform}: real result footer remains scrollable at ${height}px`);
+      assert.equal(await page.locator('#source-text').inputValue(), '明白');
+    }
+    // New presentation, identical empty-input content: force a fresh fit even
+    // if the previous manual resize had cached the same measured dimensions.
+    await page.evaluate(() => window.__qa.emit('source-text', { text: 'same content', mode: 'input', presentationEpoch: window.__qa.presentation.epoch }));
+    await page.waitForFunction(() => document.querySelector('#source-text').value === 'same content');
+    await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+    const before = await page.evaluate(() => {
+      const q = window.__qa; const before = q.layoutCalls.length;
+      const presentation = q.nativeInputShow();
+      q.emit('source-text', { text: 'same content', mode: 'input', presentationEpoch: presentation.epoch });
+      return before;
+    });
+    await page.waitForFunction(count => window.__qa.layoutCalls.length > count, before);
+    assert.equal(await page.evaluate(() => window.__qa.appliedHeightQA.at(-1)), await page.evaluate(() => window.__qa.layoutCalls.at(-1).contentHeight));
+  }
   assert.deepEqual(errors, []);
   console.log('PASS: Windows and macOS two-default shortcut UI permits changing core bindings, explicitly opting in optional actions, rejecting duplicates and clearing all bindings. Mock IPC only.');
+  for (const windows of [false, true]) {
+    await page.goto(`http://127.0.0.1:1420/?twoShortcutDefaultsFixture=1${windows ? '&windowsSelectionFixture=1' : ''}`);
+    const pin = page.locator('#pin-button'), more = page.locator('#more-toggle');
+    await pin.waitFor();
+    await pin.evaluate(element => element.focus({ preventScroll: true }));
+    assert.equal(await pin.evaluate(element => document.activeElement === element), true);
+    assert.equal(await pin.evaluate(element => getComputedStyle(element).outlineStyle), 'none', 'restored/programmatic pin focus has no purple ring');
+    await pin.click();
+    assert.equal(await pin.getAttribute('aria-pressed'), 'true', 'pointer pin activation is preserved');
+    assert.equal(await pin.evaluate(element => getComputedStyle(element).outlineStyle), 'none');
+    await more.evaluate(element => element.focus({ preventScroll: true }));
+    await page.keyboard.press('Shift+Tab');
+    assert.equal(await pin.evaluate(element => document.activeElement === element), true);
+    assert.equal(await pin.evaluate(element => getComputedStyle(element).outlineStyle), 'solid', 'Shift+Tab keeps keyboard ring');
+    await page.keyboard.press('Tab');
+    assert.equal(await more.evaluate(element => document.activeElement === element), true);
+    assert.equal(await more.evaluate(element => getComputedStyle(element).outlineStyle), 'solid', 'Tab keeps keyboard ring');
+    await page.keyboard.press('Shift+Tab');
+    await page.keyboard.press('Space');
+    await page.waitForFunction(() => document.querySelector('#pin-button').getAttribute('aria-pressed') === 'false');
+    assert.equal(await pin.evaluate(element => getComputedStyle(element).outlineStyle), 'solid', 'keyboard pin activation retains ring');
+    await pin.click();
+    assert.equal(await pin.evaluate(element => getComputedStyle(element).outlineStyle), 'none', 'pointer interaction clears prior keyboard ring');
+    await page.keyboard.press('Tab');
+    await page.evaluate(() => new Promise(resolve => setTimeout(resolve, 0)));
+    await pin.evaluate(element => element.focus({ preventScroll: true }));
+    assert.equal(await pin.evaluate(element => getComputedStyle(element).outlineStyle), 'none', 'later programmatic focus does not inherit an old Tab');
+    await page.keyboard.press('Tab');
+    await page.evaluate(() => window.dispatchEvent(new Event('blur')));
+    assert.equal(await more.evaluate(element => document.activeElement === element), true, 'clearing restoration ring never blurs or redirects focus');
+    assert.equal(await more.evaluate(element => getComputedStyle(element).outlineStyle), 'none');
+    await page.keyboard.press('Shift+Tab');
+    await page.evaluate(() => {
+      delete document.body.dataset.popupFocusManaged;
+      document.querySelector('#pin-button').removeAttribute('data-keyboard-focus');
+    });
+    assert.equal(await pin.evaluate(element => getComputedStyle(element).outlineStyle), 'solid', 'unmanaged browser/demo toolbar keeps the browser keyboard focus cue');
+  }
+  assert.deepEqual(errors, []);
+  console.log('PASS: macOS and Windows toolbar restored/programmatic and pointer focus stay quiet; Tab/Shift+Tab and keyboard activation retain accessible focus rings without changing pin or moving focus. Mock IPC only.');
+  // Backend NO_TEXT and empty successful recognition map to this exact blank
+  // input delivery (Rust policy tests exercise both native result forms). Never
+  // fake an OCR engine success or globally silence arbitrary provider errors.
+  for (const platform of ['mac', 'windows']) {
+    for (const action of ['capture', 'ocr', 'silentOcr']) {
+      for (const retained of [false, true]) {
+        const url = new URL(process.env.ECHOLINGO_TEST_URL ?? 'http://127.0.0.1:1420/');
+        if (platform === 'windows') url.searchParams.set('windowsSelectionFixture', '1');
+        await page.goto(url.href);
+        await page.waitForFunction(() => document.querySelector('#footer-status')?.textContent === '准备就绪');
+        await page.locator('#source-text').fill(`Completed source before ${action}`);
+        await page.locator('#source-text').press('Enter');
+        await page.getByText('Isolated test translation fixture', { exact: true }).waitFor();
+        if (retained) {
+          await page.locator('#pin-button').click();
+          await page.waitForFunction(() => window.__qa.pinned);
+        }
+        const baseline = await page.evaluate(() => ({ requests: window.__qa.translationRequests.length, permissions: window.__qa.permissionRequests.length, copies: window.__qa.copies.length }));
+        await page.evaluate(({ retained }) => {
+          const fixture = window.__qa;
+          const task = retained ? fixture.nativePinnedCaptureStart() : fixture.nativeHide();
+          const payload = { text: '', mode: 'input', captureOrigin: 'ocr', deliveryId: 901, presentationEpoch: task.epoch,
+            updateVisiblePopup: retained, reuseVisiblePopup: retained };
+          fixture.emptyOcrPayload = payload;
+          fixture.pendingSource = structuredClone(payload);
+          fixture.emit('source-text', structuredClone(payload));
+        }, { retained });
+        await page.waitForFunction(() => document.querySelector('#source-text').value === '' && window.__qa.sourceAcks.includes(901));
+        assert.equal(await page.locator('.result-card').count(), 0);
+        assert.equal(await page.locator('.results-column').isHidden(), true);
+        assert.equal(await page.locator('#toast').isHidden(), true);
+        assert.equal(await page.locator('#translation-state').textContent(), '');
+        assert.equal(await page.locator('#pin-button').getAttribute('aria-pressed'), String(retained));
+        await page.evaluate(() => window.__qa.emit('source-text', { ...window.__qa.emptyOcrPayload, deliveryRetry: true }));
+        assert.equal(await page.locator('#source-text').inputValue(), '');
+        assert.deepEqual(await page.evaluate(() => ({ requests: window.__qa.translationRequests.length, permissions: window.__qa.permissionRequests.length, copies: window.__qa.copies.length })), baseline);
+        // A delayed older no-text completion must not erase a newer capture.
+        await page.evaluate(() => {
+          const fixture = window.__qa, task = fixture.nativeInputShow();
+          const payload = { text: 'Newer captured words', mode: 'input', deliveryId: 902, presentationEpoch: task.epoch };
+          fixture.pendingSource = payload; fixture.emit('source-text', payload);
+        });
+        await page.waitForFunction(() => document.querySelector('#source-text').value === 'Newer captured words' && window.__qa.sourceAcks.includes(902));
+        await page.evaluate(() => window.__qa.emit('source-text', { ...window.__qa.emptyOcrPayload, deliveryRetry: true }));
+        assert.equal(await page.locator('#source-text').inputValue(), 'Newer captured words');
+        assert.equal(await page.locator('#toast').isHidden(), true);
+        assert.deepEqual(await page.evaluate(() => ({ requests: window.__qa.translationRequests.length, permissions: window.__qa.permissionRequests.length, copies: window.__qa.copies.length })), baseline);
+        // Neither the quiet outcome nor its retries mask unrelated safety or
+        // provider errors, and those errors cannot blank the newer source.
+        for (const message of ['OCR: HTTP 503', 'PERMISSION: Screen capture denied', 'CLIPBOARD_RESTORE_FAILED: original unavailable']) {
+          await page.evaluate((message) => window.__qa.emit('action-error', message), message);
+          await page.locator('#toast').waitFor({ state: 'visible' });
+          assert.equal(await page.locator('#source-text').inputValue(), 'Newer captured words');
+        }
+      }
+    }
+  }
+  assert.deepEqual(errors, []);
+  console.log('PASS: Windows/macOS capture, OCR and silent OCR quiet blank delivery clears earlier completed source/results, does not translate or copy, preserves pin, ignores repeats and old empty completions, and retains real provider/permission/clipboard error feedback. Mock IPC only.');
+  for (const enabled of [false, true]) {
+    await page.goto(`http://127.0.0.1:1420/${enabled ? '?inputDiagnosticsFixture=1' : ''}`);
+    await page.waitForFunction(() => document.querySelector('#footer-status')?.textContent === '准备就绪');
+    await page.locator('#source-text').fill('Private generated diagnostic marker');
+    await page.locator('#source-text').press('Shift+Enter');
+    assert.equal(await page.evaluate(() => window.__qa.translationRequests.length), 0);
+    await page.locator('#source-text').press('Enter');
+    await page.getByText('Isolated test translation fixture', { exact: true }).waitFor();
+    if (enabled) await page.waitForFunction(() => window.__qa.inputDiagnosticRecords.some(r => r.stage === 'complete'));
+    const records = await page.evaluate(() => window.__qa.inputDiagnosticRecords);
+    if (!enabled) assert.deepEqual(records, []);
+    else {
+      assert.equal(records[0].stage, 'ready');
+      assert.equal(records.some(r => r.stage === 'handler' && r.shift && r.sourceNonempty), true);
+      for (const stage of ['arrival', 'handler', 'translateStart', 'ticket', 'dispatch', 'complete']) assert.equal(records.some(r => r.stage === stage), true);
+      assert.equal(JSON.stringify(records).includes('Private generated'), false);
+      for (const record of records) assert.deepEqual(Object.keys(record).sort(), ['stage', 'sequence', 'timestamp', 'epoch', 'generation', 'requestEpoch', 'requestGeneration', 'composing', 'shift', 'alt', 'ctrl', 'meta', 'repeat', 'translating', 'sourceNonempty', 'sourceFocused', 'settingsReady'].sort());
+      assert.equal(records.every((r, i) => r.sequence === i + 1), true);
+      await page.evaluate(() => { window.__qa.holdInputDiagnostics = true; });
+      const requestsBeforeSlowObservation = await page.evaluate(() => window.__qa.translationRequests.length);
+      await page.locator('#source-text').fill('Another private diagnostic marker');
+      await page.locator('#source-text').press('Enter');
+      await page.waitForFunction(before => window.__qa.translationRequests.length === before + 1, requestsBeforeSlowObservation);
+      await page.waitForFunction(() => document.querySelector('#translate-button-label').textContent === '翻译');
+      await page.evaluate(() => {
+        const source = document.querySelector('#source-text');
+        for (let i = 0; i < 50; i++) source.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', shiftKey: true, bubbles: true }));
+        window.__qa.holdInputDiagnostics = false; window.__qa.releaseInputDiagnostics();
+      });
+      await page.waitForFunction(before => window.__qa.inputDiagnosticRecords.length === before + 32, records.length);
+      assert.equal(await page.evaluate(() => window.__qa.translationRequests.length), requestsBeforeSlowObservation + 1);
+
+    }
+  }
+  console.log('PASS: explicit input diagnostics contain only fixed stages, scalar guard flags and epochs, remain off by default, and do not alter Shift+Enter or ordinary Enter submission. Mock IPC only.');
+  for (const windows of [false, true]) {
+    for (const width of [900, 420]) {
+      await page.setViewportSize({ width, height: 850 });
+      await page.goto(`http://127.0.0.1:1420/?serviceManagerFixture=1${windows ? '&windowsSelectionFixture=1' : ''}`);
+      await page.waitForFunction(() => document.querySelector('#footer-status')?.textContent === '准备就绪');
+      await page.locator('#more-toggle').click();
+      await page.locator('#popup-more-menu [data-view="services"]').click();
+      const before = await page.evaluate(() => ({ reads: window.__qa.credentialReadCalls, keys: window.__qa.keyCalls, ocrKeys: window.__qa.ocrKeyCalls }));
+      assert.equal(await page.locator('#managed-service-list > li').count(), 2);
+      await page.locator('#managed-service-list [data-service-id="qa-local"] .managed-service-select').click();
+      assert.equal(await page.locator('#managed-service-detail').getByText('删除配置', { exact: true }).count(), 0);
+      assert.match(await page.locator('#managed-service-detail').innerText(), /内置.*无需密钥|内置服务/);
+      if (width === 900) await page.locator('.app-shell').screenshot({ path: `test-results/service-manager-${windows ? 'windows' : 'macos'}-translation.png` });
+      if (width === 420) {
+        await page.evaluate(() => { window.__qa.failSave = true; });
+        const savesBeforeDetail = await page.evaluate(() => window.__qa.saveCalls);
+        await page.locator('#managed-service-detail [data-manager-action="enable"]').click();
+        await page.waitForFunction(before => window.__qa.saveCalls > before && document.querySelector('#service-manager').getAttribute('aria-busy') === 'false', savesBeforeDetail);
+        assert.equal(await page.locator('#managed-service-detail [data-manager-action="enable"]').evaluate(el => el === document.activeElement), true);
+        assert.equal(await page.evaluate(() => window.__qa.settings.providers.find(p => p.id === 'qa-local').enabled), true);
+        await page.evaluate(() => { window.__qa.failSave = false; });
+        assert.equal(await page.locator('.service-manager-master').isVisible(), false);
+        await page.locator('.managed-service-back').click();
+        assert.equal(await page.locator('.service-manager-master').isVisible(), true);
+        assert.equal(await page.locator('#managed-service-list [data-service-id="qa-local"] .managed-service-select').evaluate(el => el === document.activeElement), true);
+      }
+      const qaEnabled = page.locator('#managed-service-list input[data-service-id="qa-service"]');
+      await qaEnabled.uncheck();
+      await page.waitForFunction(() => window.__qa.settings.providers.find(p => p.id === 'qa-service').enabled === false);
+      assert.equal(await page.evaluate(() => window.__qa.settings.providers.find(p => p.id === 'qa-local').enabled), true);
+      await qaEnabled.check();
+      await page.waitForFunction(() => window.__qa.settings.providers.find(p => p.id === 'qa-service').enabled === true);
+      await page.evaluate(() => { window.__qa.failSave = true; });
+      const failedSaveBefore = await page.evaluate(() => window.__qa.saveCalls);
+      // A rollback intentionally restores checked=true, so uncheck() would retry
+      // a successful click until timeout while expecting the rejected state.
+      await qaEnabled.click();
+      await page.waitForFunction(before => window.__qa.saveCalls > before && document.querySelector('#service-manager').getAttribute('aria-busy') === 'false', failedSaveBefore);
+      await page.locator('#toast').waitFor({ state: 'visible' });
+      assert.equal(await qaEnabled.isChecked(), true);
+      await page.evaluate(() => { window.__qa.failSave = false; });
+      await page.locator('[data-service-role="ocr"]').click();
+      assert.equal(await page.locator('#managed-service-list input[type="radio"]').count(), 3);
+      const translationBeforeOcr = await page.evaluate(() => structuredClone(window.__qa.settings.providers));
+      await page.locator('#managed-service-list input[data-service-id="qa-ocr-1"]').check();
+      await page.waitForFunction(() => window.__qa.settings.activeOcrProviderId === 'qa-ocr-1');
+      await page.locator('#managed-service-list input[data-service-id="qa-ocr-2"]').check();
+      await page.waitForFunction(() => window.__qa.settings.activeOcrProviderId === 'qa-ocr-2');
+      assert.equal(await page.locator('#managed-service-list input:checked').count(), 1);
+      assert.deepEqual(await page.evaluate(() => window.__qa.settings.providers), translationBeforeOcr);
+      await page.locator('#managed-service-list [data-service-id="qa-ocr-2"] .managed-service-select').click();
+      assert.deepEqual(await page.evaluate(() => ({ reads: window.__qa.credentialReadCalls, keys: window.__qa.keyCalls, ocrKeys: window.__qa.ocrKeyCalls })), before);
+      assert.match(await page.locator('#managed-service-detail').innerText(), /当前 OCR/);
+      if (width === 900) await page.locator('.app-shell').screenshot({ path: `test-results/service-manager-${windows ? 'windows' : 'macos'}-ocr.png` });
+      await page.evaluate(() => { window.__qa.holdFreeSetupTest = true; });
+      const testsBefore = await page.evaluate(() => window.__qa.freeSetupTestWaits);
+      await page.locator('#managed-service-detail [data-manager-action="test"]').click();
+      await page.waitForFunction(before => window.__qa.freeSetupTestWaits === before + 1, testsBefore);
+      assert.equal(await page.locator('#service-manager').getAttribute('aria-busy'), 'true');
+      assert.equal(await page.locator('#managed-service-list input').first().isDisabled(), true);
+      await page.locator('#managed-service-detail [data-manager-action="test"]').dispatchEvent('click');
+      // Even an advanced-view action uses the same per-provider in-flight task.
+      await page.evaluate(() => document.querySelector('#ocr-provider-list [data-service-id="qa-ocr-2"] [data-service-action="test"]').click());
+      assert.equal(await page.evaluate(() => window.__qa.freeSetupTestWaits), testsBefore + 1);
+      await page.evaluate(() => { window.__qa.holdFreeSetupTest = false; window.__qa.releaseFreeSetupTest(); });
+      await page.waitForFunction(() => document.querySelector('#service-manager').getAttribute('aria-busy') === 'false');
+      assert.equal(await page.locator('#managed-service-detail [data-manager-action="test"]').evaluate(el => el === document.activeElement), true);
+
+
+      await page.locator('#managed-service-detail').getByRole('button', { name: '编辑配置', exact: true }).click();
+      assert.equal(await page.locator('#ocr-provider-dialog').isVisible(), true);
+      assert.equal(await page.locator('#ocr-provider-key').inputValue(), '');
+      await page.locator('#ocr-provider-key').fill('private-cancelled-manager-key');
+      await page.keyboard.press('Escape');
+      assert.equal(await page.locator('#ocr-provider-key').inputValue(), '');
+      assert.equal(await page.evaluate(() => window.__qa.ocrKeyCalls), before.ocrKeys);
+      await page.locator('#managed-service-detail').getByRole('button', { name: '删除配置', exact: true }).click();
+      await page.locator('#confirm-cancel').click();
+      assert.equal(await page.evaluate(() => window.__qa.settings.ocrProviders.length), 2);
+      await page.locator('#managed-service-detail').getByRole('button', { name: '删除配置', exact: true }).click();
+      await page.locator('#confirm-accept').click();
+      await page.waitForFunction(() => window.__qa.settings.ocrProviders.length === 1 && window.__qa.settings.activeOcrProviderId === null);
+      assert.equal(await page.locator('#managed-service-list input:checked').count(), 1);
+      if (width === 420) await page.locator('.managed-service-back').click();
+      await page.locator('#managed-service-add').click();
+      assert.equal(await page.locator('#ocr-provider-dialog').isVisible(), true);
+      await page.keyboard.press('Escape');
+      assert.equal(await page.locator('#service-manager').evaluate(el => el.scrollWidth <= el.clientWidth), true);
+      assert.deepEqual(errors, []);
+    }
+  }
+  await page.setViewportSize({ width: 800, height: 820 });
+  for (const windows of [false, true]) {
+    await page.goto(`http://127.0.0.1:1420/?serviceManagerFixture=1&managerOllamaFixture=1${windows ? '&windowsSelectionFixture=1' : ''}`);
+    await page.waitForFunction(() => document.querySelector('#footer-status')?.textContent === '准备就绪');
+    await page.locator('#more-toggle').click();
+    await page.locator('#popup-more-menu [data-view="services"]').click();
+    const beforeKeys = await page.evaluate(() => window.__qa.credentialReadCalls);
+    await page.locator('#managed-service-list [data-service-id="qa-ollama"] .managed-service-select').click();
+    assert.match(await page.locator('#managed-service-detail').innerText(), /本机 Ollama.*无需密钥/s);
+    assert.match(await page.locator('#managed-service-detail').innerText(), /云模型或本机代理转发仍可能上传/);
+    assert.equal(await page.locator('#managed-service-detail').getByRole('button', { name: '编辑配置', exact: true }).isVisible(), true);
+    await page.locator('#managed-service-detail').getByRole('button', { name: '删除配置', exact: true }).click();
+    await page.locator('#confirm-cancel').click();
+    assert.equal(await page.evaluate(() => window.__qa.settings.providers.some(p => p.id === 'qa-ollama')), true);
+    assert.equal(await page.evaluate(() => window.__qa.credentialReadCalls), beforeKeys);
+    await page.locator('#managed-service-detail').getByRole('button', { name: '删除配置', exact: true }).click();
+    await page.locator('#confirm-accept').click();
+    await page.waitForFunction(() => !window.__qa.settings.providers.some(p => p.id === 'qa-ollama'));
+    assert.equal(await page.evaluate(() => window.__qa.settings.providers.some(p => p.id === 'qa-local')), true);
+  }
+  console.log('PASS: dual-platform service workspace separates multi-enabled translation from one-current OCR, keeps native capabilities, preserves secure edit/cancel/confirmation flows and failed-toggle rollback, and supports 420px master/detail navigation without key reads. Mock IPC only.');
   console.log('PASS: persistent screenshot permission guidance prepared before presentation; click-only correct pane without authorization; retained sanitized link failure and manual path; first-use pending-open help navigation/focus; 800 px light and 420 px narrow/dark screenshots; dismiss/input/quiet Alt+D/Alt+A/stale-epoch recovery; deferred-modal permission payload and granted-status clearing; backend cancellation tickets on edit/clear/stop/Escape/close/native hide; native presentation epochs cover unallocated tickets, omitted/stale hide events, reopen overtaking pending begin and stale delayed popup fitting; backend-only cancellation clears old result state; late-ticket and replacement ordering; pending-save close/reentry guard; failure unlock; blank shortcuts; duplicate rejection; no countdown; theme/favorites and history bounds; OCR dual-key bundles/protocol isolation/no plaintext settings; documented vendor presets; origin-bound saved-key indications; minimal popup/menu/automatic source height; OCR configuration/privacy; empty-selection immediate typing; persistent source copy/speech; pin edge/icon/keyboard hit areas and drag isolation; captured source editing after completion and pending cancellation/retranslation; narrow-wrap source presentation; inconsistent permission feedback; automatic/fixed targets; Enter/ShiftEnter/IME/repeat; passive permissions; real capture and translation error preservation.');
 } finally {
   await browser.close();

@@ -31,7 +31,7 @@ const input = (id: string): HTMLInputElement => $<HTMLInputElement>(id);
 const textArea = (id: string): HTMLTextAreaElement => $<HTMLTextAreaElement>(id);
 const select = (id: string): HTMLSelectElement => $<HTMLSelectElement>(id);
 
-export function createOcrUi(context: UiContext): { render: () => void; close: () => void } {
+export function createOcrUi(context: UiContext): { render: () => void; close: () => void; open: (provider?: OcrProvider) => void; activate: (id: string | null) => Promise<void>; test: (id: string) => Promise<void> } {
   const modal = $('ocr-provider-dialog');
   let editingId: string | null = null;
   let saving = false;
@@ -144,6 +144,18 @@ export function createOcrUi(context: UiContext): { render: () => void; close: ()
     $('ocr-provider-error').hidden = true;
     kindChanged(); context.showModal(modal);
   };
+  const tests = new Map<string, Promise<void>>();
+  const testService = (id: string): Promise<void> => {
+    const current = tests.get(id); if (current) return current;
+    const task = (async () => {
+      if (!context.desktop) { context.toast('请在桌面应用中测试 OCR API。'); return; }
+      if (!context.settings().ocrProviders.some(provider => provider.id === id)) return;
+      context.toast('正在上传生成的测试图片，可能消耗少量 OCR / 模型额度。');
+      try { context.toast(await invoke<string>('test_ocr_provider', { providerId: id }) || 'OCR 服务连接成功。'); }
+      finally { await context.reloadSettings().catch(context.reportError); }
+    })().finally(() => { tests.delete(id); });
+    tests.set(id, task); return task;
+  };
   const render = (): void => {
     const settings = context.settings();
     const providers = settings.ocrProviders ?? [];
@@ -164,21 +176,16 @@ export function createOcrUi(context: UiContext): { render: () => void; close: ()
     const list = $('ocr-provider-list'); list.replaceChildren();
     if (providers.length === 0) list.append(el('div', 'provider-empty', '默认使用本机 OCR。可添加百度、腾讯云、有道、Google OCR，或视觉模型与高级 JSON 网关。'));
     for (const provider of providers) {
-      const row = el('div', 'provider-row'); row.append(el('span', 'provider-avatar ocr-avatar', '文'));
+      const row = el('div', 'provider-row'); row.dataset.serviceId = provider.id; row.append(el('span', 'provider-avatar ocr-avatar', '文'));
       const info = el('div', 'provider-info'); const title = el('div', 'provider-title', provider.name);
       title.append(el('span', 'provider-key-badge', `· ${credentialStatusLabel(provider)}`));
       info.append(title, el('span', 'provider-details', `${kindLabel(provider.kind)} · ${provider.model || provider.responsePath} · ${provider.baseUrl}`));
       const controls = el('div', 'provider-controls');
       const test = el('button', 'text-button', '测试连接'); test.type = 'button'; test.title = '会上传生成的测试图片，可能消耗 API 额度';
       test.addEventListener('click', () => run(async () => {
-        if (!context.desktop) { context.toast('请在桌面应用中测试 OCR API。'); return; }
         test.disabled = true; test.textContent = '测试中…';
-        context.toast('正在上传生成的测试图片，可能消耗少量 OCR / 模型额度。');
-        try { context.toast(await invoke<string>('test_ocr_provider', { providerId: provider.id }) || 'OCR 服务连接成功。'); }
-        finally {
-          test.disabled = false; test.textContent = '测试连接';
-          await context.reloadSettings().catch(context.reportError);
-        }
+        try { await testService(provider.id); }
+        finally { test.disabled = false; test.textContent = '测试连接'; }
       }));
       const edit = el('button', 'text-button', '编辑'); edit.type = 'button'; edit.setAttribute('aria-label', `编辑 OCR ${provider.name}`); edit.addEventListener('click', () => open(provider));
       const remove = el('button', 'text-button danger', '删除'); remove.type = 'button'; remove.setAttribute('aria-label', `删除 OCR ${provider.name}`);
@@ -191,6 +198,7 @@ export function createOcrUi(context: UiContext): { render: () => void; close: ()
         });
         context.toast('OCR 服务已删除。');
       }));
+      test.dataset.serviceAction = 'test'; edit.dataset.serviceAction = 'edit'; remove.dataset.serviceAction = 'remove';
       controls.append(test, edit, remove); row.append(info, controls); list.append(row);
     }
     $<HTMLButtonElement>('add-ocr-provider').disabled = providers.length >= 12;
@@ -201,16 +209,18 @@ export function createOcrUi(context: UiContext): { render: () => void; close: ()
   modal.addEventListener('click', (event) => { if (event.target === modal) close(); });
   select('ocr-provider-kind').addEventListener('change', () => kindChanged(true));
   input('ocr-provider-url').addEventListener('input', () => updateCredentialState());
+  const activate = async (id: string | null): Promise<void> => {
+    const provider = (context.settings().ocrProviders ?? []).find((item) => item.id === id);
+    if (id && !provider) throw new Error('OCR 服务已不存在，请重新选择。');
+    if (provider && isNativeOcr(provider.kind) && credentialStateOf(provider) === 'missing') { context.toast('此 OCR 服务尚未配置完整凭据，请先编辑并保存密钥。', 'error'); render(); return; }
+    try {
+      await context.updateSettings((next) => { next.activeOcrProviderId = id; });
+      context.toast(id ? '云端 OCR 已启用，截图会上传到选定服务。' : '已切换为本机 OCR，不上传截图。');
+    } finally { render(); }
+  };
   select('active-ocr-provider').addEventListener('change', (event) => {
     const id = (event.target as HTMLSelectElement).value || null;
-    const provider = (context.settings().ocrProviders ?? []).find((item) => item.id === id);
-    if (provider && isNativeOcr(provider.kind) && credentialStateOf(provider) === 'missing') { context.toast('此 OCR 服务尚未配置完整凭据，请先编辑并保存密钥。', 'error'); render(); return; }
-    run(async () => {
-      try {
-        await context.updateSettings((next) => { next.activeOcrProviderId = id; });
-        context.toast(id ? '云端 OCR 已启用，截图会上传到选定服务。' : '已切换为本机 OCR，不上传截图。');
-      } finally { render(); }
-    });
+    run(() => activate(id));
   });
   $('remove-ocr-provider-key').addEventListener('click', () => run(async () => {
     if (!context.desktop || !editingId || saving) return;
@@ -270,5 +280,5 @@ export function createOcrUi(context: UiContext): { render: () => void; close: ()
       finally { setSaving(false); }
     });
   });
-  return { render, close };
+  return { render, close, open, activate, test: testService };
 }

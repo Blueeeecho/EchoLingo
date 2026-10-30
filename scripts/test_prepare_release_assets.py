@@ -19,8 +19,8 @@ class ReleaseAssetsTests(unittest.TestCase):
         self.root = Path(self.temp.name)
         self.artifacts = self.root / "artifacts"
         self.output = self.root / "public"
-        self.windows = self.artifacts / "EchoLingo-Windows/nsis/EchoLingo_0.2.1_x64-setup.exe"
-        self.macos = self.artifacts / "EchoLingo-macOS/dmg/EchoLingo_0.2.1_aarch64.dmg"
+        self.windows = self.artifacts / "EchoLingo-Windows/nsis/EchoLingo_0.2.2_x64-setup.exe"
+        self.macos = self.artifacts / "EchoLingo-macOS/dmg/EchoLingo_0.2.2_aarch64.dmg"
         self.report_path = self.artifacts / "EchoLingo-Windows-offline-evidence/temp/echolingo-offline-validation.json"
         for path, data in [(self.windows, b"accepted Windows installer"), (self.macos, b"tested Mac installer")]:
             path.parent.mkdir(parents=True)
@@ -82,12 +82,27 @@ class ReleaseAssetsTests(unittest.TestCase):
     def test_versions_are_consistent(self):
         RELEASE.check_version()
 
+    def test_new_release_does_not_retarget_historical_macos_only_publication(self):
+        root = Path(__file__).resolve().parents[1]
+        historical = (root / ".github/workflows/release-macos-first.yml").read_text()
+        self.assertIn("paths: [.github/workflows/release-macos-first.yml]", historical)
+        self.assertNotIn("package.json", historical)
+        publisher = (root / "scripts/publish-macos-first-release.cjs").read_text()
+        self.assertIn("tag: '0.2.1'", publisher)
+        self.assertIn("Release exists; no overwrite", publisher)
+        self.assertEqual(RELEASE.VERSION, "0.2.2")
+
+    def test_refuses_previous_version_installer_filename(self):
+        self.windows.rename(self.windows.with_name("EchoLingo_0.2.1_x64-setup.exe"))
+        with self.assertRaisesRegex(ValueError, "version or architecture"):
+            self.prepare()
+
     def test_copies_exact_bytes_with_public_provenance_and_checksums(self):
         manifest = self.prepare()
         self.assertFalse(manifest["rebuiltAfterValidation"])
         self.assertEqual(len(manifest["files"]), 3)
         self.assertEqual(len(list(self.output.iterdir())), 5)
-        self.assertEqual((self.output / "EchoLingo_0.2.1_windows_x64-setup.exe").read_bytes(), self.windows.read_bytes())
+        self.assertEqual((self.output / "EchoLingo_0.2.2_windows_x64-setup.exe").read_bytes(), self.windows.read_bytes())
         self.assertNotIn(str(self.root), (self.output / "RELEASE-MANIFEST.json").read_text())
         for line in (self.output / "SHA256SUMS.txt").read_text().splitlines():
             digest, name = line.split("  ", 1)

@@ -3,6 +3,7 @@ import { randomUUID } from 'node:crypto';
 import { invoke } from '@tauri-apps/api/core';
 import { installFreeSetup } from '../src/free-setup-ui';
 import { defaultSettings } from '../src/model';
+import { servicesFor } from '../src/free-services';
 import type { Settings } from '../src/types';
 
 vi.mock('@tauri-apps/api/core', () => ({ invoke: vi.fn() }));
@@ -10,7 +11,7 @@ vi.mock('@tauri-apps/api/core', () => ({ invoke: vi.fn() }));
 // Minimal DOM fixture for the production wizard's event handlers. No network,
 // browser process, real account, credential store, or installed app is involved.
 class Element {
-  id = ''; hidden = false; disabled = false; value = ''; textContent = '';
+  id = ''; open = false; hidden = false; disabled = false; value = ''; textContent = '';
   children: Element[] = [];
   attributes = new Map<string, string>();
   listeners = new Map<string, ((event: { target: Element; key?: string; preventDefault: () => void; stopPropagation: () => void }) => void)[]>();
@@ -31,7 +32,7 @@ function deferred() {
 }
 const settle = async () => { for (let i = 0; i < 50; i++) await Promise.resolve(); };
 function fixture(desktop = true, blockingHint?: 'engine-hint' | 'core-guidance') {
-  const ids = ['free-setup-hint', 'free-setup-dialog', 'free-setup-body', 'free-setup-error', 'free-translation-list', 'free-ocr-list', 'free-region-cn', 'free-region-overseas', 'core-guidance', 'engine-hint', 'free-setup-step', 'free-setup-next', 'free-setup-back', 'free-setup-close', 'free-setup-settings', 'free-setup-open', 'free-setup-docs', 'free-setup-dismiss'];
+  const ids = ['free-translation-section', 'free-ocr-section', 'free-translation-summary', 'free-ocr-summary', 'free-translation-count', 'free-ocr-count', 'free-setup-hint', 'free-setup-dialog', 'free-setup-body', 'free-setup-error', 'free-translation-list', 'free-ocr-list', 'free-region-cn', 'free-region-overseas', 'core-guidance', 'engine-hint', 'free-setup-step', 'free-setup-next', 'free-setup-back', 'free-setup-close', 'free-setup-settings', 'free-setup-open', 'free-setup-docs', 'free-setup-dismiss'];
   const roots = ids.map((id) => { const node = new Element(); node.id = id; node.hidden = id === 'free-setup-hint' || id === 'free-setup-dialog' || ((id === 'core-guidance' || id === 'engine-hint') && id !== blockingHint); return node; });
   const find = (id: string) => roots.map((root) => root.find(id)).find(Boolean) ?? null;
   const node = (id: string) => { const result = find(id); if (!result) throw new Error(`Missing fixture node: ${id}`); return result; };
@@ -86,7 +87,7 @@ function fixture(desktop = true, blockingHint?: 'engine-hint' | 'core-guidance')
 }
 
 beforeEach(() => vi.clearAllMocks());
-afterEach(() => vi.unstubAllGlobals());
+afterEach(() => { vi.useRealTimers(); vi.unstubAllGlobals(); });
 
 describe('combined engine and signup guidance', () => {
   it.each(['engine-hint', 'core-guidance'] as const)('defers signup behind %s and reveals it only after the blocker is gone', (blocker) => {
@@ -252,6 +253,24 @@ describe('independent role selection and setup', () => {
     expect(JSON.stringify(provider)).not.toContain('private-test-key');
     expect(f.settings().activeOcrProviderId).toBe('existing-ocr');
   });
+  it('preserves independent disclosure states through region switches and refreshes', () => {
+    const f = fixture();
+    expect(f.node('free-translation-section').open).toBe(false);
+    expect(f.node('free-ocr-section').open).toBe(false);
+    f.node('free-ocr-section').open = true;
+    f.node('free-region-cn').emit(); f.api.refresh();
+    expect(f.node('free-translation-section').open).toBe(false);
+    expect(f.node('free-ocr-section').open).toBe(true);
+    expect(f.node('free-translation-count').textContent).toBe(`(${servicesFor('cn', 'translation').length})`);
+    expect(f.node('free-ocr-count').textContent).toContain('4');
+    f.node('free-setup-settings').emit();
+    expect(f.node('free-translation-section').open).toBe(true);
+    expect(f.node('free-ocr-section').open).toBe(true);
+    f.node('free-translation-section').open = false;
+    f.node('free-region-overseas').emit(); f.api.refresh();
+    expect(f.node('free-translation-section').open).toBe(false);
+    expect(f.node('free-ocr-count').textContent).toContain('3');
+  });
   it('publishes verified quota summaries and source buttons in both role lists', () => {
     const f = fixture();
     expect(f.node('free-translation-list').children.length).toBeGreaterThan(1);
@@ -274,4 +293,66 @@ describe('independent role selection and setup', () => {
     expect(f.node('free-setup-error').hidden).toBe(false); expect(f.fresh()).toEqual([]); expect(invoke).not.toHaveBeenCalled();
   });
 
+});
+
+describe('local Ollama setup', () => {
+  const openLocal = () => {
+    const f = fixture();
+    f.node('free-region-overseas').emit();
+    const rows = f.node('free-translation-list').children;
+    rows.find(row => row.attributes.get('data-free-service') === 'ollama')!.children[4]!.children[0]!.emit();
+    return f;
+  };
+  it('tests a downloaded local model without writing a placeholder key', async () => {
+    const f = openLocal();
+    expect(f.find('free-field-key')).toBeNull();
+    f.node('free-field-model').value = 'qwen3:8b';
+    await f.submit();
+    expect(f.fresh()).toHaveLength(1);
+    expect(f.fresh()[0]).toMatchObject({ baseUrl: 'http://localhost:11434/v1', model: 'qwen3:8b', enabled: true });
+    expect(vi.mocked(invoke).mock.calls.some(([command]) => command === 'set_api_key')).toBe(false);
+    expect(vi.mocked(invoke).mock.calls.some(([command]) => command === 'test_provider')).toBe(true);
+  });
+  it('does not silently choose a cloud model or stage an empty model', async () => {
+    const f = openLocal();
+    await f.submit(); expect(f.fresh()).toHaveLength(0);
+    f.node('free-field-model').value = 'gpt-oss:120b-cloud';
+    await f.submit(); expect(f.fresh()).toHaveLength(0);
+    expect(invoke).not.toHaveBeenCalled();
+  });
+  it('removes the fresh disabled row after a failed local test, without deleting a key', async () => {
+    const f = openLocal(); f.node('free-field-model').value = 'qwen3:8b';
+    f.invokeFailures.add('test_provider'); await f.submit();
+    expect(f.fresh()).toHaveLength(0);
+    expect(vi.mocked(invoke).mock.calls.some(([command]) => command === 'delete_api_key')).toBe(false);
+    expect(f.settings().providers.some(p => p.id === 'existing-translation')).toBe(true);
+  });
+});
+
+describe('additional official translation setup', () => {
+  it.each(['niutrans', 'google-translate', 'caiyun'])('tests and enables only %s and keeps its Key out of settings', async (kind) => {
+    const f = fixture(); f.node(`free-region-${kind === 'google-translate' ? 'overseas' : 'cn'}`).emit();
+    const row = f.node('free-translation-list').children.find(item => item.attributes.get('data-free-service') === kind)!;
+    row.children[4]!.children[0]!.emit(); f.fill(); await f.submit();
+    expect(f.fresh()).toHaveLength(1);
+    expect(f.fresh()[0]).toMatchObject({ kind, enabled: true, model: '' });
+    expect(f.keys.get(f.fresh()[0]!.id)).toBe('private-test-key');
+    expect(JSON.stringify(f.settings())).not.toContain('private-test-key');
+    expect(f.settings().activeOcrProviderId).toBe('existing-ocr');
+  });
+});
+
+describe('newcomer trial model confirmation', () => {
+  it.each(['qianfan', 'tokenhub', 'ark'])('requires an explicitly selected trial model for %s', async (id) => {
+    vi.useFakeTimers({ toFake: ['Date'] }); vi.setSystemTime(new Date('2026-10-30T00:00:00Z'));
+    const f = fixture(); f.node('free-region-cn').emit();
+    f.node('free-translation-list').children.find(row => row.attributes.get('data-free-service') === `${id}-trial`)!.children[4]!.children[0]!.emit();
+    f.fill(); await f.submit();
+    expect(f.fresh()).toHaveLength(0); expect(invoke).not.toHaveBeenCalled();
+    f.node('free-field-model').value = 'account-confirmed-model';
+    await f.submit();
+    expect(f.fresh()[0]).toMatchObject({ kind: 'openai', model: 'account-confirmed-model', enabled: true });
+    expect(f.settings().activeOcrProviderId).toBe('existing-ocr');
+    expect(JSON.stringify(f.settings())).not.toContain('private-test-key');
+  });
 });

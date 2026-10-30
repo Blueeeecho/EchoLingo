@@ -45,6 +45,15 @@ public static class WindowsBrowserSelectionBridge {
     [StructLayout(LayoutKind.Sequential)] struct INPUT {public uint type;public INPUTDATA data;}
     [StructLayout(LayoutKind.Sequential)] struct POINT {public int x,y;}
     [DllImport("user32.dll")] static extern IntPtr GetClipboardOwner();
+    [DllImport("user32.dll")] static extern bool OpenClipboard(IntPtr window);
+    [DllImport("user32.dll")] static extern bool CloseClipboard();
+    [DllImport("user32.dll",CharSet=CharSet.Unicode)] static extern uint RegisterClipboardFormat(string name);
+    [DllImport("user32.dll")] static extern IntPtr GetClipboardData(uint format);
+    [DllImport("kernel32.dll")] static extern UIntPtr GlobalSize(IntPtr memory);
+    [DllImport("kernel32.dll")] static extern IntPtr GlobalLock(IntPtr memory);
+    [DllImport("kernel32.dll")] static extern bool GlobalUnlock(IntPtr memory);
+    static readonly string ProbeNonce=Guid.NewGuid().ToString("N");
+    static readonly string ProbeFormat="EchoLingo.ClipboardProbe."+ProbeNonce;
     static readonly JavaScriptSerializer Json=new JavaScriptSerializer { MaxJsonLength=1048576 };
     static string Helper,Assembly,Browser;
     static uint ownedClipboard;
@@ -108,8 +117,39 @@ public static class WindowsBrowserSelectionBridge {
         while(!query.IsCompleted&&deadline.ElapsedMilliseconds<2000){Application.DoEvents();Thread.Sleep(2);}
         Need(query.IsCompleted,"BROWSER_UIA_METADATA_TIMEOUT");Need(GetForegroundWindow()==main,"BROWSER_FOREGROUND_CHANGED");if(query.IsFaulted)throw query.Exception.InnerException;return query.Result;
     }
+    // Read only our nonce-tagged synthetic clipboard, under one clipboard lock.
+    // No raw content, token or arbitrary format names are returned to diagnostics.
+    static byte[] LockedBytes(uint format,int maximum){
+        IntPtr handle=GetClipboardData(format);if(handle==IntPtr.Zero)return null;
+        ulong size=GlobalSize(handle).ToUInt64();if(size==0||size>(ulong)maximum)return null;
+        IntPtr memory=GlobalLock(handle);if(memory==IntPtr.Zero)return null;
+        try{byte[] bytes=new byte[(int)size];Marshal.Copy(memory,bytes,0,bytes.Length);return bytes;}
+        finally{GlobalUnlock(handle);}
+    }
+    static Dictionary<string,object> ObserveSyntheticHtml(string expected){
+        var result=new Dictionary<string,object>{{"lockAcquired",false},{"nonceVerified",false},{"htmlExactEqual",false},{"clipboardWritten",false}};
+        result["sequenceBeforeLock"]=GetClipboardSequenceNumber();
+        if(!OpenClipboard(IntPtr.Zero))return result;
+        result["lockAcquired"]=true;
+        try{
+            byte[] nonce=LockedBytes(RegisterClipboardFormat(ProbeFormat),256),wantedNonce=Encoding.ASCII.GetBytes(ProbeNonce);
+            bool verified=nonce!=null&&nonce.Length>=wantedNonce.Length;
+            if(verified){for(int i=0;i<wantedNonce.Length;i++)if(nonce[i]!=wantedNonce[i]){verified=false;break;}}
+            result["nonceVerified"]=verified;if(!verified)return result;
+            byte[] html=LockedBytes(RegisterClipboardFormat(DataFormats.Html),65536),wanted=Encoding.UTF8.GetBytes(expected+"\0");
+            result["htmlAllocationBytes"]=html==null?-1:html.Length;result["htmlExpectedBytes"]=wanted.Length;
+            int end=html==null?-1:Array.IndexOf(html,(byte)0);result["htmlTerminatedBytes"]=end<0?-1:end+1;
+            bool equal=end>=0&&end+1==wanted.Length;
+            if(equal)for(int i=0;i<wanted.Length;i++)if(html[i]!=wanted[i]){equal=false;break;}
+            result["htmlExactEqual"]=equal;return result;
+        }finally{result["sequenceWhileLocked"]=GetClipboardSequenceNumber();CloseClipboard();result["sequenceAfterUnlock"]=GetClipboardSequenceNumber();}
+    }
     static DataObject Seed(){
-        DataObject data=new DataObject();data.SetData(DataFormats.UnicodeText,false,"Generated browser clipboard original 24680");data.SetData(DataFormats.Html,false,"<p>Generated browser rich original 24680</p>");data.SetData(DataFormats.Rtf,false,"{\\rtf1 Generated browser rich original 24680}");Clipboard.SetDataObject(data,true,0,0);ownedClipboard=GetClipboardSequenceNumber();seeded=true;return data;
+        DataObject data=new DataObject();data.SetData(DataFormats.UnicodeText,false,"Generated browser clipboard original 24680");data.SetData(DataFormats.Html,false,"<p>Generated browser rich original 24680</p>");data.SetData(DataFormats.Rtf,false,"{\\rtf1 Generated browser rich original 24680}");data.SetData(ProbeFormat,false,new MemoryStream(Encoding.ASCII.GetBytes(ProbeNonce)));Clipboard.SetDataObject(data,true,0,0);ownedClipboard=GetClipboardSequenceNumber();seeded=true;
+        var seedObservation=ObserveSyntheticHtml((string)data.GetData(DataFormats.Html,false));
+        if(LastMetadata!=null)LastMetadata["seedHtmlPublicationObservation"]=seedObservation;
+        if(!Convert.ToBoolean(seedObservation["htmlExactEqual"])&&LastMetadata!=null)LastMetadata["failureClassification"]="fixture-seed-publication";
+        Need(Convert.ToBoolean(seedObservation["htmlExactEqual"]),"SEED_HTML_PUBLISH_MISMATCH");return data;
     }
     static bool Restored(DataObject expected){return Restored(expected,null);}
     static bool Restored(DataObject expected,Dictionary<string,object> observation){
@@ -119,6 +159,7 @@ public static class WindowsBrowserSelectionBridge {
         // content or arbitrary format names and never convert a failed read into
         // a retry/pass. The failure verdict remains the original observation.
         foreach(string format in expected.GetFormats(false)){
+            if(format==ProbeFormat)continue;
             object wanted=expected.GetData(format,false),received=actual==null?null:actual.GetData(format,false);
             bool equal=Object.Equals(wanted,received);matches=matches&&equal;
             if(observation!=null)formats.Add(new Dictionary<string,object>{
@@ -133,6 +174,8 @@ public static class WindowsBrowserSelectionBridge {
             observation["ownerProcessAfterRead"]=owner;observation["dataObjectAvailable"]=actual!=null;
             observation["formats"]=formats;observation["originalVerdict"]=matches;
             observation["retryAttempts"]=0;observation["clipboardWritten"]=false;
+            // Supplement only: never turn the original OLE failure into a pass.
+            if(!matches)observation["rawHtmlAfterOleFailure"]=ObserveSyntheticHtml((string)expected.GetData(DataFormats.Html,false));
         }return matches;
     }
     static Dictionary<string,object> QueryDiagnostics(Dictionary<string,object> reply){
@@ -244,14 +287,14 @@ public static class WindowsBrowserSelectionBridge {
         public AppSession(string executable,string mockUrl,string providerId,string hash,long bytes,bool diagnostics){
             Diagnostics=diagnostics;
             provider=providerId;Need(provider.StartsWith("generated-browser-",StringComparison.Ordinal)&&provider.Length<=100,"APP_PROVIDER_NOT_GENERATED");Uri endpoint;Need(Uri.TryCreate(mockUrl,UriKind.Absolute,out endpoint)&&endpoint.Scheme=="http"&&endpoint.Host=="127.0.0.1"&&endpoint.Port>1024&&endpoint.AbsolutePath=="/","APP_MOCK_NOT_LOOPBACK");
-            Identity=new Dictionary<string,object>{{"applicationSha256",hash},{"applicationBytes",bytes},{"actualApplicationTested",true},{"actualRegisteredAltD",true},{"shortcutGesture",ShortcutGesture},{"fakeIpcUsed",false},{"translationBackend","generated-loopback-mock"},{"credentialScope","One random absent provider ID only; no existing credential account"},{"nativeReadinessIsOsRegistrationProof",false},{"fixedFrontendWarmupMilliseconds",0},{"preHotkeyAppUiaCalls",0}};
+            Identity=new Dictionary<string,object>{{"formsAssemblyFileVersion",FileVersionInfo.GetVersionInfo(typeof(Clipboard).Assembly.Location).FileVersion},{"clrVersion",Environment.Version.ToString()},{"runtimeSystemVersion",RuntimeEnvironment.GetSystemVersion()},{"applicationSha256",hash},{"applicationBytes",bytes},{"actualApplicationTested",true},{"actualRegisteredAltD",true},{"shortcutGesture",ShortcutGesture},{"fakeIpcUsed",false},{"translationBackend","generated-loopback-mock"},{"credentialScope","One random absent provider ID only; no existing credential account"},{"nativeReadinessIsOsRegistrationProof",false},{"fixedFrontendWarmupMilliseconds",0},{"preHotkeyAppUiaCalls",0}};
             try{
                 foreach(Process p in Process.GetProcessesByName(Path.GetFileNameWithoutExtension(executable)))using(p)Need(p.HasExited,"EXISTING_APP_PROCESS_REFUSED");
                 string roaming=Path.Combine(Folder("3EB685DB-65F9-4CF6-A03A-E3EF65729F3D"),Identifier),local=Path.Combine(Folder("F1B32785-6FBA-4FCF-9D55-7B8E7F157091"),Identifier),root=Path.Combine(Path.GetTempPath(),"echolingo-browser-app-"+token);
                 Claim(roaming);Claim(local);Claim(root);history=Path.Combine(roaming,"history.json");
                 var settings=new Dictionary<string,object>{{"providers",new object[]{new Dictionary<string,object>{{"id",provider},{"name","Generated browser loopback mock"},{"kind","libretranslate"},{"baseUrl",mockUrl},{"requiresApiKey",false},{"enabled",true},{"model",""},{"prompt",""}}}},{"ocrProviders",new object[0]},{"sourceLanguage","auto"},{"targetLanguage","auto"},{"languageDirectionVersion",1},{"shortcutDefaultsVersion",1},{"saveHistory",true},{"maxHistory",100},{"theme","light"},{"autoHideSeconds",0},{"shortcuts",new Dictionary<string,object>{{"selection","Alt+D"},{"silentOcr",""},{"ocr",""},{"capture",""},{"input",""}}}};
                 File.WriteAllText(Path.Combine(roaming,"settings.json"),Json.Serialize(settings),new UTF8Encoding(false));
-                ProcessStartInfo start=new ProcessStartInfo(executable);start.UseShellExecute=false;start.CreateNoWindow=true;string temp=Path.Combine(root,"Temp");Directory.CreateDirectory(temp);start.EnvironmentVariables["TEMP"]=temp;start.EnvironmentVariables["TMP"]=temp;start.EnvironmentVariables["LOCALAPPDATA"]=local;start.EnvironmentVariables["WEBVIEW2_USER_DATA_FOLDER"]=Path.Combine(local,"webview-browser-fixture");app=Process.Start(start);Need(app.WaitForInputIdle(15000),"APP_NATIVE_INPUT_IDLE_DEADLINE");
+                ProcessStartInfo start=new ProcessStartInfo(executable);start.UseShellExecute=false;start.CreateNoWindow=true;string temp=Path.Combine(root,"Temp");Directory.CreateDirectory(temp);start.EnvironmentVariables["ECHOLINGO_CLIPBOARD_DIAGNOSTIC_NONCE"]=ProbeNonce;start.EnvironmentVariables["TEMP"]=temp;start.EnvironmentVariables["TMP"]=temp;start.EnvironmentVariables["LOCALAPPDATA"]=local;start.EnvironmentVariables["WEBVIEW2_USER_DATA_FOLDER"]=Path.Combine(local,"webview-browser-fixture");app=Process.Start(start);Need(app.WaitForInputIdle(15000),"APP_NATIVE_INPUT_IDLE_DEADLINE");
                 WaitNative(delegate{Need(!app.HasExited,"APP_EXITED_BEFORE_NATIVE_MAIN");main=OwnMain();return main!=IntPtr.Zero;},20000,"APP_NATIVE_MAIN_DEADLINE");WaitNative(NativeReady,15000,"APP_HOTKEY_HOST_AND_TRAY_DEADLINE");Need(!IsWindowVisible(main),"APP_DID_NOT_START_SILENTLY");Identity["applicationProcessId"]=app.Id;Identity["mainHwnd"]=WindowId(main);
                 uiThread=new Thread(delegate(){while(true){wake.WaitOne();Action next;lock(uiGate){next=pending;pending=null;}if(next!=null)next();if(uiStop)return;}});uiThread.IsBackground=true;uiThread.SetApartmentState(ApartmentState.MTA);uiThread.Start();
             }catch{Close();throw;}
@@ -280,6 +323,7 @@ public static class WindowsBrowserSelectionBridge {
             var fields=new HashSet<string>(new string[]{"attemptId","attemptPhase","nativeBoundaryStage","configuredCopyStrategy","actionErrorKind","actionResultOk","actionResultNonempty","sourceSnapshotOutcome","sourceCurrentAtWorker","selectionQueryCount","helperResponseReceived","helperElapsedMilliseconds","helperResultNonempty","cancellationRequested","cancellationSignalled","cancellationSignalFailed"});
             foreach(string key in new string[]{"copyStrategy","copyPhase","copyNativeContextValid","copyNativeContextChecks","copyNativeGuardReason","copyNativeInvalidReason","copyNativeGtiSucceeded","copyNativeGtiFlags","copyNativeFocusPresent","copyNativeFocusProcessMatchesForeground","copyNativeFocusRootMatchesForeground","copyNativeActivePresent","copyNativeActiveRootMatchesForeground","copyNativeEditable","copyNativeProtection","copyNativeSelectionKnown","copyNativeSelectionNonempty","copyProtectionProbe","copyProtectionProbeMilliseconds","copyProtectionUnknown","copySnapshotOutcome","copyDispatchInserted","copyOwnInputObserved","copyOwnerOutcome","copyClipboardRestored","copyTerminalReason"})fields.Add(key);
             foreach(string suffix in new string[]{"Stage","Depth","IdentityCompared","IdentityEqual","RootWalkReason","ExceptionKind","Milliseconds"})for(int index=1;index<=16;index++)fields.Add("selectionQuery"+index+suffix);
+            foreach(string key in new string[]{"copyHtmlProbeEnabled","copyHtmlSnapshotOlePresent","copyHtmlSnapshotOleChars","copyHtmlSnapshotEqual","copyHtmlRestoreEqual","copyHtmlSnapshotError","copyHtmlSnapshotSeedVerified","copyHtmlSnapshotPresent","copyHtmlSnapshotAllocatedBytes","copyHtmlSnapshotPayloadBytes","copyHtmlSnapshotSequenceChanged","copyHtmlRestoreError","copyHtmlRestoreSeedVerified","copyHtmlRestorePresent","copyHtmlRestoreAllocatedBytes","copyHtmlRestorePayloadBytes","copyHtmlRestoreSequenceChanged"})fields.Add(key);
             return fields;
         }
         // Observe only after acceptance has already failed. The existing CLI

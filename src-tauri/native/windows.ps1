@@ -127,9 +127,22 @@ public static class CaptureHealth {
     public static void Increment(string name) { long value;values.TryGetValue(name,out value);values[name]=value+1; }
     public static void ResetSelection() {
         List<string> old = new List<string>();
-        foreach (string key in values.Keys) if (key.StartsWith("selectionQuery", StringComparison.Ordinal)) old.Add(key);
+        foreach (string key in values.Keys) if (key.StartsWith("selectionQuery", StringComparison.Ordinal) || key.StartsWith("copyHtml", StringComparison.Ordinal)) old.Add(key);
         foreach (string key in old) values.Remove(key);
         values["selectionQueryCount"] = 0;
+    }
+    public static int ResetSelectionSelfTest() {
+        Dictionary<string, long> previous = Snapshot();
+        try {
+            values.Clear(); values["copyHtmlSnapshotSeedVerified"] = 1; values["copyHtmlRestoreEqual"] = 1;
+            values["selectionQuery1Stage"] = 11; values["unrelatedFixtureCounter"] = 7;
+            ResetSelection();
+            if (values.ContainsKey("copyHtmlSnapshotSeedVerified") || values.ContainsKey("copyHtmlRestoreEqual") || values.ContainsKey("selectionQuery1Stage")) throw new Exception("PROBE_EARLY_FAILURE_STALE_HEALTH");
+            if (values["selectionQueryCount"] != 0 || values["unrelatedFixtureCounter"] != 7 || values.Count != 2) throw new Exception("PROBE_RESET_CHANGED_OTHER_HEALTH");
+            ResetSelection();
+            if (values.Count != 2) throw new Exception("PROBE_DISABLED_ATTEMPT_ADDED_HEALTH");
+            return 2;
+        } finally { values.Clear(); foreach (KeyValuePair<string, long> pair in previous) values[pair.Key] = pair.Value; }
     }
     public static Dictionary<string, long> Snapshot() { return new Dictionary<string, long>(values); }
 }
@@ -246,6 +259,95 @@ sealed class SelectionCopyObserver : IDisposable {
         if (threadId != 0 && running && !PostThreadMessage(threadId, 0x12, UIntPtr.Zero, IntPtr.Zero)) failure = "stop";
         if (thread.IsAlive && !thread.Join(1000)) { failure = "join"; return; }
         ready.Dispose(); GC.KeepAlive(callback);
+    }
+}
+
+// Explicit generated-fixture diagnostics only. Never changes clipboard data or
+// the copy verdict; raw reads require the unpredictable fixture marker first.
+public sealed class ClipboardHtmlProbe {
+    [DllImport("user32.dll")] static extern uint GetClipboardSequenceNumber();
+    [DllImport("user32.dll")] static extern bool OpenClipboard(IntPtr owner);
+    [DllImport("user32.dll")] static extern bool CloseClipboard();
+    [DllImport("user32.dll")] static extern bool IsClipboardFormatAvailable(uint format);
+    [DllImport("user32.dll", CharSet=CharSet.Unicode)] static extern uint RegisterClipboardFormat(string name);
+    [DllImport("user32.dll")] static extern IntPtr GetClipboardData(uint format);
+    [DllImport("kernel32.dll")] static extern UIntPtr GlobalSize(IntPtr value);
+    [DllImport("kernel32.dll")] static extern IntPtr GlobalLock(IntPtr value);
+    [DllImport("kernel32.dll")] static extern bool GlobalUnlock(IntPtr value);
+    readonly string nonce; byte[] original;
+    ClipboardHtmlProbe(string value) { nonce = value; }
+    public static bool ValidNonce(string value) {
+        if (value == null || value.Length != 32) return false;
+        foreach (char c in value) if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f'))) return false;
+        return true;
+    }
+    static bool Equal(byte[] a, byte[] b) {
+        if (a == null || b == null || a.Length != b.Length) return false;
+        for (int i = 0; i < a.Length; i++) if (a[i] != b[i]) return false;
+        return true;
+    }
+    static bool MarkerMatches(byte[] marker, string nonce) {
+        if (!ValidNonce(nonce) || marker == null || marker.Length < 32) return false;
+        for (int i = 0; i < 32; i++) if (marker[i] != (byte)nonce[i]) return false;
+        return true;
+    }
+    static byte[] Payload(byte[] allocated) {
+        if (allocated == null || allocated.Length > 65536) throw new InvalidOperationException();
+        int length = Array.IndexOf<byte>(allocated, 0);
+        if (length < 0) throw new InvalidOperationException();
+        byte[] result = new byte[length + 1]; Array.Copy(allocated, result, result.Length); return result;
+    }
+    static byte[] Memory(uint format) {
+        IntPtr handle = GetClipboardData(format); if (handle == IntPtr.Zero) throw new InvalidOperationException();
+        ulong length = GlobalSize(handle).ToUInt64(); if (length == 0 || length > 65536) throw new InvalidOperationException();
+        IntPtr pointer = GlobalLock(handle); if (pointer == IntPtr.Zero) throw new InvalidOperationException();
+        try { byte[] bytes = new byte[(int)length]; Marshal.Copy(pointer, bytes, 0, bytes.Length); return bytes; }
+        finally { GlobalUnlock(handle); }
+    }
+    byte[] ReadBoundary(string phase) {
+        string prefix = "copyHtml" + phase; uint sequence = GetClipboardSequenceNumber(); bool opened = false;
+        try {
+            opened = OpenClipboard(IntPtr.Zero); if (!opened) { CaptureHealth.Set(prefix + "Error", 1); return null; }
+            uint marker = RegisterClipboardFormat("EchoLingo.ClipboardProbe." + nonce);
+            if (!IsClipboardFormatAvailable(marker)) { CaptureHealth.Set(prefix + "Error", 2); return null; }
+            if (!MarkerMatches(Memory(marker), nonce)) { CaptureHealth.Set(prefix + "Error", 3); return null; }
+            CaptureHealth.Set(prefix + "SeedVerified", 1);
+            uint html = RegisterClipboardFormat(DataFormats.Html);
+            bool present = IsClipboardFormatAvailable(html); CaptureHealth.Set(prefix + "Present", present ? 1 : 0);
+            if (!present) return null;
+            byte[] bytes = Memory(html); CaptureHealth.Set(prefix + "AllocatedBytes", bytes.Length);
+            byte[] payload = Payload(bytes); CaptureHealth.Set(prefix + "PayloadBytes", payload.Length); return payload;
+        } catch { CaptureHealth.Set(prefix + "Error", 4); return null; }
+        finally {
+            CaptureHealth.Set(prefix + "SequenceChanged", sequence == GetClipboardSequenceNumber() ? 0 : 1);
+            if (opened) CloseClipboard();
+        }
+    }
+    public static ClipboardHtmlProbe Begin() {
+        string nonce = Environment.GetEnvironmentVariable("ECHOLINGO_CLIPBOARD_DIAGNOSTIC_NONCE");
+        if (!ValidNonce(nonce)) return null;
+        foreach (string field in new string[] { "copyHtmlProbeEnabled", "copyHtmlSnapshotOlePresent", "copyHtmlSnapshotOleChars", "copyHtmlSnapshotEqual", "copyHtmlRestoreEqual", "copyHtmlSnapshotError", "copyHtmlSnapshotSeedVerified", "copyHtmlSnapshotPresent", "copyHtmlSnapshotAllocatedBytes", "copyHtmlSnapshotPayloadBytes", "copyHtmlSnapshotSequenceChanged", "copyHtmlRestoreError", "copyHtmlRestoreSeedVerified", "copyHtmlRestorePresent", "copyHtmlRestoreAllocatedBytes", "copyHtmlRestorePayloadBytes", "copyHtmlRestoreSequenceChanged" }) CaptureHealth.Set(field, 0);
+        ClipboardHtmlProbe probe = new ClipboardHtmlProbe(nonce); CaptureHealth.Set("copyHtmlProbeEnabled", 1);
+        probe.original = probe.ReadBoundary("Snapshot"); return probe;
+    }
+    public void SnapshotValue(object value) {
+        string text = value as string; CaptureHealth.Set("copyHtmlSnapshotOlePresent", text == null ? 0 : 1);
+        if (text == null) return;
+        CaptureHealth.Set("copyHtmlSnapshotOleChars", Math.Min(10000000, text.Length));
+        CaptureHealth.Set("copyHtmlSnapshotEqual", original != null && text.Length <= 65536 && Equal(original, Encoding.UTF8.GetBytes(text + '\0')) ? 1 : 0);
+    }
+    public void Restored() {
+        byte[] restored = ReadBoundary("Restore");
+        CaptureHealth.Set("copyHtmlRestoreEqual", Equal(original, restored) ? 1 : 0);
+    }
+    public static int SelfTest() {
+        string nonce = "0123456789abcdef0123456789abcdef"; int count = 0;
+        if (!ValidNonce(nonce) || ValidNonce(null) || ValidNonce(nonce + "a") || ValidNonce(nonce.ToUpperInvariant())) throw new Exception("PROBE_NONCE_POLICY"); count++;
+        if (!MarkerMatches(Encoding.ASCII.GetBytes(nonce + "padding"), nonce) || MarkerMatches(Encoding.ASCII.GetBytes(nonce.Substring(1)), nonce) || MarkerMatches(Encoding.ASCII.GetBytes(new string('a', 32)), nonce)) throw new Exception("PROBE_MARKER_POLICY"); count++;
+        if (!Equal(Payload(new byte[] { 65, 0, 99 }), new byte[] {65, 0}) || Equal(new byte[] {65, 0}, new byte[] {0}) || Equal(null, null)) throw new Exception("PROBE_PAYLOAD_POLICY"); count++;
+        bool rejected = false; try { Payload(new byte[] {65}); } catch (InvalidOperationException) { rejected = true; }
+        if (!rejected) throw new Exception("PROBE_TERMINATOR_POLICY"); count++;
+        return count + CaptureHealth.ResetSelectionSelfTest();
     }
 }
 
@@ -1067,12 +1169,14 @@ public static class EchoLingoNative {
         if (value is string || value.GetType().IsValueType) return value;
         throw new InvalidOperationException("Unsupported clipboard representation: " + value.GetType().Name);
     }
-    static DataObject SnapshotClipboard(List<IDisposable> resources) {
+    static DataObject SnapshotClipboard(List<IDisposable> resources, out ClipboardHtmlProbe probe) {
+        probe = ClipboardHtmlProbe.Begin();
         IDataObject existing = Clipboard.GetDataObject();
         DataObject saved = new DataObject();
         if (existing == null) return saved;
         foreach (string format in existing.GetFormats(false)) {
             object value = CloneClipboardValue(existing.GetData(format, false));
+            if (probe != null && format == DataFormats.Html) probe.SnapshotValue(value);
             IDisposable disposable = value as IDisposable;
             if (disposable != null) resources.Add(disposable);
             saved.SetData(format, false, value);
@@ -1250,10 +1354,10 @@ public static class EchoLingoNative {
         // It never claims the strict auto path's complete ancestor guarantee.
         if (protection == 1) CaptureHealth.Set("copyProtectionUnknown", 0);
         SelectionCopyPolicy.RequireCompatibilitySelection(protection == 1, false, false, 0, 0);
-        List<IDisposable> resources = new List<IDisposable>(); DataObject saved;
+        List<IDisposable> resources = new List<IDisposable>(); DataObject saved; ClipboardHtmlProbe htmlProbe;
         uint initial = GetClipboardSequenceNumber();
         try {
-            NativeCancellation.ThrowIfRequested(); saved = SnapshotClipboard(resources);
+            NativeCancellation.ThrowIfRequested(); saved = SnapshotClipboard(resources, out htmlProbe);
             SelectionCopyPolicy.RequireCurrentSequence(initial, GetClipboardSequenceNumber());
             CaptureHealth.Set("copySnapshotOutcome", 1);
         } catch (OperationCanceledException) { foreach (IDisposable resource in resources) resource.Dispose(); throw; }
@@ -1261,10 +1365,10 @@ public static class EchoLingoNative {
             CaptureHealth.Set("copySnapshotOutcome", 2); foreach (IDisposable resource in resources) resource.Dispose();
             throw new InvalidOperationException("CLIPBOARD: Cannot preserve all clipboard formats. Selection capture was stopped before changing the clipboard. " + error.Message);
         }
-        try { return CopyCompatiblePreservedClipboard(context, expected, nativeEditable, saved, initial); }
+        try { return CopyCompatiblePreservedClipboard(context, expected, nativeEditable, saved, initial, htmlProbe); }
         finally { foreach (IDisposable resource in resources) resource.Dispose(); }
     }
-    static string CopyCompatiblePreservedClipboard(SelectionContext context, SelectionCopyPolicy.NativeContext expected, bool nativeEditable, DataObject saved, uint initial) {
+    static string CopyCompatiblePreservedClipboard(SelectionContext context, SelectionCopyPolicy.NativeContext expected, bool nativeEditable, DataObject saved, uint initial, ClipboardHtmlProbe htmlProbe) {
         RequireNativeCopyContext(expected, 4);
         if (ModifiersDown()) throw new InvalidOperationException("SELECTION: Shortcut modifiers changed before copy; retry.");
         SelectionCopyPolicy.RequireCurrentSequence(initial, GetClipboardSequenceNumber());
@@ -1300,6 +1404,7 @@ public static class EchoLingoNative {
                         throw new InvalidOperationException("CLIPBOARD_RESTORE_FAILED: Could not restore original clipboard formats. " + error.Message);
                     }
                     CaptureHealth.Set("copyClipboardRestored", 1);
+                    if (htmlProbe != null) htmlProbe.Restored();
                 }, delegate { return clock.ElapsedMilliseconds; }, delegate { Thread.Sleep(5); }, null,
                 delegate { RequireNativeCopyContext(expected, 6); },
                 delegate {
@@ -1363,11 +1468,11 @@ public static class EchoLingoNative {
         }
         RequireSelectionContext(context);
         List<IDisposable> resources = new List<IDisposable>();
-        DataObject saved;
+        DataObject saved; ClipboardHtmlProbe htmlProbe;
         uint initial = GetClipboardSequenceNumber();
         try {
             NativeCancellation.ThrowIfRequested();
-            saved = SnapshotClipboard(resources);
+            saved = SnapshotClipboard(resources, out htmlProbe);
             if (GetClipboardSequenceNumber() != initial) throw new InvalidOperationException("Clipboard changed while its formats were being preserved. Retry.");
         }
         catch (OperationCanceledException) {
@@ -1435,6 +1540,7 @@ public static class EchoLingoNative {
                                     || error.Message.StartsWith("CLIPBOARD_RESTORE_SKIPPED:", StringComparison.Ordinal)) throw;
                                 throw new InvalidOperationException("CLIPBOARD_RESTORE_FAILED: Could not restore original clipboard formats. " + error.Message);
                             }
+                            if (htmlProbe != null) htmlProbe.Restored();
                         }, delegate { return clock.ElapsedMilliseconds; }, delegate { Thread.Sleep(5); },
                         Environment.GetEnvironmentVariable("ECHOLINGO_SELECTION_TRACE") == "1"
                             ? (Action<string>)delegate(string message) { Console.Error.WriteLine(message); } : null,
@@ -1592,8 +1698,8 @@ public sealed class CaptureSelectionState {
         int topologyAssertions = CaptureTopologyPolicy.SelfTest();
         int outlineAssertions = CaptureOutlinePolicy.SelfTest();
         int hoverAssertions = CaptureHoverPolicy.SelfTest(), redrawAssertions = CaptureMoveMailbox.SelfTest(), healthAssertions = CaptureInputHealthPolicy.SelfTest();
-        int magnifierAssertions = CaptureMagnifierSample.SelfTest(), zOrderAssertions = CaptureZOrderPolicy.SelfTest();
-        return new Dictionary<string, object> { { "captureStateFixturePassed", true }, { "fixtureAssertions", 11 + inputAssertions + topologyAssertions + outlineAssertions + hoverAssertions + redrawAssertions + healthAssertions + magnifierAssertions + zOrderAssertions }, { "inputPolicyAssertions", inputAssertions }, { "topologyPolicyAssertions", topologyAssertions }, { "outlinePolicyAssertions", outlineAssertions }, { "hoverPolicyAssertions", hoverAssertions }, { "redrawPolicyAssertions", redrawAssertions }, { "inputHealthPolicyAssertions", healthAssertions }, { "magnifierSampleAssertions", magnifierAssertions }, { "zOrderPolicyAssertions", zOrderAssertions }, { "hoverQueryMilliseconds", CaptureHoverPolicy.QueryMilliseconds }, { "releaseGraceMilliseconds", 500 }, { "screenCaptured", false }, { "clipboardChanged", false }, { "interactiveCaptureTested", false } };
+        int magnifierAssertions = CaptureMagnifierSample.SelfTest(), zOrderAssertions = CaptureZOrderPolicy.SelfTest(), clipboardProbeAssertions = ClipboardHtmlProbe.SelfTest();
+        return new Dictionary<string, object> { { "captureStateFixturePassed", true }, { "fixtureAssertions", 11 + inputAssertions + topologyAssertions + outlineAssertions + hoverAssertions + redrawAssertions + healthAssertions + magnifierAssertions + zOrderAssertions + clipboardProbeAssertions }, { "inputPolicyAssertions", inputAssertions }, { "topologyPolicyAssertions", topologyAssertions }, { "outlinePolicyAssertions", outlineAssertions }, { "hoverPolicyAssertions", hoverAssertions }, { "redrawPolicyAssertions", redrawAssertions }, { "inputHealthPolicyAssertions", healthAssertions }, { "magnifierSampleAssertions", magnifierAssertions }, { "zOrderPolicyAssertions", zOrderAssertions }, { "clipboardProbeAssertions", clipboardProbeAssertions }, { "hoverQueryMilliseconds", CaptureHoverPolicy.QueryMilliseconds }, { "releaseGraceMilliseconds", 500 }, { "screenCaptured", false }, { "clipboardChanged", false }, { "interactiveCaptureTested", false } };
     }
 }
 

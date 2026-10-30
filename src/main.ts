@@ -1,4 +1,5 @@
 import './styles.css';
+import { installServiceManager } from './service-manager';
 import { renderTranslationParagraphs } from './translation-text-layout';
 import { installUpdateNotice } from './update-notice-ui';
 import { createOcrUi } from './ocr-ui';
@@ -11,7 +12,7 @@ import { HistoryCache } from './history-cache';
 import { mergeProviderRetry, sameTranslationSnapshot, type TranslationSnapshot } from './translation-retry';
 import { credentialScope } from './credential-scope';
 import { credentialMayExist, credentialStateOf, credentialStatusLabel } from './credential-state';
-import { inferProviderPreset, PROVIDER_PRESETS, qwenBaseUrl, qwenSettingsFromUrl } from './provider-presets';
+import { isLocalOllama, inferProviderPreset, PROVIDER_PRESETS, qwenBaseUrl, qwenSettingsFromUrl } from './provider-presets';
 import type { QwenRegion } from './provider-presets';
 import { installFreeSetup } from './free-setup-ui';
 import { buildTranslationCredential, isNativeTranslation, TRANSLATION_NATIVE_URLS } from './translation-credentials';
@@ -89,7 +90,7 @@ let saveQueue: Promise<void> = Promise.resolve();
 let settingsReady = !desktop;
 let currentView = 'translate';
 let currentResults: TranslationResult[] = [];
-interface ResultView { card: HTMLElement; body: HTMLElement; actions: HTMLButtonElement[]; result: TranslationResult; done: boolean; sequence: number; providerKind?: ProviderKind }
+interface ResultView { card: HTMLElement; body: HTMLElement; preservedNotice: HTMLElement; actions: HTMLButtonElement[]; result: TranslationResult; done: boolean; sequence: number; providerKind?: ProviderKind }
 const progressViews = new Map<string, ResultView>();
 let progressEpoch: number | null = null;
 let resultSource = '';
@@ -176,13 +177,13 @@ function requireDesktop(): boolean {
 function reportError(error: unknown): void { toast(userFacingError(error), 'error', 6500); }
 function run(work: () => Promise<unknown>): void { void work().catch(reportError); }
 function setView(view: string, skipSystemStatusRefresh = false): void {
-  if (!['translate', 'history', 'settings'].includes(view)) return;
+  if (!['translate', 'history', 'settings', 'services'].includes(view)) return;
   if (view !== 'translate') endSourceInputSession();
   if (currentView === 'settings' && view !== 'settings') shortcutEditor.leave();
   if (view !== currentView) focusIntentRevision += 1;
   closeMoreMenu();
   currentView = view; document.body.dataset.view = view;
-  $('#management-title').textContent = view === 'history' ? '历史与收藏' : '设置';
+  $('#management-title').textContent = view === 'history' ? '历史与收藏' : view === 'services' ? '服务管理' : '设置';
   for (const section of document.querySelectorAll<HTMLElement>('.view')) section.hidden = section.id !== `view-${view}`;
   for (const button of document.querySelectorAll<HTMLButtonElement>('button[data-view]')) {
     const selected = button.dataset.view === view;
@@ -597,13 +598,18 @@ function speak(text: string, language: string): void {
 }
 function updateResultView(view: ResultView, result: TranslationResult, done: boolean): void {
   view.result = result; view.done = done;
+  view.preservedNotice.hidden = !done || !result.preserved;
+  view.actions[0].setAttribute('aria-label', result.preserved ? '朗读原文' : '朗读译文');
+  view.actions[1].setAttribute('aria-label', result.preserved ? '复制原文' : '复制译文');
+  for (const button of view.actions.slice(0, 2)) button.title = button.getAttribute('aria-label')!;
+  view.actions[0].parentElement?.setAttribute('aria-label', `${result.providerName}${result.preserved ? '原文' : '译文'}操作`);
   view.card.setAttribute('aria-busy', String(!done));
   view.body.className = result.error ? 'result-error' : !done && !result.text ? 'result-loading' : 'result-text';
   const setupPair = needsSystemTranslationSetup(view) ? systemTranslationSetupPair(result.resolvedLanguages) : null;
   const content = result.error ? userFacingError(result.error) + (setupPair
     ? ` 本次语言组合：${languageName(setupPair.sourceLanguage)} → ${languageName(setupPair.targetLanguage)}。若原文语言识别不正确，请手动选择源语言后重试。` : '') : result.text;
   const previous = view.body.textContent ?? '';
-  const compact = done && !result.error;
+  const compact = done && !result.error && !result.preserved;
   const layoutChanged = view.body.dataset.paragraphLayout !== String(compact);
   view.body.dataset.paragraphLayout = String(compact);
   if (compact && (content !== previous || layoutChanged)) {
@@ -662,10 +668,12 @@ function createResultView(result: TranslationResult, done: boolean, providerKind
   const header = node('div', 'result-card-header');
   const name = node('span', 'result-provider');
   name.append(node('span', 'provider-dot'), document.createTextNode(result.providerName));
-  header.append(name);
+  const preservedNotice = node('span', 'result-preserved', '原文（无需翻译，未调用服务）');
+  preservedNotice.hidden = true;
+  header.append(name, preservedNotice);
   const body = node('p');
   const actions = node('div', 'result-actions'); actions.setAttribute('role', 'group'); actions.setAttribute('aria-label', `${result.providerName}译文操作`);
-  const view: ResultView = { card, body, actions: [], result, done, sequence: 0, providerKind };
+  const view: ResultView = { card, body, preservedNotice, actions: [], result, done, sequence: 0, providerKind };
   const read = actionButton('朗读译文', 'audio', () => speak(view.result.text, targetLanguage.value));
   const copy = actionButton('复制译文', 'copy', () => run(() => copyText(view.result.text)));
   const retry = actionButton('重试此服务', 'history', () => {
@@ -707,7 +715,7 @@ function renderResults(results: TranslationResult[]): void {
     if (resultsContainer.children[index] !== card) resultsContainer.insertBefore(card, resultsContainer.children[index] ?? null);
   });
   const success = results.filter((result) => !result.error).length;
-  $('#translation-state').textContent = success === results.length ? '翻译完成' : `${success} / ${results.length} 个服务成功`;
+  $('#translation-state').textContent = results.every((result) => result.preserved && !result.error) ? '原文已保留' : success === results.length ? '翻译完成' : `${success} / ${results.length} 个服务成功`;
   if (results.some((result) => result.error || !result.text.trim())) {
     const weakSignal = results.some((result) => result.error) ? '翻译失败' : '服务返回错误';
     maybeSoftEngineHint(weakSignal);
@@ -723,13 +731,14 @@ function restoreHistoryResults(entry: HistoryEntry): void {
     }
     select.value = value;
   }
-  currentResults = entry.results; resultSource = entry.text.trim();
+  currentResults = entry.results; resultSource = entry.text;
   resultSnapshot = { text: resultSource, sourceLanguage: entry.sourceLanguage, targetLanguage: entry.targetLanguage };
   renderResults(entry.results);
 }
 async function translate(providerId?: string): Promise<void> {
-  const text = source.value.trim();
-  if (!text || translating) return;
+  recordInputDiagnostic('translateStart');
+  const text = source.value;
+  if (!text.trim() || translating) return;
   if (!settingsReady) throw new Error('设置正在加载，请稍候。');
   if (text.length > MAX_TEXT_LENGTH) throw new Error('每次最多翻译 20,000 字符。');
   if (!requireDesktop()) return;
@@ -773,16 +782,20 @@ async function translate(providerId?: string): Promise<void> {
       progressViews.set(provider.id, view);
     }
     const requestId = await beginTranslation(presentationEpoch);
+    recordInputDiagnostic('ticket', undefined, { epoch: presentationEpoch, generation: token });
     if (token !== generation) { await invoke('cancel_translation', { requestId }); return; }
     activeTranslationId = requestId;
+    recordInputDiagnostic('dispatch', undefined, { epoch: presentationEpoch, generation: token });
     const results = await invoke<TranslationResult[]>('translate', { requestId, text, sourceLanguage: from, targetLanguage: to, ...(retrying ? { providerId } : {}) });
     if (token !== generation) return;
+    recordInputDiagnostic('complete', undefined, { epoch: presentationEpoch, generation: token });
     currentResults = retrying ? mergeProviderRetry(previousResults, providerId, results) : results;
     resultSource = text;
     resultSnapshot = snapshot;
     renderResults(currentResults);
-    status(results.some((result) => !result.error) ? '翻译完成' : '服务返回错误');
+    status(results.every((result) => result.preserved && !result.error) ? '原文已保留' : results.some((result) => !result.error) ? '翻译完成' : '服务返回错误');
   } catch (error) {
+    recordInputDiagnostic('error', undefined, { epoch: presentationEpoch, generation: token });
     if (token !== generation) return;
     if (errorMessage(error).startsWith('CANCELLED:')) { invalidateResults(true); status('翻译已取消'); return; }
     if (retrying) {
@@ -807,6 +820,7 @@ async function translate(providerId?: string): Promise<void> {
     await refreshHistory().catch(() => undefined);
   }
 }
+let serviceManager: { render: () => void } = { render() {} };
 let coreGuidanceProblem: CoreShortcutProblem | null = null;
 function renderCoreGuidance(): void {
   const guidance = $('#core-guidance');
@@ -960,7 +974,22 @@ function renderHistory(): void {
     item.append(reopen); list.append(item);
   }
 }
-function providerKindLabel(kind: ProviderKind): string { return { offline: '本机离线翻译', system: '系统翻译', baidu: '百度翻译', youdao: '有道翻译', microsoft: '微软翻译', openai: 'OpenAI 兼容', deepl: 'DeepL', libretranslate: 'LibreTranslate', volcengine: '火山引擎机器翻译', aliyun: '阿里云机器翻译' }[kind]; }
+function providerKindLabel(kind: ProviderKind): string { return { offline: '本机离线翻译', system: '系统翻译', baidu: '百度翻译', youdao: '有道翻译', microsoft: '微软翻译', openai: 'OpenAI 兼容', deepl: 'DeepL', libretranslate: 'LibreTranslate', volcengine: '火山引擎机器翻译', aliyun: '阿里云机器翻译', niutrans: '小牛翻译', 'google-translate': 'Google Cloud Translation', caiyun: '彩云小译' }[kind]; }
+const translationServiceTests = new Map<string, Promise<void>>();
+function testTranslationService(id: string): Promise<void> {
+  const current = translationServiceTests.get(id); if (current) return current;
+  const task = (async () => {
+    if (!requireDesktop()) return;
+    const provider = settings.providers.find(item => item.id === id); if (!provider) return;
+    toast(isLocalProvider(provider.kind) ? '正在使用本机服务翻译 Hello。' : '正在发送 Hello 测试连接，可能消耗少量 API 额度。');
+    try { toast(await invoke<string>('test_provider', { providerId: id }) || '服务连接成功。'); }
+    finally {
+      try { settings = await invoke<Settings>('get_settings'); renderSettings(); }
+      catch (error) { reportError(error); }
+    }
+  })().finally(() => { translationServiceTests.delete(id); });
+  translationServiceTests.set(id, task); return task;
+}
 function renderProviders(): void {
   const list = $('#provider-list'); list.replaceChildren();
   $<HTMLButtonElement>('#add-provider').disabled = !settingsReady || settings.providers.length >= 12;
@@ -970,11 +999,11 @@ function renderProviders(): void {
     list.append(empty); return;
   }
   for (const provider of settings.providers) {
-    const row = node('div', 'provider-row');
+    const row = node('div', 'provider-row'); row.dataset.serviceId = provider.id;
     row.append(node('span', 'provider-avatar', provider.name.slice(0, 1).toUpperCase()));
     const info = node('div', 'provider-info');
     const title = node('div', 'provider-title', provider.name);
-    if (isLocalProvider(provider.kind)) title.append(node('span', 'provider-key-badge', '· 无需 API Key'));
+    if (isLocalProvider(provider.kind) || isLocalOllama(provider)) title.append(node('span', 'provider-key-badge', '· 无需 API Key'));
     else title.append(node('span', 'provider-key-badge', `· ${credentialStatusLabel(provider)}`));
     info.append(title, node('span', 'provider-details', provider.kind === 'offline' ? '内置中英模型 · 离线使用 · 无需配置' : provider.kind === 'system' ? '本机语言包 · 首次使用请检查下方准备状态' : `${providerKindLabel(provider.kind)}${provider.model ? ` · ${provider.model}` : ''} · ${provider.baseUrl}`));
     const controls = node('div', 'provider-controls');
@@ -988,25 +1017,21 @@ function renderProviders(): void {
     const test = node('button', 'text-button', testLabel);
     test.title = provider.kind === 'offline' ? '使用内置模型离线翻译 Hello' : provider.kind === 'system' ? '使用已准备的本机语言包翻译 Hello，不会自动下载' : '发送 Hello 测试服务，可能消耗少量 API 额度';
     test.addEventListener('click', () => run(async () => {
-      if (!requireDesktop()) return;
       test.disabled = true; test.textContent = '测试中…';
-      toast(provider.kind === 'offline' ? '正在使用内置模型离线翻译 Hello。' : provider.kind === 'system' ? '正在使用本机语言包翻译 Hello。' : '正在发送 Hello 测试连接，可能消耗少量 API 额度。');
-      try {
-        const message = await invoke<string>('test_provider', { providerId: provider.id });
-        toast(message || '服务连接成功。');
-      } finally {
-        test.disabled = false; test.textContent = testLabel;
-        try { settings = await invoke<Settings>('get_settings'); renderProviders(); }
-        catch (error) { reportError(error); }
-      }
+      try { await testTranslationService(provider.id); }
+      finally { test.disabled = false; test.textContent = testLabel; }
     }));
     const edit = node('button', 'text-button', '编辑'); edit.addEventListener('click', () => openProviderDialog(provider));
     const remove = actionButton(`删除 ${provider.name}`, 'trash', () => run(async () => {
+      if (isLocalProvider(provider.kind)) return;
       if (!await confirmAction('删除翻译服务？', isLocalProvider(provider.kind) ? `将移除“${provider.name}”配置。已安装的本机语言资源会保留。` : `将移除“${provider.name}”及其已保存的 API 密钥。`)) return;
       if (desktop && !isLocalProvider(provider.kind)) await invoke('delete_api_key', { providerId: provider.id });
       await updateSettings((next) => { next.providers = next.providers.filter((item) => item.id !== provider.id); });
       toast('翻译服务已删除。');
     }));
+    test.dataset.serviceAction = 'test'; edit.dataset.serviceAction = 'edit'; remove.dataset.serviceAction = 'remove';
+    // Built-in capabilities can be disabled but never removed from this UI.
+    remove.hidden = isLocalProvider(provider.kind); remove.disabled = isLocalProvider(provider.kind);
     controls.append(enabled, test, edit, remove); row.append(info, controls); list.append(row);
   }
 }
@@ -1101,7 +1126,7 @@ function renderSettings(): void {
   $('#app-version').hidden = !settings.appVersion;
   renderProviders(); renderPopupServices();
   renderSystemTranslationSetup();
-  ocrUi.render();
+  ocrUi.render(); serviceManager.render();
   shortcutEditor.render(settings.shortcuts, settingsReady, settings.shortcutRegistration);
   $('#windows-selection-settings').hidden = document.documentElement.dataset.platform !== 'windows';
   $<HTMLSelectElement>('#windows-selection-strategy').value = settings.windowsSelectionStrategy ?? 'copy';
@@ -1173,7 +1198,7 @@ function providerKindChanged(useDefaults = false): void {
   const system = isLocalProvider(kind);
   const native = isNativeTranslation(kind);
   $('#provider-url-field').hidden = system || native;
-  $('#provider-key-field').hidden = system || native;
+  $('#provider-key-field').hidden = system || (native && !['niutrans', 'google-translate', 'caiyun'].includes(kind));
   $('#provider-baidu-credentials').hidden = kind !== 'baidu' && kind !== 'volcengine' && kind !== 'aliyun';
   const baiduLabels = $('#provider-baidu-credentials').querySelectorAll('label');
   const pairLabels = kind === 'volcengine' ? ['AccessKey ID', 'Secret Access Key'] : kind === 'aliyun' ? ['AccessKey ID', 'AccessKey Secret'] : ['APP ID', '密钥'];
@@ -1200,6 +1225,7 @@ function providerKindChanged(useDefaults = false): void {
     system: '系统翻译无需 API 地址。',
     baidu: '使用百度翻译官方固定端点。', youdao: '使用有道文本翻译官方固定端点。', microsoft: '使用 Azure Translator 全球固定端点。',
     volcengine: '使用火山引擎机器翻译固定端点。额度说明核对于 2026-10，可能变化。', aliyun: '使用阿里云机器翻译固定端点，不是百炼。免费额度用完后可能按量计费。',
+    niutrans: '小牛官方固定 HTTPS 端点。', 'google-translate': 'Google Cloud Translation Basic 固定端点。', caiyun: '彩云官方固定 HTTPS 端点。',
     openai: '填写 API 基础地址，无需包含 /chat/completions。DeepSeek、Ollama 等请填写对应地址。',
     deepl: '免费账户通常使用 api-free.deepl.com，付费账户使用 api.deepl.com。无需包含 /v2/translate。',
     libretranslate: '填写你使用的 LibreTranslate 服务地址，无需包含 /translate。',
@@ -1234,7 +1260,7 @@ function closeModal(modal: HTMLElement): void {
   }
   const previous = modalReturnFocus.get(modal);
   modalReturnFocus.delete(modal);
-  const fallback = anotherModal ? modalFocusable(anotherModal)[0] : document.querySelector<HTMLElement>('button[data-view].active');
+  const fallback = anotherModal ? modalFocusable(anotherModal)[0] : currentView === 'services' ? document.querySelector<HTMLElement>('#managed-service-detail h2') : document.querySelector<HTMLElement>('button[data-view].active');
   if (previous?.isConnected && previous.getClientRects().length > 0) previous.focus({ preventScroll: true });
   else fallback?.focus({ preventScroll: true });
   if (!anotherModal && queuedCapture) {
@@ -1447,8 +1473,10 @@ function handleActionError(message: string): void {
     toast(userFacingError(message), 'error', 8000);
     return;
   }
-  // Selection/cancellation compatibility only. Screenshot permission, NO_TEXT,
-  // OCR service failures and translation failures remain actionable errors.
+  // Only selection/cancellation compatibility is suppressed here. The backend
+  // converts a confirmed empty OCR into an epoch-bound blank source, rather
+  // than emitting an unscoped NO_TEXT error that could clear unrelated input.
+  // Permission, provider and clipboard-safety errors remain actionable.
   if (/^(?:NO_SELECTION|SELECTION_EMPTY|CANCELLED):/i.test(message.trim()) || /^未取得选区/.test(message.trim())) return;
   const guidance = /^PERMISSION:/i.test(message.trim()) ? '\n可在“更多 → 设置 → 系统权限”中检查或授权。' : '';
   toast(`${message}${guidance}`, 'error', 8000);
@@ -1463,6 +1491,29 @@ const ocrUi = createOcrUi({
   showModal, closeModal, confirm: confirmAction, toast, reportError,
 });
 
+$('#service-manager-advanced').addEventListener('click', () => setView('settings'));
+$('#open-service-manager').addEventListener('click', () => setView('services'));
+serviceManager = installServiceManager({
+  settings: () => settings, ready: () => settingsReady, reportError, providerKindLabel,
+  add: role => { if (role === 'translation') openProviderDialog(); else ocrUi.open(); },
+  operate: (role, id, operation) => {
+    const list = $(role === 'translation' ? '#provider-list' : '#ocr-provider-list');
+    const row = Array.from(list.children).find(item => (item as HTMLElement).dataset.serviceId === id);
+    row?.querySelector<HTMLButtonElement>(`[data-service-action="${operation}"]`)?.click();
+  },
+  test: (role, id) => role === 'translation' ? testTranslationService(id) : ocrUi.test(id),
+  enable: async (role, id, enabled) => {
+    if (role === 'ocr') { await ocrUi.activate(id || null); return; }
+    await updateSettings(next => { const provider = next.providers.find(p => p.id === id); if (!provider) throw new Error('服务已不存在，请重新选择。'); provider.enabled = enabled; });
+  },
+  recommend: role => {
+    setView('settings');
+    $<HTMLDetailsElement>(`#free-${role}-section`).open = true;
+    const summary = $(`#free-${role}-summary`);
+    summary.scrollIntoView({ block: 'start' }); summary.focus({ preventScroll: true });
+  },
+});
+
 for (const button of document.querySelectorAll<HTMLButtonElement>('button[data-view]')) button.addEventListener('click', () => setView(button.dataset.view ?? 'translate'));
 for (const button of document.querySelectorAll<HTMLButtonElement>('[data-action]')) button.addEventListener('click', () => run(() => runAction(button.dataset.action as Action)));
 $('#copy-source').addEventListener('click', () => run(() => copyText(source.value)));
@@ -1470,7 +1521,27 @@ $('#speak-source').addEventListener('click', () => speak(source.value, sourceLan
 source.addEventListener('compositionstart', () => { sourceComposing = true; });
 source.addEventListener('compositionend', () => { sourceComposing = false; resizeSourceEditor(); });
 source.addEventListener('blur', () => { sourceComposing = false; });
+// Explicit acceptance-only mode; the ordinary app never persists this record.
+// Observe only Enter arrival and fixed request stages, never text/key sequences.
+let inputDiagnosticsEnabled = false, inputDiagnosticSequence = 0, inputDiagnosticsPending = 0;
+let inputDiagnosticQueue: Promise<unknown> = Promise.resolve();
+function recordInputDiagnostic(stage: 'ready' | 'arrival' | 'handler' | 'translateStart' | 'ticket' | 'dispatch' | 'complete' | 'error', event?: KeyboardEvent, request?: { epoch: number; generation: number }): void {
+  if (!inputDiagnosticsEnabled || inputDiagnosticsPending >= 32) return;
+  const record = { stage, sequence: ++inputDiagnosticSequence, timestamp: Date.now(), epoch: translationPresentation.epoch, generation, requestEpoch: request?.epoch ?? null, requestGeneration: request?.generation ?? null,
+    composing: sourceComposing || Boolean(event?.isComposing) || event?.keyCode === 229,
+    shift: Boolean(event?.shiftKey), alt: Boolean(event?.altKey), ctrl: Boolean(event?.ctrlKey), meta: Boolean(event?.metaKey), repeat: Boolean(event?.repeat),
+    translating, sourceNonempty: Boolean(source.value.trim()), sourceFocused: document.activeElement === source, settingsReady };
+  // Ordered, fire-and-forget observation must never delay or retry submission.
+  inputDiagnosticsPending += 1;
+  inputDiagnosticQueue = inputDiagnosticQueue.then(() => invoke('record_frontend_input_diagnostic', { record })).catch(() => {}).finally(() => { inputDiagnosticsPending -= 1; });
+}
+if (desktop) void invoke<boolean>('frontend_input_diagnostics_enabled').then(enabled => {
+  inputDiagnosticsEnabled = enabled === true;
+  recordInputDiagnostic('ready');
+}).catch(() => {});
+document.addEventListener('keydown', event => { if (event.key === 'Enter') recordInputDiagnostic('arrival', event); }, true);
 source.addEventListener('keydown', (event) => {
+  if (event.key === 'Enter') recordInputDiagnostic('handler', event);
   if (event.key !== 'Enter' || isCompositionKey(event)) return;
   if (event.shiftKey || event.altKey) return;
   event.preventDefault(); event.stopPropagation();
@@ -1532,7 +1603,7 @@ $('#swap-language').addEventListener('click', () => {
   if (sourceLanguage.value === 'auto' || targetLanguage.value === 'auto') { toast('自动模式会按原文决定翻译方向；需要交换时，请先选择具体语言。'); return; }
   const previousSource = sourceLanguage.value;
   sourceLanguage.value = targetLanguage.value; targetLanguage.value = previousSource;
-  if (currentResults.find((result) => !result.error)?.text && resultSource === source.value.trim()) setSourceText(currentResults.find((result) => !result.error)!.text);
+  if (currentResults.find((result) => !result.error)?.text && resultSource === source.value) setSourceText(currentResults.find((result) => !result.error)!.text);
   else invalidateResults();
   run(() => updateSettings((next) => { next.sourceLanguage = sourceLanguage.value; next.targetLanguage = targetLanguage.value; }));
 });

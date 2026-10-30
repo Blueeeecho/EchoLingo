@@ -19,11 +19,51 @@ const MIN_POPUP_WIDTH: f64 = 420.0;
 const MAX_INPUT_DIMENSION: f64 = 100_000.0;
 const LAYOUT_FILE: &str = "window-layout.json";
 
+#[cfg(any(target_os = "macos", test))]
+fn current_layout_request(
+    request: u64,
+    latest: u64,
+    expected_style: bool,
+    actual_style: Option<bool>,
+) -> bool {
+    request == latest && actual_style == Some(expected_style)
+}
+
+#[derive(Default)]
+struct ManualPopupHeight {
+    active: Option<(u64, f64)>,
+    saved: Option<(u64, f64)>,
+}
+impl ManualPopupHeight {
+    fn begin(&mut self, epoch: u64, height: f64) {
+        self.active = Some((epoch, height));
+    }
+    fn finish(&mut self, epoch: u64, height: f64) {
+        if self
+            .active
+            .take()
+            .is_some_and(|(started, initial)| started == epoch && (initial - height).abs() > 1.0)
+            && height.is_finite()
+            && height > 0.0
+        {
+            self.saved = Some((epoch, height));
+        }
+    }
+    fn height(&self, epoch: u64, automatic: f64) -> f64 {
+        self.saved
+            .filter(|(saved_epoch, _)| *saved_epoch == epoch)
+            .map_or(automatic, |(_, height)| height)
+    }
+}
+
 pub struct LayoutState {
     management: AtomicBool,
+    manual_height: Mutex<ManualPopupHeight>,
     popup: Arc<Mutex<PopupWidth>>,
     data_dir: Option<PathBuf>,
     constraints: Mutex<Option<Constraints>>,
+    #[cfg(target_os = "macos")]
+    layout_revision: std::sync::atomic::AtomicU64,
     #[cfg(target_os = "macos")]
     popup_drag: Mutex<PopupDrag>,
     #[cfg(target_os = "windows")]
@@ -35,9 +75,12 @@ impl Default for LayoutState {
     fn default() -> Self {
         Self {
             management: AtomicBool::new(false),
+            manual_height: Mutex::new(ManualPopupHeight::default()),
             popup: Arc::new(Mutex::new(PopupWidth::new(None))),
             data_dir: None,
             constraints: Mutex::new(None),
+            #[cfg(target_os = "macos")]
+            layout_revision: std::sync::atomic::AtomicU64::new(0),
             #[cfg(target_os = "macos")]
             popup_drag: Mutex::new(PopupDrag::default()),
             #[cfg(target_os = "windows")]
@@ -490,12 +533,14 @@ mod native_resize {
                 // pointer to POINTS (Tao 0.37.2's Windows resize path). Dispatch
                 // synchronously on the owning UI thread so no stale queued down
                 // can start a resize after release or a new presentation.
+                let filter = ResizeFilter::install(hwnd);
                 unsafe {
                     if GetAsyncKeyState(1) >= 0 {
                         return Err(crate::translation_requests::CANCELLED.into());
                     }
                     SendMessageW(hwnd, 0x00a1, hit, parameter);
                 }
+                drop(filter);
                 // The OS modal sizing loop consumes release. Mirror the host's
                 // release cleanup, but never synthesize up during a newer press.
                 let same_presentation = window
@@ -530,6 +575,297 @@ mod native_resize {
         })
         .map_err(|_| "无法开始调整窗口大小")?;
         result.await.map_err(|_| "窗口调整已中断".to_string())?
+    }
+
+    #[derive(Clone, Copy)]
+    struct FilterContext {
+        window: Handle,
+        marker: u32,
+    }
+    thread_local! {
+        static RESIZE_FILTER: std::cell::Cell<FilterContext> = const { std::cell::Cell::new(FilterContext { window: std::ptr::null_mut(), marker: 0 }) };
+    }
+    #[repr(C)]
+    struct FilterMessage {
+        window: Handle,
+        message: u32,
+        word: usize,
+        parameter: isize,
+        time: u32,
+        point: Point,
+        private: u32,
+    }
+    type FilterCallback = unsafe extern "system" fn(i32, usize, isize) -> isize;
+    #[link(name = "user32")]
+    unsafe extern "system" {
+        fn RegisterWindowMessageW(name: *const u16) -> u32;
+        fn SetWindowsHookExW(
+            kind: i32,
+            callback: Option<FilterCallback>,
+            module: Handle,
+            thread: u32,
+        ) -> Handle;
+        fn UnhookWindowsHookEx(hook: Handle) -> i32;
+        fn CallNextHookEx(hook: Handle, code: i32, word: usize, parameter: isize) -> isize;
+    }
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        fn GetCurrentThreadId() -> u32;
+    }
+    struct ResizeFilter {
+        hook: Handle,
+        window: Handle,
+    }
+    impl ResizeFilter {
+        fn install(window: Handle) -> Option<Self> {
+            // Opt-in fixture observation only. No global hook, no user runtime
+            // dependency, and failure must not change normal sizing behavior.
+            if std::env::var_os("ECHOLINGO_NATIVE_RESIZE_PROBE").as_deref()
+                != Some(std::ffi::OsStr::new("1"))
+                || RESIZE_FILTER.with(|value| !value.get().window.is_null())
+            {
+                return None;
+            }
+            let name: Vec<u16> = "EchoLingo.Resize.Readiness.v1"
+                .encode_utf16()
+                .chain(Some(0))
+                .collect();
+            let marker = unsafe { RegisterWindowMessageW(name.as_ptr()) };
+            if marker == 0 {
+                return None;
+            }
+            RESIZE_FILTER.with(|value| value.set(FilterContext { window, marker }));
+            let hook = unsafe {
+                SetWindowsHookExW(
+                    -1,
+                    Some(resize_filter),
+                    std::ptr::null_mut(),
+                    GetCurrentThreadId(),
+                )
+            };
+            if hook.is_null() {
+                RESIZE_FILTER.with(|value| {
+                    value.set(FilterContext {
+                        window: std::ptr::null_mut(),
+                        marker: 0,
+                    })
+                });
+                return None;
+            }
+            Some(Self { hook, window })
+        }
+    }
+    impl Drop for ResizeFilter {
+        fn drop(&mut self) {
+            RESIZE_FILTER.with(|value| {
+                value.set(FilterContext {
+                    window: std::ptr::null_mut(),
+                    marker: 0,
+                })
+            });
+            let removed = unsafe { UnhookWindowsHookEx(self.hook) } != 0;
+            diagnostic_write(
+                self.window,
+                false,
+                &[("filterRemoved", isize::from(removed))],
+            );
+        }
+    }
+    unsafe extern "system" fn resize_filter(code: i32, word: usize, parameter: isize) -> isize {
+        // MSGF_SIZE is a system-defined modal-sizing filter context. Unlike a
+        // WindowProc marker, this acknowledgement requires that context itself
+        // to consume the message. Never modify or suppress any message.
+        let next = unsafe { CallNextHookEx(std::ptr::null_mut(), code, word, parameter) };
+        if next == 0 && code == 4 && parameter != 0 {
+            let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let context = RESIZE_FILTER.with(|value| value.get());
+                let message = unsafe { &*(parameter as *const FilterMessage) };
+                if context.window.is_null() || message.window != context.window {
+                    return;
+                }
+                let revision = diagnostic_get(context.window, "revision");
+                if message.message == context.marker
+                    && message.word > 0
+                    && message.word <= i32::MAX as usize
+                    && message.parameter == revision
+                    && revision > 0
+                    && unsafe { GetAsyncKeyState(1) } < 0
+                {
+                    diagnostic_write(
+                        context.window,
+                        false,
+                        &[
+                            ("barrierNonce", message.word as isize),
+                            ("barrierRevision", revision),
+                        ],
+                    );
+                } else if message.message == 0x0200 {
+                    diagnostic_write(
+                        context.window,
+                        false,
+                        &[
+                            (
+                                "filterMoves",
+                                diagnostic_get(context.window, "filterMoves") + 1,
+                            ),
+                            ("filterMoveX", message.point.x as isize),
+                            ("filterMoveY", message.point.y as isize),
+                        ],
+                    );
+                }
+            }));
+        }
+        next
+    }
+
+    // Bounded numeric diagnostics on this app's own HWND only. They never
+    // influence sizing, read user content, or retain message-owned pointers.
+    const DIAGNOSTIC_KEYS: &[&str] = &[
+        "version",
+        "revision",
+        "sizingCount",
+        "edge",
+        "enterX",
+        "enterY",
+        "messageX",
+        "messageY",
+        "captureAtEnter",
+        "enterTick",
+        "exitTick",
+        "requestedLeft",
+        "requestedTop",
+        "requestedRight",
+        "requestedBottom",
+        "returnedLeft",
+        "returnedTop",
+        "returnedRight",
+        "returnedBottom",
+        "filterInstalled",
+        "filterRemoved",
+        "barrierNonce",
+        "barrierRevision",
+        "filterMoves",
+        "filterMoveX",
+        "filterMoveY",
+    ];
+    #[repr(C)]
+    #[derive(Clone, Copy)]
+    struct DiagnosticRect {
+        left: i32,
+        top: i32,
+        right: i32,
+        bottom: i32,
+    }
+    #[link(name = "user32")]
+    unsafe extern "system" {
+        fn SetPropW(window: Handle, name: *const u16, value: Handle) -> i32;
+        fn GetPropW(window: Handle, name: *const u16) -> Handle;
+        fn RemovePropW(window: Handle, name: *const u16) -> Handle;
+        fn GetMessagePos() -> u32;
+        fn GetCapture() -> Handle;
+    }
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        fn GetTickCount64() -> u64;
+    }
+    fn diagnostic_key(name: &str) -> Vec<u16> {
+        format!("EchoLingo.Resize.{name}")
+            .encode_utf16()
+            .chain(Some(0))
+            .collect()
+    }
+    fn diagnostic_get(window: Handle, name: &str) -> isize {
+        unsafe { GetPropW(window, diagnostic_key(name).as_ptr()) as isize }
+    }
+    fn diagnostic_set(window: Handle, name: &str, value: isize) -> bool {
+        unsafe { SetPropW(window, diagnostic_key(name).as_ptr(), value as Handle) != 0 }
+    }
+    fn diagnostic_write(window: Handle, reset: bool, values: &[(&str, isize)]) {
+        let previous = diagnostic_get(window, "version");
+        // Only a full new ENTER snapshot can recover a failed partial write.
+        if !reset && (previous == 0 || previous & 1 != 0) {
+            return;
+        }
+        let version = previous.saturating_add(2) & !1;
+        if !diagnostic_set(window, "version", version - 1) {
+            return;
+        }
+        let mut complete = true;
+        for (name, value) in values {
+            complete &= diagnostic_set(window, name, *value);
+        }
+        // A failed partial write remains odd: readers must reject that snapshot.
+        if complete {
+            diagnostic_set(window, "version", version);
+        }
+    }
+    fn diagnostic_enter(window: Handle) {
+        let mut point = Point { x: 0, y: 0 };
+        if unsafe { GetCursorPos(&mut point) } == 0 {
+            diagnostic_set(window, "version", 0);
+            return;
+        }
+        let position = unsafe { GetMessagePos() };
+        diagnostic_write(
+            window,
+            true,
+            &[
+                ("revision", diagnostic_get(window, "revision") + 1),
+                ("sizingCount", 0),
+                (
+                    "filterInstalled",
+                    isize::from(RESIZE_FILTER.with(|value| value.get().window == window)),
+                ),
+                ("filterRemoved", 0),
+                ("barrierNonce", 0),
+                ("barrierRevision", 0),
+                ("filterMoves", 0),
+                ("filterMoveX", 0),
+                ("filterMoveY", 0),
+                ("edge", 0),
+                ("enterX", point.x as isize),
+                ("enterY", point.y as isize),
+                ("messageX", position as u16 as i16 as isize),
+                ("messageY", (position >> 16) as u16 as i16 as isize),
+                (
+                    "captureAtEnter",
+                    isize::from(unsafe { GetCapture() } == window),
+                ),
+                ("enterTick", unsafe { GetTickCount64() } as isize),
+                ("exitTick", 0),
+                ("requestedLeft", 0),
+                ("requestedTop", 0),
+                ("requestedRight", 0),
+                ("requestedBottom", 0),
+                ("returnedLeft", 0),
+                ("returnedTop", 0),
+                ("returnedRight", 0),
+                ("returnedBottom", 0),
+            ],
+        );
+    }
+    fn diagnostic_sizing(
+        window: Handle,
+        edge: usize,
+        requested: DiagnosticRect,
+        returned: DiagnosticRect,
+    ) {
+        diagnostic_write(
+            window,
+            false,
+            &[
+                ("sizingCount", diagnostic_get(window, "sizingCount") + 1),
+                ("edge", edge as isize),
+                ("requestedLeft", requested.left as isize),
+                ("requestedTop", requested.top as isize),
+                ("requestedRight", requested.right as isize),
+                ("requestedBottom", requested.bottom as isize),
+                ("returnedLeft", returned.left as isize),
+                ("returnedTop", returned.top as isize),
+                ("returnedRight", returned.right as isize),
+                ("returnedBottom", returned.bottom as isize),
+            ],
+        );
     }
 
     #[derive(Clone, Serialize)]
@@ -586,12 +922,18 @@ mod native_resize {
             return unsafe { DefSubclassProc(window, message, word, parameter) };
         }
         let app = unsafe { &*(data as *const tauri::AppHandle) };
+        let requested = if message == 0x0214 && parameter != 0 {
+            Some(unsafe { *(parameter as *const DiagnosticRect) })
+        } else {
+            None
+        };
         // Keep a panic from crossing the Win32 ABI. The observer never consumes
         // the native message or performs painting, focus or geometry changes.
         let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             let state = app.state::<LayoutState>();
             if message == 0x0231 {
                 // WM_ENTERSIZEMOVE
+                diagnostic_enter(window);
                 if let Ok(presentation) = app
                     .state::<crate::AppState>()
                     .translation_requests
@@ -600,6 +942,20 @@ mod native_resize {
                     if let Ok(mut sizing) = state.native_sizing.lock() {
                         let token = sizing.begin(presentation.epoch);
                         drop(sizing);
+                        if state.is_popup() && presentation.presented {
+                            if let Some(native) = app.get_webview_window("main") {
+                                if let (Ok(size), Ok(scale)) =
+                                    (native.inner_size(), native.scale_factor())
+                                {
+                                    if let Ok(mut manual) = state.manual_height.lock() {
+                                        manual.begin(
+                                            token.epoch,
+                                            size.to_logical::<f64>(scale).height,
+                                        );
+                                    }
+                                }
+                            }
+                        }
                         notify(app, token, true);
                     }
                 }
@@ -612,6 +968,11 @@ mod native_resize {
                 }
             } else if message == 0x0232 {
                 // WM_EXITSIZEMOVE
+                diagnostic_write(
+                    window,
+                    false,
+                    &[("exitTick", unsafe { GetTickCount64() } as isize)],
+                );
                 let token = state
                     .native_sizing
                     .lock()
@@ -636,6 +997,9 @@ mod native_resize {
                 };
             }));
             unsafe {
+                for key in DIAGNOSTIC_KEYS {
+                    RemovePropW(window, diagnostic_key(key).as_ptr());
+                }
                 RemoveWindowSubclass(window, Some(callback), ID);
             }
             let result = unsafe { DefSubclassProc(window, message, word, parameter) };
@@ -644,7 +1008,14 @@ mod native_resize {
             }
             return result;
         }
-        unsafe { DefSubclassProc(window, message, word, parameter) }
+        let result = unsafe { DefSubclassProc(window, message, word, parameter) };
+        if let Some(requested) = requested {
+            let returned = unsafe { *(parameter as *const DiagnosticRect) };
+            let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                diagnostic_sizing(window, word, requested, returned);
+            }));
+        }
+        result
     }
 
     fn finish(app: &tauri::AppHandle, token: SizingToken) {
@@ -688,6 +1059,10 @@ mod native_resize {
                             // A move, DPI transition or work-area clamp is not
                             // permission to replace the owner's wider preference.
                             if resized {
+                                if let Ok(mut manual) = state.manual_height.lock() {
+                                    manual
+                                        .finish(token.epoch, size.to_logical::<f64>(scale).height);
+                                }
                                 changed =
                                     popup.observe_user_width(true, width, Some(width), scale, area);
                             }
@@ -695,6 +1070,11 @@ mod native_resize {
                         }
                     }
                 }
+            }
+        }
+        if let Ok(mut manual) = state.manual_height.lock() {
+            if manual.active.is_some_and(|(epoch, _)| epoch == token.epoch) {
+                manual.active = None;
             }
         }
         if state
@@ -710,7 +1090,7 @@ mod native_resize {
     }
 }
 
-pub fn fit(
+pub async fn fit(
     window: &WebviewWindow,
     state: &LayoutState,
     management: bool,
@@ -722,25 +1102,340 @@ pub fn fit(
         // Keep the sizing-loop test and all resulting HWND mutations on the
         // same UI thread. A worker-side test could enqueue SetSize just before
         // WM_ENTERSIZEMOVE and apply it in the middle of the user's gesture.
+        #[cfg(target_os = "macos")]
+        let revision = state
+            .layout_revision
+            .fetch_add(1, Ordering::SeqCst)
+            .wrapping_add(1);
         let _ = state;
         let native = window.clone();
         let app = window.app_handle().clone();
-        let (reply, result) = std::sync::mpsc::sync_channel(1);
+        #[cfg(target_os = "macos")]
+        let expected = app
+            .state::<crate::AppState>()
+            .translation_requests
+            .presentation();
+        let (reply, result) = tokio::sync::oneshot::channel();
         window
             .run_on_main_thread(move || {
                 let state = app.state::<LayoutState>();
                 #[cfg(target_os = "windows")]
                 let value = native_resize::install(&native, &state)
                     .and_then(|_| fit_inner(&native, &state, management, height, content_width));
-                #[cfg(target_os = "macos")]
-                let value = fit_inner(&native, &state, management, height, content_width);
+                #[cfg(target_os = "windows")]
                 let _ = reply.send(value);
+                #[cfg(target_os = "macos")]
+                {
+                    if state.layout_revision.load(Ordering::SeqCst) != revision
+                        || expected.is_err()
+                        || app
+                            .state::<crate::AppState>()
+                            .translation_requests
+                            .presentation()
+                            != expected
+                    {
+                        let _ = reply.send(Err(crate::translation_requests::CANCELLED.into()));
+                        return;
+                    }
+                    let gate_window = native.clone();
+                    let gate_epoch = expected.as_ref().map(|value| value.epoch).unwrap_or(0);
+                    after_mac_live_resize(&gate_window, gate_epoch, move |closing| {
+                        let state = app.state::<LayoutState>();
+                        if closing {
+                            let _ = reply.send(Err(crate::translation_requests::CANCELLED.into()));
+                            return;
+                        }
+                        if state.layout_revision.load(Ordering::SeqCst) != revision
+                            || expected.is_err()
+                            || app
+                                .state::<crate::AppState>()
+                                .translation_requests
+                                .presentation()
+                                != expected
+                        {
+                            let _ = reply.send(Err(crate::translation_requests::CANCELLED.into()));
+                            return;
+                        }
+                        // A missed end notification cannot leave a stale active
+                        // token blocking future layouts. The native idle gate has
+                        // already read inLiveResize=false on this UI thread.
+                        if let Err(error) =
+                            finish_manual_resize_at_idle(&native, &state, gate_epoch)
+                        {
+                            let _ = reply.send(Err(error));
+                            return;
+                        }
+                        // Tao maintains its own decoration flag but applies the
+                        // AppKit style mask asynchronously. Queue our continuation
+                        // after that change, before measuring frame/content sizes.
+                        let preparation = native
+                            .is_decorated()
+                            .map_err(|_| "无法读取窗口外观")
+                            .and_then(|decorated| {
+                                if !decorated {
+                                    native.set_decorations(true).map_err(|_| "无法调整窗口外观")
+                                } else {
+                                    Ok(())
+                                }
+                            });
+                        if let Err(error) = preparation {
+                            let _ = reply.send(Err(error.into()));
+                            return;
+                        }
+                        after_mac_window_changes(move || {
+                            if app
+                                .state::<LayoutState>()
+                                .layout_revision
+                                .load(Ordering::SeqCst)
+                                != revision
+                                || app
+                                    .state::<crate::AppState>()
+                                    .translation_requests
+                                    .presentation()
+                                    != expected
+                            {
+                                let _ =
+                                    reply.send(Err(crate::translation_requests::CANCELLED.into()));
+                                return;
+                            }
+                            let gate_window = native.clone();
+                            after_mac_live_resize(&gate_window, gate_epoch, move |closing| {
+                                if closing {
+                                    let _ = reply
+                                        .send(Err(crate::translation_requests::CANCELLED.into()));
+                                    return;
+                                }
+                                let current = app
+                                    .state::<crate::AppState>()
+                                    .translation_requests
+                                    .presentation();
+                                if expected.is_err()
+                                    || current != expected
+                                    || !current_layout_request(
+                                        revision,
+                                        app.state::<LayoutState>()
+                                            .layout_revision
+                                            .load(Ordering::SeqCst),
+                                        true,
+                                        native.is_decorated().ok(),
+                                    )
+                                {
+                                    let _ = reply
+                                        .send(Err(crate::translation_requests::CANCELLED.into()));
+                                    return;
+                                }
+                                let state = app.state::<LayoutState>();
+                                let value =
+                                    finish_manual_resize_at_idle(&native, &state, gate_epoch)
+                                        .and_then(|_| {
+                                            configure_mac_window_frame(&native, management)
+                                        })
+                                        .and_then(|_| {
+                                            fit_inner(
+                                                &native,
+                                                &state,
+                                                management,
+                                                height,
+                                                content_width,
+                                            )
+                                        });
+                                let _ = reply.send(value);
+                            });
+                        });
+                    });
+                }
             })
             .map_err(|_| "无法安排窗口布局")?;
-        return result.recv().map_err(|_| "窗口布局已中断")?;
+        return result.await.map_err(|_| "窗口布局已中断")?;
     }
     #[cfg(not(any(target_os = "windows", target_os = "macos")))]
     fit_inner(window, state, management, height, content_width)
+}
+
+#[cfg(target_os = "macos")]
+fn finish_manual_resize_at_idle(
+    window: &WebviewWindow,
+    state: &LayoutState,
+    epoch: u64,
+) -> Result<(), String> {
+    let mut manual = state.manual_height.lock().map_err(|_| "窗口布局状态异常")?;
+    if manual.active.is_some() {
+        let scale = window.scale_factor().map_err(|_| "无法读取窗口比例")?;
+        let size = window.inner_size().map_err(|_| "无法读取窗口大小")?;
+        manual.finish(epoch, size.to_logical::<f64>(scale).height);
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn configure_mac_window_frame(window: &WebviewWindow, management: bool) -> Result<(), String> {
+    unsafe extern "C" {
+        fn echolingo_configure_window_frame(window: *mut std::ffi::c_void, popup: i32) -> i32;
+    }
+    let native = window.ns_window().map_err(|_| "窗口不可用")?;
+    // Tao's decoration cache and actual NSWindow both remain titled. Only
+    // native title presentation/full-size content change on the main thread.
+    if unsafe { echolingo_configure_window_frame(native, i32::from(!management)) } == 0 {
+        Ok(())
+    } else {
+        Err("无法设置窗口边框".into())
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn install_mac_resize_observer(window: &WebviewWindow) -> Result<(), String> {
+    unsafe extern "C" fn notification(context: *mut std::ffi::c_void, phase: i32, height: f64) {
+        let app = unsafe { &*context.cast::<tauri::AppHandle>() };
+        let state = app.state::<LayoutState>();
+        let Ok(presentation) = app
+            .state::<crate::AppState>()
+            .translation_requests
+            .presentation()
+        else {
+            return;
+        };
+        let Ok(mut manual) = state.manual_height.lock() else {
+            return;
+        };
+        if phase == 0 {
+            if state.is_popup() && presentation.presented {
+                manual.begin(presentation.epoch, height);
+            }
+        } else if state.is_popup() && presentation.presented {
+            manual.finish(presentation.epoch, height);
+        } else {
+            manual.active = None;
+        }
+        drop(manual);
+        if phase == 1 {
+            use tauri::Emitter;
+            // Remeasure after native resizing: fit calls during the gesture
+            // were intentionally skipped, so their frontend cache is stale.
+            let _ = app.emit("popup-user-resize-ended", presentation.epoch);
+        }
+    }
+    unsafe extern "C" fn release(context: *mut std::ffi::c_void) {
+        drop(unsafe { Box::from_raw(context.cast::<tauri::AppHandle>()) });
+    }
+    unsafe extern "C" {
+        fn echolingo_observe_live_resize(
+            window: *mut std::ffi::c_void,
+            callback: unsafe extern "C" fn(*mut std::ffi::c_void, i32, f64),
+            release: unsafe extern "C" fn(*mut std::ffi::c_void),
+            context: *mut std::ffi::c_void,
+        ) -> i32;
+    }
+    let native = window.ns_window().map_err(|_| "窗口不可用")?;
+    let context = Box::into_raw(Box::new(window.app_handle().clone())).cast();
+    // Swift either owns context until observer deinit, or releases it immediately
+    // for an already-installed observer. Failure leaves ownership with Rust.
+    let status = unsafe { echolingo_observe_live_resize(native, notification, release, context) };
+    if status != 0 {
+        unsafe { release(context) };
+        return Err("无法观察窗口调整".into());
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+pub fn cancel_stale_native_layout(app: &tauri::AppHandle) {
+    let app = app.clone();
+    let dispatcher = app.clone();
+    let _ = dispatcher.run_on_main_thread(move || {
+        let (Some(window), Ok(current)) = (
+            app.get_webview_window("main"),
+            app.state::<crate::AppState>()
+                .translation_requests
+                .presentation(),
+        ) else {
+            return;
+        };
+        let Ok(native) = window.ns_window() else {
+            return;
+        };
+        unsafe extern "C" {
+            fn echolingo_cancel_stale_resize_wait(window: *mut std::ffi::c_void, epoch: u64);
+        }
+        // Read the current epoch when executing, not an older queued announcement.
+        unsafe { echolingo_cancel_stale_resize_wait(native, current.epoch) };
+    });
+}
+
+#[cfg(target_os = "macos")]
+fn after_mac_live_resize(
+    window: &WebviewWindow,
+    epoch: u64,
+    operation: impl FnOnce(bool) + Send + 'static,
+) {
+    type Operation = Box<dyn FnOnce(bool) + Send>;
+    unsafe extern "C" fn complete(context: *mut std::ffi::c_void, closing: i32) {
+        let operation = unsafe { Box::from_raw(context.cast::<Operation>()) };
+        operation(closing != 0);
+    }
+    unsafe extern "C" {
+        fn echolingo_after_live_resize(
+            window: *mut std::ffi::c_void,
+            epoch: u64,
+            callback: unsafe extern "C" fn(*mut std::ffi::c_void, i32),
+            context: *mut std::ffi::c_void,
+        );
+    }
+    let Ok(native) = window.ns_window() else {
+        operation(true);
+        return;
+    };
+    let operation: Box<Operation> = Box::new(Box::new(operation));
+    // Exactly one callback owns the operation. Swift uses AppKit notifications,
+    // never blocks its main thread and never waits on a guessed fixed delay.
+    unsafe {
+        echolingo_after_live_resize(native, epoch, complete, Box::into_raw(operation).cast())
+    };
+}
+
+#[cfg(target_os = "macos")]
+fn after_mac_window_changes(operation: impl FnOnce() + Send + 'static) {
+    type Operation = Box<dyn FnOnce() + Send>;
+    unsafe extern "C" fn complete(context: *mut std::ffi::c_void) {
+        // SAFETY: exactly one callback consumes the owned, double-boxed closure.
+        let operation = unsafe { Box::from_raw(context.cast::<Operation>()) };
+        operation();
+    }
+    unsafe extern "C" {
+        fn echolingo_after_window_changes(
+            callback: unsafe extern "C" fn(*mut std::ffi::c_void),
+            context: *mut std::ffi::c_void,
+        );
+    }
+    let operation: Box<Operation> = Box::new(Box::new(operation));
+    // SAFETY: Swift enqueues exactly one callback on the main queue. No UI
+    // thread waits for it; fit's worker receives its acknowledgement later.
+    unsafe { echolingo_after_window_changes(complete, Box::into_raw(operation).cast()) };
+}
+
+// Tao's macOS set_inner_size always dispatches asynchronously, even on the
+// main thread. A successful fit must not acknowledge only a queued resize.
+fn apply_content_size(window: &WebviewWindow, width: f64, height: f64) -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    {
+        unsafe extern "C" {
+            fn echolingo_set_content_size_sync(
+                window: *mut std::ffi::c_void,
+                width: f64,
+                height: f64,
+            ) -> i32;
+        }
+        let native = window.ns_window().map_err(|_| "窗口不可用")?;
+        // SAFETY: layout callers hold Tauri's borrowed NSWindow on its main
+        // thread. Swift independently checks the thread and numeric input.
+        if unsafe { echolingo_set_content_size_sync(native, width, height) } != 0 {
+            return Err("无法同步调整窗口大小".into());
+        }
+        Ok(())
+    }
+    #[cfg(not(target_os = "macos"))]
+    window
+        .set_size(LogicalSize::new(width, height))
+        .map_err(|_| "无法调整窗口大小".into())
 }
 
 fn fit_inner(
@@ -789,6 +1484,18 @@ fn fit_inner(
             drag.finish(token.id);
         }
     }
+    let presentation = window
+        .state::<crate::AppState>()
+        .translation_requests
+        .presentation()?;
+    #[cfg(target_os = "macos")]
+    install_mac_resize_observer(window)?;
+    let height = if management {
+        height
+    } else {
+        let manual = state.manual_height.lock().map_err(|_| "窗口布局状态异常")?;
+        manual.height(presentation.epoch, height)
+    };
     let previous = state.management.load(Ordering::SeqCst);
     let (scale, area) = window_geometry(window)?;
     let old_size = window
@@ -826,6 +1533,7 @@ fn fit_inner(
                 available.1.max(1.0),
             )))
             .map_err(|_| "无法调整窗口最大大小")?;
+        #[cfg(not(target_os = "macos"))]
         if window.is_decorated().map_err(|_| "无法读取窗口外观")? != management {
             window
                 .set_decorations(management)
@@ -837,9 +1545,7 @@ fn fit_inner(
         || (old_size.width - width).abs() > 1.0
         || (old_size.height - height).abs() > 1.0
     {
-        window
-            .set_size(LogicalSize::new(width, height))
-            .map_err(|_| "无法调整窗口大小")?;
+        apply_content_size(window, width, height)?;
     }
     let frame = if management { (16.0, 44.0) } else { (0.0, 0.0) };
     if let Ok(position) = window.outer_position() {
@@ -905,9 +1611,9 @@ fn fit_inner(
 }
 
 #[tauri::command]
-pub fn fit_window(
+pub async fn fit_window(
     window: WebviewWindow,
-    state: State<LayoutState>,
+    state: State<'_, LayoutState>,
     presentation: String,
     content_height: f64,
     content_width: Option<f64>,
@@ -920,7 +1626,7 @@ pub fn fit_window(
         "management" => true,
         _ => return Err("未知窗口模式".into()),
     };
-    fit(&window, &state, management, content_height, content_width)
+    fit(&window, &state, management, content_height, content_width).await
 }
 
 #[tauri::command]
@@ -1304,9 +2010,7 @@ pub async fn resize_popup_width(
                 available_size(area, scale, false),
             );
             let position = window.outer_position().map_err(|_| "无法读取窗口位置")?;
-            window
-                .set_size(LogicalSize::new(next_width, next_height))
-                .map_err(|_| "无法调整窗口大小")?;
+            apply_content_size(&window, next_width, next_height)?;
             let next = resize_position(
                 area,
                 (position.x, position.y),
@@ -1444,9 +2148,7 @@ pub async fn resize_management_window(
             if !valid() {
                 return Err(crate::translation_requests::CANCELLED.into());
             }
-            window
-                .set_size(LogicalSize::new(size.0, size.1))
-                .map_err(|_| "无法调整窗口大小")?;
+            apply_content_size(&window, size.0, size.1)?;
             if !valid() {
                 return Err(crate::translation_requests::CANCELLED.into());
             }
@@ -1947,5 +2649,61 @@ mod tests {
         let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(value, serde_json::json!({"version":1,"popupWidth":850.0}));
         std::fs::remove_dir_all(directory).unwrap();
+    }
+    #[test]
+    fn same_epoch_queued_layout_supersession_does_not_reapply_old_style() {
+        // A popup and B settings share a presentation epoch. Both preparation
+        // closures ran before A's queued continuation. Only B may apply size;
+        // A must not enqueue another style change after B's preparation.
+        let a = 1;
+        let b = 2;
+        let latest = b;
+        let cached_style = Some(true);
+        assert!(!current_layout_request(a, latest, false, cached_style));
+        assert!(current_layout_request(b, latest, true, cached_style));
+        // Even the latest request may not acknowledge a mismatched style.
+        assert!(!current_layout_request(b, latest, true, Some(false)));
+        assert!(!current_layout_request(b, latest, true, None));
+        // Reverse direction has the same property, without a new epoch.
+        assert!(!current_layout_request(b, 3, true, Some(false)));
+        assert!(current_layout_request(3, 3, false, Some(false)));
+    }
+    #[test]
+    fn manual_height_respects_user_size_only_in_same_presentation() {
+        let mut manual = ManualPopupHeight::default();
+        assert_eq!(manual.height(1, 280.0), 280.0);
+        manual.begin(1, 280.0);
+        manual.finish(1, 469.0);
+        assert_eq!(manual.height(1, 300.0), 469.0);
+        manual.begin(1, 469.0);
+        manual.finish(1, 160.0);
+        assert_eq!(manual.height(1, 300.0), 160.0);
+        assert_eq!(manual.height(2, 300.0), 300.0);
+        // Width-only gestures must not disable automatic vertical fitting.
+        manual.begin(2, 300.0);
+        manual.finish(2, 300.0);
+        assert_eq!(manual.height(2, 400.0), 400.0);
+        // A superseded gesture cannot set a newer presentation's height.
+        manual.begin(2, 300.0);
+        manual.finish(3, 160.0);
+        assert_eq!(manual.height(3, 400.0), 400.0);
+        manual.begin(3, 300.0);
+        manual.finish(3, f64::NAN);
+        assert_eq!(manual.height(3, 400.0), 400.0);
+    }
+    #[test]
+    fn second_idle_gate_recovers_a_new_resize_with_missing_end() {
+        let mut manual = ManualPopupHeight::default();
+        manual.finish(5, 280.0); // first gate already idle
+                                 // A real gesture starts between style preparation and final size gate.
+        manual.begin(5, 280.0);
+        // Missing didEnd: final actual-idle recovery must save before fitting.
+        manual.finish(5, 469.0);
+        assert_eq!(manual.height(5, 280.0), 469.0);
+        assert!(manual.active.is_none());
+        manual.begin(5, 469.0);
+        manual.finish(6, 160.0); // a newer source does not inherit old height
+        assert_eq!(manual.height(6, 280.0), 280.0);
+        assert!(manual.active.is_none());
     }
 }

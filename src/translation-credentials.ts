@@ -1,6 +1,10 @@
 import type { ProviderKind } from './types';
 
 export const TRANSLATION_NATIVE_URLS = {
+  "niutrans": "https://api.niutrans.com/NiuTransServer/translation",
+  "google-translate": "https://translation.googleapis.com/language/translate/v2",
+  "caiyun": "https://api.interpreter.caiyunai.com/v1/translator",
+
   baidu: 'https://fanyi-api.baidu.com/api/trans/vip/translate',
   youdao: 'https://openapi.youdao.com/api',
   microsoft: 'https://api.cognitive.microsofttranslator.com',

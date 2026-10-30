@@ -2,6 +2,101 @@
 // RunResize executes: its other visibility/OCR/clipboard cases are not run.
 public static partial class EchoLingoPopupVisibilitySmoke {
     static System.Collections.Generic.Dictionary<string, object> activeResizeObservation;
+    [System.Runtime.InteropServices.DllImport("dwmapi.dll")]
+    static extern int DwmGetWindowAttribute(System.IntPtr window, uint attribute, out RECT bounds, uint size);
+    [System.Runtime.InteropServices.DllImport("user32.dll")]
+    static extern int GetSystemMetricsForDpi(int index, uint dpi);
+    static System.IntPtr ResizeHitParameter(int x, int y) {
+        Require(x >= short.MinValue && x <= short.MaxValue && y >= short.MinValue && y <= short.MaxValue,
+            "Owned edge probe coordinate exceeds WM_NCHITTEST signed words; no query sent.");
+        return new System.IntPtr(unchecked((int)((uint)(ushort)x | ((uint)(ushort)y << 16))));
+    }
+    static POINT ResizeExactEdgePoint(RECT bounds, string edge, int inwardPhysical) {
+        POINT point = new POINT();
+        // RECT right/bottom are exclusive. offset=0 is the last visible physical
+        // pixel on those edges, offset=-1 is the first outside pixel.
+        point.x = edge.Contains("west") ? bounds.left + inwardPhysical :
+            edge.Contains("east") ? bounds.right - 1 - inwardPhysical : bounds.left + (bounds.right - bounds.left) / 2;
+        point.y = edge.Contains("north") ? bounds.top + inwardPhysical :
+            edge.Contains("south") ? bounds.bottom - 1 - inwardPhysical : bounds.top + (bounds.bottom - bounds.top) / 2;
+        return point;
+    }
+    static void ResizeExactEdgeSelfTest() {
+        RECT bounds = new RECT(); bounds.left = -1500; bounds.top = -900; bounds.right = -220; bounds.bottom = 404;
+        POINT edge = ResizeExactEdgePoint(bounds, "south-east", 0);
+        Require(edge.x == -221 && edge.y == 403, "Exclusive native edge convention regressed.");
+        POINT outside = ResizeExactEdgePoint(bounds, "north-west", -1);
+        Require(outside.x == -1501 && outside.y == -901, "Negative-screen outside edge regressed.");
+        POINT inside = ResizeExactEdgePoint(bounds, "east", (int)System.Math.Round(10 * 192 / 96.0));
+        Require(inside.x == -241 && inside.y == -248, "HiDPI CSS-to-physical edge sample regressed.");
+        long packed = ResizeHitParameter(-1501, -901).ToInt64();
+        Require(unchecked((short)(packed & 65535)) == -1501 && unchecked((short)((packed >> 16) & 65535)) == -901,
+            "Signed screen-coordinate packing regressed.");
+    }
+    static System.Collections.Generic.Dictionary<string, object> ResizeExactEdgeObservation(Process app, System.IntPtr main) {
+        var result = new System.Collections.Generic.Dictionary<string, object> {
+            { "scope", "read-only-WM_NCHITTEST-to-owned-main-only" },
+            { "physicalOutsideEventDispatchProven", false }, { "mouseInputSent", false },
+            { "edgeConvention", "offset-zero-last-visible-pixel; negative-outside; positive-inward" },
+            { "domFallbackInsetCssPixels", 10 }
+        };
+        WaitResizeLayoutReady(app, main, result);
+        RequireUniqueOwnedMainWindow(app, main);
+        RECT before = ResizeBounds(main), visible, client;
+        int hr = DwmGetWindowAttribute(main, 9, out visible, (uint)System.Runtime.InteropServices.Marshal.SizeOf(typeof(RECT)));
+        Require(hr == 0 && visible.right > visible.left && visible.bottom > visible.top, "DWM visible frame unavailable; do not substitute shadow bounds.");
+        Require(GetClientRect(main, out client), "Owned exact-edge client unavailable.");
+        POINT tl = new POINT(), br = new POINT(); tl.x = client.left; tl.y = client.top; br.x = client.right; br.y = client.bottom;
+        Require(ClientToScreen(main, ref tl) && ClientToScreen(main, ref br), "Owned exact-edge screen conversion unavailable.");
+        uint dpi = GetDpiForWindow(main); Require(dpi >= 96 && dpi <= 384, "Unsupported probe DPI.");
+        result["dpi"] = dpi;
+        result["outerPhysicalBounds"] = new int[] { before.left, before.top, before.right, before.bottom };
+        result["dwmVisiblePhysicalBounds"] = new int[] { visible.left, visible.top, visible.right, visible.bottom };
+        result["clientPhysicalBounds"] = new int[] { tl.x, tl.y, br.x, br.y };
+        result["frameMetricsPhysical"] = new int[] { GetSystemMetricsForDpi(32, dpi), GetSystemMetricsForDpi(33, dpi), GetSystemMetricsForDpi(92, dpi) };
+        var samples = new System.Collections.Generic.List<object>(); result["samples"] = samples;
+        string[] edges = new string[] { "west", "east", "north", "south", "north-west", "north-east", "south-west", "south-east" };
+        int[] offsets = new int[] { -2, -1, 0, 1, (int)System.Math.Round(4 * dpi / 96.0), (int)System.Math.Round(10 * dpi / 96.0) };
+        foreach (string edge in edges) foreach (int offset in offsets) {
+            RequireUniqueOwnedMainWindow(app, main);
+            Require(IsWindowVisible(main) && GetForegroundWindow() == main && !ResizeLoop(main) && (GetAsyncKeyState(1) & 0x8000) == 0,
+                "Owned exact-edge observation interrupted; no input or foreign-window query sent.");
+            POINT point = ResizeExactEdgePoint(visible, edge, offset);
+            // WindowFromPoint only records ownership. Never send to the returned
+            // HWND (which may be another app outside our frame).
+            System.IntPtr target = WindowFromPoint(point); uint owner = 0;
+            if (target != System.IntPtr.Zero) GetWindowThreadProcessId(target, out owner);
+            bool ownTarget = target != System.IntPtr.Zero && owner == (uint)app.Id && GetAncestor(target, 2) == main;
+            System.UIntPtr value;
+            bool answered = SendMessageTimeout(main, 0x0084, System.UIntPtr.Zero, ResizeHitParameter(point.x, point.y),
+                0x0001 | 0x0002 | 0x0020, 500, out value) != System.IntPtr.Zero;
+            long hit = unchecked((int)value.ToUInt64());
+            samples.Add(new System.Collections.Generic.Dictionary<string, object> {
+                { "edge", edge }, { "inwardPhysicalOffset", offset }, { "point", new int[] { point.x, point.y } },
+                { "windowFromPointOwned", ownTarget }, { "answered", answered }, { "hitCode", hit },
+                { "nativeResizeCode", answered && hit >= 10 && hit <= 17 },
+                { "insideClient", point.x >= tl.x && point.x < br.x && point.y >= tl.y && point.y < br.y }
+            });
+            Require(answered, "Owned WM_NCHITTEST timed out; matrix incomplete.");
+        }
+        RECT after = ResizeBounds(main);
+        Require(before.left == after.left && before.top == after.top && before.right == after.right && before.bottom == after.bottom && dpi == GetDpiForWindow(main),
+            "Window geometry/DPI changed during exact-edge observation; matrix is not coherent.");
+        RECT afterVisible, afterClient = new RECT();
+        Require(DwmGetWindowAttribute(main, 9, out afterVisible, (uint)System.Runtime.InteropServices.Marshal.SizeOf(typeof(RECT))) == 0 &&
+            GetClientRect(main, out afterClient), "Owned frame/client disappeared after exact-edge observation.");
+        POINT afterTl = new POINT(), afterBr = new POINT();
+        afterTl.x = afterClient.left; afterTl.y = afterClient.top; afterBr.x = afterClient.right; afterBr.y = afterClient.bottom;
+        Require(ClientToScreen(main, ref afterTl) && ClientToScreen(main, ref afterBr) &&
+            afterVisible.left == visible.left && afterVisible.top == visible.top && afterVisible.right == visible.right && afterVisible.bottom == visible.bottom &&
+            afterTl.x == tl.x && afterTl.y == tl.y && afterBr.x == br.x && afterBr.y == br.y,
+            "Visible/client frame changed during exact-edge observation; matrix is not coherent.");
+        result["geometryUnchanged"] = true; result["sampleCount"] = samples.Count;
+        // Do not assert all forced outside queries hit resize: that would conflate
+        // window-procedure answers with OS routing and hide platform differences.
+        return result;
+    }
+
     [System.Runtime.InteropServices.DllImport("user32.dll")] static extern uint GetDpiForWindow(System.IntPtr window);
     [System.Runtime.InteropServices.DllImport("user32.dll")] static extern bool GetClientRect(System.IntPtr window, out RECT bounds);
     [System.Runtime.InteropServices.DllImport("user32.dll")] static extern bool ClientToScreen(System.IntPtr window, ref POINT point);
@@ -60,6 +155,69 @@ public static partial class EchoLingoPopupVisibilitySmoke {
             { "maximumPhysicalSize", new int[] { info.maximumSize.x, info.maximumSize.y } }
         };
     }
+    [System.Runtime.InteropServices.DllImport("user32.dll", EntryPoint="GetPropW", CharSet=System.Runtime.InteropServices.CharSet.Unicode)]
+    static extern System.IntPtr ResizeDiagnosticProperty(System.IntPtr window, string name);
+    static System.Collections.Generic.Dictionary<string, object> ResizeNativeObservation(Process app, System.IntPtr main) {
+        RequireUniqueOwnedMainWindow(app, main);
+        var result = new System.Collections.Generic.Dictionary<string, object>();
+        string[] fields = new string[] { "revision", "sizingCount", "edge", "enterX", "enterY", "messageX", "messageY", "captureAtEnter", "enterTick", "exitTick", "requestedLeft", "requestedTop", "requestedRight", "requestedBottom", "returnedLeft", "returnedTop", "returnedRight", "returnedBottom", "filterInstalled", "filterRemoved", "barrierNonce", "barrierRevision", "filterMoves", "filterMoveX", "filterMoveY" };
+        // A version bracket avoids treating cross-process partial writes as one
+        // coherent native snapshot. Retries read metadata only, never replay input.
+        for (int attempt = 1; attempt <= 3; attempt++) {
+            long before = ResizeDiagnosticProperty(main, "EchoLingo.Resize.version").ToInt64();
+            foreach (string field in fields) result[field] = ResizeDiagnosticProperty(main, "EchoLingo.Resize." + field).ToInt64();
+            long after = ResizeDiagnosticProperty(main, "EchoLingo.Resize.version").ToInt64();
+            bool coherent = before > 0 && before == after && (after & 1) == 0;
+            result["versionBefore"] = before; result["versionAfter"] = after; result["coherent"] = coherent; result["readAttempts"] = attempt;
+            if (coherent) break;
+        }
+        uint process; uint thread = GetWindowThreadProcessId(main, out process);
+        ResizeGuiInfo info = new ResizeGuiInfo(); info.size = (uint)System.Runtime.InteropServices.Marshal.SizeOf(typeof(ResizeGuiInfo));
+        bool known = thread != 0 && GetGUIThreadInfo(thread, ref info);
+        result["guiStateKnown"] = known; result["guiFlags"] = info.flags;
+        result["captureIsMain"] = known && info.capture == main; result["moveSizeIsMain"] = known && info.move == main;
+        return result;
+    }
+    [System.Runtime.InteropServices.DllImport("user32.dll", EntryPoint="RegisterWindowMessageW", CharSet=System.Runtime.InteropServices.CharSet.Unicode)]
+    static extern uint ResizeRegisterMarker(string name);
+    [System.Runtime.InteropServices.DllImport("user32.dll", EntryPoint="PostMessageW", SetLastError=true)]
+    static extern bool ResizePostMarker(System.IntPtr window, uint message, System.UIntPtr word, System.IntPtr parameter);
+    static int resizeMarkerSequence;
+    static void WaitResizeMessageLoop(Process app, System.IntPtr main, System.Collections.Generic.Dictionary<string, object> result) {
+        var barrier = new System.Collections.Generic.Dictionary<string, object> { { "markerPosts", 0 }, { "deadlineMilliseconds", 3000 }, { "contextRequired", "MSGF_SIZE" } };
+        result["nativeLoopBarrier"] = barrier;
+        var before = (System.Collections.Generic.Dictionary<string, object>)result["nativeBeforeGesture"];
+        long previousRevision = (long)before["revision"];
+        barrier["previousRevision"] = previousRevision;
+        System.Collections.Generic.Dictionary<string, object> native = null;
+        Wait(delegate {
+            native = ResizeNativeObservation(app, main); barrier["lastNative"] = native;
+            return (bool)native["coherent"] && (long)native["revision"] > previousRevision && (long)native["exitTick"] == 0 &&
+                (long)native["filterRemoved"] == 0 && (bool)native["captureIsMain"] && (bool)native["moveSizeIsMain"];
+        }, 3000, "No new coherent native ENTER/capture snapshot became available; no resize movement sent.");
+        Require((long)native["filterInstalled"] == 1, "Fixture-only native sizing filter unavailable; no resize movement sent.");
+        long revision = (long)native["revision"]; int nonce = System.Threading.Interlocked.Increment(ref resizeMarkerSequence);
+        Require(nonce > 0, "Fixture marker sequence overflow; no marker sent.");
+        uint message = ResizeRegisterMarker("EchoLingo.Resize.Readiness.v1"); Require(message != 0, "Native sizing marker registration failed.");
+        RequireUniqueOwnedMainWindow(app, main);
+        Require(GetForegroundWindow() == main && ResizeLoop(main) && (GetAsyncKeyState(1) & 0x8000) != 0, "Native sizing ended before the marker; no movement sent.");
+        Require(ResizePostMarker(main, message, new System.UIntPtr((uint)nonce), new System.IntPtr(revision)), "Native sizing marker could not be posted.");
+        barrier["markerPosts"] = 1; barrier["nonce"] = nonce; barrier["revision"] = revision;
+        Wait(delegate {
+            Require(GetForegroundWindow() == main && ResizeLoop(main) && (GetAsyncKeyState(1) & 0x8000) != 0, "Native sizing ended while awaiting modal message consumption.");
+            native = ResizeNativeObservation(app, main); barrier["lastNative"] = native;
+            return (bool)native["coherent"] && (long)native["revision"] == revision && (long)native["barrierRevision"] == revision && (long)native["barrierNonce"] == nonce;
+        }, 3000, "Native sizing context did not acknowledge the unique marker; no resize movement sent.");
+        barrier["acknowledged"] = true;
+    }
+    static void WaitResizeFilterRemoved(Process app, System.IntPtr main, System.Collections.Generic.Dictionary<string, object> result) {
+        var barrier = (System.Collections.Generic.Dictionary<string, object>)result["nativeLoopBarrier"];
+        long revision = (long)barrier["revision"];
+        Wait(delegate {
+            var native = ResizeNativeObservation(app, main); result["nativeAfterRelease"] = native;
+            return (bool)native["coherent"] && (long)native["revision"] == revision && (long)native["filterRemoved"] == 1;
+        }, 3000, "Fixture-only native sizing filter removal was not confirmed after release.");
+    }
     static bool ResizeLoop(System.IntPtr main) {
         uint process; uint thread = GetWindowThreadProcessId(main, out process);
         ResizeGuiInfo info = new ResizeGuiInfo(); info.size = (uint)System.Runtime.InteropServices.Marshal.SizeOf(typeof(ResizeGuiInfo));
@@ -116,6 +274,58 @@ public static partial class EchoLingoPopupVisibilitySmoke {
             parent = System.Windows.Automation.TreeWalker.RawViewWalker.GetParent(parent);
         }
         return false;
+    }
+    static bool ResizeViewportReady(double[] client, double[] document, double scale) {
+        if (!ResizeFiniteRectangle(client) || !ResizeFiniteRectangle(document) || double.IsNaN(scale) || double.IsInfinity(scale) || scale <= 0) return false;
+        // A layout viewport may exclude native scrollbars, never extend beyond
+        // its client or retain the previous presentation's dimensions.
+        return System.Math.Abs(document[0] - client[0]) <= scale && System.Math.Abs(document[1] - client[1]) <= scale &&
+            client[2] - document[2] >= -scale && client[2] - document[2] <= 32 * scale &&
+            client[3] - document[3] >= -scale && client[3] - document[3] <= 32 * scale;
+    }
+    static void ResizeViewportReadinessSelfTest() {
+        double[] client = new double[] { 108, 51, 748, 703 };
+        Require(ResizeViewportReady(client, client, 1), "Exact viewport readiness regressed.");
+        Require(!ResizeViewportReady(client, new double[] { 108, 51, 948, 560 }, 1), "Stale popup document was accepted as settings readiness.");
+        Require(ResizeViewportReady(client, new double[] { 108, 51, 732, 687 }, 1), "Valid scrollbar viewport was rejected.");
+        Require(!ResizeViewportReady(client, new double[] { 108, 51, 715, 703 }, 1), "Oversized viewport gap was accepted.");
+        Require(ResizeViewportReady(new double[] { -1500, -900, -220, 404 }, new double[] { -1500, -900, -252, 372 }, 2), "Negative-coordinate HiDPI viewport regressed.");
+        Require(!ResizeViewportReady(client, null, 1) && !ResizeViewportReady(client, client, double.NaN) && !ResizeViewportReady(client, client, 0), "Invalid readiness input was accepted.");
+    }
+    static void WaitResizeLayoutReady(Process app, System.IntPtr main, System.Collections.Generic.Dictionary<string, object> observation) {
+        var probe = new System.Collections.Generic.Dictionary<string, object> { { "deadlineMilliseconds", 5000 }, { "polls", 0 }, { "requiredMatchingObservations", 2 } };
+        observation["layoutReadiness"] = probe;
+        double[] previous = null; int matching = 0; Stopwatch elapsed = Stopwatch.StartNew();
+        Wait(delegate {
+            RequireUniqueOwnedMainWindow(app, main);
+            Require(IsWindowVisible(main) && GetForegroundWindow() == main && (GetAsyncKeyState(1) & 0x8000) == 0 && !ResizeLoop(main), "Layout readiness requires the idle visible owned foreground window; no resize input sent.");
+            probe["polls"] = (int)probe["polls"] + 1;
+            RECT native; Require(GetClientRect(main, out native), "Owned readiness client unavailable.");
+            POINT tl = new POINT(), br = new POINT(); tl.x = native.left; tl.y = native.top; br.x = native.right; br.y = native.bottom;
+            Require(ClientToScreen(main, ref tl) && ClientToScreen(main, ref br), "Owned readiness coordinates unavailable.");
+            double[] client = new double[] { tl.x, tl.y, br.x, br.y }; double[] document = null; int count = 0;
+            var root = System.Windows.Automation.AutomationElement.FromHandle(main);
+            var found = root.FindAll(System.Windows.Automation.TreeScope.Descendants,
+                new System.Windows.Automation.PropertyCondition(System.Windows.Automation.AutomationElement.ControlTypeProperty, System.Windows.Automation.ControlType.Document));
+            for (int index = 0; index < found.Count && index < 32; index++) {
+                var element = found[index]; var info = element.Current;
+                if (info.IsOffscreen || !ResizeIsMainDocument(element, root)) continue;
+                count++; var rect = info.BoundingRectangle; document = new double[] { rect.Left, rect.Top, rect.Right, rect.Bottom };
+            }
+            RECT afterNative; Require(GetClientRect(main, out afterNative), "Owned readiness client disappeared.");
+            POINT afterTop = new POINT(), afterBottom = new POINT(); afterTop.x = afterNative.left; afterTop.y = afterNative.top; afterBottom.x = afterNative.right; afterBottom.y = afterNative.bottom;
+            Require(ClientToScreen(main, ref afterTop) && ClientToScreen(main, ref afterBottom), "Owned readiness position disappeared.");
+            bool nativeUnchanged = afterTop.x == client[0] && afterTop.y == client[1] && afterBottom.x == client[2] && afterBottom.y == client[3];
+            bool ready = nativeUnchanged && found.Count <= 32 && count == 1 && ResizeViewportReady(client, document, GetDpiForWindow(main) / 96.0);
+            double[] current = ready ? new double[] { client[0], client[1], client[2], client[3], document[0], document[1], document[2], document[3] } : null;
+            bool same = current != null && previous != null;
+            if (same) for (int index = 0; index < current.Length; index++) if (current[index] != previous[index]) same = false;
+            matching = ready ? (same ? matching + 1 : 1) : 0; previous = current;
+            probe["clientPhysicalBounds"] = client; probe["documentPhysicalBounds"] = document; probe["visibleMainDocumentCount"] = count;
+            probe["candidateCount"] = found.Count; probe["matchingObservations"] = matching; probe["observedMilliseconds"] = elapsed.Elapsed.TotalMilliseconds;
+            return matching >= 2;
+        }, 5000, "WebView layout viewport did not match the stable native client before resize; no gesture sent.");
+        probe["ready"] = true;
     }
     static POINT ResizeLayoutViewportPoint(Process app, System.IntPtr main, POINT original, System.Collections.Generic.Dictionary<string, object> observation) {
         RequireUniqueOwnedMainWindow(app, main);
@@ -273,6 +483,7 @@ public static partial class EchoLingoPopupVisibilitySmoke {
         activeResizeObservation = result;
         RequireUniqueOwnedMainWindow(app, main);
         Require(IsWindowVisible(main) && GetForegroundWindow() == main, "Only the exact foreground app HWND may receive the generated resize.");
+        WaitResizeLayoutReady(app, main, result);
         RECT before = ResizeBounds(main); int startWidth = before.right - before.left;
         result["initialPhysicalWidth"] = startWidth;
         result["trackConstraintsBeforeDrag"] = ResizeTrackConstraints(app, main);
@@ -283,10 +494,12 @@ public static partial class EchoLingoPopupVisibilitySmoke {
         RequireResizePointerTarget(app, main, point, result);
         var motion = new System.Collections.Generic.List<object>(); result["boundedMotionObservations"] = motion;
         result["initialBounds"] = new int[] { before.left, before.top, before.right, before.bottom };
+        result["nativeBeforeGesture"] = ResizeNativeObservation(app, main);
         try {
             INPUT down = new INPUT(); down.type = 0; down.data.mouse.flags = 2; Send(new INPUT[] { down }); held = true;
             Wait(delegate { Require(IsWindowVisible(main), "Popup hid during edge-down."); return ResizeLoop(main); }, 3000, "Actual native WM move/size loop did not start; resize was not tested.");
             result["nativeSizingLoopObserved"] = true;
+            WaitResizeMessageLoop(app, main, result);
             POINT nativeAnchor; result["nativeLoopPointerKnown"] = GetPhysicalCursorPos(out nativeAnchor); result["nativeLoopPointer"] = new int[] { nativeAnchor.x, nativeAnchor.y };
             result["motionMethod"] = "SendInput absolute virtual desktop";
             for (int step = 1; step <= 8; step++) {
@@ -320,9 +533,12 @@ public static partial class EchoLingoPopupVisibilitySmoke {
                 }
             }
         } finally {
-            if (held) { INPUT up = new INPUT(); up.type = 0; up.data.mouse.flags = 4; Send(new INPUT[] { up }); }
+            try { result["nativeBeforeRelease"] = ResizeNativeObservation(app, main); }
+            catch (System.Exception diagnosticError) { result["nativeObservationExceptionType"] = diagnosticError.GetType().Name; }
+            finally { if (held) { INPUT up = new INPUT(); up.type = 0; up.data.mouse.flags = 4; Send(new INPUT[] { up }); } }
         }
         Wait(delegate { return !ResizeLoop(main); }, 3000, "Native sizing loop did not end after the generated release.");
+        WaitResizeFilterRemoved(app, main, result);
         if (retainAfterRelease) {
             int expected = startWidth + distance;
             Wait(delegate { return System.Math.Abs(ResizeWidth(main) - expected) <= 5; }, 3000, "Released popup did not retain the actual resized width.");
@@ -341,6 +557,7 @@ public static partial class EchoLingoPopupVisibilitySmoke {
         activeResizeObservation = result;
         RequireUniqueOwnedMainWindow(app, main);
         Require(IsWindowVisible(main) && GetForegroundWindow() == main, "Only the exact foreground settings HWND may receive a generated resize.");
+        WaitResizeLayoutReady(app, main, result);
         RECT before = ResizeBounds(main); int height = before.bottom - before.top, width = before.right - before.left;
         result["initialPhysicalHeight"] = height; result["initialPhysicalWidth"] = width;
         POINT point = ResizeClientEdgePoint(main, false, true);
@@ -352,10 +569,12 @@ public static partial class EchoLingoPopupVisibilitySmoke {
         Require(SetCursorPos(x, y), "Could not position the generated settings resize pointer.");
         RequireResizePointerTarget(app, main, point, result);
         var samples = new System.Collections.Generic.List<int>(); result["heightSamples"] = samples; bool held = false;
+        result["nativeBeforeGesture"] = ResizeNativeObservation(app, main);
         try {
             INPUT down = new INPUT(); down.type = 0; down.data.mouse.flags = 2; Send(new INPUT[] { down }); held = true;
             Wait(delegate { Require(IsWindowVisible(main), "Settings hid during resize edge-down."); return ResizeLoop(main); }, 3000, "Settings never entered an actual native sizing loop.");
             result["nativeSizingLoopObserved"] = true;
+            WaitResizeMessageLoop(app, main, result);
             var desktop = System.Windows.Forms.SystemInformation.VirtualScreen;
             for (int step = 1; step <= 8; step++) {
                 Require(GetForegroundWindow() == main && IsWindowVisible(main), "Settings foreground changed during generated resize.");
@@ -373,9 +592,12 @@ public static partial class EchoLingoPopupVisibilitySmoke {
                 }
             }
         } finally {
-            if (held) { INPUT up = new INPUT(); up.type = 0; up.data.mouse.flags = 4; Send(new INPUT[] { up }); }
+            try { result["nativeBeforeRelease"] = ResizeNativeObservation(app, main); }
+            catch (System.Exception diagnosticError) { result["nativeObservationExceptionType"] = diagnosticError.GetType().Name; }
+            finally { if (held) { INPUT up = new INPUT(); up.type = 0; up.data.mouse.flags = 4; Send(new INPUT[] { up }); } }
         }
         Wait(delegate { return !ResizeLoop(main); }, 3000, "Settings sizing loop did not end on mouse release.");
+        WaitResizeFilterRemoved(app, main, result);
         int finalHeight = height + distance;
         Wait(delegate { return System.Math.Abs(ResizeHeight(main) - finalHeight) <= 5; }, 3000, "Settings height rewound after the native sizing loop ended.");
         Stopwatch retention = Stopwatch.StartNew();
@@ -473,8 +695,10 @@ public static partial class EchoLingoPopupVisibilitySmoke {
         var owned = new System.Collections.Generic.List<string>(); Process app = null;
         var report = new System.Collections.Generic.Dictionary<string, object> {
             { "ok", false }, { "actualWindowsResizeTested", false }, { "fakeIpcUsed", false }, { "userContentRead", false },
-            { "clipboardRead", false }, { "externalApiUsed", false }, { "physicalWindows10Tested", false }, { "dwmFrameRateMeasured", false }
+            { "clipboardRead", false }, { "externalApiUsed", false }, { "physicalWindows10Tested", false }, { "dwmFrameRateMeasured", false }, { "fixtureNativeResizeProbe", true }, { "nativeSizingMarkerUsed", true }
         };
+        ResizeViewportReadinessSelfTest(); report["viewportReadinessSelfTest"] = true;
+        ResizeExactEdgeSelfTest(); report["exactEdgeSelfTest"] = true;
         activeResizeObservation = null;
         int geometryPort = 0;
         if (geometryProbeScript != null) {
@@ -530,6 +754,7 @@ public static partial class EchoLingoPopupVisibilitySmoke {
                             var start = new ProcessStartInfo(executable); start.UseShellExecute = false; start.CreateNoWindow = true;
                             string temp = Path.Combine(root, "Temp"); Directory.CreateDirectory(temp);
                             start.EnvironmentVariables["TEMP"] = temp; start.EnvironmentVariables["TMP"] = temp;
+                            start.EnvironmentVariables["ECHOLINGO_NATIVE_RESIZE_PROBE"] = "1";
                             start.EnvironmentVariables["WEBVIEW2_USER_DATA_FOLDER"] = Path.Combine(local, "fixture-webview");
                             if (geometryPort != 0) {
                                 Require(string.IsNullOrEmpty(start.EnvironmentVariables["WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS"]), "Unexpected inherited WebView arguments; refused to change the diagnostic baseline.");
@@ -619,6 +844,7 @@ public static partial class EchoLingoPopupVisibilitySmoke {
                             Require(work.Width >= (before.right - before.left) + 240, "Fixture desktop is too narrow for both generated edge drags; no product failure inferred.");
                             Require(SetWindowPos(main, System.IntPtr.Zero, work.Left + (work.Width - ResizeWidth(main)) / 2, work.Top + 20, 0, 0, 0x1 | 0x4 | 0x10), "Could not position the own popup before test gestures.");
                             report["nativePreparationMovesOnly"] = true;
+                            stage = "popup-exact-edge-observation"; report["popupExactEdges"] = ResizeExactEdgeObservation(app, main);
                             stage = "actual-east-drag"; report["east"] = DragResize(app, main, false, 96, true);
                             stage = "actual-west-drag"; report["west"] = DragResize(app, main, true, 64, true);
                             int finalWidth = ResizeWidth(main); RECT client;
@@ -633,6 +859,7 @@ public static partial class EchoLingoPopupVisibilitySmoke {
                             Wait(delegate { var back = Element(main, "\u8fd4\u56de\u7ffb\u8bd1"); return back != null && !back.Current.IsOffscreen; }, 5000, "Actual settings presentation did not open.");
                             stage = "management-native-resize-frame";
                             report["managementResizeFrame"] = ManagementResizeFrame(app, main);
+                            stage = "management-exact-edge-observation"; report["managementExactEdges"] = ResizeExactEdgeObservation(app, main);
                             stage = "management-width-retention";
                             report["managementDrag"] = DragResize(app, main, false, -64, true);
                             RECT managementClient; Require(GetClientRect(main, out managementClient), "Settings client bounds are unavailable.");

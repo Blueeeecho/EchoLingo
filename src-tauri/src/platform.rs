@@ -712,6 +712,23 @@ fn bounded_selection_health(value: &Value) -> Value {
         "copyTerminalReason",
         "copyClipboardOutcome",
         "copyWaitElapsedMilliseconds",
+        "copyHtmlProbeEnabled",
+        "copyHtmlSnapshotOlePresent",
+        "copyHtmlSnapshotOleChars",
+        "copyHtmlSnapshotEqual",
+        "copyHtmlRestoreEqual",
+        "copyHtmlSnapshotError",
+        "copyHtmlSnapshotSeedVerified",
+        "copyHtmlSnapshotPresent",
+        "copyHtmlSnapshotAllocatedBytes",
+        "copyHtmlSnapshotPayloadBytes",
+        "copyHtmlSnapshotSequenceChanged",
+        "copyHtmlRestoreError",
+        "copyHtmlRestoreSeedVerified",
+        "copyHtmlRestorePresent",
+        "copyHtmlRestoreAllocatedBytes",
+        "copyHtmlRestorePayloadBytes",
+        "copyHtmlRestoreSequenceChanged",
     ] {
         retain(field);
     }
@@ -1669,6 +1686,20 @@ fn materialize(
 #[cfg(test)]
 mod tests {
     use serde_json::{json, Value};
+
+    #[test]
+    fn clipboard_probe_diagnostics_are_numeric_only() {
+        let safe = super::bounded_selection_health(&json!({
+            "copyHtmlProbeEnabled": 1, "copyHtmlSnapshotPayloadBytes": 45,
+            "copyHtmlSnapshotOleChars": 0, "copyHtmlRestoreEqual": 0,
+            "copyHtmlSnapshot": "private", "copyHtmlNonce": "private",
+            "copyHtmlRestorePayloadBytes": -1, "copyHtmlSnapshotEqual": "private"
+        }));
+        assert_eq!(
+            safe,
+            json!({"copyHtmlProbeEnabled":1,"copyHtmlSnapshotPayloadBytes":45,"copyHtmlSnapshotOleChars":0,"copyHtmlRestoreEqual":0})
+        );
+    }
 
     #[test]
     fn keyboard_focus_follows_the_first_child_chain_and_stops_on_a_cycle() {
