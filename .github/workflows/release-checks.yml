@@ -82,6 +82,11 @@ jobs:
       - name: Audit exact Windows runtime resource allowlist
         if: runner.os == 'Windows'
         run: python scripts/audit-windows-resources.py --staged
+      - name: Check synchronous macOS window sizing
+        if: runner.os == 'macOS'
+        run: |
+          swiftc src-tauri/native/macos_window.swift tests/macos-window-size.swift -o "$RUNNER_TEMP/echolingo-window-size-check"
+          "$RUNNER_TEMP/echolingo-window-size-check"
       - run: npm ci
       - run: npm run check
       - run: npm test
