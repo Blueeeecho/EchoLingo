@@ -80,6 +80,7 @@ public static class EchoLingoDesktopSmoke {
     [DllImport("user32.dll")] static extern IntPtr GetForegroundWindow();
     [DllImport("kernel32.dll")] static extern uint GetCurrentThreadId();
     [DllImport("user32.dll")] static extern IntPtr GetClipboardOwner();
+    [DllImport("user32.dll")] static extern uint GetClipboardSequenceNumber();
     [DllImport("user32.dll")] static extern uint GetWindowThreadProcessId(IntPtr window, out uint process);
     [DllImport("user32.dll")] static extern bool SetForegroundWindow(IntPtr window);
     [DllImport("user32.dll", SetLastError=true)] static extern IntPtr OpenInputDesktop(uint flags, bool inherit, uint access);
@@ -136,6 +137,17 @@ public static class EchoLingoDesktopSmoke {
         public string Text;
         public string Error;
         public int ExitCode;
+    }
+
+    // Observe the real keyboard message without intercepting or implementing
+    // copy. Keep TextBox's native editor/provider behavior unchanged.
+    sealed class ObservedTextBox : TextBox {
+        public int CopyKeyDowns;
+        public override bool PreProcessMessage(ref Message message) {
+            if (message.Msg == 0x100 && message.WParam.ToInt32() == 0x43
+                && ModifierKeys == Keys.Control) CopyKeyDowns++;
+            return base.PreProcessMessage(ref message);
+        }
     }
 
     // This selectable test control intentionally supplies no text-provider
@@ -351,7 +363,7 @@ public static class EchoLingoDesktopSmoke {
         catch (Exception error) { report["error"] = error.Message; return report; }
 
         using (Form form = new Form())
-        using (TextBox selection = new TextBox())
+        using (ObservedTextBox selection = new ObservedTextBox())
         using (TextBox password = new TextBox())
         using (CopyFallbackControl fallback = new CopyFallbackControl())
         using (System.Windows.Forms.Timer timeout = new System.Windows.Forms.Timer()) {
@@ -404,11 +416,28 @@ public static class EchoLingoDesktopSmoke {
                         AssertRichClipboard(seeded);
                         passed.Add("Foreground TextBox selection captured; Unicode/HTML/RTF clipboard preserved");
 
-                        FocusFixture(form, selection, delegate { selection.Select(0, 0); });
+                        int copiesBeforeEmpty = 0;
+                        FocusFixture(form, selection, delegate { selection.Select(0, 0); copiesBeforeEmpty = selection.CopyKeyDowns; });
+                        uint sequenceBeforeEmpty = GetClipboardSequenceNumber();
                         Reply emptyReply = CaptureFixtureSelection(form, helperPath);
-                        Assert(!emptyReply.Ok && emptyReply.ExitCode != 0 && emptyReply.Error != null && emptyReply.Error.StartsWith("NO_SELECTION:", StringComparison.Ordinal), "Empty TextBox selection must return NO_SELECTION, received " + emptyReply.Error);
+                        Assert(!emptyReply.Ok && emptyReply.ExitCode != 0 && emptyReply.Error != null, "Empty TextBox must fail without captured text");
+                        int emptyCopies = 0, remainingSelection = -1;
+                        OnUi(form, delegate { emptyCopies = selection.CopyKeyDowns - copiesBeforeEmpty; remainingSelection = selection.SelectionLength; });
+                        Assert(remainingSelection == 0, "The generated empty TextBox must remain unselected");
+                        if (emptyReply.Error.StartsWith("NO_SELECTION:", StringComparison.Ordinal)) {
+                            Assert(emptyCopies == 0, "A verified empty selection must be rejected before copy input");
+                        } else {
+                            // Auto mode depends on the runner's real UIA provider. If it
+                            // cannot expose this empty range, the unchanged fallback
+                            // observes a no-op copy; it cannot claim verified emptiness.
+                            Assert(emptyReply.Error.StartsWith("COPY_NO_UPDATE:", StringComparison.Ordinal), "Expected verified empty or evidenced no-op copy, received " + emptyReply.Error);
+                            Assert(emptyCopies == 1, "An unavailable UIA empty range must issue exactly one observed copy, never retry");
+                        }
+                        Assert(GetClipboardSequenceNumber() == sequenceBeforeEmpty, "Empty/no-op copy must not change or restore the clipboard generation");
+                        report["emptyTextBoxCopyKeyDowns"] = emptyCopies;
+                        report["emptyTextBoxOutcome"] = emptyCopies == 0 ? "verified-empty" : "copy-no-update";
                         AssertRichClipboard(seeded);
-                        passed.Add("Empty TextBox selection returns NO_SELECTION; rich clipboard preserved");
+                        passed.Add("Empty TextBox rejected with exact input/outcome evidence; rich clipboard preserved");
 
                         FocusFixture(form, fallback, null);
                         AssertSuccess(CaptureFixtureSelection(form, helperPath), CopyFallbackControl.Selection, "Forced Ctrl+C selection fallback");

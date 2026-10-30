@@ -39,7 +39,7 @@ try {
     Object.assign(fixture, { updateChecks: [], updateReads: 0, updateStatus: { available: null, checkedAt: null, failed: false }, holdUpdate: false, releaseUpdate: () => {}, failUpdate: false, holdServiceLink: false, releaseServiceLink: () => {}, failServiceLink: false });
     const updateSnapshot = () => { const value = structuredClone(fixture.updateStatus); if (!fixture.settings.includePrereleaseUpdates && value.available?.prerelease) value.available = null; return value; };
     Object.assign(fixture, { holdFreeSetupTest: false, freeSetupTestWaits: 0, releaseFreeSetupTest: () => {} });
-    Object.assign(fixture, { resizeRequests: [], nativeResizeRequests: [], holdResize: false, releaseResize: () => {} });
+    Object.assign(fixture, { resizeRequests: [], nativeResizeRequests: [], holdResize: false, releaseResize: () => {}, popupDragCommands: [], nextPopupDragId: 0, activePopupDragId: null });
     Object.assign(fixture, { pinned: false, nativeVisible: true, popupReveals: 0, nativeHideTransitions: 0 });
     Object.assign(fixture, { popupStages: [], failPopupShow: false });
     Object.assign(fixture, { holdPopupAck: false, popupAckWaits: 0, releasePopupAck: () => {}, sourceFocusCalls: 0 });
@@ -196,6 +196,19 @@ try {
         if (command === 'wait_for_window_sizing') return 0;
         if (command === 'fit_window') { fixture.layoutCalls.push(args); if (fixture.holdFit) { fixture.fitWaits++; await new Promise((resolve) => { fixture.releaseFit = resolve; }); } return; }
         if (command === 'start_window_drag') { fixture.dragCalls++; return; }
+        if (command === 'begin_popup_drag') {
+          if (args.presentationEpoch !== fixture.presentation.epoch || !fixture.presentation.presented) throw new Error('CANCELLED: stale popup drag');
+          const dragId = ++fixture.nextPopupDragId;
+          fixture.activePopupDragId = dragId;
+          fixture.popupDragCommands.push({ command, ...structuredClone(args), dragId });
+          return dragId;
+        }
+        if (command === 'move_popup_drag' || command === 'end_popup_drag') {
+          if (args.dragId !== fixture.activePopupDragId) throw new Error('CANCELLED: stale popup drag token');
+          fixture.popupDragCommands.push({ command, ...structuredClone(args) });
+          if (command === 'end_popup_drag') fixture.activePopupDragId = null;
+          return;
+        }
         if (command === 'start_window_resize') { fixture.nativeResizeRequests.push(structuredClone(args)); return; }
         if (command === 'resize_popup_width') { fixture.resizeRequests.push(structuredClone(args)); if (fixture.holdResize) await new Promise((resolve) => { fixture.releaseResize = resolve; }); return; }
         if (command === 'show_management') {
@@ -785,6 +798,7 @@ try {
   await page.waitForFunction(() => document.activeElement.id !== 'source-text');
   // Padding belongs to the button's hit area, and must never start a drag.
   const pinDragCalls = await page.evaluate(() => window.__qa.dragCalls);
+  const pinPopupDragCalls = await page.evaluate(() => window.__qa.popupDragCommands.length);
   await pin.click({ position: { x: 3, y: 3 } });
   await page.waitForFunction(() => document.querySelector('#pin-button').getAttribute('aria-pressed') === 'true');
   assert.equal(await pin.getAttribute('aria-label'), '取消钉住');
@@ -817,8 +831,34 @@ try {
   assert.equal(await page.locator('.popup-toolbar').getAttribute('data-window-drag'), null);
   assert.equal(await page.locator('.popup-drag-space').getAttribute('data-window-drag'), '');
   assert.equal(await page.locator('.popup-toolbar').getAttribute('data-tauri-drag-region'), null);
+  // Mac ordinary clicks, including nested pin SVGs and toolbar blank space,
+  // must not enter either native drag path. Only a deliberate >4px gesture
+  // begins a tokenized drag using the original local press anchor.
+  assert.equal(await page.evaluate(() => window.__qa.popupDragCommands.length), pinPopupDragCalls);
   await page.locator('.popup-drag-space').click();
-  assert.equal(await page.evaluate(() => window.__qa.dragCalls), pinDragCalls + 1);
+  assert.equal(await page.evaluate(() => window.__qa.dragCalls), pinDragCalls);
+  assert.equal(await page.evaluate(() => window.__qa.popupDragCommands.length), pinPopupDragCalls);
+  const dragBox = await page.locator('.popup-drag-space').boundingBox();
+  const dragX = dragBox.x + dragBox.width / 2, dragY = dragBox.y + dragBox.height / 2;
+  const dragEpoch = await page.evaluate(() => window.__qa.presentation.epoch);
+  await page.mouse.move(dragX, dragY); await page.mouse.down();
+  await page.mouse.move(dragX + 2, dragY + 1);
+  await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+  assert.equal(await page.evaluate(() => window.__qa.popupDragCommands.length), pinPopupDragCalls);
+  await page.mouse.move(dragX + 30, dragY + 10, { steps: 3 });
+  await page.waitForFunction(before => window.__qa.popupDragCommands.slice(before).some(value => value.command === 'move_popup_drag'), pinPopupDragCalls);
+  const beginDrag = await page.evaluate(before => window.__qa.popupDragCommands[before], pinPopupDragCalls);
+  assert.deepEqual(beginDrag, { command: 'begin_popup_drag', presentationEpoch: dragEpoch, anchorX: dragX, anchorY: dragY, dragId: 1 });
+  await page.mouse.up();
+  await page.waitForFunction(() => window.__qa.popupDragCommands.at(-1)?.command === 'end_popup_drag');
+  const dragCommands = await page.evaluate(before => window.__qa.popupDragCommands.slice(before), pinPopupDragCalls);
+  assert.equal(dragCommands.filter(value => value.command === 'begin_popup_drag').length, 1);
+  assert.ok(dragCommands.filter(value => value.command === 'move_popup_drag').length >= 1);
+  assert.ok(dragCommands.every(value => value.dragId === beginDrag.dragId));
+  assert.equal(dragCommands.filter(value => value.command === 'end_popup_drag').length, 1);
+  assert.equal(await page.evaluate(() => window.__qa.activePopupDragId), null);
+  assert.equal(await page.locator('body').evaluate(element => element.classList.contains('popup-dragging')), false);
+  assert.equal(await page.evaluate(() => window.__qa.dragCalls), pinDragCalls);
   assert.deepEqual(await page.evaluate(() => window.__qa.resizeRequests), []);
   assert.deepEqual(await page.evaluate(() => window.__qa.nativeResizeRequests), []);
   // The actual macOS tao backend has no native drag-resize implementation.
@@ -881,6 +921,10 @@ try {
   assert.equal(await page.evaluate(() => window.__qa.resizeRequests.length), beforeChangedEpoch);
   // Windows uses its native resize API; this fixture only verifies dispatch.
   await page.evaluate(() => Object.defineProperty(navigator, 'platform', { configurable: true, get: () => 'Win32' }));
+  const windowsDragBefore = await page.evaluate(() => ({ native: window.__qa.dragCalls, mac: window.__qa.popupDragCommands.length }));
+  await page.locator('.popup-drag-space').click();
+  assert.equal(await page.evaluate(() => window.__qa.dragCalls), windowsDragBefore.native + 1);
+  assert.equal(await page.evaluate(() => window.__qa.popupDragCommands.length), windowsDragBefore.mac);
   await eastEdge.click({ position: { x: 2, y: 45 } });
   assert.deepEqual(await page.evaluate(() => window.__qa.nativeResizeRequests.at(-1)), { direction: 'east', presentationEpoch: await page.evaluate(() => window.__qa.presentation.epoch) });
   await page.evaluate(() => Object.defineProperty(navigator, 'platform', { configurable: true, get: () => 'MacIntel' }));
