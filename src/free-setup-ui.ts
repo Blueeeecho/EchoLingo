@@ -1,5 +1,5 @@
 import { invoke } from '@tauri-apps/api/core';
-import { comboById, combosFor, type FreeCombo, type FreePiece, type FreeRegion } from './free-combos';
+import { serviceById, servicesFor, type FreePiece, type FreeRegion } from './free-services';
 import { EXTRA_SERVICE_LINKS } from './service-quotas';
 import type { OcrProvider, Provider, Settings } from './types';
 import { tx } from './ui-text';
@@ -49,11 +49,14 @@ function values(ids: string[]): Record<string, string> {
 }
 
 function credentialFor(piece: FreePiece, input: Record<string, string>): { key: string | null; error: string | null } {
+  if (piece.credential === 'youdaoPair') return piece.role === 'translation'
+    ? buildTranslationCredential('youdao', { appKey: input.first, appSecret: input.second })
+    : buildOcrCredential('youdao', { appKey: input.first, appSecret: input.second }, true);
   if (piece.role === 'translation') {
     if (piece.credential === 'appPair' || piece.credential === 'microsoft') {
       return piece.credential === 'microsoft'
         ? buildTranslationCredential('microsoft', { subscriptionKey: input.key })
-        : buildTranslationCredential(piece.kind as 'baidu', { appId: input.first, secretKey: input.second });
+        : buildTranslationCredential(piece.kind as Provider['kind'], { appId: input.first, secretKey: input.second });
     }
     return buildTranslationCredential(piece.kind as 'openai', { genericKey: input.key });
   }
@@ -71,8 +74,7 @@ export function installFreeSetup(context: SetupContext): { refresh: () => void; 
   let state = readState();
   let mode: 'first' | 'soft' | null = null;
   let region: FreeRegion = (navigator.language || '').toLowerCase().startsWith('zh') ? 'cn' : 'overseas';
-  let combo: FreeCombo | null = null;
-  let pieceIndex = 0;
+  let selectedPiece: FreePiece | null = null;
   let revision = 0;
   let busy = false;
   const nextButton = document.querySelector<HTMLButtonElement>('#free-setup-next');
@@ -88,20 +90,42 @@ export function installFreeSetup(context: SetupContext): { refresh: () => void; 
   // optional signup guidance; never stack multiple onboarding banners.
   const hintBlocked = (): boolean => ['#core-guidance', '#engine-hint'].some((selector) => document.querySelector<HTMLElement>(selector)?.hidden === false);
   const showError = (message: string): void => { if (!error) return; error.hidden = !message; error.textContent = message; };
+  const openLink = (url: string): void => {
+    if (context.desktop) void invoke('open_service_link', { url }).catch(context.reportError);
+    else window.open(url, '_blank', 'noopener');
+  };
   const renderCards = (): void => {
-    const list = document.querySelector<HTMLElement>('#free-combo-list');
-    if (!list) return;
     document.querySelector<HTMLButtonElement>('#free-region-cn')?.setAttribute('aria-pressed', String(region === 'cn'));
     document.querySelector<HTMLButtonElement>('#free-region-overseas')?.setAttribute('aria-pressed', String(region === 'overseas'));
-    list.replaceChildren();
-    for (const item of combosFor(region)) {
-      const card = document.createElement('article'); card.className = 'free-combo';
-      const title = document.createElement('h3'); title.textContent = tx(item.titleZh, item.titleEn);
-      const detail = document.createElement('p'); detail.textContent = tx(item.detailZh, item.detailEn);
-      const button = document.createElement('button'); button.type = 'button'; button.className = 'text-button';
-      button.textContent = tx('一键配置', 'Set up');
-      button.addEventListener('click', () => openWizard(item.id));
-      card.append(title, detail, button); list.append(card);
+    for (const role of ['translation', 'ocr'] as const) {
+      const list = document.querySelector<HTMLElement>(`#free-${role}-list`);
+      if (!list) continue;
+      list.replaceChildren();
+      for (const item of servicesFor(region, role)) {
+        const row = document.createElement('li'); row.className = 'free-service';
+        row.setAttribute('data-free-service', item.id);
+        const title = document.createElement('h4'); title.textContent = tx(item.name, item.nameEn);
+        const quota = document.createElement('p'); quota.className = 'free-service-quota';
+        quota.textContent = tx(item.allowance.summary, item.quotaEn);
+        const detail = document.createElement('p'); detail.className = 'free-service-conditions';
+        detail.textContent = tx(item.allowance.details.join(' '), item.conditionsEn);
+        const cost = document.createElement('p'); cost.className = 'free-service-warning';
+        cost.textContent = tx('费用提醒：免费条件或额度之外可能收费，请核对平台计费规则。', 'Billing notice: use outside the free eligibility or allowance may be charged. Check the vendor rules.');
+        const date = document.createElement('small');
+        date.textContent = tx(`核对日期：${item.allowance.checkedOn} · 额度可能变化`, `Checked: ${item.allowance.checkedOn} · Quotas may change`);
+        const actions = document.createElement('div'); actions.className = 'free-service-actions';
+        const button = document.createElement('button'); button.type = 'button'; button.className = 'text-button';
+        button.textContent = tx('配置此服务', 'Set up this service');
+        button.setAttribute('aria-label', tx(`配置${item.name}`, `Set up ${item.nameEn}`));
+        button.addEventListener('click', () => openWizard(item.id));
+        actions.append(button);
+        for (const [label, url] of item.allowance.links.slice(0, 1)) {
+          const source = document.createElement('button'); source.type = 'button'; source.className = 'text-button';
+          source.textContent = tx(label, 'Official quota'); source.setAttribute('data-free-source', item.id);
+          source.addEventListener('click', () => openLink(url)); actions.append(source);
+        }
+        row.append(title, quota, detail, date, actions, cost); list.append(row);
+      }
     }
   };
   const refresh = (): void => {
@@ -133,27 +157,29 @@ export function installFreeSetup(context: SetupContext): { refresh: () => void; 
     mode = 'soft'; state = { ...state, softAt: now }; writeState(state); refresh();
   };
   const renderPiece = (): void => {
-    if (!body || !combo) return;
-    const piece = combo.pieces[pieceIndex];
+    if (!body) return;
+    const piece = selectedPiece;
     if (!piece) return;
     showError('');
     const step = document.querySelector('#free-setup-step');
-    if (step) step.textContent = tx(`第 ${pieceIndex + 1} / ${combo.pieces.length} 步 · ${piece.name}`, `Step ${pieceIndex + 1} of ${combo.pieces.length} · ${piece.name}`);
+    if (step) step.textContent = tx(`${piece.role === 'translation' ? '翻译服务' : 'OCR 服务'} · ${piece.name}`, `${piece.role === 'translation' ? 'Translation' : 'OCR'} · ${piece.nameEn}`);
     const fields = document.createElement('div'); fields.className = 'free-setup-fields';
-    const quota = document.createElement('p'); quota.className = 'field-help'; quota.textContent = tx(piece.quotaZh, piece.quotaEn);
+    const quota = document.createElement('p'); quota.className = 'field-help'; quota.textContent = tx(piece.allowance.summary, piece.quotaEn) + tx(` 核对日期：${piece.allowance.checkedOn}。`, ` Checked: ${piece.allowance.checkedOn}.`);
     const privacy = document.createElement('p'); privacy.className = 'field-help';
     privacy.textContent = piece.role === 'ocr'
-      ? tx('测试和之后的识别会把选区图片发给这个服务商。密钥只写入系统凭据库。', 'The test and later recognition send the selected image to this provider. The key is stored only in the system credential store.')
-      : tx('测试和之后的翻译会把原文发给这个服务商。密钥只写入系统凭据库。', 'The test and later translation send the source text to this provider. The key is stored only in the system credential store.');
-    const warning = document.createElement('p'); warning.className = 'field-help';
-    warning.textContent = tx(piece.warningZh ?? '如果免费额度用完后会自动转为按量计费，请到该服务商控制台关闭后付费或打开“用完即停”。', piece.warningEn ?? 'If this provider starts charging after the free tier, turn off post-paid billing or enable stop-when-exhausted in its console.');
+      ? tx('测试会发送内置示例图；启用后的识别会把你的选区图片发给这个服务商。密钥只写入系统凭据库。', 'The test sends a built-in sample image. Later recognition sends your selected image to this provider. The key is stored only in the system credential store.')
+      : tx('测试会发送内置短句；启用后的翻译会把原文发给这个服务商。密钥只写入系统凭据库。启用会保留现有翻译服务；如不需要并行翻译，请在设置中关闭其他服务。', 'The test sends a built-in short sentence; later translation sends your source text to this provider. The key stays in the system credential store. Existing translation services remain enabled; disable others in Settings if you do not want parallel translation.');
+    const warning = document.createElement('p'); warning.className = 'free-service-warning';
+    warning.textContent = tx('费用提醒：免费额度用完后可能继续计费，请先确认控制台的计费与停止使用方式；应用不会保证自动停用。', 'Billing notice: usage above the free allowance may be billed. Check the vendor billing and stop-usage controls; this app does not guarantee an automatic stop.');
     const open = document.createElement('button'); open.type = 'button'; open.className = 'text-button'; open.textContent = tx('打开申请页', 'Open signup page');
     open.addEventListener('click', () => {
       if (context.desktop) void invoke('open_service_link', { url: piece.signupUrl }).catch(context.reportError);
       else window.open(piece.signupUrl, '_blank', 'noopener');
     });
-    if (piece.credential === 'appPair' || piece.credential === 'ocrPair' || piece.credential === 'tencentOcr') {
-      fields.append(field(piece.credential === 'tencentOcr' ? 'SecretId' : tx('第一项 ID / Key', 'First ID / key'), 'free-field-first'), field(tx('密钥', 'Secret'), 'free-field-second'));
+    if (piece.credential === 'appPair' || piece.credential === 'ocrPair' || piece.credential === 'tencentOcr' || piece.credential === 'youdaoPair') {
+      const firstLabel = piece.credential === 'youdaoPair' ? 'AppKey' : piece.kind === 'volcengine' || piece.kind === 'aliyun' ? 'AccessKey ID' : piece.credential === 'tencentOcr' ? 'SecretId' : piece.role === 'translation' ? 'APP ID' : 'API Key';
+      const secondLabel = piece.credential === 'youdaoPair' ? 'AppSecret' : piece.kind === 'volcengine' ? 'Secret Access Key' : piece.kind === 'aliyun' ? 'AccessKey Secret' : piece.credential === 'tencentOcr' ? 'SecretKey' : piece.role === 'ocr' ? 'Secret Key' : tx('密钥', 'Secret');
+      fields.append(field(firstLabel, 'free-field-first'), field(secondLabel, 'free-field-second'));
     } else if (piece.credential === 'azureVision') {
       fields.append(field(tx('终结点，例如 https://名字.cognitiveservices.azure.com', 'Endpoint, for example https://name.cognitiveservices.azure.com'), 'free-field-endpoint', false), field('API Key', 'free-field-key'));
     } else if (piece.credential === 'microsoft') {
@@ -161,12 +187,14 @@ export function installFreeSetup(context: SetupContext): { refresh: () => void; 
     } else fields.append(field('API Key', 'free-field-key'));
     body.replaceChildren(quota, warning, privacy, open, fields);
     const next = document.querySelector<HTMLButtonElement>('#free-setup-next');
-    if (next) next.textContent = tx('测试并设为当前', 'Test and set as current');
+    if (next) next.textContent = piece.role === 'translation'
+      ? tx('测试并启用此翻译服务', 'Test and enable translation')
+      : tx('测试并设为当前 OCR', 'Test and set as current OCR');
   };
-  const openWizard = (id?: string): void => {
+  const openWizard = (id: string): void => {
     invalidate();
-    combo = id ? comboById(id) ?? null : combosFor(region)[0] ?? null;
-    pieceIndex = 0;
+    selectedPiece = serviceById(id) ?? null;
+    if (!selectedPiece) return;
     renderPiece();
     if (dialog && dialog.hidden) context.showModal(dialog);
     document.querySelector<HTMLElement>('#free-setup-dialog')?.focus();
@@ -175,7 +203,7 @@ export function installFreeSetup(context: SetupContext): { refresh: () => void; 
     invalidate();
     // Remove password inputs as well as hiding the dialog.
     body?.replaceChildren();
-    combo = null;
+    selectedPiece = null;
     showError('');
     if (dialog && !dialog.hidden) context.closeModal(dialog);
   };
@@ -211,7 +239,7 @@ export function installFreeSetup(context: SetupContext): { refresh: () => void; 
     const translation = piece.role === 'translation';
     try {
       if (translation) {
-        const provider: Provider = { id, name: piece.name, kind: piece.kind as Provider['kind'], baseUrl, model: piece.model, enabled: false, prompt: '', region: input.region ?? '' };
+        const provider: Provider = { id, name: piece.name, kind: piece.kind as Provider['kind'], baseUrl, model: piece.model, enabled: false, prompt: '', region: input.region || piece.region || '' };
         await context.updateSettings((next) => { staged = true; next.providers.push(provider); }, current);
       } else {
         const provider: OcrProvider = {
@@ -267,10 +295,15 @@ export function installFreeSetup(context: SetupContext): { refresh: () => void; 
     }
   };
 
+  const chooseService = (): void => {
+    closeWizard(); context.setView('settings'); renderCards();
+    const section = document.querySelector<HTMLElement>('#free-translation-heading');
+    section?.scrollIntoView?.({ block: 'start' }); section?.focus();
+  };
   document.querySelector('#free-region-cn')?.addEventListener('click', () => { region = 'cn'; renderCards(); });
   document.querySelector('#free-region-overseas')?.addEventListener('click', () => { region = 'overseas'; renderCards(); });
-  document.querySelector('#free-setup-settings')?.addEventListener('click', () => openWizard());
-  document.querySelector('#free-setup-open')?.addEventListener('click', () => { context.setView('settings'); openWizard(); });
+  document.querySelector('#free-setup-settings')?.addEventListener('click', chooseService);
+  document.querySelector('#free-setup-open')?.addEventListener('click', chooseService);
   document.querySelector('#free-setup-docs')?.addEventListener('click', () => {
     const url = tx(EXTRA_SERVICE_LINKS.freeSetupZh, EXTRA_SERVICE_LINKS.freeSetupEn);
     if (context.desktop) void invoke('open_service_link', { url }).catch(context.reportError);
@@ -281,23 +314,14 @@ export function installFreeSetup(context: SetupContext): { refresh: () => void; 
   });
   document.querySelector('#free-setup-close')?.addEventListener('click', closeWizard);
   dialog?.addEventListener('click', (event) => { if (event.target === dialog) closeWizard(); });
-  document.querySelector('#free-setup-back')?.addEventListener('click', () => {
-    if (pieceIndex === 0) closeWizard(); else { invalidate(); pieceIndex -= 1; renderPiece(); }
-  });
+  document.querySelector('#free-setup-back')?.addEventListener('click', closeWizard);
   nextButton?.addEventListener('click', () => {
-    if (busy || !combo || dialog?.hidden) return;
-    const selected = combo, index = pieceIndex, intent = revision;
-    const piece = selected.pieces[index];
-    if (!piece) return;
-    const current = (): boolean => revision === intent && combo === selected && pieceIndex === index && dialog?.hidden === false;
+    if (busy || !selectedPiece || dialog?.hidden) return;
+    const piece = selectedPiece, intent = revision;
+    const current = (): boolean => revision === intent && selectedPiece === piece && dialog?.hidden === false;
     setBusy(true);
     void applyPiece(piece, current).then((success) => {
-      if (!success || !current()) return;
-      pieceIndex += 1;
-      if (pieceIndex >= selected.pieces.length) {
-        closeWizard();
-        context.toast(tx('这一组已经启用。本机引擎仍是默认兜底，可在设置里关掉不需要的服务。', 'This combination is enabled. The local engine remains available; turn off anything you do not want in Settings.'));
-      } else renderPiece();
+      if (success && current()) closeWizard();
     }).catch((failure: unknown) => {
       if (current()) showError(typeof failure === 'string' ? failure : failure instanceof Error ? failure.message : tx('测试没有成功，请检查密钥、网络和是否已开通该服务。', 'The test did not succeed. Check the key, network, and that the service is enabled.'));
     }).finally(() => { if (revision === intent) setBusy(false); });
@@ -307,15 +331,18 @@ export function installFreeSetup(context: SetupContext): { refresh: () => void; 
       event.preventDefault(); event.stopPropagation(); closeWizard();
     }
   });
+  for (const [id, zh, en] of [['free-translation-heading', '翻译服务', 'Translation services'], ['free-ocr-heading', 'OCR 服务', 'OCR services'], ['free-setup-settings', '选择服务', 'Choose a service']] as const) {
+    const element = document.querySelector(`#${id}`); if (element) element.textContent = tx(zh, en);
+  }
   const cardTitle = document.querySelector('#free-setup-card-title');
   const cardSummary = document.querySelector('#free-setup-card-summary');
-  if (cardTitle) cardTitle.textContent = tx('推荐免费组合', 'Recommended free combinations');
+  if (cardTitle) cardTitle.textContent = tx('有免费额度的服务', 'Services with free allowances');
   if (cardSummary) cardSummary.textContent = tx(
-    '默认仍是本机翻译和本机识别。下面的组合来自 2026-10 的公开额度，会变，不代表永久免费。',
-    'The default stays local. These combinations use public quotas checked in 2026-10. They can change and are not permanently free.',
+    '默认仍是本机翻译和本机识别。翻译和 OCR 分开选择，可自由搭配，也可只配置其中一项。免费额度与条件以官方当时说明为准。',
+    'The default stays local. Choose translation and OCR independently, or configure only one. Free allowances and eligibility follow the current vendor terms.',
   );
   // The host refreshes hints after rendering its existing engine/privacy state.
   // Do not consume the first-run timestamp before that banner can block this one.
   renderCards();
-  return { refresh, noteWeak, close: closeWizard, open: (next) => { if (next) region = next; openWizard(); } };
+  return { refresh, noteWeak, close: closeWizard, open: (next) => { if (next) region = next; chooseService(); } };
 }

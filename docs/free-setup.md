@@ -1,110 +1,39 @@
-# Free setup guide
+# Free service setup
 
-The default remains on-device translation and on-device OCR. Nothing is uploaded until you add and enable a cloud service yourself.
+Local translation and local OCR remain the defaults. Cloud services are optional and independent: configuring translation does not configure OCR, and configuring OCR does not change translation. Keys stay in the OS credential store.
 
-Quotas below were **checked in 2026-10**. Vendors change free tiers, regions, and billing. This is not a promise that anything stays free. After a free tier, some providers start charging automatically. In that provider's console, turn off post-paid billing or enable stop-when-exhausted.
+## Choose translation and OCR independently
 
-Settings includes recommended combinations for mainland China and for overseas use. The wizard opens the signup page, accepts your own key, tests the connection, and can set that service as current. Keys go to the operating system credential store. Do not post them in issues, chat, or screenshots.
+Settings now shows two lists, **Translation services** and **OCR services**, with region grouping. Each row shows the allowance, reset or expiry rules, eligibility, official source and verification date. Choose any supported service in either role, or keep one role local. The generic entry opens the lists; it never silently chooses a vendor. A successful test enables only the selected service.
 
-## Why local is the default
+Official public allowances checked **2026-10-30**. They may change. Region grouping does not guarantee connectivity or account eligibility. Overages may be billed; not every provider offers a stop-after-free switch.
 
-Local engines need no account and cannot run up a bill. Long text, terminology, and small screenshot text are often better in the cloud. You can add a cloud service and still keep the local engine.
+### Translation
 
-## Mainland China
+- **SiliconFlow Hunyuan-MT-7B:** named model input/output price 0, no fixed monthly Token allowance; rate/concurrency limits. [Pricing](https://www.siliconflow.cn/pricing)
+- **Baidu:** Standard 50,000 characters/month; Advanced 1,000,000/month after personal verification and version activation. Tiers do not stack. [Official allowance](https://fanyi-api.baidu.com/access/0/1)
+- **Zhipu GLM-4-Flash-250414:** named free model, no fixed monthly Token allowance, rate limits apply. [Model](https://docs.bigmodel.cn/cn/guide/models/free/glm-4-flash-250414)
+- **Volcengine machine translation:** first 2,000,000 characters/month; activate through the vendor's sales/contract process, default post-paid billing. [Billing](https://docs.volcengine.com/docs/machine-translation/product-billing)
+- **Alibaba Cloud machine translation:** General edition 1,000,000 characters/month, subaccounts share the main quota, resets monthly without rollover; paid usage follows exhaustion. Not Bailian. [Billing](https://help.aliyun.com/zh/machine-translation/product-overview/billing-overview)
+- **Azure Translator F0:** 2,000,000 characters/month, shared by standard translation and custom training; create an F0 resource. [Pricing](https://azure.microsoft.com/en-us/pricing/details/translator/)
+- **DeepL API Developer:** new users receive 1,000,000 characters total, not monthly. Legacy Free 500,000/month is for existing accounts only. [Plans](https://support.deepl.com/hc/en-us/articles/360021200939-DeepL-API-plans)
+- **Qwen introductory trial:** eligible Beijing models typically 1,000,000 Tokens/model, once, 90 days; input/output share quota. Enable the vendor's stop-when-exhausted control if appropriate. [Quota](https://help.aliyun.com/zh/model-studio/new-free-quota/)
+- **Youdao introductory credit:** CNY 10 registration plus CNY 40 identity verification, once; account expiry/eligibility apply. Shared with OCR. [Price center](https://ai.youdao.com/new/newuser-promotion.s)
 
-| Combination | Translation | OCR | What the public pages said in 2026-10 |
-| --- | --- | --- | --- |
-| First choice | SiliconFlow `tencent/Hunyuan-MT-7B` | Baidu OCR standard | That model's listed input/output price is 0, with rate limits; Baidu OCR personal verification is about 1,000 calls/month |
-| Alternate | Baidu Translate advanced | Tencent Cloud OCR | About 1 million characters/month after personal verification; OCR about 1,000 calls/month, then possibly paid |
-| One account | Zhipu GLM-4-Flash | Zhipu GLM-4V-Flash | Listed as free models at that time, with rate limits. Not every Zhipu model is free |
+### OCR
 
-Baidu Translate APP ID / secret and Baidu OCR API key / secret are different. The wizard asks for them separately.
+- **Baidu:** supported Standard/Accurate interfaces each 1,000 calls/month personal or 2,000 enterprise; verified users enter the console to receive resources under vendor rules. Different credentials from Baidu Translation. [Quota](https://ai.baidu.com/ai-doc/OCR/fk3h7xu7h)
+- **Tencent Cloud:** 1,000 calls/month in each corresponding Basic/Accurate resource pack, subject to shared-pack rules; China account, verification and activation. No rollover; long inactivity can pause issuance. [Quota](https://cloud.tencent.com/document/product/866/35945)
+- **Zhipu GLM-4V-Flash:** named free vision model, no fixed monthly call allowance; images go to BigModel, rate limits apply. [Model](https://docs.bigmodel.cn/cn/guide/models/free/glm-4v-flash)
+- **Google Cloud Vision:** first 1,000 units/month per Text/Document Text Detection feature; billing-enabled project; per-image/page units, not HTTP calls. [Pricing](https://cloud.google.com/vision/pricing)
+- **Azure AI Vision F0:** 5,000 transactions/month and 20/minute, region availability varies. Use your own resource endpoint. [Pricing](https://azure.microsoft.com/en-us/pricing/details/computer-vision/)
+- **OCR.space Engine 1/2:** 25,000 requests/month, additionally 500/day/IP and 1 MB/file. Use your own key, not the public sample key. [API](https://ocr.space/ocrapi)
+- **Youdao introductory credit:** same one-time CNY 10 + CNY 40 account pool as translation, not an additional allowance. [Price center](https://ai.youdao.com/new/newuser-promotion.s)
 
-You can also add Volcengine machine translation (about the first 2 million characters/month) or Aliyun Machine Translation general edition (about 1 million characters/month). Aliyun Machine Translation is not the Bailian / Qwen API. Do not add Tencent text translation; its free packs are being discontinued.
+Local engines need no cloud quota or account. Providers without a confirmed free allowance remain available through the complete manual settings rather than this list. No new adapters are implied.
 
-### SiliconFlow
+## Privacy and billing
 
-1. Create an API key in the [SiliconFlow console](https://cloud.siliconflow.cn/).
-2. Add SiliconFlow in EchoLingo with model `tencent/Hunyuan-MT-7B`.
-3. Use Test connection. The test sends the short text Hello.
+A translation connection test sends a short sample text; an OCR test sends a sample image. Later cloud translation uploads source text, and cloud OCR uploads the selected image. Only enable a provider after reviewing its terms. The app stores keys in the OS credential store, not the settings file. Never share keys in issues or screenshots.
 
-### Baidu Translate
-
-1. Open the [Baidu Translate console](https://fanyi-api.baidu.com/manage/developer) and enable general text translation.
-2. Enter the APP ID and secret. Do not paste a Baidu OCR key.
-3. Personal verification plus the advanced plan usually has a larger quota. The console wins if they differ.
-
-### Baidu OCR
-
-1. Open the [Baidu OCR console](https://console.bce.baidu.com/ai/#/ai/ocr/overview/index) and claim the general-text trial quota.
-2. Enter the API key and secret key.
-3. Select it as the recognizer. Later screenshots are uploaded to Baidu.
-
-### Tencent Cloud OCR
-
-1. Enable OCR and create a SecretId / SecretKey in [access management](https://console.cloud.tencent.com/cam/capi).
-2. `ap-guangzhou` is a reasonable first region if it matches the console.
-3. Check billing settings so a used-up free pack does not keep charging.
-
-### Zhipu
-
-1. Create an API key on the [BigModel console](https://open.bigmodel.cn/).
-2. Use `glm-4-flash` for translation and `glm-4v-flash` for images, both at `https://open.bigmodel.cn/api/paas/v4`.
-3. Image recognition uploads the selected picture.
-
-### Volcengine machine translation
-
-1. Read the [billing page](https://docs.volcengine.com/docs/machine-translation/product-billing) and enable machine translation.
-2. Create a key in [AccessKey management](https://console.volcengine.com/iam/keymanage/).
-3. Add Volcengine machine translation in Settings and test the connection.
-
-### Aliyun Machine Translation
-
-1. Read the [billing page](https://help.aliyun.com/zh/machine-translation/product-overview/billing-overview). This is not Bailian.
-2. Create an AccessKey in [RAM](https://ram.console.aliyun.com/manage/ak).
-3. Add Aliyun Machine Translation and test it. Turn off post-paid billing or enable stop-when-exhausted.
-
-## Overseas
-
-| Combination | Translation | OCR | What the public pages said in 2026-10 |
-| --- | --- | --- | --- |
-| First choice | Azure Translator F0 | Google Cloud Vision | F0 about 2 million characters/month; about 1,000 units/month per text feature |
-| Alternate | DeepL API Developer | Azure AI Vision F0 | About 1 million characters total for new Developer accounts, not a monthly reset; Vision F0 about 5,000 calls/month, unavailable in some regions |
-
-DeepL, Google, and Gemini are often unreachable directly from mainland China, so they are not the mainland recommendations.
-
-### Azure Translator
-
-Create a Translator resource on the F0 tier and copy the key. Regional or multi-service resources also need the region. The app uses the global endpoint.
-
-### Google Vision
-
-Enable the Vision API and create an API key restricted to Vision. Images are uploaded to Google.
-
-### DeepL
-
-Open API Developer and use `https://api-free.deepl.com/v2`. The older monthly Free plan is not available to new accounts.
-
-### Azure AI Vision Read
-
-Create an F0 resource and enter `https://your-resource.cognitiveservices.azure.com` plus the key. The app only accepts your own host under that suffix. It does not ship a shared key.
-
-### Gemini (manual configuration only)
-
-Gemini is not a recommended free combination. Check Google's current [eligibility and data-use terms](https://ai.google.dev/gemini-api/terms) before configuring an OpenAI-compatible service manually: the terms limit use to supported regions and professional/business purposes, include age restrictions, and require Paid Services when making API clients available to users in the EEA, Switzerland or UK. Whether your account and use qualify depends on Google's current terms, not on this app.
-
-Where the unpaid-service data terms apply, submitted content and responses may be used to improve Google's products and reviewed by people; do not send sensitive, confidential or personal data. Paid-service and some regional data terms differ. Review the linked terms for your situation.
-
-Select a currently available model in your own account using the [model lifecycle list](https://ai.google.dev/gemini-api/docs/deprecations) and [pricing page](https://ai.google.dev/gemini-api/docs/pricing); this guide does not preselect a model or promise free access.
-
-### OCR.space
-
-Register at the [OCR.space API](https://ocr.space/ocrapi) and copy your own key. Do not use the public sample key `helloworld`. The app rejects it.
-
-## Privacy
-
-On-device translation and OCR stay on your computer. After you enable a cloud translator, the source text you submit is sent to that translator. After you enable cloud OCR, the selected image is sent to that OCR provider. If a cloud translator then runs, the recognized text is sent as well. Do not translate or recognize anything you do not want a third party to receive.
-
-## Keys
-
-Keys are not written into the settings file. Do not paste them into an issue. Test connection sends only a short sample, but that sample does go to the cloud service.
+Gemini remains manual-only. Before adding an OpenAI-compatible endpoint, review Google's [eligibility and data terms](https://ai.google.dev/gemini-api/terms), [model lifecycle](https://ai.google.dev/gemini-api/docs/deprecations), and [pricing](https://ai.google.dev/gemini-api/docs/pricing). Do not assume free API eligibility or submit sensitive information under unpaid-service data terms.

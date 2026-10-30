@@ -26,7 +26,7 @@ try {
       const card=page.locator('#provider-service-guide .service-quota');
       assert.equal(await card.locator('.service-quota-badge').innerText(),quota.badge);
       assert.equal(await card.locator('.service-quota-summary').innerText(),quota.summary);
-      assert.match(await card.locator('.service-quota-date').innerText(),new RegExp(data.date));
+      assert.match(await card.locator('.service-quota-date').innerText(),new RegExp(quota.checkedOn));
       await card.locator('summary').click();
       const text=await card.innerText();
       for (const allowance of quota.allowances) {
@@ -63,7 +63,7 @@ try {
       const card=page.locator('#ocr-service-guide .service-quota');
       assert.equal(await card.locator('.service-quota-badge').innerText(),quota.badge);
       assert.equal(await card.locator('.service-quota-summary').innerText(),quota.summary);
-      assert.match(await card.locator('.service-quota-date').innerText(),new RegExp(data.date));
+      assert.match(await card.locator('.service-quota-date').innerText(),new RegExp(quota.checkedOn));
       await card.locator('summary').click();
       const text=await card.innerText();
       for(const allowance of quota.allowances)for(const condition of allowance.conditions)assert.ok(text.includes(condition));
