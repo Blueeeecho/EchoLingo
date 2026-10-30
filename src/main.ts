@@ -1483,6 +1483,8 @@ const ocrUi = createOcrUi({
   showModal, closeModal, confirm: confirmAction, toast, reportError,
 });
 
+$('#service-manager-advanced').addEventListener('click', () => setView('settings'));
+$('#open-service-manager').addEventListener('click', () => setView('services'));
 serviceManager = installServiceManager({
   settings: () => settings, ready: () => settingsReady, reportError,
   add: role => { if (role === 'translation') openProviderDialog(); else ocrUi.open(); },
