@@ -2787,7 +2787,7 @@ try {
   await page.locator('#free-region-cn').click();
   assert.equal(await page.locator('#free-ocr-list .free-service').count(), 4);
   assert.equal(await page.locator('#free-translation-list .free-service').count(), 7);
-  assert.equal(await page.locator('#free-translation-list').getByText(/100 万字符/).count() > 0, true);
+  assert.equal(await page.locator('[data-free-service="baidu"] .free-service-quota').getByText(/100 万字符|1,000,000/).count() > 0, true);
   await page.locator('#free-setup-settings').click();
   assert.equal(await page.locator('#free-setup-dialog').isHidden(), true);
   await page.locator('#free-translation-list .free-service-actions button:first-child').first().click();
