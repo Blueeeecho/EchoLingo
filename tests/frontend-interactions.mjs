@@ -3036,6 +3036,7 @@ try {
   assert.deepEqual(errors, []);
   const independentBefore = await page.evaluate(() => structuredClone(window.__qa.settings));
   await page.locator('#free-region-cn').click();
+  await page.locator('#free-ocr-summary').click();
   await page.locator('[data-free-service="baidu-ocr"] .free-service-actions button').first().click();
   await page.locator('#free-field-first').fill('qa-independent-ocr-key');
   await page.locator('#free-field-second').fill('qa-independent-ocr-secret');

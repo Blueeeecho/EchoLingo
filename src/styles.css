@@ -357,7 +357,9 @@ body[data-view="translate"] .result-provider { font-size: 10px; }
 .free-region button[aria-pressed="true"] { background: var(--accent-soft); color: var(--accent); border-color: transparent; }
 .free-service-list { list-style: none; margin: 0; padding: 0; }
 .free-service-section { margin-top: 18px; }
-.free-service-section > h3 { font-size: 13px; margin: 0 0 8px; }
+.free-service-section > summary { font-size: 13px; font-weight: 600; cursor: pointer; padding: 10px 0; }
+.free-service-section > summary:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; border-radius: 4px; }
+.free-service-count { color: var(--secondary); font-weight: 400; }
 .free-service { padding: 12px 0; border-top: 1px solid var(--border); overflow-wrap: anywhere; }
 .free-service h4 { margin: 0 0 6px; font-size: 13px; }
 .free-service p { margin: 0 0 6px; font-size: 12px; line-height: 1.6; }
