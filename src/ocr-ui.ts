@@ -15,6 +15,7 @@ type UiContext = {
   reloadSettings: () => Promise<void>;
   showModal: (modal: HTMLElement) => void;
   closeModal: (modal: HTMLElement) => void;
+  resumeDraft?: () => boolean;
   confirm: (title: string, description: string) => Promise<boolean>;
   toast: (message: string, tone?: 'info' | 'error', duration?: number) => void;
   reportError: (error: unknown) => void;
@@ -121,6 +122,7 @@ export function createOcrUi(context: UiContext): { render: () => void; close: ()
     $('ocr-provider-url-help').textContent = vision ? '填写 OpenAI 兼容视觉 API 基础地址，例如 https://api.openai.com/v1。' : '高级配置：填写你信任的 OCR JSON 网关完整请求地址，例如 https://ocr.example.com/recognize。';
   };
   const open = (provider?: OcrProvider): void => {
+    if (context.resumeDraft?.()) return;
     if (saving) return;
     if (!provider && (context.settings().ocrProviders ?? []).length >= 12) { context.toast('最多可添加 12 个 OCR 服务。'); return; }
     editingId = provider?.id ?? null;

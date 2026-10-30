@@ -1,6 +1,6 @@
 [package]
 name = "echolingo"
-version = "0.2.2"
+version = "0.2.3"
 description = "EchoLingo: lightweight translation and offline OCR"
 authors = ["Blueeeecho"]
 edition = "2021"

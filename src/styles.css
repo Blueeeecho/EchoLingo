@@ -431,3 +431,6 @@ body[data-popup-focus-managed="true"] .popup-toolbar > .icon-button:focus-visibl
 /* A bypass result is not a provider translation; keep the notice readable in narrow popups. */
 .result-card-header { flex-wrap: wrap; }
 .result-preserved { color: var(--secondary); font-size: 10px; line-height: 1.5; }
+
+/* Keep live credential drafts out of layout/accessibility while a shortcut is presented. */
+[data-modal-suspended="true"] { display: none !important; }

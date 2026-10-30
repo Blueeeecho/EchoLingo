@@ -761,6 +761,26 @@ fn selection_health_from_reply(
 #[cfg(any(target_os = "windows", test))]
 fn bounded_capture_health(value: &Value) -> Value {
     const FIELDS: &[&str] = &[
+        "displayWindowDpiNotificationsVerified",
+        "displayMismatchIndex",
+        "displayDeviceChanged",
+        "displayBeforeWidth",
+        "displayBeforeHeight",
+        "displayAfterWidth",
+        "displayAfterHeight",
+        "displayBeforeMonitorDpi",
+        "displayAfterMonitorDpi",
+        "displayInvalidationReason",
+        "displayInvalidationPhase",
+        "displayExpectedDpi",
+        "displayObservedDpi",
+        "displayAwareness",
+        "displayCount",
+        "displayObservedCount",
+        "displayObservedAwareness",
+        "assembliesLoadedMilliseconds",
+        "nativeTypesReadyMilliseconds",
+        "firstBordersVisibleMilliseconds",
         "hookMouseDowns",
         "hookMouseUps",
         "hookMouseMoves",
@@ -802,6 +822,20 @@ fn bounded_capture_health(value: &Value) -> Value {
     for field in FIELDS {
         if let Some(number) = value.get(field).and_then(Value::as_u64) {
             safe.insert((*field).to_owned(), json!(number));
+        }
+    }
+    for field in [
+        "displayBeforeX",
+        "displayBeforeY",
+        "displayAfterX",
+        "displayAfterY",
+    ] {
+        if let Some(number) = value
+            .get(field)
+            .and_then(Value::as_i64)
+            .filter(|n| i32::try_from(*n).is_ok())
+        {
+            safe.insert(field.to_owned(), json!(number));
         }
     }
     Value::Object(safe)
@@ -1089,7 +1123,11 @@ fn run_windows_selection(
     use std::process::Stdio;
     use std::time::{Duration, Instant};
 
+    static CAPTURE_ATTEMPT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let started = Instant::now();
     let capture = matches!(mode, "capture-ocr" | "capture-image");
+    let capture_attempt =
+        capture.then(|| CAPTURE_ATTEMPT.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1);
     let selection = mode == "selected-text";
     let attempt = selection.then(|| attempt.unwrap_or_else(|| begin_selection_attempt(strategy)));
     let stage = |stage| {
@@ -1100,7 +1138,7 @@ fn run_windows_selection(
     stage(1);
     if capture {
         if let Ok(mut health) = windows_capture_health().lock() {
-            *health = json!({"helperResponseReceived": 0});
+            *health = json!({"helperResponseReceived": 0, "attemptId": capture_attempt, "attemptStage": 1});
         }
     }
 
@@ -1117,6 +1155,13 @@ fn run_windows_selection(
         crate::windows_capture_input::wait_available(|| cancelled(cancel.as_ref()))?;
     }
     stage(3);
+    let input_available_ms = started.elapsed().as_millis() as u64;
+    if capture {
+        if let Ok(mut health) = windows_capture_health().lock() {
+            health["inputAvailableMilliseconds"] = json!(input_available_ms);
+            health["attemptStage"] = json!(2);
+        }
+    }
     let mut command = native_command(mode)?;
     if selection {
         command.args(["-SelectionStrategy", strategy.native_argument()]);
@@ -1162,6 +1207,13 @@ fn run_windows_selection(
     }
     stage(5);
     let helper_started = Instant::now();
+    let helper_launch_ms = started.elapsed().as_millis() as u64;
+    if capture {
+        if let Ok(mut health) = windows_capture_health().lock() {
+            health["helperLaunchMilliseconds"] = json!(helper_launch_ms);
+            health["attemptStage"] = json!(3);
+        }
+    }
     if let Some(attempt) = attempt {
         update_selection_health(attempt, json!({"attemptPhase": 2}));
     }
@@ -1278,6 +1330,15 @@ fn run_windows_selection(
         if let Ok(reply) = serde_json::from_slice::<Value>(&output) {
             let mut safe = bounded_capture_health(&reply["captureHealth"]);
             safe["helperResponseReceived"] = json!(1);
+            safe["attemptId"] = json!(capture_attempt);
+            safe["attemptStage"] = json!(4);
+            safe["resultOk"] = json!(u64::from(reply["ok"].as_bool().unwrap_or(false)));
+            safe["displayChangedError"] =
+                json!(u64::from(reply["error"].as_str().is_some_and(|error| {
+                    error.starts_with("CAPTURE_DISPLAY_CHANGED:")
+                })));
+            safe["inputAvailableMilliseconds"] = json!(input_available_ms);
+            safe["helperLaunchMilliseconds"] = json!(helper_launch_ms);
             safe["helperElapsedMilliseconds"] = json!(helper_started
                 .elapsed()
                 .as_millis()
@@ -1810,6 +1871,22 @@ mod tests {
         assert_eq!(
             super::bounded_capture_health(&serde_json::json!(null)),
             serde_json::json!({})
+        );
+    }
+
+    #[test]
+    fn capture_topology_health_accepts_signed_coordinates_but_never_content() {
+        assert_eq!(
+            super::bounded_capture_health(&json!({
+                "displayInvalidationReason": 4, "displayInvalidationPhase": 2,
+                "displayBeforeX": -1920, "displayAfterY": -300,
+                "displayBeforeY": 2147483648i64, "displayAfterX": "secret",
+                "displayExpectedDpi": 144, "displayObservedDpi": 192,
+                "monitorName": "private", "nativeTypesReadyMilliseconds": 180
+            })),
+            json!({"displayInvalidationReason":4,"displayInvalidationPhase":2,
+            "displayBeforeX":-1920,"displayAfterY":-300,"displayExpectedDpi":144,
+            "displayObservedDpi":192,"nativeTypesReadyMilliseconds":180})
         );
     }
 

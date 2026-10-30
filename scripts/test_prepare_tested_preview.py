@@ -66,8 +66,20 @@ class TestedPreviewTests(unittest.TestCase):
                               "sha256": hashlib.sha256(data).hexdigest()})
 
     def prepare(self):
-        with patch.object(M, "ARTIFACTS", self.pins):
+        # Historical 0.2.2 fixture bytes remain pinned. Do not retarget the
+        # retired publisher to the current release version just to run unit tests.
+        with patch.object(M, "ARTIFACTS", self.pins), \
+                patch.object(M.RELEASE, "VERSION", "0.2.2"), \
+                patch.object(M.RELEASE, "check_version", return_value=None):
             return M.prepare(self.archives, self.output, "a" * 40)
+
+    def test_historical_publisher_rejects_current_release_without_extracting(self):
+        self.assertNotEqual(M.RELEASE.VERSION, M.VERSION)
+        with patch.object(M, "extract_pinned") as extract:
+            with self.assertRaisesRegex(ValueError, "Only the authorized 0.2.2"):
+                M.prepare(self.archives, self.output, "a" * 40)
+            extract.assert_not_called()
+        self.assertFalse(self.output.exists())
 
     def extract(self, entries):
         data = archive_bytes(entries)

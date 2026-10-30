@@ -95,7 +95,35 @@ public static class WindowsSelectionApplicationFixture {
             int count=trace.ContainsKey("managementReadinessTransientUnavailableCount")?Convert.ToInt32(trace["managementReadinessTransientUnavailableCount"]):0;trace["managementReadinessTransientUnavailableCount"]=count+1;trace["managementLastTransientReadPhase"]=trace["managementPhase"];trace["managementLastTransientException"]="ElementNotAvailableException";return false;
         }
     }
-    static object[] Histories(){if(!File.Exists(History))return new object[0];try{return Json.Deserialize<object[]>(File.ReadAllText(History));}catch(IOException){return new object[0];}catch(ArgumentException){return new object[0];}}
+    // This observer must not deny the application's MoveFileEx atomic history
+    // replacement. A held generation remains readable after replacement.
+    static FileStream OpenHistorySnapshot(string path){return new FileStream(path,FileMode.Open,FileAccess.Read,FileShare.ReadWrite|FileShare.Delete);}
+    static string ReadHistorySnapshot(string path){using(var stream=OpenHistorySnapshot(path))using(var reader=new StreamReader(stream,Encoding.UTF8,true))return reader.ReadToEnd();}
+    static object[] Histories(){if(!File.Exists(History))return new object[0];try{return Json.Deserialize<object[]>(ReadHistorySnapshot(History));}catch(IOException){return new object[0];}catch(ArgumentException){return new object[0];}}
+    [DllImport("kernel32.dll",CharSet=CharSet.Unicode,SetLastError=true)] static extern bool MoveFileEx(string from,string to,uint flags);
+    static void CreateHistoryFixture(string path,string value){using(var file=new FileStream(path,FileMode.CreateNew,FileAccess.Write,FileShare.None)){byte[] bytes=Encoding.UTF8.GetBytes(value);file.Write(bytes,0,bytes.Length);file.Flush(true);}}
+    static Dictionary<string,object> HistoryReaderSharingRegression(string ownedRoot){
+        string file=Path.Combine(ownedRoot,"history-share-"+Guid.NewGuid().ToString("N")+".json"),pending=file+".tmp";
+        var result=new Dictionary<string,object>{{"generatedFilesOnly",true},{"replacementAttempts",0},{"sameFlagsAsProduction",9},{"retryAttempts",0}};
+        try{
+            CreateHistoryFixture(file,"old-generation");CreateHistoryFixture(pending,"new-generation");
+            // Negative control: File.ReadAllText's Framework sharing policy.
+            using(var legacy=new FileStream(file,FileMode.Open,FileAccess.Read,FileShare.Read)){
+                bool moved=MoveFileEx(pending,file,9);int error=Marshal.GetLastWin32Error();result["replacementAttempts"]=1;result["legacyReplacementBlocked"]=!moved;result["legacyWin32Error"]=error;
+                Need(!moved&&error!=0&&File.Exists(pending),"LEGACY_READER_DID_NOT_BLOCK_ATOMIC_REPLACEMENT");
+                Need(legacy.ReadByte()=='o'&&ReadHistorySnapshot(file)=="old-generation","LEGACY_BLOCK_CHANGED_PUBLISHED_HISTORY");
+            }
+            // Positive control uses the exact observer factory held across the
+            // single replacement; it must retain old bytes while new opens see B.
+            using(var observed=OpenHistorySnapshot(file)){
+                bool moved=MoveFileEx(pending,file,9);result["replacementAttempts"]=2;result["sharedReplacementSucceeded"]=moved;
+                Need(moved&&!File.Exists(pending),"HISTORY_OBSERVER_BLOCKED_ATOMIC_REPLACEMENT");
+                using(var reader=new StreamReader(observed,Encoding.UTF8,true))result["heldOldGenerationPreserved"]=reader.ReadToEnd()=="old-generation";result["freshNewGenerationVisible"]=ReadHistorySnapshot(file)=="new-generation";
+                Need((bool)result["heldOldGenerationPreserved"]&&(bool)result["freshNewGenerationVisible"],"HISTORY_OBSERVER_GENERATION_MISMATCH");
+            }
+            result["ok"]=true;return result;
+        }finally{if(File.Exists(pending))File.Delete(pending);if(File.Exists(file))File.Delete(file);}
+    }
     static bool HistoryHas(string source){foreach(object raw in Histories()){Dictionary<string,object> e=(Dictionary<string,object>)raw;if((string)e["text"]!=source)continue;foreach(object item in (IEnumerable)e["results"]){Dictionary<string,object> result=(Dictionary<string,object>)item;if((string)result["providerId"]==Provider&&!result.ContainsKey("error")&&(string)result["text"]==Mock.Result(source))return true;}}return false;}
     static int HistorySourceCount(string source){int count=0;foreach(object value in Histories())if((string)((Dictionary<string,object>)value)["text"]==source)count++;return count;}
     static List<string> HistorySources(){List<string> text=new List<string>();foreach(object value in Histories())text.Add((string)((Dictionary<string,object>)value)["text"]);return text;}
@@ -455,6 +483,7 @@ public static class WindowsSelectionApplicationFixture {
         foreach(Process p in Process.GetProcessesByName(Path.GetFileNameWithoutExtension(executable)))using(p)Need(p.HasExited,"EXISTING_APPLICATION_REFUSED");
         try{
             IDataObject old=Clipboard.GetDataObject();Need(old==null||old.GetFormats(false).Length==0,"FRESH_EMPTY_CLIPBOARD_REQUIRED");Claim(roaming,token,owned);Claim(local,token,owned);Claim(root,token,owned);History=Path.Combine(roaming,"history.json");Provider="generated-selection-"+token;DiagnosticRoaming=roaming;DiagnosticToken=token;
+            Report["historyReaderSharingRegression"]=HistoryReaderSharingRegression(root);
             using(Server=new Mock()){
                 Dictionary<string,object> settings=new Dictionary<string,object>{{"providers",new object[]{new Dictionary<string,object>{{"id",Provider},{"name","Generated loopback mock"},{"kind","libretranslate"},{"baseUrl",Server.Url},{"enabled",true},{"model",""},{"prompt",""}}}},{"ocrProviders",new object[0]},{"sourceLanguage","auto"},{"targetLanguage","auto"},{"languageDirectionVersion",1},{"shortcutDefaultsVersion",1},{"saveHistory",true},{"maxHistory",100},{"theme","light"},{"autoHideSeconds",0},{"shortcuts",new Dictionary<string,object>{{"selection","Alt+D"},{"silentOcr","Alt+S"},{"ocr",""},{"capture",""},{"input",""}}}};settings["windowsSelectionStrategy"]=ConfiguredWindowsSelectionStrategy;File.WriteAllText(Path.Combine(roaming,"settings.json"),Json.Serialize(settings),new UTF8Encoding(false));
                 SetProcessDpiAwarenessContext(new IntPtr(-4));Need(SetThreadDpiAwarenessContext(new IntPtr(-4))!=IntPtr.Zero,"PHYSICAL_COORDINATES_REQUIRED");
