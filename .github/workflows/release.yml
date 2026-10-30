@@ -4,16 +4,16 @@ on:
   push:
     branches: [main]
     paths: [package.json]
-    tags: ['0.2.1']
+    tags: ['0.2.2']
 # Build jobs retain read-only repository access. Only the final publish job writes.
 permissions:
   contents: read
 concurrency:
-  group: echolingo-prerelease-0.2.1
+  group: echolingo-prerelease-0.2.2
   cancel-in-progress: false
 jobs:
   release-inputs:
-    if: github.repository == 'Blueeeecho/EchoLingo' && (github.ref == 'refs/heads/main' || github.ref == 'refs/tags/0.2.1')
+    if: github.repository == 'Blueeeecho/EchoLingo' && (github.ref == 'refs/heads/main' || github.ref == 'refs/tags/0.2.2')
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -26,12 +26,12 @@ jobs:
         with:
           script: |
             const { owner, repo } = context.repo;
-            const tag = '0.2.1';
+            const tag = '0.2.2';
             const { data: main } = await github.rest.git.getRef({ owner, repo, ref: 'heads/main' });
             if (main.object.sha !== context.sha) throw new Error('Only the exact main release commit may be validated for publication.');
             try {
               await github.rest.repos.getReleaseByTag({ owner, repo, tag });
-              throw new Error('Release 0.2.1 already exists; inspect it instead of overwriting.');
+              throw new Error('Release 0.2.2 already exists; inspect it instead of overwriting.');
             } catch (error) { if (error.status !== 404) throw error; }
             try {
               const { data } = await github.rest.git.getRef({ owner, repo, ref: `tags/${tag}` });
@@ -72,7 +72,7 @@ jobs:
       - name: Preserve verified publication inputs
         uses: actions/upload-artifact@v4
         with:
-          name: EchoLingo-0.2.1-publication
+          name: EchoLingo-0.2.2-publication
           if-no-files-found: error
           path: release-assets/*
       - name: Publish a new verified prerelease without replacing existing assets
@@ -83,7 +83,7 @@ jobs:
             const path = require('node:path');
             const crypto = require('node:crypto');
             const { owner, repo } = context.repo;
-            const tag = '0.2.1';
+            const tag = '0.2.2';
             const sha256 = bytes => crypto.createHash('sha256').update(bytes).digest('hex');
             // Check again after the long build: never replace another release.
             try {
@@ -106,8 +106,8 @@ jobs:
             const names = fs.readdirSync(directory).sort();
             if (JSON.stringify(names) !== JSON.stringify(expectedNames)) throw new Error('Unexpected public asset inventory.');
             const runUrl = `${context.serverUrl}/${owner}/${repo}/actions/runs/${context.runId}`;
-            const body = fs.readFileSync('docs/releases/0.2.1.zh-CN.md', 'utf8') + `\n\n源码提交：\`${context.sha}\`\n\n[完整构建与验收记录](${runUrl})\n`;
-            const { data: release } = await github.rest.repos.createRelease({ owner, repo, tag_name: tag, target_commitish: context.sha, name: '0.2.1 内测版', body, draft: true, prerelease: true, make_latest: 'false' });
+            const body = fs.readFileSync('docs/releases/0.2.2.zh-CN.md', 'utf8') + `\n\n源码提交：\`${context.sha}\`\n\n[完整构建与验收记录](${runUrl})\n`;
+            const { data: release } = await github.rest.repos.createRelease({ owner, repo, tag_name: tag, target_commitish: context.sha, name: '0.2.2 内测版', body, draft: true, prerelease: true, make_latest: 'false' });
             for (const name of names) {
               const bytes = fs.readFileSync(path.join(directory, name));
               const { data: asset } = await github.rest.repos.uploadReleaseAsset({ owner, repo, release_id: release.id, name, data: bytes });
@@ -123,4 +123,4 @@ jobs:
             if (finalMain.object.sha !== context.sha) throw new Error('main moved during upload; release remains a draft.');
             const { data: published } = await github.rest.repos.updateRelease({ owner, repo, release_id: release.id, draft: false, prerelease: true, make_latest: 'false' });
             if (published.draft || !published.prerelease || published.tag_name !== tag) throw new Error('Published release metadata mismatch.');
-            await core.summary.addLink('0.2.1 内测版', published.html_url).addRaw(`\nCommit: ${context.sha}\n`).write();
+            await core.summary.addLink('0.2.2 内测版', published.html_url).addRaw(`\nCommit: ${context.sha}\n`).write();
