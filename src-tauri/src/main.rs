@@ -1518,8 +1518,30 @@ async fn translate(
                 } else {
                     None
                 };
+                let prose_direction = if mixed_plan.is_none() {
+                    language_detection::local_mixed_prose_direction(
+                        &text,
+                        &source_language,
+                        &target_language,
+                        detected.as_deref(),
+                        providers.iter().map(|provider| provider.kind.as_str()),
+                    )
+                } else {
+                    None
+                };
+                let source_resolution = if mixed_plan.is_some() {
+                    translation_health::SourceResolution::LocalMixedLog
+                } else if prose_direction.is_some() {
+                    translation_health::SourceResolution::LocalMixedProse
+                } else if source_language != "auto" {
+                    translation_health::SourceResolution::Explicit
+                } else {
+                    translation_health::SourceResolution::StandardDetection
+                };
                 let (resolved_source, resolved_target) = if let Some(plan) = &mixed_plan {
                     (plan.source.to_string(), "en".to_string())
+                } else if let Some(direction) = prose_direction {
+                    direction
                 } else {
                     language_detection::resolve_translation_languages(
                         &text,
@@ -1529,6 +1551,7 @@ async fn translate(
                     )?
                 };
                 trace.languages(&resolved_source, &resolved_target);
+                trace.source_resolution(source_resolution);
                 if let Some(plan) = &mixed_plan {
                     trace.mixed_local_fragments(plan.fragment_count());
                 }

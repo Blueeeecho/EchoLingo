@@ -6,6 +6,24 @@ use std::{
     time::{Instant, SystemTime, UNIX_EPOCH},
 };
 
+/// Closed vocabulary: never accepts source text or raw detector output.
+pub enum SourceResolution {
+    Explicit,
+    StandardDetection,
+    LocalMixedLog,
+    LocalMixedProse,
+}
+impl SourceResolution {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Explicit => "explicit",
+            Self::StandardDetection => "nativeOrFallback",
+            Self::LocalMixedLog => "localMixedLogHeuristic",
+            Self::LocalMixedProse => "localMixedProseHeuristic",
+        }
+    }
+}
+
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct ProviderHealth {
@@ -27,6 +45,7 @@ struct Snapshot {
     resolved_source: Option<&'static str>,
     resolved_target: Option<&'static str>,
     mixed_local_fragments: usize,
+    source_resolution: &'static str,
 }
 #[derive(Default)]
 struct Health {
@@ -97,6 +116,7 @@ impl Health {
             resolved_source: None,
             resolved_target: None,
             mixed_local_fragments: 0,
+            source_resolution: "unresolved",
         });
         true
     }
@@ -134,6 +154,13 @@ impl RequestTrace {
                 s.resolved_source = Some(language(source));
                 s.resolved_target = Some(language(target));
             });
+        }
+    }
+    pub fn source_resolution(&self, resolution: SourceResolution) {
+        if self.active {
+            if let Ok(mut h) = health().lock() {
+                h.update(self.id, |s| s.source_resolution = resolution.label());
+            }
         }
     }
     pub fn mixed_local_fragments(&self, count: usize) {
@@ -252,6 +279,7 @@ mod tests {
         let mut request = RequestTrace::start(id);
         request.languages("ca", "zh-Hans");
         request.mixed_local_fragments(usize::MAX);
+        request.source_resolution(SourceResolution::LocalMixedProse);
         let mut providers: Vec<_> = (0..30)
             .map(|i| ProviderTrace::start(id, i, "private provider key"))
             .collect();
@@ -265,19 +293,38 @@ mod tests {
         assert_eq!(value["providers"].as_array().unwrap().len(), 16);
         assert_eq!(value["resolvedSource"], "ca");
         assert_eq!(value["mixedLocalFragments"], 8);
+        assert_eq!(value["sourceResolution"], "localMixedProseHeuristic");
         assert!(!value.to_string().contains("private"));
         let newer = RequestTrace::start(id + 1);
         request.finish(Some("private old failure"));
         request.mixed_local_fragments(6);
+        request.source_resolution(SourceResolution::LocalMixedLog);
         providers[0].finish(None);
         assert_eq!(snapshot()["requestId"], id + 1);
         assert_eq!(snapshot()["phase"], "started");
         assert_eq!(snapshot()["mixedLocalFragments"], 0);
+        assert_eq!(snapshot()["sourceResolution"], "unresolved");
         drop(newer);
         assert_eq!(snapshot()["phase"], "cancelled");
         let mut duplicate = RequestTrace::start(id + 1);
         duplicate.finish(None);
         assert_eq!(snapshot()["phase"], "cancelled");
+    }
+    #[test]
+    fn source_resolution_is_a_fixed_enum_not_untrusted_detector_data() {
+        assert_eq!(SourceResolution::Explicit.label(), "explicit");
+        assert_eq!(
+            SourceResolution::StandardDetection.label(),
+            "nativeOrFallback"
+        );
+        assert_eq!(
+            SourceResolution::LocalMixedLog.label(),
+            "localMixedLogHeuristic"
+        );
+        assert_eq!(
+            SourceResolution::LocalMixedProse.label(),
+            "localMixedProseHeuristic"
+        );
     }
     #[test]
     fn older_completion_and_start_cannot_replace_newer_request() {
