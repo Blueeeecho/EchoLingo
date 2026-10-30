@@ -40,7 +40,7 @@ import Foundation
         // Reproduce Tao's FIFO style change rather than testing a fixed style.
         DispatchQueue.main.async { transitionWindow.styleMask = [.resizable] }
         echoLingoAfterWindowChanges({ context in
-            trace("first FIFO continuation main=\(Thread.isMainThread)")
+            WindowSizeChecks.trace("first FIFO continuation main=\(Thread.isMainThread)")
             let window = Unmanaged<NSWindow>.fromOpaque(context!).takeUnretainedValue()
             precondition(!window.styleMask.contains(.titled))
             let topLeft = NSPoint(x: window.frame.minX, y: window.frame.maxY)
@@ -50,7 +50,7 @@ import Foundation
             precondition(!window.isVisible && !window.isKeyWindow)
             DispatchQueue.main.async { window.styleMask = [.titled, .resizable] }
             echoLingoAfterWindowChanges({ context in
-                trace("second FIFO continuation main=\(Thread.isMainThread)")
+                WindowSizeChecks.trace("second FIFO continuation main=\(Thread.isMainThread)")
                 let window = Unmanaged<NSWindow>.fromOpaque(context!).takeRetainedValue()
                 precondition(window.styleMask.contains(.titled))
                 let topLeft = NSPoint(x: window.frame.minX, y: window.frame.maxY)
