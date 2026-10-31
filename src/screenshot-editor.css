@@ -53,3 +53,12 @@ body[data-inplace=true] .status-line { z-index:4; }
 
 .pin-icon { width:18px; height:18px; fill:none; stroke:currentColor; stroke-width:1.8; stroke-linecap:round; stroke-linejoin:round; vertical-align:middle; }
 #overlay-pin, #pin-image { color:var(--accent); }
+
+/* Text stays next to its image location; no modal/backdrop interrupts annotation. */
+.inline-text-editor { position:fixed; z-index:20; width:280px; max-width:calc(100vw - 16px); padding:6px; border:1px solid var(--accent); border-radius:8px; background:var(--surface); box-shadow:0 4px 16px #0002; }
+.inline-text-editor textarea { display:block; min-height:58px; max-height:180px; resize:vertical; padding:4px; line-height:1.35; border:0; border-radius:3px; }
+.inline-text-actions { display:flex; align-items:center; gap:3px; margin-top:4px; }
+.inline-text-actions button { min-height:30px; padding:4px 7px; }
+.inline-text-editor small { display:block; font-size:10px; color:var(--secondary); padding:3px; }
+#object-selection { fill:none; stroke:#7862d8; stroke-width:1.5; stroke-dasharray:4 3; vector-effect:non-scaling-stroke; }
+#image-canvas[data-tool=select] { cursor:default; }

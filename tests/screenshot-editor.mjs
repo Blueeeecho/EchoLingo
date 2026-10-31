@@ -124,18 +124,80 @@ try {
     await page.locator('#annotation-text').fill('中文标注\n<script>alert(1)</script>');
     await page.locator('#annotation-text').dispatchEvent('compositionstart');
     await page.locator('#annotation-text').dispatchEvent('keydown', { key: 'Enter', code: 'Enter', ctrlKey: true, isComposing: true, keyCode: 229 });
-    assert.equal(await page.locator('#text-dialog').evaluate(d => d.open), true);
-    await page.locator('#text-dialog').dispatchEvent('cancel');
-    assert.equal(await page.locator('#text-dialog').evaluate(d => d.open), true, 'IME Escape must not discard the text dialog');
+    assert.equal(await page.locator('#text-dialog').evaluate(d => !d.hidden), true);
+    await page.locator('#annotation-text').dispatchEvent('keydown', { key: 'Escape', isComposing: true, keyCode: 229 });
+    assert.equal(await page.locator('#text-dialog').evaluate(d => !d.hidden), true, 'IME Escape must not discard the text dialog');
     await page.locator('#annotation-text').dispatchEvent('keydown', { key: 'Escape', isComposing: true, keyCode: 229 });
     await page.locator('#annotation-text').dispatchEvent('compositionend');
-    await page.locator('#text-dialog').dispatchEvent('cancel');
-    assert.equal(await page.locator('#text-dialog').evaluate(d => d.open), true, 'compositionend before the Escape default must retain text');
-    await page.locator('#apply-text').click(); assert.equal(await page.locator('#text-dialog').evaluate(d => d.open), false);
+    await page.locator('#annotation-text').dispatchEvent('keydown', { key: 'Escape' });
+    assert.equal(await page.locator('#text-dialog').evaluate(d => !d.hidden), true, 'compositionend before the Escape default must retain text');
+    await page.locator('#apply-text').click(); assert.equal(await page.locator('#text-dialog').evaluate(d => !d.hidden), false);
     assert.equal(await page.locator('#undo-edit').isEnabled(), true);
     await page.locator('.editor-toolbar button[data-tool="text"]').click(); await page.locator('#image-canvas').click({ position: { x: 5, y: 5 } });
     await page.locator('#annotation-text').fill('字'.repeat(2000)); assert.equal(await page.locator('#annotation-text').inputValue().then(x => x.length), 2000);
     await page.locator('#cancel-text').click();
+
+    // New annotation interactions use a nonmodal inline editor and one shared
+    // history. Coordinates are source pixels at both DPRs, not CSS pixel guesses.
+    await fresh(320, 240);
+    const clickImage = async (x, y, count = 1) => {
+      const b = await page.locator('#image-canvas').boundingBox();
+      const [w, h] = await page.locator('#image-canvas').evaluate(c => [c.width, c.height]);
+      await page.mouse.click(b.x + x * b.width / w, b.y + y * b.height / h, { clickCount: count });
+    };
+    await page.locator('[data-tool="text"]').click();
+    await page.locator('#edit-font-size').selectOption('16');
+    await page.locator('#note-style').selectOption('#fff3b0');
+    await clickImage(20, 20); await page.locator('#annotation-text').fill('说明 A');
+    assert.equal(await page.locator('.screenshot-modal-backdrop').count(), 0);
+    await page.keyboard.press('Control+Enter');
+    const notePixels = await pixels();
+    await drag('select', [25, 25], [75, 65]);
+    const movedNote = await pixels(); assert.notDeepEqual(movedNote, notePixels, 'move changes the existing note');
+    await page.locator('#undo-edit').click(); assert.deepEqual(await pixels(), notePixels, 'move is one undo step');
+    await page.locator('#redo-edit').click(); assert.deepEqual(await pixels(), movedNote);
+    await clickImage(75, 65, 2);
+    assert.equal(await page.locator('#annotation-text').inputValue(), '说明 A');
+    await page.locator('#annotation-text').fill('说明 B'); await page.keyboard.press('Control+Enter');
+    const editedNote = await pixels(); assert.notDeepEqual(editedNote, movedNote);
+    await page.locator('#undo-edit').click(); assert.deepEqual(await pixels(), movedNote, 'text edit replaces instead of painting a second layer');
+    await page.locator('#redo-edit').click(); assert.deepEqual(await pixels(), editedNote);
+    await page.locator('[data-tool="select"]').click(); await clickImage(75, 65);
+    await page.keyboard.press('Delete'); assert.notDeepEqual(await pixels(), editedNote);
+    await page.locator('#undo-edit').click(); assert.deepEqual(await pixels(), editedNote, 'delete is reversible');
+
+    await page.locator('[data-tool="number"]').click();
+    await page.locator('#edit-font-size').selectOption('32');
+    await clickImage(45, 150); const oneStep = await pixels();
+    await clickImage(95, 150); const twoSteps = await pixels();
+    await page.locator('#undo-edit').click(); assert.deepEqual(await pixels(), oneStep);
+    await page.locator('#redo-edit').click(); assert.deepEqual(await pixels(), twoSteps);
+    await page.locator('#step-style').selectOption('numbered-arrow');
+    await drag('number', [170, 100], [250, 170]);
+    const stepArrow = await pixels();
+    await drag('select', [170, 100], [190, 115]);
+    const movedArrow = await pixels(); assert.notDeepEqual(movedArrow, stepArrow);
+    await page.locator('#undo-edit').click(); assert.deepEqual(await pixels(), stepArrow, 'badge and arrow move atomically');
+    await page.locator('#undo-edit').click(); assert.deepEqual(await pixels(), twoSteps, 'badge and arrow creation is one undo step');
+    await page.locator('#redo-edit').click();
+    await drag('crop', [10, 10], [300, 220]);
+    const afterCrop = await pixels(); assert.deepEqual([afterCrop.width, afterCrop.height], [290, 210]);
+    await drag('select', [160, 90], [170, 95]);
+    assert.notDeepEqual(await pixels(), afterCrop, 'annotations remain selectable in crop-adjusted coordinates');
+    await page.locator('#undo-edit').click(); assert.deepEqual(await pixels(), afterCrop);
+    await page.locator('#edit-color').fill('#112233'); await drag('solid', [0, 0], [25, 25]);
+    const finalAnnotations = await pixels();
+    for (const [button, collection] of [['#copy-image', 'copies'], ['#save-image', 'saves'], ['#pin-image', 'pins']]) {
+      const before = await page.evaluate(collection => window.__screenshotQA[collection].length, collection);
+      await page.locator(button).click();
+      await page.waitForFunction(([collection, before]) => window.__screenshotQA[collection].length > before, [collection, before]);
+      const raster = await page.evaluate(async collection => {
+        const image = new Image(); image.src = 'data:image/png;base64,' + window.__screenshotQA[collection].at(-1).pngBase64; await image.decode();
+        const c = document.createElement('canvas'); c.width = image.width; c.height = image.height; const ctx = c.getContext('2d'); ctx.drawImage(image, 0, 0);
+        return { width: c.width, height: c.height, data: [...ctx.getImageData(0, 0, c.width, c.height).data] };
+      }, collection);
+      assert.deepEqual(raster, finalAnnotations, collection + ' contains the same flattened annotations/crop/mask');
+    }
 
     // Mosaic modifies actual pixels; solid masks replace RGB and alpha fully.
     await fresh(); await drag('mosaic', [8, 8], [24, 24]);
@@ -254,7 +316,7 @@ try {
     await page.waitForFunction(() => window.__screenshotQA.ready.length === 1);
     await page.locator('.editor-toolbar button[data-tool="text"]').click(); await page.locator('#image-canvas').click({ position: { x: 5, y: 5 } });
     await page.locator('#annotation-text').fill('兼容旧版系统 WebView');
-    await page.keyboard.press('Shift+Tab'); assert.equal(await page.evaluate(() => document.activeElement.id), 'apply-text');
+    assert.equal(await page.locator('.screenshot-modal-backdrop').count(), 0, 'inline annotation does not create a modal backdrop');
     await page.locator('#cancel-text').click(); assert.equal(await page.locator('#text-dialog').isVisible(), false);
     await page.locator('#close-editor').click(); await page.keyboard.press('Escape');
     assert.equal(await page.evaluate(() => window.__screenshotQA.closed.length), 0);
