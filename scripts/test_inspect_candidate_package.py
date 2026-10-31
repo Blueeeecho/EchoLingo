@@ -1,5 +1,6 @@
 """Generated static fixtures only: no installers, native apps or permission APIs."""
 import importlib.util
+import hashlib
 import io
 import json
 from pathlib import Path
@@ -39,6 +40,68 @@ def macho(cpu=0x0100000C, filetype=2):
 
 
 class CandidateInspectionTests(unittest.TestCase):
+    def license_fixture(self, path, mutate=None):
+        controls = {"LPic": [{"ID": "5000", "Data": b"synthetic reviewed mapping"}],
+                    "STR#": [{"ID": "5000", "Data": b"synthetic reviewed buttons"}]}
+        resources = {**controls, "TEXT": [{"ID": "5000", "Data": (MODULE.ROOT / "LICENSE").read_bytes()}]}
+        if mutate: mutate(resources)
+        data = plistlib.dumps({"resource-fork": resources})
+        trailer = bytearray(512); trailer[:4] = b"koly"
+        struct.pack_into(">II", trailer, 4, 4, 512)
+        struct.pack_into(">QQ", trailer, 216, 8, len(data))
+        path.write_bytes(b"fixture!" + data + trailer)
+        return {key: sorted((item["ID"], hashlib.sha256(item["Data"]).hexdigest()) for item in value)
+                for key, value in controls.items()}
+
+    def test_only_exact_own_license_and_reviewed_mapping_can_supply_one_response(self):
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / "fixture.dmg"
+            pins = self.license_fixture(path)
+            with mock.patch.object(MODULE, "OWN_EULA_CONTROLS", pins):
+                self.assertEqual(MODULE.verified_own_dmg_license(path), b"y\n")
+                for mutate in (lambda r: r["TEXT"][0].update(Data=b"unknown terms"),
+                               lambda r: r["TEXT"].append(dict(r["TEXT"][0])),
+                               lambda r: r.update({"RTF ": [{"ID": "5000", "Data": b"other terms"}]}),
+                               lambda r: r["LPic"][0].update(Data=b"changed mapping"),
+                               lambda r: r.pop("TEXT")):
+                    self.license_fixture(path, mutate)
+                    with self.subTest(mutate=mutate), self.assertRaises(MODULE.InspectionError):
+                        MODULE.verified_own_dmg_license(path)
+
+    def test_license_parser_rejects_bad_bounds_and_duplicate_keys(self):
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / "fixture.dmg"
+            self.license_fixture(path)
+            data = bytearray(path.read_bytes())
+            struct.pack_into(">QQ", data, len(data) - 512 + 216, len(data), 100)
+            path.write_bytes(data)
+            with self.assertRaisesRegex(MODULE.InspectionError, "Unbounded"):
+                MODULE.verified_own_dmg_license(path)
+            self.license_fixture(path)
+            data = path.read_bytes(); metadata = data[8:-512]
+            metadata = metadata.replace(b"<dict>", b"<dict><key>resource-fork</key><dict/>", 1)
+            trailer = bytearray(data[-512:]); struct.pack_into(">QQ", trailer, 216, 8, len(metadata))
+            path.write_bytes(b"fixture!" + metadata + trailer)
+            with self.assertRaisesRegex(MODULE.InspectionError, "Duplicate"):
+                MODULE.verified_own_dmg_license(path)
+
+    def test_verified_license_prompt_prefix_does_not_replace_attachment_metadata(self):
+        data = plistlib.dumps({"system-entities": [{"dev-entry": "/dev/disk9"}]})
+        self.assertEqual(MODULE.own_license_attachment_plist(b"generated own-license prompt\n" + data), data)
+        for invalid in (data + data, b"prompt without metadata", b"x" * 32769 + data):
+            with self.assertRaises(MODULE.InspectionError): MODULE.own_license_attachment_plist(invalid)
+
+    def test_unknown_license_fails_before_attach_and_generic_input_is_forbidden(self):
+        with tempfile.TemporaryDirectory() as folder:
+            with mock.patch.object(MODULE, "tool", return_value="hdiutil"), mock.patch.object(MODULE, "checked_command") as command, \
+                    mock.patch.object(MODULE, "verified_own_dmg_license", side_effect=MODULE.InspectionError("unknown terms")):
+                with self.assertRaisesRegex(MODULE.InspectionError, "unknown terms"):
+                    with MODULE.readonly_dmg(Path(folder) / "fixture.dmg", Path(folder) / "mount"): pass
+                self.assertEqual(command.call_count, 1)
+                self.assertEqual(command.call_args.args[0][1], "verify")
+        with self.assertRaises(MODULE.InspectionError):
+            MODULE.checked_command([sys.executable, "-c", "print('never run')"], stdin_bytes=b"y\n")
+
     def test_exact_nsis_member_and_windows_separators(self):
         selected = MODULE.parse_7z_listing(listing(entry("$_OUTDIR\\echolingo.exe"), entry("resources/model.bin")))
         self.assertEqual(selected["Path"], "$_OUTDIR\\echolingo.exe")
@@ -194,7 +257,7 @@ class CandidateInspectionTests(unittest.TestCase):
                                                     {"dev-entry": "/dev/disk9s1", "mount-point": str(mount)}]}
                         return subprocess.CompletedProcess(command, 0, plistlib.dumps(data), b"")
                     return subprocess.CompletedProcess(command, 0, b"", b"")
-                with mock.patch.object(MODULE, "tool", return_value="hdiutil"), mock.patch.object(MODULE, "checked_command", side_effect=execute):
+                with mock.patch.object(MODULE, "verified_own_dmg_license", return_value=b"y\n"), mock.patch.object(MODULE, "tool", return_value="hdiutil"), mock.patch.object(MODULE, "checked_command", side_effect=execute):
                     with self.assertRaises(MODULE.InspectionError):
                         with MODULE.readonly_dmg(Path(folder) / "fixture.dmg", mount):
                             raise MODULE.InspectionError("generated inspection failure")
@@ -232,7 +295,7 @@ class CandidateInspectionTests(unittest.TestCase):
                 if command[1] == "detach":
                     raise MODULE.InspectionError("hdiutil detach failed (exit 1); stderr: not mounted")
                 return subprocess.CompletedProcess(command, 0, b"", b"")
-            with mock.patch.object(MODULE, "tool", return_value="hdiutil"), mock.patch.object(MODULE, "checked_command", side_effect=execute):
+            with mock.patch.object(MODULE, "verified_own_dmg_license", return_value=b"y\n"), mock.patch.object(MODULE, "tool", return_value="hdiutil"), mock.patch.object(MODULE, "checked_command", side_effect=execute):
                 with self.assertRaisesRegex(MODULE.InspectionError, "hdiutil attach failed.*permission denied.*cleanup also failed.*hdiutil detach"):
                     with MODULE.readonly_dmg(Path(folder) / "fixture.dmg", mount):
                         self.fail("Failed attach must not yield")
@@ -247,7 +310,7 @@ class CandidateInspectionTests(unittest.TestCase):
                     return subprocess.CompletedProcess(command, 0, plistlib.dumps(data), b"")
                 if command[1] == "detach": raise MODULE.InspectionError("generated detach failure")
                 return subprocess.CompletedProcess(command, 0, b"", b"")
-            with mock.patch.object(MODULE, "tool", return_value="hdiutil"), mock.patch.object(MODULE, "checked_command", side_effect=execute):
+            with mock.patch.object(MODULE, "verified_own_dmg_license", return_value=b"y\n"), mock.patch.object(MODULE, "tool", return_value="hdiutil"), mock.patch.object(MODULE, "checked_command", side_effect=execute):
                 with self.assertRaisesRegex(MODULE.InspectionError, "generated detach failure"):
                     with MODULE.readonly_dmg(Path(folder) / "fixture.dmg", mount): pass
 
@@ -260,7 +323,7 @@ class CandidateInspectionTests(unittest.TestCase):
                     data = plistlib.dumps({"system-entities": [{"dev-entry": "/dev/disk9"}]})
                     return subprocess.CompletedProcess(command, 1, data, b"generated mount failure")
                 return subprocess.CompletedProcess(command, 0, b"", b"")
-            with mock.patch.object(MODULE, "tool", return_value="hdiutil"), mock.patch.object(MODULE, "checked_command", side_effect=execute):
+            with mock.patch.object(MODULE, "verified_own_dmg_license", return_value=b"y\n"), mock.patch.object(MODULE, "tool", return_value="hdiutil"), mock.patch.object(MODULE, "checked_command", side_effect=execute):
                 with self.assertRaises(MODULE.InspectionError):
                     with MODULE.readonly_dmg(Path(folder) / "fixture.dmg", Path(folder) / "mount"):
                         self.fail("Failed attachment must not inspect a bundle")

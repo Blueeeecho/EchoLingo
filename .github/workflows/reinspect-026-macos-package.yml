@@ -1,0 +1,86 @@
+name: Reinspect immutable 0.2.6 macOS package
+on:
+  push:
+    branches: [verify/026-macos-package]
+permissions:
+  contents: read
+  actions: read
+jobs:
+  reinspect-macos-package:
+    name: Reinspect the original 0.2.6 macOS bytes without rebuilding
+    runs-on: macos-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+          path: inspection-tools
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: d91b59505f81d766eca25a8cff4764c278542275
+          persist-credentials: false
+          path: product-source
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - name: Require only the reviewed inspection repair and unchanged product source
+        shell: bash
+        working-directory: inspection-tools
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse d91b59505f81d766eca25a8cff4764c278542275^{tree})" = 2898ee1bad7f1d73d408d2ad5fc136cfc869fe3a
+          python3 - <<'PY'
+          import subprocess
+          allowed = {'.github/workflows/reinspect-026-macos-package.yml', 'scripts/reinspect-026-macos-package.py',
+                     'scripts/inspect-candidate-package.py', 'scripts/test_inspect_candidate_package.py'}
+          changed = set(subprocess.check_output(['git', 'diff', '--name-only', 'd91b59505f81d766eca25a8cff4764c278542275', 'HEAD'], text=True).splitlines())
+          if changed != allowed: raise SystemExit('Unexpected inspection-only delta')
+          PY
+          python3 scripts/check-repository.py
+          python3 scripts/test_inspect_candidate_package.py
+      - name: Verify original native tests and successful build before downloading the exact bytes
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('node:fs');
+            const path = require('node:path');
+            const crypto = require('node:crypto');
+            if (context.repo.owner !== 'Blueeeecho' || context.repo.repo !== 'EchoLingo' || context.eventName !== 'push' || context.ref !== 'refs/heads/verify/026-macos-package') throw new Error('Wrong inspection context');
+            const base = {owner:'Blueeeecho', repo:'EchoLingo'};
+            const {data:run} = await github.rest.actions.getWorkflowRun({...base,run_id:41195400127});
+            if (run.repository.id !== 1432139657 || run.head_sha !== 'd91b59505f81d766eca25a8cff4764c278542275' || run.head_branch !== 'fix/025-macos-recovery-integration' || run.event !== 'push' || run.run_attempt !== 1) throw new Error('Wrong original source run');
+            const {data:{jobs}} = await github.rest.actions.listJobsForWorkflowRun({...base,run_id:41195400127,per_page:100});
+            for (const id of [124520436757,124520436887]) {
+              const job = jobs.find(j=>j.id===id);
+              if (!job || job.conclusion !== 'success') throw new Error('Original native tests did not pass');
+            }
+            const mac = jobs.find(j=>j.id===124521433142);
+            if (!mac || mac.conclusion !== 'failure') throw new Error('Original inspection failure must remain explicit');
+            for (const [name,outcome] of [['Build fresh application and installer with locked dependencies','success'],['Inspect fresh installer bytes without installing or launching the application','failure'],['Upload unverified build diagnosis separately from candidates','success']]) {
+              const steps=mac.steps.filter(s=>s.name===name);
+              if (steps.length!==1 || steps[0].conclusion!==outcome) throw new Error('Original build/inspection outcome changed');
+            }
+            const {data:artifact} = await github.rest.actions.getArtifact({...base,artifact_id:13041241190});
+            const hash='c877dcf26a6e85d7ee8e3f7682980b20fbb68f3241065efbdb99b86d65377ba8';
+            if (artifact.expired || artifact.workflow_run.id!==41195400127 || artifact.name!=='EchoLingo-0.2.6-UNVERIFIED-build-macOS' || artifact.size_in_bytes!==9596150 || artifact.digest!==`sha256:${hash}`) throw new Error('Original artifact pin changed');
+            const {data}=await github.rest.actions.downloadArtifact({...base,artifact_id:13041241190,archive_format:'zip'});
+            const bytes=Buffer.from(data);
+            if (bytes.length!==9596150 || crypto.createHash('sha256').update(bytes).digest('hex')!==hash) throw new Error('Original artifact bytes changed');
+            fs.writeFileSync(path.join(process.env.RUNNER_TEMP,'original-macos-build.zip'),bytes,{flag:'wx'});
+      - name: Inspect the unchanged DMG and compare its executable with the original signed app
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 inspection-tools/scripts/reinspect-026-macos-package.py --archive "$RUNNER_TEMP/original-macos-build.zip" --source "$GITHUB_WORKSPACE/product-source" --output "$RUNNER_TEMP/reinspected-macos"
+      - name: Preserve only the verified original installer and explicit two-run provenance
+        uses: actions/upload-artifact@v4
+        with:
+          name: EchoLingo-0.2.6-candidate-macOS-reinspected
+          if-no-files-found: error
+          path: |
+            ${{ runner.temp }}/reinspected-macos/candidate/EchoLingo_0.2.6_aarch64.dmg
+            ${{ runner.temp }}/reinspected-macos/candidate/CANDIDATE-MANIFEST.json
+            ${{ runner.temp }}/reinspected-macos/candidate/CANDIDATE-MANIFEST.json.sha256
+            ${{ runner.temp }}/reinspected-macos/candidate/REINSPECTION-MANIFEST.json

@@ -33,6 +33,14 @@ MAX_MEMBERS = 20000
 MAX_LISTING = 16 * 1024 * 1024
 MAX_EXECUTABLE = 512 * 1024 * 1024
 RUN_URL = re.compile(r"https://github\.com/[A-Za-z0-9_-]+/[A-Za-z0-9_.-]+/actions/runs/[1-9][0-9]*")
+OWN_LICENSE_SHA256 = "20ce870fd3c179bf06c2d28e32264a30e2a7b34e5d317d7aafe2ee0176849e71"
+# Reviewed Tauri-generated English EULA mapping/buttons. These are not terms
+# supplied by an arbitrary image; the sole TEXT must also equal our LICENSE.
+OWN_EULA_CONTROLS = {
+    "LPic": [("5000", "9d2e9278dc24c471c56efa4c6fa9e822a8f224591127c97f7f95e23fe26b94e1")],
+    "STR#": [("5000", "18cad9796406ffbae589e79be9b765185599c2e98b6c6726ead904d9540feb5a"),
+             ("5002", "0ea8bb19a8005a9a61fc0e608b714898075356487cd1815a39ebffc67f9d11cc")],
+}
 
 
 class InspectionError(ValueError):
@@ -65,15 +73,29 @@ def command_failure(result):
     return f"{label} failed (exit {result.returncode}){detail}"
 
 
-def checked_command(command, *, env=None, check=True, maximum_bytes=MAX_LISTING):
+def checked_command(command, *, env=None, check=True, maximum_bytes=MAX_LISTING, stdin_bytes=None):
     # Bound stdout while reading (not after capture_output has allocated it).
     # stderr is a private temporary stream, never a candidate-content log.
     args = [str(item) for item in command]
+    require(stdin_bytes is None or (stdin_bytes == b"y\n" and len(args) > 1 and Path(args[0]).name == "hdiutil" and args[1] == "attach"),
+            "Only the verified own-license attach may receive bounded input")
     with tempfile.TemporaryFile() as errors:
-        process = subprocess.Popen(args, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=errors, env=env)
+        process = subprocess.Popen(args, stdin=subprocess.PIPE if stdin_bytes is not None else subprocess.DEVNULL,
+                                   stdout=subprocess.PIPE, stderr=errors, env=env)
         timer = threading.Timer(180, process.kill)
         timer.start()
         try:
+            if stdin_bytes is not None:
+                try:
+                    process.stdin.write(stdin_bytes)
+                    process.stdin.flush()
+                except BrokenPipeError:
+                    pass  # Preserve the actual hdiutil exit/error below.
+                finally:
+                    try:
+                        process.stdin.close()
+                    except BrokenPipeError:
+                        pass
             chunks, total = [], 0
             for chunk in iter(lambda: process.stdout.read(1024 * 1024), b""):
                 total += len(chunk)
@@ -318,10 +340,68 @@ def validate_attach_result(data, mountpoint):
     return device
 
 
+def verified_own_dmg_license(installer, root=ROOT):
+    """Read only the bounded UDIF resource plist; never mount or alter bytes.
+
+    Acceptance is limited to the owner's already reviewed, unchanged project
+    LICENSE. Additional, changed, missing or differently mapped terms fail closed.
+    """
+    license_file = regular_file(root / "LICENSE")
+    require(license_file.stat().st_size <= 16384, "Own LICENSE exceeds reviewed size bound")
+    license_bytes = license_file.read_bytes()
+    require(hashlib.sha256(license_bytes).hexdigest() == OWN_LICENSE_SHA256, "Own LICENSE changed; review required")
+    config = json.loads((root / "src-tauri/tauri.conf.json").read_text(encoding="utf-8"))
+    require(config.get("bundle", {}).get("licenseFile") == "../LICENSE", "Unreviewed DMG license configuration")
+    path = regular_file(installer)
+    size = path.stat().st_size
+    require(size > 512, "Truncated UDIF image")
+    with path.open("rb") as stream:
+        stream.seek(-512, 2)
+        trailer = stream.read(512)
+        require(trailer[:4] == b"koly" and struct.unpack_from(">II", trailer, 4) == (4, 512), "Invalid UDIF trailer")
+        offset, length = struct.unpack_from(">QQ", trailer, 216)
+        require(0 < length <= 1024 * 1024 and offset < size - 512 and offset + length <= size - 512,
+                "Unbounded UDIF resource plist")
+        stream.seek(offset)
+        class UniqueKeys(dict):
+            def __setitem__(self, key, value):
+                require(key not in self, "Duplicate UDIF resource key")
+                super().__setitem__(key, value)
+        metadata = plistlib.loads(stream.read(length), dict_type=UniqueKeys)
+    require(isinstance(metadata, dict) and set(metadata) == {"resource-fork"}, "Unexpected UDIF resource metadata")
+    resources = metadata["resource-fork"]
+    require(isinstance(resources, dict) and set(resources) <= {"LPic", "STR#", "TEXT", "TMPL", "blkx", "plst", "styl"},
+            "Unknown or alternate DMG license resources")
+    texts = resources.get("TEXT")
+    require(isinstance(texts, list) and len(texts) == 1 and isinstance(texts[0], dict)
+            and texts[0].get("ID") == "5000" and texts[0].get("Data") == license_bytes,
+            "Embedded DMG license is not the exact reviewed own LICENSE")
+    for kind, pins in OWN_EULA_CONTROLS.items():
+        entries = resources.get(kind)
+        require(isinstance(entries, list) and len(entries) == len(pins)
+                and all(isinstance(item, dict) and isinstance(item.get("ID"), str)
+                        and isinstance(item.get("Data"), bytes) for item in entries),
+                "DMG license control resources differ")
+        observed = sorted((item.get("ID"), hashlib.sha256(item["Data"]).hexdigest()) for item in entries)
+        require(observed == pins, "DMG license locale/button mapping differs")
+    return b"y\n"
+
+
+def own_license_attachment_plist(data):
+    # hdiutil can precede -plist output with the verified license/prompt. Never
+    # log that prefix. Require exactly one XML document and validate it normally.
+    marker = b"<?xml"
+    require(data.count(marker) == 1, "hdiutil attach returned ambiguous plist output")
+    offset = data.index(marker)
+    require(offset <= 32768, "hdiutil license prompt output exceeds bound")
+    return data[offset:]
+
+
 @contextmanager
 def readonly_dmg(installer, mountpoint):
     hdiutil = tool("hdiutil")
     checked_command([hdiutil, "verify", installer])
+    license_input = verified_own_dmg_license(installer)
     mountpoint.mkdir()
     detach_target = str(mountpoint)
     primary_error = None
@@ -329,11 +409,12 @@ def readonly_dmg(installer, mountpoint):
     # of only the freshly owned mountpoint/device, never a pre-existing volume.
     try:
         result = checked_command([hdiutil, "attach", "-readonly", "-nobrowse", "-noautoopen", "-plist",
-                                  "-mountpoint", mountpoint, installer], check=False)
+                                  "-mountpoint", mountpoint, installer], check=False, stdin_bytes=license_input)
         # A failed attach can still report an allocated but unmounted device.
         # Retain that exact operation's device before checking mount/exit state.
         if result.stdout:
             try:
+                result.stdout = own_license_attachment_plist(result.stdout)
                 detach_target = attachment_device(result.stdout)
             except (ValueError, TypeError, plistlib.InvalidFileException):
                 # Nonzero attach may emit a human-readable prompt rather than
