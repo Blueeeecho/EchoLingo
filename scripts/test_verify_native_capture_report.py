@@ -14,6 +14,7 @@ def complete_report():
               "helperDiagnostics": {"captureHealth": {"magnifierSampleThreadStopped": 1}}}
              for mode in sorted(REPORT.EXPECTED_MODES)]
     case = next(case for case in cases if case["mode"] == "magnifier-continuity-armed-and-dragging")
+    case["generatedFinalTargetReadyBeforeHelper"] = True
     case["helperDiagnostics"] = {"captureHealth": {"magnifierSampleThreadStopped": 1,
         "magnifierSampleCompleted": 30, "magnifierFrameAgeMillisecondsMax": 80}}
     for phase in ("armed", "dragging"):
@@ -37,6 +38,13 @@ def complete_report():
 
 
 class CaptureReportTests(unittest.TestCase):
+    def test_final_target_must_preexist_the_capture(self):
+        for value in (None, False, 1):
+            report = complete_report()
+            case = next(case for case in report["cases"] if case["mode"].startswith("magnifier-continuity"))
+            case["generatedFinalTargetReadyBeforeHelper"] = value
+            with self.assertRaises(ValueError):
+                REPORT.verify(json.dumps(report))
     def test_complete_report_with_bom_and_surrounding_output(self):
         report = complete_report()
         self.assertEqual(REPORT.verify("\ufefffixture output\n" + json.dumps(report) + "\ndone"), report)

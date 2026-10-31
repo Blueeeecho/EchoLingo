@@ -59,6 +59,8 @@ private func sourceMain() {
             "scale": screen.backingScaleFactor,
             "applicationActive": app.isActive, "windowKey": window.isKeyWindow,
             "windowVisible": window.isVisible, "windowOnActiveSpace": window.isOnActiveSpace,
+            "applicationFinishedLaunching": NSRunningApplication.current.isFinishedLaunching,
+            "runningApplicationActive": NSRunningApplication.current.isActive,
             "frontmostIsSource": NSWorkspace.shared.frontmostApplication?.processIdentifier == ProcessInfo.processInfo.processIdentifier
         ]) + Data([10]))
     }
@@ -294,7 +296,8 @@ private final class ScreenshotProbe {
             if phase == 2 && self.target != target { self.finish("failed", reason: "generated-source-frame-changed"); return }
             self.target = target; self.sourceScale = scale
             var appKitState: [String: Any] = [:]
-            for key in ["applicationActive", "windowKey", "windowVisible", "windowOnActiveSpace", "frontmostIsSource"] {
+            for key in ["applicationActive", "windowKey", "windowVisible", "windowOnActiveSpace", "frontmostIsSource",
+                        "applicationFinishedLaunching", "runningApplicationActive"] {
                 if let value = object[key] as? Bool { appKitState[key] = value }
             }
             self.report["sourceAppKitState"] = appKitState
@@ -405,6 +408,21 @@ private final class ScreenshotProbe {
                                      ("layer", kCGWindowLayer), ("alpha", kCGWindowAlpha)] {
                     if let value = captureWindowNumber(record[key as String]) { occluder[label] = value }
                 }
+                // Read-only identity of this single obstructing PID, requested
+                // to distinguish a system/security shield from fixture setup.
+                // Never enumerate other applications or read window titles,
+                // command-line arguments, environment, or image contents.
+                if let pid = captureWindowNumber(record[kCGWindowOwnerPID as String]),
+                   pid > 0, pid <= Double(Int32.max), pid.rounded(.towardZero) == pid,
+                   let application = NSRunningApplication(processIdentifier: Int32(pid)) {
+                    occluder["ownerApplicationIdentityAvailable"] = true
+                    if let identifier = application.bundleIdentifier {
+                        occluder["ownerBundleIdentifier"] = String(identifier.prefix(256))
+                    }
+                    if let executable = application.executableURL {
+                        occluder["ownerExecutablePath"] = String(executable.path.prefix(1024))
+                    }
+                } else { occluder["ownerApplicationIdentityAvailable"] = false }
                 report["sourceOccluderDiagnostic"] = occluder
             }
             try fixtureNeed(frame.intersection(target.frame).isEmpty, "foreign window overlaps generated source; capture refused")

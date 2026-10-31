@@ -51,6 +51,11 @@ class MacScreenshotProbeContract(unittest.TestCase):
         self.assertIn('window.orderFrontRegardless()', swift)
         self.assertIn('!panel.isVisible && !owner.isVisible && owner.attachedSheet == nil', swift)
         self.assertIn('sourceOccluderDiagnostic', swift)
+        self.assertIn('NSRunningApplication(processIdentifier: Int32(pid))', swift)
+        self.assertIn('ownerBundleIdentifier', swift)
+        self.assertIn('ownerExecutablePath', swift)
+        self.assertNotIn('runningApplications', swift)
+        self.assertNotIn('localizedName', swift)
         self.assertIn('try fixtureNeed(frame.intersection(target.frame).isEmpty', swift)
         self.assertNotIn('kCGWindowName', swift)
         diagnostics = swift.split('func sourceIdentityDiagnostic(', 1)[1].split('func verifySourceVisible()', 1)[0]

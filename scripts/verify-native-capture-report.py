@@ -44,6 +44,8 @@ def verify(text):
                 or health["magnifierSampleThreadStopped"] != 1):
             raise ValueError("Every native case must stop its sampling worker")
     continuity = next(case for case in cases if case["mode"] == "magnifier-continuity-armed-and-dragging")
+    if continuity.get("generatedFinalTargetReadyBeforeHelper") is not True:
+        raise ValueError("The generated final spatial target must be verified before helper launch")
     health = continuity["helperDiagnostics"]["captureHealth"]
     if (type(health.get("magnifierSampleThreadStopped")) is not int
             or health["magnifierSampleThreadStopped"] != 1

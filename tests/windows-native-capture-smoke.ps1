@@ -95,6 +95,7 @@ public static class EchoLingoNativeCaptureSmoke {
     [DllImport("user32.dll")] static extern uint SendInput(uint count,INPUT[] values,int size);
     [DllImport("kernel32.dll")] static extern uint GetCurrentThreadId();
     [DllImport("dwmapi.dll")] static extern int DwmGetWindowAttribute(IntPtr window,uint attribute,out RECT bounds,int size);
+    [DllImport("dwmapi.dll")] static extern int DwmFlush();
     sealed class WindowInfo { public IntPtr Handle; public Rectangle Bounds; }
     static readonly JavaScriptSerializer json=new JavaScriptSerializer { MaxJsonLength=16*1024*1024 };
     static void Need(bool value,string message) { if (!value) throw new InvalidOperationException(message); }
@@ -178,9 +179,30 @@ public static class EchoLingoNativeCaptureSmoke {
     [DllImport("user32.dll")] static extern IntPtr SetWinEventHook(uint first,uint last,IntPtr module,WinEventCallback callback,uint process,uint thread,uint flags);
     [DllImport("user32.dll")] static extern bool UnhookWinEvent(IntPtr hook);
     static readonly Color[] MotionColors={Color.FromArgb(70,110,210),Color.FromArgb(170,60,180),Color.FromArgb(60,190,120),Color.FromArgb(230,150,40)};
+    static void PrepareFinalPixelTarget(Sources source,Dictionary<string,object> report) {
+        // The final spatial target must already exist before capture begins.
+        // Creating it at the final move couples the 200 ms sampler deadline to
+        // an unrelated source repaint hidden behind the old loupe position.
+        source.OnUi(delegate {source.PreviewPatch=true;source.A.Controls[0].Refresh();});
+        Point probe=new Point(source.First.X+112,source.First.Y+32);
+        Need(GetForegroundWindow()==source.AH&&GetAncestor(WindowFromPoint(probe),2)==source.AH,
+            "Generated final pixel target is obscured before helper launch.");
+        Need(DwmFlush()>=0,"Generated final pixel target did not reach the compositor.");
+        using(Bitmap pixels=new Bitmap(3,3,PixelFormat.Format32bppArgb)) {
+            using(Graphics graphics=Graphics.FromImage(pixels))graphics.CopyFromScreen(probe,Point.Empty,new Size(3,3),CopyPixelOperation.SourceCopy);
+            for(int y=0;y<3;y++)for(int x=0;x<3;x++) {
+                Color actual=pixels.GetPixel(x,y);
+                Need(Math.Abs(actual.R-30)<=2&&Math.Abs(actual.G-200)<=2&&Math.Abs(actual.B-220)<=2,
+                    "Generated final pixel target was not painted before helper launch.");
+            }
+        }
+        report["generatedFinalTargetReadyBeforeHelper"]=true;
+    }
     sealed class MotionPixelObserver : IDisposable {
         readonly Thread worker;readonly Stopwatch clock;readonly Rectangle roi,final;
         readonly long[] changed={-1,-1,-1,-1};readonly HashSet<int> colors=new HashSet<int>();
+        readonly List<Dictionary<string,object>> finalSnapshots=new List<Dictionary<string,object>>();
+        long finalDispatch=-1;
         volatile bool stopping;bool failed,stopped,finalMatched;long maximumRefresh;int samples;
         public MotionPixelObserver(Sources source,Stopwatch clock) {
             this.clock=clock;
@@ -191,6 +213,7 @@ public static class EchoLingoNativeCaptureSmoke {
             worker=new Thread(Run);worker.IsBackground=true;worker.Start();
         }
         public void Changed(int index) { Interlocked.Exchange(ref changed[index],clock.ElapsedMilliseconds); }
+        public void FinalDispatched() { Interlocked.Exchange(ref finalDispatch,clock.ElapsedMilliseconds); }
         static bool Rgb(byte[] bytes,int width,int x,int y,Color expected) {
             int offset=(y*width+x)*4;
             return Math.Abs(bytes[offset+2]-expected.R)<=2&&Math.Abs(bytes[offset+1]-expected.G)<=2&&Math.Abs(bytes[offset]-expected.B)<=2;
@@ -201,25 +224,40 @@ public static class EchoLingoNativeCaptureSmoke {
                 using(Bitmap bitmap=new Bitmap(roi.Width,roi.Height,PixelFormat.Format32bppArgb)) {
                     byte[] bytes=new byte[roi.Width*roi.Height*4];
                     while(!stopping&&clock.ElapsedMilliseconds<956) {
+                        long captureStarted=clock.ElapsedMilliseconds;
                         using(Graphics graphics=Graphics.FromImage(bitmap))graphics.CopyFromScreen(roi.Location,Point.Empty,roi.Size,CopyPixelOperation.SourceCopy);
                         BitmapData data=bitmap.LockBits(new Rectangle(Point.Empty,roi.Size),ImageLockMode.ReadOnly,PixelFormat.Format32bppArgb);
                         try {for(int y=0;y<roi.Height;y++)Marshal.Copy(IntPtr.Add(data.Scan0,y*data.Stride),bytes,y*roi.Width*4,roi.Width*4);}
                         finally {bitmap.UnlockBits(data);}
-                        long elapsed=clock.ElapsedMilliseconds;if(elapsed>=956)continue;samples++;
+                        long elapsed=clock.ElapsedMilliseconds;bool eligible=elapsed<956;if(eligible)samples++;
+                        int detected=0,probeKind=0;bool finalGeometry=false;
                         // Identify the actual magnifier in the SAME immutable
                         // screenshot, not a stale GetWindowRect at moving coordinates.
                         for(int y=0;y<=roi.Height-174;y++)for(int x=0;x<=roi.Width-156;x++) {
                             Color blue=Color.FromArgb(90,150,255),red=Color.FromArgb(230,70,70);
                             if(!Rgb(bytes,roi.Width,x+1,y+1,blue)||!Rgb(bytes,roi.Width,x+153,y+1,blue)
                                 ||!Rgb(bytes,roi.Width,x+78,y+10,red)||!Rgb(bytes,roi.Width,x+10,y+78,red))continue;
-                            if(elapsed>=180&&elapsed<756)for(int color=0;color<MotionColors.Length;color++) {
+                            detected++;
+                            bool atFinal=new Point(roi.X+x,roi.Y+y)==final.Location;
+                            bool cyan=Rgb(bytes,roi.Width,x+54,y+54,Color.FromArgb(30,200,220));
+                            if(atFinal) {
+                                finalGeometry=true;
+                                // Generated-color categories only; no screenshot/RGB payload.
+                                probeKind=cyan?1:Rgb(bytes,roi.Width,x+54,y+54,MotionColors[3])?2:
+                                    Rgb(bytes,roi.Width,x+54,y+54,Color.FromArgb(22,26,34))?3:4;
+                            }
+                            if(eligible&&elapsed>=180&&elapsed<756)for(int color=0;color<MotionColors.Length;color++) {
                                 long since=Interlocked.Read(ref changed[color]);
                                 if(since>=0&&elapsed>=since&&Rgb(bytes,roi.Width,x+54,y+54,MotionColors[color])&&colors.Add(color))
                                     maximumRefresh=Math.Max(maximumRefresh,elapsed-since);
                             }
-                            if(elapsed>=756&&new Point(roi.X+x,roi.Y+y)==final.Location
-                                &&Rgb(bytes,roi.Width,x+54,y+54,Color.FromArgb(30,200,220)))finalMatched=true;
+                            if(eligible&&elapsed>=756&&atFinal&&cyan)finalMatched=true;
                         }
+                        if(elapsed>=700&&finalSnapshots.Count<6)finalSnapshots.Add(new Dictionary<string,object> {
+                            {"captureStartMilliseconds",captureStarted},{"captureEndMilliseconds",elapsed},
+                            {"eligibleBeforeDeadline",eligible},{"detectedFrames",detected},
+                            {"finalGeometry",finalGeometry},{"probeColorKind",probeKind}
+                        });
                         Thread.Sleep(1);
                     }
                 }
@@ -230,7 +268,9 @@ public static class EchoLingoNativeCaptureSmoke {
             report[phase+"MagnifierMovingPixels"]=new Dictionary<string,object> {
                 {"distinctMotionPixelColors",colors.Count},{"maximumColorRefreshMilliseconds",maximumRefresh},
                 {"finalTargetPixelMatched",finalMatched},{"pixelObservations",samples},
-                {"observerStopped",stopped},{"samplePixelsStored",false}
+                {"observerStopped",stopped},{"samplePixelsStored",false},
+                {"finalPointerDispatchMilliseconds",Interlocked.Read(ref finalDispatch)},
+                {"finalSnapshotEvidence",finalSnapshots}
             };
             Need(!failed&&stopped&&colors.Count>=3&&maximumRefresh<=200&&finalMatched,
                 "Moving magnifier pixels froze, lagged, or did not match the generated final target.");
@@ -323,9 +363,9 @@ public static class EchoLingoNativeCaptureSmoke {
                         });
                         pixels.Changed(color);
                     }
-                    if(step==24)source.OnUi(delegate {source.PreviewPatch=true;source.A.Controls[0].Refresh();});
                     Point target=step==24 ? final : new Point(source.First.X+(step<=12 ? step : 24-step)*8,source.First.Y+(step%6)*4);
                     Send(new INPUT[]{Move(target)});issued=step;moves++;
+                    if(step==24)pixels.FinalDispatched();
                 }
                 Application.DoEvents();
                 uint pid;GetWindowThreadProcessId(loupe,out pid);
@@ -361,7 +401,7 @@ public static class EchoLingoNativeCaptureSmoke {
         } finally {
             try {
                 if(pixels!=null)pixels.Dispose();
-                source.OnUi(delegate {source.PreviewPatch=false;source.A.Controls[0].Text="Generated input only";source.A.Controls[0].Refresh();});
+                source.OnUi(delegate {source.A.Controls[0].Text="Generated input only";source.A.Controls[0].Refresh();});
             } finally {
                 // Retain the delegate if unhook fails; the fixture process then
                 // fails without exposing an unrooted callback to a live hook.
@@ -545,6 +585,7 @@ public static class EchoLingoNativeCaptureSmoke {
         Dictionary<string,object> report=new Dictionary<string,object>{{"mode",kind},{"ok",false}};Sources source=null;bool finished=false;
         try {
             source=new Sources();int oldDown=0,oldUp=0,oldClick=0;
+            if(kind=="magnifier-continuity-armed-and-dragging")PrepareFinalPixelTarget(source,report);
             bool preheld=kind=="preheld-source-release-then-first-fresh-pair";
             if(preheld){Send(new INPUT[]{Mouse(2)});source.Partial=true;Thread.Sleep(80);source.Drain();Need(source.Downs==1&&source.Ups==0,"Preheld setup did not deliver exactly one source down.");}
             if(kind=="escape-held900ms-drains-real-key-up") {

@@ -41,6 +41,9 @@ Failure diagnostics project only the exact generated PID/window's numeric frame,
 layer, alpha, sharing and visibility fields. If a foreground window obstructs
 the generated source, its numeric PID/window ID, layer/alpha and bounds are
 recorded to diagnose the refusal, never titles, record descriptions or pixels.
+The same single obstructing PID's public `NSRunningApplication` bundle identifier
+and executable URL are recorded when available, solely to diagnose its owner.
+No other processes, command-line arguments, environment or window names are read.
 The fixture explicitly confirms its canceled save panel and owner are hidden
 before starting capture. Only the generated source uses `orderFrontRegardless`
 to stage itself at the front of the normal window level; no foreign window is
@@ -96,3 +99,6 @@ does not re-label those as physical-display tests.
 - [Apple: ordering cooperating windows](https://developer.apple.com/documentation/appkit/nswindow/orderfrontregardless())
   documents front ordering for cooperating processes without changing the window
   level; this is fixture staging, not production capture behavior.
+- [Apple: running-application identity](https://developer.apple.com/documentation/appkit/nsrunningapplication)
+  provides the exact-PID bundle and executable metadata for obstruction diagnostics;
+  identifying a system owner never exempts its window from the capture guard.

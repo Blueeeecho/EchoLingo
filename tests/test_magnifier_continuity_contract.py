@@ -7,6 +7,28 @@ NATIVE = (ROOT / "src-tauri/src/windows_capture_native.rs").read_text()
 
 
 class MagnifierContinuityContract(unittest.TestCase):
+    def test_final_marker_was_occluded_and_cannot_match_an_old_motion_frame(self):
+        # Coordinates relative to the generated First point, independent of DPI.
+        marker = (108, 28, 12, 12)
+        old_loupe = (50, -6, 156, 174)  # Last motion target: (+8,+20), offset (+42,-26).
+        self.assertTrue(old_loupe[0] <= marker[0] and old_loupe[1] <= marker[1])
+        self.assertTrue(old_loupe[0] + old_loupe[2] >= marker[0] + marker[2])
+        self.assertTrue(old_loupe[1] + old_loupe[3] >= marker[1] + marker[3])
+        for step in range(24):
+            pointer_x = (step if step <= 12 else 24 - step) * 8
+            self.assertLess(pointer_x - 8, marker[0])
+        self.assertEqual((120 - 8, 40 - 8), (112, 32))
+        self.assertTrue(108 <= 112 and 112 + 3 <= 120 and 28 <= 32 and 32 + 3 <= 40)
+
+    def test_final_spatial_target_is_painted_before_helper_not_during_final_move(self):
+        fixture = (ROOT / "tests/windows-native-capture-smoke.ps1").read_text()
+        case = fixture.split("static Dictionary<string,object> Case(", 1)[1]
+        self.assertLess(case.index("PrepareFinalPixelTarget(source,report)"), case.index("host.Begin()"))
+        observe = fixture.split("static void ObserveMagnifierContinuity(", 1)[1].split("static Dictionary<string,object> SafeReply", 1)[0]
+        self.assertNotIn("PreviewPatch=", observe)
+        self.assertIn("if(eligible&&elapsed>=756&&atFinal&&cyan)finalMatched=true;", fixture)
+        self.assertIn("bool eligible=elapsed<956", fixture)
+        self.assertIn('"finalSnapshotEvidence",finalSnapshots', fixture)
     def test_throttle_retains_frame_instead_of_hiding(self):
         select = NATIVE.split("    fn select(&mut self)", 1)[1].split("    fn cleanup(&mut self)", 1)[0]
         self.assertIn("let frame_action = self.redraw.frame_action(", select)
