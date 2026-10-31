@@ -17,6 +17,14 @@ class ScreenshotEditorGateContract(unittest.TestCase):
             self.assertIn('echolingo-installed-screenshot-editor.log', source)
             self.assertIn("nativeCaptureContinuity = '${{ steps.windows_native_capture_continuity.outcome }}'", source)
 
+    def test_f1_image_fixture_runs_after_original_empty_clipboard_consumers(self):
+        for name in ['ci.yml', 'release-checks.yml']:
+            source = (ROOT / '.github/workflows' / name).read_text()
+            self.assertLess(source.index('id: windows_selection_internals'), source.index('id: windows_screenshot_editor'))
+            self.assertLess(source.index('id: windows_screenshot_editor'), source.index('id: windows_installed_offline'))
+            self.assertEqual(source.count('id: windows_screenshot_editor'), 1)
+            self.assertIn("screenshotEditor = '${{ steps.windows_screenshot_editor.outcome }}'", source)
+
     def test_mac_probe_requires_pass_and_preserves_blocked_evidence(self):
         jobs = []
         for name in ['ci.yml', 'release-checks.yml']:

@@ -1414,6 +1414,13 @@ pub fn magnifier_place_avoiding(
     let preferred = magnifier_place(pointer, sample, area);
     let candidates = [
         preferred,
+        // A short reverse move can put the preferred loupe across the old
+        // in-flight sample. Nudge around that small rectangle before resorting
+        // to a distant monitor corner; never move into either sampled area.
+        Rect::new(in_flight.right().saturating_add(16), preferred.y, 156, 174),
+        Rect::new(in_flight.x.saturating_sub(172), preferred.y, 156, 174),
+        Rect::new(preferred.x, in_flight.bottom().saturating_add(16), 156, 174),
+        Rect::new(preferred.x, in_flight.y.saturating_sub(190), 156, 174),
         Rect::new(area.x, area.y, 156, 174),
         Rect::new(area.right().saturating_sub(156), area.y, 156, 174),
         Rect::new(area.x, area.bottom().saturating_sub(174), 156, 174),
@@ -1424,12 +1431,18 @@ pub fn magnifier_place_avoiding(
             174,
         ),
     ];
-    candidates.into_iter().find(|candidate| {
-        area.contains_rect(*candidate)
-            && !candidate.contains(pointer)
-            && candidate.intersect(sample).is_empty()
-            && candidate.intersect(in_flight).is_empty()
-    })
+    candidates
+        .into_iter()
+        .filter(|candidate| {
+            area.contains_rect(*candidate)
+                && !candidate.contains(pointer)
+                && candidate.intersect(sample).is_empty()
+                && candidate.intersect(in_flight).is_empty()
+        })
+        .min_by_key(|candidate| {
+            (i64::from(candidate.x) - i64::from(preferred.x)).abs()
+                + (i64::from(candidate.y) - i64::from(preferred.y)).abs()
+        })
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1500,6 +1513,36 @@ impl CaptureSamplePolicy {
 #[cfg(test)]
 mod magnifier_sampling_tests {
     use super::*;
+
+    #[test]
+    fn short_reverse_motion_nudges_nearby_instead_of_jumping_to_a_monitor_corner() {
+        for (area, old, current, expected) in [
+            (
+                Rect::new(0, 0, 1920, 1080),
+                Point::new(100, 100),
+                Point::new(76, 100),
+                Rect::new(142, 74, 156, 174),
+            ),
+            (
+                Rect::new(-1920, 0, 1920, 1080),
+                Point::new(-100, 100),
+                Point::new(-76, 100),
+                Rect::new(-298, 74, 156, 174),
+            ),
+        ] {
+            let pending = CaptureMagnifierSample::new(old, area).bounds;
+            let sample = CaptureMagnifierSample::new(current, area).bounds;
+            let placed = magnifier_place_avoiding(current, sample, area, pending).unwrap();
+            assert_eq!(placed, expected);
+            assert!(placed.intersect(pending).is_empty());
+            assert!(placed.intersect(sample).is_empty());
+            assert!(area.contains_rect(placed));
+            assert_eq!(
+                magnifier_place_avoiding(current, sample, area, Rect::default()),
+                Some(magnifier_place(current, sample, area))
+            );
+        }
+    }
 
     #[test]
     fn only_one_request_and_next_position_is_current_not_queued() {

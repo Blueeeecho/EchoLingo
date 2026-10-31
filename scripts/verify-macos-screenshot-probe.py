@@ -7,7 +7,7 @@ import sys
 
 MODES = ('window-phase1', 'rectangle-phase1', 'escape-cancel', 'request-cancel', 'window-phase2')
 INDEPENDENT = ('privatePasteboardImageRoundtripPassed', 'nativePNGJPEGFileRoundtripPassed',
-               'nativeSavePanelCancelPassed', 'nativeSavePanelHiddenBeforeCapture')
+               'nativeSavePanelCancelPassed', 'nativeSavePanelHiddenBeforeCapture', 'authoritativeHitPolicyFixturePassed')
 SOURCES = {'src-tauri/native/macos.swift', 'src-tauri/native/macos_capture.swift', 'src-tauri/native/macos_window.swift'}
 
 
@@ -19,8 +19,19 @@ def verify(report):
                  'rustClipboardBackendTested', 'physicalMultiDisplayTested', 'monitorGapRuntimeTested'):
         if report.get(flag) is not False:
             raise ValueError('Native probe scope is missing or overstated: ' + flag)
-    if report.get('productionNativeEntryPoint') != 'capture-screenshot' or report.get('ownAppKitEventsOnly') is not True:
+    if (report.get('productionNativeEntryPoint') != 'capture-screenshot'
+            or report.get('captureGesturesOwnAppKitOnly') is not True):
         raise ValueError('Missing exact native entry point or scoped AppKit event evidence')
+    setup = report.get('globalSystemUISetupEventDispatched')
+    if (type(setup) is not bool or report.get('ownAppKitEventsOnly') is not (not setup)
+            or type(report.get('globalSystemUISetupEscapePairs')) is not int
+            or report['globalSystemUISetupEscapePairs'] != int(setup)):
+        raise ValueError('Global setup input must be explicitly scoped to zero or one Escape pair')
+    if setup:
+        for flag in ('systemUISetupGitHubHosted', 'systemUISetupAccessibilityPreflightGranted', 'systemUISetupExactDockOwnerVerified',
+                     'systemUISetupGeneratedSourceFrontmost', 'systemUISetupExactSourceRevalidated'):
+            if report.get(flag) is not True:
+                raise ValueError('Global setup Escape lacks preapproved trust and exact source/Dock ownership')
     digest = lambda value: isinstance(value, str) and re.fullmatch('[0-9a-f]{64}', value) is not None
     sources = report.get('productionSourceSha256')
     if (not digest(report.get('fixtureBinarySha256')) or not isinstance(sources, dict)
@@ -45,15 +56,48 @@ def verify(report):
     if (status != 'passed' or report.get('ok') is not True or report.get('captureCasesPassed') is not True
             or report.get('screenCapturePreflightGranted') is not True or report.get('nativeProcessExitCode') != 0):
         raise ValueError('Native capture pass lacks successful permission/runtime evidence')
+    if type(report.get('sourcePhaseAcknowledged')) is not int or report['sourcePhaseAcknowledged'] != 2:
+        raise ValueError('The generated source must acknowledge exact phase2 before its native capture')
     if (report.get('sourceWindowServerReady') is not True
             or type(report.get('sourceReadinessObservations')) is not int
             or report['sourceReadinessObservations'] <= 0):
         raise ValueError('Exact generated WindowServer source readiness was not observed')
+    if report.get('sourceWindowServerReadinessMethod') not in ('exact-geometric-metadata', 'independent-composited-pixels'):
+        raise ValueError('The source readiness method must distinguish geometry from actual composite pixels')
+    if setup and report.get('systemUISetupOcclusionCleared') is not True:
+        raise ValueError('The original foreign-occlusion guard must clear after setup Escape')
+    oracle_used = report.get('sourceWindowServerReadinessMethod') == 'independent-composited-pixels'
+    if oracle_used or any(key.startswith('visibilityOracle') for key in report):
+        for flag in ('nativePickerStartedAfterVisibilityOracle', 'visibilityOracleHostedRunnerVerified',
+                     'visibilityOraclePassed', 'visibilityOracleGeneratedOccluderRejected', 'visibilityOracleOwnedOccluderHidden',
+                     'visibilityOracleOverlaySharingGuardVerified'):
+            if report.get(flag) is not True:
+                raise ValueError('Independent full-ROI positive/negative visibility proof is incomplete')
+        if (type(report.get('visibilityOracleExcludedWindowCount')) is not int
+                or report['visibilityOracleExcludedWindowCount'] != 0
+                or report.get('visibilityOraclePixelBytesRetained') is not False
+                or report.get('visibilityOracleRegion') != 'exact-generated-source-512x320'
+                or report.get('sourceWindowServerReadinessMethod') != 'independent-composited-pixels'):
+            raise ValueError('Visibility oracle must retain no pixels and exclude no windows from the exact source ROI')
+        if (type(report.get('visibilityOracleIntersectingSharedOverlayCount')) is not int
+                or report['visibilityOracleIntersectingSharedOverlayCount'] < 0):
+            raise ValueError('The independent oracle must record its protected-overlay metadata guard')
+        if (report.get('phase2CurrentCompositeVerified') is not True
+                or report.get('phase2ReadinessUsedSingleDeadline') is not True
+                or type(report.get('phase2ReadinessMismatchCategory')) is not int or report['phase2ReadinessMismatchCategory'] != 0
+                or type(report.get('phase2ReadinessObservations')) is not int
+                or type(report.get('phase2KnownPriorPhaseObservations')) is not int
+                or report['phase2KnownPriorPhaseObservations'] < 0
+                or report['phase2ReadinessObservations'] != report['phase2KnownPriorPhaseObservations'] + 1):
+            raise ValueError('Phase2 requires exact current composite pixels within one unchanged readiness deadline')
     cases = report.get('cases')
     if (not isinstance(cases, list) or len(cases) != len(MODES) or any(not isinstance(case, dict) for case in cases)
             or tuple(case.get('mode') for case in cases) != MODES):
         raise ValueError('All five native screenshot cases must execute in order')
     for case in cases:
+        if oracle_used and (case.get('preCaseFullCompositeVerified') is not True
+                            or case.get('postCaseFullCompositeVerified') is not True):
+            raise ValueError('Each native case requires its own current-phase full-composite proof before and after selector cleanup')
         for flag in ('ok', 'hoverOutlineVerified', 'exactOwnedSourceRevalidated'):
             if case.get(flag) is not True:
                 raise ValueError('Native screenshot case evidence is incomplete')
@@ -63,6 +107,10 @@ def verify(report):
             raise ValueError('Request cancellation must not be labeled as an AppKit input event')
         if type(case.get('visiblePanelsAfter')) is not int or case['visiblePanelsAfter'] != 0:
             raise ValueError('Native selector cleanup is incomplete')
+        if (case.get('exactSelectorRetirementVerified') is not True
+                or type(case.get('selectorRetirementObservations')) is not int
+                or case['selectorRetirementObservations'] <= 0):
+            raise ValueError('Exact current-case selector IDs must retire from WindowServer before post-case evidence')
         if any(field in case for field in ('imageBase64', 'text', 'pixels')):
             raise ValueError('Probe must not retain captured pixels or text')
         if case['mode'] in ('escape-cancel', 'request-cancel'):

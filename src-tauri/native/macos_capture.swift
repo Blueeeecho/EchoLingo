@@ -55,19 +55,29 @@ func captureWindowTarget(_ record: [String: Any], primaryHeight: CGFloat, exclud
 }
 
 func captureHoverWindow(_ records: [[String: Any]], at point: CGPoint, primaryHeight: CGFloat,
-                        excludingPID: Int32) -> CaptureWindowTarget? {
-    // CGWindowListCopyWindowInfo preserves front-to-back order. Own selectors
-    // are skipped; a foreign ineligible window at the pointer blocks retargeting
-    // through it to a different application below.
-    for record in records {
-        if captureWindowNumber(record[kCGWindowOwnerPID as String]) == Double(excludingPID) { continue }
-        guard let dictionary = record[kCGWindowBounds as String] as? [String: Any],
-              let quartz = CGRect(dictionaryRepresentation: dictionary as CFDictionary),
-              [quartz.minX, quartz.minY, quartz.width, quartz.height].allSatisfy({ $0.isFinite }) else { return nil }
-        let frame = CGRect(x: quartz.minX, y: primaryHeight - quartz.maxY, width: quartz.width, height: quartz.height)
-        guard frame.contains(point) else { continue }
-        if captureWindowNumber(record[kCGWindowAlpha as String]) == 0 { continue }
-        return captureWindowTarget(record, primaryHeight: primaryHeight, excludingPID: excludingPID)
+                        excludingPID: Int32, hitTest: ((Int) -> Int)? = nil) -> CaptureWindowTarget? {
+    guard point.x.isFinite, point.y.isFinite, primaryHeight.isFinite,
+          hitTest != nil || Thread.isMainThread else { return nil }
+    // A window's metadata rectangle need not be opaque or mouse-hittable.
+    // Ask AppKit for the actual mouse-down target, which accounts for point
+    // transparency and ignoresMouseEvents. Never whitelist a process/layer.
+    // Only proven own-PID hits may be stepped past (our selectors/editor).
+    var below = 0
+    var seen = Set<Int>()
+    for _ in 0..<min(records.count + 1, 64) {
+        let hit = hitTest?(below) ?? NSWindow.windowNumber(at: point, belowWindowWithWindowNumber: below)
+        guard hit > 0, UInt64(hit) <= UInt64(UInt32.max), seen.insert(hit).inserted else { return nil }
+        let matches = records.filter { captureWindowNumber($0[kCGWindowNumber as String]) == Double(hit) }
+        guard matches.count == 1, let record = matches.first else { return nil }
+        if captureWindowNumber(record[kCGWindowOwnerPID as String]) == Double(excludingPID) {
+            below = hit
+            continue
+        }
+        // Unknown, protected, ineligible or inconsistent REAL hits fail closed;
+        // do not look through them for a different foreign window underneath.
+        guard let target = captureWindowTarget(record, primaryHeight: primaryHeight, excludingPID: excludingPID),
+              target.frame.contains(point) else { return nil }
+        return target
     }
     return nil
 }
@@ -993,7 +1003,8 @@ func captureScreenshotSelfTest() throws {
         throw NativeError("SELF_TEST: F1 screenshot valid metadata was rejected.")
     }
     try expect(target.frame == CGRect(x: -200, y: 200, width: 500, height: 300))
-    try expect(captureHoverWindow([record], at: CGPoint(x: -100, y: 250), primaryHeight: 900, excludingPID: 91) == target)
+    let point = CGPoint(x: -100, y: 250)
+    try expect(captureHoverWindow([record], at: point, primaryHeight: 900, excludingPID: 91, hitTest: { _ in 51 }) == target)
     try expect(captureWindowTarget(record, primaryHeight: 900, excludingPID: 41) == nil)
     for (key, value) in [(kCGWindowOwnerPID as String, NSNumber(value: true) as Any),
                          (kCGWindowNumber as String, NSNumber(value: 0) as Any),
@@ -1006,9 +1017,32 @@ func captureScreenshotSelfTest() throws {
         try expect(!captureWindowIsCurrent(target, records: [invalid], primaryHeight: 900, excludingPID: 91))
     }
     var protected = record; protected.removeValue(forKey: kCGWindowSharingState as String)
-    try expect(captureHoverWindow([protected, record], at: CGPoint(x: -100, y: 250), primaryHeight: 900, excludingPID: 91) == nil)
-    var own = record; own[kCGWindowOwnerPID as String] = NSNumber(value: 91)
-    try expect(captureHoverWindow([own, record], at: CGPoint(x: -100, y: 250), primaryHeight: 900, excludingPID: 91) == target)
+    protected[kCGWindowNumber as String] = NSNumber(value: 52)
+    try expect(captureHoverWindow([protected, record], at: point, primaryHeight: 900, excludingPID: 91, hitTest: { _ in 52 }) == nil)
+    var overlay = record; overlay[kCGWindowNumber as String] = NSNumber(value: 53)
+    overlay[kCGWindowLayer as String] = NSNumber(value: 20)
+    // A non-hittable covering rectangle does not replace the OS's actual hit.
+    try expect(captureHoverWindow([overlay, record], at: point, primaryHeight: 900, excludingPID: 91, hitTest: { _ in 51 }) == target)
+    try expect(captureHoverWindow([overlay, record], at: point, primaryHeight: 900, excludingPID: 91, hitTest: { _ in 53 }) == nil)
+    var own = overlay; own[kCGWindowOwnerPID as String] = NSNumber(value: 91)
+    var ownSecond = own; ownSecond[kCGWindowNumber as String] = NSNumber(value: 54)
+    ownSecond[kCGWindowSharingState as String] = NSNumber(value: 0)
+    var queriedBelow: [Int] = []
+    try expect(captureHoverWindow([own, ownSecond, record], at: point, primaryHeight: 900, excludingPID: 91, hitTest: { below in
+        queriedBelow.append(below)
+        return below == 0 ? 53 : below == 53 ? 54 : 51
+    }) == target)
+    try expect(queriedBelow == [0, 53, 54])
+    var loopQueries = 0
+    try expect(captureHoverWindow([own, record], at: point, primaryHeight: 900, excludingPID: 91, hitTest: { _ in
+        loopQueries += 1; return 53
+    }) == nil)
+    try expect(loopQueries == 2)
+    for hit in [0, -1, 999, Int(UInt32.max) + 1] {
+        try expect(captureHoverWindow([record], at: point, primaryHeight: 900, excludingPID: 91, hitTest: { _ in hit }) == nil)
+    }
+    try expect(captureHoverWindow([record, record], at: point, primaryHeight: 900, excludingPID: 91, hitTest: { _ in 51 }) == nil)
+    try expect(captureHoverWindow([record], at: CGPoint(x: 800, y: 700), primaryHeight: 900, excludingPID: 91, hitTest: { _ in 51 }) == nil)
     for key in [kCGWindowNumber as String, kCGWindowOwnerPID as String] {
         var replaced = record; replaced[key] = NSNumber(value: 999)
         try expect(!captureWindowIsCurrent(target, records: [replaced], primaryHeight: 900, excludingPID: 91))

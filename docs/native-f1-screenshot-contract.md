@@ -34,7 +34,13 @@ not bypass capture exclusion.
 
 macOS uses public on-screen CG window metadata with ID, owner PID, layer, alpha,
 sharing state and bounds; it never needs window titles. Missing sharing metadata
-is not treated as permission. Quartz top-left coordinates are converted to
+is not treated as permission. Hover first uses AppKit's actual mouse-down hit
+test, not a foreign window's possibly transparent bounding rectangle. Only hits
+proven to belong to this app may be walked past; unknown, repeated, ambiguous,
+protected or ineligible foreign hits fail closed. The hit ID must resolve to the
+strict CG metadata and contain the pointer. There is no Dock/process/layer
+whitelist. Click-through overlays remain in the final visible display pixels;
+hit testing does not remove them from capture. Quartz top-left coordinates are converted to
 AppKit global points, and the existing mixed-Retina capture planner handles
 output pixels. The final image remains a display-region composition, not an
 isolated `SCWindow` capture. Existing permission preflight remains mandatory;
@@ -107,6 +113,9 @@ and boolean hit diagnostics; an obscured endpoint still fails the case.
   defines main-display upper-left screen coordinates.
 - [Apple: CGWindowListCopyWindowInfo](https://developer.apple.com/documentation/coregraphics/cgwindowlistcopywindowinfo(_:_:))
   is the public metadata query used by the selector.
+- [Apple: actual mouse-down window hit testing](https://developer.apple.com/documentation/appkit/nswindow/windownumber(at:belowwindowwithwindownumber:))
+  accounts for point transparency and windows that ignore mouse events; the
+  returned identity is still checked against fresh capture eligibility metadata.
 - [Apple: Advances in macOS Security, WWDC19](https://developer.apple.com/videos/play/wwdc2019/701/)
   explains that sharing state can be withheld without screen-recording approval
   and that the metadata query itself does not prompt.

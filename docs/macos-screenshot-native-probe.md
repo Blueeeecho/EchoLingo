@@ -51,8 +51,70 @@ hidden, closed, or exempted from the occlusion guard.
 The generated source
 places the cursor inside itself using the public non-event-generating cursor
 position API, then restores its original position on exit. All mouse-button and
-Escape events go only through the fixture application's own AppKit dispatcher;
-there is no system-wide key/button injection or Accessibility automation.
+Escape events **used for capture cases** go only through the fixture application's
+own AppKit dispatcher. The earlier one-shot hosted-CI Escape did not clear the
+observed Dock rectangle; it is no longer dispatched. The global-setup report
+fields remain explicitly false/zero.
+
+### Independent hosted-CI visibility diagnostic
+
+Only with both `GITHUB_ACTIONS=true` and `RUNNER_ENVIRONMENT=github-hosted`, a failed
+geometric visibility precondition may run a separate ScreenCaptureKit **display**
+composite oracle. Existing screen-recording preflight must remain granted. It
+captures exactly the generated 512×320 logical-point ROI, with its measured
+backing scale and no smaller crop stretched into that size. **No windows are
+excluded**, and no isolated/backing-window capture or production capture helper is
+used. Every pixel must match the generated phase color and spatial fiducials.
+
+The oracle runs before selector creation, never while own blue outlines/loupe are
+visible. It verifies source PID/window/frame/sharing, display ID/frame and scale
+before and after each asynchronous image, has bounded timeouts, and discards late
+callbacks. Every intersecting nonzero/unknown-alpha window above the source must
+have explicit sharing1/2 before and after the read; protected/unknown-sharing
+covers fail rather than letting OS omission masquerade as transparency. The
+successful guard and intersecting shared-overlay count are recorded numerically.
+A generated normal-level magenta occluder must appear in exactly its
+known 64×64 region and must fail the unobstructed-source comparison; closing it
+must restore the complete original pixel pattern. No window is raised above the
+Dock or security UI. Any unexpected pixel/identity or unavailable API fails.
+
+A failed bounded visibility read may transiently contain non-generated pixels
+from that ROI on this disposable CI desktop. Images and normalized pixels stay
+in memory only, are discarded immediately, and are never written, logged,
+returned or retained in artifacts. Only scalar match outcomes survive.
+
+The source-point OS mouse-down hit ID and unmodified production hover-candidate
+ID are then reported separately. A positive visibility oracle only starts the
+**real unmodified native picker**; it never injects a candidate or satisfies any
+of the five capture cases. If production hover still rejects the source, the
+probe remains failed. This diagnostic is not a Dock whitelist or a product-policy
+change and does not claim all five cases have executed.
+
+When the independent pixel route is used, every native case gets a new complete
+current-phase display-composite proof immediately before selector creation and
+again after its cleanup, including cancellation cases. While the selector is
+visible, the fixture checks the exact live source identity, authoritative hit,
+and all intersecting foreign sharing metadata; only exact owned selector panels
+are exempt from that metadata guard. It does not run the no-exclusion pixel
+oracle through its own blue outline/loupe. Final native PNG pixel checks are
+unchanged, and phase2 must independently show the newly generated red pixels.
+The production hit-policy negative vectors run before any native capture probe.
+The phase2 source ACK is not assumed to mean the compositor has already published
+the red frame. Its pre-case oracle may make further read-only observations only
+while **every pixel and fiducial exactly matches known phase1**. These observations
+share the original single eight-second oracle deadline; arbitrary/misaligned/
+occluded pixels, identity/protection changes or deadline expiry fail immediately.
+The real picker is armed only after full exact red pixels are visible, is never
+retried, and must still return its own exact red PNG. Reports retain numeric
+observation counts and mismatch category (0=current, 1=known previous, 2=unknown),
+never image bytes or sample colors.
+After native completion, AppKit must still report no visible selectors. The
+fixture then observes only the current case's recorded selector IDs/PID/frames
+until WindowServer removes them, for at most one second within the existing
+case budget. It never accepts a remaining record, retries input, or exempts an
+unknown/moved/reused own window. This handles asynchronous publication of panel
+closure before the unchanged live-source guard and post-case pixel proof.
+Failures include bounded own-window numeric inventories and the exact check phase.
 
 Five ordered cases call the production `capture-screenshot` endpoint:
 
@@ -63,7 +125,7 @@ Five ordered cases call the production `capture-screenshot` endpoint:
 5. Capture the same window after it repaints red, proving fresh pixels and reentry.
 
 The probe verifies exact image dimensions and every PNG pixel against the
-current generated color, catching blue outlines, loupe plates, old frames and
+current generated color and fiducials, catching blue outlines, loupe plates, old frames and
 unexpected desktop pixels. Cancel cases must return no image. Every case requires
 no remaining visible capture panels and exact source revalidation. Reports contain
 only scalar metadata, never PNG/base64/pixel content. The owned source must exit
@@ -102,3 +164,8 @@ does not re-label those as physical-display tests.
 - [Apple: running-application identity](https://developer.apple.com/documentation/appkit/nsrunningapplication)
   provides the exact-PID bundle and executable metadata for obstruction diagnostics;
   identifying a system owner never exempts its window from the capture guard.
+- [Apple: ScreenCaptureKit display filters](https://developer.apple.com/documentation/screencapturekit/sccontentfilter/init(display:excludingwindows:))
+  defines the independent composite oracle; its exclusion array is empty.
+- [Apple: actual window hit-testing](https://developer.apple.com/documentation/appkit/nswindow/windownumber(at:belowwindowwithwindownumber:))
+  skips point transparency and mouse-ignoring windows. Hit testing is reported
+  independently, never used alone as proof of visible pixel contents.
