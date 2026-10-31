@@ -7,14 +7,14 @@ permissions:
 jobs:
   probe:
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 8
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           ref: ${{ github.sha }}
           persist-credentials: false
       - uses: dtolnay/rust-toolchain@stable
-      - name: Run only the generated language corpus using the exact official dependency
+      - name: Generate the app lock without upgrades and test actual language modules
         shell: bash
         run: |
           set -euo pipefail
@@ -23,11 +23,17 @@ jobs:
           mkdir "$RUNNER_TEMP/language-routing-probe"
           git rev-parse HEAD HEAD^{tree} > "$RUNNER_TEMP/language-routing-probe/source.txt"
           rustc --version > "$RUNNER_TEMP/language-routing-probe/toolchain.txt"
-          sha256sum tests/language-routing-probe/Cargo.toml tests/language-routing-probe/src/main.rs > "$RUNNER_TEMP/language-routing-probe/inputs.sha256"
+          sha256sum src-tauri/Cargo.toml src-tauri/Cargo.lock src-tauri/src/bilingual_input.rs src-tauri/src/language_detection.rs tests/language-routing-probe/Cargo.toml tests/language-routing-probe/src/main.rs > "$RUNNER_TEMP/language-routing-probe/inputs.sha256"
+          cp src-tauri/Cargo.lock "$RUNNER_TEMP/language-routing-probe/app-baseline.Cargo.lock"
+          cargo update --manifest-path src-tauri/Cargo.toml --workspace 2>&1 | tee "$RUNNER_TEMP/language-routing-probe/app-lock-generation.log"
+          cargo metadata --manifest-path src-tauri/Cargo.toml --locked --format-version 1 --no-deps > "$RUNNER_TEMP/language-routing-probe/app-metadata.json"
+          cp src-tauri/Cargo.lock "$RUNNER_TEMP/language-routing-probe/app.Cargo.lock"
+          git diff -- src-tauri/Cargo.lock > "$RUNNER_TEMP/language-routing-probe/app-lock.patch"
           cargo generate-lockfile --manifest-path tests/language-routing-probe/Cargo.toml
           cp tests/language-routing-probe/Cargo.lock "$RUNNER_TEMP/language-routing-probe/Cargo.lock"
           cargo run --manifest-path tests/language-routing-probe/Cargo.toml --locked 2>&1 | tee "$RUNNER_TEMP/language-routing-probe/output.log"
-          sha256sum "$RUNNER_TEMP/language-routing-probe/Cargo.lock" > "$RUNNER_TEMP/language-routing-probe/lock.sha256"
+          cargo test --manifest-path tests/language-routing-probe/Cargo.toml --locked -- --nocapture 2>&1 | tee "$RUNNER_TEMP/language-routing-probe/actual-module-tests.log"
+          sha256sum "$RUNNER_TEMP/language-routing-probe/app.Cargo.lock" "$RUNNER_TEMP/language-routing-probe/Cargo.lock" > "$RUNNER_TEMP/language-routing-probe/lock.sha256"
       - name: Preserve actual detection results and generated registry lock
         if: always()
         uses: actions/upload-artifact@v4
@@ -37,4 +43,4 @@ jobs:
           if-no-files-found: error
       - name: State diagnostic scope
         if: always()
-        run: echo 'Synthetic dependency corpus probe only. Not application, installer, or release acceptance; no repository writes or screenshots.' >> "$GITHUB_STEP_SUMMARY"
+        run: echo 'Actual pure language-module unit tests and generated corpus only; full app lock is generated for review. Not GUI, installer, or release acceptance; no repository writes or screenshots.' >> "$GITHUB_STEP_SUMMARY"

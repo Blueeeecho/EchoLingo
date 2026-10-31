@@ -18,4 +18,16 @@ class ProbeContract(unittest.TestCase):
         for forbidden in ('std::env', 'std::fs', 'std::net', 'include_str!', 'stdin'):
             self.assertNotIn(forbidden, source)
         self.assertIn('i.confidence(), i.is_reliable()', source)
+    def test_actual_module_and_app_lock_are_not_simulations(self):
+        workflow = (ROOT/'.github/workflows/language-routing-probe.yml').read_text()
+        self.assertIn('cargo update --manifest-path src-tauri/Cargo.toml --workspace', workflow)
+        self.assertNotIn('cargo update --manifest-path src-tauri/Cargo.toml\n', workflow)
+        self.assertIn('cargo metadata --manifest-path src-tauri/Cargo.toml --locked', workflow)
+        self.assertIn('cargo test --manifest-path tests/language-routing-probe/Cargo.toml --locked', workflow)
+        self.assertIn('app-baseline.Cargo.lock', workflow)
+        self.assertIn('app-lock.patch', workflow)
+        harness = (ROOT/'tests/language-routing-probe/src/main.rs').read_text()
+        for module in ('bilingual_input', 'language_detection'):
+            self.assertIn(f'#[path = "../../../src-tauri/src/{module}.rs"]', harness)
+        self.assertIn('tokio = { version = "=1.54.1"', (ROOT/'tests/language-routing-probe/Cargo.toml').read_text())
 if __name__ == '__main__': unittest.main()
