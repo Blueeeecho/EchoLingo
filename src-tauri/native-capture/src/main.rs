@@ -88,10 +88,20 @@ fn main() {
             Err(error) => capture::CapturedResult {
                 result: Err(error),
                 health: Default::default(),
+                capture_geometry: None,
+                capture_screens: Vec::new(),
             },
         };
         let ok = reply.result.is_ok();
         let mut output = serde_json::json!({"ok":ok,"nativeBackend":"rust-win32-capture","captureHealth":reply.health});
+        if let Some(g) = reply.capture_geometry {
+            output["captureGeometry"] = serde_json::json!({"x":g[0], "y":g[1], "width":g[2], "height":g[3],
+                "screenX":g[4], "screenY":g[5], "screenWidth":g[6], "screenHeight":g[7], "scale":1.0});
+        }
+        if ok {
+            output["captureScreens"] = serde_json::json!(reply.capture_screens.iter().map(|screen|
+                serde_json::json!({"x":screen[0], "y":screen[1], "width":screen[2], "height":screen[3]})).collect::<Vec<_>>());
+        }
         match reply.result {
             Ok(bytes) => {
                 output["imageBase64"] =

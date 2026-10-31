@@ -3224,6 +3224,50 @@ func captureImage(purpose: CapturePurpose = .region, cancellation: CaptureScreen
     }
 }
 
+// Unlike captureImage (OCR/cloud transport), F1 keeps exact logical placement
+// alongside the immutable pixels. It still neither writes a file nor touches
+// the clipboard; only the user's later check/save action may export the image.
+func captureScreenshotResponse(cancellation: CaptureScreenshotOperation) throws -> [String: Any] {
+    guard CGPreflightScreenCaptureAccess() else {
+        throw NativeError("PERMISSION: 请在 EchoLingo 设置中开启屏幕录制权限后重试；系统可能要求重新打开应用。")
+    }
+    if cancellation.isCancelled { throw NativeError("CANCELLED: 截图请求已取消。") }
+    let captured = try captureNativeRegionResult(purpose: .screenshot, operation: cancellation)
+    if cancellation.isCancelled { throw NativeError("CANCELLED: 截图请求已取消。") }
+    let png = NSMutableData()
+    guard let destination = CGImageDestinationCreateWithData(png, "public.png" as CFString, 1, nil) else {
+        throw NativeError("CAPTURE: 无法创建截图图像。")
+    }
+    CGImageDestinationAddImage(destination, captured.image, nil)
+    guard CGImageDestinationFinalize(destination) else { throw NativeError("CAPTURE: 无法编码截图图像。") }
+    let encoded = try encodePNG(png as Data)
+    if cancellation.isCancelled { throw NativeError("CANCELLED: 截图请求已取消。") }
+    // Usable toolbar rectangles, not image viewports. Keep each actual
+    // monitor's visible area so controls avoid monitor gaps, Dock and menu.
+    // Pixels and image placement still use the original frozen capture plan.
+    let captureScreens: [[String: Double]] = try onMainThread {
+        guard CGDisplayBounds(CGMainDisplayID()).height == captured.plan.primaryHeight else {
+            throw NativeError("CAPTURE_GEOMETRY: 显示器布局已改变，请重新截图。")
+        }
+        return try captured.plan.displays.map { display in
+            guard let screen = NSScreen.screens.first(where: {
+                ($0.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber)?.uint32Value == display.id
+                    && $0.frame == display.frame && $0.backingScaleFactor == display.scale
+            }) else { throw NativeError("CAPTURE_GEOMETRY: 截图显示器已移动或断开，请重新截图。") }
+            let usable = screen.visibleFrame.intersection(display.frame)
+            guard !usable.isNull, !usable.isEmpty else {
+                throw NativeError("CAPTURE_GEOMETRY: 截图显示器没有可用的工具栏区域。")
+            }
+            return ["x": Double(usable.minX),
+                    "y": Double(captured.plan.primaryHeight - usable.maxY),
+                    "width": Double(usable.width), "height": Double(usable.height)]
+        }
+    }
+    return ["ok": true, "imageBase64": encoded,
+            "captureGeometry": try captureEditorGeometry(captured.plan, primaryHeight: captured.plan.primaryHeight),
+            "captureScreens": captureScreens]
+}
+
 func screenCapturePermissionFields(preflight: Bool, requestState: String? = nil) -> [String: Any] {
     // A false preflight is not proof that a visible System Settings switch is
     // off: stale registration and OS/API disagreements need explicit diagnosis.
@@ -4298,7 +4342,7 @@ func nativeResponse(mode: String, input: Data = Data()) -> [String: Any] {
                 throw NativeError("CANCELLED: Screenshot operation has ended.")
             }
             if mode == "--cancel-native-capture" { operation.cancel(); return ["ok": true] }
-            return ["ok": true, "imageBase64": try captureImage(purpose: .screenshot, cancellation: operation)]
+            return try captureScreenshotResponse(cancellation: operation)
         case "--clipboard":
             guard let text = NSPasteboard.general.string(forType: .string), !text.isEmpty else {
                 throw NativeError("CLIPBOARD_EMPTY: The clipboard does not contain text.")

@@ -34,15 +34,39 @@ class MacRecoveryWorkflowContract(unittest.TestCase):
         self.assertNotIn('*', artifact)
         self.assertNotIn('test-results', artifact)
         self.assertNotIn('diagnostics.json', artifact)
-        self.assertEqual(artifact.count('${{ runner.temp }}/macos-selection-recovery/'), 10)
+        self.assertEqual(artifact.count('${{ runner.temp }}/macos-selection-recovery/'), 12)
 
     def test_failure_is_not_a_skipped_or_implicit_pass(self):
         final = SOURCE.split('name: Require every executed candidate gate', 1)[1]
-        for gate in ['guard', 'contracts', 'frontend', 'typography', 'formatting', 'swift', 'bridge', 'failure']:
+        for gate in ['guard', 'contracts', 'frontend', 'typography', 'formatting', 'swift', 'overlay_host', 'overlay_policy', 'bridge', 'failure']:
             self.assertIn(f'steps.{gate}.outcome', final)
         self.assertIn('for outcome in $GATES; do test "$outcome" = success; done', final)
-        for forbidden in ['tauri build', 'createRelease', 'git push', 'verify-language-patch.py']:
+        for forbidden in ['createRelease', 'git push', 'verify-language-patch.py']:
             self.assertNotIn(forbidden, SOURCE)
+
+    def test_in_place_editor_has_real_host_and_pure_policy_gates(self):
+        self.assertIn('bash tests/macos-screenshot-overlay-host-fixture.sh', SOURCE)
+        self.assertIn('node tests/screenshot-editor.mjs', SOURCE)
+        self.assertIn('test result: ok. 5 passed; 0 failed', SOURCE)
+        self.assertIn('overlay-policy.log', SOURCE)
+        self.assertIn('overlay-host.log', SOURCE)
+
+    def test_candidate_packages_require_native_success_and_do_not_publish(self):
+        packages = SOURCE.split('  candidate-installers:', 1)[1]
+        self.assertIn('needs: [native-selection-recovery, windows-native-preflight]', packages)
+        self.assertIn('os: [windows-latest, macos-latest]', packages)
+        self.assertIn('npm run tauri build -- --bundles', packages)
+        self.assertIn('-- --locked', packages)
+        self.assertIn('inspect-candidate-package.py', packages)
+        self.assertIn('verify-candidate-package.py', packages)
+        self.assertNotIn('continue-on-error:', packages)
+        self.assertIn('candidate-offline-evidence/baseline-reuse.json', packages)
+        artifact = packages.split('name: EchoLingo-0.2.6-candidate-', 1)[1].split('      - name:', 1)[0]
+        self.assertNotIn('*', artifact)
+        self.assertNotIn('baseline-reuse', artifact)
+        self.assertNotIn('evidence.zip', artifact)
+        self.assertNotIn('test-results', artifact)
+        self.assertIn('CANDIDATE-MANIFEST.json.sha256', artifact)
 
 
 if __name__ == '__main__':

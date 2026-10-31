@@ -7,6 +7,7 @@
   </header>
   <nav class="editor-toolbar" aria-label="图片编辑工具">
     <div class="tool-group" role="group" aria-label="标注工具">
+      <button data-tool="select" class="inplace-only" aria-label="选择" data-image-action aria-pressed="false" title="选择 · V">⌖</button>
       <button data-tool="rectangle" aria-label="矩形" data-image-action aria-pressed="true" title="矩形 · R">▢ <span>矩形</span></button>
       <button data-tool="arrow" aria-label="箭头" data-image-action aria-pressed="false" title="箭头 · A">↗ <span>箭头</span></button>
       <button data-tool="text" aria-label="文字" data-image-action aria-pressed="false" title="文字 · T">T <span>文字</span></button>
@@ -16,7 +17,13 @@
     </div>
     <div class="tool-options"><label>颜色 <input id="edit-color" type="color" value="#e45d68" aria-label="标注颜色"/></label><label>线宽 <select id="edit-width" aria-label="线宽"><option value="2">细</option><option value="4" selected>中</option><option value="8">粗</option><option value="16">特粗</option></select></label><label id="text-size-label" hidden>字号 <select id="edit-font-size" aria-label="文字字号"><option>16</option><option>24</option><option selected>32</option><option>48</option><option>64</option><option>96</option></select></label><label id="mosaic-size-label" hidden>块大小 <select id="edit-block-size" aria-label="马赛克块大小"><option value="8">8 px</option><option value="16" selected>16 px</option><option value="32">32 px</option><option value="64">64 px</option></select></label></div>
     <div class="history-actions"><button id="undo-edit" aria-label="撤销" data-image-action title="撤销 · Ctrl/⌘ Z">↶ 撤销</button><button id="redo-edit" aria-label="重做" data-image-action title="重做 · Ctrl/⌘ Shift Z">↷ 重做</button></div>
+    <div class="inplace-actions inplace-only" role="group" aria-label="截图完成操作">
+      <button id="overlay-save" data-image-action data-export-action aria-label="下载截图" title="保存到设置中的截图目录 · Ctrl/⌘ S">↓</button>
+      <button id="overlay-cancel" aria-label="取消截图" title="丢弃本次截图 · Esc">×</button>
+      <button id="overlay-copy" data-image-action data-export-action aria-label="复制截图并完成" title="复制编辑后的图片并完成 · Enter">✓</button>
+    </div>
   </nav>
+  <div id="overlay-info" class="inplace-only" aria-live="polite"></div>
   <main id="editor-workspace"><div id="empty-state"><div class="empty-icon">▧</div><h1>在这里，给图片加一点说明</h1><p>使用截图快捷键（默认 F1），或打开本地 PNG / JPEG。</p><p class="muted">只在本机编辑，不识别文字，不上传图片。</p></div>
     <div id="canvas-frame" hidden><canvas id="image-canvas" role="img" aria-label="图片预览；使用工具栏添加标注" tabindex="0"></canvas><svg id="gesture-preview" aria-hidden="true"><rect id="gesture-rect"/><line id="gesture-line"/></svg></div>
   </main>

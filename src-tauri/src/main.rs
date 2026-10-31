@@ -15,6 +15,7 @@ mod offline_translation;
 mod platform;
 mod popup_health;
 mod screenshot;
+mod screenshot_overlay;
 mod service_links;
 mod shortcut_bindings;
 mod shortcut_control;
@@ -3699,6 +3700,7 @@ fn main() {
             run_action,
             screenshot::get_screenshot_session,
             screenshot::screenshot_editor_ready,
+            screenshot::focus_screenshot_overlay,
             screenshot::open_screenshot_image,
             screenshot::save_screenshot_image,
             screenshot::copy_screenshot_image,

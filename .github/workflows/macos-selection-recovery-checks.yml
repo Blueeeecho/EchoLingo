@@ -1,9 +1,10 @@
-name: Focused macOS selection recovery candidate
+name: Native recovery checks and candidate installers
 on:
   push:
     branches: [fix/025-macos-recovery-integration]
 permissions:
   contents: read
+  actions: read
 concurrency:
   group: macos-selection-recovery-${{ github.ref }}
   cancel-in-progress: true
@@ -37,6 +38,28 @@ jobs:
               'tests/macos-native-self-test.sh', 'tests/test_macos_chat_multiselection_contract.py',
               'tests/test_macos_selection_recovery_contract.py',
               'tests/test_macos_recovery_workflow_contract.py',
+              'package.json', 'package-lock.json', 'src-tauri/tauri.conf.json',
+              'src-tauri/Cargo.toml', 'src-tauri/Cargo.lock',
+              'src-tauri/native-capture/Cargo.toml', 'src-tauri/native-capture/Cargo.lock',
+              'scripts/verify-candidate-package.py', 'scripts/test_candidate_package.py',
+              'scripts/inspect-candidate-package.py', 'scripts/test_inspect_candidate_package.py',
+              'docs/screenshot-editor.md',
+              'screenshot.html',
+              'src-tauri/native-capture/src/main.rs',
+              'src-tauri/src/screenshot.rs',
+              'src-tauri/src/screenshot_overlay.rs',
+              'src-tauri/src/windows_capture_native.rs',
+              'src-tauri/src/windows_screenshot_overlay.rs',
+              'src/screenshot-editor.css',
+              'src/screenshot-editor.ts',
+              'src/screenshot-overlay-layout.ts', 'src/screenshot-overlay-layout.test.ts',
+              'tests/macos-screenshot-overlay-host-fixture.sh',
+              'tests/macos-screenshot-overlay-host-fixture.swift',
+              'tests/screenshot-editor.mjs',
+              'tests/test_macos_screenshot_overlay_contract.py',
+              'tests/test_screenshot_backend_contract.py',
+              'tests/test_screenshot_overlay_contract.py',
+              'tests/test_screenshot_window_contract.py',
           }
           changed = set(subprocess.check_output(['git', 'diff', '--name-only',
               'da0b5d03060a62ea120d931cc6c9eede5af66a7f', 'HEAD'], text=True).splitlines())
@@ -71,6 +94,11 @@ jobs:
             python3 -m unittest discover -s tests -p 'test_macos_ocr_hover_contract.py' -v;
             python3 -m unittest discover -s tests -p 'test_macos_chat_multiselection_contract.py' -v;
             python3 -m unittest discover -s tests -p 'test_macos_recovery_workflow_contract.py' -v;
+            python3 -m unittest discover -s scripts -p 'test_*candidate_package*.py' -v;
+            python3 -m unittest discover -s tests -p 'test_macos_screenshot_overlay_contract.py' -v;
+            python3 -m unittest discover -s tests -p 'test_screenshot_overlay_contract.py' -v;
+            python3 -m unittest discover -s tests -p 'test_screenshot_backend_contract.py' -v;
+            python3 -m unittest discover -s tests -p 'test_screenshot_window_contract.py' -v;
           } 2>&1 | tee "$RUNNER_TEMP/macos-selection-recovery/contracts.log"
       - name: Typecheck and execute frontend unit regressions
         id: frontend
@@ -79,7 +107,7 @@ jobs:
         run: |
           set -euo pipefail
           { npm ci; npm run check; npm test; npm run build; } 2>&1 | tee "$RUNNER_TEMP/macos-selection-recovery/frontend.log"
-      - name: Verify synthetic source and result typography in Chromium
+      - name: Verify synthetic typography and in-place screenshot editor in Chromium
         id: typography
         continue-on-error: true
         shell: bash
@@ -97,6 +125,7 @@ jobs:
             done
             test "$ready" = 1
             node tests/reading-typography.mjs
+            node tests/screenshot-editor.mjs
           } 2>&1 | tee "$RUNNER_TEMP/macos-selection-recovery/typography.log"
       - name: Check official formatting and preserve a reviewable patch
         id: formatting
@@ -106,9 +135,10 @@ jobs:
           set -euo pipefail
           trap 'git restore --worktree -- src-tauri' EXIT
           cargo fmt --manifest-path src-tauri/Cargo.toml
+          cargo fmt --manifest-path src-tauri/native-capture/Cargo.toml
           git diff --binary -- src-tauri > "$RUNNER_TEMP/macos-selection-recovery/rustfmt.patch"
           status=0
-          cargo fmt --manifest-path src-tauri/Cargo.toml --check 2>&1 | tee "$RUNNER_TEMP/macos-selection-recovery/rustfmt.log" || status=$?
+          { cargo fmt --manifest-path src-tauri/Cargo.toml --check && cargo fmt --manifest-path src-tauri/native-capture/Cargo.toml --check; } 2>&1 | tee "$RUNNER_TEMP/macos-selection-recovery/rustfmt.log" || status=$?
           if ! git diff --quiet -- src-tauri; then status=1; fi
           # Tests below must exercise committed HEAD, never a formatted working copy.
           git restore --worktree -- src-tauri
@@ -121,6 +151,21 @@ jobs:
         run: |
           set -euo pipefail
           bash tests/macos-native-self-test.sh 2>&1 | tee "$RUNNER_TEMP/macos-selection-recovery/native-self-test.log"
+      - name: Exercise the isolated native in-place editor host lifecycle
+        id: overlay_host
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash tests/macos-screenshot-overlay-host-fixture.sh 2>&1 | tee "$RUNNER_TEMP/macos-selection-recovery/overlay-host.log"
+      - name: Execute exact screenshot geometry and key ownership regressions
+        id: overlay_policy
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo test --manifest-path src-tauri/Cargo.toml --locked screenshot_overlay -- --nocapture 2>&1 | tee "$RUNNER_TEMP/macos-selection-recovery/overlay-policy.log"
+          grep -q 'test result: ok. 5 passed; 0 failed' "$RUNNER_TEMP/macos-selection-recovery/overlay-policy.log"
       - name: Execute the production Swift Rust Swift JSON bridge
         id: bridge
         continue-on-error: true
@@ -155,12 +200,213 @@ jobs:
             ${{ runner.temp }}/macos-selection-recovery/native-self-test.log
             ${{ runner.temp }}/macos-selection-recovery/source-bridge.log
             ${{ runner.temp }}/macos-selection-recovery/source-failure.log
+            ${{ runner.temp }}/macos-selection-recovery/overlay-host.log
+            ${{ runner.temp }}/macos-selection-recovery/overlay-policy.log
       - name: Require every executed candidate gate without claiming release acceptance
         if: always()
         shell: bash
         env:
-          GATES: ${{ steps.guard.outcome }} ${{ steps.contracts.outcome }} ${{ steps.frontend.outcome }} ${{ steps.typography.outcome }} ${{ steps.formatting.outcome }} ${{ steps.swift.outcome }} ${{ steps.bridge.outcome }} ${{ steps.failure.outcome }}
+          GATES: ${{ steps.guard.outcome }} ${{ steps.contracts.outcome }} ${{ steps.frontend.outcome }} ${{ steps.typography.outcome }} ${{ steps.formatting.outcome }} ${{ steps.swift.outcome }} ${{ steps.overlay_host.outcome }} ${{ steps.overlay_policy.outcome }} ${{ steps.bridge.outcome }} ${{ steps.failure.outcome }}
         run: |
           set -euo pipefail
           echo 'Focused source/synthetic/native bridge checks only. No installed Codex/Feishu/QQ selection, hover pixels, performance, package or release acceptance is claimed.' >> "$GITHUB_STEP_SUMMARY"
           for outcome in $GATES; do test "$outcome" = success; done
+  windows-native-preflight:
+    name: Compile Windows host and focused input policies (no package output)
+    runs-on: windows-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri -> target
+      - name: Keep Windows preflight source-bound and read-only
+        shell: bash
+        run: |
+          set -euo pipefail
+          git merge-base --is-ancestor da0b5d03060a62ea120d931cc6c9eede5af66a7f HEAD
+          python scripts/check-repository.py
+          git diff --exit-code
+      - run: npm ci
+      - run: npm run build
+      - name: Compile actual Windows helper child and app test binary
+        shell: pwsh
+        run: |
+          $output = @(& cargo test --manifest-path src-tauri/Cargo.toml --locked screenshot_overlay -- --nocapture 2>&1)
+          $code = $LASTEXITCODE
+          $output | Out-File "$env:RUNNER_TEMP/windows-native-preflight.log" -Encoding utf8
+          $output | ForEach-Object { Write-Host $_ }
+          if ($code -ne 0) { exit $code }
+          if (($output -join "`n") -notmatch 'test result: ok\. 5 passed; 0 failed') { throw 'All five geometry and input-ownership regressions must execute.' }
+      - name: Preserve only compiler and generated policy evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-native-preflight-evidence
+          if-no-files-found: warn
+          path: ${{ runner.temp }}/windows-native-preflight.log
+  candidate-installers:
+    name: Build and inspect 0.2.6 candidate (${{ matrix.os }})
+    needs: [native-selection-recovery, windows-native-preflight]
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri -> target
+      - name: Verify only unchanged offline resource inputs may be reused
+        if: runner.os == 'Windows'
+        shell: bash
+        run: |
+          set -euo pipefail
+          git diff --exit-code 4b8c5f5ac67e07cc4005812963b2c02acdd14d5d HEAD -- \
+            scripts/offline-engine scripts/prepare-offline-models.py scripts/test_prepare_offline_models.py \
+            scripts/prepare-offline-notices.py scripts/package-offline-source.py \
+            scripts/audit-windows-resources.py \
+            resources/offline-translation src-tauri/tauri.windows.conf.json LICENSE LICENSING.md
+          git diff --exit-code da0b5d03060a62ea120d931cc6c9eede5af66a7f HEAD -- scripts/stage-language-patch-resources.py
+      - name: Download pinned offline resources and corresponding source without old app reuse
+        if: runner.os == 'Windows'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('node:fs');
+            const path = require('node:path');
+            const pins = [
+              [13034542412, 'windows.zip', 'da42d05739744f5eafa71f9758d6a045b42020403d4228f3007d9bbda92fbb25'],
+              [13034970610, 'evidence.zip', '2520b83f54d3774b75c0cc1c6fc3f3105f0c9fb380800d94ac73001e36295285']
+            ];
+            const directory = path.join(process.env.RUNNER_TEMP, 'candidate-offline-inputs');
+            fs.mkdirSync(directory);
+            const { data: run } = await github.rest.actions.getWorkflowRun({owner:'Blueeeecho',repo:'EchoLingo',run_id:41178655504});
+            if (run.conclusion !== 'success' || run.head_sha !== '4b8c5f5ac67e07cc4005812963b2c02acdd14d5d') throw new Error('Pinned resource run mismatch');
+            for (const [id,name,hash] of pins) {
+              const { data: artifact } = await github.rest.actions.getArtifact({owner:'Blueeeecho',repo:'EchoLingo',artifact_id:id});
+              if (artifact.expired || artifact.workflow_run.id !== 41178655504 || artifact.digest !== `sha256:${hash}`) throw new Error('Pinned resource artifact mismatch');
+              const { data } = await github.rest.actions.downloadArtifact({owner:'Blueeeecho',repo:'EchoLingo',artifact_id:id,archive_format:'zip'});
+              fs.writeFileSync(path.join(directory,name), Buffer.from(data));
+            }
+      - name: Extract only hash-verified offline engine models licenses and source
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          python scripts/stage-language-patch-resources.py --windows-zip "$env:RUNNER_TEMP/candidate-offline-inputs/windows.zip" --evidence-zip "$env:RUNNER_TEMP/candidate-offline-inputs/evidence.zip" --output-dir "$env:RUNNER_TEMP/candidate-offline-evidence"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          python scripts/audit-windows-resources.py --staged
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - run: npm ci
+      - run: npm run check
+      - name: Execute Windows native policy and shared current-request regression
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          cargo test --manifest-path src-tauri/native-capture/Cargo.toml --locked
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $output = @(& cargo test --manifest-path src-tauri/Cargo.toml --locked source_identity_failure_is_actionable_but_superseded_selection_stays_quiet -- --nocapture 2>&1)
+          $code = $LASTEXITCODE
+          $output | ForEach-Object { Write-Host $_ }
+          if ($code -ne 0) { exit $code }
+          if (($output -join "`n") -notmatch 'test result: ok\. 1 passed; 0 failed') { throw 'The exact current-request regression must execute.' }
+          $output = @(& cargo test --manifest-path src-tauri/Cargo.toml --locked screenshot_overlay -- --nocapture 2>&1)
+          $code = $LASTEXITCODE
+          $output | ForEach-Object { Write-Host $_ }
+          if ($code -ne 0) { exit $code }
+          if (($output -join "`n") -notmatch 'test result: ok\. 5 passed; 0 failed') { throw 'All five geometry and input-ownership regressions must execute.' }
+      - name: Require committed Rust formatting without rewriting source
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo fmt --manifest-path src-tauri/Cargo.toml --check
+          cargo fmt --manifest-path src-tauri/native-capture/Cargo.toml --check
+      - name: Build fresh application and installer with locked dependencies
+        run: npm run tauri build -- --bundles ${{ runner.os == 'Windows' && 'nsis' || 'dmg' }} -- --locked
+      - name: Verify the Windows capture child actually embedded in this fresh application
+        if: runner.os == 'Windows'
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import hashlib, os, pathlib
+          app = pathlib.Path('src-tauri/target/release/echolingo.exe').read_bytes()
+          matches = {}
+          for path in pathlib.Path('src-tauri/target/release/build').glob('*/out/echolingo-native-capture.exe'):
+              data = path.read_bytes()
+              if data.startswith(b'MZ') and data in app:
+                  matches[hashlib.sha256(data).hexdigest()] = data
+          if len(matches) != 1:
+              raise SystemExit('Expected exactly one embedded native capture payload identity')
+          output = pathlib.Path(os.environ['RUNNER_TEMP']) / 'candidate-embedded-capture.exe'
+          with output.open('xb') as file: file.write(next(iter(matches.values())))
+          PY
+          pwsh -NoProfile -File tests/windows-rust-capture-binary-smoke.ps1 -ExecutablePath "$RUNNER_TEMP/candidate-embedded-capture.exe"
+      - name: Inspect fresh installer bytes without installing or launching the application
+        shell: bash
+        env:
+          CANDIDATE_RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          if [ "$RUNNER_OS" = Windows ]; then
+            files=(src-tauri/target/release/bundle/nsis/*.exe)
+            application=src-tauri/target/release/echolingo.exe
+          else
+            files=(src-tauri/target/release/bundle/dmg/*.dmg)
+            application=src-tauri/target/release/bundle/macos/EchoLingo.app/Contents/MacOS/echolingo
+          fi
+          test "${#files[@]}" -eq 1
+          python scripts/inspect-candidate-package.py --platform "$RUNNER_OS" --installer "${files[0]}" --built-application "$application" --output-dir "$RUNNER_TEMP/candidate-inspection" --run-url "$CANDIDATE_RUN_URL" --locked-build-passed --focused-tests-passed
+          mkdir "$RUNNER_TEMP/candidate-artifacts"
+          cp "${files[0]}" "$RUNNER_TEMP/candidate-artifacts/"
+          extra=()
+          if [ "$RUNNER_OS" = Windows ]; then
+            cp "$RUNNER_TEMP/candidate-offline-evidence/EchoLingo-offline-engine-source.zip" "$RUNNER_TEMP/candidate-artifacts/"
+            extra=(--offline-staging-manifest "$RUNNER_TEMP/candidate-offline-evidence/baseline-reuse.json" --offline-source-archive "$RUNNER_TEMP/candidate-artifacts/EchoLingo-offline-engine-source.zip")
+            extracted="$RUNNER_TEMP/candidate-inspection/echolingo.exe"
+          else
+            extracted="$RUNNER_TEMP/candidate-inspection/echolingo"
+          fi
+          python scripts/verify-candidate-package.py --platform "$RUNNER_OS" --installer "$RUNNER_TEMP/candidate-artifacts/$(basename "${files[0]}")" --application "$extracted" --checks-json "$RUNNER_TEMP/candidate-inspection/checks.json" --output "$RUNNER_TEMP/candidate-artifacts/CANDIDATE-MANIFEST.json" --run-url "$CANDIDATE_RUN_URL" "${extra[@]}"
+          git diff --exit-code
+      - name: Preserve only verified testing-candidate installers and provenance
+        uses: actions/upload-artifact@v4
+        with:
+          name: EchoLingo-0.2.6-candidate-${{ runner.os }}
+          if-no-files-found: error
+          path: |
+            ${{ runner.temp }}/candidate-artifacts/EchoLingo_0.2.6_x64-setup.exe
+            ${{ runner.temp }}/candidate-artifacts/EchoLingo_0.2.6_aarch64.dmg
+            ${{ runner.temp }}/candidate-artifacts/EchoLingo_0.2.6_arm64.dmg
+            ${{ runner.temp }}/candidate-artifacts/CANDIDATE-MANIFEST.json
+            ${{ runner.temp }}/candidate-artifacts/CANDIDATE-MANIFEST.json.sha256
+            ${{ runner.temp }}/candidate-artifacts/EchoLingo-offline-engine-source.zip
+      - name: Distinguish built testing candidates from installed and real-app acceptance
+        if: always()
+        shell: bash
+        run: echo '0.2.6 testing-candidate packaging only. Fresh application binaries; unchanged pinned offline resources only. No app/installer launch, real Codex/Feishu/QQ selection, installed acceptance, signing/notarization upgrade, tag, main update or release publication is claimed.' >> "$GITHUB_STEP_SUMMARY"

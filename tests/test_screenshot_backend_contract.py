@@ -16,7 +16,7 @@ class ScreenshotBackendContract(unittest.TestCase):
         body = main.split('fn start_action(', 1)[1].split('async fn hide_native_capture_window', 1)[0]
         self.assertLess(body.index('screenshot::start_capture(app)'), body.index('cloud_ocr'))
         screenshot = (ROOT / 'src-tauri/src/screenshot.rs').read_text()
-        self.assertIn('platform::capture_screenshot_cancelable', screenshot)
+        self.assertIn('platform::capture_screenshot_with_geometry_cancelable', screenshot)
         for forbidden in ['ocr::recognize(', 'load_ocr_key', 'finish_translation(', 'history.json', 'reqwest::', 'platform::capture_ocr']:
             self.assertNotIn(forbidden, screenshot)
 

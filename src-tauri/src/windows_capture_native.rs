@@ -2139,6 +2139,22 @@ impl Drop for Picker {
         self.cleanup();
     }
 }
+fn screenshot_toolbar_bounds(display: &CaptureDisplaySnapshot) -> Result<[i32; 4]> {
+    #[link(name = "user32")]
+    unsafe extern "system" { fn MonitorFromPoint(point: w::Point, flags: u32) -> w::H; }
+    let point = w::Point { x: display.bounds.x + display.bounds.width / 2, y: display.bounds.y + display.bounds.height / 2 };
+    let monitor = unsafe { MonitorFromPoint(point, 0) };
+    let mut info: w::Monitor = unsafe { std::mem::zeroed() };
+    info.size = std::mem::size_of::<w::Monitor>() as u32;
+    if monitor.is_null() || unsafe { w::GetMonitorInfoW(monitor, &mut info) } == 0 || from_rect(info.rect) != display.bounds {
+        return Err(error("CAPTURE_DISPLAY_CHANGED"));
+    }
+    // Work area excludes taskbar/app bars. It controls only toolbar placement;
+    // image pixels and the full-screen overlay retain the selected capture rect.
+    let work = from_rect(info.work).intersect(display.bounds);
+    if !work.valid() { return Err(error("CAPTURE_DISPLAY_CHANGED")); }
+    Ok([work.x, work.y, work.width, work.height])
+}
 pub fn run(request: Request) -> CapturedResult {
     let mut picker = match Picker::new(&request) {
         Ok(p) => p,
@@ -2146,11 +2162,26 @@ pub fn run(request: Request) -> CapturedResult {
             return CapturedResult {
                 result: Err(e),
                 health: BTreeMap::new(),
+                capture_geometry: None,
+                capture_screens: Vec::new(),
             }
         }
     };
+    let mut capture_geometry = None;
+    let mut capture_screens = Vec::new();
     let result = (|| {
         let selected = picker.select()?;
+        if request.purpose == CapturePurpose::Screenshot {
+            let visible: Vec<_> = picker.topology.displays().iter().filter(|display| selected.intersect(display.bounds).valid()).collect();
+            capture_screens = visible.iter().map(|display| screenshot_toolbar_bounds(display)).collect::<Result<Vec<_>>>()?;
+            let left = visible.iter().map(|display| display.bounds.x).min().ok_or_else(|| error("CAPTURE_GEOMETRY"))?;
+            let top = visible.iter().map(|display| display.bounds.y).min().ok_or_else(|| error("CAPTURE_GEOMETRY"))?;
+            let right = visible.iter().map(|display| i64::from(display.bounds.x) + i64::from(display.bounds.width)).max().ok_or_else(|| error("CAPTURE_GEOMETRY"))?;
+            let bottom = visible.iter().map(|display| i64::from(display.bounds.y) + i64::from(display.bounds.height)).max().ok_or_else(|| error("CAPTURE_GEOMETRY"))?;
+            let width = i32::try_from(right - i64::from(left)).map_err(|_| error("CAPTURE_GEOMETRY"))?;
+            let height = i32::try_from(bottom - i64::from(top)).map_err(|_| error("CAPTURE_GEOMETRY"))?;
+            capture_geometry = Some([selected.x, selected.y, selected.width, selected.height, left, top, width, height]);
+        }
         if picker.cancel.requested()? {
             return Err("CANCELLED: Native task was superseded.".into());
         }
@@ -2200,14 +2231,20 @@ pub fn run(request: Request) -> CapturedResult {
             released.elapsed().as_millis() as u64,
         );
     }
+    let capture_geometry = if result.is_ok() { capture_geometry } else { None };
     CapturedResult {
         result,
         health: picker.health.clone(),
+        capture_geometry,
+        capture_screens,
     }
 }
 pub struct CapturedResult {
     pub result: Result<Vec<u8>>,
     pub health: BTreeMap<&'static str, u64>,
+    /// Physical desktop pixels: selected rect followed by containing display union.
+    pub capture_geometry: Option<[i32; 8]>,
+    pub capture_screens: Vec<[i32; 4]>,
 }
 
 /// Explicit memory-only smoke path: never opens a screen DC or starts input interception.
