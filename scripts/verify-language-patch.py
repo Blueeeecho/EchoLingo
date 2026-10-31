@@ -19,6 +19,7 @@ PINS = {
     'src-tauri/Cargo.lock': '96403a321dd3aa005243b7cd2923011b58ae2cbcfd1db959624d322d747b30cc',
 }
 SUPPORT = {
+    'README.md', 'README.en.md',  # Post-release download/docs sync only.
     'package.json', '.github/workflows/ci.yml', '.github/workflows/release.yml',
     '.github/workflows/language-patch-checks.yml', 'scripts/verify-language-patch.py',
     'scripts/test_language_patch_contract.py', 'scripts/stage-language-patch-resources.py',

@@ -3,22 +3,22 @@
 <h1 align="center">EchoLingo · 回声译</h1>
 <p align="center"><strong>A familiar echo for unfamiliar words.</strong></p>
 <p align="center">A lightweight desktop app for selection translation and seamless OCR, so understanding can keep up with your reading.</p>
-<p align="center"><a href="https://blueeeecho.github.io/EchoLingo/">Website</a> · <a href="https://github.com/Blueeeecho/EchoLingo/releases/tag/0.2.3">Windows 0.2.3 preview</a> · <a href="https://github.com/Blueeeecho/EchoLingo/releases/tag/0.2.3">macOS 0.2.3 preview</a> · <a href="https://github.com/Blueeeecho/EchoLingo/issues">Feedback</a></p>
+<p align="center"><a href="https://blueeeecho.github.io/EchoLingo/">Website</a> · <a href="https://github.com/Blueeeecho/EchoLingo/releases/tag/0.2.4">Windows 0.2.4 preview</a> · <a href="https://github.com/Blueeeecho/EchoLingo/releases/tag/0.2.4">macOS 0.2.4 preview</a> · <a href="https://github.com/Blueeeecho/EchoLingo/issues">Feedback</a></p>
 
 ## Download and install
 
-**[Download Windows 0.2.3 internal preview (x64)](https://github.com/Blueeeecho/EchoLingo/releases/download/0.2.3/EchoLingo_0.2.3_windows_x64-setup.exe)** · **[Download macOS 0.2.3 internal preview (Apple silicon)](https://github.com/Blueeeecho/EchoLingo/releases/download/0.2.3/EchoLingo_0.2.3_macos_arm64.dmg)**
+**[Download Windows 0.2.4 internal preview (x64)](https://github.com/Blueeeecho/EchoLingo/releases/download/0.2.4/EchoLingo_0.2.4_windows_x64-setup.exe)** · **[Download macOS 0.2.4 internal preview (Apple silicon)](https://github.com/Blueeeecho/EchoLingo/releases/download/0.2.4/EchoLingo_0.2.4_macos_arm64.dmg)**
 
 Windows supports Windows 10 1809+ and Windows 11. The macOS package is for Apple silicon Macs on macOS 12 or later. Apple system translation needs macOS 26 or later. After installation, EchoLingo stays in the tray or menu bar. Quit the previous version completely before you upgrade.
 
-Windows and macOS now both offer the 0.2.3 internal preview. Translation and OCR services are managed separately, with collapsible free-service recommendations. Only `Alt+D` and `Alt+S` are enabled by default; you can change or clear shortcuts and assign your own bindings for other actions.
+Windows and macOS now both offer the 0.2.4 internal preview. Translation and OCR services are managed separately, with collapsible free-service recommendations. The defaults are `Alt+D`, `Alt+S`, and a separate `F1` screenshot and local editor action; shortcuts can be changed, cleared, or customized.
 
 Intermittent Windows HTML clipboard restoration and history recording during rapid consecutive selections are not confirmed fixed. Mac drag feel, first-frame clarity, and multi-display behavior still need real-machine testing; see the release notes.
 
 This is an internal prerelease, not a stable release. Windows has no commercial code signature; macOS uses ad hoc signing and is not notarized by Apple. Your system may show warnings or request permissions again. Install only files from this repository’s release page with matching checksums.
 
-- **Windows 0.2.3**: [Release notes](https://github.com/Blueeeecho/EchoLingo/releases/tag/0.2.3) · [SHA-256 checksums](https://github.com/Blueeeecho/EchoLingo/releases/download/0.2.3/SHA256SUMS.txt) · [Release manifest](https://github.com/Blueeeecho/EchoLingo/releases/download/0.2.3/RELEASE-MANIFEST.json)
-- **macOS 0.2.3**: [Release notes](https://github.com/Blueeeecho/EchoLingo/releases/tag/0.2.3) · [SHA-256 checksums](https://github.com/Blueeeecho/EchoLingo/releases/download/0.2.3/SHA256SUMS.txt) · [Release manifest](https://github.com/Blueeeecho/EchoLingo/releases/download/0.2.3/RELEASE-MANIFEST.json)
+- **Windows 0.2.4**: [Release notes](https://github.com/Blueeeecho/EchoLingo/releases/tag/0.2.4) · [SHA-256 checksums](https://github.com/Blueeeecho/EchoLingo/releases/download/0.2.4/SHA256SUMS.txt) · [Release manifest](https://github.com/Blueeeecho/EchoLingo/releases/download/0.2.4/RELEASE-MANIFEST.json)
+- **macOS 0.2.4**: [Release notes](https://github.com/Blueeeecho/EchoLingo/releases/tag/0.2.4) · [SHA-256 checksums](https://github.com/Blueeeecho/EchoLingo/releases/download/0.2.4/SHA256SUMS.txt) · [Release manifest](https://github.com/Blueeeecho/EchoLingo/releases/download/0.2.4/RELEASE-MANIFEST.json)
 
 [First-launch notes for macOS](docs/macos-install.zh-CN.md) (Chinese) · [Build from source](docs/build.md) (Chinese)
 
@@ -31,7 +31,7 @@ Press `Alt+D` with nothing selected to type directly. The source stays editable.
 
 ## Use it your way
 
-- **Quiet and light**: it lives in the tray and appears when you call it. Click outside to hide it, or pin it to keep it. It uses the system web view and does not bundle Chromium.
+- **Quiet and light**: it lives in the tray and appears when you call it. Click outside to hide the translation popup, or pin it to keep it. It uses the system web view and does not bundle Chromium.
 - **Your choice of service**: Windows includes offline Chinese–English translation, and OCR stays on the device by default. You can also configure your own translation and OCR services, with multiple translation services enabled together to compare results.
 - **Small things close at hand**: copy or speak the source and the translation, switch themes, and keep history and favorites. History keeps the latest 20 items by default, adjustable from 1 to 100.
 
