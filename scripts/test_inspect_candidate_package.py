@@ -205,7 +205,7 @@ class CandidateInspectionTests(unittest.TestCase):
                 self.assertIn("-noautoopen", calls[1])
 
     def test_bounded_capture_rejects_stdout_before_unbounded_allocation(self):
-        result = MODULE.checked_command([sys.executable, "-c", "print('generated')"], maximum_bytes=32)
+        result = MODULE.checked_command([sys.executable, "-c", "import sys; sys.stdout.buffer.write(b'generated\\n')"], maximum_bytes=32)
         self.assertEqual(result.stdout, b"generated\n")
         with self.assertRaisesRegex(MODULE.InspectionError, "output exceeds limit"):
             MODULE.checked_command([sys.executable, "-c", "print('x' * 2048)"], maximum_bytes=32)
