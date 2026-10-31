@@ -238,13 +238,15 @@ try {
 
     // Crop after zoom uses image coordinates, reduces actual PNG dimensions and
     // exposes no crop-excluded pixels. DPR changes display density, not output.
-    await fresh(); await page.locator('#zoom-in').click();
+    const cropSessionId = await fresh(); await page.locator('#zoom-in').click();
     await drag('crop', [10, 8], [42, 32]);
     const crop = await pixels(); assert.deepEqual([crop.width, crop.height], [32, 24]);
     assert.deepEqual(at(crop, 0, 0), at(original, 10, 8));
     await page.locator('#undo-edit').click(); assert.deepEqual(await pixels(), original);
     await page.locator('#redo-edit').click();
-    await page.locator('#copy-image').click(); await page.waitForFunction(() => window.__screenshotQA.copies.length === 1);
+    const copiesBeforeCrop = await page.evaluate(() => window.__screenshotQA.copies.length);
+    await page.locator('#copy-image').click();
+    await page.waitForFunction(([count, id]) => window.__screenshotQA.copies.length === count + 1 && window.__screenshotQA.copies.at(-1).sessionId === id, [copiesBeforeCrop, cropSessionId]);
     const copiedSize = await page.evaluate(async () => {
       const image = new Image(); image.src = 'data:image/png;base64,' + window.__screenshotQA.copies.at(-1).pngBase64; await image.decode(); return [image.naturalWidth, image.naturalHeight];
     }); assert.deepEqual(copiedSize, [32, 24]);
