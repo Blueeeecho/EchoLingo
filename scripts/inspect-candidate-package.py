@@ -396,11 +396,10 @@ def nsis_application_identity(stage, packaged):
     replacement = b"__TAURI_BUNDLE_TYPE_VAR_NSS"
     require(0 < len(stage) <= MAX_EXECUTABLE and len(packaged) == len(stage),
             "NSIS application length differs from the complete fresh application")
-    require(stage.count(marker) == 1 and stage.count(replacement) == 0,
-            "Expected exactly one fresh Tauri unknown bundle marker")
+    require(stage.count(marker) == 1,
+            f"Expected exactly one fresh Tauri unknown bundle marker; observed {stage.count(marker)}")
     offset = stage.index(marker)
-    require(packaged.count(replacement) == 1 and packaged.count(marker) == 0
-            and packaged[offset:offset + len(marker)] == replacement,
+    require(packaged[offset:offset + len(marker)] == replacement,
             "Packaged NSIS marker does not match the verified fresh marker location")
     expected = hashlib.sha256()
     expected.update(stage[:offset])

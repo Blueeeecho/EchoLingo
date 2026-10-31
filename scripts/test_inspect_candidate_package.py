@@ -334,6 +334,11 @@ class CandidateInspectionTests(unittest.TestCase):
         self.assertEqual(result["comparedBytes"], len(stage))
         self.assertEqual(result["expectedNsisSha256"], result["packagedSha256"])
         self.assertIs(result["actualExecutablesModified"], False)
+        # The existing release verifier allows unrelated NSS literals. Only
+        # the unique UNK token is replaced, and every other byte still matches.
+        suffix = b"\0unchanged-__TAURI_BUNDLE_TYPE_VAR_NSS\0"
+        identity = MODULE.nsis_application_identity(stage + suffix, packaged + suffix)
+        self.assertEqual(identity["expectedNsisSha256"], identity["packagedSha256"])
         # No other byte, region, resource, checksum, timestamp, or append may
         # differ. A three-byte exception without the unique full token fails.
         invalid = [(stage, stage), (stage, packaged + b"x"), (stage, packaged[:-1]),
@@ -341,7 +346,7 @@ class CandidateInspectionTests(unittest.TestCase):
                    (stage, packaged.replace(b"NSS", b"MSI")),
                    (stage + b"__TAURI_BUNDLE_TYPE_VAR_UNK", packaged + b"__TAURI_BUNDLE_TYPE_VAR_NSS"),
                    (b"prefixUNKtail", b"prefixNSStail"),
-                   (stage + b"__TAURI_BUNDLE_TYPE_VAR_NSS", packaged + b"__TAURI_BUNDLE_TYPE_VAR_NSS"),
+                   (stage, packaged + b"__TAURI_BUNDLE_TYPE_VAR_NSS"),
                    (stage, packaged.replace(b"__TAURI", b"__tAURI"))]
         for original, extracted in invalid:
             with self.subTest(original=original, extracted=extracted), self.assertRaises(MODULE.InspectionError):
