@@ -16,6 +16,7 @@ mod platform;
 mod popup_health;
 mod screenshot;
 mod screenshot_overlay;
+mod screenshot_pins;
 mod service_links;
 mod shortcut_bindings;
 mod shortcut_control;
@@ -63,6 +64,7 @@ struct AppState {
     pinned: AtomicBool,
     native_tasks: native_tasks::Controller,
     screenshots: screenshot::Controller,
+    screenshot_pins: screenshot_pins::Controller,
     shortcut_gate: Mutex<shortcut_control::ShortcutGate>,
     shortcut_routes: shortcut_control::ShortcutRoutes,
     shortcut_updating: AtomicBool,
@@ -3560,6 +3562,7 @@ fn main() {
                 pinned: AtomicBool::new(false),
                 native_tasks: native_tasks::Controller::default(),
                 screenshots: screenshot::Controller::default(),
+                screenshot_pins: screenshot_pins::Controller::default(),
                 shortcut_gate: Mutex::new(shortcut_control::ShortcutGate::default()),
                 shortcut_routes: shortcut_control::ShortcutRoutes::default(),
                 shortcut_updating: AtomicBool::new(false),
@@ -3657,6 +3660,12 @@ fn main() {
                 api.prevent_close();
                 let _ = window.emit("screenshot-close-requested", ());
             }
+            tauri::WindowEvent::CloseRequested { .. } if screenshot_pins::is_pin(window.label()) => {
+                // Reference windows close independently; never hide/cancel the translator.
+            }
+            tauri::WindowEvent::Destroyed if screenshot_pins::is_pin(window.label()) => {
+                screenshot_pins::destroyed(window.app_handle(), window.label());
+            }
             tauri::WindowEvent::CloseRequested { api, .. } => {
                 api.prevent_close();
                 cancel_shortcut_recording(window.app_handle());
@@ -3704,6 +3713,11 @@ fn main() {
             screenshot::open_screenshot_image,
             screenshot::save_screenshot_image,
             screenshot::copy_screenshot_image,
+            screenshot_pins::pin_screenshot_image,
+            screenshot_pins::get_pinned_screenshot,
+            screenshot_pins::pinned_screenshot_ready,
+            screenshot_pins::set_screenshot_pinned,
+            screenshot_pins::close_pinned_screenshot,
             screenshot::close_screenshot_editor,
             screenshot::get_screenshot_directory,
             screenshot::choose_screenshot_directory,
@@ -4516,6 +4530,7 @@ mod tests {
             pinned: AtomicBool::new(false),
             native_tasks: native_tasks::Controller::default(),
             screenshots: screenshot::Controller::default(),
+            screenshot_pins: screenshot_pins::Controller::default(),
             shortcut_gate: Mutex::new(shortcut_control::ShortcutGate::default()),
             shortcut_routes: shortcut_control::ShortcutRoutes::default(),
             shortcut_updating: AtomicBool::new(false),

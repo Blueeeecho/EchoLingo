@@ -47,7 +47,7 @@ struct SessionState {
 }
 pub struct Controller {
     state: Mutex<SessionState>,
-    operations: tokio::sync::Semaphore,
+    pub(crate) operations: tokio::sync::Semaphore,
     dialog_active: AtomicBool,
 }
 impl Default for Controller {
@@ -66,6 +66,13 @@ impl Controller {
             image: None,
         };
         Ok(())
+    }
+    pub(crate) fn with_pin_source<T>(
+        &self,
+        id: u64,
+        operation: impl FnOnce() -> Result<T, String>,
+    ) -> Result<T, String> {
+        self.with_image(id, |_| operation())
     }
     fn cancel_pending(&self) {
         if let Ok(mut state) = self.state.lock() {
@@ -264,7 +271,7 @@ fn encode(image: &RgbaImage) -> Result<Vec<u8>, String> {
         .map_err(|_| "SCREENSHOT_ENCODE: 无法生成小于 32 MiB 的 PNG 图片")?;
     Ok(output.0)
 }
-fn from_base64(value: &str, png_only: bool) -> Result<RgbaImage, String> {
+pub(crate) fn from_base64(value: &str, png_only: bool) -> Result<RgbaImage, String> {
     if value.len() > MAX_ENCODED_BYTES.div_ceil(3) * 4 {
         return Err("SCREENSHOT_SIZE: 图片必须小于 32 MiB".into());
     }
@@ -425,7 +432,7 @@ pub fn reset_screenshot_directory(app: tauri::AppHandle) -> Result<Directory, St
 
 // Dialog creation stays on AppKit's UI thread on macOS. A later intent is
 // checked after the modal result; cancelling a dialog never saves or publishes.
-async fn dialog<T: Send + 'static>(
+pub(crate) async fn dialog<T: Send + 'static>(
     app: &tauri::AppHandle,
     operation: impl FnOnce() -> T + Send + 'static,
 ) -> Result<T, String> {
