@@ -18,6 +18,9 @@ describe('isolated screenshot image-pixel model', () => {
     expect(new ScreenshotDocument(extra).original).toEqual({ width: 2, height: 2 });
     expect(model.operations[0]).toEqual(rectangle());
     expect(Object.isFrozen(model.operations[0])).toBe(true);
+    const arrow: EditOperation = { kind: 'arrow', start: { x: 1, y: 1 }, end: { x: 8, y: 8 }, color: '#000000', width: 2 };
+    const arrows = new ScreenshotDocument({ width: 10, height: 10 }); arrows.append(arrow); arrow.start.x = 9;
+    expect(arrows.operations[0]).toMatchObject({ start: { x: 1, y: 1 } });
     const originalState = model.stateId;
     model.append({ kind: 'crop', rect: { x: 10, y: 20, width: 25, height: 30 } });
     expect(model.size).toEqual({ width: 25, height: 30 }); expect(model.undo()).toBe(true);
@@ -36,6 +39,16 @@ describe('isolated screenshot image-pixel model', () => {
     while (model.redo()) { /* Restore bounded typed history. */ }
     expect(model.operations).toHaveLength(MAX_OPERATIONS);
     expect(JSON.stringify(model.operations).length).toBeLessThan(100_000);
+  });
+  it('bounds large-image replay work before accepting more expensive pixel operations', () => {
+    const model = new ScreenshotDocument({ width: 8000, height: 4000 });
+    const mosaic: EditOperation = { kind: 'mosaic', rect: { x: 0, y: 0, width: 8000, height: 4000 }, blockSize: 16 };
+    model.append(mosaic); const state = model.stateId;
+    expect(() => model.append(mosaic)).toThrow('安全上限');
+    expect(model.stateId).toBe(state); expect(model.operations).toHaveLength(1);
+    model.undo(); model.append({ kind: 'crop', rect: { x: 0, y: 0, width: 100, height: 100 } });
+    for (let i = 0; i < 50; i++) model.append({ ...mosaic, rect: { x: 0, y: 0, width: 100, height: 100 } });
+    expect(model.operations).toHaveLength(51);
   });
   it('rejects invalid/huge images and edit parameters before allocating canvases', () => {
     for (const size of [{ width: 0, height: 10 }, { width: 16_385, height: 1 }, { width: 8_000, height: 8_000 }, { width: NaN, height: 10 }, { width: 10.5, height: 10 }]) expect(() => validateSize(size)).toThrow();

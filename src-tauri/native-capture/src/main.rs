@@ -53,15 +53,27 @@ fn main() {
                         )
                     }
                     "-NativeCancellationEvent" => cancel = Some(value.clone()),
-                    "-CaptureOwnerProcessId" => owner = Some(value.parse::<u32>().map_err(|_| "CAPTURE_ARGUMENT: Invalid owner")?),
+                    "-CaptureOwnerProcessId" => {
+                        owner = Some(
+                            value
+                                .parse::<u32>()
+                                .map_err(|_| "CAPTURE_ARGUMENT: Invalid owner")?,
+                        )
+                    }
                     _ => return Err("CAPTURE_ARGUMENT: Unsupported argument".into()),
                 }
                 i += 2;
             }
             let purpose = match mode.as_deref() {
                 Some("capture-image") => policy::CapturePurpose::Region,
-                Some("capture-screenshot") if owner.is_some_and(|pid| pid > 0) => policy::CapturePurpose::Screenshot,
-                _ => return Err("CAPTURE_ARGUMENT: Unsupported mode or missing screenshot owner".into()),
+                Some("capture-screenshot") if owner.is_some_and(|pid| pid > 0) => {
+                    policy::CapturePurpose::Screenshot
+                }
+                _ => {
+                    return Err(
+                        "CAPTURE_ARGUMENT: Unsupported mode or missing screenshot owner".into(),
+                    )
+                }
             };
             Ok(capture::Request {
                 purpose,

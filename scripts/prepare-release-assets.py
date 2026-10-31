@@ -10,6 +10,8 @@ import shutil
 import tomllib
 import zipfile
 
+from verify_screenshot_editor_report import verify_report as verify_screenshot_editor_report
+
 
 ROOT = Path(__file__).resolve().parent.parent
 VERSION = "0.2.4"
@@ -62,6 +64,16 @@ def prepare(artifacts, output, commit, run_url):
     for field in ("ok", "windowsRuntimeExecuted", "installerExecuted", "realModelExecuted", "rulesRemoved", "ownedInstallRemoved"):
         if report.get(field) is not True:
             raise ValueError(f"Installed Windows acceptance did not pass: {field}")
+    # Historical 0.2.1/0.2.2 helpers import this preparer but remain version-pinned.
+    # F1 is mandatory from 0.2.4 onward; do not retroactively assert it for old bytes.
+    requires_screenshot_editor = tuple(map(int, VERSION.split("."))) >= (0, 2, 4)
+    if requires_screenshot_editor:
+        if report.get("installedScreenshotEditorVerified") is not True:
+            raise ValueError("Installed F1 editor acceptance did not pass")
+        installed_sha = report.get("applicationSha256")
+        if not isinstance(installed_sha, str) or re.fullmatch(r"[0-9a-f]{64}", installed_sha) is None:
+            raise ValueError("Installed application identity is absent for F1 acceptance")
+        verify_screenshot_editor_report(report.get("installedScreenshotEditor"), installed_sha, installed=True)
     if report.get("mockTranslationUsed") is not False:
         raise ValueError("Real-model acceptance must not use a translation mock")
     if report.get("installerSha256") != sha256(windows) or report.get("installerBytes") != windows.stat().st_size:
@@ -89,6 +101,8 @@ def prepare(artifacts, output, commit, run_url):
         files.append({"name": name, "size": destination.stat().st_size, "sha256": sha256(destination)})
     manifest = {"version": VERSION, "commit": commit, "validationRun": run_url,
                 "rebuiltAfterValidation": False, "windowsInstalledAcceptanceVerified": True, "files": files}
+    if requires_screenshot_editor:
+        manifest["windowsInstalledScreenshotEditorVerified"] = True
     (output / "RELEASE-MANIFEST.json").write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
     checksums = [f"{sha256(path)}  {path.name}\n" for path in sorted(output.iterdir())]
     (output / "SHA256SUMS.txt").write_text("".join(checksums), encoding="utf-8")

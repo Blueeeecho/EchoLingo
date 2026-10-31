@@ -105,28 +105,36 @@ fn run_cancelable(mode: &str, cancel: NativeCancel) -> Result<Value, String> {
 
 #[cfg(target_os = "macos")]
 fn run_macos_screenshot_cancelable(cancel: NativeCancel) -> Result<Value, String> {
-    use std::sync::{Arc, atomic::{AtomicBool, Ordering}};
+    use std::sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    };
     // Register before the watcher can cancel, so cancellation cannot get lost
     // while AppKit presentation is queued. Tokens isolate repeated F1 requests.
     let operation = run("begin-native-capture", None)?
-        .get("operationId").and_then(Value::as_str).filter(|id| id.len() == 36)
-        .ok_or("NATIVE_PROTOCOL: Missing screenshot operation.")?.to_owned();
+        .get("operationId")
+        .and_then(Value::as_str)
+        .filter(|id| id.len() == 36)
+        .ok_or("NATIVE_PROTOCOL: Missing screenshot operation.")?
+        .to_owned();
     let finished = Arc::new(AtomicBool::new(false));
     let watching = finished.clone();
     let cancellation = cancel.clone();
     let watched_operation = operation.clone();
-    let watcher = std::thread::Builder::new().name("screenshot-cancel".into()).spawn(move || {
-        while !watching.load(Ordering::SeqCst) {
-            if cancellation.load(Ordering::SeqCst) {
-                // Cancellation is outside the serialized capture lock. Swift
-                // only flips this request's flag; its own main-thread session
-                // disposes panels/monitors, never another request's selector.
-                return run("cancel-native-capture", Some(&watched_operation)).map(|_| ());
+    let watcher = std::thread::Builder::new()
+        .name("screenshot-cancel".into())
+        .spawn(move || {
+            while !watching.load(Ordering::SeqCst) {
+                if cancellation.load(Ordering::SeqCst) {
+                    // Cancellation is outside the serialized capture lock. Swift
+                    // only flips this request's flag; its own main-thread session
+                    // disposes panels/monitors, never another request's selector.
+                    return run("cancel-native-capture", Some(&watched_operation)).map(|_| ());
+                }
+                std::thread::sleep(std::time::Duration::from_millis(20));
             }
-            std::thread::sleep(std::time::Duration::from_millis(20));
-        }
-        Ok(())
-    });
+            Ok(())
+        });
     let watcher = match watcher {
         Ok(watcher) => watcher,
         Err(_) => {
@@ -134,14 +142,23 @@ fn run_macos_screenshot_cancelable(cancel: NativeCancel) -> Result<Value, String
             return Err("CAPTURE: Could not start screenshot cancellation watcher.".into());
         }
     };
-    let result = if cancelled(Some(&cancel)) { Err(NATIVE_CANCELLED.into()) }
-        else { run("capture-screenshot", Some(&operation)) };
+    let result = if cancelled(Some(&cancel)) {
+        Err(NATIVE_CANCELLED.into())
+    } else {
+        run("capture-screenshot", Some(&operation))
+    };
     finished.store(true, Ordering::SeqCst);
-    let cancellation_result = watcher.join().map_err(|_| "CAPTURE: Screenshot cancellation watcher failed.");
+    let cancellation_result = watcher
+        .join()
+        .map_err(|_| "CAPTURE: Screenshot cancellation watcher failed.");
     let cleanup = run("end-native-capture", Some(&operation));
     cancellation_result??;
     cleanup?;
-    if cancelled(Some(&cancel)) { Err(NATIVE_CANCELLED.into()) } else { result }
+    if cancelled(Some(&cancel)) {
+        Err(NATIVE_CANCELLED.into())
+    } else {
+        result
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -975,6 +992,12 @@ fn bounded_capture_health(value: &Value) -> Value {
         "magnifierBitBltMillisecondsMax",
         "magnifierReleaseDcMillisecondsTotal",
         "magnifierReleaseDcMillisecondsMax",
+        "magnifierSampleFlushMillisecondsTotal",
+        "magnifierSampleFlushMillisecondsMax",
+        "magnifierSampleCompleted",
+        "magnifierStaleFrames",
+        "magnifierFrameAgeMillisecondsMax",
+        "magnifierSampleThreadStopped",
     ] {
         if let Some(number) = value
             .get(field)
@@ -1389,7 +1412,9 @@ fn run_windows_selection(
     if selection {
         command.args(["-SelectionStrategy", strategy.native_argument()]);
     }
-    let mut cancellation = if cancel.is_some() || (capture && (rust_capture_enabled() || mode == "capture-screenshot")) {
+    let mut cancellation = if cancel.is_some()
+        || (capture && (rust_capture_enabled() || mode == "capture-screenshot"))
+    {
         Some(native_process::CancellationEvent::new()?)
     } else {
         None
@@ -1457,7 +1482,12 @@ fn run_windows_selection(
         })
     };
     // An 8 MiB PNG expands to about 10.7 MiB of base64 plus the JSON envelope.
-    let output_limit = if matches!(mode, "capture-image" | "capture-screenshot") { 12 } else { 4 } * 1024 * 1024;
+    let output_limit = if matches!(mode, "capture-image" | "capture-screenshot") {
+        12
+    } else {
+        4
+    } * 1024
+        * 1024;
     let output_thread = read_pipe(Box::new(stdout), output_limit);
     let error_thread = read_pipe(Box::new(stderr), 4 * 1024 * 1024);
     let input_thread = if let Some(text) = input {
@@ -1646,7 +1676,12 @@ fn run(mode: &str, input: Option<&str>) -> Result<Value, String> {
     static CAPTURE: Mutex<()> = Mutex::new(());
     let _capture = if matches!(
         mode,
-        "selected-text" | "clipboard" | "copy" | "capture-ocr" | "capture-image" | "capture-screenshot"
+        "selected-text"
+            | "clipboard"
+            | "copy"
+            | "capture-ocr"
+            | "capture-image"
+            | "capture-screenshot"
     ) {
         Some(
             CAPTURE
@@ -1759,7 +1794,12 @@ fn rust_capture_command(mode: &str) -> Result<std::process::Command, String> {
     verify_native_assembly(path,BYTES).map_err(|_|"NATIVE_BINARY: The packaged native capture executable changed or is unavailable. Restart or reinstall EchoLingo.".to_owned())?;
     let mut command = std::process::Command::new(path);
     command
-        .args(["-Mode", mode, "-CaptureOwnerProcessId", &std::process::id().to_string()])
+        .args([
+            "-Mode",
+            mode,
+            "-CaptureOwnerProcessId",
+            &std::process::id().to_string(),
+        ])
         .creation_flags(0x08000000);
     Ok(command)
 }
@@ -2169,9 +2209,15 @@ mod tests {
             "magnifierBitBltMillisecondsMax": 30,
             "magnifierReleaseDcMillisecondsTotal": 30,
             "magnifierReleaseDcMillisecondsMax": 3,
+            "magnifierSampleFlushMillisecondsTotal": 4,
+            "magnifierSampleFlushMillisecondsMax": 2,
+            "magnifierSampleCompleted": 30,
+            "magnifierStaleFrames": 2,
+            "magnifierFrameAgeMillisecondsMax": 80,
+            "magnifierSampleThreadStopped": 1,
             "captureFramePixels": "private", "captureFramePointer": [100, 200]
         }));
-        assert_eq!(safe.as_object().unwrap().len(), 21);
+        assert_eq!(safe.as_object().unwrap().len(), 27);
         assert_eq!(safe["captureFrameCount"], 63);
         for boundary in [0, 10_000_000] {
             let input: serde_json::Map<String, Value> = safe
@@ -2211,7 +2257,13 @@ mod tests {
                     "magnifierBitBltMillisecondsTotal": invalid,
                     "magnifierBitBltMillisecondsMax": invalid,
                     "magnifierReleaseDcMillisecondsTotal": invalid,
-                    "magnifierReleaseDcMillisecondsMax": invalid
+                    "magnifierReleaseDcMillisecondsMax": invalid,
+                    "magnifierSampleFlushMillisecondsTotal": invalid,
+                    "magnifierSampleFlushMillisecondsMax": invalid,
+                    "magnifierSampleCompleted": invalid,
+                    "magnifierStaleFrames": invalid,
+                    "magnifierFrameAgeMillisecondsMax": invalid,
+                    "magnifierSampleThreadStopped": invalid
                 })),
                 json!({})
             );

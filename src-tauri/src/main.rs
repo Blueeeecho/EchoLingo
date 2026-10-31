@@ -14,8 +14,8 @@ mod ocr_outcome;
 mod offline_translation;
 mod platform;
 mod popup_health;
-mod service_links;
 mod screenshot;
+mod service_links;
 mod shortcut_bindings;
 mod shortcut_control;
 mod shortcut_probe;
@@ -2483,7 +2483,9 @@ fn action_failure_presentation(
             error: None,
         });
     }
-    if matches!(action, "capture" | "ocr" | "silentOcr" | "screenshot") && error.starts_with("PERMISSION:") {
+    if matches!(action, "capture" | "ocr" | "silentOcr" | "screenshot")
+        && error.starts_with("PERMISSION:")
+    {
         // Keep permission guidance and the blank capture view in one event so
         // the frontend can prepare both before presenting the inactive popup.
         // Neither this mapping nor a shortcut requests permission or opens
@@ -2709,7 +2711,7 @@ fn start_action(app: tauri::AppHandle, action: String) {
                 "capture" | "ocr" | "silentOcr" => {
                     ocr::record_invocation();
                     platform::capture_ocr_cancelable(cancel)
-                },
+                }
                 _ => Err("未知操作".into()),
             };
             #[cfg(target_os = "windows")]
@@ -3247,8 +3249,8 @@ async fn copy_text(app: tauri::AppHandle, text: String) -> Result<(), String> {
         let _physical = state.native_tasks.enter_effect()?;
         platform::copy_text(&text)
     })
-        .await
-        .map_err(|_| "复制失败".to_string())?
+    .await
+    .map_err(|_| "复制失败".to_string())?
 }
 #[tauri::command]
 async fn set_pinned(app: tauri::AppHandle, pinned: bool) -> Result<(), String> {
@@ -3639,7 +3641,9 @@ fn main() {
                 #[cfg(target_os = "windows")]
                 windows_popup_focus_changed(window.app_handle(), *focused);
             }
-            tauri::WindowEvent::CloseRequested { api, .. } if window.label() == "screenshot-editor" => {
+            tauri::WindowEvent::CloseRequested { api, .. }
+                if window.label() == "screenshot-editor" =>
+            {
                 api.prevent_close();
                 let _ = window.emit("screenshot-close-requested", ());
             }
@@ -4499,7 +4503,7 @@ mod tests {
             history: Mutex::new(vec![]),
             pinned: AtomicBool::new(false),
             native_tasks: native_tasks::Controller::default(),
-                screenshots: screenshot::Controller::default(),
+            screenshots: screenshot::Controller::default(),
             shortcut_gate: Mutex::new(shortcut_control::ShortcutGate::default()),
             shortcut_routes: shortcut_control::ShortcutRoutes::default(),
             shortcut_updating: AtomicBool::new(false),

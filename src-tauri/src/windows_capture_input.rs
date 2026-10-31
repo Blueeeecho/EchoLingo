@@ -90,7 +90,10 @@ fn capture_drag_extent(origin: isize, x: i32, y: i32) -> (u32, u32) {
             .unsigned_abs()
             .min(i32::MAX as u64) as u32
     };
-    (extent(x, (origin >> 32) as i32), extent(y, origin as u32 as i32))
+    (
+        extent(x, (origin >> 32) as i32),
+        extent(y, origin as u32 as i32),
+    )
 }
 
 struct Shared {
@@ -458,12 +461,7 @@ pub fn mouse(kind: u32, x: i32, y: i32, mouse_data: u32) -> bool {
         return false;
     }
     let before = s.flags.load(Ordering::SeqCst);
-    let d = decide(
-        before,
-        s.closing.load(Ordering::SeqCst),
-        kind,
-        mouse_data,
-    );
+    let d = decide(before, s.closing.load(Ordering::SeqCst), kind, mouse_data);
     s.flags.store(d.flags, Ordering::SeqCst);
     // Keep a scalar maximum independently of throttled MOVE delivery. A fast
     // drag out and back between paints must not become a window click.
@@ -477,7 +475,10 @@ pub fn mouse(kind: u32, x: i32, y: i32, mouse_data: u32) -> bool {
         s.drag_max_y.fetch_max(dy, Ordering::SeqCst);
     }
     if d.message == LEFT_UP && target != 0 && s.target.load(Ordering::SeqCst) == target {
-        let excursion = pack_point(s.drag_max_x.load(Ordering::SeqCst) as i32, s.drag_max_y.load(Ordering::SeqCst) as i32);
+        let excursion = pack_point(
+            s.drag_max_x.load(Ordering::SeqCst) as i32,
+            s.drag_max_y.load(Ordering::SeqCst) as i32,
+        );
         if !post(target, DRAG_EXCURSION, token, excursion) {
             s.failed.store(true, Ordering::SeqCst);
             s.closing.store(true, Ordering::SeqCst);
@@ -805,8 +806,17 @@ mod screenshot_extent_tests {
     use super::{capture_drag_extent, pack_point};
     #[test]
     fn signed_display_coordinates_and_extremes_do_not_wrap() {
-        assert_eq!(capture_drag_extent(pack_point(-2000, -400), -1998, -401), (2, 1));
-        assert_eq!(capture_drag_extent(pack_point(-2000, -400), 300, 600), (2300, 1000));
-        assert_eq!(capture_drag_extent(pack_point(i32::MIN, i32::MAX), i32::MAX, i32::MIN), (i32::MAX as u32, i32::MAX as u32));
+        assert_eq!(
+            capture_drag_extent(pack_point(-2000, -400), -1998, -401),
+            (2, 1)
+        );
+        assert_eq!(
+            capture_drag_extent(pack_point(-2000, -400), 300, 600),
+            (2300, 1000)
+        );
+        assert_eq!(
+            capture_drag_extent(pack_point(i32::MIN, i32::MAX), i32::MAX, i32::MIN),
+            (i32::MAX as u32, i32::MAX as u32)
+        );
     }
 }

@@ -89,7 +89,10 @@ impl Controller {
     /// Call only on a blocking worker, then revalidate the image/session before
     /// the effect. It never changes intent and never blocks the UI/controller.
     pub fn enter_effect(&self) -> Result<Permit<'_>, String> {
-        let guard = self.worker.lock().map_err(|_| "NATIVE_TASK: Native worker is unavailable")?;
+        let guard = self
+            .worker
+            .lock()
+            .map_err(|_| "NATIVE_TASK: Native worker is unavailable")?;
         Ok(Permit { _guard: guard })
     }
     /// Call on a blocking worker. A stale waiter must not start a helper,
@@ -176,13 +179,17 @@ mod tests {
         let (send, receive) = mpsc::channel();
         let worker = {
             let controller = controller.clone();
-            std::thread::spawn(move || { let _effect = controller.enter_effect().unwrap(); send.send(()).unwrap(); })
+            std::thread::spawn(move || {
+                let _effect = controller.enter_effect().unwrap();
+                send.send(()).unwrap();
+            })
         };
         assert!(receive.recv_timeout(Duration::from_millis(20)).is_err());
         let latest = controller.begin().unwrap();
         assert!(old.cancelled());
         drop(physical);
-        receive.recv_timeout(Duration::from_secs(1)).unwrap(); worker.join().unwrap();
+        receive.recv_timeout(Duration::from_secs(1)).unwrap();
+        worker.join().unwrap();
         assert!(controller.is_current(&latest));
     }
     #[test]

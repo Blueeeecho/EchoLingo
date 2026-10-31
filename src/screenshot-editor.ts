@@ -1,4 +1,5 @@
 import './screenshot-editor.css';
+import { closeDialog, dialogOpen, showDialog } from './screenshot-dialog';
 import { invoke, isTauri } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 import { ScreenshotDocument, imagePoint, selectionRect, validateSize, MAX_ENCODED_BYTES, type Point, type EditOperation } from './screenshot-model';
@@ -59,14 +60,14 @@ function clearGesture(): void {
   if (gesture && canvas.hasPointerCapture(gesture.pointerId)) canvas.releasePointerCapture(gesture.pointerId);
   gesture = null; $('#gesture-rect').setAttribute('visibility', 'hidden'); $('#gesture-line').setAttribute('visibility', 'hidden');
 }
-function cancelText(): void { textDialog.close(); textInput.value = ''; textPoint = null; composing = false; imeEscape = false; }
-function resolveDiscard(value: boolean): void { discardDialog.close(); const resolve = discardResolve; discardResolve = null; resolve?.(value); }
+function cancelText(): void { closeDialog(textDialog); textInput.value = ''; textPoint = null; composing = false; imeEscape = false; }
+function resolveDiscard(value: boolean): void { closeDialog(discardDialog); const resolve = discardResolve; discardResolve = null; resolve?.(value); }
 async function confirmDiscard(action: 'open' | 'close'): Promise<boolean> {
   if (!dirty()) return true;
   if (discardResolve) return false;
   $('#discard-description').textContent = action === 'close' ? '关闭后，本次图片和编辑内容将被丢弃。不会自动保存。' : '打开新图片会替换当前图片。取消文件选择时，当前图片仍会保留。';
   $('#discard-confirm').textContent = action === 'close' ? '丢弃并关闭' : '继续打开';
-  discardDialog.showModal(); $<HTMLButtonElement>('#discard-cancel').focus();
+  showDialog(discardDialog); $<HTMLButtonElement>('#discard-cancel').focus();
   return new Promise(resolve => { discardResolve = resolve; });
 }
 async function acceptSession(value: ScreenshotSession | null): Promise<void> {
@@ -117,7 +118,7 @@ canvas.addEventListener('pointerdown', event => {
   const start = point(event); canvas.focus({ preventScroll: true });
   if (tool === 'text') {
     textPoint = { x: Math.min(model.size.width - 1, Math.floor(start.x)), y: Math.min(model.size.height - 1, Math.floor(start.y)) };
-    textInput.value = ''; $('#text-count').textContent = '0 / 2000'; textDialog.showModal(); textInput.focus(); return;
+    textInput.value = ''; $('#text-count').textContent = '0 / 2000'; showDialog(textDialog); textInput.focus(); return;
   }
   gesture = { start, end: start, pointerId: event.pointerId }; canvas.setPointerCapture(event.pointerId); event.preventDefault();
 });
@@ -162,7 +163,7 @@ $('#text-form').addEventListener('submit', event => {
 textInput.addEventListener('keydown', event => {
   imeEscape = event.key === 'Escape' && (composing || event.isComposing || event.keyCode === 229);
   if (imeEscape) { event.preventDefault(); return; }
-  if ((event.metaKey || event.ctrlKey) && event.key === 'Enter' && !event.isComposing && event.keyCode !== 229 && !composing) { event.preventDefault(); $<HTMLFormElement>('#text-form').requestSubmit(); } });
+  if ((event.metaKey || event.ctrlKey) && event.key === 'Enter' && !event.isComposing && event.keyCode !== 229 && !composing) { event.preventDefault(); $<HTMLButtonElement>('#apply-text').click(); } });
 $('#cancel-text').addEventListener('click', cancelText); textDialog.addEventListener('cancel', event => { event.preventDefault(); if (composing || imeEscape) { imeEscape = false; return; } cancelText(); });
 $('#discard-cancel').addEventListener('click', () => resolveDiscard(false)); $('#discard-confirm').addEventListener('click', () => resolveDiscard(true));
 discardDialog.addEventListener('cancel', event => { event.preventDefault(); resolveDiscard(false); });
@@ -218,7 +219,7 @@ async function closeEditor(): Promise<void> {
 $('#open-image').addEventListener('click', () => void openImage()); $('#close-editor').addEventListener('click', () => void closeEditor());
 $('#copy-image').addEventListener('click', () => void exportImage('copy')); $('#save-image').addEventListener('click', () => void exportImage('save')); $('#save-as-image').addEventListener('click', () => void exportImage('saveAs'));
 document.addEventListener('keydown', event => {
-  if (event.isComposing || event.keyCode === 229 || composing || textDialog.open || discardDialog.open) return;
+  if (event.isComposing || event.keyCode === 229 || composing || dialogOpen(textDialog) || dialogOpen(discardDialog)) return;
   if (event.target instanceof HTMLInputElement || event.target instanceof HTMLTextAreaElement || event.target instanceof HTMLSelectElement) return;
   const mod = event.ctrlKey || event.metaKey, key = event.key.toLowerCase();
   if (event.key === 'Escape') { event.preventDefault(); if (gesture) clearGesture(); else void closeEditor(); return; }

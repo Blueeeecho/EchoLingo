@@ -10,9 +10,18 @@ SPEC.loader.exec_module(REPORT)
 
 
 def complete_report():
-    cases = [{"mode": mode, "ok": True} for mode in sorted(REPORT.EXPECTED_MODES)]
+    cases = [{"mode": mode, "ok": True,
+              "helperDiagnostics": {"captureHealth": {"magnifierSampleThreadStopped": 1}}}
+             for mode in sorted(REPORT.EXPECTED_MODES)]
     case = next(case for case in cases if case["mode"] == "magnifier-continuity-armed-and-dragging")
+    case["helperDiagnostics"] = {"captureHealth": {"magnifierSampleThreadStopped": 1,
+        "magnifierSampleCompleted": 30, "magnifierFrameAgeMillisecondsMax": 80}}
     for phase in ("armed", "dragging"):
+        case[phase + "MagnifierMovingPixels"] = {
+            "distinctMotionPixelColors": 4, "maximumColorRefreshMilliseconds": 100,
+            "finalTargetPixelMatched": True, "pixelObservations": 20,
+            "observerStopped": True, "samplePixelsStored": False,
+        }
         case[phase + "MagnifierLivePixels"] = {
             "generatedColorChanges": 3, "maximumRefreshMilliseconds": 50,
             "livePixelRefreshVerified": True, "samplePixelsStored": False,
@@ -100,6 +109,37 @@ class CaptureReportTests(unittest.TestCase):
             for phase in ("armed", "dragging"):
                 case[phase + "MagnifierLivePixels"]["maximumRefreshMilliseconds"] = boundary
             self.assertEqual(REPORT.verify(json.dumps(report)), report)
+
+    def test_frozen_moving_pixels_or_unstopped_sampler_cannot_pass(self):
+        for mode in REPORT.EXPECTED_MODES:
+            report = complete_report()
+            case = next(case for case in report["cases"] if case["mode"] == mode)
+            case["helperDiagnostics"]["captureHealth"]["magnifierSampleThreadStopped"] = 0
+            with self.subTest(mode=mode), self.assertRaises(ValueError):
+                REPORT.verify(json.dumps(report))
+        for phase in ("armed", "dragging"):
+            for field, value in (("distinctMotionPixelColors", 2), ("distinctMotionPixelColors", True),
+                                 ("maximumColorRefreshMilliseconds", 201), ("maximumColorRefreshMilliseconds", -1),
+                                 ("finalTargetPixelMatched", False), ("pixelObservations", 0),
+                                 ("observerStopped", False), ("samplePixelsStored", True)):
+                report = complete_report()
+                case = next(case for case in report["cases"] if case["mode"].startswith("magnifier-continuity"))
+                case[phase + "MagnifierMovingPixels"][field] = value
+                with self.subTest(phase=phase, field=field), self.assertRaises(ValueError):
+                    REPORT.verify(json.dumps(report))
+            report = complete_report()
+            case = next(case for case in report["cases"] if case["mode"].startswith("magnifier-continuity"))
+            del case[phase + "MagnifierMovingPixels"]
+            with self.assertRaises(ValueError):
+                REPORT.verify(json.dumps(report))
+        for field, value in (("magnifierSampleThreadStopped", 0), ("magnifierSampleThreadStopped", True),
+                             ("magnifierSampleCompleted", 0), ("magnifierSampleCompleted", None),
+                             ("magnifierFrameAgeMillisecondsMax", 201), ("magnifierFrameAgeMillisecondsMax", -1)):
+            report = complete_report()
+            case = next(case for case in report["cases"] if case["mode"].startswith("magnifier-continuity"))
+            case["helperDiagnostics"]["captureHealth"][field] = value
+            with self.subTest(field=field), self.assertRaises(ValueError):
+                REPORT.verify(json.dumps(report))
 
 
 if __name__ == "__main__":

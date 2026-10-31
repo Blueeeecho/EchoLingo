@@ -18,6 +18,7 @@ try {
     });
     await page.addInitScript(() => {
       window.isTauri = true;
+      if (new URL(location.href).searchParams.has('fallbackDialog')) for (const name of ['showModal', 'close']) Object.defineProperty(HTMLDialogElement.prototype, name, { configurable: true, value: undefined });
       const callbacks = new Map(), listeners = new Map(); let callbackId = 0, nextId = 0;
       const image = (width = 96, height = 64) => {
         const canvas = document.createElement('canvas'); canvas.width = width; canvas.height = height;
@@ -59,6 +60,7 @@ try {
           }
           if (command === 'screenshot_editor_ready') { q.ready.push(args.sessionId); return; }
           if (command === 'open_screenshot_image') {
+            if (q.openError) throw new Error('QA damaged local image');
             if (q.holdOpen) await new Promise(resolve => { q.releaseOpen = resolve; });
             if (!q.nextOpen) return null;
             q.session = q.nextOpen; q.nextOpen = null; q.emit('screenshot-session', structuredClone(q.session)); return structuredClone(q.session);
@@ -160,6 +162,21 @@ try {
     assert.equal(saved.saveAs, false); assert.match(saved.pngBase64, /^iVBORw0KGgo/);
     assert.deepEqual(Object.keys(saved).sort(), ['pngBase64', 'saveAs', 'sessionId']);
 
+    // Backend-normalized local image delivery may arrive both as an event and
+    // the Open return value; install only once, reset history, retain on failure.
+    const importedId = await page.evaluate(() => { const q = window.__screenshotQA; q.nextOpen = { ...q.image(40, 30), sourceName: 'generated-local.jpg' }; return q.nextOpen.id; });
+    await page.locator('#open-image').click();
+    await page.waitForFunction(id => window.__screenshotQA.ready.includes(id), importedId);
+    assert.deepEqual(await page.locator('#image-canvas').evaluate(c => [c.width, c.height]), [40, 30]);
+    assert.equal(await page.evaluate(id => window.__screenshotQA.ready.filter(value => value === id).length, importedId), 1);
+    assert.equal(await page.locator('#undo-edit').isDisabled(), true);
+    const importedPixels = await pixels();
+    await page.evaluate(() => { window.__screenshotQA.openError = true; });
+    await page.locator('#open-image').click(); await page.locator('#discard-confirm').click();
+    await page.getByText('无法打开图片：QA damaged local image', { exact: true }).waitFor();
+    assert.deepEqual(await pixels(), importedPixels);
+    await page.evaluate(() => { window.__screenshotQA.openError = false; });
+
     // Fail closed if pixel redaction/crop throws after the original was drawn.
     // Never export the unredacted/partial canvas; undo can recover safely.
     for (const tool of ['mosaic', 'crop']) {
@@ -218,6 +235,19 @@ try {
       await page.waitForFunction(() => document.querySelector('#editor-status').dataset.error === 'true');
       assert.equal(await page.locator('#save-image').isDisabled(), true);
     }
+    // The shipped minimum OS predates native <dialog> support in WebKit.
+    // Exercise the fallback, including focus containment and Escape cancellation.
+    await page.goto(new URL('screenshot.html?fallbackDialog=1', base).href);
+    await page.waitForFunction(() => window.__screenshotQA.ready.length === 1);
+    await page.locator('[data-tool="text"]').click(); await page.locator('#image-canvas').click({ position: { x: 5, y: 5 } });
+    await page.locator('#annotation-text').fill('兼容旧版系统 WebView');
+    await page.keyboard.press('Shift+Tab'); assert.equal(await page.evaluate(() => document.activeElement.id), 'apply-text');
+    await page.locator('#cancel-text').click(); assert.equal(await page.locator('#text-dialog').isVisible(), false);
+    await page.locator('#close-editor').click(); await page.keyboard.press('Escape');
+    assert.equal(await page.evaluate(() => window.__screenshotQA.closed.length), 0);
+    await page.locator('#close-editor').click(); await page.locator('#discard-confirm').click();
+    await page.waitForFunction(() => window.__screenshotQA.closed.length === 1);
+
     // A clear before the durable snapshot is a tombstone. A newer event during
     // snapshot retrieval wins even though the old snapshot resolves later.
     await page.goto(new URL('screenshot.html?startup=cleared', base).href);

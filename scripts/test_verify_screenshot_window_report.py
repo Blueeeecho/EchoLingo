@@ -15,7 +15,11 @@ def complete():
     cases = []
     for generation, mode in enumerate(module.EXPECTED_MODES, 1):
         rejected = mode in module.REJECTED
-        native = {'ok': not rejected}
+        native = {'ok': not rejected, 'nativeBackend': 'rust-win32-capture',
+                  'captureHealth': {'nativeCaptureBackend': 1, 'nativeHostReady': 1,
+                    'nativeHostArmed': 1, 'nativeHostStopped': 1,
+                    'inputPlaneRemainingAfterCleanup': 0, 'inputPlaneVisibleCount': 0,
+                    'hookRunningAfterStop': 0}}
         if rejected:
             native['error'] = module.REJECTED[mode] + ' generated fixture rejection'
         case = {'mode': mode, 'ok': True, 'generation': generation,
@@ -28,6 +32,8 @@ def complete():
             case.update(imageWidth=80, imageHeight=60)
         cases.append(case)
     return {'ok': True, 'cases': cases, 'screenshotPurpose': True,
+            'startedGenerations': 10, 'hostExitedNormally': True, 'hostShutdownError': None,
+            'hostShutdown': {'event': 'stopped', 'ok': True, 'completedGenerations': 10, 'productionObserverStopRequested': True},
             'productionModulesImported': True, 'userContentCaptured': False,
             'clipboardAccessed': False, 'ocrInvoked': False}
 
@@ -80,6 +86,24 @@ class ScreenshotWindowReport(unittest.TestCase):
         report = complete(); report['cases'][3]['helperDiagnostics']['error'] = 'UNRELATED:'; self.rejects(report)
         report = complete(); report['cases'][0]['imageWidth'] = True; self.rejects(report)
         report = complete(); report['cases'][3]['imageWidth'] = 5; self.rejects(report)
+
+    def test_normal_host_shutdown_and_exact_generation_total_are_required(self):
+        for field, value in [('startedGenerations', 9), ('startedGenerations', True),
+                             ('hostExitedNormally', False), ('hostShutdownError', 'fixture failure'),
+                             ('hostShutdown', None)]:
+            report = complete(); report[field] = value; self.rejects(report)
+        for field, value in [('event', 'other'), ('ok', False), ('completedGenerations', 9),
+                             ('productionObserverStopRequested', False)]:
+            report = complete(); report['hostShutdown'][field] = value; self.rejects(report)
+
+    def test_backend_and_every_native_cleanup_field_are_mandatory(self):
+        report = complete(); del report['cases'][0]['helperDiagnostics']['nativeBackend']; self.rejects(report)
+        report = complete(); report['cases'][0]['helperDiagnostics']['nativeBackend'] = 'legacy'; self.rejects(report)
+        report = complete(); del report['cases'][0]['helperDiagnostics']['captureHealth']; self.rejects(report)
+        for field, value in complete()['cases'][0]['helperDiagnostics']['captureHealth'].items():
+            for invalid in (None, True, 1 - value):
+                report = complete(); report['cases'][0]['helperDiagnostics']['captureHealth'][field] = invalid
+                self.rejects(report)
 
     def test_image_or_text_payloads_are_not_report_evidence(self):
         for key in ('imageBase64', 'text'):

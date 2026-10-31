@@ -671,10 +671,19 @@ mod tests {
     #[test]
     fn screenshot_conflict_is_reported_without_removing_another_apps_registration() {
         let rows = bindings(None).unwrap();
-        let id = rows.iter().find(|row| row.action == "screenshot").unwrap().shortcut.unwrap().id();
+        let id = rows
+            .iter()
+            .find(|row| row.action == "screenshot")
+            .unwrap()
+            .shortcut
+            .unwrap()
+            .id();
         let mut registry = FakeRegistry::new(vec![], false);
         registry.conflict_id = Some(id);
-        assert_eq!(check(&mut registry, rows).protocol(), (2, "screenshot=F1\n".into()));
+        assert_eq!(
+            check(&mut registry, rows).protocol(),
+            (2, "screenshot=F1\n".into())
+        );
         assert_eq!(registry.removed.len(), 2);
         assert!(!registry.removed.contains(&id));
     }
@@ -717,7 +726,7 @@ mod native_priority_probe_tests {
         let outcome = check_windows(&mut probe, bindings(None).unwrap());
         assert_eq!(outcome.protocol().0, 0);
         assert_eq!(probe.0, 1); // F1 uses the ordinary registrar.
-        // Optional opt-in actions still use the native registrar.
+                                // Optional opt-in actions still use the native registrar.
         let mut settings = Settings::default();
         settings.shortcuts.screenshot.clear();
         settings.shortcuts.input = "Alt+A".into();

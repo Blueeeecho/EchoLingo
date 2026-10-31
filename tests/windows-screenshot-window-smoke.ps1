@@ -86,6 +86,13 @@ try {
             }
             Dictionary<string,object> reply=host.Finish(report,12000);finished=true;
             Need(!reply.ContainsKey("text"),"F1 capture unexpectedly returned OCR text.");
+            Need(reply.ContainsKey("nativeBackend")&&Convert.ToString(reply["nativeBackend"])=="rust-win32-capture","F1 did not use the exact Rust native capture backend.");
+            Need(reply.ContainsKey("captureHealth")&&reply["captureHealth"] is Dictionary<string,object>,"F1 native capture health is missing.");
+            Dictionary<string,object> health=(Dictionary<string,object>)reply["captureHealth"];
+            foreach(string key in new string[]{"nativeCaptureBackend","nativeHostReady","nativeHostArmed","nativeHostStopped"})
+                Need(health.ContainsKey(key)&&Convert.ToInt64(health[key])==1,"F1 native lifecycle evidence is missing: "+key);
+            foreach(string key in new string[]{"inputPlaneRemainingAfterCleanup","inputPlaneVisibleCount","hookRunningAfterStop"})
+                Need(health.ContainsKey(key)&&Convert.ToInt64(health[key])==0,"F1 native cleanup left resources: "+key);
             if(rejected) {
                 Need(!(bool)reply["ok"]&&!reply.ContainsKey("imageBase64"),"Invalid/stale F1 target produced pixels.");
                 string error=Convert.ToString(reply["error"]);
@@ -122,15 +129,22 @@ try {
         SetProcessDpiAwarenessContext(new IntPtr(-4));
         Need(SetThreadDpiAwarenessContext(new IntPtr(-4))!=IntPtr.Zero,"Screenshot fixture DPI context failed.");
         List<object> cases=new List<object>(); bool ok=true;
+        Dictionary<string,object> stopped=null;string shutdownError=null;int startedGenerations=0;bool hostExitedNormally=false;
         using(Host host=new Host(harness,helper)) {
             foreach(string kind in new string[]{"click-visible-window","click-small-jitter","drag-rectangle-wins","drag-out-and-back-is-not-click","moved-target-fails-closed","hidden-target-fails-closed","protected-target-fails-closed","visible-overlap-stays-in-image","escape-cancels","next-request-after-cancel"}) {
                 Dictionary<string,object> result=ScreenshotCase(host,kind);cases.Add(result);ok=ok&&(bool)result["ok"];
                 if(!host.Usable||host.Child!=0||host.Process.HasExited)break;
             }
-            if(host.Child==0&&!host.Process.HasExited){host.Shutdown();Dictionary<string,object> stopped=host.Read(4000);Need((string)stopped["event"]=="stopped"&&Convert.ToInt32(stopped["completedGenerations"])==cases.Count,"F1 generation cleanup mismatch.");Need(host.Process.WaitForExit(4000)&&host.Process.ExitCode==0,"F1 host did not exit cleanly.");}
-            else ok=false;
+            startedGenerations=host.Generation;
+            if(host.Child==0&&!host.Process.HasExited) {
+                try {
+                    host.Shutdown();stopped=host.Read(4000);
+                    Need((string)stopped["event"]=="stopped"&&Convert.ToInt32(stopped["completedGenerations"])==cases.Count&&host.Generation==cases.Count,"F1 generation cleanup mismatch.");
+                    Need(host.Process.WaitForExit(4000)&&host.Process.ExitCode==0,"F1 host did not exit cleanly.");hostExitedNormally=true;
+                } catch(Exception error) {ok=false;shutdownError=error.Message;}
+            } else {ok=false;shutdownError="F1 host did not reach an idle normal shutdown.";}
         }
-        return new Dictionary<string,object>{{"ok",ok&&cases.Count==10},{"cases",cases},{"screenshotPurpose",true},{"productionModulesImported",true},{"userContentCaptured",false},{"clipboardAccessed",false},{"ocrInvoked",false},{"scope","Generated isolated Windows desktop only; actual F1 global shortcut/editor integration and physical multi-display acceptance are separate gates."}};
+        return new Dictionary<string,object>{{"ok",ok&&cases.Count==10},{"cases",cases},{"hostShutdown",stopped},{"hostShutdownError",shutdownError},{"hostExitedNormally",hostExitedNormally},{"startedGenerations",startedGenerations},{"screenshotPurpose",true},{"productionModulesImported",true},{"userContentCaptured",false},{"clipboardAccessed",false},{"ocrInvoked",false},{"scope","Generated isolated Windows desktop only; actual F1 global shortcut/editor integration and physical multi-display acceptance are separate gates."}};
     }
 '@
     $closing=$source.LastIndexOf("`n}")

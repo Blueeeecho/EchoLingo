@@ -37,6 +37,14 @@ def verify(text):
     for field in ('userContentCaptured', 'clipboardAccessed', 'ocrInvoked'):
         if report.get(field) is not False:
             raise ValueError('F1 generated-image-only scope is absent or invalid')
+    stopped = report.get('hostShutdown')
+    if (type(report.get('startedGenerations')) is not int or report['startedGenerations'] != 10
+            or report.get('hostExitedNormally') is not True
+            or report.get('hostShutdownError') is not None
+            or not isinstance(stopped, dict) or stopped.get('event') != 'stopped'
+            or stopped.get('ok') is not True or stopped.get('productionObserverStopRequested') is not True
+            or type(stopped.get('completedGenerations')) is not int or stopped['completedGenerations'] != 10):
+        raise ValueError('F1 host must normally stop after exactly 10 native generations')
     cases = report.get('cases')
     if (not isinstance(cases, list) or len(cases) != len(EXPECTED_MODES)
             or any(not isinstance(case, dict) for case in cases)
@@ -61,6 +69,19 @@ def verify(text):
         native = case.get('helperDiagnostics')
         if not isinstance(native, dict) or native.get('ok') is not (not rejected):
             raise ValueError('F1 expected native success or fail-closed result is absent')
+        if native.get('nativeBackend') != 'rust-win32-capture':
+            raise ValueError('F1 report must identify the actual Rust native backend')
+        health = native.get('captureHealth')
+        if not isinstance(health, dict):
+            raise ValueError('F1 native input ownership and cleanup health is required')
+        for field, expected in (
+            ('nativeCaptureBackend', 1), ('nativeHostReady', 1),
+            ('nativeHostArmed', 1), ('nativeHostStopped', 1),
+            ('inputPlaneRemainingAfterCleanup', 0), ('inputPlaneVisibleCount', 0),
+            ('hookRunningAfterStop', 0),
+        ):
+            if type(health.get(field)) is not int or health[field] != expected:
+                raise ValueError('F1 native backend/cleanup health is incomplete: ' + field)
         if any(key in native or key in case for key in ('imageBase64', 'text')):
             raise ValueError('F1 report must not retain image pixels or selected text')
         if rejected:

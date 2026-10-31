@@ -3,7 +3,7 @@
 # It creates generated source content, a loopback mock and empty owned app dirs.
 # CustomShortcutsTests exercises loaded custom bindings, not Settings UI saving.
 [CmdletBinding()]
-param([string]$ApplicationPath = '', [switch]$OfflineTranslation, [switch]$InstalledPackage, [switch]$LatestIntentTests, [switch]$CustomShortcutsTests, [switch]$RustCapture, [string]$NativeCapturePath = '', [switch]$SourceTopmostModal, [switch]$DefaultCapture)
+param([string]$ApplicationPath = '', [switch]$OfflineTranslation, [switch]$InstalledPackage, [switch]$LatestIntentTests, [switch]$CustomShortcutsTests, [switch]$RustCapture, [string]$NativeCapturePath = '', [switch]$SourceTopmostModal, [switch]$DefaultCapture, [switch]$ScreenshotEditorTests)
 $ErrorActionPreference = 'Stop'
 [Console]::OutputEncoding = [Text.UTF8Encoding]::new($false)
 try {
@@ -18,6 +18,7 @@ try {
     if ([string]::IsNullOrWhiteSpace($ApplicationPath)) {
         $ApplicationPath = Join-Path $PSScriptRoot '..\src-tauri\target\release\echolingo.exe'
     }
+    if ($ScreenshotEditorTests -and ($OfflineTranslation -or $LatestIntentTests -or $CustomShortcutsTests -or -not $DefaultCapture)) { throw 'SCREENSHOT_EDITOR_SCOPE: Use the dedicated generated F1 workflow with -DefaultCapture and exact native helper.' }
     if ($LatestIntentTests -and $OfflineTranslation) { throw 'LATEST_INTENT_MOCK_ONLY: Existing three offline-model flows are unchanged.' }
     if ($CustomShortcutsTests -and ($OfflineTranslation -or $LatestIntentTests)) { throw 'CUSTOM_SHORTCUTS_MOCK_ONLY: Run the three loaded-custom-bindings workflows separately from offline/latest-intent modes.' }
     $ApplicationPath = (Resolve-Path -LiteralPath $ApplicationPath).Path
@@ -52,7 +53,7 @@ using System.Web.Script.Serialization;
 using System.Windows.Forms;
 using System.Windows.Automation;
 
-public static class EchoLingoApplicationSmoke {
+public static partial class EchoLingoApplicationSmoke {
     const string Identifier = "io.github.blueeeecho.echolingo";
     static bool Offline;
     static bool RustCapture,SourceTopmostModal;
@@ -177,8 +178,8 @@ public static class EchoLingoApplicationSmoke {
         if (GetForegroundWindow() != form.Handle && (app == null || ForegroundPid() != app.Id)) return;
         INPUT mouse = new INPUT(); mouse.data.mouse.flags = 4;
         INPUT[] input = customBindings
-            ? new INPUT[] { Key(0x11, true), Key(0x12, true), Key(0x10, true), Key(0x78, true), Key(0x79, true), Key(0x0D, true), mouse }
-            : new INPUT[] { Key(0x12, true), Key(0x44, true), Key(0x53, true), Key(0x0D, true), mouse };
+            ? new INPUT[] { Key(0x11, true), Key(0x12, true), Key(0x10, true), Key(0x78, true), Key(0x79, true), Key(0x0D, true), Key(0x70, true), Key(0x1B, true), mouse }
+            : new INPUT[] { Key(0x12, true), Key(0x44, true), Key(0x53, true), Key(0x0D, true), Key(0x70, true), Key(0x1B, true), mouse };
         SendInput((uint)input.Length, input, Marshal.SizeOf(typeof(INPUT)));
     }
     static string KnownFolder(string id) {
@@ -270,6 +271,32 @@ public static class EchoLingoApplicationSmoke {
         public InputPlaneStyleException(Dictionary<string,object> metadata)
             : base("ASSERTION_FAILED: Actual input plane has incorrect NoRedirection/NoActivate/Topmost/ToolWindow styles.") { ScalarMetadata=metadata; }
     }
+    // Failure-only scalar observation; never reclassifies or accepts an invalid
+    // live plane. HWND ownership/class can change between EnumWindows reads.
+    static Dictionary<string,object> PlaneFailureIdentity(IntPtr window,uint expectedOwner,int expectedParent,long rejectedStyle) {
+        var result=new Dictionary<string,object>{{"hwnd",WindowId(window)},{"expectedHelperProcessId",expectedOwner},
+            {"expectedParentProcessId",expectedParent},{"rejectedExtendedStyle",rejectedStyle}};
+        try {
+            uint before,after;uint thread=GetWindowThreadProcessId(window,out before);
+            StringBuilder name=new StringBuilder(256);int length=GetClassName(window,name,name.Capacity);
+            string expected=RustCapture?"EchoLingoNativeCapture-"+expectedOwner:"EchoLingoCaptureInputPlane-"+expectedOwner;
+            // Never publish a foreign/reused window's arbitrary class or title.
+            result["expectedGeneratedClass"]=expected;result["classMatchesExpected"]=length>0&&name.ToString()==expected;
+            result["ownerBeforeStyleRead"]=before;result["ownerThreadBeforeStyleRead"]=thread;
+            result["extendedStyleAfterFailure"]=GetWindowLongPtr(window,-20).ToInt64();
+            result["visibleAfterFailure"]=IsWindowVisible(window);result["existsAfterFailure"]=IsWindow(window);
+            uint afterThread=GetWindowThreadProcessId(window,out after);
+            result["ownerAfterStyleRead"]=after;result["ownerThreadAfterStyleRead"]=afterThread;
+            result["ownerIdentityStable"]=before==expectedOwner&&after==expectedOwner&&thread!=0&&thread==afterThread;
+            long verified;result["verifiedHelperStartUtcTicks"]=VerifiedNativeChildren.TryGetValue(expectedOwner,out verified)?verified:0;
+            if(before==expectedOwner&&after==expectedOwner)using(Process child=Process.GetProcessById((int)expectedOwner)) {
+                result["helperExitedAtFailure"]=child.HasExited;
+                if(!child.HasExited){long currentStarted=child.StartTime.ToUniversalTime().Ticks;result["helperStartUtcTicksAtFailure"]=currentStarted;result["sameVerifiedHelperGeneration"]=verified!=0&&currentStarted==verified;}
+            }
+            RECT rectangle;if(GetWindowRect(window,out rectangle))result["physicalBoundsAfterFailure"]=new int[]{rectangle.left,rectangle.top,rectangle.right-rectangle.left,rectangle.bottom-rectangle.top};
+        }catch(Exception error){result["observationErrorType"]=error.GetType().Name;}
+        return result;
+    }
     static long hiddenPlaneStyleChecks, hiddenPlaneWithoutTopmostChecks, visiblePlaneStyleChecks;
     static long destroyedRejectedStyleRowsSkipped, destroyedRejectedRectangleRowsSkipped;
     static List<AppEdge> AppInputPlanes(int appId, bool visibleOnly, uint edgeHelper=0, uint rejectedHelper=0) {
@@ -295,6 +322,7 @@ public static class EchoLingoApplicationSmoke {
                 bool exists=IsWindow(window);
                 if (rejectedHelper!=0 && owner==rejectedHelper && !exists) { destroyedRejectedStyleRowsSkipped++; return true; }
                 throw new InputPlaneStyleException(new Dictionary<string,object> {
+                    {"identityAfterFailure",PlaneFailureIdentity(window,owner,parent,style)},
                     {"scanPhase",visibleOnly?1:0},{"visibleAtStyleRead",visible},{"topmostRequired",requireTopmost},
                     {"extendedStyle",style},{"requiredExtendedStyle",required},{"noRedirection",(style&0x00200000L)!=0},
                     {"noActivate",(style&0x08000000L)!=0},{"toolWindow",(style&0x80L)!=0},{"topmost",(style&8L)!=0},
@@ -473,7 +501,7 @@ public static class EchoLingoApplicationSmoke {
         List<IntPtr> candidates=new List<IntPtr>();
         EnumWindows(delegate(IntPtr window,IntPtr unused){
             uint owner;GetWindowThreadProcessId(window,out owner);StringBuilder name=new StringBuilder(256);GetClassName(window,name,name.Capacity);
-            if(owner==process&&GetAncestor(window,2)==window&&name.ToString()=="Tauri Window")candidates.Add(window);return true;
+            if(owner==process&&GetAncestor(window,2)==window&&name.ToString()=="Tauri Window") { StringBuilder title=new StringBuilder(256);GetWindowText(window,title,title.Capacity);if(title.ToString().IndexOf("\u622a\u56fe",StringComparison.Ordinal)<0)candidates.Add(window); }return true;
         },IntPtr.Zero);return candidates.Count==1?candidates[0]:IntPtr.Zero;
     }
     static Dictionary<string,object> NativeStartup(Process app) {
@@ -544,7 +572,7 @@ public static class EchoLingoApplicationSmoke {
         return count;
     }
     static readonly HashSet<string> CaptureFields=new HashSet<string>(new string[]{
-        "nativeCaptureBackend","attemptId","attemptStage","resultOk","displayChangedError","helperResponseReceived","helperElapsedMilliseconds",
+        "ocrInvocationCount","nativeCaptureBackend","attemptId","attemptStage","resultOk","displayChangedError","helperResponseReceived","helperElapsedMilliseconds",
         "nativeHostReady","nativeHostStopped","nativeHostFailed","hookRunningAfterStop","inputPlaneRemainingAfterCleanup",
         "hostSessionReserved","hostOwnedButtons","hostSessionClosing","hostEndRequested","cancellationRequested","displayInvalidationReason","currentHostSessionReserved","currentHostOwnedButtons","currentHostSessionClosing","currentHostEndRequested"});
     static string ReadBoundedCaptureFile(string path) {
@@ -576,6 +604,7 @@ public static class EchoLingoApplicationSmoke {
                     long recorded=BoundedDiagnosticNumber(payload["recordedAtUnixMs"],Int64.MaxValue),now=(long)(DateTime.UtcNow-new DateTime(1970,1,1,0,0,0,DateTimeKind.Utc)).TotalMilliseconds;
                     if(recorded>=earliest&&recorded<=now) {
                         Dictionary<string,object> health=payload["diagnostics"] as Dictionary<string,object>;
+                        if(health!=null&&payload.ContainsKey("ocrInvocationCount"))health["ocrInvocationCount"]=BoundedDiagnosticNumber(payload["ocrInvocationCount"],10000000);
                         Assert(health!=null&&health.Count<=CaptureFields.Count,"Capture numeric metadata is missing or too large.");
                         foreach(KeyValuePair<string,object> pair in health){Assert(CaptureFields.Contains(pair.Key),"Unexpected capture diagnostic field.");BoundedDiagnosticNumber(pair.Value,Int64.MaxValue);}
                         Assert(!app.HasExited,"Primary exited during read-only snapshot.");return health;
@@ -646,8 +675,10 @@ public static class EchoLingoApplicationSmoke {
             }catch{editor.Failed=1;}finally{Interlocked.Exchange(ref editor.Complete,1);}});
             reader.IsBackground=true;reader.SetApartmentState(ApartmentState.MTA);reader.Start();
             Assert(primaryStart!=null&&(File.GetAttributes(roaming)&FileAttributes.ReparsePoint)==0&&File.ReadAllText(Path.Combine(roaming,MarkerName))==token,"Failure diagnostic directory is not owned.");
-            string file=Path.Combine(roaming,"selection-diagnostics.json");
-            ProcessStartInfo start=new ProcessStartInfo(executable,"--selection-diagnostics");start.UseShellExecute=false;start.CreateNoWindow=true;
+            bool captureFailure=report.ContainsKey("inputPlaneStyleFailure");
+            snapshot["diagnosticKind"]=captureFailure?"capture":"selection";
+            string file=Path.Combine(roaming,captureFailure?"capture-diagnostics.json":"selection-diagnostics.json");
+            ProcessStartInfo start=new ProcessStartInfo(executable,captureFailure?"--capture-diagnostics":"--selection-diagnostics");start.UseShellExecute=false;start.CreateNoWindow=true;
             foreach(string key in new string[]{"APPDATA","LOCALAPPDATA","TEMP","TMP","WEBVIEW2_USER_DATA_FOLDER"})start.EnvironmentVariables[key]=primaryStart.EnvironmentVariables[key];
             long earliest=(long)(DateTime.UtcNow-new DateTime(1970,1,1,0,0,0,DateTimeKind.Utc)).TotalMilliseconds;
             snapshot["diagnosticExportsRequested"]=1;secondary=Process.Start(start);
@@ -656,12 +687,12 @@ public static class EchoLingoApplicationSmoke {
             if(secondary.HasExited&&secondary.ExitCode==0&&File.Exists(file)&&budget.ElapsedMilliseconds<2000){
                 Assert((File.GetAttributes(file)&FileAttributes.ReparsePoint)==0&&new FileInfo(file).Length>0&&new FileInfo(file).Length<=16384,"Failure diagnostic file exceeds its ownership/bound contract.");
                 Dictionary<string,object> payload=new JavaScriptSerializer().Deserialize<Dictionary<string,object>>(File.ReadAllText(file));
-                Assert((string)payload["diagnostic"]=="last-selection-attempt"&&BoundedDiagnosticNumber(payload["processId"],Int32.MaxValue)==app.Id&&String.Equals((string)payload["executablePath"],Path.GetFullPath(executable),StringComparison.OrdinalIgnoreCase),"Failure diagnostic primary identity differs.");
+                Assert((string)payload["diagnostic"]==(captureFailure?"last-capture-attempt":"last-selection-attempt")&&BoundedDiagnosticNumber(payload["processId"],Int32.MaxValue)==app.Id&&String.Equals((string)payload["executablePath"],Path.GetFullPath(executable),StringComparison.OrdinalIgnoreCase),"Failure diagnostic primary identity differs.");
                 long recorded=BoundedDiagnosticNumber(payload["recordedAtUnixMs"],Int64.MaxValue),latest=(long)(DateTime.UtcNow-new DateTime(1970,1,1,0,0,0,DateTimeKind.Utc)).TotalMilliseconds;
                 snapshot["diagnosticIsFreshAfterFailure"]=recorded>=earliest&&recorded<=latest?1:0;
                 if(recorded>=earliest&&recorded<=latest){
                     Dictionary<string,object> health=payload["diagnostics"] as Dictionary<string,object>;Assert(health!=null,"Failure numeric health is missing.");
-                    Dictionary<string,object> numeric=new Dictionary<string,object>();HashSet<string> allowed=FailureHealthFields();
+                    Dictionary<string,object> numeric=new Dictionary<string,object>();HashSet<string> allowed=captureFailure?CaptureFields:FailureHealthFields();
                     foreach(KeyValuePair<string,object> pair in health)if(allowed.Contains(pair.Key))numeric[pair.Key]=BoundedDiagnosticNumber(pair.Value,10000000);
                     snapshot["nativeHealth"]=numeric;snapshot["primaryIdentityVerified"]=1;
                 }
@@ -769,6 +800,7 @@ public static class EchoLingoApplicationSmoke {
         }
         public string Url { get { return "http://127.0.0.1:" + ((IPEndPoint)listener.LocalEndpoint).Port; } }
         public int Count { get { lock (gate) return Requests.Count; } }
+        long connections; public long Connections { get { return Interlocked.Read(ref connections); } }
         public static string Kind(string text) {
             if (text == PinnedSelectionOne) return "pinned-selection-one";
             if (text == PinnedSelectionTwo) return "pinned-selection-two";
@@ -783,7 +815,7 @@ public static class EchoLingoApplicationSmoke {
         public static string Result(string kind) { return "ECHOLINGO_MOCK_" + kind.ToUpperInvariant() + "_TRANSLATED"; }
         void Loop() {
             while (!stopping) {
-                try { using (TcpClient client = listener.AcceptTcpClient()) Handle(client); }
+                try { using (TcpClient client = listener.AcceptTcpClient()) { Interlocked.Increment(ref connections); Handle(client); } }
                 catch (Exception error) { if (!stopping) Error = error.Message; }
             }
         }
@@ -853,7 +885,8 @@ public static class EchoLingoApplicationSmoke {
         using (Process command = Process.Start(stop)) { command.StandardOutput.ReadToEnd(); command.StandardError.ReadToEnd(); Assert(command.WaitForExit(10000), "Own process-tree cleanup timed out."); }
         Assert(app.WaitForExit(5000), "Own application did not exit during cleanup.");
     }
-    public static Dictionary<string, object> Run(string executable, bool offline, bool installed, bool latest, bool customBindings, bool rustCapture, string nativeCapturePath, bool sourceTopmostModal, bool defaultCapture) {
+    public static Dictionary<string, object> Run(string executable, bool offline, bool installed, bool latest, bool customBindings, bool rustCapture, string nativeCapturePath, bool sourceTopmostModal, bool defaultCapture, bool screenshotEditor) {
+        Assert(!screenshotEditor||(!offline&&!latest&&!customBindings&&defaultCapture&&!sourceTopmostModal),"Screenshot workflow must be isolated from OCR/translation modes.");
         SourceTopmostModal=sourceTopmostModal;SourceModalOwner=IntPtr.Zero;SourceModalChecks=0;
         Assert(!sourceTopmostModal||(rustCapture&&latest),"Modal run must explicitly select native capture.");
         RustCapture=rustCapture;VerifiedNativeChildren.Clear();NativeCaptureHash=rustCapture?NativeHash(nativeCapturePath):null;
@@ -862,12 +895,14 @@ public static class EchoLingoApplicationSmoke {
         Assert(!customBindings||(!offline&&!latest),"Loaded-custom-bindings workflows require their own mock-only run.");
         Offline = offline; ActualTranslations.Clear(); hiddenPlaneStyleChecks=hiddenPlaneWithoutTopmostChecks=visiblePlaneStyleChecks=0;
         Dictionary<string, object> report = new Dictionary<string, object>(); List<string> passed = new List<string>();
+        report["screenshotEditorTestsRequested"] = screenshotEditor;
+        if(screenshotEditor){report["startupSettingsWrittenDirectly"]=true;report["settingsUiSaveTested"]=false;report["defaultDesktopLocationTested"]=false;}
         report["ok"] = false; report["passed"] = passed; report["actualApplicationTested"] = false;
         report["sourceTopmostModalRequested"]=SourceTopmostModal;
         report["defaultCaptureWithoutEnvironmentRequested"]=defaultCapture;
         report["rustCaptureRequested"]=RustCapture;report["expectedNativeCaptureSha256"]=NativeCaptureHash;
         report["latestIntentTestsRequested"]=latest; report["singleHotkeyPerAction"] = true;
-        report["displayChangeRecoveryRequired"]=!offline&&!customBindings; report["uiAutomationSelectorsUsed"] = false;
+        report["displayChangeRecoveryRequired"]=!offline&&!customBindings&&!screenshotEditor; report["uiAutomationSelectorsUsed"] = false;
         report["credentialsCreated"] = false; report["credentialAccessScope"] = offline ? "None: bundled offline provider" : "One random absent provider account; no existing credential or key supplied";
         report["translationBackend"] = offline ? "real-bundled-offline-model" : "loopback-mock";
         report["multiMonitorTested"] = false; report["fullscreenTested"] = false; report["installedPackageTested"] = installed;
@@ -901,6 +936,7 @@ public static class EchoLingoApplicationSmoke {
             NativeCaptureCache=Path.GetFullPath(Path.Combine(childLocal,"EchoLingo","native"));
             string childTemp = Path.Combine(root, "Temp"); Directory.CreateDirectory(childTemp);
             string history = Path.Combine(roaming, "history.json");
+            string screenshotOutput=Path.Combine(root,"ScreenshotExports");if(screenshotEditor)Directory.CreateDirectory(screenshotOutput);
             using (MockServer server = offline ? null : new MockServer()) {
                 JavaScriptSerializer json = new JavaScriptSerializer();
                 // Current-schema fixture explicitly opts into the optional input/OCR shortcuts.
@@ -910,6 +946,7 @@ public static class EchoLingoApplicationSmoke {
                     { "languageDirectionVersion", 1 }, { "shortcutDefaultsVersion", 2 }, { "saveHistory", true }, { "maxHistory", 20 }, { "theme", "light" }, { "autoHideSeconds", 0 },
                     { "shortcuts", new Dictionary<string, object> { { "selection", selectionShortcut }, { "capture", "" }, { "ocr", "Alt+Shift+S" }, { "silentOcr", silentOcrShortcut }, { "input", "Alt+A" } } }
                 };
+                if(screenshotEditor) { settings["screenshotSaveDirectory"]=screenshotOutput;((Dictionary<string,object>)settings["shortcuts"])["screenshot"]="F1";settings["automaticUpdateChecks"]=false; }
                 File.WriteAllText(Path.Combine(roaming, "settings.json"), json.Serialize(settings), new UTF8Encoding(false));
                 SetProcessDpiAwarenessContext(new IntPtr(-4));
                 Assert(SetThreadDpiAwarenessContext(new IntPtr(-4)) != IntPtr.Zero, "Fixture main-thread physical coordinates unavailable.");
@@ -920,7 +957,7 @@ public static class EchoLingoApplicationSmoke {
                     source.Multiline = true; source.SetBounds(20, 20, 680, 80); source.Text = "Prefix " + Selected + " suffix";
                     image.SetBounds(20, 170, 680, 150); image.BackColor = Color.White;
                     string paintedOcrText=OcrText;float paintedOcrFontPoints=30;
-                    image.Paint += delegate(object sender, PaintEventArgs args) { using (Font font = new Font("Segoe UI", paintedOcrFontPoints, FontStyle.Regular)) args.Graphics.DrawString(paintedOcrText, font, Brushes.Black, 12, 40); };
+                    image.Paint += delegate(object sender, PaintEventArgs args) { if(screenshotEditor){using(SolidBrush blue=new SolidBrush(Color.FromArgb(23,101,199)))using(SolidBrush pink=new SolidBrush(Color.FromArgb(210,60,90))){args.Graphics.FillRectangle(blue,0,0,340,image.Height);args.Graphics.FillRectangle(pink,340,0,image.Width-340,image.Height);}return;} using (Font font = new Font("Segoe UI", paintedOcrFontPoints, FontStyle.Regular)) args.Graphics.DrawString(paintedOcrText, font, Brushes.Black, 12, 40); };
                     int sourceMouseEvents = 0; image.MouseDown += delegate { sourceMouseEvents++; }; image.MouseUp += delegate { sourceMouseEvents++; };
                     form.Controls.Add(source); form.Controls.Add(image); bool finished = false;
                     form.FormClosing += delegate(object sender, FormClosingEventArgs args) { if (!finished) args.Cancel = true; };
@@ -960,6 +997,7 @@ public static class EchoLingoApplicationSmoke {
                                 // and complete source/translation/history flow below do.
                                 else hotkeys["afterApplicationStart"]=ProbeHotkey(0x6E19,selectionShortcut,1,selectionKey,true);
                                 OnUi(form, delegate { form.Activate(); SetForegroundWindow(form.Handle); source.Focus(); source.Select(7, Selected.Length); }); Thread.Sleep(150);
+                                if(screenshotEditor) { stage="actual-f1-screenshot-editor";ScreenshotEditorWorkflow(form,image,app,server,history,screenshotOutput,start,executable,roaming,token,passed,report,delegate{int events=0;OnUi(form,delegate{events=sourceMouseEvents;});return events;});report["ok"]=true;return; }
                                 stage="first-selected-text-shortcut";
                                 Shortcut(form, selectionKey, customBindings);
                                 if (customBindings) report["customShortcutExecutedWorkflowCount"] = 1;
@@ -1095,11 +1133,12 @@ public static class EchoLingoApplicationSmoke {
     }
 }
 '@
+    $source += [IO.File]::ReadAllText((Join-Path $PSScriptRoot 'windows-screenshot-editor-fixture.cs'), [Text.Encoding]::UTF8)
     $references = @([Windows.Forms.Form].Assembly.Location, [Drawing.Bitmap].Assembly.Location,
         [Web.Script.Serialization.JavaScriptSerializer].Assembly.Location, [Management.ManagementObject].Assembly.Location, [Windows.Automation.AutomationElement].Assembly.Location,
         [Windows.Automation.ControlType].Assembly.Location, [Windows.DependencyObject].Assembly.Location) | Select-Object -Unique
     Add-Type -TypeDefinition $source -ReferencedAssemblies $references
-    $result = [EchoLingoApplicationSmoke]::Run($ApplicationPath, [bool]$OfflineTranslation, [bool]$InstalledPackage, [bool]$LatestIntentTests, [bool]$CustomShortcutsTests, [bool]$RustCapture, $NativeCapturePath, [bool]$SourceTopmostModal, [bool]$DefaultCapture)
+    $result = [EchoLingoApplicationSmoke]::Run($ApplicationPath, [bool]$OfflineTranslation, [bool]$InstalledPackage, [bool]$LatestIntentTests, [bool]$CustomShortcutsTests, [bool]$RustCapture, $NativeCapturePath, [bool]$SourceTopmostModal, [bool]$DefaultCapture, [bool]$ScreenshotEditorTests)
     $result['powerShellVersion'] = $PSVersionTable.PSVersion.ToString()
     $result['applicationSha256'] = (Get-FileHash -Algorithm SHA256 -LiteralPath $ApplicationPath).Hash.ToLowerInvariant()
     [Console]::Out.WriteLine(($result | ConvertTo-Json -Depth 12 -Compress))

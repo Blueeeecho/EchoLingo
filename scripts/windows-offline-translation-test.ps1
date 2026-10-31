@@ -1,6 +1,7 @@
 # Real bundled-model and installed-NSIS acceptance, CI disposable Windows only.
 # Program-specific firewall rules are temporary; no adapter/profile/default
-# policy is changed. This script never uses a translation HTTP mock or API key.
+# policy is changed. No translation results or API keys are mocked; the separate
+# F1 editor fixture uses a zero-request loopback trap, not a translation response.
 [CmdletBinding()]
 param([string]$InstallerPath = '', [string]$ApplicationSmokePath = '', [string]$NativeCapturePath = '')
 $ErrorActionPreference = 'Stop'
@@ -16,6 +17,7 @@ $app = $null
 $cli = $null
 $install = $null
 $smoke = $null
+$screenshotSmoke = $null
 
 function Assert-Fixture([bool]$Condition, [string]$Message) {
     if (-not $Condition) { throw "OFFLINE_ACCEPTANCE: $Message" }
@@ -260,6 +262,21 @@ public static class EchoLingoOwnedDirectory {
     $report.installedApplication = $smokeOut.Result.Trim() | ConvertFrom-Json
     Assert-Fixture ($smoke.ExitCode -eq 0 -and $report.installedApplication.ok -and $report.installedApplication.translationBackend -eq 'real-bundled-offline-model' -and @($report.installedApplication.mockRequests).Count -eq 0) ('Installed app did not pass real offline core flows: ' + $smokeErr.Result)
     Assert-Fixture ($report.installedApplication.defaultCaptureWithoutEnvironmentRequested -eq $true -and $report.installedApplication.captureBackendEnvironmentAbsent -eq $true -and $report.installedApplication.defaultNativeCaptureCompletion.nativeCaptureBackend -eq 1) 'Installed package did not verify the unset-environment native screenshot backend.'
+    # Test the actual NSIS-installed executable, not only the pre-bundle app.
+    # Its exact bundle-marker-derived identity was verified above and is rechecked below.
+    $screenshotArguments = '-NoProfile -STA -ExecutionPolicy Bypass -File ' + (Quote-Argument $ApplicationSmokePath) + ' -ApplicationPath ' + (Quote-Argument $app) + ' -ScreenshotEditorTests -InstalledPackage -DefaultCapture -NativeCapturePath ' + (Quote-Argument $NativeCapturePath)
+    $screenshotSmoke = Start-Captured (Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe') $screenshotArguments
+    $screenshotSmoke.StandardInput.Close()
+    $screenshotOut = $screenshotSmoke.StandardOutput.ReadToEndAsync()
+    $screenshotErr = $screenshotSmoke.StandardError.ReadToEndAsync()
+    Assert-Fixture ($screenshotSmoke.WaitForExit(300000)) 'Installed F1 editor smoke exceeded its separate bounded deadline.'
+    $screenshotLog = Join-Path $env:RUNNER_TEMP 'echolingo-installed-screenshot-editor.log'
+    [IO.File]::WriteAllText($screenshotLog, $screenshotOut.Result, [Text.UTF8Encoding]::new($false))
+    Assert-Fixture ($screenshotSmoke.ExitCode -eq 0) ('Installed F1 editor fixture failed: ' + $screenshotErr.Result)
+    & python (Join-Path $PSScriptRoot 'verify_screenshot_editor_report.py') $screenshotLog --application $app --installed
+    Assert-Fixture ($LASTEXITCODE -eq 0) 'Installed F1 editor raw evidence is incomplete or does not identify the installed bytes.'
+    $report.installedScreenshotEditor = $screenshotOut.Result.Trim() | ConvertFrom-Json
+    $report.installedScreenshotEditorVerified = $true
     $report.installedPackageTested = $true
     $report.policyStillEffective = @(Assert-OfflinePolicy)
     Assert-Fixture ((Get-FileHash -Algorithm SHA256 -LiteralPath $engine).Hash.ToLowerInvariant() -eq $report.engineSha256 -and (Get-FileHash -Algorithm SHA256 -LiteralPath $app).Hash.ToLowerInvariant() -eq $report.applicationSha256) 'Installed executable changed during the real-model test.'
@@ -274,7 +291,7 @@ public static class EchoLingoOwnedDirectory {
     $report.error = $message
 } finally {
     if ($null -ne $cli) { try { if (-not $cli.HasExited) { $cli.Kill(); $cli.WaitForExit(5000) | Out-Null } } catch { $report.ok = $false; $report.engineCleanupError = $_.Exception.Message }; $cli.Dispose() }
-    foreach ($ownedProcess in @($smoke, $install)) {
+    foreach ($ownedProcess in @($smoke, $screenshotSmoke, $install)) {
         if ($null -ne $ownedProcess) {
             try { if (-not $ownedProcess.HasExited) { & taskkill.exe /PID $ownedProcess.Id /T /F 2>&1 | Out-Null; $ownedProcess.WaitForExit(5000) | Out-Null } }
             catch { $report.ok = $false; $report.processCleanupError = $_.Exception.Message }

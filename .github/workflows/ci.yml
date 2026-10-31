@@ -154,6 +154,33 @@ jobs:
           name: macOS-routed-edge-diagnostic
           path: ${{ runner.temp }}/native-edge-diagnostic.log
           if-no-files-found: warn
+  macos-screenshot-native-probe:
+    name: macOS native screenshot capture (permission block is not a pass)
+    runs-on: macos-latest
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - name: Exercise generated native images, dialogs and production capture
+        id: macos_f1_native_probe
+        continue-on-error: true
+        shell: bash
+        run: bash tests/macos-screenshot-native-fixture.sh "$RUNNER_TEMP/macos-f1-native-probe" --isolated-test-session
+      - name: Preserve native capture provenance and failures
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: macOS-F1-native-probe
+          path: ${{ runner.temp }}/macos-f1-native-probe
+          if-no-files-found: error
+      - name: Require actual native capture pass, not blocked permissions
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo 'Native capture probe outcome: ${{ steps.macos_f1_native_probe.outcome }}. This is not physical F1 or packaged editor acceptance. Permission-blocked capture remains a failed gate; no security settings are changed.' >> "$GITHUB_STEP_SUMMARY"
+          python3 scripts/verify-macos-screenshot-probe.py "$RUNNER_TEMP/macos-f1-native-probe/report.json" 2>&1 | tee -a "$GITHUB_STEP_SUMMARY"
   desktop:
     if: github.event.inputs.mode != 'windows-popup-diagnostics' && github.event.inputs.mode != 'windows-popup-current-diagnostics' && github.event.inputs.mode != 'windows-application-diagnostics' && github.event.inputs.mode != 'windows-input-plane-experiment' && github.event.inputs.mode != 'windows-native-diagnostics' && github.event.inputs.mode != 'windows-shortcuts-ui-diagnostics' && github.event.inputs.mode != 'windows-shortcuts-ui-medium-diagnostics' && github.event.inputs.mode != 'windows-shortcuts-current-diagnostics' && github.event.inputs.mode != 'windows-shortcuts-workflows-diagnostics' && github.event.inputs.mode != 'windows-delegated-diagnostics' && github.event.inputs.mode != 'windows-browser-diagnostics' && github.event.inputs.mode != 'windows-selection-same-page-diagnostics' && github.event.inputs.mode != 'windows-selection-browser-app-diagnostics' && github.event.inputs.mode != 'windows-browser-ocr-visibility-diagnostics' && github.event.inputs.mode != 'windows-selection-cold-edge-diagnostics' && github.event.inputs.mode != 'windows-selection-paced-edge-diagnostics' && github.event.inputs.mode != 'windows-selection-nonbrowser-app-diagnostics' && github.event.inputs.mode != 'windows-latest-intent-diagnostics' && github.event.inputs.mode != 'windows-selection-application-diagnostics' && github.event.inputs.mode != 'windows-selection-clipboard-diagnostics' && github.event.inputs.mode != 'windows-selection-notepad-diagnostics' && github.event.inputs.mode != 'windows-selection-budget-diagnostics' && github.event.inputs.mode != 'windows-selection-context-diagnostics' && github.event.inputs.mode != 'windows-wps-selection-diagnostics' && github.event.inputs.mode != 'windows-focus-resize-current-diagnostics' && github.event.inputs.mode != 'windows-priority-input-diagnostics' && github.event.inputs.mode != 'windows-priority-candidate-diagnostics'
     strategy:
@@ -362,6 +389,20 @@ jobs:
           $output = @(& powershell.exe -NoProfile -STA -ExecutionPolicy Bypass -File tests/windows-screenshot-window-smoke.ps1 -NativeCapturePath '${{ steps.windows_native_candidate.outputs.capturePath }}' -HarnessPath "$env:RUNNER_TEMP/echolingo-screenshot-window-harness.exe" -IsolatedTestSession 2>&1)
           $fixtureExit = $LASTEXITCODE
           $output | Out-File "$env:RUNNER_TEMP/echolingo-screenshot-window.log" -Encoding utf8
+          $output | Write-Output
+          exit $fixtureExit
+      - name: Windows actual F1 editor image clipboard and safe PNG export
+        id: windows_screenshot_editor
+        if: runner.os == 'Windows'
+        continue-on-error: true
+        timeout-minutes: 8
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Continue'
+          $global:LASTEXITCODE = 1
+          $output = @(& powershell.exe -NoProfile -STA -ExecutionPolicy Bypass -File tests/windows-application-smoke.ps1 -ApplicationPath src-tauri/target/release/echolingo.exe -ScreenshotEditorTests -DefaultCapture -NativeCapturePath '${{ steps.windows_native_candidate.outputs.capturePath }}' 2>&1)
+          $fixtureExit = $LASTEXITCODE
+          $output | Out-File "$env:RUNNER_TEMP/echolingo-screenshot-editor.log" -Encoding utf8
           $output | Write-Output
           exit $fixtureExit
       - name: Verify generated Windows launcher boundaries and same-DLL performance
@@ -708,6 +749,8 @@ jobs:
             ${{ runner.temp }}/echolingo-native-delegated-capture.log
             ${{ runner.temp }}/echolingo-native-capture-continuity.log
             ${{ runner.temp }}/echolingo-screenshot-window.log
+            ${{ runner.temp }}/echolingo-screenshot-editor.log
+            ${{ runner.temp }}/echolingo-installed-screenshot-editor.log
             ${{ runner.temp }}/echolingo-helper-performance.log
             ${{ runner.temp }}/echolingo-popup-resize.log
             ${{ runner.temp }}/echolingo-selection-document.log
@@ -763,6 +806,7 @@ jobs:
             delegatedCapture = '${{ steps.windows_delegated_capture.outcome }}'
             nativeCaptureContinuity = '${{ steps.windows_native_capture_continuity.outcome }}'
             screenshotWindow = '${{ steps.windows_screenshot_window.outcome }}'
+            screenshotEditor = '${{ steps.windows_screenshot_editor.outcome }}'
             selectionDocument = '${{ steps.windows_selection_document.outcome }}'
             selectionCompatibility = '${{ steps.windows_selection_compat.outcome }}'
             selectionNativeFocus = '${{ steps.windows_selection_native_focus.outcome }}'
@@ -780,6 +824,9 @@ jobs:
           $global:LASTEXITCODE = 1
           & python scripts/verify-screenshot-window-report.py "$env:RUNNER_TEMP/echolingo-screenshot-window.log"
           if ($LASTEXITCODE -ne 0) { throw 'Embedded F1 selector acceptance report is missing, incomplete or failed.' }
+          $global:LASTEXITCODE = 1
+          & python scripts/verify_screenshot_editor_report.py "$env:RUNNER_TEMP/echolingo-screenshot-editor.log" --application src-tauri/target/release/echolingo.exe
+          if ($LASTEXITCODE -ne 0) { throw 'Actual F1 editor acceptance report is missing, incomplete or failed.' }
           if (@($taskOutcomes.Values | Where-Object { $_ -ne 'success' }).Count -gt 0) {
             throw 'Windows desktop acceptance incomplete or failed; preview artifacts are not a passing release.'
           }

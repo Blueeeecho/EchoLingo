@@ -14,6 +14,23 @@ export const MAX_ENCODED_BYTES = 32 * 1024 * 1024;
 export const MAX_TEXT = 2_000;
 export const MAX_OPERATIONS = 500;
 export const MAX_UNDO = 100;
+// Bound a single replay as well as history size. Large-image pixel operations
+// otherwise multiply 500 steps into billions of synchronous pixel visits.
+export const MAX_REPLAY_PIXELS = 256_000_000;
+function operationCost(operation: EditOperation, size: Size): number {
+  if (operation.kind === 'mosaic') return operation.rect.width * operation.rect.height * 4;
+  if (operation.kind === 'crop') return operation.rect.width * operation.rect.height * 2;
+  if (operation.kind === 'rectangle') return operation.solid ? operation.rect.width * operation.rect.height
+    : Math.min(operation.rect.width * operation.rect.height, (operation.rect.width + operation.rect.height) * operation.width * 2);
+  if (operation.kind === 'arrow') return Math.hypot(operation.end.x - operation.start.x, operation.end.y - operation.start.y) * operation.width * 6 + operation.width ** 2 * 32;
+  const lines = operation.text.split('\n').reduce((sum, line) => sum + Math.max(1, Math.ceil([...line].length / Math.max(1, Math.floor(operation.maxWidth / operation.size)))), 0);
+  return operation.maxWidth * Math.min(size.height - operation.point.y, lines * operation.size * 1.35);
+}
+function replayCost(original: Size, operations: readonly EditOperation[]): number {
+  let cost = original.width * original.height, size = original;
+  for (const operation of operations) { cost += operationCost(operation, size); if (operation.kind === 'crop') size = operation.rect; }
+  return cost;
+}
 const finite = (n: number) => Number.isFinite(n);
 const clamp = (n: number, lo: number, hi: number) => Math.max(lo, Math.min(n, hi));
 export function validateSize(size: Size): void {
@@ -50,7 +67,10 @@ export function validateOperation(operation: EditOperation, size: Size): void {
   if (operation.kind === 'mosaic' && (!Number.isSafeInteger(operation.blockSize) || operation.blockSize < 4 || operation.blockSize > 128)) throw new Error('马赛克大小无效。');
 }
 function immutableOperation(operation: EditOperation): EditOperation {
-  const copy = structuredClone(operation);
+  const copy = { ...operation };
+  if ('rect' in copy) copy.rect = { ...copy.rect };
+  if ('point' in copy) copy.point = { ...copy.point };
+  if ('start' in copy) { copy.start = { ...copy.start }; copy.end = { ...copy.end }; }
   for (const value of Object.values(copy)) if (value && typeof value === 'object') Object.freeze(value);
   return Object.freeze(copy);
 }
@@ -71,6 +91,7 @@ export class ScreenshotDocument {
   append(operation: EditOperation): void {
     validateOperation(operation, this.size);
     if (this.cursor >= MAX_OPERATIONS) throw new Error('已达到 500 步编辑上限。请保存图片，再打开已保存的图片继续编辑。');
+    if (replayCost(this.original, [...this.operations, operation]) > MAX_REPLAY_PIXELS) throw new Error('这张大图的编辑量已达到安全上限。请保存图片，再打开保存结果继续编辑。');
     this.nodes.splice(this.cursor, this.nodes.length - this.cursor, { id: this.nextId++, operation: immutableOperation(operation) });
     this.cursor++; this.floor = Math.max(this.floor, this.cursor - MAX_UNDO);
   }

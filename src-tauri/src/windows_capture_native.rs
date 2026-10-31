@@ -375,8 +375,9 @@ struct Surface {
     width: i32,
     height: i32,
 }
-// GDI handles and every canvas owner stay on the native UI thread; Surface is
-// intentionally not Send/Sync. WM_PAINT borrows it only during synchronous redraw.
+// Each Surface stays on its creating thread and is intentionally not Send/Sync.
+// The UI canvas is borrowed only by synchronous WM_PAINT; the sampling worker
+// owns a separate DIB and hands off owned bytes, never GDI objects.
 impl Surface {
     fn new(width: i32, height: i32) -> Result<Self> {
         Self::allocate(width, height, true)
@@ -545,6 +546,21 @@ impl Surface {
         }
         Ok(bytes)
     }
+    fn pixels(&self) -> Result<Vec<u8>> {
+        if self.bits.is_null() || unsafe { w::GdiFlush() } == 0 {
+            return Err(error("CAPTURE_BITMAP_SYNC"));
+        }
+        let length = self.width as usize * self.height as usize * 4;
+        Ok(unsafe { std::slice::from_raw_parts(self.bits, length) }.to_vec())
+    }
+    fn write_pixels(&mut self, pixels: &[u8]) -> Result<()> {
+        let length = self.width as usize * self.height as usize * 4;
+        if self.bits.is_null() || pixels.len() != length || unsafe { w::GdiFlush() } == 0 {
+            return Err(error("CAPTURE_BITMAP_SYNC"));
+        }
+        unsafe { std::ptr::copy_nonoverlapping(pixels.as_ptr(), self.bits, length) };
+        Ok(())
+    }
 }
 impl Drop for Surface {
     fn drop(&mut self) {
@@ -553,6 +569,126 @@ impl Drop for Surface {
             w::DeleteObject(self.bitmap);
             w::DeleteDC(self.dc);
         }
+    }
+}
+
+struct SampleFrame {
+    ticket: CaptureSampleTicket,
+    pixels: Vec<u8>,
+    // clear, GetDC, BitBlt, ReleaseDC, pixel flush/read, complete sample.
+    milliseconds: [u64; 6],
+}
+struct ScreenSampler {
+    request: Option<std::sync::mpsc::SyncSender<CaptureSampleTicket>>,
+    reply: std::sync::mpsc::Receiver<Result<SampleFrame>>,
+    stopping: Arc<AtomicBool>,
+    join: Option<std::thread::JoinHandle<()>>,
+}
+impl ScreenSampler {
+    fn start() -> Result<Self> {
+        let (request, requests) = std::sync::mpsc::sync_channel::<CaptureSampleTicket>(1);
+        let (replies, reply) = std::sync::mpsc::sync_channel(1);
+        let stopping = Arc::new(AtomicBool::new(false));
+        let worker_stopping = stopping.clone();
+        let join = std::thread::Builder::new()
+            .name("capture-sample".into())
+            .spawn(move || {
+                let work = (|| -> Result<()> {
+                    unsafe {
+                        if w::SetThreadDpiAwarenessContext(-4isize as _).is_null() {
+                            w::SetThreadDpiAwarenessContext(-3isize as _);
+                        }
+                        if w::GetAwarenessFromDpiAwarenessContext(w::GetThreadDpiAwarenessContext())
+                            != 2
+                        {
+                            return Err(error("CAPTURE_DPI"));
+                        }
+                    }
+                    // No Surface or GDI handle crosses threads. This DIB and
+                    // every screen DC are created, used and freed here.
+                    let raw =
+                        Surface::new(CaptureMagnifierSample::SIDE, CaptureMagnifierSample::SIDE)?;
+                    while let Ok(ticket) = requests.recv() {
+                        if worker_stopping.load(Ordering::SeqCst) {
+                            break;
+                        }
+                        let total = Instant::now();
+                        let started = Instant::now();
+                        raw.clear(w::rgb(22, 26, 34));
+                        let clear = started.elapsed().as_millis().min(10_000_000) as u64;
+                        let times = raw.copy_screen_timed(
+                            ticket.sample.copy_offset,
+                            ticket.sample.grabbed,
+                            false,
+                        )?;
+                        let started = Instant::now();
+                        let pixels = raw.pixels()?;
+                        let flush = started.elapsed().as_millis().min(10_000_000) as u64;
+                        if worker_stopping.load(Ordering::SeqCst) {
+                            break;
+                        }
+                        let frame = SampleFrame {
+                            ticket,
+                            pixels,
+                            milliseconds: [
+                                clear,
+                                times[0],
+                                times[1],
+                                times[2],
+                                flush,
+                                total.elapsed().as_millis().min(10_000_000) as u64,
+                            ],
+                        };
+                        if replies.send(Ok(frame)).is_err() {
+                            break;
+                        }
+                    }
+                    Ok(())
+                })();
+                if let Err(error) = work {
+                    let _ = replies.try_send(Err(error));
+                }
+            })
+            .map_err(|_| error("CAPTURE_SAMPLE_THREAD"))?;
+        Ok(Self {
+            request: Some(request),
+            reply,
+            stopping,
+            join: Some(join),
+        })
+    }
+    fn request(&self, ticket: CaptureSampleTicket) -> Result<()> {
+        self.request
+            .as_ref()
+            .ok_or_else(|| error("CAPTURE_SAMPLE_STOPPED"))?
+            .try_send(ticket)
+            .map_err(|_| error("CAPTURE_SAMPLE_QUEUE"))
+    }
+    fn poll(&self) -> Result<Option<SampleFrame>> {
+        match self.reply.try_recv() {
+            Ok(frame) => frame.map(Some),
+            Err(std::sync::mpsc::TryRecvError::Empty) => Ok(None),
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => Err(error("CAPTURE_SAMPLE_THREAD")),
+        }
+    }
+    fn stop(&mut self) {
+        self.stopping.store(true, Ordering::SeqCst);
+        self.request.take();
+    }
+    fn join_if_finished(&mut self) -> Option<bool> {
+        if self.join.as_ref().is_some_and(|join| !join.is_finished()) {
+            return None;
+        }
+        Some(self.join.take().is_none_or(|join| join.join().is_ok()))
+    }
+}
+impl Drop for ScreenSampler {
+    fn drop(&mut self) {
+        self.stop();
+        // Never abandon borrowed/shared GDI state: the worker owns everything.
+        // A stalled OS call is reported by cleanup; this isolated helper exits
+        // instead of letting that thread or its resources enter the app process.
+        let _ = self.join_if_finished();
     }
 }
 struct Cancellation(w::H);
@@ -958,7 +1094,12 @@ fn hover_target(pointer: Point, own: &HashSet<isize>, owner: u32) -> Option<Capt
         window_target(root, Some(pointer), own, owner)
     }
 }
-fn window_target(root: w::H, pointer: Option<Point>, own: &HashSet<isize>, owner: u32) -> Option<CaptureWindowTarget> {
+fn window_target(
+    root: w::H,
+    pointer: Option<Point>,
+    own: &HashSet<isize>,
+    owner: u32,
+) -> Option<CaptureWindowTarget> {
     unsafe {
         if root.is_null()
             || root == w::GetDesktopWindow()
@@ -1009,13 +1150,19 @@ fn window_target(root: w::H, pointer: Option<Point>, own: &HashSet<isize>, owner
             || w::GetAncestor(root, 2) != root
             || w::GetWindowThreadProcessId(root, &mut after) != thread
             || after != pid
-            || w::IsWindowVisible(root) == 0 || w::IsIconic(root) != 0
+            || w::IsWindowVisible(root) == 0
+            || w::IsIconic(root) != 0
             || !bounds.valid()
             || pointer.is_some_and(|point| !bounds.contains(point))
         {
             None
         } else {
-            Some(CaptureWindowTarget { window: root as usize, process: pid, thread, frame: bounds })
+            Some(CaptureWindowTarget {
+                window: root as usize,
+                process: pid,
+                thread,
+                frame: bounds,
+            })
         }
     }
 }
@@ -1026,8 +1173,10 @@ struct Picker {
     planes: Vec<Window>,
     edges: Vec<Window>,
     loupe: Window,
-    // One fixed-size source bitmap per picker, not a new GDI DC/DIB per frame.
+    // Fixed UI upload bitmap; the sampling thread owns a separate source DIB.
     loupe_sample: Surface,
+    sampler: ScreenSampler,
+    sample_policy: CaptureSamplePolicy,
     own: HashSet<isize>,
     owner_process: u32,
     purpose: CapturePurpose,
@@ -1081,7 +1230,8 @@ impl Picker {
         let topology = topology(&class, &inbox, &canvas)?;
         let selection = CaptureSelectionState::with_purpose(
             topology.displays().iter().map(|d| d.bounds).collect(),
-            pointer()?, request.purpose,
+            pointer()?,
+            request.purpose,
         )
         .map_err(str::to_owned)?;
         let mailbox = Window::new(
@@ -1125,7 +1275,8 @@ impl Picker {
         )?;
         own.insert(loupe.hwnd as isize);
         let loupe_sample =
-            Surface::preview(CaptureMagnifierSample::SIDE, CaptureMagnifierSample::SIDE)?;
+            Surface::new(CaptureMagnifierSample::SIDE, CaptureMagnifierSample::SIDE)?;
+        let sampler = ScreenSampler::start()?;
         *canvas.lock().map_err(|_| error("CAPTURE_BITMAP"))? = Some(Surface::preview(156, 174)?);
         let mut input = CaptureInputPolicy::default();
         input.resync_released_buttons(down(1), down(2));
@@ -1167,6 +1318,12 @@ impl Picker {
             "magnifierBitBltMillisecondsMax",
             "magnifierReleaseDcMillisecondsTotal",
             "magnifierReleaseDcMillisecondsMax",
+            "magnifierSampleFlushMillisecondsTotal",
+            "magnifierSampleFlushMillisecondsMax",
+            "magnifierSampleCompleted",
+            "magnifierStaleFrames",
+            "magnifierFrameAgeMillisecondsMax",
+            "magnifierSampleThreadStopped",
         ] {
             health.insert(name, 0);
         }
@@ -1184,6 +1341,8 @@ impl Picker {
             edges,
             loupe,
             loupe_sample,
+            sampler,
+            sample_policy: CaptureSamplePolicy::default(),
             own,
             owner_process: request.owner_process,
             purpose: request.purpose,
@@ -1266,13 +1425,20 @@ impl Picker {
     fn mouse(&mut self, kind: u32, p: Point) -> Result<()> {
         if kind == 0x201 && self.purpose == CapturePurpose::Screenshot && !self.selection.dragging {
             let target = hover_target(p, &self.own, self.owner_process);
-            let dpi = self.topology.displays().iter().find(|d| d.bounds.contains(p)).map_or(96, |d| d.dpi);
+            let dpi = self
+                .topology
+                .displays()
+                .iter()
+                .find(|d| d.bounds.contains(p))
+                .map_or(96, |d| d.dpi);
             self.selection.set_window_candidate(target, dpi);
         }
         self.input.mouse(kind, p, &mut self.selection);
         // Once released, a changed/closed/reused/protected target is an error,
         // not permission to capture the stale coordinates or a replacement.
-        if kind == 0x202 { self.validate_window()?; }
+        if kind == 0x202 {
+            self.validate_window()?;
+        }
         Ok(())
     }
     fn events(&mut self) -> Result<()> {
@@ -1380,7 +1546,10 @@ impl Picker {
                             }
                         }
                         wire::DRAG_EXCURSION => {
-                            self.selection.note_drag_excursion(((value as u64) >> 32) as i32, value as u32 as i32);
+                            self.selection.note_drag_excursion(
+                                ((value as u64) >> 32) as i32,
+                                value as u32 as i32,
+                            );
                         }
                         wire::MOVE => {
                             self.host.send(wire::MOVE_ACK)?;
@@ -1498,13 +1667,12 @@ impl Picker {
             self.last_raise = elapsed;
         }
         if self.first {
-            self.health.insert(
-                "firstBordersVisibleMilliseconds",
-                self.started.elapsed().as_millis() as u64,
-            );
+            self.health
+                .entry("firstBordersVisibleMilliseconds")
+                .or_insert(self.started.elapsed().as_millis() as u64);
         }
         let magnifier_started = Instant::now();
-        self.render_loupe(p)?;
+        let complete = self.render_loupe(p)?;
         self.record_render_duration(
             "magnifierRenderMillisecondsTotal",
             "magnifierRenderMillisecondsMax",
@@ -1519,7 +1687,7 @@ impl Picker {
         if self.selection.dragging {
             self.increment("captureDraggingFrameCount");
         }
-        if self.first {
+        if self.first && complete {
             self.health.insert(
                 "firstPickerFrameCompleteMilliseconds",
                 self.started.elapsed().as_millis() as u64,
@@ -1528,7 +1696,45 @@ impl Picker {
         }
         Ok(())
     }
-    fn render_loupe(&mut self, p: Point) -> Result<()> {
+    fn render_loupe(&mut self, p: Point) -> Result<bool> {
+        if let Some(frame) = self.sampler.poll()? {
+            self.increment("magnifierSampleCompleted");
+            for ((total, max), elapsed) in [
+                (
+                    "magnifierClearMillisecondsTotal",
+                    "magnifierClearMillisecondsMax",
+                ),
+                (
+                    "magnifierGetDcMillisecondsTotal",
+                    "magnifierGetDcMillisecondsMax",
+                ),
+                (
+                    "magnifierBitBltMillisecondsTotal",
+                    "magnifierBitBltMillisecondsMax",
+                ),
+                (
+                    "magnifierReleaseDcMillisecondsTotal",
+                    "magnifierReleaseDcMillisecondsMax",
+                ),
+                (
+                    "magnifierSampleFlushMillisecondsTotal",
+                    "magnifierSampleFlushMillisecondsMax",
+                ),
+                (
+                    "magnifierSampleMillisecondsTotal",
+                    "magnifierSampleMillisecondsMax",
+                ),
+            ]
+            .into_iter()
+            .zip(frame.milliseconds)
+            {
+                self.record_duration_value(total, max, elapsed);
+            }
+            let now = self.started.elapsed().as_millis() as i64;
+            if self.sample_policy.complete(frame.ticket, now) {
+                self.loupe_sample.write_pixels(&frame.pixels)?;
+            }
+        }
         let sample = CaptureMagnifierSample::new(p, self.selection.desktop);
         let area = self
             .topology
@@ -1537,51 +1743,23 @@ impl Picker {
             .find(|d| d.bounds.contains(p))
             .map(|d| d.bounds)
             .unwrap_or(self.selection.desktop);
-        let place = magnifier_place(p, sample.bounds, area);
-        if self.loupe.visible() && self.loupe.bounds()?.intersect(sample.bounds).valid() {
-            set_bounds(self.loupe.hwnd, TOPMOST, place, POS)?;
-        }
         if sample.grabbed.width < 4 || sample.grabbed.height < 4 {
-            self.loupe.hide();
-            return Ok(());
+            return Err(error("CAPTURE_MAGNIFIER_SAMPLE"));
         }
-        let sample_started = Instant::now();
-        let clear_started = Instant::now();
-        self.loupe_sample.clear(w::rgb(22, 26, 34));
-        self.record_render_duration(
-            "magnifierClearMillisecondsTotal",
-            "magnifierClearMillisecondsMax",
-            clear_started,
-        );
-        let times =
-            self.loupe_sample
-                .copy_screen_timed(sample.copy_offset, sample.grabbed, false)?;
-        // No extra flush or native call is added to force a phase boundary.
-        // These are wall times in the unchanged synchronous GDI call sequence.
-        for ((total, max), elapsed) in [
-            (
-                "magnifierGetDcMillisecondsTotal",
-                "magnifierGetDcMillisecondsMax",
-            ),
-            (
-                "magnifierBitBltMillisecondsTotal",
-                "magnifierBitBltMillisecondsMax",
-            ),
-            (
-                "magnifierReleaseDcMillisecondsTotal",
-                "magnifierReleaseDcMillisecondsMax",
-            ),
-        ]
-        .into_iter()
-        .zip(times)
-        {
-            self.record_duration_value(total, max, elapsed);
-        }
-        self.record_render_duration(
-            "magnifierSampleMillisecondsTotal",
-            "magnifierSampleMillisecondsMax",
-            sample_started,
-        );
+        let request = self
+            .sample_policy
+            .begin(sample, self.started.elapsed().as_millis() as i64);
+        let place = magnifier_place_avoiding(
+            p,
+            sample.bounds,
+            area,
+            self.sample_policy.pending_bounds(),
+        )
+        .ok_or_else(|| error("CAPTURE_MAGNIFIER_PLACEMENT"))?;
+        let mut fresh = self
+            .sample_policy
+            .displayed_age(self.started.elapsed().as_millis() as i64)
+            .is_some();
         let compose_started = Instant::now();
         {
             let raw = &self.loupe_sample;
@@ -1590,7 +1768,9 @@ impl Picker {
             canvas.clear(w::rgb(22, 26, 34));
             unsafe {
                 w::SetStretchBltMode(canvas.dc, 3);
-                if w::StretchBlt(canvas.dc, 0, 0, 156, 156, raw.dc, 0, 0, 52, 52, SRCCOPY) == 0 {
+                if fresh
+                    && w::StretchBlt(canvas.dc, 0, 0, 156, 156, raw.dc, 0, 0, 52, 52, SRCCOPY) == 0
+                {
                     return Err(error("CAPTURE_MAGNIFIER"));
                 }
                 let pen = w::CreatePen(0, 1, w::rgb(230, 70, 70));
@@ -1610,15 +1790,16 @@ impl Picker {
                 w::LineTo(canvas.dc, 1, 1);
                 w::SelectObject(canvas.dc, old);
                 w::DeleteObject(frame);
-                let label =
-                    if self.selection.selected.width > 1 && self.selection.selected.height > 1 {
-                        format!(
-                            "{} × {}",
-                            self.selection.selected.width, self.selection.selected.height
-                        )
-                    } else {
-                        "3×".into()
-                    };
+                let label = if !fresh {
+                    "…".into()
+                } else if self.selection.selected.width > 1 && self.selection.selected.height > 1 {
+                    format!(
+                        "{} × {}",
+                        self.selection.selected.width, self.selection.selected.height
+                    )
+                } else {
+                    "3×".into()
+                };
                 let label = w::wide(&label);
                 let oldfont = w::SelectObject(canvas.dc, w::GetStockObject(17));
                 w::SetTextColor(canvas.dc, w::rgb(255, 255, 255));
@@ -1644,6 +1825,43 @@ impl Picker {
             "magnifierComposeMillisecondsMax",
             compose_started,
         );
+        if self.cancel.requested()? {
+            self.sample_policy.close();
+            self.sampler.stop();
+            return Err("CANCELLED: Native task was superseded.".into());
+        }
+        // Recheck age at publication, not only when the worker completed.
+        let age = self
+            .sample_policy
+            .displayed_age(self.started.elapsed().as_millis() as i64);
+        if fresh && age.is_none() {
+            let canvas = self.canvas.lock().map_err(|_| error("CAPTURE_BITMAP"))?;
+            if let Some(canvas) = canvas.as_ref() {
+                canvas.clear(w::rgb(22, 26, 34));
+                let mut caption = w::Rect {
+                    left: 4,
+                    top: 157,
+                    right: 156,
+                    bottom: 174,
+                };
+                unsafe {
+                    w::DrawTextW(canvas.dc, [0x2026u16, 0].as_ptr(), 1, &mut caption, 0x20);
+                }
+            }
+            fresh = false;
+        }
+        if let Some(age) = age {
+            let maximum = self
+                .health
+                .get("magnifierFrameAgeMillisecondsMax")
+                .copied()
+                .unwrap_or(0);
+            self.health
+                .insert("magnifierFrameAgeMillisecondsMax", maximum.max(age));
+        }
+        if !fresh {
+            self.increment("magnifierStaleFrames");
+        }
         let present_started = Instant::now();
         set_bounds(self.loupe.hwnd, TOPMOST, place, POS | 0x40)?;
         unsafe {
@@ -1657,7 +1875,12 @@ impl Picker {
             "magnifierPresentMillisecondsMax",
             present_started,
         );
-        Ok(())
+        // The screen read starts only after the loupe is outside its immutable
+        // in-flight sample. Later UI moves preserve that exclusion until reply.
+        if let Some(request) = request {
+            self.sampler.request(request)?;
+        }
+        Ok(fresh)
     }
     fn select(&mut self) -> Result<Rect> {
         self.validate()?;
@@ -1728,6 +1951,8 @@ impl Picker {
             if self.selection.finished {
                 if self.finished_at.is_none() {
                     self.finished_at = Some(Instant::now());
+                    self.sample_policy.close();
+                    self.sampler.stop();
                     self.loupe.hide();
                     for edge in &self.edges {
                         edge.hide();
@@ -1749,7 +1974,10 @@ impl Picker {
                 }
                 let hovered = if !self.selection.dragging && self.selection.highlighted >= 0 {
                     if self.hover.begin_query(elapsed) {
-                        self.hover.set_frame(hover_target(p, &self.own, self.owner_process).map_or(Rect::default(), |target| target.frame));
+                        self.hover.set_frame(
+                            hover_target(p, &self.own, self.owner_process)
+                                .map_or(Rect::default(), |target| target.frame),
+                        );
                     }
                     self.hover.current(p, elapsed, true)
                 } else {
@@ -1793,6 +2021,8 @@ impl Picker {
             return;
         }
         self.cleaned = true;
+        self.sample_policy.close();
+        self.sampler.stop();
         self.loupe.hide();
         for plane in &self.planes {
             plane.hide();
@@ -1801,7 +2031,13 @@ impl Picker {
             edge.hide();
         }
         let stop = Instant::now();
-        while !self.host.stopped && stop.elapsed() < Duration::from_millis(600) {
+        let mut sampler_stopped = self.sampler.join_if_finished();
+        while (!self.host.stopped || sampler_stopped.is_none())
+            && stop.elapsed() < Duration::from_millis(600)
+        {
+            if sampler_stopped.is_none() {
+                sampler_stopped = self.sampler.join_if_finished();
+            }
             if let Err(e) = self.host.pulse(true, false) {
                 self.failure = Some(e);
                 break;
@@ -1816,6 +2052,13 @@ impl Picker {
         if !self.host.stopped {
             self.failure = Some(self.host.fail());
         }
+        if sampler_stopped != Some(true) {
+            self.failure = Some(error("CAPTURE_SAMPLE_STOP"));
+        }
+        self.health.insert(
+            "magnifierSampleThreadStopped",
+            u64::from(sampler_stopped == Some(true)),
+        );
         self.health
             .insert("nativeHostFailed", u64::from(self.host.failed));
         if !self.escape.stop() {
@@ -1930,7 +2173,11 @@ pub fn run(request: Request) -> CapturedResult {
             for display in picker.topology.displays() {
                 let visible = selected.intersect(display.bounds);
                 if visible.valid() {
-                    image.copy_screen(Point::new(visible.x - selected.x, visible.y - selected.y), visible, true)?;
+                    image.copy_screen(
+                        Point::new(visible.x - selected.x, visible.y - selected.y),
+                        visible,
+                        true,
+                    )?;
                 }
             }
         } else {
@@ -1976,9 +2223,17 @@ pub fn self_test() -> Result<()> {
     {
         return Err(error("CAPTURE_ABI"));
     }
-    let mut surface = Surface::new(3, 2)?;
+    let surface = Surface::new(3, 2)?;
     surface.clear(w::rgb(19, 73, 151));
-    let bytes = surface.png()?;
+    let owned_pixels = surface.pixels()?;
+    let mut uploaded = Surface::new(3, 2)?;
+    if uploaded.write_pixels(&owned_pixels[..4]).is_ok() {
+        return Err(error("CAPTURE_SELF_TEST"));
+    }
+    uploaded.write_pixels(&owned_pixels)?;
+    // The uploaded frame must not borrow the producer's mutable bitmap.
+    surface.clear(w::rgb(210, 40, 30));
+    let bytes = uploaded.png()?;
     let decoder = png::Decoder::new(std::io::Cursor::new(bytes));
     let mut reader = decoder
         .read_info()
@@ -1999,6 +2254,21 @@ pub fn self_test() -> Result<()> {
             .any(|p| p != [19, 73, 151, 255])
     {
         return Err(error("CAPTURE_SELF_TEST"));
+    }
+    let mut sampler = ScreenSampler::start()?;
+    sampler.stop();
+    let stopped = Instant::now();
+    loop {
+        if let Some(joined) = sampler.join_if_finished() {
+            if !joined {
+                return Err(error("CAPTURE_SELF_TEST"));
+            }
+            break;
+        }
+        if stopped.elapsed() >= Duration::from_millis(600) {
+            return Err(error("CAPTURE_SELF_TEST"));
+        }
+        std::thread::sleep(Duration::from_millis(1));
     }
     Ok(())
 }

@@ -541,7 +541,14 @@ mod tests {
                 .iter()
                 .map(|(action, _)| action.as_str())
                 .collect::<Vec<_>>(),
-            ["selection", "capture", "ocr", "silentOcr", "input", "screenshot"]
+            [
+                "selection",
+                "capture",
+                "ocr",
+                "silentOcr",
+                "input",
+                "screenshot"
+            ]
         );
     }
 

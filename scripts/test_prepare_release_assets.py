@@ -6,6 +6,8 @@ import tempfile
 import unittest
 import zipfile
 
+from test_verify_screenshot_editor_report import complete as screenshot_report
+
 
 SPEC = importlib.util.spec_from_file_location("prepare_release_assets", Path(__file__).with_name("prepare-release-assets.py"))
 RELEASE = importlib.util.module_from_spec(SPEC)
@@ -27,6 +29,7 @@ class ReleaseAssetsTests(unittest.TestCase):
             path.write_bytes(data)
         self.report = {field: True for field in ("ok", "windowsRuntimeExecuted", "installerExecuted", "realModelExecuted", "rulesRemoved", "ownedInstallRemoved")}
         self.report.update(mockTranslationUsed=False, installerSha256=RELEASE.sha256(self.windows), installerBytes=self.windows.stat().st_size)
+        self.report.update(applicationSha256="a"*64, installedScreenshotEditorVerified=True, installedScreenshotEditor=screenshot_report(installed=True))
         self.report_path.parent.mkdir(parents=True)
         self.write_report()
         self.source = self.report_path.with_name("EchoLingo-offline-engine-source.zip")
@@ -42,10 +45,24 @@ class ReleaseAssetsTests(unittest.TestCase):
     def prepare(self):
         return RELEASE.prepare(self.artifacts, self.output, "a" * 40, "https://github.com/Blueeeecho/EchoLingo/actions/runs/123")
 
+    def test_installed_screenshot_evidence_is_required_and_bound_to_installed_bytes(self):
+        for field in ("installedScreenshotEditorVerified", "installedScreenshotEditor"):
+            original = self.report.pop(field)
+            self.write_report()
+            with self.assertRaises(ValueError): self.prepare()
+            self.report[field] = original
+        original = self.report.pop("applicationSha256")
+        self.write_report()
+        with self.assertRaises(ValueError): self.prepare()
+        self.report["applicationSha256"] = original
+        self.report["installedScreenshotEditor"]["applicationSha256"] = "b"*64
+        self.write_report()
+        with self.assertRaises(ValueError): self.prepare()
+
     def test_release_keeps_every_full_ci_gate_and_existing_priority_input_gate(self):
         root = Path(__file__).resolve().parents[1]
         ci = (root / ".github/workflows/ci.yml").read_text()
-        start = ci.index("  desktop:\n")
+        start = ci.index("  macos-screenshot-native-probe:\n")
         end = ci.index("\n  windows-popup-diagnostics:", start)
         expected = ci[start:end]
         expected = "\n".join(line for line in expected.split("\n") if not line.startswith("    if: github.event.inputs.mode"))

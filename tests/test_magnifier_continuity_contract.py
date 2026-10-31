@@ -28,9 +28,34 @@ class MagnifierContinuityContract(unittest.TestCase):
         self.assertNotIn("Surface::new", render)
         self.assertNotIn("w::EnableWindow", render)
         self.assertIn("let raw = &self.loupe_sample;", render)
-        self.assertIn("self.loupe_sample.clear(", render)
-        self.assertIn(".copy_screen_timed(sample.copy_offset, sample.grabbed, false)", render)
-        self.assertEqual(NATIVE.count("Surface::preview(CaptureMagnifierSample::SIDE"), 1)
+        self.assertIn("self.loupe_sample.write_pixels(&frame.pixels)", render)
+        self.assertNotIn(".copy_screen", render)
+        worker = NATIVE.split("impl ScreenSampler", 1)[1].split("impl Drop for ScreenSampler", 1)[0]
+        self.assertRegex(worker, r"let raw =\s+Surface::new\(")
+        self.assertIn("let pixels = raw.pixels()?", worker)
+        self.assertIn(".try_send(ticket)", worker)
+        self.assertNotIn("unsafe impl Send", NATIVE)
+
+    def test_async_sampler_is_bounded_and_placement_precedes_dispatch(self):
+        render = NATIVE.split("    fn render_loupe(", 1)[1].split("    fn select(", 1)[0]
+        self.assertIn("magnifier_place_avoiding(", render)
+        self.assertIn("self.sample_policy.pending_bounds()", render)
+        self.assertIn("self.sample_policy.complete(frame.ticket, now)", render)
+        self.assertIn("self.cancel.requested()?", render)
+        self.assertLess(render.index("set_bounds(self.loupe.hwnd"), render.index("self.sampler.request(request)"))
+        cleanup = NATIVE.split("    fn cleanup(&mut self)", 1)[1].split("impl Drop for Picker", 1)[0]
+        self.assertIn("self.sampler.stop();", cleanup)
+        self.assertIn("sampler_stopped.is_none()", cleanup)
+        self.assertIn("Duration::from_millis(600)", cleanup)
+        self.assertNotIn("recv_timeout", cleanup)
+
+    def test_motion_pixel_oracle_identifies_frame_inside_same_snapshot(self):
+        fixture = (ROOT / "tests/windows-native-capture-smoke.ps1").read_text()
+        self.assertIn("class MotionPixelObserver", fixture)
+        self.assertIn("ImageLockMode.ReadOnly", fixture)
+        self.assertIn("colors.Count>=3&&maximumRefresh<=200&&finalMatched", fixture)
+        self.assertIn("pixels.Finish(report,phase)", fixture)
+        self.assertIn("new Rectangle(133,48,12,12)", fixture)
 
     def test_preview_is_device_compatible_but_png_remains_readable(self):
         self.assertIn("Some(Surface::preview(156, 174)?)", NATIVE)

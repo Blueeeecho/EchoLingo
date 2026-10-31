@@ -110,7 +110,9 @@ pub fn add_system_translation_option(settings: &mut Settings) {
 }
 
 const MISSING_SCREENSHOT_SHORTCUT: &str = "\0screenshot-missing";
-fn missing_screenshot_shortcut() -> String { MISSING_SCREENSHOT_SHORTCUT.into() }
+fn missing_screenshot_shortcut() -> String {
+    MISSING_SCREENSHOT_SHORTCUT.into()
+}
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -228,8 +230,9 @@ pub fn migrate_language_direction(settings: &mut Settings) {
 /// replace the exact old capture/silent pair; retain all customized shortcuts.
 pub fn migrate_shortcut_defaults(settings: &mut Settings) {
     if settings.shortcuts.screenshot == MISSING_SCREENSHOT_SHORTCUT {
-        let occupied = settings.shortcuts.pairs().iter().any(|(action, value)|
-            *action != "screenshot" && value.trim().eq_ignore_ascii_case("F1"));
+        let occupied = settings.shortcuts.pairs().iter().any(|(action, value)| {
+            *action != "screenshot" && value.trim().eq_ignore_ascii_case("F1")
+        });
         settings.shortcuts.screenshot = if occupied { String::new() } else { "F1".into() };
     }
     if settings.shortcut_defaults_version == 0 {
@@ -304,7 +307,8 @@ pub struct HistoryEntry {
 pub fn validate_settings(s: &Settings) -> Result<(), String> {
     if s.screenshot_save_directory.len() > 32_768
         || s.screenshot_save_directory.contains('\0')
-        || (!s.screenshot_save_directory.is_empty() && !std::path::Path::new(&s.screenshot_save_directory).is_absolute())
+        || (!s.screenshot_save_directory.is_empty()
+            && !std::path::Path::new(&s.screenshot_save_directory).is_absolute())
     {
         return Err("截图文件夹必须是有效的绝对路径".into());
     }
@@ -559,12 +563,22 @@ mod tests {
     fn screenshot_migration_preserves_disabled_custom_and_existing_f1_bindings() {
         for existing in ["Alt+D", "F1", " f1 "] {
             let mut value = serde_json::to_value(Settings::default()).unwrap();
-            value["shortcuts"].as_object_mut().unwrap().remove("screenshot");
+            value["shortcuts"]
+                .as_object_mut()
+                .unwrap()
+                .remove("screenshot");
             value["shortcuts"]["selection"] = serde_json::json!(existing);
             let mut settings: Settings = serde_json::from_value(value).unwrap();
             migrate_shortcut_defaults(&mut settings);
             assert_eq!(settings.shortcuts.selection, existing);
-            assert_eq!(settings.shortcuts.screenshot, if existing.trim().eq_ignore_ascii_case("F1") { "" } else { "F1" });
+            assert_eq!(
+                settings.shortcuts.screenshot,
+                if existing.trim().eq_ignore_ascii_case("F1") {
+                    ""
+                } else {
+                    "F1"
+                }
+            );
             assert_eq!(settings.shortcuts.silent_ocr, "Alt+S");
         }
         for screenshot in ["", "Ctrl+F2", "F1"] {

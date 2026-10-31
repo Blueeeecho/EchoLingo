@@ -37,8 +37,30 @@ def verify(text):
             or any(not isinstance(case, dict) or case.get("ok") is not True for case in cases)
             or {case.get("mode") for case in cases} != EXPECTED_MODES):
         raise ValueError("All 16 distinct native-capture cases must pass")
+    for case in cases:
+        diagnostics = case.get("helperDiagnostics")
+        health = diagnostics.get("captureHealth") if isinstance(diagnostics, dict) else None
+        if (not isinstance(health, dict) or type(health.get("magnifierSampleThreadStopped")) is not int
+                or health["magnifierSampleThreadStopped"] != 1):
+            raise ValueError("Every native case must stop its sampling worker")
     continuity = next(case for case in cases if case["mode"] == "magnifier-continuity-armed-and-dragging")
+    health = continuity["helperDiagnostics"]["captureHealth"]
+    if (type(health.get("magnifierSampleThreadStopped")) is not int
+            or health["magnifierSampleThreadStopped"] != 1
+            or type(health.get("magnifierSampleCompleted")) is not int
+            or health["magnifierSampleCompleted"] < 1
+            or type(health.get("magnifierFrameAgeMillisecondsMax")) is not int
+            or not 0 <= health["magnifierFrameAgeMillisecondsMax"] <= 200):
+        raise ValueError("Magnifier sampling must be fresh and its worker must stop")
     for phase in ("armed", "dragging"):
+        moving = continuity.get(phase + "MagnifierMovingPixels")
+        if (not isinstance(moving, dict) or moving.get("finalTargetPixelMatched") is not True
+                or moving.get("observerStopped") is not True or moving.get("samplePixelsStored") is not False
+                or type(moving.get("distinctMotionPixelColors")) is not int or moving["distinctMotionPixelColors"] < 3
+                or type(moving.get("pixelObservations")) is not int or moving["pixelObservations"] < 1
+                or type(moving.get("maximumColorRefreshMilliseconds")) is not int
+                or not 0 <= moving["maximumColorRefreshMilliseconds"] <= 200):
+            raise ValueError("Magnifier pixels must change during motion and match the final target")
         pixels = continuity.get(phase + "MagnifierLivePixels")
         if (not isinstance(pixels, dict) or pixels.get("livePixelRefreshVerified") is not True
                 or pixels.get("samplePixelsStored") is not False
