@@ -33,6 +33,13 @@ If preapproved, it launches exactly one separate generated `NSWindow` process.
 Before capture and after each result, it verifies that process's known PID,
 window ID, frame, visibility and sharing metadata, and refuses to proceed when
 an unrelated foreground window intersects its bounds. The generated source
+must first satisfy that same exact public WindowServer predicate within a bounded
+two-second readiness wait; AppKit `makeKeyAndOrderFront`/`displayIfNeeded` alone
+are not treated as readiness. This wait performs no input or capture and is used
+only before the first case. Later revalidations remain immediate fail-closed.
+Failure diagnostics project only the exact generated PID/window's numeric frame,
+layer, alpha, sharing and visibility fields, never foreign records or names.
+The generated source
 places the cursor inside itself using the public non-event-generating cursor
 position API, then restores its original position on exit. All mouse-button and
 Escape events go only through the fixture application's own AppKit dispatcher;
@@ -71,3 +78,9 @@ does not re-label those as physical-display tests.
   is the permission check; missing window metadata is not used to infer consent.
 - [Apple: native bitmap serialization](https://developer.apple.com/documentation/appkit/nsbitmapimagerep/representation(using:properties:))
   describes image representations suitable for file/decode roundtrips.
+- [Apple: deferred window display](https://developer.apple.com/documentation/appkit/nswindow/displayifneeded())
+  describes AppKit's event-loop display behavior; source readiness is established
+  by fresh public window metadata rather than a fixed rendering delay.
+- [Apple: window sharing metadata](https://developer.apple.com/documentation/coregraphics/kcgwindowsharingstate)
+  specifies its numeric representation; diagnostics retain the strict production
+  parser and expose numeric/Boolean type mismatches without accepting them.

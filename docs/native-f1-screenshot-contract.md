@@ -83,6 +83,13 @@ Actual Windows/macOS F1 shortcut-to-editor acceptance, macOS permissions and
 physical multi-monitor/mixed-DPI behavior remain separate native acceptance
 checks; no actual user's desktop is used by these fixtures.
 
+The generated Windows peers stage their background below both source windows
+after the initial WinForms `Shown` handler returns. Before any generated input or
+native capture, a bounded read-only wait requires three consecutive exact A/B
+root hit tests with unchanged frames and A foreground. It never retries input or
+reorders during observation. Failure reports retain only generated-window handle
+and boolean hit diagnostics; an obscured endpoint still fails the case.
+
 ## Primary API references
 
 - [Microsoft: GetWindowRect](https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-getwindowrect)
@@ -92,6 +99,10 @@ checks; no actual user's desktop is used by these fixtures.
   documents extended frames and cloak state.
 - [Microsoft: GetWindowDisplayAffinity](https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-getwindowdisplayaffinity)
   documents supported query conditions and limitations; this is not a DRM bypass.
+- [Microsoft: Control.BeginInvoke](https://learn.microsoft.com/en-us/dotnet/api/system.windows.forms.control.begininvoke)
+  documents asynchronous dispatch to the generated source's own UI thread.
+- [Microsoft: SetWindowPos](https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-setwindowpos)
+  defines the explicit peer/background ordering used only by the fixture.
 - [Apple: kCGWindowBounds](https://developer.apple.com/documentation/coregraphics/kcgwindowbounds?language=objc)
   defines main-display upper-left screen coordinates.
 - [Apple: CGWindowListCopyWindowInfo](https://developer.apple.com/documentation/coregraphics/cgwindowlistcopywindowinfo(_:_:))

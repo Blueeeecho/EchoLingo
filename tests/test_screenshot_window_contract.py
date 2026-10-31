@@ -86,6 +86,21 @@ class ScreenshotWindowContract(unittest.TestCase):
         self.assertIn('CAPTURE_WINDOW_CHANGED:', new)
         self.assertNotIn('SetWindowDisplayAffinity', read('src-tauri/src/windows_capture_native.rs'))
 
+    def test_generated_windows_are_ready_before_any_input_or_capture(self):
+        existing = read('tests/windows-native-capture-smoke.ps1')
+        setup = existing.split('public Sources(Dictionary<string,object> report=null)', 1)[1].split('void Prepare(', 1)[0]
+        self.assertIn('A.BeginInvoke((Action)delegate', setup)
+        self.assertIn('SetWindowPos(Background.Handle,BH', setup)
+        wait = setup.split('Stopwatch visible=Stopwatch.StartNew()', 1)[1].split('Send(new INPUT[]{Move(First)})', 1)[0]
+        self.assertIn('visible.ElapsedMilliseconds<2000', wait)
+        self.assertIn('consecutive==3&&GetAncestor(WindowFromPoint(First),2)==AH', wait)
+        self.assertIn('GetAncestor(WindowFromPoint(Last),2)==BH', wait)
+        self.assertNotIn('SetWindowPos(', wait)
+        self.assertNotIn('SetForegroundWindow(', wait)
+        self.assertNotIn('Send(', wait)
+        self.assertIn('report["generatedSourceSetup"]=setup', setup)
+        self.assertIn('source=new Sources(report);', read('tests/windows-screenshot-window-smoke.ps1'))
+
 
 class ScreenshotWindowWorkflowContract(unittest.TestCase):
     def test_normal_and_release_require_built_child_fixture_and_raw_inventory(self):

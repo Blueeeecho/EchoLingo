@@ -35,7 +35,7 @@ try {
         Dictionary<string,object> report=new Dictionary<string,object>{{"mode",kind},{"ok",false}};
         Sources source=null; bool finished=false,hidden=false,protectedWindow=false;
         try {
-            source=new Sources();
+            source=new Sources(report);
             if(kind=="protected-target-fails-closed") {
                 source.OnUi(delegate { source.A.Opacity=0.99; });
                 uint initialAffinity;Need(GetWindowDisplayAffinity(source.AH,out initialAffinity)&&initialAffinity==0,"Generated layered source did not expose a known initially unprotected affinity.");

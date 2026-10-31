@@ -44,6 +44,10 @@ def verify(report):
     if (status != 'passed' or report.get('ok') is not True or report.get('captureCasesPassed') is not True
             or report.get('screenCapturePreflightGranted') is not True or report.get('nativeProcessExitCode') != 0):
         raise ValueError('Native capture pass lacks successful permission/runtime evidence')
+    if (report.get('sourceWindowServerReady') is not True
+            or type(report.get('sourceReadinessObservations')) is not int
+            or report['sourceReadinessObservations'] <= 0):
+        raise ValueError('Exact generated WindowServer source readiness was not observed')
     cases = report.get('cases')
     if (not isinstance(cases, list) or len(cases) != len(MODES) or any(not isinstance(case, dict) for case in cases)
             or tuple(case.get('mode') for case in cases) != MODES):

@@ -13,6 +13,7 @@ def passed():
                   productionNativeEntryPoint='capture-screenshot', ownAppKitEventsOnly=True,
                   ownedSourceCleanupConfirmed=True, captureCasesPassed=True,
                   screenCapturePreflightGranted=True, nativeProcessExitCode=0, cases=[],
+                  sourceWindowServerReady=True, sourceReadinessObservations=1,
                   fixtureBinarySha256='1' * 64, productionSourceSha256={path: '2' * 64 for path in module.SOURCES})
     for flag in ('permissionRequested', 'securitySettingsChanged', 'generalClipboardTouched', 'userContentCaptured',
                  'physicalF1Tested', 'packagedEditorTested', 'rustClipboardBackendTested',
@@ -34,6 +35,23 @@ def passed():
 class MacScreenshotProbeContract(unittest.TestCase):
     def test_full_native_evidence_is_passed(self):
         self.assertEqual(module.verify(passed()), 0)
+
+    def test_window_server_readiness_is_required_without_weakening_capture(self):
+        for field, value in [('sourceWindowServerReady', False), ('sourceReadinessObservations', 0)]:
+            report = passed(); report[field] = value
+            with self.assertRaises(ValueError): module.verify(report)
+        root = Path(__file__).resolve().parents[1]
+        swift = (root/'tests/macos-screenshot-native-fixture.swift').read_text()
+        self.assertIn('self.awaitInitialSource(deadline: Date().addingTimeInterval(2)', swift)
+        self.assertIn('if phase == 1 {', swift)
+        self.assertIn('productionProjectionAccepted', swift)
+        self.assertIn('exactProductionTargetMatches', swift)
+        self.assertIn('image.setPixel(pixel.baseAddress!', swift)
+        self.assertNotIn('image.setColor(.green', swift)
+        diagnostics = swift.split('func sourceIdentityDiagnostic(', 1)[1].split('func verifySourceVisible()', 1)[0]
+        self.assertIn('Double(target.pid)', diagnostics)
+        self.assertIn('Double(target.id)', diagnostics)
+        self.assertNotIn('kCGWindowName', diagnostics)
 
     def test_preflight_block_is_nonzero_not_successful_skip(self):
         report = passed()

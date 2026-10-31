@@ -28,6 +28,10 @@ def complete():
                 'hostSessionClosure': {'event': 'closed', 'generation': generation,
                     'sessionCloseCalled': True, 'helperDeadlineKilled': False,
                     'hostThreadId': 1, 'helperExitCode': 1 if rejected else 0}}
+        case['generatedSourceSetup'] = {field: True for field in (
+            'exactEndpointReadinessConfirmed', 'firstRootIsSourceA', 'lastRootIsSourceB',
+            'foregroundIsSourceA', 'exactFramesUnchanged', 'firstRootSameProcess', 'lastRootSameProcess')}
+        case['generatedSourceSetup'].update(firstRootIsBackground=False, lastRootIsBackground=False, observations=3)
         if not rejected:
             case.update(imageWidth=80, imageHeight=60)
         cases.append(case)
@@ -95,6 +99,15 @@ class ScreenshotWindowReport(unittest.TestCase):
         for field, value in [('event', 'other'), ('ok', False), ('completedGenerations', 9),
                              ('productionObserverStopRequested', False)]:
             report = complete(); report['hostShutdown'][field] = value; self.rejects(report)
+
+    def test_exact_generated_source_readiness_is_mandatory(self):
+        report = complete(); del report['cases'][0]['generatedSourceSetup']; self.rejects(report)
+        for field in complete()['cases'][0]['generatedSourceSetup']:
+            report = complete(); del report['cases'][0]['generatedSourceSetup'][field]; self.rejects(report)
+        for field, expected in complete()['cases'][0]['generatedSourceSetup'].items():
+            for invalid in (None, not expected) if type(expected) is bool else (True, 2):
+                report = complete(); report['cases'][0]['generatedSourceSetup'][field] = invalid
+                self.rejects(report)
 
     def test_backend_and_every_native_cleanup_field_are_mandatory(self):
         report = complete(); del report['cases'][0]['helperDiagnostics']['nativeBackend']; self.rejects(report)

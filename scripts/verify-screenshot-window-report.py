@@ -56,6 +56,18 @@ def verify(text):
                 raise ValueError('F1 case lacks success, hover outline or input ownership')
         if type(case.get('generation')) is not int or case['generation'] != generation:
             raise ValueError('F1 native generations must advance exactly once')
+        setup = case.get('generatedSourceSetup')
+        if not isinstance(setup, dict):
+            raise ValueError('Exact generated-source readiness evidence is required before F1 input')
+        for field in ('exactEndpointReadinessConfirmed', 'firstRootIsSourceA', 'lastRootIsSourceB',
+                      'foregroundIsSourceA', 'exactFramesUnchanged', 'firstRootSameProcess', 'lastRootSameProcess'):
+            if setup.get(field) is not True:
+                raise ValueError('Generated source readiness was not established: ' + field)
+        for field in ('firstRootIsBackground', 'lastRootIsBackground'):
+            if setup.get(field) is not False:
+                raise ValueError('Generated input must not hit the fixture background')
+        if type(setup.get('observations')) is not int or setup['observations'] < 3:
+            raise ValueError('At least three exact read-only readiness observations are required')
         closed = case.get('hostSessionClosure')
         rejected = case['mode'] in REJECTED
         if (not isinstance(closed, dict) or closed.get('event') != 'closed'

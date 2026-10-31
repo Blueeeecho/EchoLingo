@@ -42,6 +42,7 @@ private func sourceMain() {
     window.hasShadow = false
     window.isOpaque = true
     window.sharingType = .readOnly
+    window.animationBehavior = .none
     let view = FixtureColorView(frame: CGRect(origin: .zero, size: frame.size))
     window.contentView = view
     func stop() -> Never {
@@ -171,7 +172,12 @@ private final class ScreenshotProbe {
                 colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0) else {
             throw NativeError("FIXTURE: generated image allocation failed")
         }
-        for y in 0..<24 { for x in 0..<32 { image.setColor(.green, atX: x, y: y) } }
+        // Raw device-RGB samples avoid a dynamic/catalog NSColor conversion
+        // which emits "Unrecognized colorspace number -1" on the CI host.
+        var green = [0, 255, 0, 255]
+        green.withUnsafeMutableBufferPointer { pixel in
+            for y in 0..<24 { for x in 0..<32 { image.setPixel(pixel.baseAddress!, atX: x, y: y) } }
+        }
         guard let png = image.representation(using: .png, properties: [:]),
               let jpeg = image.representation(using: .jpeg, properties: [.compressionFactor: 0.95]) else {
             throw NativeError("FIXTURE: native PNG/JPEG serialization failed")
@@ -262,6 +268,13 @@ private final class ScreenshotProbe {
                                              frame: CGRect(x: x, y: y, width: width, height: height))
             if phase == 2 && self.target != target { self.finish("failed", reason: "generated-source-frame-changed"); return }
             self.target = target; self.sourceScale = scale
+            if phase == 1 {
+                // AppKit ordering/display calls are not a WindowServer-ready
+                // handshake. No event or capture starts until the exact public
+                // PID/ID/frame/sharing/z-order predicate has become true.
+                self.awaitInitialSource(deadline: Date().addingTimeInterval(2), observations: 0)
+                return
+            }
             do {
                 try self.verifySourceVisible()
                 // Only the generated source repositions the cursor, while it
@@ -275,12 +288,65 @@ private final class ScreenshotProbe {
         }
     }
 
+    func awaitInitialSource(deadline: Date, observations: Int) {
+        guard !finished else { return }
+        report["sourceReadinessObservations"] = observations + 1
+        do {
+            try verifySourceVisible()
+            guard let target = target else { throw NativeError("FIXTURE: missing owned source") }
+            let point = CGPoint(x: target.frame.minX + 80, y: target.frame.minY + 80)
+            let actual = NSEvent.mouseLocation
+            try fixtureNeed(abs(actual.x - point.x) <= 1 && abs(actual.y - point.y) <= 1,
+                            "generated pointer position was not retained")
+            report["sourceWindowServerReady"] = true
+            beginCase()
+        } catch {
+            if Date() >= deadline { finish("failed", reason: String(describing: error)); return }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.025) {
+                self.awaitInitialSource(deadline: deadline, observations: observations + 1)
+            }
+        }
+    }
+
+    func sourceIdentityDiagnostic(_ target: CaptureWindowTarget, records: [[String: Any]],
+                                  primary: CGFloat, excludingPID: Int32) -> [String: Any] {
+        // Only project this generated process's exact window. Do not retain
+        // foreign metadata, titles, record descriptions, or image bytes.
+        var result: [String: Any] = ["windowPresent": false,
+            "expectedPID": target.pid, "expectedWindowID": target.id,
+            "expectedFrame": [target.frame.minX, target.frame.minY, target.frame.width, target.frame.height],
+            "primaryHeight": primary]
+        guard let record = records.first(where: {
+            captureWindowNumber($0[kCGWindowOwnerPID as String]) == Double(target.pid)
+                && captureWindowNumber($0[kCGWindowNumber as String]) == Double(target.id)
+        }) else { return result }
+        result["windowPresent"] = true
+        for (label, key) in [("layer", kCGWindowLayer), ("alpha", kCGWindowAlpha), ("sharing", kCGWindowSharingState)] {
+            if let value = record[key as String] as? NSNumber {
+                result[label + "IsBoolean"] = CFGetTypeID(value) == CFBooleanGetTypeID()
+                if value.doubleValue.isFinite { result[label] = value.doubleValue }
+            }
+        }
+        if let value = record[kCGWindowIsOnscreen as String] as? Bool { result["onScreen"] = value }
+        if let dictionary = record[kCGWindowBounds as String] as? [String: Any],
+           let quartz = CGRect(dictionaryRepresentation: dictionary as CFDictionary),
+           [quartz.minX, quartz.minY, quartz.width, quartz.height].allSatisfy({ $0.isFinite }) {
+            result["quartzFrame"] = [quartz.minX, quartz.minY, quartz.width, quartz.height]
+            result["appKitFrame"] = [quartz.minX, primary - quartz.maxY, quartz.width, quartz.height]
+        }
+        let projected = captureWindowTarget(record, primaryHeight: primary, excludingPID: excludingPID)
+        result["productionProjectionAccepted"] = projected != nil
+        result["exactProductionTargetMatches"] = projected == target
+        return result
+    }
+
     func verifySourceVisible() throws {
         guard let target = target, let source = source, source.isRunning,
               target.pid == source.processIdentifier,
               let records = captureCurrentWindows() else { throw NativeError("FIXTURE: owned source is unavailable") }
         let ownPID = ProcessInfo.processInfo.processIdentifier
         let primary = CGDisplayBounds(CGMainDisplayID()).height
+        report["sourceIdentityDiagnostic"] = sourceIdentityDiagnostic(target, records: records, primary: primary, excludingPID: ownPID)
         try fixtureNeed(captureWindowIsCurrent(target, records: records, primaryHeight: primary, excludingPID: ownPID), "owned source identity/frame/sharing changed")
         // Before any pixels are captured, prove no foreign window covers any
         // part of this exact generated source. Never capture arbitrary desktop.

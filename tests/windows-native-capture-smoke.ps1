@@ -438,7 +438,7 @@ public static class EchoLingoNativeCaptureSmoke {
     sealed class Sources : IDisposable {
         public Form A,B,Background;public IntPtr AH,BH;public uint ThreadId;public Rectangle AFrame,BFrame,Display;public Point First,Last;
         public int Downs,Ups,Clicks,EscapeDowns,EscapeUps;public bool Partial,EscapePartial,PreviewPatch;Thread ui;ManualResetEvent ready=new ManualResetEvent(false);string error;
-        public Sources() {
+        public Sources(Dictionary<string,object> report=null) {
             ui=new Thread(delegate(){
                 try {
                     Need(SetThreadDpiAwarenessContext(new IntPtr(-4))!=IntPtr.Zero,"Source DPI context failed.");
@@ -452,18 +452,47 @@ public static class EchoLingoNativeCaptureSmoke {
                             Background.Show();B.Show();AH=A.Handle;BH=B.Handle;ThreadId=GetCurrentThreadId();
                             Need(AH!=BH&&GetWindow(AH,4)==IntPtr.Zero&&GetWindow(BH,4)==IntPtr.Zero&&GetParent(AH)==IntPtr.Zero&&GetParent(BH)==IntPtr.Zero,"Generated sources are not independent ownerless peers.");
                             Need(GetAncestor(AH,2)==AH&&GetAncestor(BH,2)==BH,"Peer roots changed.");
-                            SetForegroundWindow(AH);A.Activate();AFrame=Frame(AH);BFrame=Frame(BH);First=A.PointToScreen(new Point(65,70));Last=B.PointToScreen(new Point(100,115));
-                        }catch(Exception e){error=e.Message;}finally{ready.Set();}
+                            // Shown is still inside WinForms' initial ordering.
+                            // Stage only these generated ownerless peers after
+                            // that handler returns; never signal ready midway.
+                            A.BeginInvoke((Action)delegate {
+                                try {
+                                    Need(SetWindowPos(BH,new IntPtr(-1),0,0,0,0,0x10|1|2),"Generated B ordering failed.");
+                                    Need(SetWindowPos(AH,new IntPtr(-1),0,0,0,0,0x10|1|2),"Generated A ordering failed.");
+                                    Need(SetWindowPos(Background.Handle,BH,0,0,0,0,0x10|1|2),"Generated background ordering failed.");
+                                    SetForegroundWindow(AH);A.Activate();
+                                    AFrame=Frame(AH);BFrame=Frame(BH);First=A.PointToScreen(new Point(65,70));Last=B.PointToScreen(new Point(100,115));
+                                }catch(Exception e){error=e.Message;}finally{ready.Set();}
+                            });
+                        }catch(Exception e){error=e.Message;ready.Set();}
                     };EscapeSourceFilter filter=new EscapeSourceFilter(this);Application.AddMessageFilter(filter);try{Application.Run(A);}finally{Application.RemoveMessageFilter(filter);}
                 }catch(Exception e){error=e.Message;ready.Set();}
                 finally {if(Background!=null)Background.Dispose();if(B!=null)B.Dispose();if(A!=null)A.Dispose();}
             });ui.IsBackground=true;ui.SetApartmentState(ApartmentState.STA);ui.Start();
             try {
             Need(ready.WaitOne(10000)&&error==null,"Generated peer setup failed: "+error);
-            Need(ThreadId!=GetCurrentThreadId()&&GetForegroundWindow()==AH,"Source is not the independent foreground UI thread.");
+            Need(ThreadId!=GetCurrentThreadId(),"Source is not the independent UI thread.");
             uint pid;Need(GetWindowThreadProcessId(AH,out pid)==ThreadId&&pid==Process.GetCurrentProcess().Id,"Source PID/TID mismatch.");
             Need(Display.Contains(AFrame)&&Display.Contains(BFrame)&&!AFrame.IntersectsWith(BFrame)&&AFrame!=Display&&BFrame!=Display,"Generated peers are not independent non-fullscreen windows.");
-            Need(GetAncestor(WindowFromPoint(First),2)==AH&&GetAncestor(WindowFromPoint(Last),2)==BH,"Generated input endpoints are obscured.");
+            Dictionary<string,object> setup=new Dictionary<string,object>();if(report!=null)report["generatedSourceSetup"]=setup;
+            setup["sourceAHwnd"]=Id(AH);setup["sourceBHwnd"]=Id(BH);setup["backgroundHwnd"]=Id(Background.Handle);setup["sourceUiThreadId"]=ThreadId;
+            // Observe only: no reordering, clicks, or input retries in this
+            // bounded precondition wait. Native capture has not begun yet.
+            Stopwatch visible=Stopwatch.StartNew();int consecutive=0,observations=0;
+            do {
+                IntPtr first=GetAncestor(WindowFromPoint(First),2),last=GetAncestor(WindowFromPoint(Last),2);
+                uint firstPID,lastPID;GetWindowThreadProcessId(first,out firstPID);GetWindowThreadProcessId(last,out lastPID);
+                bool foreground=GetForegroundWindow()==AH,frames=Frame(AH)==AFrame&&Frame(BH)==BFrame;
+                setup["firstRootIsSourceA"]=first==AH;setup["lastRootIsSourceB"]=last==BH;
+                setup["firstRootIsBackground"]=first==Background.Handle;setup["lastRootIsBackground"]=last==Background.Handle;
+                setup["firstRootSameProcess"]=firstPID==Process.GetCurrentProcess().Id;setup["lastRootSameProcess"]=lastPID==Process.GetCurrentProcess().Id;
+                setup["foregroundIsSourceA"]=foreground;setup["exactFramesUnchanged"]=frames;setup["observations"]=++observations;
+                consecutive=first==AH&&last==BH&&foreground&&frames?consecutive+1:0;
+                if(consecutive==3)break;Thread.Sleep(10);
+            }while(visible.ElapsedMilliseconds<2000);
+            setup["exactEndpointReadinessConfirmed"]=consecutive==3;
+            Need(consecutive==3&&GetAncestor(WindowFromPoint(First),2)==AH&&GetAncestor(WindowFromPoint(Last),2)==BH,"Generated input endpoints are obscured.");
+            Need(GetForegroundWindow()==AH&&Frame(AH)==AFrame&&Frame(BH)==BFrame,"Generated source foreground/frames changed before input.");
             Send(new INPUT[]{Move(First)});Thread.Sleep(70);
             }catch{Dispose();throw;}
         }
