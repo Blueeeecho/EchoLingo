@@ -1,0 +1,46 @@
+name: Publish verified 0.2.6 candidate bytes once
+on:
+  push:
+    branches: [release/026-verified-candidate]
+    paths: [.github/workflows/publish-026-candidate.yml]
+permissions:
+  contents: read
+  actions: read
+concurrency:
+  group: echolingo-026-verified-candidate-publication
+  cancel-in-progress: false
+jobs:
+  policy-tests:
+    if: github.repository == 'Blueeeecho/EchoLingo' && github.ref == 'refs/heads/release/026-verified-candidate'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - run: |
+          node --test scripts/test-publish-026-candidate.cjs
+          python3 -m unittest discover -s scripts -p 'test_prepare_026_candidate.py' -v
+  publish:
+    needs: policy-tests
+    if: github.repository == 'Blueeeecho/EchoLingo' && github.ref == 'refs/heads/release/026-verified-candidate'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+      actions: read
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Publish only exact successful candidate artifacts
+        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b
+        with:
+          retries: 0
+          script: |
+            const { publish } = require('./scripts/publish-026-candidate.cjs');
+            await publish({ github, context, core });

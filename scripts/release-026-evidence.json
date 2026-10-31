@@ -1,0 +1,135 @@
+{
+  "schemaVersion": 1,
+  "ready": true,
+  "version": "0.2.6",
+  "repository": "Blueeeecho/EchoLingo",
+  "repositoryId": 1432139657,
+  "sourceCommit": "d91b59505f81d766eca25a8cff4764c278542275",
+  "sourceTree": "2898ee1bad7f1d73d408d2ad5fc136cfc869fe3a",
+  "runId": 41195400127,
+  "sourceBranch": "fix/025-macos-recovery-integration",
+  "jobs": [
+    {
+      "id": 124520436757,
+      "name": "native-selection-recovery"
+    },
+    {
+      "id": 124520436887,
+      "name": "Compile Windows host and focused input policies (no package output)"
+    },
+    {
+      "id": 124521433142,
+      "name": "Build and inspect 0.2.6 candidate (macos-latest)"
+    },
+    {
+      "id": 124521433185,
+      "name": "Build and inspect 0.2.6 candidate (windows-latest)"
+    }
+  ],
+  "artifacts": [
+    {
+      "platform": "Windows",
+      "id": 13040383835,
+      "name": "EchoLingo-0.2.6-candidate-Windows-reinspected",
+      "size": 91042322,
+      "sha256": "b9a39c5f8428f3c4ab4418b47e6ef05b37c323374f0a96676b5b17d2a6a1d4c3",
+      "installer": "EchoLingo_0.2.6_x64-setup.exe"
+    },
+    {
+      "platform": "macOS",
+      "id": 13041182431,
+      "name": "EchoLingo-0.2.6-candidate-macOS-reinspected",
+      "size": 5324591,
+      "sha256": "cdba272684a80a659606d6c6d21ce2a0fd802eae3230a76a63a1d882c30e855a",
+      "installer": "EchoLingo_0.2.6_aarch64.dmg"
+    }
+  ],
+  "macOSReinspection": {
+    "runId": 41196532484,
+    "commit": "2ae424c3f37bfeb970af41d333c48c3f2d49706f",
+    "tree": "9e8f5a0ff669a5c5e3818e9520ea9c61b4dbcb65",
+    "branch": "verify/026-macos-package",
+    "workflowPath": ".github/workflows/reinspect-026-macos-package.yml",
+    "job": {
+      "id": 124523709445,
+      "name": "Reinspect the original 0.2.6 macOS bytes without rebuilding"
+    },
+    "allowedChanges": [
+      {
+        "status": "A",
+        "path": ".github/workflows/reinspect-026-macos-package.yml"
+      },
+      {
+        "status": "A",
+        "path": "scripts/reinspect-026-macos-package.py"
+      },
+      {
+        "status": "M",
+        "path": "scripts/inspect-candidate-package.py"
+      },
+      {
+        "status": "M",
+        "path": "scripts/test_inspect_candidate_package.py"
+      }
+    ],
+    "inputArtifact": {
+      "id": 13041241190,
+      "name": "EchoLingo-0.2.6-UNVERIFIED-build-macOS",
+      "size": 9596150,
+      "sha256": "c877dcf26a6e85d7ee8e3f7682980b20fbb68f3241065efbdb99b86d65377ba8"
+    },
+    "installerSha256": "441c7d00fee0701f1942b1e5fc173c79479385d71c8922507fd83163d37c26e7",
+    "applicationSha256": "112c4888c2d6c3dd801f808364ccb2dc2d23ffd23219052822e0d50f6fbaaf17",
+    "licenseSha256": "20ce870fd3c179bf06c2d28e32264a30e2a7b34e5d317d7aafe2ee0176849e71"
+  },
+  "windowsReinspection": {
+    "runId": 41197711577,
+    "commit": "02eb0c8bcda28dd1b72d892122759994ed1c8ef9",
+    "tree": "1d559979f707399f8233120d05f6b3aac55e45da",
+    "branch": "verify/026-windows-package",
+    "workflowPath": ".github/workflows/diagnose-026-windows-package.yml",
+    "job": {
+      "id": 124527141042,
+      "name": "Reinspect the original 0.2.6 Windows bytes without rebuilding"
+    },
+    "allowedChanges": [
+      {
+        "status": "A",
+        "path": ".github/workflows/diagnose-026-windows-package.yml"
+      },
+      {
+        "status": "A",
+        "path": "scripts/diagnose-026-windows-package.py"
+      },
+      {
+        "status": "M",
+        "path": "scripts/inspect-candidate-package.py"
+      },
+      {
+        "status": "M",
+        "path": "scripts/test_inspect_candidate_package.py"
+      }
+    ],
+    "inputArtifact": {
+      "id": 13040982741,
+      "name": "EchoLingo-0.2.6-UNVERIFIED-build-Windows",
+      "size": 79796541,
+      "sha256": "4787f328c08f8b9e4afd9a2881efcac192047cc38e73c5a9ae3add1b86116618"
+    },
+    "installerSha256": "d6849ba7dd241ca690b7b787cc7c50c4d1ff779100dc955ffed17ae7fb6973ae",
+    "applicationSha256": "159ffa2b057b1e106d64022acd554f7cf2d75f9e4e0294b916e043f55414e653",
+    "applicationIdentity": {
+      "schemaVersion": 1,
+      "method": "tauri-cli-2.12.4-nsis-bundle-marker",
+      "stageSha256": "5027e0162754b53689219b15d710680c49579fe4974bb5acf6bc2204469c03f4",
+      "packagedSha256": "159ffa2b057b1e106d64022acd554f7cf2d75f9e4e0294b916e043f55414e653",
+      "expectedNsisSha256": "159ffa2b057b1e106d64022acd554f7cf2d75f9e4e0294b916e043f55414e653",
+      "markerOffset": 7402725,
+      "stageMarker": "__TAURI_BUNDLE_TYPE_VAR_UNK",
+      "packagedMarker": "__TAURI_BUNDLE_TYPE_VAR_NSS",
+      "changedBytes": 3,
+      "comparedBytes": 8223744,
+      "actualExecutablesModified": false
+    }
+  }
+}
