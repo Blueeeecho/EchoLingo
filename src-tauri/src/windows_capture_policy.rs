@@ -81,10 +81,33 @@ impl Rect {
     }
 }
 
+/// F1 is additive: translation/OCR retain their drag-only selection contract.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum CapturePurpose {
+    #[default]
+    Region,
+    Screenshot,
+}
+
+/// Scalar identity only; never contains titles, text, or window contents.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CaptureWindowTarget {
+    pub window: usize,
+    pub process: u32,
+    pub thread: u32,
+    pub frame: Rect,
+}
+
 #[derive(Clone, Debug)]
 pub struct CaptureSelectionState {
     screens: Vec<Rect>,
     origin: Point,
+    purpose: CapturePurpose,
+    click_threshold: i32,
+    drag_exceeded: bool,
+    candidate: Option<CaptureWindowTarget>,
+    pressed_window: Option<CaptureWindowTarget>,
+    pub selected_window: Option<CaptureWindowTarget>,
     pub desktop: Rect,
     pub dragging: bool,
     pub finished: bool,
@@ -94,6 +117,13 @@ pub struct CaptureSelectionState {
 }
 impl CaptureSelectionState {
     pub fn new(screens: Vec<Rect>, pointer: Point) -> Result<Self, &'static str> {
+        Self::with_purpose(screens, pointer, CapturePurpose::Region)
+    }
+    pub fn with_purpose(
+        screens: Vec<Rect>,
+        pointer: Point,
+        purpose: CapturePurpose,
+    ) -> Result<Self, &'static str> {
         let mut desktop = *screens.first().ok_or("CAPTURE: No display is available.")?;
         for screen in &screens {
             if !screen.valid() {
@@ -106,6 +136,12 @@ impl CaptureSelectionState {
         let mut state = Self {
             screens,
             origin: Point::default(),
+            purpose,
+            click_threshold: 4,
+            drag_exceeded: false,
+            candidate: None,
+            pressed_window: None,
+            selected_window: None,
             desktop,
             dragging: false,
             finished: false,
@@ -115,6 +151,22 @@ impl CaptureSelectionState {
         };
         state.move_to(pointer);
         Ok(state)
+    }
+    /// Supplied from a fresh native hit-test immediately before button down.
+    pub fn set_window_candidate(&mut self, candidate: Option<CaptureWindowTarget>, dpi: u32) {
+        if !self.dragging && !self.finished {
+            self.candidate = candidate;
+            // Four logical pixels of jitter on the display where the press began.
+            self.click_threshold = ((4 * dpi.clamp(96, 768) + 95) / 96) as i32;
+        }
+    }
+    pub fn note_drag_excursion(&mut self, dx: i32, dy: i32) {
+        if self.dragging && !self.finished {
+            self.drag_exceeded |= dx > self.click_threshold || dy > self.click_threshold;
+        }
+    }
+    pub fn is_window_click(&self) -> bool {
+        self.purpose == CapturePurpose::Screenshot && !self.drag_exceeded
     }
     fn clamp(&self, p: Point) -> Point {
         Point::new(
@@ -133,6 +185,11 @@ impl CaptureSelectionState {
             .map_or(-1, |i| i as i32);
         if self.dragging {
             let end = self.clamp(p);
+            // Sticky: moving away and returning must never turn a drag into a click.
+            self.drag_exceeded |= (i64::from(p.x) - i64::from(self.origin.x)).abs()
+                > i64::from(self.click_threshold)
+                || (i64::from(p.y) - i64::from(self.origin.y)).abs()
+                    > i64::from(self.click_threshold);
             // Retain zero-width/height while dragging, just like Rectangle.FromLTRB.
             self.selected = Rect::new(
                 self.origin.x.min(end.x),
@@ -151,6 +208,9 @@ impl CaptureSelectionState {
             return;
         }
         self.origin = self.clamp(p);
+        self.drag_exceeded = false;
+        self.pressed_window = self.candidate.filter(|target| target.frame.contains(p));
+        self.selected_window = None;
         self.selected = Rect::default();
         self.dragging = true;
     }
@@ -161,6 +221,14 @@ impl CaptureSelectionState {
         self.move_to(p);
         self.dragging = false;
         self.finished = true;
+        if self.is_window_click() {
+            if let Some(target) = self.pressed_window {
+                self.selected = target.frame.intersect(self.desktop);
+                self.selected_window = Some(target);
+            } else {
+                self.selected = Rect::default();
+            }
+        }
         self.cancelled = self.selected.width < 3 || self.selected.height < 3;
     }
     pub fn cancel(&mut self) {
@@ -333,7 +401,7 @@ pub fn outline_edges(outline: Rect, display: Rect) -> [Rect; 4] {
     ]
     .map(|r| r.intersect(display))
 }
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct CaptureMagnifierSample {
     pub bounds: Rect,
     pub grabbed: Rect,
@@ -685,11 +753,27 @@ impl CaptureTopologyPolicy {
             && self.displays == other.displays
     }
 }
+/// Skipping a throttled repaint is not a request to hide its last complete frame.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CaptureFrameAction {
+    Hide,
+    Retain,
+    Render,
+}
 #[derive(Default, Debug)]
 pub struct CaptureRedrawPolicy {
     presented: Option<i64>,
 }
 impl CaptureRedrawPolicy {
+    pub fn frame_action(&self, armed: bool, finished: bool, elapsed: i64) -> CaptureFrameAction {
+        if !armed || finished {
+            CaptureFrameAction::Hide
+        } else if self.is_due(elapsed) {
+            CaptureFrameAction::Render
+        } else {
+            CaptureFrameAction::Retain
+        }
+    }
     pub fn is_due(&self, elapsed: i64) -> bool {
         elapsed >= 0
             && self
@@ -698,6 +782,19 @@ impl CaptureRedrawPolicy {
     }
     pub fn presented(&mut self, elapsed: i64) {
         self.presented = Some(elapsed);
+    }
+    pub fn wait_milliseconds(&self, armed: bool, finished: bool, elapsed: i64) -> u32 {
+        if !armed || finished || elapsed < 0 {
+            return 16;
+        }
+        match self.presented {
+            // The paint itself already consumed part (or all) of this frame.
+            // Never append another whole frame interval after rendering.
+            Some(start) if start >= 0 && elapsed >= start => 16 - (elapsed - start).min(16) as u32,
+            None => 0,
+            Some(start) if start < 0 => 0,
+            _ => 16,
+        }
     }
 }
 #[derive(Default, Debug)]
@@ -825,6 +922,18 @@ impl CaptureHoverPolicy {
         }
     }
 }
+/// Re-query at release and around pixel copy. Never retarget a stale click.
+pub fn capture_window_is_current(
+    expected: CaptureWindowTarget,
+    current: Option<CaptureWindowTarget>,
+) -> bool {
+    expected.window != 0
+        && expected.process != 0
+        && expected.thread != 0
+        && expected.frame.valid()
+        && current == Some(expected)
+}
+
 /// Keep every hint above every input plane after EACH native positioning call.
 /// render_hints returns the FIRST raised visible hint (bottom of the hint set).
 /// Callers must propagate render failure without repairing input above absent hints.
@@ -968,6 +1077,96 @@ mod supplemental_tests {
         for t in [6000, 120000] {
             assert_eq!(h.observe(true, false, true, true, false, t), 0);
         }
+    }
+    #[test]
+    fn frame_wait_consumes_only_the_budget_remaining_after_rendering() {
+        let mut redraw = CaptureRedrawPolicy::default();
+        assert_eq!(redraw.wait_milliseconds(true, false, 0), 0);
+        redraw.presented(100);
+        for render_cost in [0_i64, 1, 8, 15, 16, 25, 46] {
+            let wait = redraw.wait_milliseconds(true, false, 100 + render_cost);
+            assert_eq!(i64::from(wait), (16 - render_cost).max(0));
+            assert_eq!(render_cost + i64::from(wait), render_cost.max(16));
+        }
+        // Inactive/closing loops still yield for their existing bounded input
+        // handshake, and malformed/regressing clocks cannot produce a spin.
+        for elapsed in [-1, 99, 100, 116, 146] {
+            assert_eq!(redraw.wait_milliseconds(false, false, elapsed), 16);
+            assert_eq!(redraw.wait_milliseconds(true, true, elapsed), 16);
+        }
+        assert_eq!(redraw.wait_milliseconds(true, false, -1), 16);
+        assert_eq!(redraw.wait_milliseconds(true, false, 99), 16);
+        // Sustained expensive rendering must not be capped at cost + 16 ms.
+        let mut redraw = CaptureRedrawPolicy::default();
+        let mut elapsed = 0;
+        for _ in 0..24 {
+            assert_eq!(
+                redraw.frame_action(true, false, elapsed),
+                CaptureFrameAction::Render
+            );
+            redraw.presented(elapsed);
+            elapsed += 25;
+            elapsed += i64::from(redraw.wait_milliseconds(true, false, elapsed));
+        }
+        assert_eq!(elapsed, 600);
+    }
+    #[test]
+    fn magnifier_retains_every_throttled_frame_until_disarmed_or_finished() {
+        let mut redraw = CaptureRedrawPolicy::default();
+        let mut visible = false;
+        let mut renders = 0;
+        let mut retained = 0;
+        assert_eq!(
+            redraw.frame_action(false, false, 0),
+            CaptureFrameAction::Hide
+        );
+        // Frequent pointer/mailbox events wake the loop between its 16 ms
+        // paints. Every one of those ticks must retain the last visible frame.
+        for elapsed in 0..=1000 {
+            match redraw.frame_action(true, false, elapsed) {
+                CaptureFrameAction::Render => {
+                    redraw.presented(elapsed);
+                    visible = true;
+                    renders += 1;
+                }
+                CaptureFrameAction::Retain => retained += 1,
+                CaptureFrameAction::Hide => visible = false,
+            }
+            assert!(visible, "armed frame disappeared at {elapsed} ms");
+        }
+        assert_eq!(renders, 63);
+        assert_eq!(retained, 938);
+        // Same-time/reordered notifications cannot erase a complete frame.
+        for elapsed in [1000, 999, -1] {
+            assert_eq!(
+                redraw.frame_action(true, false, elapsed),
+                CaptureFrameAction::Retain
+            );
+        }
+        for elapsed in [1000, 1008, 2000] {
+            assert_eq!(
+                redraw.frame_action(false, false, elapsed),
+                CaptureFrameAction::Hide
+            );
+            assert_eq!(
+                redraw.frame_action(true, true, elapsed),
+                CaptureFrameAction::Hide
+            );
+            assert_eq!(
+                redraw.frame_action(false, true, elapsed),
+                CaptureFrameAction::Hide
+            );
+        }
+        // Re-arming after suspension renders afresh when due, then retains.
+        assert_eq!(
+            redraw.frame_action(true, false, 2000),
+            CaptureFrameAction::Render
+        );
+        redraw.presented(2000);
+        assert_eq!(
+            redraw.frame_action(true, false, 2001),
+            CaptureFrameAction::Retain
+        );
     }
     #[test]
     fn hover_oracle_exact_metadata_throttle_and_no_stale_frame() {
@@ -1203,6 +1402,227 @@ pub fn magnifier_place(pointer: Point, sample: Rect, area: Rect) -> Rect {
     }
     placed
 }
+
+/// Keep a moving preview out of both the current pointer sample and the
+/// immutable rectangle currently being read by the sampling worker.
+pub fn magnifier_place_avoiding(
+    pointer: Point,
+    sample: Rect,
+    area: Rect,
+    in_flight: Rect,
+) -> Option<Rect> {
+    let preferred = magnifier_place(pointer, sample, area);
+    let candidates = [
+        preferred,
+        // A short reverse move can put the preferred loupe across the old
+        // in-flight sample. Nudge around that small rectangle before resorting
+        // to a distant monitor corner; never move into either sampled area.
+        Rect::new(in_flight.right().saturating_add(16), preferred.y, 156, 174),
+        Rect::new(in_flight.x.saturating_sub(172), preferred.y, 156, 174),
+        Rect::new(preferred.x, in_flight.bottom().saturating_add(16), 156, 174),
+        Rect::new(preferred.x, in_flight.y.saturating_sub(190), 156, 174),
+        Rect::new(area.x, area.y, 156, 174),
+        Rect::new(area.right().saturating_sub(156), area.y, 156, 174),
+        Rect::new(area.x, area.bottom().saturating_sub(174), 156, 174),
+        Rect::new(
+            area.right().saturating_sub(156),
+            area.bottom().saturating_sub(174),
+            156,
+            174,
+        ),
+    ];
+    candidates
+        .into_iter()
+        .filter(|candidate| {
+            area.contains_rect(*candidate)
+                && !candidate.contains(pointer)
+                && candidate.intersect(sample).is_empty()
+                && candidate.intersect(in_flight).is_empty()
+        })
+        .min_by_key(|candidate| {
+            (i64::from(candidate.x) - i64::from(preferred.x)).abs()
+                + (i64::from(candidate.y) - i64::from(preferred.y)).abs()
+        })
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CaptureSampleTicket {
+    pub sequence: u64,
+    pub sample: CaptureMagnifierSample,
+    pub requested_ms: i64,
+}
+
+/// No queued historical positions: at most one immutable in-flight sample.
+/// The next request is constructed from the newest UI pointer after completion.
+#[derive(Default)]
+pub struct CaptureSamplePolicy {
+    sequence: u64,
+    pending: Option<CaptureSampleTicket>,
+    displayed: Option<CaptureSampleTicket>,
+    closed: bool,
+}
+impl CaptureSamplePolicy {
+    pub const MAX_AGE_MS: i64 = 200;
+    pub fn pending_bounds(&self) -> Rect {
+        self.pending
+            .map_or(Rect::default(), |ticket| ticket.sample.bounds)
+    }
+    pub fn begin(
+        &mut self,
+        sample: CaptureMagnifierSample,
+        now: i64,
+    ) -> Option<CaptureSampleTicket> {
+        if self.closed || self.pending.is_some() || now < 0 {
+            return None;
+        }
+        self.sequence = self.sequence.checked_add(1)?;
+        let ticket = CaptureSampleTicket {
+            sequence: self.sequence,
+            sample,
+            requested_ms: now,
+        };
+        self.pending = Some(ticket);
+        Some(ticket)
+    }
+    pub fn complete(&mut self, ticket: CaptureSampleTicket, now: i64) -> bool {
+        if self.closed || self.pending != Some(ticket) {
+            return false;
+        }
+        self.pending = None;
+        if !Self::fresh(ticket, now) {
+            return false;
+        }
+        self.displayed = Some(ticket);
+        true
+    }
+    fn fresh(ticket: CaptureSampleTicket, now: i64) -> bool {
+        now >= ticket.requested_ms && now - ticket.requested_ms <= Self::MAX_AGE_MS
+    }
+    pub fn displayed_age(&self, now: i64) -> Option<u64> {
+        self.displayed
+            .filter(|ticket| !self.closed && Self::fresh(*ticket, now))
+            .map(|ticket| (now - ticket.requested_ms) as u64)
+    }
+    pub fn close(&mut self) {
+        self.closed = true;
+        self.pending = None;
+        self.displayed = None;
+    }
+}
+
+#[cfg(test)]
+mod magnifier_sampling_tests {
+    use super::*;
+
+    #[test]
+    fn short_reverse_motion_nudges_nearby_instead_of_jumping_to_a_monitor_corner() {
+        for (area, old, current, expected) in [
+            (
+                Rect::new(0, 0, 1920, 1080),
+                Point::new(100, 100),
+                Point::new(76, 100),
+                Rect::new(142, 74, 156, 174),
+            ),
+            (
+                Rect::new(-1920, 0, 1920, 1080),
+                Point::new(-100, 100),
+                Point::new(-76, 100),
+                Rect::new(-298, 74, 156, 174),
+            ),
+        ] {
+            let pending = CaptureMagnifierSample::new(old, area).bounds;
+            let sample = CaptureMagnifierSample::new(current, area).bounds;
+            let placed = magnifier_place_avoiding(current, sample, area, pending).unwrap();
+            assert_eq!(placed, expected);
+            assert!(placed.intersect(pending).is_empty());
+            assert!(placed.intersect(sample).is_empty());
+            assert!(area.contains_rect(placed));
+            assert_eq!(
+                magnifier_place_avoiding(current, sample, area, Rect::default()),
+                Some(magnifier_place(current, sample, area))
+            );
+        }
+    }
+
+    #[test]
+    fn only_one_request_and_next_position_is_current_not_queued() {
+        let desktop = Rect::new(0, 0, 1920, 1080);
+        let mut policy = CaptureSamplePolicy::default();
+        let first = policy
+            .begin(
+                CaptureMagnifierSample::new(Point::new(100, 100), desktop),
+                0,
+            )
+            .unwrap();
+        for x in 101..150 {
+            assert!(policy
+                .begin(CaptureMagnifierSample::new(Point::new(x, 100), desktop), 16)
+                .is_none());
+        }
+        assert!(policy.complete(first, 40));
+        let latest = CaptureMagnifierSample::new(Point::new(150, 100), desktop);
+        let next = policy.begin(latest, 48).unwrap();
+        assert_eq!(next.sample, latest);
+        assert!(!policy.complete(first, 49));
+        assert_eq!(policy.pending_bounds(), latest.bounds);
+        assert!(policy.complete(next, 80));
+    }
+
+    #[test]
+    fn age_bound_and_cancel_prevent_stale_or_late_frame_publication() {
+        let sample = CaptureMagnifierSample::new(Point::new(100, 100), Rect::new(0, 0, 1920, 1080));
+        let mut policy = CaptureSamplePolicy::default();
+        let ticket = policy.begin(sample, 20).unwrap();
+        assert!(policy.complete(ticket, 60));
+        assert_eq!(policy.displayed_age(220), Some(200));
+        assert_eq!(policy.displayed_age(221), None);
+        assert_eq!(policy.displayed_age(19), None);
+        let slow = policy.begin(sample, 230).unwrap();
+        assert!(!policy.complete(slow, 431));
+        let cancelled = policy.begin(sample, 432).unwrap();
+        policy.close();
+        assert!(!policy.complete(cancelled, 450));
+        assert_eq!(policy.displayed_age(450), None);
+        assert!(policy.begin(sample, 451).is_none());
+    }
+
+    #[test]
+    fn moving_loupe_never_enters_in_flight_sample_on_monitor_edges_or_jumps() {
+        for area in [
+            Rect::new(0, 0, 800, 600),
+            Rect::new(-1920, -300, 1920, 1080),
+        ] {
+            for old_x in [1, area.width / 2, area.width - 1] {
+                for old_y in [1, area.height / 2, area.height - 1] {
+                    let old = CaptureMagnifierSample::new(
+                        Point::new(area.x + old_x, area.y + old_y),
+                        area,
+                    );
+                    for x in [1, 40, area.width / 2, area.width - 40, area.width - 1] {
+                        for y in [1, 40, area.height / 2, area.height - 40, area.height - 1] {
+                            let point = Point::new(area.x + x, area.y + y);
+                            let current = CaptureMagnifierSample::new(point, area);
+                            let placed =
+                                magnifier_place_avoiding(point, current.bounds, area, old.bounds)
+                                    .unwrap();
+                            assert!(area.contains_rect(placed));
+                            assert!(placed.intersect(old.bounds).is_empty());
+                            assert!(placed.intersect(current.bounds).is_empty());
+                            assert!(!placed.contains(point));
+                        }
+                    }
+                }
+            }
+        }
+        assert!(magnifier_place_avoiding(
+            Point::new(50, 50),
+            Rect::new(24, 24, 52, 52),
+            Rect::new(0, 0, 100, 100),
+            Rect::default(),
+        )
+        .is_none());
+    }
+}
 #[cfg(test)]
 mod magnifier_placement_tests {
     use super::*;
@@ -1401,5 +1821,128 @@ mod window_cancellation_tests {
         assert!(!capture_window_cancels(false, 0x001f)); // EnableWindow(loupe,false)
         assert!(capture_window_cancels(true, 0x001f)); // genuine input cancellation
         assert!(capture_window_cancels(true, 0x0215)); // never activate to recapture
+    }
+}
+
+#[cfg(test)]
+mod screenshot_window_tests {
+    use super::*;
+    fn target() -> CaptureWindowTarget {
+        CaptureWindowTarget {
+            window: 41,
+            process: 42,
+            thread: 43,
+            frame: Rect::new(-200, -100, 500, 300),
+        }
+    }
+    fn screenshot() -> CaptureSelectionState {
+        let mut state = CaptureSelectionState::with_purpose(
+            vec![Rect::new(-300, -200, 1000, 800)],
+            Point::new(0, 0),
+            CapturePurpose::Screenshot,
+        )
+        .unwrap();
+        state.set_window_candidate(Some(target()), 96);
+        state
+    }
+    #[test]
+    fn screenshot_click_keeps_button_down_candidate_with_jitter() {
+        let mut state = screenshot();
+        state.begin(Point::new(0, 0));
+        state.set_window_candidate(None, 96); // cannot replace a pressed ticket
+        state.end(Point::new(4, -3));
+        assert!(!state.cancelled);
+        assert_eq!(state.selected, target().frame);
+        assert_eq!(state.selected_window, Some(target()));
+    }
+    #[test]
+    fn screenshot_drag_takes_precedence_even_after_returning_to_anchor() {
+        let mut state = screenshot();
+        state.begin(Point::new(0, 0));
+        state.move_to(Point::new(40, 10));
+        state.end(Point::new(2, 2));
+        assert!(state.cancelled);
+        assert_eq!(state.selected_window, None);
+        let mut state = screenshot();
+        state.begin(Point::new(0, 0));
+        state.end(Point::new(-150, 120));
+        assert_eq!(state.selected, Rect::new(-150, 0, 150, 120));
+        assert_eq!(state.selected_window, None);
+    }
+    #[test]
+    fn screenshot_click_without_candidate_never_captures_a_small_jitter_rect() {
+        let mut state = screenshot();
+        state.set_window_candidate(None, 96);
+        state.begin(Point::new(0, 0));
+        state.end(Point::new(4, 4));
+        assert!(state.cancelled);
+    }
+    #[test]
+    fn region_click_semantics_are_unchanged() {
+        let mut state =
+            CaptureSelectionState::new(vec![Rect::new(-300, -200, 1000, 800)], Point::new(0, 0))
+                .unwrap();
+        state.set_window_candidate(Some(target()), 96);
+        state.begin(Point::new(0, 0));
+        state.end(Point::new(0, 0));
+        assert!(state.cancelled);
+        assert_eq!(state.selected_window, None);
+    }
+    #[test]
+    fn screenshot_threshold_scales_and_window_is_clipped_to_visible_desktop() {
+        let mut state = screenshot();
+        let partly_offscreen = CaptureWindowTarget {
+            frame: Rect::new(-400, -300, 500, 500),
+            ..target()
+        };
+        state.set_window_candidate(Some(partly_offscreen), 192);
+        state.begin(Point::new(0, 0));
+        state.end(Point::new(8, 8));
+        assert_eq!(state.selected, Rect::new(-300, -200, 400, 400));
+        assert_eq!(state.selected_window, Some(partly_offscreen));
+    }
+    #[test]
+    fn window_identity_geometry_and_permission_loss_fail_closed() {
+        let expected = target();
+        assert!(capture_window_is_current(expected, Some(expected)));
+        for current in [
+            None,
+            Some(CaptureWindowTarget {
+                window: 9,
+                ..expected
+            }),
+            Some(CaptureWindowTarget {
+                process: 9,
+                ..expected
+            }),
+            Some(CaptureWindowTarget {
+                thread: 9,
+                ..expected
+            }),
+            Some(CaptureWindowTarget {
+                frame: Rect::new(-199, -100, 500, 300),
+                ..expected
+            }),
+        ] {
+            assert!(!capture_window_is_current(expected, current));
+        }
+    }
+    #[test]
+    fn coalesced_drag_excursion_cannot_turn_into_window_click() {
+        let mut state = screenshot();
+        state.begin(Point::new(0, 0));
+        state.note_drag_excursion(50, 10);
+        state.end(Point::new(3, 3));
+        assert_eq!(state.selected, Rect::new(0, 0, 3, 3));
+        assert_eq!(state.selected_window, None);
+    }
+    #[test]
+    fn screenshot_cancel_cannot_be_reactivated_by_late_release() {
+        let mut state = screenshot();
+        state.begin(Point::new(0, 0));
+        state.cancel();
+        state.end(Point::new(1, 1));
+        assert!(state.finished && state.cancelled);
+        assert_eq!(state.selected_window, None);
     }
 }

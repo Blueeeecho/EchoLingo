@@ -228,6 +228,7 @@ fn prepare_for_platform(
     windows: bool,
 ) -> Result<(Shortcuts, Vec<(String, Binding)>), String> {
     let canonical = Shortcuts {
+        screenshot: normalize_one(&shortcuts.screenshot, mac)?,
         selection: normalize_one(&shortcuts.selection, mac)?,
         capture: normalize_one(&shortcuts.capture, mac)?,
         ocr: normalize_one(&shortcuts.ocr, mac)?,
@@ -311,6 +312,7 @@ mod tests {
 
     fn only(value: &str) -> Shortcuts {
         Shortcuts {
+            screenshot: String::new(),
             selection: value.into(),
             capture: String::new(),
             ocr: String::new(),
@@ -335,14 +337,15 @@ mod tests {
     #[test]
     fn windows_rejects_numpad_equal_in_every_action_but_preserves_other_platforms() {
         let expected = "Windows 暂不支持小键盘等号键，请选择其他按键。";
-        for action in 0..5 {
+        for action in 0..6 {
             let mut values = only("");
             let field = match action {
                 0 => &mut values.selection,
                 1 => &mut values.capture,
                 2 => &mut values.ocr,
                 3 => &mut values.silent_ocr,
-                _ => &mut values.input,
+                4 => &mut values.input,
+                _ => &mut values.screenshot,
             };
             *field = "control+numpadequal".into();
             assert_eq!(
@@ -512,12 +515,14 @@ mod tests {
         assert!(defaults.ocr.is_empty());
         assert!(defaults.input.is_empty());
         assert!(defaults.capture.is_empty());
-        assert_eq!(parsed(&defaults).unwrap().len(), 2);
+        assert_eq!(defaults.screenshot, "F1");
+        assert_eq!(parsed(&defaults).unwrap().len(), 3);
     }
 
     #[test]
     fn normalizes_every_field_without_changing_action_identity() {
         let input = Shortcuts {
+            screenshot: "f1".into(),
             selection: "control+keyd".into(),
             capture: "alt+digit1".into(),
             ocr: "shift+alt+S".into(),
@@ -536,19 +541,27 @@ mod tests {
                 .iter()
                 .map(|(action, _)| action.as_str())
                 .collect::<Vec<_>>(),
-            ["selection", "capture", "ocr", "silentOcr", "input"]
+            [
+                "selection",
+                "capture",
+                "ocr",
+                "silentOcr",
+                "input",
+                "screenshot"
+            ]
         );
     }
 
     #[test]
-    fn conflicts_use_real_shortcut_ids_across_all_five_fields() {
-        for field in 0..4 {
+    fn conflicts_use_real_shortcut_ids_across_all_six_fields() {
+        for field in 0..5 {
             let mut values = only("Ctrl+KeyA");
             let slot = match field {
                 0 => &mut values.capture,
                 1 => &mut values.ocr,
                 2 => &mut values.silent_ocr,
-                _ => &mut values.input,
+                3 => &mut values.input,
+                _ => &mut values.screenshot,
             };
             *slot = "Control+A".into();
             assert!(normalized(&values).unwrap_err().contains("相同"));
@@ -639,6 +652,7 @@ mod native_binding_tests {
     #[test]
     fn priority_and_mouse_have_distinct_real_routes() {
         let s = Shortcuts {
+            screenshot: String::new(),
             selection: "Alt+D".into(),
             silent_ocr: "MouseX1".into(),
             capture: String::new(),

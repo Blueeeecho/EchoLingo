@@ -14,6 +14,7 @@ mod ocr_outcome;
 mod offline_translation;
 mod platform;
 mod popup_health;
+mod screenshot;
 mod service_links;
 mod shortcut_bindings;
 mod shortcut_control;
@@ -60,6 +61,7 @@ struct AppState {
     history: Mutex<Vec<HistoryEntry>>,
     pinned: AtomicBool,
     native_tasks: native_tasks::Controller,
+    screenshots: screenshot::Controller,
     shortcut_gate: Mutex<shortcut_control::ShortcutGate>,
     shortcut_routes: shortcut_control::ShortcutRoutes,
     shortcut_updating: AtomicBool,
@@ -291,6 +293,7 @@ fn capture_diagnostic_payload(diagnostics: serde_json::Value) -> serde_json::Val
     }
     serde_json::json!({
         "diagnostic": "last-capture-attempt", "recordedAtUnixMs": now(),
+        "ocrInvocationCount": ocr::invocation_count(),
         "appVersion": env!("CARGO_PKG_VERSION"), "processId": std::process::id(),
         "executablePath": std::env::current_exe().ok().map(|path| path.display().to_string()),
         "diagnostics": safe,
@@ -1320,6 +1323,8 @@ fn save_settings(
         .shortcut_maintenance
         .try_enter()
         .ok_or("快捷键正在更新，请稍后再保存。")?;
+    // Only the dedicated native choose/reset commands may change this path.
+    settings.screenshot_save_directory = locked(&state.settings)?.screenshot_save_directory.clone();
     validate_settings(&settings)?;
     settings.shortcuts = shortcut_bindings::normalized(&settings.shortcuts)?;
     let next = parsed_shortcuts(&settings.shortcuts)?;
@@ -1346,7 +1351,7 @@ fn save_settings(
     if retry_actions.iter().any(|action| {
         !matches!(
             action.as_str(),
-            "selection" | "silentOcr" | "capture" | "ocr" | "input"
+            "selection" | "silentOcr" | "capture" | "ocr" | "input" | "screenshot"
         )
     }) {
         return Err("未知快捷键操作".into());
@@ -1559,6 +1564,7 @@ fn announce_presentation(app: &tauri::AppHandle, presentation: translation_reque
     let _ = app.emit("translation-presentation", presentation);
 }
 fn cancel_active_translation(app: &tauri::AppHandle) -> Option<translation_requests::Presentation> {
+    screenshot::cancel_pending(app);
     if let Ok(presentation) = app.state::<AppState>().translation_requests.presentation() {
         record_popup_health(app, presentation.epoch, "presentationCancelled", None);
     }
@@ -1912,6 +1918,7 @@ fn prepare_input_presentation(
 }
 
 fn show(app: &tauri::AppHandle) -> Result<translation_requests::Presentation, String> {
+    screenshot::cancel_pending(app);
     app.state::<AppState>().native_tasks.cancel();
     let presentation = prepare_input_presentation(&app.state::<AppState>().translation_requests)?;
     announce_presentation(app, presentation);
@@ -2476,7 +2483,9 @@ fn action_failure_presentation(
             error: None,
         });
     }
-    if matches!(action, "capture" | "ocr" | "silentOcr") && error.starts_with("PERMISSION:") {
+    if matches!(action, "capture" | "ocr" | "silentOcr" | "screenshot")
+        && error.starts_with("PERMISSION:")
+    {
         // Keep permission guidance and the blank capture view in one event so
         // the frontend can prepare both before presenting the inactive popup.
         // Neither this mapping nor a shortcut requests permission or opens
@@ -2508,6 +2517,11 @@ async fn show_popup(
     .await
 }
 fn start_action(app: tauri::AppHandle, action: String) {
+    if action == "screenshot" {
+        screenshot::start_capture(app);
+        return;
+    }
+    screenshot::cancel_pending(&app);
     if action == "input" {
         if let Err(error) = show(&app) {
             let _ = app.emit("action-error", error);
@@ -2549,6 +2563,12 @@ fn start_action(app: tauri::AppHandle, action: String) {
     #[cfg(target_os = "windows")]
     let source_snapshot = if action == "selection" {
         platform::native_source_snapshot().map(Some)
+    } else {
+        Ok(None)
+    };
+    #[cfg(target_os = "macos")]
+    let macos_selection_source = if action == "selection" {
+        platform::macos_selection_source().map(Some)
     } else {
         Ok(None)
     };
@@ -2609,6 +2629,8 @@ fn start_action(app: tauri::AppHandle, action: String) {
             }
             #[cfg(target_os = "windows")]
             let expected_source = source_snapshot?;
+            #[cfg(target_os = "macos")]
+            let expected_macos_source = macos_selection_source?;
             #[cfg(target_os = "windows")]
             if let Some(source) = &expected_source {
                 let current = source.is_current();
@@ -2648,7 +2670,11 @@ fn start_action(app: tauri::AppHandle, action: String) {
                 None
             };
             #[cfg(not(target_os = "windows"))]
-            std::thread::sleep(Duration::from_millis(180));
+            if worker_action != "selection" {
+                // Selection already waits for modifier release before Copy.
+                // Do not postpone its initial AX/focus read by another 180 ms.
+                std::thread::sleep(Duration::from_millis(180));
+            }
             if worker_request.cancelled() {
                 return Err(translation_requests::CANCELLED.into());
             }
@@ -2666,14 +2692,26 @@ fn start_action(app: tauri::AppHandle, action: String) {
                         let (strategy, attempt) = selection_attempt.ok_or("缺少取词任务")?;
                         platform::selected_text_with_strategy_cancelable(cancel, strategy, attempt)
                     }
-                    #[cfg(not(target_os = "windows"))]
-                    platform::selected_text_cancelable(cancel)
+                    #[cfg(target_os = "macos")]
+                    {
+                        platform::selected_text_from_source_cancelable(
+                            cancel,
+                            expected_macos_source.as_ref().ok_or("缺少原取词窗口")?,
+                        )
+                    }
+                    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+                    {
+                        platform::selected_text_cancelable(cancel)
+                    }
                 }
                 "clipboard" => platform::clipboard_text(),
                 "capture" | "ocr" | "silentOcr" if cloud_ocr.is_some() => {
                     platform::capture_image_cancelable(cancel)
                 }
-                "capture" | "ocr" | "silentOcr" => platform::capture_ocr_cancelable(cancel),
+                "capture" | "ocr" | "silentOcr" => {
+                    ocr::record_invocation();
+                    platform::capture_ocr_cancelable(cancel)
+                }
                 _ => Err("未知操作".into()),
             };
             #[cfg(target_os = "windows")]
@@ -3171,7 +3209,7 @@ async fn fit_window_with_visibility(
     presentation: String,
     content_height: f64,
     content_width: Option<f64>,
-) -> Result<(), String> {
+) -> Result<Option<window_layout::LayoutViewport>, String> {
     #[cfg(target_os = "windows")]
     let mode_changed = matches!(presentation.as_str(), "popup" | "management")
         && state.is_popup() != (presentation == "popup");
@@ -3201,14 +3239,18 @@ fn run_action(app: tauri::AppHandle, action: String) -> Result<(), String> {
 fn is_native_action(action: &str) -> bool {
     matches!(
         action,
-        "selection" | "capture" | "ocr" | "silentOcr" | "input" | "clipboard"
+        "selection" | "capture" | "ocr" | "silentOcr" | "input" | "clipboard" | "screenshot"
     )
 }
 #[tauri::command]
-async fn copy_text(text: String) -> Result<(), String> {
-    tauri::async_runtime::spawn_blocking(move || platform::copy_text(&text))
-        .await
-        .map_err(|_| "复制失败".to_string())?
+async fn copy_text(app: tauri::AppHandle, text: String) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        let _physical = state.native_tasks.enter_effect()?;
+        platform::copy_text(&text)
+    })
+    .await
+    .map_err(|_| "复制失败".to_string())?
 }
 #[tauri::command]
 async fn set_pinned(app: tauri::AppHandle, pinned: bool) -> Result<(), String> {
@@ -3381,6 +3423,7 @@ fn tray(app: &tauri::AppHandle) -> tauri::Result<()> {
         ("settings", "设置与服务"),
         ("input", "打开翻译窗口"),
         ("selection", "划词翻译"),
+        ("screenshot", "截图与编辑"),
         ("capture", "截图翻译"),
         ("ocr", "截图 OCR"),
         ("silentOcr", "无感 OCR"),
@@ -3506,6 +3549,7 @@ fn main() {
                 history: Mutex::new(history),
                 pinned: AtomicBool::new(false),
                 native_tasks: native_tasks::Controller::default(),
+                screenshots: screenshot::Controller::default(),
                 shortcut_gate: Mutex::new(shortcut_control::ShortcutGate::default()),
                 shortcut_routes: shortcut_control::ShortcutRoutes::default(),
                 shortcut_updating: AtomicBool::new(false),
@@ -3597,6 +3641,12 @@ fn main() {
                 #[cfg(target_os = "windows")]
                 windows_popup_focus_changed(window.app_handle(), *focused);
             }
+            tauri::WindowEvent::CloseRequested { api, .. }
+                if window.label() == "screenshot-editor" =>
+            {
+                api.prevent_close();
+                let _ = window.emit("screenshot-close-requested", ());
+            }
             tauri::WindowEvent::CloseRequested { api, .. } => {
                 api.prevent_close();
                 cancel_shortcut_recording(window.app_handle());
@@ -3638,6 +3688,15 @@ fn main() {
             toggle_favorite,
             delete_history,
             run_action,
+            screenshot::get_screenshot_session,
+            screenshot::screenshot_editor_ready,
+            screenshot::open_screenshot_image,
+            screenshot::save_screenshot_image,
+            screenshot::copy_screenshot_image,
+            screenshot::close_screenshot_editor,
+            screenshot::get_screenshot_directory,
+            screenshot::choose_screenshot_directory,
+            screenshot::reset_screenshot_directory,
             copy_text,
             set_pinned,
             hide_window,
@@ -4444,6 +4503,7 @@ mod tests {
             history: Mutex::new(vec![]),
             pinned: AtomicBool::new(false),
             native_tasks: native_tasks::Controller::default(),
+            screenshots: screenshot::Controller::default(),
             shortcut_gate: Mutex::new(shortcut_control::ShortcutGate::default()),
             shortcut_routes: shortcut_control::ShortcutRoutes::default(),
             shortcut_updating: AtomicBool::new(false),

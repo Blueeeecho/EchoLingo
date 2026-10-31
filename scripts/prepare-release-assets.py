@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Prepare 0.2.3 public assets from the exact successful CI run, without rebuilding."""
+"""Prepare 0.2.4 public assets from the exact successful CI run, without rebuilding."""
 
 import argparse
 import hashlib
@@ -10,9 +10,11 @@ import shutil
 import tomllib
 import zipfile
 
+from verify_screenshot_editor_report import verify_report as verify_screenshot_editor_report
+
 
 ROOT = Path(__file__).resolve().parent.parent
-VERSION = "0.2.3"
+VERSION = "0.2.4"
 
 
 def check_version(root=ROOT):
@@ -24,8 +26,12 @@ def check_version(root=ROOT):
     versions = [package["version"], lock["version"], lock["packages"][""]["version"],
                 tauri["version"], cargo["package"]["version"]]
     versions.extend(item["version"] for item in cargo_lock["package"] if item["name"] == "echolingo")
-    if len(versions) != 6 or any(version != VERSION for version in versions):
-        raise ValueError("All package, Tauri and Cargo versions must be exactly 0.2.3")
+    capture = tomllib.loads((root / "src-tauri/native-capture/Cargo.toml").read_text())
+    capture_lock = tomllib.loads((root / "src-tauri/native-capture/Cargo.lock").read_text())
+    versions.append(capture["package"]["version"])
+    versions.extend(item["version"] for item in capture_lock["package"] if item["name"] == "echolingo-native-capture")
+    if len(versions) != 8 or any(version != VERSION for version in versions):
+        raise ValueError("All package, Tauri and Cargo versions must be exactly 0.2.4")
 
 
 def one_file(directory, pattern):
@@ -58,6 +64,16 @@ def prepare(artifacts, output, commit, run_url):
     for field in ("ok", "windowsRuntimeExecuted", "installerExecuted", "realModelExecuted", "rulesRemoved", "ownedInstallRemoved"):
         if report.get(field) is not True:
             raise ValueError(f"Installed Windows acceptance did not pass: {field}")
+    # Historical 0.2.1/0.2.2 helpers import this preparer but remain version-pinned.
+    # F1 is mandatory from 0.2.4 onward; do not retroactively assert it for old bytes.
+    requires_screenshot_editor = tuple(map(int, VERSION.split("."))) >= (0, 2, 4)
+    if requires_screenshot_editor:
+        if report.get("installedScreenshotEditorVerified") is not True:
+            raise ValueError("Installed F1 editor acceptance did not pass")
+        installed_sha = report.get("applicationSha256")
+        if not isinstance(installed_sha, str) or re.fullmatch(r"[0-9a-f]{64}", installed_sha) is None:
+            raise ValueError("Installed application identity is absent for F1 acceptance")
+        verify_screenshot_editor_report(report.get("installedScreenshotEditor"), installed_sha, installed=True)
     if report.get("mockTranslationUsed") is not False:
         raise ValueError("Real-model acceptance must not use a translation mock")
     if report.get("installerSha256") != sha256(windows) or report.get("installerBytes") != windows.stat().st_size:
@@ -85,6 +101,8 @@ def prepare(artifacts, output, commit, run_url):
         files.append({"name": name, "size": destination.stat().st_size, "sha256": sha256(destination)})
     manifest = {"version": VERSION, "commit": commit, "validationRun": run_url,
                 "rebuiltAfterValidation": False, "windowsInstalledAcceptanceVerified": True, "files": files}
+    if requires_screenshot_editor:
+        manifest["windowsInstalledScreenshotEditorVerified"] = True
     (output / "RELEASE-MANIFEST.json").write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
     checksums = [f"{sha256(path)}  {path.name}\n" for path in sorted(output.iterdir())]
     (output / "SHA256SUMS.txt").write_text("".join(checksums), encoding="utf-8")
@@ -101,7 +119,7 @@ def main():
     args = parser.parse_args()
     check_version()
     if args.check_version:
-        print("All release versions match 0.2.3.")
+        print("All release versions match 0.2.4.")
         return
     if not all((args.artifacts, args.output, args.commit, args.run_url)):
         parser.error("--artifacts, --output, --commit and --run-url are required")

@@ -134,7 +134,7 @@ public static class CaptureHealth {
     public static void Increment(string name) { long value;values.TryGetValue(name,out value);values[name]=value+1; }
     public static void ResetSelection() {
         List<string> old = new List<string>();
-        foreach (string key in values.Keys) if (key.StartsWith("selectionQuery", StringComparison.Ordinal) || (key.StartsWith("copyHtml", StringComparison.Ordinal) || key.StartsWith("copyUnicode", StringComparison.Ordinal) || key.StartsWith("copyRtf", StringComparison.Ordinal))) old.Add(key);
+        foreach (string key in values.Keys) if (key.StartsWith("selectionQuery", StringComparison.Ordinal) || (key.StartsWith("copyHtml", StringComparison.Ordinal) || key.StartsWith("copyUnicode", StringComparison.Ordinal) || key.StartsWith("copyRtf", StringComparison.Ordinal) || key.StartsWith("copySnapshot", StringComparison.Ordinal))) old.Add(key);
         foreach (string key in old) values.Remove(key);
         values["selectionQueryCount"] = 0;
     }
@@ -142,9 +142,9 @@ public static class CaptureHealth {
         Dictionary<string, long> previous = Snapshot();
         try {
             values.Clear(); values["copyHtmlSnapshotSeedVerified"] = 1; values["copyHtmlRestoreEqual"] = 1; values["copyUnicodeSnapshotEqual"] = 1; values["copyRtfRestoreEqual"] = 1;
-            values["selectionQuery1Stage"] = 11; values["unrelatedFixtureCounter"] = 7;
+            values["selectionQuery1Stage"] = 11; values["copySnapshotEmptyMarkers"] = 1; values["copySnapshotFailureKind"] = 4; values["unrelatedFixtureCounter"] = 7;
             ResetSelection();
-            if (values.ContainsKey("copyHtmlSnapshotSeedVerified") || values.ContainsKey("copyHtmlRestoreEqual") || values.ContainsKey("copyUnicodeSnapshotEqual") || values.ContainsKey("copyRtfRestoreEqual") || values.ContainsKey("selectionQuery1Stage")) throw new Exception("PROBE_EARLY_FAILURE_STALE_HEALTH");
+            if (values.ContainsKey("copyHtmlSnapshotSeedVerified") || values.ContainsKey("copyHtmlRestoreEqual") || values.ContainsKey("copyUnicodeSnapshotEqual") || values.ContainsKey("copyRtfRestoreEqual") || values.ContainsKey("selectionQuery1Stage") || values.ContainsKey("copySnapshotEmptyMarkers") || values.ContainsKey("copySnapshotFailureKind")) throw new Exception("PROBE_EARLY_FAILURE_STALE_HEALTH");
             if (values["selectionQueryCount"] != 0 || values["unrelatedFixtureCounter"] != 7 || values.Count != 2) throw new Exception("PROBE_RESET_CHANGED_OTHER_HEALTH");
             ResetSelection();
             if (values.Count != 2) throw new Exception("PROBE_DISABLED_ATTEMPT_ADDED_HEALTH");
@@ -623,6 +623,9 @@ public static class EchoLingoNative {
     [DllImport("user32.dll", SetLastError=true)] static extern bool OpenClipboard(IntPtr owner);
     [DllImport("user32.dll", SetLastError=true)] static extern bool EmptyClipboard();
     [DllImport("user32.dll")] static extern bool CloseClipboard();
+    [DllImport("user32.dll", CharSet=CharSet.Unicode)] static extern uint RegisterClipboardFormat(string name);
+    [DllImport("user32.dll", EntryPoint="GetClipboardData", SetLastError=true)] static extern IntPtr SnapshotGetClipboardData(uint format);
+    [DllImport("kernel32.dll", EntryPoint="SetLastError")] static extern void SnapshotSetLastError(uint error);
     [DllImport("user32.dll")] static extern uint GetWindowThreadProcessId(IntPtr window, out uint process);
     [DllImport("user32.dll")] static extern bool GetGUIThreadInfo(uint thread, ref GUITHREADINFO info);
     [DllImport("user32.dll", EntryPoint="GetClassNameW", CharSet=CharSet.Unicode)] static extern int CopyWindowClass(IntPtr window, StringBuilder name, int length);
@@ -1202,35 +1205,113 @@ public static class EchoLingoNative {
             + " elapsedMs=" + readClock.ElapsedMilliseconds + " sequence=" + GetClipboardSequenceNumber());
         return text;
     }
-    static object CloneClipboardValue(object value) {
-        if (value == null) throw new InvalidOperationException("Clipboard format could not be materialized.");
+    sealed class ClipboardSnapshotException : InvalidOperationException {
+        public readonly int Kind;
+        public ClipboardSnapshotException(int kind) : base("Clipboard representation cannot be preserved safely.") { Kind = kind; }
+    }
+    const string WebKitSmartPasteFormat = "WebKit Smart Paste Format";
+    // Whitelisted categories only. Never report arbitrary clipboard format names,
+    // object type names, payloads or exception messages in selection health.
+    static int ClipboardSnapshotFormatKind(string format) {
+        if (format == DataFormats.UnicodeText) return 1;
+        if (format == DataFormats.Html) return 2;
+        if (format == DataFormats.Rtf) return 3;
+        if (format == DataFormats.Bitmap || format == DataFormats.Dib) return 4;
+        if (format == DataFormats.FileDrop) return 5;
+        if (format == WebKitSmartPasteFormat) return 6;
+        return 7;
+    }
+    static void RequireEmptySmartPasteMarker(uint generation) {
+        // OLE null alone could mean it failed to read a nonempty HGLOBAL. Never
+        // replace that data with a marker. Only classify the exact known format,
+        // with one read-only native observation inside the same generation.
+        SelectionCopyPolicy.RequireCurrentSequence(generation, GetClipboardSequenceNumber());
+        if (!OpenClipboard(IntPtr.Zero)) throw new ClipboardSnapshotException(10);
+        try {
+            SelectionCopyPolicy.RequireCurrentSequence(generation, GetClipboardSequenceNumber());
+            uint format = RegisterClipboardFormat(WebKitSmartPasteFormat);
+            if (format == 0 || !IsClipboardFormatAvailable(format)) throw new ClipboardSnapshotException(10);
+            SnapshotSetLastError(0);
+            IntPtr payload = SnapshotGetClipboardData(format);
+            int error = Marshal.GetLastWin32Error();
+            SelectionCopyPolicy.RequireCurrentSequence(generation, GetClipboardSequenceNumber());
+            if (payload != IntPtr.Zero || error != 0) throw new ClipboardSnapshotException(10);
+        } finally { CloseClipboard(); }
+    }
+    static object CloneClipboardValue(string format, object value, uint generation) {
+        if (value == null) {
+            // Chromium intentionally publishes this exact presence-only marker
+            // with SetClipboardData(format, NULL). Its readers query availability,
+            // not payload. Preserve that semantic marker instead of dropping it.
+            // Use a nonempty stream: an empty HGLOBAL cannot be GlobalLock'ed.
+            // All other null/delayed-rendering formats still fail closed.
+            if (String.Equals(format, WebKitSmartPasteFormat, StringComparison.Ordinal)) {
+                RequireEmptySmartPasteMarker(generation);
+                CaptureHealth.Increment("copySnapshotEmptyMarkers");
+                return new MemoryStream(new byte[] { 0 });
+            }
+            throw new ClipboardSnapshotException(4);
+        }
         Bitmap bitmap = value as Bitmap;
         if (bitmap != null) return new Bitmap(bitmap);
         Stream stream = value as Stream;
         if (stream != null) {
-            if (!stream.CanSeek) throw new InvalidOperationException("Clipboard stream cannot be preserved safely.");
+            if (!stream.CanSeek) throw new ClipboardSnapshotException(5);
             long position = stream.Position;
-            try { stream.Position = 0; MemoryStream copy = new MemoryStream(); stream.CopyTo(copy); copy.Position = 0; return copy; }
-            finally { stream.Position = position; }
+            MemoryStream copy = new MemoryStream(); bool completed = false;
+            try {
+                try { stream.Position = 0; stream.CopyTo(copy); copy.Position = 0; }
+                finally { stream.Position = position; }
+                completed = true; return copy;
+            } finally { if (!completed) copy.Dispose(); }
         }
         Array array = value as Array;
         if (array != null) return array.Clone();
         if (value is string || value.GetType().IsValueType) return value;
-        throw new InvalidOperationException("Unsupported clipboard representation: " + value.GetType().Name);
+        throw new ClipboardSnapshotException(6);
     }
     static DataObject SnapshotClipboard(List<IDisposable> resources, out ClipboardHtmlProbe probe) {
-        probe = ClipboardHtmlProbe.Begin();
-        IDataObject existing = Clipboard.GetDataObject();
-        DataObject saved = new DataObject();
-        if (existing == null) return saved;
-        foreach (string format in existing.GetFormats(false)) {
-            object value = CloneClipboardValue(existing.GetData(format, false));
-            if (probe != null) probe.SnapshotValue(format, value);
-            IDisposable disposable = value as IDisposable;
-            if (disposable != null) resources.Add(disposable);
-            saved.SetData(format, false, value);
+        // Stage: 1 object, 2 enumerate, 3 read, 4 clone, 5 save, 6 complete.
+        // Failure: 1 object, 2 enumerate, 3 read, 4 null, 5 nonseekable,
+        // 6 unsupported object, 7 clone, 8 save, 9 generation changed,
+        // 10 known-marker native observation unavailable or not empty.
+        foreach (string field in new string[] { "copySnapshotStage", "copySnapshotFailureKind",
+            "copySnapshotFormatKind", "copySnapshotFormatCount", "copySnapshotFormatsSaved",
+            "copySnapshotEmptyMarkers" }) CaptureHealth.Set(field, 0);
+        int stage = 1; probe = null;
+        try {
+            CaptureHealth.Set("copySnapshotStage", stage);
+            uint generation = GetClipboardSequenceNumber();
+            probe = ClipboardHtmlProbe.Begin();
+            IDataObject existing = Clipboard.GetDataObject();
+            DataObject saved = new DataObject();
+            if (existing != null) {
+                CaptureHealth.Set("copySnapshotStage", stage = 2);
+                string[] formats = existing.GetFormats(false);
+                CaptureHealth.Set("copySnapshotFormatCount", Math.Min(10000000, formats.Length));
+                foreach (string format in formats) {
+                    CaptureHealth.Set("copySnapshotFormatKind", ClipboardSnapshotFormatKind(format));
+                    CaptureHealth.Set("copySnapshotStage", stage = 3);
+                    object original = existing.GetData(format, false);
+                    CaptureHealth.Set("copySnapshotStage", stage = 4);
+                    object value = CloneClipboardValue(format, original, generation);
+                    IDisposable disposable = value as IDisposable;
+                    if (disposable != null) resources.Add(disposable);
+                    if (probe != null) probe.SnapshotValue(format, value);
+                    CaptureHealth.Set("copySnapshotStage", stage = 5);
+                    saved.SetData(format, false, value);
+                    CaptureHealth.Increment("copySnapshotFormatsSaved");
+                }
+            }
+            CaptureHealth.Set("copySnapshotStage", 6);
+            return saved;
+        } catch (Exception error) {
+            ClipboardSnapshotException known = error as ClipboardSnapshotException;
+            CaptureHealth.Set("copySnapshotFailureKind", known != null ? known.Kind
+                : error.Message.StartsWith("CLIPBOARD_CHANGED:", StringComparison.Ordinal) ? 9
+                : stage == 4 ? 7 : stage == 5 ? 8 : stage);
+            throw;
         }
-        return saved;
     }
     static INPUT Key(ushort code, bool up) {
         return Key(code, up, UIntPtr.Zero);
@@ -1412,7 +1493,10 @@ public static class EchoLingoNative {
         } catch (OperationCanceledException) { foreach (IDisposable resource in resources) resource.Dispose(); throw; }
         catch (Exception error) {
             CaptureHealth.Set("copySnapshotOutcome", 2); foreach (IDisposable resource in resources) resource.Dispose();
-            throw new InvalidOperationException("CLIPBOARD: Cannot preserve all clipboard formats. Selection capture was stopped before changing the clipboard. " + error.Message);
+            if (error.Message.StartsWith("CLIPBOARD_CHANGED:", StringComparison.Ordinal)) {
+                CaptureHealth.Set("copySnapshotFailureKind", 9); throw;
+            }
+            throw new InvalidOperationException("CLIPBOARD: Cannot preserve all clipboard formats. No copy input was sent; use clipboard translation or screenshot OCR.");
         }
         try { return CopyCompatiblePreservedClipboard(context, expected, nativeEditable, saved, initial, htmlProbe); }
         finally { foreach (IDisposable resource in resources) resource.Dispose(); }
@@ -1522,14 +1606,17 @@ public static class EchoLingoNative {
         try {
             NativeCancellation.ThrowIfRequested();
             saved = SnapshotClipboard(resources, out htmlProbe);
-            if (GetClipboardSequenceNumber() != initial) throw new InvalidOperationException("Clipboard changed while its formats were being preserved. Retry.");
+            SelectionCopyPolicy.RequireCurrentSequence(initial, GetClipboardSequenceNumber());
         }
         catch (OperationCanceledException) {
             foreach (IDisposable resource in resources) resource.Dispose(); throw;
         }
         catch (Exception error) {
             foreach (IDisposable resource in resources) resource.Dispose();
-            throw new InvalidOperationException("CLIPBOARD: Cannot preserve all clipboard formats. Selection capture was stopped before changing the clipboard. " + error.Message);
+            if (error.Message.StartsWith("CLIPBOARD_CHANGED:", StringComparison.Ordinal)) {
+                CaptureHealth.Set("copySnapshotFailureKind", 9); throw;
+            }
+            throw new InvalidOperationException("CLIPBOARD: Cannot preserve all clipboard formats. No copy input was sent; use clipboard translation or screenshot OCR.");
         }
         try {
             return SelectionCopyPolicy.RevalidateAndCopy(delegate { return SelectionQuery(delegate { return AutomationSelection(context); }); },

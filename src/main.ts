@@ -1,3 +1,4 @@
+import { installScreenshotSettings } from './screenshot-settings';
 import './styles.css';
 import { installServiceManager } from './service-manager';
 import { renderTranslationParagraphs } from './translation-text-layout';
@@ -111,7 +112,7 @@ let latestSettingsOpenEpoch = -1;
 let confirmResolve: ((value: boolean) => void) | null = null;
 const cleanupListeners: Array<() => void> = [];
 const prefersDark = window.matchMedia('(prefers-color-scheme: dark)');
-const panelLayout = installPanelLayout(desktop, () => translationPresentation);
+const panelLayout = installPanelLayout(desktop, () => translationPresentation, resizeSourceEditor);
 let layoutQueued = false;
 function notifyLayout(): void {
   if (layoutQueued) return;
@@ -1126,7 +1127,9 @@ const shortcutEditor = createShortcutEditor({
   error: userFacingError, changed: notifyLayout,
 });
 const updateNotice = installUpdateNotice({ desktop, settings: () => settings, ready: () => settingsReady, updateSettings });
+const screenshotSettings = installScreenshotSettings({ desktop, settings: () => settings, ready: () => settingsReady, updateSettings, action: () => runAction('screenshot') });
 function renderSettings(): void {
+  screenshotSettings.refresh();
   updateNotice.refresh();
   $('#app-version').textContent = settings.appVersion ? 'EchoLingo ' + settings.appVersion : '';
   $('#app-version').hidden = !settings.appVersion;

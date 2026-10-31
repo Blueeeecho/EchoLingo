@@ -85,6 +85,16 @@ impl Controller {
         }
         Some(publication())
     }
+    /// Serialize an explicitly committed clipboard effect with native helpers.
+    /// Call only on a blocking worker, then revalidate the image/session before
+    /// the effect. It never changes intent and never blocks the UI/controller.
+    pub fn enter_effect(&self) -> Result<Permit<'_>, String> {
+        let guard = self
+            .worker
+            .lock()
+            .map_err(|_| "NATIVE_TASK: Native worker is unavailable")?;
+        Ok(Permit { _guard: guard })
+    }
     /// Call on a blocking worker. A stale waiter must not start a helper,
     /// read another application's selection or acquire an exclusion guard.
     pub fn enter(&self, request: &Request) -> Result<Permit<'_>, String> {
@@ -161,6 +171,27 @@ mod tests {
         assert!(controller.is_current(&next));
     }
 
+    #[test]
+    fn explicit_clipboard_effect_waits_for_cleanup_without_changing_latest_intent() {
+        let controller = Arc::new(Controller::default());
+        let old = controller.begin().unwrap();
+        let physical = controller.enter(&old).unwrap();
+        let (send, receive) = mpsc::channel();
+        let worker = {
+            let controller = controller.clone();
+            std::thread::spawn(move || {
+                let _effect = controller.enter_effect().unwrap();
+                send.send(()).unwrap();
+            })
+        };
+        assert!(receive.recv_timeout(Duration::from_millis(20)).is_err());
+        let latest = controller.begin().unwrap();
+        assert!(old.cancelled());
+        drop(physical);
+        receive.recv_timeout(Duration::from_secs(1)).unwrap();
+        worker.join().unwrap();
+        assert!(controller.is_current(&latest));
+    }
     #[test]
     fn old_completion_cannot_release_another_intent_or_make_old_request_current() {
         let controller = Controller::default();

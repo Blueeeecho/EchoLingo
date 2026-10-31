@@ -1,4 +1,4 @@
-# Disposable Windows account only. Owns temporary settings and hotkeys; never
+﻿# Disposable Windows account only. Owns temporary settings and hotkeys; never
 # reads existing user settings, starts the WebView, or sends user input.
 [CmdletBinding()]
 param([Parameter(Mandatory=$true)][string]$ApplicationPath, [switch]$IsolatedTestSession)
@@ -21,7 +21,7 @@ function Probe([int]$Expected, [string]$ExpectedOutput, [string]$Name) {
         $stdout = $outputTask.GetAwaiter().GetResult().Replace("`r`n", "`n")
         $stderr = $errorTask.GetAwaiter().GetResult()
         Require ($process.ExitCode -eq $Expected) "$Name returned unexpected exit code $($process.ExitCode)."
-        Require ($stdout -eq $ExpectedOutput -and $stdout.Length -le 480 -and $stdout -notmatch '[^\x00-\x7f]') "$Name returned an invalid bounded ASCII protocol."
+        Require ($stdout -eq $ExpectedOutput -and $stdout.Length -le 576 -and $stdout -notmatch '[^\x00-\x7f]') "$Name returned an invalid bounded ASCII protocol."
         Require ([string]::IsNullOrEmpty($stderr)) "$Name unexpectedly printed an error or private data."
         $after = if (Test-Path -LiteralPath $script:settings) { (Get-FileHash -LiteralPath $script:settings -Algorithm SHA256).Hash } else { '' }
         Require ($before -eq $after) "$Name modified settings."
@@ -32,9 +32,9 @@ function Probe([int]$Expected, [string]$ExpectedOutput, [string]$Name) {
         $process.Dispose()
     }
 }
-function Set-Bindings([string]$Selection, [string]$Ocr, [string]$ManualInput = '', [string]$Recognition = '') {
+function Set-Bindings([string]$Selection, [string]$Ocr, [string]$ManualInput = '', [string]$Recognition = '', [string]$Screenshot = '') {
     # Optional bindings are explicit current-schema choices, never legacy defaults.
-    @{ shortcutDefaultsVersion=2; shortcuts=@{ selection=$Selection; silentOcr=$Ocr; capture=''; ocr=$Recognition; input=$ManualInput } } |
+    @{ shortcutDefaultsVersion=2; shortcuts=@{ selection=$Selection; silentOcr=$Ocr; capture=''; ocr=$Recognition; input=$ManualInput; screenshot=$Screenshot } } |
         ConvertTo-Json -Depth 4 -Compress | ForEach-Object { [IO.File]::WriteAllText($script:settings, $_, [Text.UTF8Encoding]::new($false)) }
 }
 try {
@@ -78,6 +78,15 @@ public static class EchoLingoShortcutOwner {
     Probe 2 "ocr=Alt+Shift+S`n" 'explicit-optional-ocr-conflict-not-missed'
     Require ([EchoLingoShortcutOwner]::UnregisterHotKey([IntPtr]::Zero, 17031)) 'Cannot release optional OCR fixture hotkey.'
     $held = $false
+    Require ([EchoLingoShortcutOwner]::RegisterHotKey([IntPtr]::Zero, 17031, 0, 0x70)) 'Cannot own the fixture F1 conflict.'
+    $held = $true
+    Set-Bindings 'Alt+D' 'Alt+S' '' '' 'F1'
+    Probe 2 "screenshot=F1`n" 'screenshot-conflict-real-registration'
+    Probe 2 "screenshot=F1`n" 'screenshot-probe-does-not-remove-external-owner'
+    Set-Bindings 'Alt+D' 'Alt+S'
+    Probe 0 "selection=Alt+D`nsilentOcr=Alt+S`n" 'explicitly-disabled-screenshot-preserved'
+    Require ([EchoLingoShortcutOwner]::UnregisterHotKey([IntPtr]::Zero, 17031)) 'Cannot release F1 fixture hotkey.'
+    $held = $false
     Set-Bindings 'Ctrl+Alt+Shift+F9' 'Ctrl+Alt+Shift+F10'
     Probe 0 "selection=Ctrl+Alt+Shift+F9`nsilentOcr=Ctrl+Alt+Shift+F10`n" 'existing-custom-settings'
     Require ([EchoLingoShortcutOwner]::RegisterHotKey([IntPtr]::Zero, 17031, 7, 0x79)) 'Cannot own the fixture custom OCR conflict.'
@@ -91,7 +100,7 @@ public static class EchoLingoShortcutOwner {
     Probe 0 "selection=`nsilentOcr=`n" 'explicitly-disabled-core-shortcuts'
     # Real early CLI validation only: not Settings UI recording or physical
     # key acceptance. The pinned Windows mapping must not turn keypad = into E.
-    foreach ($action in @('selection', 'silentOcr', 'capture', 'ocr', 'input')) {
+    foreach ($action in @('selection', 'silentOcr', 'capture', 'ocr', 'input', 'screenshot')) {
         Set-Bindings '' ''
         $unsupported = [IO.File]::ReadAllText($settings) | ConvertFrom-Json
         $unsupported.shortcuts.PSObject.Properties[$action].Value = 'Ctrl+Alt+Shift+NumpadEqual'

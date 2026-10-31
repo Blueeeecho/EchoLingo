@@ -22,7 +22,7 @@ $directory=New-Item -ItemType Directory -Path $OutputDirectory
 $shell=Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
 $measurements=@();$orders=@(@('legacy','native'),@('native','legacy'),@('legacy','native'))
 $common=@('first-fresh-pair-immediate-release','topmost-self-raise-immediate-first-pair','foreign-thread-native-capture','cross-peer-held900ms','preheld-source-release-then-first-fresh-pair','escape-drains-owned-release','escape-held-release-after-helper-close','next-capture-after-escape','display-change-before-input','next-capture-after-display-change')
-$nativeModes=$common+@('escape-held900ms-drains-real-key-up','next-capture-after-held-escape','own-plane-cancelmode-no-input','next-capture-after-plane-cancelmode','benign-dpi-notifications-then-capture')
+$nativeModes=$common+@('magnifier-continuity-armed-and-dragging','escape-held900ms-drains-real-key-up','next-capture-after-held-escape','own-plane-cancelmode-no-input','next-capture-after-plane-cancelmode','benign-dpi-notifications-then-capture')
 function Median($Values){$sorted=@($Values|Sort-Object);$n=$sorted.Count;if($n -eq 0){throw 'AB_EMPTY_MEDIAN'};if($n % 2){return [double]$sorted[[int][Math]::Floor($n/2)]};return ([double]$sorted[$n/2-1]+[double]$sorted[$n/2])/2}
 if((Median @(1,2,100)) -ne 2 -or (Median @(100,1,2)) -ne 2 -or (Median @(9,1,5,3)) -ne 4 -or (Median @(7)) -ne 7){throw 'AB_MEDIAN_SELF_TEST'}
 try {
@@ -60,7 +60,7 @@ try {
         if($values.Count -ne 3){throw 'AB_PAIR_COUNT'}
         $summary+=@{backend=$backend;mode=$mode;samples=3;medianFirstBorderMilliseconds=(Median $values.firstBorderMilliseconds);medianFullReadyMilliseconds=(Median $values.fullReadyMilliseconds)}
     }}
-    $report=@{ok=$true;pairedRounds=3;orders=$orders;binarySha256=$hashes;measurements=$measurements;summary=$summary;allLegacyCasesPassed=30;allNativeCasesPassed=45;scope='Same Windows runner/session, alternating complete strict runs. Each child process is new; parent hook reused only within each run. OS caches not reset. Command-to-first-observed-border polling upper bounds, not application Alt+S or OCR latency. No physical multi-monitor or DPI-switch claim.'}
+    $report=@{ok=$true;pairedRounds=3;orders=$orders;binarySha256=$hashes;measurements=$measurements;summary=$summary;allLegacyCasesPassed=30;allNativeCasesPassed=48;scope='Same Windows runner/session, alternating complete strict runs. Each child process is new; parent hook reused only within each run. OS caches not reset. Command-to-first-observed-border polling upper bounds, not application Alt+S or OCR latency. No physical multi-monitor or DPI-switch claim.'}
     $report|ConvertTo-Json -Depth 12|Set-Content -LiteralPath (Join-Path $directory.FullName 'summary.json') -Encoding UTF8
     $report|ConvertTo-Json -Depth 12 -Compress
 } catch {

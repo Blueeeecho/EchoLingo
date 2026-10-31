@@ -1,12 +1,39 @@
-# 0.2.3 uses the full normal CI jobs plus the existing release priority-input gate.
+# 0.2.4 uses the full normal CI jobs plus the existing release priority-input gate.
 # Keep diagnostic-only token permissions out of this reusable publication gate.
 # Build/test steps mirror ci.yml; no production binaries are rebuilt afterward.
-name: Validate 0.2.3 release installers
+name: Validate 0.2.4 release installers
 on:
   workflow_call:
 permissions:
   contents: read
 jobs:
+  macos-screenshot-native-probe:
+    name: macOS native screenshot capture (permission block is not a pass)
+    runs-on: macos-latest
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - name: Exercise generated native images, dialogs and production capture
+        id: macos_f1_native_probe
+        continue-on-error: true
+        shell: bash
+        run: bash tests/macos-screenshot-native-fixture.sh "$RUNNER_TEMP/macos-f1-native-probe" --isolated-test-session
+      - name: Preserve native capture provenance and failures
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: macOS-F1-native-probe
+          path: ${{ runner.temp }}/macos-f1-native-probe
+          if-no-files-found: error
+      - name: Require actual native capture pass, not blocked permissions
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo 'Native capture probe outcome: ${{ steps.macos_f1_native_probe.outcome }}. This is not physical F1 or packaged editor acceptance. Permission-blocked capture remains a failed gate; no security settings are changed.' >> "$GITHUB_STEP_SUMMARY"
+          python3 scripts/verify-macos-screenshot-probe.py "$RUNNER_TEMP/macos-f1-native-probe/report.json" 2>&1 | tee -a "$GITHUB_STEP_SUMMARY"
   desktop:
     strategy:
       fail-fast: false
@@ -90,15 +117,25 @@ jobs:
             lldb --batch -o run -o 'thread backtrace all' -- "$RUNNER_TEMP/echolingo-window-size-check" || true
             exit 1
           fi
+          swiftc -parse-as-library -g src-tauri/native/macos_window.swift tests/macos-popup-viewport.swift -o "$RUNNER_TEMP/echolingo-popup-viewport-check"
+          "$RUNNER_TEMP/echolingo-popup-viewport-check"
       - run: npm ci
       - run: npm run check
       - run: npm test
       - run: npm audit --audit-level=high
       - run: npm run build
+      - name: Windows clipboard presence-marker preservation and unknown-format rejection
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: powershell.exe -NoProfile -STA -ExecutionPolicy Bypass -File tests/windows-clipboard-marker-smoke.ps1 -IsolatedTestSession
       - name: Native Windows OCR self-test (real WinRT fixture)
         if: runner.os == 'Windows'
         shell: powershell
         run: powershell.exe -NoProfile -STA -ExecutionPolicy Bypass -File src-tauri/native/windows.ps1 -Mode self-test
+      - name: Native Windows capture frame lifecycle policy tests
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: cargo test --manifest-path src-tauri/native-capture/Cargo.toml --locked
       - name: Windows transparent selector state regression
         if: runner.os == 'Windows'
         shell: powershell
@@ -134,11 +171,11 @@ jobs:
           $text = $output -join "`n"
           if ($text -notmatch 'test result: ok\. 12 passed; 0 failed; 0 ignored' -or $text -notmatch 'native_generated_image_repeated_recognition_and_empty_semantics \.\.\. ok') { throw 'NATIVE_OCR_GATE: Expected all 12 Windows tests and real generated-image OCR to execute without skip.' }
       - name: Rust tests
-        run: cargo test --manifest-path src-tauri/Cargo.toml
+        run: cargo test --manifest-path src-tauri/Cargo.toml --locked
       - name: Rust formatting
         run: cargo fmt --manifest-path src-tauri/Cargo.toml --check
       - name: Build desktop installer
-        run: npm run tauri build -- --bundles ${{ runner.os == 'Windows' && 'nsis' || 'dmg' }}
+        run: npm run tauri build -- --bundles ${{ runner.os == 'Windows' && 'nsis' || 'dmg' }} -- --locked
       - name: Identify the actual embedded precompiled Windows helper
         id: windows_native_candidate
         if: runner.os == 'Windows'
@@ -177,6 +214,40 @@ jobs:
           "capturePath=$capture" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
           [ordered]@{ nativeCaptureBytes = $captureBytes.Length; nativeCaptureSha256 = (Get-FileHash $capture -Algorithm SHA256).Hash.ToLowerInvariant(); completeNativeCaptureEmbedded = $true; exactNativeCaptureOffset = $captureOffset } | ConvertTo-Json -Compress
           [ordered]@{ dllBytes = $dllBytes.Length; dllSha256 = (Get-FileHash $dll.FullName -Algorithm SHA256).Hash.ToLowerInvariant(); completePayloadEmbedded = $true; exactPayloadOffset = $payloadOffset } | ConvertTo-Json -Compress
+      - name: Windows embedded capture child continuous magnifier and input ownership
+        id: windows_native_capture_continuity
+        if: runner.os == 'Windows'
+        continue-on-error: true
+        timeout-minutes: 8
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          & rustc --edition=2021 tests/windows-native-capture-harness.rs -O -o "$env:RUNNER_TEMP/echolingo-native-capture-harness.exe"
+          if ($LASTEXITCODE -ne 0) { throw 'Native capture harness compilation failed.' }
+          $ErrorActionPreference = 'Continue'
+          $global:LASTEXITCODE = 1
+          $output = @(& powershell.exe -NoProfile -STA -ExecutionPolicy Bypass -File tests/windows-native-capture-smoke.ps1 -NativeCapturePath '${{ steps.windows_native_candidate.outputs.capturePath }}' -HarnessPath "$env:RUNNER_TEMP/echolingo-native-capture-harness.exe" -IsolatedTestSession 2>&1)
+          $fixtureExit = $LASTEXITCODE
+          $output | Out-File "$env:RUNNER_TEMP/echolingo-native-capture-continuity.log" -Encoding utf8
+          $output | Write-Output
+          exit $fixtureExit
+      - name: Windows embedded F1 visible-window selector and cancellation
+        id: windows_screenshot_window
+        if: runner.os == 'Windows'
+        continue-on-error: true
+        timeout-minutes: 8
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          & rustc --edition=2021 tests/windows-native-capture-harness.rs -O -o "$env:RUNNER_TEMP/echolingo-screenshot-window-harness.exe"
+          if ($LASTEXITCODE -ne 0) { throw 'F1 native capture harness compilation failed.' }
+          $ErrorActionPreference = 'Continue'
+          $global:LASTEXITCODE = 1
+          $output = @(& powershell.exe -NoProfile -STA -ExecutionPolicy Bypass -File tests/windows-screenshot-window-smoke.ps1 -NativeCapturePath '${{ steps.windows_native_candidate.outputs.capturePath }}' -HarnessPath "$env:RUNNER_TEMP/echolingo-screenshot-window-harness.exe" -IsolatedTestSession 2>&1)
+          $fixtureExit = $LASTEXITCODE
+          $output | Out-File "$env:RUNNER_TEMP/echolingo-screenshot-window.log" -Encoding utf8
+          $output | Write-Output
+          exit $fixtureExit
       - name: Verify generated Windows launcher boundaries and same-DLL performance
         if: runner.os == 'Windows'
         timeout-minutes: 4
@@ -365,7 +436,7 @@ jobs:
         timeout-minutes: 5
         shell: powershell
         run: |
-          $installers = @(Get-ChildItem src-tauri/target/release/bundle/nsis -File -Filter '*0.2.3*x64*setup.exe')
+          $installers = @(Get-ChildItem src-tauri/target/release/bundle/nsis -File -Filter '*0.2.4*x64*setup.exe')
           if ($installers.Count -ne 1) { throw 'Expected exactly one own versioned NSIS installer.' }
           rustc --edition=2021 tests/windows-native-capture-harness.rs -O -o "$env:RUNNER_TEMP/echolingo-upper-capture-harness.exe"
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
@@ -500,6 +571,20 @@ jobs:
           $ticketOutput | Write-Output
           [ordered]@{ selectionBudgetExit = $budgetExit; selectionQueryExit = $queryExit; copyTicketExit = $ticketExit; expectedBudgetCases = 8 } | ConvertTo-Json -Compress
           if ($budgetExit -ne 0 -or $queryExit -ne 0 -or $ticketExit -ne 0) { throw 'Windows selection internal regressions failed or were incomplete.' }
+      - name: Diagnostic duplicate built-app F1 editor (installed acceptance remains mandatory)
+        id: windows_screenshot_editor
+        if: runner.os == 'Windows'
+        continue-on-error: true
+        timeout-minutes: 8
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Continue'
+          $global:LASTEXITCODE = 1
+          $output = @(& powershell.exe -NoProfile -STA -ExecutionPolicy Bypass -File tests/windows-application-smoke.ps1 -ApplicationPath src-tauri/target/release/echolingo.exe -ScreenshotEditorTests -DefaultCapture -NativeCapturePath '${{ steps.windows_native_candidate.outputs.capturePath }}' 2>&1)
+          $fixtureExit = $LASTEXITCODE
+          $output | Out-File "$env:RUNNER_TEMP/echolingo-screenshot-editor.log" -Encoding utf8
+          $output | Write-Output
+          exit $fixtureExit
       - name: Windows installed NSIS real offline-model acceptance
         id: windows_installed_offline
         if: runner.os == 'Windows'
@@ -519,6 +604,10 @@ jobs:
             ${{ runner.temp }}/echolingo-shortcuts-ui.log
             ${{ runner.temp }}/echolingo-custom-shortcuts.log
             ${{ runner.temp }}/echolingo-native-delegated-capture.log
+            ${{ runner.temp }}/echolingo-native-capture-continuity.log
+            ${{ runner.temp }}/echolingo-screenshot-window.log
+            ${{ runner.temp }}/echolingo-screenshot-editor.log
+            ${{ runner.temp }}/echolingo-installed-screenshot-editor.log
             ${{ runner.temp }}/echolingo-helper-performance.log
             ${{ runner.temp }}/echolingo-popup-resize.log
             ${{ runner.temp }}/echolingo-selection-document.log
@@ -572,6 +661,8 @@ jobs:
             customShortcuts = '${{ steps.windows_custom_shortcuts.outcome }}'
             helperPerformance = '${{ steps.windows_helper_performance.outcome }}'
             delegatedCapture = '${{ steps.windows_delegated_capture.outcome }}'
+            nativeCaptureContinuity = '${{ steps.windows_native_capture_continuity.outcome }}'
+            screenshotWindow = '${{ steps.windows_screenshot_window.outcome }}'
             selectionDocument = '${{ steps.windows_selection_document.outcome }}'
             selectionCompatibility = '${{ steps.windows_selection_compat.outcome }}'
             selectionNativeFocus = '${{ steps.windows_selection_native_focus.outcome }}'
@@ -582,6 +673,19 @@ jobs:
             actualBrowserOcr = '${{ steps.windows_browser_ocr.outcome }}'
           }
           $taskOutcomes | ConvertTo-Json -Compress
+          $diagnosticOutcomes = @{ acceptancePolicy = 'core-functional-v1'; bareScreenshotEditor = '${{ steps.windows_screenshot_editor.outcome }}'; bareScreenshotEditorBlocking = $false }
+          $diagnosticOutcomes | ConvertTo-Json -Compress
+          $diagnosticOutcomes | ConvertTo-Json -Compress | Out-File $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
+          # Mandatory raw inventory and continuity evidence, independently of step success.
+          $global:LASTEXITCODE = 1
+          & python scripts/verify-native-capture-report.py "$env:RUNNER_TEMP/echolingo-native-capture-continuity.log"
+          if ($LASTEXITCODE -ne 0) { throw 'Embedded native capture acceptance report is missing, incomplete or failed.' }
+          $global:LASTEXITCODE = 1
+          & python scripts/verify-screenshot-window-report.py "$env:RUNNER_TEMP/echolingo-screenshot-window.log"
+          if ($LASTEXITCODE -ne 0) { throw 'Embedded F1 selector acceptance report is missing, incomplete or failed.' }
+          $global:LASTEXITCODE = 1
+          & python scripts/verify_screenshot_editor_report.py "$env:RUNNER_TEMP/echolingo-offline-validation.json" --application src-tauri/target/release/echolingo.exe --installed-acceptance
+          if ($LASTEXITCODE -ne 0) { throw 'Actual installed F1 editor acceptance report is missing, incomplete or failed.' }
           if (@($taskOutcomes.Values | Where-Object { $_ -ne 'success' }).Count -gt 0) {
             throw 'Windows desktop acceptance incomplete or failed; preview artifacts are not a passing release.'
           }
@@ -593,7 +697,7 @@ jobs:
       - name: Check public repository inputs
         run: |
           python3 scripts/check-repository.py
-          python3 -m unittest discover -s tests -p 'test_repository_hygiene.py'
+          python3 -m unittest discover -s tests -p 'test_*.py' -v
       - uses: actions/setup-node@v4
         with:
           node-version: '24'
@@ -622,6 +726,7 @@ jobs:
           node tests/panel-layout-performance.mjs
           node tests/window-resize-edges.mjs
           node tests/popup-manual-height.mjs
+          node tests/popup-viewport.mjs
           node tests/windows-management-scroll-container.mjs
           node tests/service-quota-ui.mjs
       - name: Preserve actual service management UI screenshots

@@ -1,6 +1,6 @@
 //! Early installer-only check. Call before constructing Tauri or its plugins.
 //! Exit0: available/disabled;2: occupied/reserved;3: unknown. Standard output
-//! keeps two core lines for success, at most five conflict lines/480ASCII bytes,
+//! keeps two core lines for success, at most six conflict lines/576 ASCII bytes,
 //! and is empty for unknown. Every enabled startup binding is checked.
 pub const FLAG: &str = "--check-shortcuts-on-install";
 
@@ -80,6 +80,7 @@ fn bindings(bytes: Option<&[u8]>) -> Result<Vec<Binding>, ()> {
         ("capture", shortcuts.capture),
         ("ocr", shortcuts.ocr),
         ("input", shortcuts.input),
+        ("screenshot", shortcuts.screenshot),
     ]
     .into_iter()
     .map(|(action, combo)| {
@@ -112,7 +113,7 @@ impl Outcome {
             Self::Conflict(rows) => (2, rows),
             Self::Unknown => return (3, String::new()),
         };
-        if rows.len() > 5 || (code == 0 && rows.len() != 5) || (code == 2 && rows.is_empty()) {
+        if rows.len() > 6 || (code == 0 && rows.len() != 6) || (code == 2 && rows.is_empty()) {
             return (3, String::new());
         }
         let mut output = String::new();
@@ -120,7 +121,7 @@ impl Outcome {
         for row in rows {
             if !matches!(
                 row.action,
-                "selection" | "silentOcr" | "capture" | "ocr" | "input"
+                "selection" | "silentOcr" | "capture" | "ocr" | "input" | "screenshot"
             ) || !seen.insert(row.action)
                 || !row.combo.is_ascii()
                 || row.combo.len() > 80
@@ -138,7 +139,7 @@ impl Outcome {
             output.push_str(&row.combo);
             output.push('\n');
         }
-        if output.len() > 480 {
+        if output.len() > 576 {
             return (3, String::new());
         }
         (code, output)
@@ -444,6 +445,7 @@ mod tests {
     }
     fn configured(selection: &str, ocr: &str) -> Vec<u8> {
         let mut settings = Settings::default();
+        settings.shortcuts.screenshot.clear();
         settings.shortcuts.selection = selection.into();
         settings.shortcuts.silent_ocr = ocr.into();
         settings.shortcuts.capture.clear();
@@ -503,7 +505,7 @@ mod tests {
     #[test]
     fn missing_settings_checks_all_defaults_but_success_lists_only_core_bindings() {
         let rows = bindings(None).unwrap();
-        assert_eq!(rows.len(), 5);
+        assert_eq!(rows.len(), 6);
         assert_eq!(
             Outcome::Available(rows).protocol(),
             (0, "selection=Alt+D\nsilentOcr=Alt+S\n".into())
@@ -524,6 +526,7 @@ mod tests {
     #[test]
     fn old_capture_defaults_migrate_before_probe_like_real_app_startup() {
         let mut settings = Settings::default();
+        settings.shortcuts.screenshot.clear();
         settings.shortcut_defaults_version = 0;
         settings.shortcuts.capture = "Alt+S".into();
         settings.shortcuts.silent_ocr = "Alt+C".into();
@@ -574,7 +577,7 @@ mod tests {
         let (code, output) = check(&mut registry, bindings(None).unwrap()).protocol();
         assert_eq!((code, output), (2, "selection=Alt+D\n".into()));
         assert!(registry.active.is_empty());
-        assert_eq!(registry.removed.len(), 1);
+        assert_eq!(registry.removed.len(), 2);
     }
     #[test]
     fn ambiguous_native_failure_takes_precedence_over_known_conflict() {
@@ -586,7 +589,7 @@ mod tests {
             check(&mut registry, bindings(None).unwrap()).protocol(),
             (3, String::new())
         );
-        assert_eq!(registry.removed.len(), 0);
+        assert_eq!(registry.removed.len(), 1);
     }
     #[test]
     fn cleanup_failure_is_unknown_and_all_remaining_releases_are_attempted() {
@@ -595,12 +598,13 @@ mod tests {
             check(&mut registry, bindings(None).unwrap()).protocol(),
             (3, String::new())
         );
-        assert_eq!(registry.removed.len(), 2);
+        assert_eq!(registry.removed.len(), 3);
     }
 
     #[test]
     fn opted_in_input_conflict_is_reported_instead_of_false_core_success() {
         let mut settings = Settings::default();
+        settings.shortcuts.screenshot.clear();
         settings.shortcuts.input = "Alt+A".into();
         let rows = bindings(Some(&serde_json::to_vec(&settings).unwrap())).unwrap();
         let id = rows
@@ -624,6 +628,7 @@ mod tests {
     #[test]
     fn all_five_enabled_bindings_are_checked_and_released_on_success() {
         let mut settings = Settings::default();
+        settings.shortcuts.screenshot.clear();
         settings.shortcuts.capture = "Ctrl+F1".into();
         settings.shortcuts.input = "Alt+A".into();
         settings.shortcuts.ocr = "Alt+Shift+S".into();
@@ -652,6 +657,7 @@ mod tests {
     #[test]
     fn legacy_f12_reaches_the_same_reserved_policy_as_a_core_binding() {
         let mut settings = Settings::default();
+        settings.shortcuts.screenshot.clear();
         settings.shortcuts.input = "F12".into();
         let rows = bindings(Some(&serde_json::to_vec(&settings).unwrap())).unwrap();
         let input = rows.iter().find(|row| row.action == "input").unwrap();
@@ -661,6 +667,25 @@ mod tests {
             Outcome::Conflict(vec![input.clone()]).protocol(),
             (2, "input=F12\n".into())
         );
+    }
+    #[test]
+    fn screenshot_conflict_is_reported_without_removing_another_apps_registration() {
+        let rows = bindings(None).unwrap();
+        let id = rows
+            .iter()
+            .find(|row| row.action == "screenshot")
+            .unwrap()
+            .shortcut
+            .unwrap()
+            .id();
+        let mut registry = FakeRegistry::new(vec![], false);
+        registry.conflict_id = Some(id);
+        assert_eq!(
+            check(&mut registry, rows).protocol(),
+            (2, "screenshot=F1\n".into())
+        );
+        assert_eq!(registry.removed.len(), 2);
+        assert!(!registry.removed.contains(&id));
     }
     #[test]
     fn protocol_refuses_control_characters_non_ascii_and_excess_rows() {
@@ -700,13 +725,14 @@ mod native_priority_probe_tests {
         let mut probe = Probe(0);
         let outcome = check_windows(&mut probe, bindings(None).unwrap());
         assert_eq!(outcome.protocol().0, 0);
-        assert_eq!(probe.0, 0);
-        // Optional opt-in actions still use the native registrar.
+        assert_eq!(probe.0, 1); // F1 uses the ordinary registrar.
+                                // Optional opt-in actions still use the native registrar.
         let mut settings = Settings::default();
+        settings.shortcuts.screenshot.clear();
         settings.shortcuts.input = "Alt+A".into();
         settings.shortcuts.ocr = "Alt+Shift+S".into();
         let rows = bindings(Some(&serde_json::to_vec(&settings).unwrap())).unwrap();
         assert_eq!(check_windows(&mut probe, rows).protocol().0, 0);
-        assert_eq!(probe.0, 2);
+        assert_eq!(probe.0, 3);
     }
 }

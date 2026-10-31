@@ -8,14 +8,14 @@ export const LANGUAGES: ReadonlyArray<readonly [string, string]> = [
   ['es', 'Español'], ['ru', 'Русский'], ['pt', 'Português'], ['it', 'Italiano'],
 ];
 export const SHORTCUT_LABELS = {
-  selection: '划词翻译', capture: '截图翻译', ocr: '截图识别', silentOcr: '无感 OCR', input: '输入翻译',
+  screenshot: '截图编辑', selection: '划词翻译', capture: '截图翻译', ocr: '截图识别', silentOcr: '无感 OCR', input: '输入翻译',
 } as const;
 export const defaultSettings = (): Settings => ({
   providers: [], sourceLanguage: 'auto', targetLanguage: 'auto', languageDirectionVersion: 1,
   shortcutDefaultsVersion: 2,
-  windowsSelectionStrategy: 'copy',
+  windowsSelectionStrategy: 'copy', screenshotSaveDirectory: '',
   automaticUpdateChecks: false, includePrereleaseUpdates: true,
-  shortcuts: { selection: 'Alt+D', capture: '', ocr: '', silentOcr: 'Alt+S', input: '' },
+  shortcuts: { selection: 'Alt+D', capture: '', ocr: '', silentOcr: 'Alt+S', screenshot: 'F1', input: '' },
   saveHistory: true, theme: 'system', maxHistory: 20, autoHideSeconds: 0, ocrProviders: [], activeOcrProviderId: null,
 });
 export function filterHistory(entries: HistoryEntry[], query: string, favoritesOnly: boolean): HistoryEntry[] {
@@ -45,6 +45,7 @@ export function errorMessage(error: unknown): string {
 export function userFacingError(error: unknown): string {
   if (/^CAPTURE_DISPLAY_CHANGED:/i.test(errorMessage(error).trim())) return '截图显示环境校验未通过，已取消本次截图。请重新按截图快捷键选择区域。';
   if (/^SELECTION_UNAVAILABLE:/i.test(errorMessage(error).trim())) return '当前应用未提供可验证的选区。请先按 ⌘C，再使用菜单栏的“翻译剪贴板”或浮窗更多里的“剪贴板翻译”；也可使用截图识别。';
+  if (/^CLIPBOARD: Cannot preserve (?:all clipboard formats|clipboard format)/i.test(errorMessage(error).trim())) return '为保留原剪贴板的全部格式，本次未发送复制快捷键。请手动复制所选文字，再使用“翻译剪贴板”，或使用截图识别。';
   if (/^COPY_NO_UPDATE:/i.test(errorMessage(error).trim())) return '已发送复制快捷键，但目标应用没有及时更新剪贴板。请在原应用选中文字后手动按 Ctrl+C 验证，或使用截图识别。';
   return errorMessage(error).replace(/^(?:SYSTEM_TRANSLATION_[A-Z_]+|NATIVE_[A-Z_]+|CAPTURE(?:_[A-Z_]+)?):\s*/, '');
 }

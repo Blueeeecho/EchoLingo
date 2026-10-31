@@ -1,0 +1,117 @@
+name: Focused 0.2.4 immutable-artifact fixture diagnostics
+on:
+  push:
+    branches: [diagnostics/024-f1-fixture-reuse]
+permissions:
+  contents: read
+  actions: read
+jobs:
+  windows-f1-fixture-reuse:
+    name: Exact existing Windows bytes, fixture diagnostics only
+    runs-on: windows-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - name: Require the exact unchanged production and build inputs
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $base = '033aa3718a0c56f05dc752c0fd729f71299b3eff'
+          git fetch --no-tags --depth=1 origin $base
+          if ($LASTEXITCODE -ne 0) { throw 'Immutable source commit is unavailable.' }
+          $changed = @(git diff --name-only $base HEAD)
+          if ($LASTEXITCODE -ne 0) { throw 'Exact source comparison failed.' }
+          # Everything outside these explicit fixture/documentation paths must
+          # remain byte-identical: app/native sources, dependencies, lockfiles,
+          # build scripts, resources, assets and configuration are not exempted.
+          $allowed = '^(tests/|docs/|\.github/workflows/|scripts/test_[^/]+\.py$|scripts/verify-(native-capture-report|screenshot-window-report|macos-screenshot-probe)\.py$|scripts/verify_screenshot_editor_report\.py$|scripts/windows-f1-fixture-reuse\.ps1$)'
+          foreach ($path in $changed) {
+            if ($path -notmatch $allowed) { throw ('Production/build input differs from immutable artifact: ' + $path) }
+          }
+          New-Item -ItemType Directory -Force "$env:RUNNER_TEMP/f1-reuse-results" | Out-Null
+          [ordered]@{ sourceCommit=$base; fixtureCommit=(git rev-parse HEAD); productionAndBuildInputsByteEqual=$true; allowedFixtureChanges=$changed; diagnosticOnly=$true; releaseAcceptance=$false } | ConvertTo-Json -Depth 4 | Set-Content "$env:RUNNER_TEMP/f1-reuse-results/source-equality.json" -Encoding utf8
+      - name: Verify immutable same-repository artifacts and actual ZIP hashes
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const path = require('path');
+            const crypto = require('crypto');
+            if (context.repo.owner !== 'Blueeeecho' || context.repo.repo !== 'EchoLingo') throw new Error('Unexpected repository.');
+            const runId = 41169341340;
+            const source = '033aa3718a0c56f05dc752c0fd729f71299b3eff';
+            const run = (await github.rest.actions.getWorkflowRun({...context.repo, run_id: runId})).data;
+            if (run.head_sha !== source || run.repository.id !== 1432139657) throw new Error('Immutable build provenance mismatch.');
+            const input = path.join(process.env.RUNNER_TEMP, 'f1-reuse-inputs');
+            fs.mkdirSync(input, {recursive:true});
+            const records = [];
+            for (const expected of [
+              {id:13031215832, name:'EchoLingo-Windows-offline-evidence', size:18853830, digest:'f23875028808cc682887667537d5935314b6d5c9d8e236b4c55803cf1af91e35', file:'evidence.zip'},
+              {id:13030374934, name:'EchoLingo-Windows', size:75880074, digest:'a40bbb7ac83a3d39fb79b158a926769896156579fe81027dd3c113bfec49bd20', file:'installer.zip'}
+            ]) {
+              const artifact = (await github.rest.actions.getArtifact({...context.repo, artifact_id:expected.id})).data;
+              if (artifact.expired || artifact.name !== expected.name || artifact.size_in_bytes !== expected.size || artifact.digest !== `sha256:${expected.digest}` || artifact.workflow_run?.id !== runId || artifact.workflow_run?.head_sha !== source) throw new Error('Artifact metadata differs from reviewed immutable bytes.');
+              const download = await github.rest.actions.downloadArtifact({...context.repo, artifact_id:expected.id, archive_format:'zip'});
+              const bytes = Buffer.from(download.data);
+              if (bytes.length !== expected.size || crypto.createHash('sha256').update(bytes).digest('hex') !== expected.digest) throw new Error('Downloaded ZIP byte identity mismatch.');
+              fs.writeFileSync(path.join(input, expected.file), bytes);
+              records.push({...expected, sourceCommit:source, sourceRun:runId, actualZipDigestVerified:true});
+            }
+            fs.writeFileSync(path.join(process.env.RUNNER_TEMP, 'f1-reuse-results', 'artifacts.json'), JSON.stringify(records,null,2));
+      - name: Expand only the verified immutable inputs
+        shell: pwsh
+        run: |
+          Expand-Archive -LiteralPath "$env:RUNNER_TEMP/f1-reuse-inputs/evidence.zip" -DestinationPath "$env:RUNNER_TEMP/f1-reuse-inputs/evidence"
+          Expand-Archive -LiteralPath "$env:RUNNER_TEMP/f1-reuse-inputs/installer.zip" -DestinationPath "$env:RUNNER_TEMP/f1-reuse-inputs/installer"
+      - name: Parse focused PowerShell harness before execution
+        shell: powershell
+        run: |
+          $tokens = $null
+          $parseErrors = $null
+          [Management.Automation.Language.Parser]::ParseFile((Resolve-Path 'scripts/windows-f1-fixture-reuse.ps1').Path, [ref]$tokens, [ref]$parseErrors) | Out-Null
+          if ($parseErrors.Count -ne 0) { $parseErrors | Format-List; throw 'Focused harness has PowerShell syntax errors.' }
+      - name: Run original shortcut and real screenshot editor fixtures without rebuilding
+        shell: powershell
+        run: powershell.exe -NoProfile -STA -ExecutionPolicy Bypass -File scripts/windows-f1-fixture-reuse.ps1 -EvidenceDirectory "$env:RUNNER_TEMP/f1-reuse-inputs/evidence" -InstallerDirectory "$env:RUNNER_TEMP/f1-reuse-inputs/installer" -OutputDirectory "$env:RUNNER_TEMP/f1-reuse-results/runtime"
+      - name: Preserve the first focused result including failures
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: Windows-F1-immutable-artifact-fixture-diagnostics
+          path: ${{ runner.temp }}/f1-reuse-results
+          if-no-files-found: error
+      - name: State evidence boundaries
+        if: always()
+        shell: pwsh
+        run: |
+          'This is fixture-only diagnosis against source-equal immutable existing bytes. It is not release acceptance. The final combined PR head still requires all normal native, browser, installed and release gates; this workflow does not rebuild, publish, merge or change repository settings.' | Add-Content "$env:GITHUB_STEP_SUMMARY"
+
+  macos-screenshot-native-probe:
+    name: macOS native screenshot capture (permission block is not a pass)
+    runs-on: macos-latest
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - name: Exercise generated native images, dialogs and production capture
+        id: macos_f1_native_probe
+        continue-on-error: true
+        shell: bash
+        run: bash tests/macos-screenshot-native-fixture.sh "$RUNNER_TEMP/macos-f1-native-probe" --isolated-test-session
+      - name: Preserve native capture provenance and failures
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: macOS-F1-native-probe
+          path: ${{ runner.temp }}/macos-f1-native-probe
+          if-no-files-found: error
+      - name: Require actual native capture pass, not blocked permissions
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo 'Native capture probe outcome: ${{ steps.macos_f1_native_probe.outcome }}. This is not physical F1 or packaged editor acceptance. Permission-blocked capture remains a failed gate; no security settings are changed.' >> "$GITHUB_STEP_SUMMARY"
+          python3 scripts/verify-macos-screenshot-probe.py "$RUNNER_TEMP/macos-f1-native-probe/report.json" 2>&1 | tee -a "$GITHUB_STEP_SUMMARY"

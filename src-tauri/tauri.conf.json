@@ -1,7 +1,7 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "EchoLingo",
-  "version": "0.2.3",
+  "version": "0.2.4",
   "identifier": "io.github.blueeeecho.echolingo",
   "build": {
     "beforeDevCommand": "npm run dev",
@@ -26,6 +26,22 @@
         "visibleOnAllWorkspaces": true,
         "acceptFirstMouse": true,
         "focus": false
+      },
+      {
+        "label": "screenshot-editor",
+        "url": "screenshot.html",
+        "title": "截图编辑 · EchoLingo",
+        "width": 1080,
+        "height": 760,
+        "minWidth": 720,
+        "minHeight": 520,
+        "center": true,
+        "visible": false,
+        "decorations": true,
+        "resizable": true,
+        "alwaysOnTop": false,
+        "focus": false,
+        "create": false
       }
     ],
     "security": {

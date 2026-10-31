@@ -64,8 +64,8 @@ export function normalizeShortcut(value: string, mac = false, windows = isWindow
 }
 export function normalizeShortcuts(values: Record<ShortcutAction, string>, mac = false, windows = isWindows()): Record<ShortcutAction, string> {
   const result = {} as Record<ShortcutAction, string>; const seen = new Set<string>();
-  for (const action of ['selection', 'silentOcr', 'capture', 'ocr', 'input'] as const) {
-    const key = normalizeShortcut(values[action], mac, windows);
+  for (const action of ['selection', 'silentOcr', 'screenshot', 'capture', 'ocr', 'input'] as const) {
+    const key = normalizeShortcut(values[action] ?? '', mac, windows);
     if (key && seen.has(key)) throw new Error('不同操作不能使用相同的快捷键。');
     if (key) seen.add(key);
     result[action] = key;

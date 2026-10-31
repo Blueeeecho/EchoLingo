@@ -1,15 +1,15 @@
 import { defaultSettings } from './model';
 import { describe, expect, it, vi } from 'vitest';
 import { displayShortcut, normalizeShortcut, normalizeShortcuts, recordedShortcut, recordedMouseShortcut } from './shortcuts';
-const keys = { selection: 'Alt+D', silentOcr: 'Alt+S', capture: '', ocr: 'Alt+Shift+S', input: 'Alt+A' };
+const keys = { selection: 'Alt+D', silentOcr: 'Alt+S', capture: '', ocr: 'Alt+Shift+S', input: 'Alt+A', screenshot: 'F1' };
 const event = (values: Partial<KeyboardEvent> = {}): Parameters<typeof recordedShortcut>[0] => ({ key: 't', code: 'KeyT', ctrlKey: true, altKey: false, shiftKey: false, metaKey: false, repeat: false, isComposing: false, keyCode: 84, ...values });
 describe('shortcut configuration', () => {
-  it('defaults to exactly two editable bindings on both platforms, with optional actions opt-in', () => {
+  it('defaults to F1 screenshot editing while preserving Alt+D and silent Alt+S on both platforms', () => {
     for (const mac of [false, true]) {
       const settings = defaultSettings();
       expect(settings.shortcutDefaultsVersion).toBe(2);
       const defaults = normalizeShortcuts(settings.shortcuts, mac, !mac);
-      expect(Object.values(defaults).filter(Boolean)).toEqual(['Alt+D', 'Alt+S']);
+      expect(Object.values(defaults).filter(Boolean)).toEqual(['Alt+D', 'Alt+S', 'F1']);
       const changed = normalizeShortcuts({ ...defaults, selection: 'Ctrl+Alt+T', silentOcr: 'Ctrl+Alt+R', input: 'Alt+A', ocr: 'Alt+Shift+S' }, mac, !mac);
       expect(changed.input).toBe('Alt+A');
       expect(changed.ocr).toBe('Alt+Shift+S');
@@ -58,7 +58,7 @@ describe('shortcut configuration', () => {
   it('rejects Windows NumpadEqual in typed and recorded input without changing macOS or other platforms', () => {
     const message = 'Windows 暂不支持小键盘等号键，请选择其他按键。';
     expect(() => normalizeShortcut('control+numpadequal', false, true)).toThrow(message);
-    for (const action of ['selection', 'silentOcr', 'capture', 'ocr', 'input'] as const) {
+    for (const action of ['selection', 'silentOcr', 'screenshot', 'capture', 'ocr', 'input'] as const) {
       expect(() => normalizeShortcuts({ ...keys, [action]: 'Ctrl+NumpadEqual' }, false, true)).toThrow(message);
     }
     const keypad = event({ key: '=', code: 'NumpadEqual' });

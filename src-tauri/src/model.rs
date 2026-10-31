@@ -109,9 +109,16 @@ pub fn add_system_translation_option(settings: &mut Settings) {
     }
 }
 
+const MISSING_SCREENSHOT_SHORTCUT: &str = "\0screenshot-missing";
+fn missing_screenshot_shortcut() -> String {
+    MISSING_SCREENSHOT_SHORTCUT.into()
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Shortcuts {
+    #[serde(default = "missing_screenshot_shortcut")]
+    pub screenshot: String,
     pub selection: String,
     pub capture: String,
     pub ocr: String,
@@ -126,12 +133,14 @@ impl Shortcuts {
             ("ocr", &self.ocr),
             ("silentOcr", &self.silent_ocr),
             ("input", &self.input),
+            ("screenshot", &self.screenshot),
         ]
     }
 }
 impl Default for Shortcuts {
     fn default() -> Self {
         Self {
+            screenshot: "F1".into(),
             selection: "Alt+D".into(),
             capture: String::new(),
             ocr: String::new(),
@@ -178,6 +187,8 @@ pub struct Settings {
     pub max_history: usize,
     pub theme: String,
     pub auto_hide_seconds: u32,
+    /// Empty means the current OS Desktop, including redirected/localized folders.
+    pub screenshot_save_directory: String,
 }
 impl Default for Settings {
     fn default() -> Self {
@@ -199,6 +210,7 @@ impl Default for Settings {
             max_history: 20,
             theme: "system".into(),
             auto_hide_seconds: 0,
+            screenshot_save_directory: String::new(),
         }
     }
 }
@@ -217,6 +229,12 @@ pub fn migrate_language_direction(settings: &mut Settings) {
 /// Alt+S uses the owner's named OCR action (which fills and translates). Only
 /// replace the exact old capture/silent pair; retain all customized shortcuts.
 pub fn migrate_shortcut_defaults(settings: &mut Settings) {
+    if settings.shortcuts.screenshot == MISSING_SCREENSHOT_SHORTCUT {
+        let occupied = settings.shortcuts.pairs().iter().any(|(action, value)| {
+            *action != "screenshot" && value.trim().eq_ignore_ascii_case("F1")
+        });
+        settings.shortcuts.screenshot = if occupied { String::new() } else { "F1".into() };
+    }
     if settings.shortcut_defaults_version == 0 {
         if settings.shortcuts.capture == "Alt+S" && settings.shortcuts.silent_ocr == "Alt+C" {
             settings.shortcuts.capture.clear();
@@ -287,6 +305,13 @@ pub struct HistoryEntry {
 }
 
 pub fn validate_settings(s: &Settings) -> Result<(), String> {
+    if s.screenshot_save_directory.len() > 32_768
+        || s.screenshot_save_directory.contains('\0')
+        || (!s.screenshot_save_directory.is_empty()
+            && !std::path::Path::new(&s.screenshot_save_directory).is_absolute())
+    {
+        return Err("截图文件夹必须是有效的绝对路径".into());
+    }
     if s.providers.len() > 12 {
         return Err("最多同时配置 12 个翻译服务".into());
     }
@@ -533,6 +558,45 @@ mod tests {
             );
             assert_eq!(settings.language_direction_version, 1);
         }
+    }
+    #[test]
+    fn screenshot_migration_preserves_disabled_custom_and_existing_f1_bindings() {
+        for existing in ["Alt+D", "F1", " f1 "] {
+            let mut value = serde_json::to_value(Settings::default()).unwrap();
+            value["shortcuts"]
+                .as_object_mut()
+                .unwrap()
+                .remove("screenshot");
+            value["shortcuts"]["selection"] = serde_json::json!(existing);
+            let mut settings: Settings = serde_json::from_value(value).unwrap();
+            migrate_shortcut_defaults(&mut settings);
+            assert_eq!(settings.shortcuts.selection, existing);
+            assert_eq!(
+                settings.shortcuts.screenshot,
+                if existing.trim().eq_ignore_ascii_case("F1") {
+                    ""
+                } else {
+                    "F1"
+                }
+            );
+            assert_eq!(settings.shortcuts.silent_ocr, "Alt+S");
+        }
+        for screenshot in ["", "Ctrl+F2", "F1"] {
+            let mut settings = Settings::default();
+            settings.shortcuts.screenshot = screenshot.into();
+            migrate_shortcut_defaults(&mut settings);
+            migrate_shortcut_defaults(&mut settings);
+            assert_eq!(settings.shortcuts.screenshot, screenshot);
+        }
+    }
+    #[test]
+    fn screenshot_directory_default_is_os_resolved_and_settings_reject_relative_paths() {
+        let mut settings = Settings::default();
+        assert!(settings.screenshot_save_directory.is_empty());
+        settings.screenshot_save_directory = "Desktop".into();
+        assert!(validate_settings(&settings).is_err());
+        settings.screenshot_save_directory = "bad\0path".into();
+        assert!(validate_settings(&settings).is_err());
     }
     #[test]
     fn old_capture_shortcut_pair_migrates_to_silent_ocr_once() {

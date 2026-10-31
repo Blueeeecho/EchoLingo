@@ -28,6 +28,7 @@ fn main() {
             let mut token = None;
             let mut cancel = None;
             let mut mode = None;
+            let mut owner = None;
             let mut i = 0;
             let mut seen = std::collections::HashSet::new();
             while i < args.len() {
@@ -52,14 +53,31 @@ fn main() {
                         )
                     }
                     "-NativeCancellationEvent" => cancel = Some(value.clone()),
+                    "-CaptureOwnerProcessId" => {
+                        owner = Some(
+                            value
+                                .parse::<u32>()
+                                .map_err(|_| "CAPTURE_ARGUMENT: Invalid owner")?,
+                        )
+                    }
                     _ => return Err("CAPTURE_ARGUMENT: Unsupported argument".into()),
                 }
                 i += 2;
             }
-            if mode.as_deref() != Some("capture-image") {
-                return Err("CAPTURE_ARGUMENT: Unsupported mode".into());
-            }
+            let purpose = match mode.as_deref() {
+                Some("capture-image") => policy::CapturePurpose::Region,
+                Some("capture-screenshot") if owner.is_some_and(|pid| pid > 0) => {
+                    policy::CapturePurpose::Screenshot
+                }
+                _ => {
+                    return Err(
+                        "CAPTURE_ARGUMENT: Unsupported mode or missing screenshot owner".into(),
+                    )
+                }
+            };
             Ok(capture::Request {
+                purpose,
+                owner_process: owner.unwrap_or(0),
                 host_thread: host.ok_or("CAPTURE_ARGUMENT: Missing host")?,
                 host_token: token.ok_or("CAPTURE_ARGUMENT: Missing token")?,
                 cancellation: cancel.ok_or("CAPTURE_ARGUMENT: Missing cancellation")?,

@@ -1,6 +1,6 @@
 {
   "name": "echolingo",
-  "version": "0.2.3",
+  "version": "0.2.4",
   "private": true,
   "description": "EchoLingo · 回声译 — a lightweight Windows-first translation and offline OCR companion",
   "type": "module",
@@ -10,7 +10,7 @@
     "check": "tsc --noEmit",
     "test": "vitest run --passWithNoTests",
     "tauri": "tauri",
-    "test:ui": "node tests/frontend-interactions.mjs"
+    "test:ui": "node tests/frontend-interactions.mjs && node tests/screenshot-editor.mjs"
   },
   "dependencies": {
     "@tauri-apps/api": "^2.9.0"

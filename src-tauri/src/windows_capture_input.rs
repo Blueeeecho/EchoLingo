@@ -83,6 +83,19 @@ pub fn pack_point(x: i32, y: i32) -> isize {
     ((u64::from(x as u32) << 32) | u64::from(y as u32)) as isize
 }
 
+fn capture_drag_extent(origin: isize, x: i32, y: i32) -> (u32, u32) {
+    let origin = origin as u64;
+    let extent = |value: i32, start: i32| {
+        (i64::from(value) - i64::from(start))
+            .unsigned_abs()
+            .min(i32::MAX as u64) as u32
+    };
+    (
+        extent(x, (origin >> 32) as i32),
+        extent(y, origin as u32 as i32),
+    )
+}
+
 struct Shared {
     thread: AtomicU32,
     token: AtomicU64,
@@ -96,6 +109,9 @@ struct Shared {
     physical_right: AtomicBool,
     physical_aux: AtomicU32,
     move_pending: AtomicBool,
+    drag_origin: AtomicIsize,
+    drag_max_x: AtomicU32,
+    drag_max_y: AtomicU32,
     failed: AtomicBool,
     writer: Mutex<()>,
     available: AtomicIsize,
@@ -115,6 +131,9 @@ impl Default for Shared {
             physical_right: AtomicBool::new(false),
             physical_aux: AtomicU32::new(0),
             move_pending: AtomicBool::new(false),
+            drag_origin: AtomicIsize::new(0),
+            drag_max_x: AtomicU32::new(0),
+            drag_max_y: AtomicU32::new(0),
             failed: AtomicBool::new(false),
             writer: Mutex::new(()),
             available: AtomicIsize::new(0),
@@ -441,13 +460,31 @@ pub fn mouse(kind: u32, x: i32, y: i32, mouse_data: u32) -> bool {
     {
         return false;
     }
-    let d = decide(
-        s.flags.load(Ordering::SeqCst),
-        s.closing.load(Ordering::SeqCst),
-        kind,
-        mouse_data,
-    );
+    let before = s.flags.load(Ordering::SeqCst);
+    let d = decide(before, s.closing.load(Ordering::SeqCst), kind, mouse_data);
     s.flags.store(d.flags, Ordering::SeqCst);
+    // Keep a scalar maximum independently of throttled MOVE delivery. A fast
+    // drag out and back between paints must not become a window click.
+    if d.message == LEFT_DOWN {
+        s.drag_origin.store(pack_point(x, y), Ordering::SeqCst);
+        s.drag_max_x.store(0, Ordering::SeqCst);
+        s.drag_max_y.store(0, Ordering::SeqCst);
+    } else if before & LEFT != 0 {
+        let (dx, dy) = capture_drag_extent(s.drag_origin.load(Ordering::SeqCst), x, y);
+        s.drag_max_x.fetch_max(dx, Ordering::SeqCst);
+        s.drag_max_y.fetch_max(dy, Ordering::SeqCst);
+    }
+    if d.message == LEFT_UP && target != 0 && s.target.load(Ordering::SeqCst) == target {
+        let excursion = pack_point(
+            s.drag_max_x.load(Ordering::SeqCst) as i32,
+            s.drag_max_y.load(Ordering::SeqCst) as i32,
+        );
+        if !post(target, DRAG_EXCURSION, token, excursion) {
+            s.failed.store(true, Ordering::SeqCst);
+            s.closing.store(true, Ordering::SeqCst);
+            let _ = post(target, FAILURE, token, 0);
+        }
+    }
     if target != 0
         && s.target.load(Ordering::SeqCst) == target
         && d.message != 0
@@ -762,4 +799,24 @@ pub fn current_token() -> u64 {
     SHARED
         .get()
         .map_or(0, |state| state.token.load(Ordering::SeqCst))
+}
+
+#[cfg(test)]
+mod screenshot_extent_tests {
+    use super::{capture_drag_extent, pack_point};
+    #[test]
+    fn signed_display_coordinates_and_extremes_do_not_wrap() {
+        assert_eq!(
+            capture_drag_extent(pack_point(-2000, -400), -1998, -401),
+            (2, 1)
+        );
+        assert_eq!(
+            capture_drag_extent(pack_point(-2000, -400), 300, 600),
+            (2300, 1000)
+        );
+        assert_eq!(
+            capture_drag_extent(pack_point(i32::MIN, i32::MAX), i32::MAX, i32::MIN),
+            (i32::MAX as u32, i32::MAX as u32)
+        );
+    }
 }

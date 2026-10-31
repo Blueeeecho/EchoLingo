@@ -263,7 +263,7 @@ mod desktop {
             if command == "shutdown" {
                 break;
             }
-            if command != "capture" {
+            if command != "capture" && command != "screenshot" {
                 return Err(format!(
                     "LIFECYCLE_COMMAND_REQUIRED firstCodepoint={} characters={}",
                     command.chars().next().map(u32::from).unwrap_or(0),
@@ -291,7 +291,8 @@ mod desktop {
             }
             let mut child = OwnedChild {
                 child: Command::new(&helper)
-                    .args(["-Mode", "capture-image"])
+                    .args(["-Mode", if command == "screenshot" { "capture-screenshot" } else { "capture-image" }])
+                    .args(["-CaptureOwnerProcessId", &std::process::id().to_string()])
                     .arg("-CaptureHostThreadId")
                     .arg(session.thread().to_string())
                     .arg("-CaptureHostToken")

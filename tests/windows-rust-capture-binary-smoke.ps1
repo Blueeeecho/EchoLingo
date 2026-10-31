@@ -31,7 +31,9 @@ foreach ($case in @(
     @{ name = 'missing-arguments'; arguments = @() },
     @{ name = 'duplicate-mode'; arguments = @('-Mode','capture-image','-CaptureHostThreadId','1','-CaptureHostToken','1','-NativeCancellationEvent','Local\EchoLingoParserOnly-NoEventCreated','-Mode','capture-image') },
     @{ name = 'unknown-flag'; arguments = @('-Unknown','value') },
-    @{ name = 'selection-not-supported'; arguments = @('-Mode','selected-text') }
+    @{ name = 'selection-not-supported'; arguments = @('-Mode','selected-text') },
+    @{ name = 'screenshot-missing-owner'; arguments = @('-Mode','capture-screenshot','-CaptureHostThreadId','1','-CaptureHostToken','1','-NativeCancellationEvent','Local\EchoLingoParserOnly-NoEventCreated') },
+    @{ name = 'screenshot-invalid-owner'; arguments = @('-Mode','capture-screenshot','-CaptureOwnerProcessId','0') }
 )) {
     $arguments = $case.arguments
     $result = Invoke-OwnedChild $arguments

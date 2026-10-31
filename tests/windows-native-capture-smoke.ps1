@@ -1,5 +1,5 @@
 # Exact production Rust hook/message-pump + Rust candidate picker, generated input only.
-# C# oracle fixture stays unchanged; this exercises the same ten strict cases.
+# Generated C# oracle verifies core input/capture ownership and records fine loupe quality.
 [CmdletBinding()]
 param([Parameter(Mandatory=$true)][string]$NativeCapturePath,
       [Parameter(Mandatory=$true)][string]$HarnessPath, [switch]$IsolatedTestSession)
@@ -19,6 +19,7 @@ using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.Drawing;
+using System.Drawing.Imaging;
 using System.IO;
 using System.Runtime.InteropServices;
 using System.Text;
@@ -94,6 +95,7 @@ public static class EchoLingoNativeCaptureSmoke {
     [DllImport("user32.dll")] static extern uint SendInput(uint count,INPUT[] values,int size);
     [DllImport("kernel32.dll")] static extern uint GetCurrentThreadId();
     [DllImport("dwmapi.dll")] static extern int DwmGetWindowAttribute(IntPtr window,uint attribute,out RECT bounds,int size);
+    [DllImport("dwmapi.dll")] static extern int DwmFlush();
     sealed class WindowInfo { public IntPtr Handle; public Rectangle Bounds; }
     static readonly JavaScriptSerializer json=new JavaScriptSerializer { MaxJsonLength=16*1024*1024 };
     static void Need(bool value,string message) { if (!value) throw new InvalidOperationException(message); }
@@ -118,7 +120,7 @@ public static class EchoLingoNativeCaptureSmoke {
     }
     static bool Ready(int helper,IntPtr source,Rectangle frame,Rectangle display,Point point,Dictionary<string,object> observed) {
         Need(GetForegroundWindow()==source && Frame(source)==frame,"Source foreground/DWM changed before adversarial action.");
-        List<WindowInfo> thin=new List<WindowInfo>(),planes=new List<WindowInfo>();int allocated=0,loupes=0;bool loupeNear=false;
+        List<WindowInfo> thin=new List<WindowInfo>(),planes=new List<WindowInfo>();int allocated=0,loupes=0;bool loupeNear=false,pixelsReady=false;
         EnumWindows(delegate(IntPtr window,IntPtr unused) {
             uint pid;GetWindowThreadProcessId(window,out pid);if (pid!=helper) return true;
             long style=GetWindowLongPtr(window,-20).ToInt64();
@@ -132,9 +134,20 @@ public static class EchoLingoNativeCaptureSmoke {
                 if (!IsWindowVisible(window)) return true;
                 loupes++; Rectangle candidate=Bounds(window);
                 int dx=candidate.Left+candidate.Width/2-point.X, dy=candidate.Top+candidate.Height/2-point.Y;
-                bool styleOk=(style&0x08000000L)!=0 && (style&0x20L)!=0 && (style&0x80000L)==0;
+                bool styleOk=(style&0x08000000L)!=0 && (style&0x20L)!=0 && (style&0x80000L)==0
+                    && (GetWindowLongPtr(window,-16).ToInt64()&0x08000000L)!=0;
                 bool sizeOk=candidate.Width>=140 && candidate.Width<=360 && candidate.Height>=150 && candidate.Height<=420;
-                if (styleOk && sizeOk && (long)dx*dx+(long)dy*dy<=500L*500L && !candidate.Contains(point)) loupeNear=true;
+                if (styleOk && sizeOk && (long)dx*dx+(long)dy*dy<=500L*500L && !candidate.Contains(point)) {
+                    loupeNear=true;
+                    using(Bitmap pixel=new Bitmap(3,3,PixelFormat.Format32bppArgb)) {
+                        using(Graphics graphics=Graphics.FromImage(pixel))graphics.CopyFromScreen(candidate.X+54,candidate.Y+54,0,0,new Size(3,3),CopyPixelOperation.SourceCopy);
+                        pixelsReady=true;
+                        for(int y=0;y<3;y++)for(int x=0;x<3;x++) {
+                            Color actual=pixel.GetPixel(x,y);
+                            pixelsReady&=Math.Abs(actual.R-230)<=2&&Math.Abs(actual.G-150)<=2&&Math.Abs(actual.B-40)<=2;
+                        }
+                    }
+                }
                 return true;
             }
             long edges=0x08000000L|0x80000L|0x20L;
@@ -155,11 +168,267 @@ public static class EchoLingoNativeCaptureSmoke {
         bool rawLoupe=Loupe(raw)&&(rawStyle&0x20L)!=0&&(rawStyle&0x80000L)==0;
         bool hit=planes.Exists(delegate(WindowInfo p){return p.Handle==through&&p.Bounds.Contains(point);})
             && (planes.Exists(delegate(WindowInfo p){return p.Handle==raw;})||thin.Exists(delegate(WindowInfo e){return e.Handle==raw&&e.Bounds.Contains(point);})||rawLoupe);
-        bool loupeReady=loupes==1 && loupeNear;
+        bool loupeReady=loupes==1 && loupeNear && pixelsReady;
         observed["thinVisibleCount"]=thin.Count;observed["thinAllocatedCount"]=allocated;observed["planeVisibleCount"]=planes.Count;
         observed["captureMagnifierCount"]=loupes;observed["captureMagnifierNearPointer"]=loupeReady;
+        observed["captureMagnifierGeneratedPixelsReady"]=pixelsReady;
         observed["rawPointerRootHwnd"]=Id(raw);observed["transparentSkippingRootHwnd"]=Id(through);
         observed["exactPlanePointerHit"]=hit;return exact&&wanted.Count==0&&planeGeometry&&monitors.Count==0&&hit&&loupeReady;
+    }
+    delegate void WinEventCallback(IntPtr hook,uint eventType,IntPtr window,int objectId,int childId,uint thread,uint time);
+    [DllImport("user32.dll")] static extern IntPtr SetWinEventHook(uint first,uint last,IntPtr module,WinEventCallback callback,uint process,uint thread,uint flags);
+    [DllImport("user32.dll")] static extern bool UnhookWinEvent(IntPtr hook);
+    static readonly Color[] MotionColors={Color.FromArgb(70,110,210),Color.FromArgb(170,60,180),Color.FromArgb(60,190,120),Color.FromArgb(230,150,40)};
+    static void PrepareFinalPixelTarget(Sources source,Dictionary<string,object> report) {
+        // The final spatial target must already exist before capture begins.
+        // Creating it at the final move couples the 200 ms sampler deadline to
+        // an unrelated source repaint hidden behind the old loupe position.
+        source.OnUi(delegate {source.PreviewPatch=true;source.A.Controls[0].Refresh();});
+        Point probe=new Point(source.First.X+112,source.First.Y+32);
+        Need(GetForegroundWindow()==source.AH&&GetAncestor(WindowFromPoint(probe),2)==source.AH,
+            "Generated final pixel target is obscured before helper launch.");
+        Need(DwmFlush()>=0,"Generated final pixel target did not reach the compositor.");
+        using(Bitmap pixels=new Bitmap(3,3,PixelFormat.Format32bppArgb)) {
+            using(Graphics graphics=Graphics.FromImage(pixels))graphics.CopyFromScreen(probe,Point.Empty,new Size(3,3),CopyPixelOperation.SourceCopy);
+            for(int y=0;y<3;y++)for(int x=0;x<3;x++) {
+                Color actual=pixels.GetPixel(x,y);
+                Need(Math.Abs(actual.R-30)<=2&&Math.Abs(actual.G-200)<=2&&Math.Abs(actual.B-220)<=2,
+                    "Generated final pixel target was not painted before helper launch.");
+            }
+        }
+        report["generatedFinalTargetReadyBeforeHelper"]=true;
+    }
+    // Fine visual/timing observations are non-blocking under the user's
+    // core-functional acceptance policy. Never use this for input or cleanup.
+    static void MagnifierQuality(Dictionary<string,object> report,string phase,bool passed,string code) {
+        Need(phase=="armed"||phase=="dragging","Unknown magnifier quality phase.");
+        Need(Array.IndexOf(new string[]{"stationary-refresh","motion-observer-failed","moving-color-count",
+            "moving-color-refresh","final-pixel-deadline","event-positive-control","visibility-continuity",
+            "motion-follow-density"},code)>=0,"Unknown magnifier quality diagnostic.");
+        if(passed)return;
+        List<string> issues=(List<string>)report["qualityDiagnostics"];string issue=phase+"-"+code;
+        if(!issues.Contains(issue)){Need(issues.Count<16,"Magnifier quality diagnostics exceeded their bound.");issues.Add(issue);}
+        report["qualityOk"]=false;
+    }
+    sealed class MotionPixelObserver : IDisposable {
+        readonly Thread worker;readonly Stopwatch clock;readonly Rectangle roi,final;
+        readonly long[] changed={-1,-1,-1,-1};readonly HashSet<int> colors=new HashSet<int>();
+        readonly List<Dictionary<string,object>> finalSnapshots=new List<Dictionary<string,object>>();
+        long finalDispatch=-1;
+        volatile bool stopping;bool failed,stopped,finalMatched;long maximumRefresh;int samples;
+        public MotionPixelObserver(Sources source,Stopwatch clock) {
+            this.clock=clock;
+            Rectangle first=new Rectangle(source.First.X+42,source.First.Y-26,156,174);
+            final=new Rectangle(first.X+120,first.Y+40,156,174);
+            roi=Rectangle.Union(first,final);
+            Need(Rectangle.Union(source.AFrame,source.BFrame).Contains(roi),"Moving-pixel observer must stay within generated sources.");
+            worker=new Thread(Run);worker.IsBackground=true;worker.Start();
+        }
+        public void Changed(int index) { Interlocked.Exchange(ref changed[index],clock.ElapsedMilliseconds); }
+        public void FinalDispatched() { Interlocked.Exchange(ref finalDispatch,clock.ElapsedMilliseconds); }
+        static bool Rgb(byte[] bytes,int width,int x,int y,Color expected) {
+            int offset=(y*width+x)*4;
+            return Math.Abs(bytes[offset+2]-expected.R)<=2&&Math.Abs(bytes[offset+1]-expected.G)<=2&&Math.Abs(bytes[offset]-expected.B)<=2;
+        }
+        void Run() {
+            try {
+                Need(SetThreadDpiAwarenessContext(new IntPtr(-4))!=IntPtr.Zero,"Moving-pixel observer DPI context failed.");
+                using(Bitmap bitmap=new Bitmap(roi.Width,roi.Height,PixelFormat.Format32bppArgb)) {
+                    byte[] bytes=new byte[roi.Width*roi.Height*4];
+                    while(!stopping&&clock.ElapsedMilliseconds<956) {
+                        long captureStarted=clock.ElapsedMilliseconds;
+                        using(Graphics graphics=Graphics.FromImage(bitmap))graphics.CopyFromScreen(roi.Location,Point.Empty,roi.Size,CopyPixelOperation.SourceCopy);
+                        BitmapData data=bitmap.LockBits(new Rectangle(Point.Empty,roi.Size),ImageLockMode.ReadOnly,PixelFormat.Format32bppArgb);
+                        try {for(int y=0;y<roi.Height;y++)Marshal.Copy(IntPtr.Add(data.Scan0,y*data.Stride),bytes,y*roi.Width*4,roi.Width*4);}
+                        finally {bitmap.UnlockBits(data);}
+                        long elapsed=clock.ElapsedMilliseconds;bool eligible=elapsed<956;if(eligible)samples++;
+                        int detected=0,probeKind=0;bool finalGeometry=false;
+                        // Identify the actual magnifier in the SAME immutable
+                        // screenshot, not a stale GetWindowRect at moving coordinates.
+                        for(int y=0;y<=roi.Height-174;y++)for(int x=0;x<=roi.Width-156;x++) {
+                            Color blue=Color.FromArgb(90,150,255),red=Color.FromArgb(230,70,70);
+                            if(!Rgb(bytes,roi.Width,x+1,y+1,blue)||!Rgb(bytes,roi.Width,x+153,y+1,blue)
+                                ||!Rgb(bytes,roi.Width,x+78,y+10,red)||!Rgb(bytes,roi.Width,x+10,y+78,red))continue;
+                            detected++;
+                            bool atFinal=new Point(roi.X+x,roi.Y+y)==final.Location;
+                            bool cyan=Rgb(bytes,roi.Width,x+54,y+54,Color.FromArgb(30,200,220));
+                            if(atFinal) {
+                                finalGeometry=true;
+                                // Generated-color categories only; no screenshot/RGB payload.
+                                probeKind=cyan?1:Rgb(bytes,roi.Width,x+54,y+54,MotionColors[3])?2:
+                                    Rgb(bytes,roi.Width,x+54,y+54,Color.FromArgb(22,26,34))?3:4;
+                            }
+                            if(eligible&&elapsed>=180&&elapsed<756)for(int color=0;color<MotionColors.Length;color++) {
+                                long since=Interlocked.Read(ref changed[color]);
+                                if(since>=0&&elapsed>=since&&Rgb(bytes,roi.Width,x+54,y+54,MotionColors[color])&&colors.Add(color))
+                                    maximumRefresh=Math.Max(maximumRefresh,elapsed-since);
+                            }
+                            if(eligible&&elapsed>=756&&atFinal&&cyan)finalMatched=true;
+                        }
+                        if(elapsed>=700&&finalSnapshots.Count<6)finalSnapshots.Add(new Dictionary<string,object> {
+                            {"captureStartMilliseconds",captureStarted},{"captureEndMilliseconds",elapsed},
+                            {"eligibleBeforeDeadline",eligible},{"detectedFrames",detected},
+                            {"finalGeometry",finalGeometry},{"probeColorKind",probeKind}
+                        });
+                        Thread.Sleep(1);
+                    }
+                }
+            }catch {failed=true;}
+        }
+        public void Finish(Dictionary<string,object> report,string phase) {
+            Dispose();
+            report[phase+"MagnifierMovingPixels"]=new Dictionary<string,object> {
+                {"distinctMotionPixelColors",colors.Count},{"maximumColorRefreshMilliseconds",maximumRefresh},
+                {"finalTargetPixelMatched",finalMatched},{"pixelObservations",samples},
+                {"observerStopped",stopped},{"observerFailed",failed},{"samplePixelsStored",false},
+                {"finalPointerDispatchMilliseconds",Interlocked.Read(ref finalDispatch)},
+                {"finalSnapshotEvidence",finalSnapshots}
+            };
+            Need(stopped,"Moving-pixel observer did not stop.");
+            MagnifierQuality(report,phase,!failed,"motion-observer-failed");
+            MagnifierQuality(report,phase,colors.Count>=3,"moving-color-count");
+            MagnifierQuality(report,phase,maximumRefresh<=200,"moving-color-refresh");
+            MagnifierQuality(report,phase,finalMatched,"final-pixel-deadline");
+        }
+        public void Dispose() {stopping=true;if(!stopped)stopped=worker.Join(5000);Need(stopped,"Moving-pixel observer did not stop.");}
+    }
+    static void VerifyLiveMagnifierPixels(IntPtr loupe,Sources source,Dictionary<string,object> report,string phase) {
+        // Observe generated colors before (never inside) the timed motion
+        // interval. Reuse its 200 ms final-settle bound for each fresh frame.
+        Rectangle expected=new Rectangle(source.First.X+42,source.First.Y-26,156,174);
+        int changedColors=0;long maximumRefresh=0;bool stayedVisible=true;
+        foreach(Color color in new Color[]{Color.FromArgb(70,110,210),Color.FromArgb(170,60,180),Color.FromArgb(230,150,40)}) {
+            Need(GetForegroundWindow()==source.AH,"Source changed before generated live-pixel probe.");
+            source.OnUi(delegate {
+                Button button=(Button)source.A.Controls[0];button.BackColor=color;
+                button.FlatAppearance.MouseOverBackColor=color;button.FlatAppearance.MouseDownBackColor=color;
+                button.Refresh();
+            });
+            Stopwatch clock=Stopwatch.StartNew();bool fresh=false;
+            while(clock.ElapsedMilliseconds<200) {
+                if(!IsWindowVisible(loupe)){stayedVisible=false;Application.DoEvents();Thread.Sleep(1);continue;}
+                if(Bounds(loupe)==expected) {
+                    using(Bitmap pixel=new Bitmap(3,3,PixelFormat.Format32bppArgb)) {
+                        using(Graphics graphics=Graphics.FromImage(pixel))graphics.CopyFromScreen(expected.X+54,expected.Y+54,0,0,new Size(3,3),CopyPixelOperation.SourceCopy);
+                        fresh=true;
+                        for(int y=0;y<3;y++)for(int x=0;x<3;x++) {
+                            Color actual=pixel.GetPixel(x,y);
+                            fresh&=Math.Abs(actual.R-color.R)<=2&&Math.Abs(actual.G-color.G)<=2&&Math.Abs(actual.B-color.B)<=2;
+                        }
+                    }
+                }
+                if(fresh)break;
+                Application.DoEvents();Thread.Sleep(1);
+            }
+            if(fresh&&clock.ElapsedMilliseconds<=200)changedColors++;
+            maximumRefresh=Math.Max(maximumRefresh,clock.ElapsedMilliseconds);
+        }
+        report[phase+"MagnifierLivePixels"]=new Dictionary<string,object> {
+            {"generatedColorChanges",changedColors},{"maximumRefreshMilliseconds",maximumRefresh},
+            {"livePixelRefreshVerified",changedColors==3},{"visibleThroughoutLiveProbe",stayedVisible},{"samplePixelsStored",false}
+        };
+        MagnifierQuality(report,phase,changedColors==3&&maximumRefresh<=200,"stationary-refresh");
+        MagnifierQuality(report,phase,stayedVisible,"visibility-continuity");
+        Need(IsWindowVisible(loupe),"Basic magnifier visibility was lost after the live-pixel probe.");
+    }
+    static void ObserveMagnifierContinuity(int helper,Sources source,Dictionary<string,object> report,string phase) {
+        IntPtr loupe=IntPtr.Zero;int matches=0;
+        EnumWindows(delegate(IntPtr window,IntPtr unused) {
+            uint pid;GetWindowThreadProcessId(window,out pid);
+            if(pid==helper&&Loupe(window)){loupe=window;matches++;}return true;
+        },IntPtr.Zero);
+        Need(matches==1&&IsWindowVisible(loupe),"Continuity requires one visible loupe from this exact helper.");
+        VerifyLiveMagnifierPixels(loupe,source,report,phase);
+        int hides=0,shows=0,locations=0,motionLocations=0,invisible=0,samples=0,moves=0;
+        int motionSamples=0,motionTransitions=0;Point? previousMotion=null;
+        long previousSample=-1,maximumSampleGap=0;
+        Stopwatch clock=new Stopwatch();
+        WinEventCallback callback=delegate(IntPtr hook,uint eventType,IntPtr window,int objectId,int childId,uint thread,uint time) {
+            if(window!=loupe||objectId!=0||childId!=0)return;
+            if(eventType==0x8003)Interlocked.Increment(ref hides);
+            if(eventType==0x8002)Interlocked.Increment(ref shows);
+            if(eventType==0x800b) {
+                Interlocked.Increment(ref locations);
+                long elapsed=clock.ElapsedMilliseconds;
+                if(elapsed>=180&&elapsed<756)Interlocked.Increment(ref motionLocations);
+            }
+        };
+        // Process-filtered WinEvents catch brief hide/show transitions even if
+        // they fall between visibility samples; no other app is observed.
+        // Real motion location events are the observer's positive control.
+        HashSet<Point> positions=new HashSet<Point>();
+        Point final=new Point(source.First.X+120,source.First.Y+40);
+        Rectangle expectedFinal=new Rectangle(final.X+42,final.Y-26,156,174);
+        Need(source.Display.Contains(expectedFinal),"Generated loupe motion requires room on the source display.");
+        GCHandle callbackRoot=GCHandle.Alloc(callback);
+        IntPtr observer=SetWinEventHook(0x8002,0x800b,IntPtr.Zero,callback,(uint)helper,0,0);
+        if(observer==IntPtr.Zero) { callbackRoot.Free();Need(false,"Cannot observe generated helper visibility events."); }
+        clock.Start();int issued=-1;long settled=-1;MotionPixelObserver pixels=null;
+        try {
+            pixels=new MotionPixelObserver(source,clock);
+            // 180 ms stationary, 24 moves 24 ms apart, then 200 ms stationary.
+            // This observes every interval, not a successful final screenshot.
+            while(clock.ElapsedMilliseconds<956) {
+                long elapsed=clock.ElapsedMilliseconds;
+                int step=elapsed<180 ? -1 : elapsed<756 ? (int)((elapsed-180)/24) : 24;
+                if(step>issued) {
+                    Need(GetForegroundWindow()==source.AH,"Source changed before generated motion.");
+                    if((step<24&&step/6!=Math.Max(-1,issued)/6) || step==0) {
+                        int color=step/6;
+                        source.OnUi(delegate {
+                            Button button=(Button)source.A.Controls[0];button.Text="";button.BackColor=MotionColors[color];
+                            button.FlatAppearance.MouseOverBackColor=button.BackColor;button.FlatAppearance.MouseDownBackColor=button.BackColor;button.Refresh();
+                        });
+                        pixels.Changed(color);
+                    }
+                    Point target=step==24 ? final : new Point(source.First.X+(step<=12 ? step : 24-step)*8,source.First.Y+(step%6)*4);
+                    Send(new INPUT[]{Move(target)});issued=step;moves++;
+                    if(step==24)pixels.FinalDispatched();
+                }
+                Application.DoEvents();
+                uint pid;GetWindowThreadProcessId(loupe,out pid);
+                Need(pid==helper&&Alive(helper),"Magnifier identity/session changed during observation.");
+                if(!IsWindowVisible(loupe))invisible++;
+                Rectangle bounds=Bounds(loupe);samples++;
+                if(previousSample>=0)maximumSampleGap=Math.Max(maximumSampleGap,elapsed-previousSample);
+                previousSample=elapsed;
+                if(elapsed>=180&&elapsed<756) {
+                    positions.Add(bounds.Location);motionSamples++;
+                    if(previousMotion.HasValue&&previousMotion.Value!=bounds.Location)motionTransitions++;
+                    previousMotion=bounds.Location;
+                }
+                if(elapsed>=756&&bounds==expectedFinal&&settled<0)settled=elapsed-756;
+                Thread.Sleep(1);
+            }
+            Application.DoEvents();
+            long observedDuration=clock.ElapsedMilliseconds;
+            report[phase+"MagnifierContinuity"]=new Dictionary<string,object> {
+                {"durationMilliseconds",observedDuration},{"visibilitySamples",samples},
+                {"invisibleSamples",invisible},{"hideEvents",hides},{"showEvents",shows},
+                {"locationEvents",locations},{"eventObserverPositiveControl",locations>0},
+                {"generatedMoves",moves},{"distinctMotionPositions",positions.Count},
+                {"motionVisibilitySamples",motionSamples},{"motionPositionTransitions",motionTransitions},
+                {"motionLocationEvents",motionLocations},{"maximumVisibilitySampleGapMilliseconds",maximumSampleGap},
+                {"finalTargetSettledMilliseconds",settled},{"continuousObservation",true}
+            };
+            pixels.Finish(report,phase);
+            MagnifierQuality(report,phase,locations>0,"event-positive-control");
+            MagnifierQuality(report,phase,invisible==0&&hides==0,"visibility-continuity");
+            MagnifierQuality(report,phase,moves>=20&&positions.Count>=12&&settled>=0&&Bounds(loupe)==expectedFinal,
+                "motion-follow-density");
+            Need(IsWindowVisible(loupe),"Basic magnifier visibility was lost after generated motion.");
+        } finally {
+            try {
+                if(pixels!=null)pixels.Dispose();
+                source.OnUi(delegate {source.A.Controls[0].Text="Generated input only";source.A.Controls[0].Refresh();});
+            } finally {
+                // Retain the delegate if unhook fails; the fixture process then
+                // fails without exposing an unrooted callback to a live hook.
+                bool stopped=UnhookWinEvent(observer);
+                if(stopped)callbackRoot.Free();
+                Need(stopped,"Generated visibility hook did not close.");
+            }
+        }
     }
     static Dictionary<string,object> SafeReply(Dictionary<string,object> reply) {
         Dictionary<string,object> safe=new Dictionary<string,object>();
@@ -227,8 +496,8 @@ public static class EchoLingoNativeCaptureSmoke {
     }
     sealed class Sources : IDisposable {
         public Form A,B,Background;public IntPtr AH,BH;public uint ThreadId;public Rectangle AFrame,BFrame,Display;public Point First,Last;
-        public int Downs,Ups,Clicks,EscapeDowns,EscapeUps;public bool Partial,EscapePartial;Thread ui;ManualResetEvent ready=new ManualResetEvent(false);string error;
-        public Sources() {
+        public int Downs,Ups,Clicks,EscapeDowns,EscapeUps;public bool Partial,EscapePartial,PreviewPatch;Thread ui;ManualResetEvent ready=new ManualResetEvent(false);string error;
+        public Sources(Dictionary<string,object> report=null) {
             ui=new Thread(delegate(){
                 try {
                     Need(SetThreadDpiAwarenessContext(new IntPtr(-4))!=IntPtr.Zero,"Source DPI context failed.");
@@ -242,18 +511,47 @@ public static class EchoLingoNativeCaptureSmoke {
                             Background.Show();B.Show();AH=A.Handle;BH=B.Handle;ThreadId=GetCurrentThreadId();
                             Need(AH!=BH&&GetWindow(AH,4)==IntPtr.Zero&&GetWindow(BH,4)==IntPtr.Zero&&GetParent(AH)==IntPtr.Zero&&GetParent(BH)==IntPtr.Zero,"Generated sources are not independent ownerless peers.");
                             Need(GetAncestor(AH,2)==AH&&GetAncestor(BH,2)==BH,"Peer roots changed.");
-                            SetForegroundWindow(AH);A.Activate();AFrame=Frame(AH);BFrame=Frame(BH);First=A.PointToScreen(new Point(65,70));Last=B.PointToScreen(new Point(100,115));
-                        }catch(Exception e){error=e.Message;}finally{ready.Set();}
+                            // Shown is still inside WinForms' initial ordering.
+                            // Stage only these generated ownerless peers after
+                            // that handler returns; never signal ready midway.
+                            A.BeginInvoke((Action)delegate {
+                                try {
+                                    Need(SetWindowPos(BH,new IntPtr(-1),0,0,0,0,0x10|1|2),"Generated B ordering failed.");
+                                    Need(SetWindowPos(AH,new IntPtr(-1),0,0,0,0,0x10|1|2),"Generated A ordering failed.");
+                                    Need(SetWindowPos(Background.Handle,BH,0,0,0,0,0x10|1|2),"Generated background ordering failed.");
+                                    SetForegroundWindow(AH);A.Activate();
+                                    AFrame=Frame(AH);BFrame=Frame(BH);First=A.PointToScreen(new Point(65,70));Last=B.PointToScreen(new Point(100,115));
+                                }catch(Exception e){error=e.Message;}finally{ready.Set();}
+                            });
+                        }catch(Exception e){error=e.Message;ready.Set();}
                     };EscapeSourceFilter filter=new EscapeSourceFilter(this);Application.AddMessageFilter(filter);try{Application.Run(A);}finally{Application.RemoveMessageFilter(filter);}
                 }catch(Exception e){error=e.Message;ready.Set();}
                 finally {if(Background!=null)Background.Dispose();if(B!=null)B.Dispose();if(A!=null)A.Dispose();}
             });ui.IsBackground=true;ui.SetApartmentState(ApartmentState.STA);ui.Start();
             try {
             Need(ready.WaitOne(10000)&&error==null,"Generated peer setup failed: "+error);
-            Need(ThreadId!=GetCurrentThreadId()&&GetForegroundWindow()==AH,"Source is not the independent foreground UI thread.");
+            Need(ThreadId!=GetCurrentThreadId(),"Source is not the independent UI thread.");
             uint pid;Need(GetWindowThreadProcessId(AH,out pid)==ThreadId&&pid==Process.GetCurrentProcess().Id,"Source PID/TID mismatch.");
             Need(Display.Contains(AFrame)&&Display.Contains(BFrame)&&!AFrame.IntersectsWith(BFrame)&&AFrame!=Display&&BFrame!=Display,"Generated peers are not independent non-fullscreen windows.");
-            Need(GetAncestor(WindowFromPoint(First),2)==AH&&GetAncestor(WindowFromPoint(Last),2)==BH,"Generated input endpoints are obscured.");
+            Dictionary<string,object> setup=new Dictionary<string,object>();if(report!=null)report["generatedSourceSetup"]=setup;
+            setup["sourceAHwnd"]=Id(AH);setup["sourceBHwnd"]=Id(BH);setup["backgroundHwnd"]=Id(Background.Handle);setup["sourceUiThreadId"]=ThreadId;
+            // Observe only: no reordering, clicks, or input retries in this
+            // bounded precondition wait. Native capture has not begun yet.
+            Stopwatch visible=Stopwatch.StartNew();int consecutive=0,observations=0;
+            do {
+                IntPtr first=GetAncestor(WindowFromPoint(First),2),last=GetAncestor(WindowFromPoint(Last),2);
+                uint firstPID,lastPID;GetWindowThreadProcessId(first,out firstPID);GetWindowThreadProcessId(last,out lastPID);
+                bool foreground=GetForegroundWindow()==AH,frames=Frame(AH)==AFrame&&Frame(BH)==BFrame;
+                setup["firstRootIsSourceA"]=first==AH;setup["lastRootIsSourceB"]=last==BH;
+                setup["firstRootIsBackground"]=first==Background.Handle;setup["lastRootIsBackground"]=last==Background.Handle;
+                setup["firstRootSameProcess"]=firstPID==Process.GetCurrentProcess().Id;setup["lastRootSameProcess"]=lastPID==Process.GetCurrentProcess().Id;
+                setup["foregroundIsSourceA"]=foreground;setup["exactFramesUnchanged"]=frames;setup["observations"]=++observations;
+                consecutive=first==AH&&last==BH&&foreground&&frames?consecutive+1:0;
+                if(consecutive==3)break;Thread.Sleep(10);
+            }while(visible.ElapsedMilliseconds<2000);
+            setup["exactEndpointReadinessConfirmed"]=consecutive==3;
+            Need(consecutive==3&&GetAncestor(WindowFromPoint(First),2)==AH&&GetAncestor(WindowFromPoint(Last),2)==BH,"Generated input endpoints are obscured.");
+            Need(GetForegroundWindow()==AH&&Frame(AH)==AFrame&&Frame(BH)==BFrame,"Generated source foreground/frames changed before input.");
             Send(new INPUT[]{Move(First)});Thread.Sleep(70);
             }catch{Dispose();throw;}
         }
@@ -262,6 +560,7 @@ public static class EchoLingoNativeCaptureSmoke {
             form.StartPosition=FormStartPosition.Manual;form.ShowInTaskbar=true;form.Owner=null;form.TopMost=true;form.Bounds=bounds;form.BackColor=color;
             Button button=new Button();button.Bounds=new Rectangle(40,50,240,100);button.Text="Generated input only";button.FlatStyle=FlatStyle.Flat;button.UseVisualStyleBackColor=false;button.BackColor=Color.FromArgb(230,150,40);
             button.FlatAppearance.MouseOverBackColor=button.BackColor;button.FlatAppearance.MouseDownBackColor=button.BackColor;
+            button.Paint+=delegate(object sender,PaintEventArgs paint) {if(PreviewPatch)using(SolidBrush brush=new SolidBrush(Color.FromArgb(30,200,220)))paint.Graphics.FillRectangle(brush,new Rectangle(133,48,12,12));};
             button.MouseDown+=delegate {Interlocked.Increment(ref Downs);};button.MouseUp+=delegate {Interlocked.Increment(ref Ups);};button.Click+=delegate {Interlocked.Increment(ref Clicks);};
             form.MouseDown+=delegate {Interlocked.Increment(ref Downs);};form.MouseUp+=delegate {Interlocked.Increment(ref Ups);};form.Controls.Add(button);
         }
@@ -303,8 +602,12 @@ public static class EchoLingoNativeCaptureSmoke {
     }
     static Dictionary<string,object> Case(Host host,string kind) {
         Dictionary<string,object> report=new Dictionary<string,object>{{"mode",kind},{"ok",false}};Sources source=null;bool finished=false;
+        if(kind=="magnifier-continuity-armed-and-dragging") {
+            report["coreOk"]=false;report["qualityOk"]=true;report["qualityDiagnostics"]=new List<string>();
+        }
         try {
             source=new Sources();int oldDown=0,oldUp=0,oldClick=0;
+            if(kind=="magnifier-continuity-armed-and-dragging")PrepareFinalPixelTarget(source,report);
             bool preheld=kind=="preheld-source-release-then-first-fresh-pair";
             if(preheld){Send(new INPUT[]{Mouse(2)});source.Partial=true;Thread.Sleep(80);source.Drain();Need(source.Downs==1&&source.Ups==0,"Preheld setup did not deliver exactly one source down.");}
             if(kind=="escape-held900ms-drains-real-key-up") {
@@ -340,8 +643,14 @@ public static class EchoLingoNativeCaptureSmoke {
                 Need(Alive(helper)&&Ready(helper,source.AH,source.AFrame,source.Display,source.First,observed),"Benign DPI messages cancelled or changed the ready picker.");
                 report["benignDpiPickerContinued"]=true;
             }
+            if(kind=="magnifier-continuity-armed-and-dragging")ObserveMagnifierContinuity(helper,source,report,"armed");
             bool planeCancel=kind=="own-plane-cancelmode-no-input";bool heldEscape=kind=="escape-held900ms-drains-real-key-up";bool displayInvalid=kind=="display-change-before-input";bool late=kind=="escape-held-release-after-helper-close";Dictionary<string,object> reply=null;bool cross=kind=="cross-peer-held900ms";if(cross)source.OnUi(delegate {source.Background.BackColor=Color.FromArgb(75,115,165);source.Background.Refresh();});Point last=cross?source.Last:new Point(source.First.X+35,source.First.Y+15);bool cancel=kind=="escape-drains-owned-release";
-            if(planeCancel){
+            if(kind=="magnifier-continuity-armed-and-dragging") {
+                Need(GetForegroundWindow()==source.AH,"Source changed before generated continuity drag.");
+                source.Partial=true;Send(new INPUT[]{Move(source.First),Mouse(2)});
+                ObserveMagnifierContinuity(helper,source,report,"dragging");
+                Send(new INPUT[]{Move(last),Mouse(4)});source.Partial=false;
+            }else if(planeCancel){
                 SendOwnedPickerMessage(helper,0x001f);report["ownedPlaneCancelModeMessage"]=0x001f;
             }else if(heldEscape){
                 EscapePart(source.AH,false);source.EscapePartial=true;
@@ -384,6 +693,8 @@ public static class EchoLingoNativeCaptureSmoke {
             // Only this intentionally no-input display-cancellation case may omit them.
             foreach(string key in new string[]{"inputBackend","nativeHostReady","nativeHostArmed","nativeHostDowns","mouseHookInstalled","hookMouseDowns","hookMouseUps","inputPlaneDowns","inputPlaneUps","inputPlaneRemainingAfterCleanup"})Need((displayInvalid&&key=="nativeHostDowns")||health.ContainsKey(key),"Missing delegated health field: "+key);
             Need(reply.ContainsKey("nativeBackend")&&(string)reply["nativeBackend"]=="rust-win32-capture"&&health.ContainsKey("nativeCaptureBackend")&&Convert.ToInt64(health["nativeCaptureBackend"])==1,"Candidate test must never silently use legacy PowerShell/C# capture.");
+            Need(health.ContainsKey("magnifierSampleThreadStopped")&&Convert.ToInt64(health["magnifierSampleThreadStopped"])==1,"Sampler worker/resources did not stop before helper completion.");
+            Need(health.ContainsKey("magnifierFrameAgeMillisecondsMax")&&Convert.ToInt64(health["magnifierFrameAgeMillisecondsMax"])<=200,"An over-age magnifier sample was published.");
             Need(Convert.ToInt64(health["inputBackend"])==3&&Convert.ToInt64(health["nativeHostReady"])==1&&Convert.ToInt64(health["nativeHostArmed"])==1,"Actual production native host handshake did not complete.");
             Need(Convert.ToInt64(health["mouseHookInstalled"])==0&&Convert.ToInt64(health["hookMouseDowns"])==0&&Convert.ToInt64(health["hookMouseUps"])==0&&Convert.ToInt64(health["inputPlaneDowns"])==0&&Convert.ToInt64(health["inputPlaneUps"])==0,"Old managed hook or input plane handled this purported delegated capture.");
             if(planeCancel){
@@ -447,19 +758,20 @@ public static class EchoLingoNativeCaptureSmoke {
                 try{source.Dispose();}catch(Exception cleanup){report["ok"]=false;report["cleanupError"]=cleanup.Message;}
             }
         }
+        if(kind=="magnifier-continuity-armed-and-dragging")report["coreOk"]=(bool)report["ok"];
         return report;
     }
     public static Dictionary<string,object> Run(string helper,string harness) {
         Need(!helper.Contains("\"")&&!harness.Contains("\""),"Invalid fixture path.");SetProcessDpiAwarenessContext(new IntPtr(-4));Need(SetThreadDpiAwarenessContext(new IntPtr(-4))!=IntPtr.Zero,"Controller physical DPI context failed.");
         List<Dictionary<string,object>> cases=new List<Dictionary<string,object>>();bool ok=true;Dictionary<string,object> stopped=null;
         using(Host host=new Host(harness,helper)){
-            foreach(string kind in new string[]{"first-fresh-pair-immediate-release","topmost-self-raise-immediate-first-pair","foreign-thread-native-capture","cross-peer-held900ms","preheld-source-release-then-first-fresh-pair","escape-drains-owned-release","escape-held-release-after-helper-close","next-capture-after-escape","display-change-before-input","next-capture-after-display-change","escape-held900ms-drains-real-key-up","next-capture-after-held-escape","own-plane-cancelmode-no-input","next-capture-after-plane-cancelmode","benign-dpi-notifications-then-capture"}){
+            foreach(string kind in new string[]{"first-fresh-pair-immediate-release","magnifier-continuity-armed-and-dragging","topmost-self-raise-immediate-first-pair","foreign-thread-native-capture","cross-peer-held900ms","preheld-source-release-then-first-fresh-pair","escape-drains-owned-release","escape-held-release-after-helper-close","next-capture-after-escape","display-change-before-input","next-capture-after-display-change","escape-held900ms-drains-real-key-up","next-capture-after-held-escape","own-plane-cancelmode-no-input","next-capture-after-plane-cancelmode","benign-dpi-notifications-then-capture"}){
                 Dictionary<string,object> result=Case(host,kind);cases.Add(result);ok=ok&&(bool)result["ok"];if(!host.Usable||host.Child!=0||host.Process.HasExited)break;
             }
             if(host.Child==0&&!host.Process.HasExited){host.Shutdown();stopped=host.Read(4000);Need((string)stopped["event"]=="stopped"&&Convert.ToInt32(stopped["completedGenerations"])==cases.Count,"Host stop/generation mismatch.");Need(host.Process.WaitForExit(4000)&&host.Process.ExitCode==0,"Production observer host failed to exit.");}
             else ok=false;
         }
-        return new Dictionary<string,object>{{"ok",ok&&cases.Count==15},{"cases",cases},{"hostShutdown",stopped},{"productionModulesImported",true},{"requestedInputBackend","delegated-exact-production"},{"userContentCaptured",false},{"clipboardAccessed",false},{"scope","Exact production hook pump/session and Rust candidate picker with generated same-integrity peers only; no Tauri/engine, physical app, elevated boundary or universal acceptance claim."}};
+        return new Dictionary<string,object>{{"ok",ok&&cases.Count==16},{"acceptancePolicy","core-functional-v1"},{"fineQualityBlocking",false},{"cases",cases},{"hostShutdown",stopped},{"productionModulesImported",true},{"requestedInputBackend","delegated-exact-production"},{"userContentCaptured",false},{"clipboardAccessed",false},{"scope","Exact production hook pump/session and Rust candidate picker with generated same-integrity peers only; no Tauri/engine, physical app, elevated boundary or universal acceptance claim."}};
     }
 }
 '@

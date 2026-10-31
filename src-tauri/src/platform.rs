@@ -19,6 +19,37 @@ fn cancelled(cancel: Option<&NativeCancel>) -> bool {
 pub fn selected_text_cancelable(cancel: NativeCancel) -> Result<String, String> {
     cancellable_text("selected-text", cancel)
 }
+
+/// Snapshot at the shortcut, not when a queued worker finally starts. The
+/// Swift endpoint reads process/window identity, never text. If CG z-order
+/// cannot identify the source, it anchors the public AX focused window now.
+#[cfg(target_os = "macos")]
+pub fn macos_selection_source() -> Result<Value, String> {
+    run("selection-source", None)?
+        .get("source")
+        .filter(|value| value.is_object())
+        .cloned()
+        .ok_or_else(|| "NATIVE_PROTOCOL: Missing selection request source.".into())
+}
+
+#[cfg(target_os = "macos")]
+pub fn selected_text_from_source_cancelable(
+    cancel: NativeCancel,
+    source: &Value,
+) -> Result<String, String> {
+    if cancelled(Some(&cancel)) {
+        return Err(NATIVE_CANCELLED.into());
+    }
+    let result = run("selected-text", Some(&source.to_string()));
+    if cancelled(Some(&cancel)) {
+        return Err(NATIVE_CANCELLED.into());
+    }
+    result?
+        .get("text")
+        .and_then(Value::as_str)
+        .map(str::to_owned)
+        .ok_or_else(|| "NATIVE_PROTOCOL: Native helper returned no text field.".into())
+}
 #[cfg(target_os = "windows")]
 pub fn selected_text_with_strategy_cancelable(
     cancel: NativeCancel,
@@ -37,6 +68,11 @@ pub fn capture_ocr_cancelable(cancel: NativeCancel) -> Result<String, String> {
 pub fn capture_image_cancelable(cancel: NativeCancel) -> Result<String, String> {
     image_response(run_cancelable("capture-image", cancel)?)
 }
+/// F1 screenshot only: hover/click a visible window or drag a rectangle.
+/// OCR and translation continue to use the existing drag-only capture mode.
+pub fn capture_screenshot_cancelable(cancel: NativeCancel) -> Result<String, String> {
+    image_response(run_cancelable("capture-screenshot", cancel)?)
+}
 fn cancellable_text(mode: &str, cancel: NativeCancel) -> Result<String, String> {
     run_cancelable(mode, cancel)?
         .get("text")
@@ -54,12 +90,74 @@ fn run_cancelable(mode: &str, cancel: NativeCancel) -> Result<Value, String> {
     }
     #[cfg(not(target_os = "windows"))]
     {
+        #[cfg(target_os = "macos")]
+        if mode == "capture-screenshot" {
+            return run_macos_screenshot_cancelable(cancel);
+        }
         let result = run(mode, None);
         if cancelled(Some(&cancel)) {
             Err(NATIVE_CANCELLED.into())
         } else {
             result
         }
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn run_macos_screenshot_cancelable(cancel: NativeCancel) -> Result<Value, String> {
+    use std::sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    };
+    // Register before the watcher can cancel, so cancellation cannot get lost
+    // while AppKit presentation is queued. Tokens isolate repeated F1 requests.
+    let operation = run("begin-native-capture", None)?
+        .get("operationId")
+        .and_then(Value::as_str)
+        .filter(|id| id.len() == 36)
+        .ok_or("NATIVE_PROTOCOL: Missing screenshot operation.")?
+        .to_owned();
+    let finished = Arc::new(AtomicBool::new(false));
+    let watching = finished.clone();
+    let cancellation = cancel.clone();
+    let watched_operation = operation.clone();
+    let watcher = std::thread::Builder::new()
+        .name("screenshot-cancel".into())
+        .spawn(move || {
+            while !watching.load(Ordering::SeqCst) {
+                if cancellation.load(Ordering::SeqCst) {
+                    // Cancellation is outside the serialized capture lock. Swift
+                    // only flips this request's flag; its own main-thread session
+                    // disposes panels/monitors, never another request's selector.
+                    return run("cancel-native-capture", Some(&watched_operation)).map(|_| ());
+                }
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+            Ok(())
+        });
+    let watcher = match watcher {
+        Ok(watcher) => watcher,
+        Err(_) => {
+            let _ = run("end-native-capture", Some(&operation));
+            return Err("CAPTURE: Could not start screenshot cancellation watcher.".into());
+        }
+    };
+    let result = if cancelled(Some(&cancel)) {
+        Err(NATIVE_CANCELLED.into())
+    } else {
+        run("capture-screenshot", Some(&operation))
+    };
+    finished.store(true, Ordering::SeqCst);
+    let cancellation_result = watcher
+        .join()
+        .map_err(|_| "CAPTURE: Screenshot cancellation watcher failed.");
+    let cleanup = run("end-native-capture", Some(&operation));
+    cancellation_result??;
+    cleanup?;
+    if cancelled(Some(&cancel)) {
+        Err(NATIVE_CANCELLED.into())
+    } else {
+        result
     }
 }
 
@@ -705,6 +803,12 @@ fn bounded_selection_health(value: &Value) -> Value {
         "copyProtectionProbeMilliseconds",
         "copyProtectionUnknown",
         "copySnapshotOutcome",
+        "copySnapshotStage",
+        "copySnapshotFailureKind",
+        "copySnapshotFormatKind",
+        "copySnapshotFormatCount",
+        "copySnapshotFormatsSaved",
+        "copySnapshotEmptyMarkers",
         "copyDispatchInserted",
         "copyOwnInputObserved",
         "copyOwnerOutcome",
@@ -862,6 +966,45 @@ fn bounded_capture_health(value: &Value) -> Value {
     for field in FIELDS {
         if let Some(number) = value.get(field).and_then(Value::as_u64) {
             safe.insert((*field).to_owned(), json!(number));
+        }
+    }
+    // Frame metrics have a deliberately tighter schema than the legacy capture
+    // counters. Enforce it at the helper boundary, not only at their producer.
+    for field in [
+        "captureFrameCount",
+        "captureDraggingFrameCount",
+        "captureFrameStartGapMillisecondsMax",
+        "captureFrameRenderMillisecondsTotal",
+        "captureFrameRenderMillisecondsMax",
+        "magnifierRenderMillisecondsTotal",
+        "magnifierRenderMillisecondsMax",
+        "magnifierSampleMillisecondsTotal",
+        "magnifierSampleMillisecondsMax",
+        "magnifierComposeMillisecondsTotal",
+        "magnifierComposeMillisecondsMax",
+        "magnifierPresentMillisecondsTotal",
+        "magnifierPresentMillisecondsMax",
+        "magnifierClearMillisecondsTotal",
+        "magnifierClearMillisecondsMax",
+        "magnifierGetDcMillisecondsTotal",
+        "magnifierGetDcMillisecondsMax",
+        "magnifierBitBltMillisecondsTotal",
+        "magnifierBitBltMillisecondsMax",
+        "magnifierReleaseDcMillisecondsTotal",
+        "magnifierReleaseDcMillisecondsMax",
+        "magnifierSampleFlushMillisecondsTotal",
+        "magnifierSampleFlushMillisecondsMax",
+        "magnifierSampleCompleted",
+        "magnifierStaleFrames",
+        "magnifierFrameAgeMillisecondsMax",
+        "magnifierSampleThreadStopped",
+    ] {
+        if let Some(number) = value
+            .get(field)
+            .and_then(Value::as_u64)
+            .filter(|number| *number <= 10_000_000)
+        {
+            safe.insert(field.to_owned(), json!(number));
         }
     }
     for field in [
@@ -1222,7 +1365,7 @@ fn run_windows_selection(
 
     static CAPTURE_ATTEMPT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let started = Instant::now();
-    let capture = matches!(mode, "capture-ocr" | "capture-image");
+    let capture = matches!(mode, "capture-ocr" | "capture-image" | "capture-screenshot");
     let capture_attempt =
         capture.then(|| CAPTURE_ATTEMPT.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1);
     let selection = mode == "selected-text";
@@ -1269,7 +1412,9 @@ fn run_windows_selection(
     if selection {
         command.args(["-SelectionStrategy", strategy.native_argument()]);
     }
-    let mut cancellation = if cancel.is_some() || (capture && rust_capture_enabled()) {
+    let mut cancellation = if cancel.is_some()
+        || (capture && (rust_capture_enabled() || mode == "capture-screenshot"))
+    {
         Some(native_process::CancellationEvent::new()?)
     } else {
         None
@@ -1337,7 +1482,12 @@ fn run_windows_selection(
         })
     };
     // An 8 MiB PNG expands to about 10.7 MiB of base64 plus the JSON envelope.
-    let output_limit = if mode == "capture-image" { 12 } else { 4 } * 1024 * 1024;
+    let output_limit = if matches!(mode, "capture-image" | "capture-screenshot") {
+        12
+    } else {
+        4
+    } * 1024
+        * 1024;
     let output_thread = read_pipe(Box::new(stdout), output_limit);
     let error_thread = read_pipe(Box::new(stderr), 4 * 1024 * 1024);
     let input_thread = if let Some(text) = input {
@@ -1349,7 +1499,7 @@ fn run_windows_selection(
     };
     // Helpers cancel their own picker after 120 seconds and OCR after 30 seconds.
     // The longer outer limit gives them time to dispose images and temporary files.
-    let limit = if matches!(mode, "capture-ocr" | "capture-image") {
+    let limit = if matches!(mode, "capture-ocr" | "capture-image" | "capture-screenshot") {
         180
     } else {
         60
@@ -1526,7 +1676,12 @@ fn run(mode: &str, input: Option<&str>) -> Result<Value, String> {
     static CAPTURE: Mutex<()> = Mutex::new(());
     let _capture = if matches!(
         mode,
-        "selected-text" | "clipboard" | "copy" | "capture-ocr" | "capture-image"
+        "selected-text"
+            | "clipboard"
+            | "copy"
+            | "capture-ocr"
+            | "capture-image"
+            | "capture-screenshot"
     ) {
         Some(
             CAPTURE
@@ -1616,7 +1771,7 @@ fn rust_capture_enabled() -> bool {
 }
 
 #[cfg(target_os = "windows")]
-fn rust_capture_command() -> Result<std::process::Command, String> {
+fn rust_capture_command(mode: &str) -> Result<std::process::Command, String> {
     use sha2::{Digest, Sha256};
     use std::os::windows::process::CommandExt;
     static HELPER: std::sync::OnceLock<Result<std::path::PathBuf, String>> =
@@ -1639,15 +1794,22 @@ fn rust_capture_command() -> Result<std::process::Command, String> {
     verify_native_assembly(path,BYTES).map_err(|_|"NATIVE_BINARY: The packaged native capture executable changed or is unavailable. Restart or reinstall EchoLingo.".to_owned())?;
     let mut command = std::process::Command::new(path);
     command
-        .args(["-Mode", "capture-image"])
+        .args([
+            "-Mode",
+            mode,
+            "-CaptureOwnerProcessId",
+            &std::process::id().to_string(),
+        ])
         .creation_flags(0x08000000);
     Ok(command)
 }
 
 #[cfg(target_os = "windows")]
 fn native_command(mode: &str) -> Result<std::process::Command, String> {
-    if mode == "capture-image" && rust_capture_enabled() {
-        return rust_capture_command();
+    if mode == "capture-screenshot" || (mode == "capture-image" && rust_capture_enabled()) {
+        // Screenshot mode has no legacy fallback: a failed native/security
+        // check must never retry through a less restrictive capture backend.
+        return rust_capture_command(mode);
     }
     use sha2::{Digest, Sha256};
     use std::os::windows::process::CommandExt;
@@ -1956,6 +2118,7 @@ mod tests {
             super::selected_text_cancelable(Arc::new(AtomicBool::new(true))),
             super::capture_ocr_cancelable(Arc::new(AtomicBool::new(true))),
             super::capture_image_cancelable(Arc::new(AtomicBool::new(true))),
+            super::capture_screenshot_cancelable(Arc::new(AtomicBool::new(true))),
         ] {
             assert_eq!(result.unwrap_err(), super::NATIVE_CANCELLED);
         }
@@ -2024,6 +2187,89 @@ mod tests {
     }
 
     #[test]
+    fn capture_frame_timings_are_bounded_numeric_metadata_only() {
+        let safe = super::bounded_capture_health(&json!({
+            "captureFrameCount": 63, "captureDraggingFrameCount": 24,
+            "captureFrameStartGapMillisecondsMax": 46,
+            "captureFrameRenderMillisecondsTotal": 980,
+            "captureFrameRenderMillisecondsMax": 46,
+            "magnifierRenderMillisecondsTotal": 870,
+            "magnifierRenderMillisecondsMax": 38,
+            "magnifierSampleMillisecondsTotal": 600,
+            "magnifierSampleMillisecondsMax": 30,
+            "magnifierComposeMillisecondsTotal": 70,
+            "magnifierComposeMillisecondsMax": 4,
+            "magnifierPresentMillisecondsTotal": 200,
+            "magnifierPresentMillisecondsMax": 12,
+            "magnifierClearMillisecondsTotal": 30,
+            "magnifierClearMillisecondsMax": 3,
+            "magnifierGetDcMillisecondsTotal": 50,
+            "magnifierGetDcMillisecondsMax": 4,
+            "magnifierBitBltMillisecondsTotal": 490,
+            "magnifierBitBltMillisecondsMax": 30,
+            "magnifierReleaseDcMillisecondsTotal": 30,
+            "magnifierReleaseDcMillisecondsMax": 3,
+            "magnifierSampleFlushMillisecondsTotal": 4,
+            "magnifierSampleFlushMillisecondsMax": 2,
+            "magnifierSampleCompleted": 30,
+            "magnifierStaleFrames": 2,
+            "magnifierFrameAgeMillisecondsMax": 80,
+            "magnifierSampleThreadStopped": 1,
+            "captureFramePixels": "private", "captureFramePointer": [100, 200]
+        }));
+        assert_eq!(safe.as_object().unwrap().len(), 27);
+        assert_eq!(safe["captureFrameCount"], 63);
+        for boundary in [0, 10_000_000] {
+            let input: serde_json::Map<String, Value> = safe
+                .as_object()
+                .unwrap()
+                .keys()
+                .map(|field| (field.clone(), json!(boundary)))
+                .collect();
+            let input = Value::Object(input);
+            assert_eq!(super::bounded_capture_health(&input), input);
+        }
+        for invalid in [
+            json!(-1),
+            json!(10_000_001),
+            json!(true),
+            json!("private"),
+            json!([1]),
+        ] {
+            assert_eq!(
+                super::bounded_capture_health(&json!({
+                    "captureFrameCount": invalid, "captureDraggingFrameCount": invalid,
+                    "captureFrameStartGapMillisecondsMax": invalid,
+                    "captureFrameRenderMillisecondsTotal": invalid,
+                    "captureFrameRenderMillisecondsMax": invalid,
+                    "magnifierRenderMillisecondsTotal": invalid,
+                    "magnifierRenderMillisecondsMax": invalid,
+                    "magnifierSampleMillisecondsTotal": invalid,
+                    "magnifierSampleMillisecondsMax": invalid,
+                    "magnifierComposeMillisecondsTotal": invalid,
+                    "magnifierComposeMillisecondsMax": invalid,
+                    "magnifierPresentMillisecondsTotal": invalid,
+                    "magnifierPresentMillisecondsMax": invalid,
+                    "magnifierClearMillisecondsTotal": invalid,
+                    "magnifierClearMillisecondsMax": invalid,
+                    "magnifierGetDcMillisecondsTotal": invalid,
+                    "magnifierGetDcMillisecondsMax": invalid,
+                    "magnifierBitBltMillisecondsTotal": invalid,
+                    "magnifierBitBltMillisecondsMax": invalid,
+                    "magnifierReleaseDcMillisecondsTotal": invalid,
+                    "magnifierReleaseDcMillisecondsMax": invalid,
+                    "magnifierSampleFlushMillisecondsTotal": invalid,
+                    "magnifierSampleFlushMillisecondsMax": invalid,
+                    "magnifierSampleCompleted": invalid,
+                    "magnifierStaleFrames": invalid,
+                    "magnifierFrameAgeMillisecondsMax": invalid,
+                    "magnifierSampleThreadStopped": invalid
+                })),
+                json!({})
+            );
+        }
+    }
+    #[test]
     fn capture_topology_health_accepts_signed_coordinates_but_never_content() {
         assert_eq!(
             super::bounded_capture_health(&json!({
@@ -2075,26 +2321,44 @@ mod tests {
 
     #[test]
     fn copy_diagnostics_allow_only_bounded_scalar_metadata() {
-        let safe = super::bounded_selection_health(&json!({
-            "copyStrategy": 1, "copyPhase": 4, "copyNativeContextValid": 1,
-            "copyNativeContextChecks": 6, "copyNativeGuardReason": 0,
-            "copyNativeInvalidReason": 10, "copyNativeGtiSucceeded": 1,
-            "copyNativeGtiFlags": 0, "copyNativeFocusPresent": 1,
-            "copyNativeFocusProcessMatchesForeground": 0, "copyNativeFocusRootMatchesForeground": 1,
-            "copyNativeActivePresent": 1, "copyNativeActiveRootMatchesForeground": 1,
-            "copyNativeEditable": 2, "copyNativeProtection": 0,
-            "copyNativeSelectionKnown": 1, "copyNativeSelectionNonempty": 1,
-            "copyProtectionProbe": 2, "copyProtectionProbeMilliseconds": 250,
-            "copyProtectionUnknown": 1, "copySnapshotOutcome": 1,
-            "copyDispatchInserted": 4, "copyOwnInputObserved": 1,
-            "copyOwnerOutcome": 1, "copyClipboardRestored": 1, "copyTerminalReason": 0,
-            "copyClipboardOutcome": 3, "copyWaitElapsedMilliseconds": 1200,
-            "copyText": "private", "copyTitle": "private", "attemptId": 1,
-            "copyNativeFocusProcess": 2468, "copyNativeForeground": 1234,
-            "actionResultNonempty": 1
-        }));
-        assert_eq!(safe.as_object().unwrap().len(), 28);
+        // Keep each json! expansion small without dropping any privacy cases
+        // or raising the crate-wide macro recursion limit for a test fixture.
+        let mut diagnostics = serde_json::Map::new();
+        for fields in [
+            json!({
+                "copyStrategy": 1, "copyPhase": 4, "copyNativeContextValid": 1,
+                "copyNativeContextChecks": 6, "copyNativeGuardReason": 0,
+                "copyNativeInvalidReason": 10, "copyNativeGtiSucceeded": 1,
+                "copyNativeGtiFlags": 0, "copyNativeFocusPresent": 1,
+                "copyNativeFocusProcessMatchesForeground": 0, "copyNativeFocusRootMatchesForeground": 1,
+                "copyNativeActivePresent": 1, "copyNativeActiveRootMatchesForeground": 1
+            }),
+            json!({
+                "copyNativeEditable": 2, "copyNativeProtection": 0,
+                "copyNativeSelectionKnown": 1, "copyNativeSelectionNonempty": 1,
+                "copyProtectionProbe": 2, "copyProtectionProbeMilliseconds": 250,
+                "copyProtectionUnknown": 1, "copySnapshotOutcome": 1,
+                "copyDispatchInserted": 4, "copyOwnInputObserved": 1,
+                "copyOwnerOutcome": 1, "copyClipboardRestored": 1, "copyTerminalReason": 0,
+                "copyClipboardOutcome": 3, "copyWaitElapsedMilliseconds": 1200
+            }),
+            json!({
+                "copySnapshotStage": 4, "copySnapshotFailureKind": 4,
+                "copySnapshotFormatKind": 7, "copySnapshotFormatCount": 4,
+                "copySnapshotFormatsSaved": 2, "copySnapshotEmptyMarkers": 1,
+                "copySnapshotFormatName": "private", "copySnapshotExceptionMessage": "private",
+                "copyText": "private", "copyTitle": "private", "attemptId": 1,
+                "copyNativeFocusProcess": 2468, "copyNativeForeground": 1234,
+                "actionResultNonempty": 1
+            }),
+        ] {
+            diagnostics.extend(fields.as_object().unwrap().clone());
+        }
+        let safe = super::bounded_selection_health(&Value::Object(diagnostics));
+        assert_eq!(safe.as_object().unwrap().len(), 34);
         assert_eq!(safe["copyDispatchInserted"], 4);
+        assert_eq!(safe["copySnapshotFailureKind"], 4);
+        assert_eq!(safe["copySnapshotEmptyMarkers"], 1);
         assert_eq!(safe["copyClipboardOutcome"], 3);
         assert_eq!(safe["copyWaitElapsedMilliseconds"], 1200);
         for invalid in [
@@ -2107,7 +2371,9 @@ mod tests {
         ] {
             assert_eq!(
                 super::bounded_selection_health(
-                    &json!({"copyTerminalReason": invalid, "copyClipboardOutcome": invalid, "copyWaitElapsedMilliseconds": invalid})
+                    &json!({"copyTerminalReason": invalid, "copyClipboardOutcome": invalid, "copyWaitElapsedMilliseconds": invalid,
+                        "copySnapshotStage": invalid, "copySnapshotFailureKind": invalid, "copySnapshotFormatKind": invalid,
+                        "copySnapshotFormatCount": invalid, "copySnapshotFormatsSaved": invalid, "copySnapshotEmptyMarkers": invalid})
                 ),
                 json!({})
             );
