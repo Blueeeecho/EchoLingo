@@ -46,6 +46,220 @@ fn capacity(entries: &HashMap<String, Entry>, pixels: u64, encoded: usize) -> bo
         && pixels <= MAX_TOTAL_PIXELS.saturating_sub(entries.values().map(|e| e.pixels).sum())
         && encoded <= MAX_TOTAL_ENCODED.saturating_sub(entries.values().map(|e| e.encoded).sum())
 }
+#[derive(Clone, Copy, Debug)]
+struct Rect {
+    x: f64,
+    y: f64,
+    width: f64,
+    height: f64,
+}
+impl Rect {
+    fn intersection(self, other: Self) -> f64 {
+        ((self.x + self.width).min(other.x + other.width) - self.x.max(other.x)).max(0.0)
+            * ((self.y + self.height).min(other.y + other.height) - self.y.max(other.y)).max(0.0)
+    }
+}
+fn capture_monitor(capture: Rect, monitors: &[Rect]) -> Option<usize> {
+    monitors
+        .iter()
+        .enumerate()
+        .map(|(index, area)| (index, area.intersection(capture)))
+        .filter(|(_, area)| *area > 0.0)
+        .max_by(|a, b| a.1.total_cmp(&b.1))
+        .map(|(index, _)| index)
+}
+// All arguments are in one coordinate system: macOS points, Windows physical
+// pixels. `units` is coordinate units per logical UI point on the chosen monitor.
+fn placement(
+    area: Rect,
+    capture: Option<Rect>,
+    image: (u32, u32),
+    units: f64,
+    pixel_scale: f64,
+    decoration: (f64, f64),
+) -> Result<Rect, String> {
+    if ![
+        area.x,
+        area.y,
+        area.width,
+        area.height,
+        units,
+        pixel_scale,
+        decoration.0,
+        decoration.1,
+    ]
+    .iter()
+    .all(|n| n.is_finite())
+        || units <= 0.0
+        || pixel_scale <= 0.0
+        || area.width <= decoration.0
+        || area.height <= decoration.1
+        || image.0 == 0
+        || image.1 == 0
+        || decoration.0 < 0.0
+        || decoration.1 < 0.0
+    {
+        return Err("SCREENSHOT_PIN: 无法确定贴图的可用屏幕范围".into());
+    }
+    let margin = (8.0 * units)
+        .min((area.width - decoration.0) / 8.0)
+        .min((area.height - decoration.1) / 8.0);
+    let max_width = area.width - decoration.0 - margin * 2.0;
+    let max_height = area.height - decoration.1 - margin * 2.0;
+    if max_width < 140.0 * units || max_height < 80.0 * units {
+        return Err("SCREENSHOT_PIN: 当前屏幕可用范围过小，无法完整显示贴图操作按钮".into());
+    }
+    if capture.is_some_and(|r| ![r.x, r.y, r.width, r.height].iter().all(|n| n.is_finite())) {
+        return Err("SCREENSHOT_PIN: 截图位置无效".into());
+    }
+    let original = (
+        f64::from(image.0) / pixel_scale * units,
+        f64::from(image.1) / pixel_scale * units,
+    );
+    let toolbar = (42.0 * units).min(max_height / 2.0);
+    let fit = (720.0 * units).min(max_width) / original.0;
+    let fit = fit
+        .min(((520.0 * units).min(max_height) - toolbar).max(1.0) / original.1)
+        .min(1.0);
+    let width = (original.0 * fit)
+        .max((240.0 * units).min(max_width))
+        .min(max_width);
+    let height = (original.1 * fit + toolbar)
+        .max((160.0 * units).min(max_height))
+        .min(max_height);
+    let outer_width = width + decoration.0;
+    let outer_height = height + decoration.1;
+    let (x, y) = capture.map_or(
+        (
+            area.x + (area.width - outer_width) / 2.0,
+            area.y + (area.height - outer_height) / 2.0,
+        ),
+        |capture| (capture.x, capture.y),
+    );
+    let min_x = area.x + margin;
+    let min_y = area.y + margin;
+    // Exact fits can invert the floating upper/lower bounds by one ULP.
+    let max_x = (area.x + area.width - outer_width - margin).max(min_x);
+    let max_y = (area.y + area.height - outer_height - margin).max(min_y);
+    Ok(Rect {
+        x: x.clamp(min_x, max_x),
+        y: y.clamp(min_y, max_y),
+        width,
+        height,
+    })
+}
+fn monitor_rect(monitor: &tauri::Monitor, work_area: bool) -> Rect {
+    let (position, size) = if work_area {
+        let work = monitor.work_area();
+        (work.position, work.size)
+    } else {
+        (*monitor.position(), *monitor.size())
+    };
+    // The capture bridge uses top-left global points on macOS, and physical
+    // pixels on Windows. Normalize each monitor with its OWN scale, not the
+    // current editor's scale (which may still describe its hidden Tauri owner).
+    let divisor = if cfg!(target_os = "macos") {
+        monitor.scale_factor()
+    } else {
+        1.0
+    };
+    Rect {
+        x: f64::from(position.x) / divisor,
+        y: f64::from(position.y) / divisor,
+        width: f64::from(size.width) / divisor,
+        height: f64::from(size.height) / divisor,
+    }
+}
+fn position_reference(
+    editor: &tauri::WebviewWindow,
+    window: &tauri::WebviewWindow,
+    geometry: Option<super::platform::ScreenshotGeometry>,
+    image: (u32, u32),
+) -> Result<(), String> {
+    let capture = geometry.as_ref().map(|g| Rect {
+        x: g.x,
+        y: g.y,
+        width: g.width,
+        height: g.height,
+    });
+    let monitors = editor
+        .available_monitors()
+        .map_err(|_| "SCREENSHOT_PIN: 无法读取截图显示器")?;
+    let bounds: Vec<_> = monitors.iter().map(|m| monitor_rect(m, false)).collect();
+    let selected = capture.and_then(|capture| capture_monitor(capture, &bounds));
+    let monitor = selected
+        .and_then(|index| monitors.get(index).cloned())
+        .or_else(|| editor.current_monitor().ok().flatten())
+        .ok_or("SCREENSHOT_PIN: 截图所在显示器不可用，请重试")?;
+    let target_scale = monitor.scale_factor();
+    let window_scale = window
+        .scale_factor()
+        .map_err(|_| "SCREENSHOT_PIN: 无法读取贴图缩放")?;
+    if !target_scale.is_finite()
+        || target_scale <= 0.0
+        || !window_scale.is_finite()
+        || window_scale <= 0.0
+    {
+        return Err("SCREENSHOT_PIN: 显示器缩放无效".into());
+    }
+    let units = if cfg!(target_os = "macos") {
+        1.0
+    } else {
+        target_scale
+    };
+    let outer = window
+        .outer_size()
+        .map_err(|_| "SCREENSHOT_PIN: 无法读取窗口边框")?;
+    let inner = window
+        .inner_size()
+        .map_err(|_| "SCREENSHOT_PIN: 无法读取图片区域")?;
+    let decoration = (
+        f64::from(outer.width.saturating_sub(inner.width)) / window_scale * units,
+        f64::from(outer.height.saturating_sub(inner.height)) / window_scale * units,
+    );
+    let pixel_scale = if cfg!(target_os = "macos") {
+        geometry.as_ref().map_or(target_scale, |g| g.scale)
+    } else {
+        target_scale
+    };
+    let frame = placement(
+        monitor_rect(&monitor, true),
+        capture,
+        image,
+        units,
+        pixel_scale,
+        decoration,
+    )?;
+    window
+        .set_min_size(Some(tauri::LogicalSize::new(
+            (frame.width / units).min(200.0),
+            (frame.height / units).min(120.0),
+        )))
+        .map_err(|_| "SCREENSHOT_PIN: 无法设置贴图最小尺寸")?;
+    #[cfg(target_os = "macos")]
+    {
+        window
+            .set_position(tauri::LogicalPosition::new(frame.x, frame.y))
+            .and_then(|_| window.set_size(tauri::LogicalSize::new(frame.width, frame.height)))
+            .map_err(|_| "SCREENSHOT_PIN: 无法定位贴图")?;
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        window
+            .set_position(tauri::PhysicalPosition::new(
+                frame.x.round() as i32,
+                frame.y.round() as i32,
+            ))
+            .and_then(|_| {
+                window.set_size(tauri::PhysicalSize::new(
+                    frame.width.floor() as u32,
+                    frame.height.floor() as u32,
+                ))
+            })
+            .map_err(|_| "SCREENSHOT_PIN: 无法定位贴图")?;
+    }
+    Ok(())
+}
 pub fn destroyed(app: &tauri::AppHandle, label: &str) {
     if let Ok(mut entries) = app.state::<super::AppState>().screenshot_pins.entries.lock() {
         if let Some(mut entry) = entries.remove(label) {
@@ -137,26 +351,20 @@ pub async fn pin_screenshot_image(
     let handle = app.clone();
     let name = label.clone();
     let built = super::screenshot::dialog(&app, move || {
-        handle
+        let geometry = handle
             .state::<super::AppState>()
             .screenshots
-            .with_pin_source(session_id, || Ok(()))?;
+            .pin_source_geometry(session_id)?;
+        let editor = handle.get_webview_window("screenshot-editor").ok_or(CLOSED)?;
         // Do not hold registry/image locks while constructing a WebView.
-        let scale = (720.0 / f64::from(width))
-            .min(520.0 / f64::from(height))
-            .min(1.0);
-        tauri::WebviewWindowBuilder::new(
+        // Keep it hidden until the actual source monitor/usable frame is applied.
+        let window = tauri::WebviewWindowBuilder::new(
             &handle,
             &name,
             tauri::WebviewUrl::App("pinned-screenshot.html".into()),
         )
         .title("贴图 · EchoLingo")
-        .inner_size(
-            (f64::from(width) * scale).max(240.0),
-            (f64::from(height) * scale + 42.0).max(160.0),
-        )
-        .min_inner_size(200.0, 120.0)
-        .center()
+        .inner_size(240.0, 160.0)
         .visible(false)
         .focused(false)
         .decorations(true)
@@ -165,8 +373,8 @@ pub async fn pin_screenshot_image(
         .visible_on_all_workspaces(true)
         .accept_first_mouse(true)
         .build()
-        .map(|_| ())
-        .map_err(|_| "SCREENSHOT_PIN: 无法创建贴图窗口".to_owned())
+        .map_err(|_| "SCREENSHOT_PIN: 无法创建贴图窗口".to_owned())?;
+        position_reference(&editor, &window, geometry, (width, height))
     })
     .await;
     let result = match built {
@@ -290,6 +498,125 @@ mod tests {
             ready: None,
             delivered: true,
         }
+    }
+    fn assert_inside(frame: Rect, area: Rect, decoration: (f64, f64)) {
+        assert!(frame.x >= area.x && frame.y >= area.y);
+        assert!(frame.x + frame.width + decoration.0 <= area.x + area.width + 0.001);
+        assert!(frame.y + frame.height + decoration.1 <= area.y + area.height + 0.001);
+    }
+    #[test]
+    fn pin_chooses_largest_capture_intersection_not_primary_display() {
+        let monitors = [
+            Rect {
+                x: 0.0,
+                y: 0.0,
+                width: 2560.0,
+                height: 1440.0,
+            },
+            Rect {
+                x: -1920.0,
+                y: -200.0,
+                width: 1920.0,
+                height: 1080.0,
+            },
+        ];
+        let capture = Rect {
+            x: -500.0,
+            y: 100.0,
+            width: 600.0,
+            height: 500.0,
+        };
+        assert_eq!(capture_monitor(capture, &monitors), Some(1));
+        assert_eq!(
+            capture_monitor(Rect { x: 8000.0, ..capture }, &monitors),
+            None,
+        );
+    }
+    #[test]
+    fn pin_clamps_capture_anchor_and_decorations_to_negative_work_area() {
+        let area = Rect {
+            x: -1920.0,
+            y: -176.0,
+            width: 1920.0,
+            height: 1016.0,
+        };
+        let capture = Rect {
+            x: -90.0,
+            y: 800.0,
+            width: 300.0,
+            height: 200.0,
+        };
+        let decoration = (16.0, 39.0);
+        let frame = placement(area, Some(capture), (1600, 1000), 1.0, 1.0, decoration).unwrap();
+        assert_inside(frame, area, decoration);
+        assert!(frame.x < -90.0 && frame.y < 800.0);
+    }
+    #[test]
+    fn pin_mixed_dpi_windows_uses_target_scale_not_source_window_scale() {
+        let area = Rect {
+            x: -3840.0,
+            y: 0.0,
+            width: 3840.0,
+            height: 2080.0,
+        };
+        let decoration = (32.0, 78.0);
+        let frame = placement(area, None, (1600, 1000), 2.0, 2.0, decoration).unwrap();
+        assert_inside(frame, area, decoration);
+        assert!(frame.width <= 1440.0);
+        assert!((frame.x - (area.x + (area.width - frame.width - decoration.0) / 2.0)).abs() < 0.001);
+        // Mac capture coordinates remain logical points even for a Retina bitmap.
+        let mac_area = Rect {
+            x: -1920.0,
+            y: 24.0,
+            width: 1920.0,
+            height: 1016.0,
+        };
+        let mac = placement(mac_area, None, (1600, 1000), 1.0, 2.0, (0.0, 28.0)).unwrap();
+        assert_inside(mac, mac_area, (0.0, 28.0));
+        assert!(mac.width <= 720.0);
+    }
+    #[test]
+    fn pin_small_work_area_reduces_minimum_instead_of_covering_other_monitors() {
+        let area = Rect {
+            x: 50.0,
+            y: -300.0,
+            width: 180.0,
+            height: 140.0,
+        };
+        let decoration = (8.0, 28.0);
+        let frame = placement(area, None, (8000, 4000), 1.0, 1.0, decoration).unwrap();
+        assert_inside(frame, area, decoration);
+        assert!(frame.width < 200.0 && frame.height < 120.0);
+        assert!(placement(
+            Rect { height: 20.0, ..area },
+            None,
+            (80, 40),
+            1.0,
+            1.0,
+            decoration,
+        ).is_err());
+    }
+    #[test]
+    fn pin_exact_fit_rounding_never_inverts_clamp_bounds() {
+        let area = Rect {
+            x: -920.0,
+            y: 9676.0,
+            width: 827.0,
+            height: 1959.0,
+        };
+        let decoration = (32.0, 78.0);
+        let frame = placement(area, None, (6089, 4215), 2.0, 2.0, decoration).unwrap();
+        assert_inside(frame, area, decoration);
+    }
+    #[test]
+    fn pin_rejects_work_area_that_cannot_show_controls() {
+        let area = Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 80.0,
+            height: 80.0,
+        };
+        assert!(placement(area, None, (800, 400), 1.0, 1.0, (8.0, 28.0)).is_err());
     }
     #[test]
     fn pin_capacity_is_bounded_by_count_pixels_and_encoded_memory() {

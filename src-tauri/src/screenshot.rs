@@ -67,6 +67,12 @@ impl Controller {
         };
         Ok(())
     }
+    pub(crate) fn pin_source_geometry(
+        &self,
+        id: u64,
+    ) -> Result<Option<super::platform::ScreenshotGeometry>, String> {
+        self.with_image(id, |image| Ok(image.public.capture_geometry.clone()))
+    }
     pub(crate) fn with_pin_source<T>(
         &self,
         id: u64,
