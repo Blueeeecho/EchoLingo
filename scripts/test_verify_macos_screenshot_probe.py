@@ -48,6 +48,11 @@ class MacScreenshotProbeContract(unittest.TestCase):
         self.assertIn('exactProductionTargetMatches', swift)
         self.assertIn('image.setPixel(pixel.baseAddress!', swift)
         self.assertNotIn('image.setColor(.green', swift)
+        self.assertIn('window.orderFrontRegardless()', swift)
+        self.assertIn('!panel.isVisible && !owner.isVisible && owner.attachedSheet == nil', swift)
+        self.assertIn('sourceOccluderDiagnostic', swift)
+        self.assertIn('try fixtureNeed(frame.intersection(target.frame).isEmpty', swift)
+        self.assertNotIn('kCGWindowName', swift)
         diagnostics = swift.split('func sourceIdentityDiagnostic(', 1)[1].split('func verifySourceVisible()', 1)[0]
         self.assertIn('Double(target.pid)', diagnostics)
         self.assertIn('Double(target.id)', diagnostics)

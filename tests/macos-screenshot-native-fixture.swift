@@ -56,12 +56,19 @@ private func sourceMain() {
             "ok": true, "phase": phase, "pid": ProcessInfo.processInfo.processIdentifier,
             "windowId": window.windowNumber, "x": window.frame.minX, "y": window.frame.minY,
             "width": window.frame.width, "height": window.frame.height,
-            "scale": screen.backingScaleFactor
+            "scale": screen.backingScaleFactor,
+            "applicationActive": app.isActive, "windowKey": window.isKeyWindow,
+            "windowVisible": window.isVisible, "windowOnActiveSpace": window.isOnActiveSpace,
+            "frontmostIsSource": NSWorkspace.shared.frontmostApplication?.processIdentifier == ProcessInfo.processInfo.processIdentifier
         ]) + Data([10]))
     }
     DispatchQueue.main.async {
         app.activate(ignoringOtherApps: true) // only this generated source process
         window.makeKeyAndOrderFront(nil)
+        // These two fixture processes cooperate. Bring only the generated
+        // normal-layer source ahead of other applications at that same level;
+        // never hide/close a foreign window or raise the production selector.
+        window.orderFrontRegardless()
         window.displayIfNeeded()
         let point = CGPoint(x: frame.minX + 80, y: CGDisplayBounds(CGMainDisplayID()).height - frame.minY - 80)
         guard CGWarpMouseCursorPosition(point) == .success else {
@@ -216,12 +223,30 @@ private final class ScreenshotProbe {
                 self.finish("failed", reason: "native-save-panel-cancel-not-observed"); return
             }
             self.report["nativeSavePanelCancelPassed"] = true
-            panel.orderOut(nil); window.close(); self.savePanel = nil; self.owner = nil
-            self.startCaptureProbe()
+            // AppKit documents that the completion can run while the sheet is
+            // still onscreen. Dismiss it explicitly, then observe closure before
+            // launching the generated source (including any XPC panel animation).
+            panel.orderOut(nil); window.orderOut(nil); window.close()
+            self.awaitDialogHidden(panel, owner: window, deadline: Date().addingTimeInterval(2))
         }
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { sawVisible = panel.isVisible; panel.cancel(nil) }
         DispatchQueue.main.asyncAfter(deadline: .now() + 5) { [weak self] in
             if self?.savePanel != nil { self?.finish("failed", reason: "native-save-panel-cancel-timeout") }
+        }
+    }
+
+    func awaitDialogHidden(_ panel: NSSavePanel, owner: NSWindow, deadline: Date) {
+        guard !finished else { return }
+        if !panel.isVisible && !owner.isVisible && owner.attachedSheet == nil {
+            report["nativeSavePanelHiddenBeforeCapture"] = true
+            savePanel = nil; self.owner = nil
+            startCaptureProbe()
+        } else if Date() >= deadline {
+            finish("failed", reason: "native-save-panel-not-hidden-before-capture")
+        } else {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.025) {
+                self.awaitDialogHidden(panel, owner: owner, deadline: deadline)
+            }
         }
     }
 
@@ -268,6 +293,11 @@ private final class ScreenshotProbe {
                                              frame: CGRect(x: x, y: y, width: width, height: height))
             if phase == 2 && self.target != target { self.finish("failed", reason: "generated-source-frame-changed"); return }
             self.target = target; self.sourceScale = scale
+            var appKitState: [String: Any] = [:]
+            for key in ["applicationActive", "windowKey", "windowVisible", "windowOnActiveSpace", "frontmostIsSource"] {
+                if let value = object[key] as? Bool { appKitState[key] = value }
+            }
+            self.report["sourceAppKitState"] = appKitState
             if phase == 1 {
                 // AppKit ordering/display calls are not a WindowServer-ready
                 // handshake. No event or capture starts until the exact public
@@ -350,6 +380,7 @@ private final class ScreenshotProbe {
         try fixtureNeed(captureWindowIsCurrent(target, records: records, primaryHeight: primary, excludingPID: ownPID), "owned source identity/frame/sharing changed")
         // Before any pixels are captured, prove no foreign window covers any
         // part of this exact generated source. Never capture arbitrary desktop.
+        report.removeValue(forKey: "sourceOccluderDiagnostic")
         var found = false
         for record in records {
             if captureWindowNumber(record[kCGWindowOwnerPID as String]) == Double(ownPID) { continue }
@@ -359,10 +390,23 @@ private final class ScreenshotProbe {
             }
             if captureWindowNumber(record[kCGWindowAlpha as String]) == 0 { continue }
             guard let dictionary = record[kCGWindowBounds as String] as? [String: Any],
-                  let quartz = CGRect(dictionaryRepresentation: dictionary as CFDictionary) else {
+                  let quartz = CGRect(dictionaryRepresentation: dictionary as CFDictionary),
+                  [quartz.minX, quartz.minY, quartz.width, quartz.height].allSatisfy({ $0.isFinite }) else {
                 throw NativeError("FIXTURE: occlusion metadata is unavailable")
             }
             let frame = CGRect(x: quartz.minX, y: primary - quartz.maxY, width: quartz.width, height: quartz.height)
+            if !frame.intersection(target.frame).isEmpty {
+                // Numeric metadata only; no names, descriptions, or pixels.
+                // This diagnoses an obstruction but does not exempt it.
+                var occluder: [String: Any] = ["appKitFrame": [frame.minX, frame.minY, frame.width, frame.height],
+                    "quartzFrame": [quartz.minX, quartz.minY, quartz.width, quartz.height],
+                    "sameGeneratedSourceProcess": captureWindowNumber(record[kCGWindowOwnerPID as String]) == Double(target.pid)]
+                for (label, key) in [("pid", kCGWindowOwnerPID), ("windowID", kCGWindowNumber),
+                                     ("layer", kCGWindowLayer), ("alpha", kCGWindowAlpha)] {
+                    if let value = captureWindowNumber(record[key as String]) { occluder[label] = value }
+                }
+                report["sourceOccluderDiagnostic"] = occluder
+            }
             try fixtureNeed(frame.intersection(target.frame).isEmpty, "foreign window overlaps generated source; capture refused")
         }
         try fixtureNeed(found, "source absent from visible z-order")

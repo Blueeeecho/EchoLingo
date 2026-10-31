@@ -38,7 +38,13 @@ two-second readiness wait; AppKit `makeKeyAndOrderFront`/`displayIfNeeded` alone
 are not treated as readiness. This wait performs no input or capture and is used
 only before the first case. Later revalidations remain immediate fail-closed.
 Failure diagnostics project only the exact generated PID/window's numeric frame,
-layer, alpha, sharing and visibility fields, never foreign records or names.
+layer, alpha, sharing and visibility fields. If a foreground window obstructs
+the generated source, its numeric PID/window ID, layer/alpha and bounds are
+recorded to diagnose the refusal, never titles, record descriptions or pixels.
+The fixture explicitly confirms its canceled save panel and owner are hidden
+before starting capture. Only the generated source uses `orderFrontRegardless`
+to stage itself at the front of the normal window level; no foreign window is
+hidden, closed, or exempted from the occlusion guard.
 The generated source
 places the cursor inside itself using the public non-event-generating cursor
 position API, then restores its original position on exit. All mouse-button and
@@ -84,3 +90,9 @@ does not re-label those as physical-display tests.
 - [Apple: window sharing metadata](https://developer.apple.com/documentation/coregraphics/kcgwindowsharingstate)
   specifies its numeric representation; diagnostics retain the strict production
   parser and expose numeric/Boolean type mismatches without accepting them.
+- [Apple: save-panel completion](https://developer.apple.com/documentation/appkit/nssavepanel/beginsheetmodal(for:completionhandler:))
+  notes that the sheet may remain onscreen in its completion callback and must
+  be explicitly ordered out before showing another window.
+- [Apple: ordering cooperating windows](https://developer.apple.com/documentation/appkit/nswindow/orderfrontregardless())
+  documents front ordering for cooperating processes without changing the window
+  level; this is fixture staging, not production capture behavior.

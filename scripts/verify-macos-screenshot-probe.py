@@ -6,7 +6,8 @@ from pathlib import Path
 import sys
 
 MODES = ('window-phase1', 'rectangle-phase1', 'escape-cancel', 'request-cancel', 'window-phase2')
-INDEPENDENT = ('privatePasteboardImageRoundtripPassed', 'nativePNGJPEGFileRoundtripPassed', 'nativeSavePanelCancelPassed')
+INDEPENDENT = ('privatePasteboardImageRoundtripPassed', 'nativePNGJPEGFileRoundtripPassed',
+               'nativeSavePanelCancelPassed', 'nativeSavePanelHiddenBeforeCapture')
 SOURCES = {'src-tauri/native/macos.swift', 'src-tauri/native/macos_capture.swift', 'src-tauri/native/macos_window.swift'}
 
 
