@@ -2679,12 +2679,16 @@ fn start_action(app: tauri::AppHandle, action: String) {
                         platform::selected_text_with_strategy_cancelable(cancel, strategy, attempt)
                     }
                     #[cfg(target_os = "macos")]
-                    platform::selected_text_from_source_cancelable(
-                        cancel,
-                        expected_macos_source.as_ref().ok_or("缺少原取词窗口")?,
-                    )
+                    {
+                        platform::selected_text_from_source_cancelable(
+                            cancel,
+                            expected_macos_source.as_ref().ok_or("缺少原取词窗口")?,
+                        )
+                    }
                     #[cfg(not(any(target_os = "windows", target_os = "macos")))]
-                    platform::selected_text_cancelable(cancel)
+                    {
+                        platform::selected_text_cancelable(cancel)
+                    }
                 }
                 "clipboard" => platform::clipboard_text(),
                 "capture" | "ocr" | "silentOcr" if cloud_ocr.is_some() => {

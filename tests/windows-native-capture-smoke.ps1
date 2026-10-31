@@ -172,12 +172,19 @@ public static class EchoLingoNativeCaptureSmoke {
             if(pid==helper&&Loupe(window)){loupe=window;matches++;}return true;
         },IntPtr.Zero);
         Need(matches==1&&IsWindowVisible(loupe),"Continuity requires one visible loupe from this exact helper.");
-        int hides=0,shows=0,locations=0,invisible=0,samples=0,moves=0;
+        int hides=0,shows=0,locations=0,motionLocations=0,invisible=0,samples=0,moves=0;
+        int motionSamples=0,motionTransitions=0;Point? previousMotion=null;
+        long previousSample=-1,maximumSampleGap=0;
+        Stopwatch clock=new Stopwatch();
         WinEventCallback callback=delegate(IntPtr hook,uint eventType,IntPtr window,int objectId,int childId,uint thread,uint time) {
             if(window!=loupe||objectId!=0||childId!=0)return;
             if(eventType==0x8003)Interlocked.Increment(ref hides);
             if(eventType==0x8002)Interlocked.Increment(ref shows);
-            if(eventType==0x800b)Interlocked.Increment(ref locations);
+            if(eventType==0x800b) {
+                Interlocked.Increment(ref locations);
+                long elapsed=clock.ElapsedMilliseconds;
+                if(elapsed>=180&&elapsed<756)Interlocked.Increment(ref motionLocations);
+            }
         };
         // Process-filtered WinEvents catch brief hide/show transitions even if
         // they fall between visibility samples; no other app is observed.
@@ -189,7 +196,7 @@ public static class EchoLingoNativeCaptureSmoke {
         GCHandle callbackRoot=GCHandle.Alloc(callback);
         IntPtr observer=SetWinEventHook(0x8002,0x800b,IntPtr.Zero,callback,(uint)helper,0,0);
         if(observer==IntPtr.Zero) { callbackRoot.Free();Need(false,"Cannot observe generated helper visibility events."); }
-        Stopwatch clock=Stopwatch.StartNew();int issued=-1;long settled=-1;
+        clock.Start();int issued=-1;long settled=-1;
         try {
             // 180 ms stationary, 24 moves 24 ms apart, then 200 ms stationary.
             // This observes every interval, not a successful final screenshot.
@@ -206,7 +213,13 @@ public static class EchoLingoNativeCaptureSmoke {
                 Need(pid==helper&&Alive(helper),"Magnifier identity/session changed during observation.");
                 if(!IsWindowVisible(loupe))invisible++;
                 Rectangle bounds=Bounds(loupe);samples++;
-                if(elapsed>=180&&elapsed<756)positions.Add(bounds.Location);
+                if(previousSample>=0)maximumSampleGap=Math.Max(maximumSampleGap,elapsed-previousSample);
+                previousSample=elapsed;
+                if(elapsed>=180&&elapsed<756) {
+                    positions.Add(bounds.Location);motionSamples++;
+                    if(previousMotion.HasValue&&previousMotion.Value!=bounds.Location)motionTransitions++;
+                    previousMotion=bounds.Location;
+                }
                 if(elapsed>=756&&bounds==expectedFinal&&settled<0)settled=elapsed-756;
                 Thread.Sleep(1);
             }
@@ -216,6 +229,8 @@ public static class EchoLingoNativeCaptureSmoke {
                 {"invisibleSamples",invisible},{"hideEvents",hides},{"showEvents",shows},
                 {"locationEvents",locations},{"eventObserverPositiveControl",locations>0},
                 {"generatedMoves",moves},{"distinctMotionPositions",positions.Count},
+                {"motionVisibilitySamples",motionSamples},{"motionPositionTransitions",motionTransitions},
+                {"motionLocationEvents",motionLocations},{"maximumVisibilitySampleGapMilliseconds",maximumSampleGap},
                 {"finalTargetSettledMilliseconds",settled},{"continuousObservation",true}
             };
             Need(locations>0,"Generated magnifier motion did not prove WinEvent callback delivery.");

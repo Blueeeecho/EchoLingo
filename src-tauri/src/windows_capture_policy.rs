@@ -715,6 +715,19 @@ impl CaptureRedrawPolicy {
     pub fn presented(&mut self, elapsed: i64) {
         self.presented = Some(elapsed);
     }
+    pub fn wait_milliseconds(&self, armed: bool, finished: bool, elapsed: i64) -> u32 {
+        if !armed || finished || elapsed < 0 {
+            return 16;
+        }
+        match self.presented {
+            // The paint itself already consumed part (or all) of this frame.
+            // Never append another whole frame interval after rendering.
+            Some(start) if start >= 0 && elapsed >= start => 16 - (elapsed - start).min(16) as u32,
+            None => 0,
+            Some(start) if start < 0 => 0,
+            _ => 16,
+        }
+    }
 }
 #[derive(Default, Debug)]
 pub struct CaptureInputHealthPolicy {
@@ -984,6 +997,38 @@ mod supplemental_tests {
         for t in [6000, 120000] {
             assert_eq!(h.observe(true, false, true, true, false, t), 0);
         }
+    }
+    #[test]
+    fn frame_wait_consumes_only_the_budget_remaining_after_rendering() {
+        let mut redraw = CaptureRedrawPolicy::default();
+        assert_eq!(redraw.wait_milliseconds(true, false, 0), 0);
+        redraw.presented(100);
+        for render_cost in [0_i64, 1, 8, 15, 16, 25, 46] {
+            let wait = redraw.wait_milliseconds(true, false, 100 + render_cost);
+            assert_eq!(i64::from(wait), (16 - render_cost).max(0));
+            assert_eq!(render_cost + i64::from(wait), render_cost.max(16));
+        }
+        // Inactive/closing loops still yield for their existing bounded input
+        // handshake, and malformed/regressing clocks cannot produce a spin.
+        for elapsed in [-1, 99, 100, 116, 146] {
+            assert_eq!(redraw.wait_milliseconds(false, false, elapsed), 16);
+            assert_eq!(redraw.wait_milliseconds(true, true, elapsed), 16);
+        }
+        assert_eq!(redraw.wait_milliseconds(true, false, -1), 16);
+        assert_eq!(redraw.wait_milliseconds(true, false, 99), 16);
+        // Sustained expensive rendering must not be capped at cost + 16 ms.
+        let mut redraw = CaptureRedrawPolicy::default();
+        let mut elapsed = 0;
+        for _ in 0..24 {
+            assert_eq!(
+                redraw.frame_action(true, false, elapsed),
+                CaptureFrameAction::Render
+            );
+            redraw.presented(elapsed);
+            elapsed += 25;
+            elapsed += i64::from(redraw.wait_milliseconds(true, false, elapsed));
+        }
+        assert_eq!(elapsed, 600);
     }
     #[test]
     fn magnifier_retains_every_throttled_frame_until_disarmed_or_finished() {

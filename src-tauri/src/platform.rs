@@ -853,6 +853,13 @@ fn bounded_capture_health(value: &Value) -> Value {
         "nativeTypesReadyMilliseconds",
         "firstBordersVisibleMilliseconds",
         "firstPickerFrameCompleteMilliseconds",
+        "captureFrameCount",
+        "captureDraggingFrameCount",
+        "captureFrameStartGapMillisecondsMax",
+        "captureFrameRenderMillisecondsTotal",
+        "captureFrameRenderMillisecondsMax",
+        "magnifierRenderMillisecondsTotal",
+        "magnifierRenderMillisecondsMax",
         "hookMouseDowns",
         "hookMouseUps",
         "hookMouseMoves",
@@ -2061,6 +2068,39 @@ mod tests {
     }
 
     #[test]
+    fn capture_frame_timings_are_bounded_numeric_metadata_only() {
+        let safe = super::bounded_capture_health(&json!({
+            "captureFrameCount": 63, "captureDraggingFrameCount": 24,
+            "captureFrameStartGapMillisecondsMax": 46,
+            "captureFrameRenderMillisecondsTotal": 980,
+            "captureFrameRenderMillisecondsMax": 46,
+            "magnifierRenderMillisecondsTotal": 870,
+            "magnifierRenderMillisecondsMax": 38,
+            "captureFramePixels": "private", "captureFramePointer": [100, 200]
+        }));
+        assert_eq!(safe.as_object().unwrap().len(), 7);
+        assert_eq!(safe["captureFrameCount"], 63);
+        for invalid in [
+            json!(-1),
+            json!(10_000_001),
+            json!(true),
+            json!("private"),
+            json!([1]),
+        ] {
+            assert_eq!(
+                super::bounded_capture_health(&json!({
+                    "captureFrameCount": invalid, "captureDraggingFrameCount": invalid,
+                    "captureFrameStartGapMillisecondsMax": invalid,
+                    "captureFrameRenderMillisecondsTotal": invalid,
+                    "captureFrameRenderMillisecondsMax": invalid,
+                    "magnifierRenderMillisecondsTotal": invalid,
+                    "magnifierRenderMillisecondsMax": invalid
+                })),
+                json!({})
+            );
+        }
+    }
+    #[test]
     fn capture_topology_health_accepts_signed_coordinates_but_never_content() {
         assert_eq!(
             super::bounded_capture_health(&json!({
@@ -2112,28 +2152,40 @@ mod tests {
 
     #[test]
     fn copy_diagnostics_allow_only_bounded_scalar_metadata() {
-        let safe = super::bounded_selection_health(&json!({
-            "copyStrategy": 1, "copyPhase": 4, "copyNativeContextValid": 1,
-            "copyNativeContextChecks": 6, "copyNativeGuardReason": 0,
-            "copyNativeInvalidReason": 10, "copyNativeGtiSucceeded": 1,
-            "copyNativeGtiFlags": 0, "copyNativeFocusPresent": 1,
-            "copyNativeFocusProcessMatchesForeground": 0, "copyNativeFocusRootMatchesForeground": 1,
-            "copyNativeActivePresent": 1, "copyNativeActiveRootMatchesForeground": 1,
-            "copyNativeEditable": 2, "copyNativeProtection": 0,
-            "copyNativeSelectionKnown": 1, "copyNativeSelectionNonempty": 1,
-            "copyProtectionProbe": 2, "copyProtectionProbeMilliseconds": 250,
-            "copyProtectionUnknown": 1, "copySnapshotOutcome": 1,
-            "copySnapshotStage": 4, "copySnapshotFailureKind": 4,
-            "copySnapshotFormatKind": 7, "copySnapshotFormatCount": 4,
-            "copySnapshotFormatsSaved": 2, "copySnapshotEmptyMarkers": 1,
-            "copySnapshotFormatName": "private", "copySnapshotExceptionMessage": "private",
-            "copyDispatchInserted": 4, "copyOwnInputObserved": 1,
-            "copyOwnerOutcome": 1, "copyClipboardRestored": 1, "copyTerminalReason": 0,
-            "copyClipboardOutcome": 3, "copyWaitElapsedMilliseconds": 1200,
-            "copyText": "private", "copyTitle": "private", "attemptId": 1,
-            "copyNativeFocusProcess": 2468, "copyNativeForeground": 1234,
-            "actionResultNonempty": 1
-        }));
+        // Keep each json! expansion small without dropping any privacy cases
+        // or raising the crate-wide macro recursion limit for a test fixture.
+        let mut diagnostics = serde_json::Map::new();
+        for fields in [
+            json!({
+                "copyStrategy": 1, "copyPhase": 4, "copyNativeContextValid": 1,
+                "copyNativeContextChecks": 6, "copyNativeGuardReason": 0,
+                "copyNativeInvalidReason": 10, "copyNativeGtiSucceeded": 1,
+                "copyNativeGtiFlags": 0, "copyNativeFocusPresent": 1,
+                "copyNativeFocusProcessMatchesForeground": 0, "copyNativeFocusRootMatchesForeground": 1,
+                "copyNativeActivePresent": 1, "copyNativeActiveRootMatchesForeground": 1
+            }),
+            json!({
+                "copyNativeEditable": 2, "copyNativeProtection": 0,
+                "copyNativeSelectionKnown": 1, "copyNativeSelectionNonempty": 1,
+                "copyProtectionProbe": 2, "copyProtectionProbeMilliseconds": 250,
+                "copyProtectionUnknown": 1, "copySnapshotOutcome": 1,
+                "copyDispatchInserted": 4, "copyOwnInputObserved": 1,
+                "copyOwnerOutcome": 1, "copyClipboardRestored": 1, "copyTerminalReason": 0,
+                "copyClipboardOutcome": 3, "copyWaitElapsedMilliseconds": 1200
+            }),
+            json!({
+                "copySnapshotStage": 4, "copySnapshotFailureKind": 4,
+                "copySnapshotFormatKind": 7, "copySnapshotFormatCount": 4,
+                "copySnapshotFormatsSaved": 2, "copySnapshotEmptyMarkers": 1,
+                "copySnapshotFormatName": "private", "copySnapshotExceptionMessage": "private",
+                "copyText": "private", "copyTitle": "private", "attemptId": 1,
+                "copyNativeFocusProcess": 2468, "copyNativeForeground": 1234,
+                "actionResultNonempty": 1
+            }),
+        ] {
+            diagnostics.extend(fields.as_object().unwrap().clone());
+        }
+        let safe = super::bounded_selection_health(&Value::Object(diagnostics));
         assert_eq!(safe.as_object().unwrap().len(), 34);
         assert_eq!(safe["copyDispatchInserted"], 4);
         assert_eq!(safe["copySnapshotFailureKind"], 4);

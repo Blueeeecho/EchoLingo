@@ -14,6 +14,15 @@ class MagnifierContinuityContract(unittest.TestCase):
         self.assertIn("else if frame_action == CaptureFrameAction::Hide", select)
         self.assertNotIn("} else {\n                self.loupe.hide();", select)
 
+    def test_frame_wait_uses_post_render_clock_not_an_extra_full_frame(self):
+        select = NATIVE.split("    fn select(&mut self)", 1)[1].split("    fn cleanup(&mut self)", 1)[0]
+        self.assertIn("let wait = self.redraw.wait_milliseconds(", select)
+        self.assertIn("self.started.elapsed().as_millis() as i64,", select)
+        self.assertIn("wait_messages(wait);", select)
+        self.assertNotIn("wait_messages();", select)
+        wait = NATIVE.split("fn wait_messages(", 1)[1].split("fn hover(", 1)[0]
+        self.assertIn("w::MsgWaitForMultipleObjects(0, null(), 0, milliseconds, 0x04ff)", wait)
+
     def test_sample_surface_is_session_owned_not_frame_allocated(self):
         render = NATIVE.split("    fn render_loupe(&mut self", 1)[1].split("    fn select(&mut self)", 1)[0]
         self.assertNotIn("Surface::new", render)
@@ -32,6 +41,8 @@ class MagnifierContinuityContract(unittest.TestCase):
         self.assertIn('ObserveMagnifierContinuity(helper,source,report,"armed")', fixture)
         self.assertIn('ObserveMagnifierContinuity(helper,source,report,"dragging")', fixture)
         self.assertIn("positions.Count>=12", fixture)
+        self.assertIn('"motionPositionTransitions",motionTransitions', fixture)
+        self.assertIn('"motionLocationEvents",motionLocations', fixture)
         self.assertIn("ok&&cases.Count==16", fixture)
 
 

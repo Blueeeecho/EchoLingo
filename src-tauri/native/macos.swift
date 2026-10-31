@@ -1914,12 +1914,12 @@ func selectionFocusRecoverySelfTest() throws {
     var reads = 0
     var focusReads = 0
     let success = try readNewlyAvailableSelection(withinBudget: { true }, contextIsCurrent: { true },
-        focus: { focusReads += 1; return 42 }, same: ==, read: { _ in reads += 1; return "selected fixture" })
+        focus: { focusReads += 1; return 42 }, same: { (left: Int, right: Int) in left == right }, read: { _ in reads += 1; return "selected fixture" })
     try expect(success == "selected fixture" && reads == 1 && focusReads == 2)
     for refusedText in [nil, "", " \n"] as [String?] {
         reads = 0
         let value = try readNewlyAvailableSelection(withinBudget: { true }, contextIsCurrent: { true },
-            focus: { 42 }, same: ==, read: { _ in reads += 1; return refusedText })
+            focus: { 42 }, same: { (left: Int, right: Int) in left == right }, read: { _ in reads += 1; return refusedText })
         try expect(value == nil && reads == 1)
     }
     for failureAt in 1...3 {
@@ -1927,29 +1927,29 @@ func selectionFocusRecoverySelfTest() throws {
         reads = 0
         let value = try readNewlyAvailableSelection(withinBudget: { true },
             contextIsCurrent: { checks += 1; return checks != failureAt },
-            focus: { 42 }, same: ==, read: { _ in reads += 1; return "selected fixture" })
+            focus: { 42 }, same: { (left: Int, right: Int) in left == right }, read: { _ in reads += 1; return "selected fixture" })
         try expect(value == nil && reads <= 1)
     }
     for failureAt in 1...4 {
         var checks = 0
         let value = try readNewlyAvailableSelection(withinBudget: { checks += 1; return checks != failureAt },
-            contextIsCurrent: { true }, focus: { 42 }, same: ==, read: { _ in "selected fixture" })
+            contextIsCurrent: { true }, focus: { 42 }, same: { (left: Int, right: Int) in left == right }, read: { _ in "selected fixture" })
         try expect(value == nil)
     }
     for secondFocus in [nil, 43] as [Int?] {
         var queries = 0
         let value = try readNewlyAvailableSelection(withinBudget: { true }, contextIsCurrent: { true },
-            focus: { queries += 1; return queries == 1 ? 42 : secondFocus }, same: ==, read: { _ in "selected fixture" })
+            focus: { queries += 1; return queries == 1 ? 42 : secondFocus }, same: { (left: Int, right: Int) in left == right }, read: { _ in "selected fixture" })
         try expect(value == nil)
     }
     var emptyQueries = 0
     let absent = try readNewlyAvailableSelection(withinBudget: { true }, contextIsCurrent: { true },
-        focus: { () -> Int? in nil }, same: ==, read: { _ in emptyQueries += 1; return "must not read" })
+        focus: { () -> Int? in nil }, same: { (left: Int, right: Int) in left == right }, read: { _ in emptyQueries += 1; return "must not read" })
     try expect(absent == nil && emptyQueries == 0)
     for message in ["NO_SELECTION: protected", "NO_SELECTION: empty editor", "SELECTION: invalid metadata"] {
         do {
             _ = try readNewlyAvailableSelection(withinBudget: { true }, contextIsCurrent: { true },
-                focus: { 42 }, same: ==, read: { _ -> String? in throw NativeError(message) })
+                focus: { 42 }, same: { (left: Int, right: Int) in left == right }, read: { _ -> String? in throw NativeError(message) })
             throw NativeError("SELF_TEST: Focus recovery swallowed a protected or invalid selection error.")
         } catch let error as NativeError where error.message == message { }
     }

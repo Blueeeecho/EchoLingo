@@ -1118,7 +1118,10 @@ pub struct LayoutViewport {
 }
 
 #[cfg(target_os = "macos")]
-fn layout_viewport(window: &WebviewWindow, presentation_epoch: u64) -> Result<LayoutViewport, String> {
+fn layout_viewport(
+    window: &WebviewWindow,
+    presentation_epoch: u64,
+) -> Result<LayoutViewport, String> {
     let scale_factor = window.scale_factor().map_err(|_| "无法读取窗口比例")?;
     let size = window
         .inner_size()
@@ -1282,7 +1285,9 @@ pub async fn fit(
                                                 content_width,
                                             )
                                         })
-                                        .and_then(|_| layout_viewport(&native, gate_epoch).map(Some));
+                                        .and_then(|_| {
+                                            layout_viewport(&native, gate_epoch).map(Some)
+                                        });
                                 let _ = reply.send(value);
                             });
                         });
@@ -1554,7 +1559,10 @@ fn fit_inner(
     let mut popup = state.popup.lock().map_err(|_| "窗口布局状态异常")?;
     let changed = popup.observe_user_width(!previous, old_size.width, content_width, scale, area);
     let mut available = available_size(area, scale, management);
-    if automatic_height && !previous && presentation.presented && window.is_visible().unwrap_or(false)
+    if automatic_height
+        && !previous
+        && presentation.presented
+        && window.is_visible().unwrap_or(false)
     {
         if let Ok(position) = window.outer_position() {
             available.1 = anchored_popup_height(available.1, area, scale, f64::from(position.y));

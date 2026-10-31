@@ -723,7 +723,7 @@ impl EscapeListener {
                         && !hook_state.ownership.may_exit()
                     {
                         pump();
-                        wait_messages();
+                        wait_messages(16);
                     }
                     w::UnhookWindowsHookEx(hook);
                 }
@@ -870,9 +870,9 @@ fn pump() {
         }
     }
 }
-fn wait_messages() {
+fn wait_messages(milliseconds: u32) {
     unsafe {
-        w::MsgWaitForMultipleObjects(0, null(), 0, 16, 0x04ff);
+        w::MsgWaitForMultipleObjects(0, null(), 0, milliseconds, 0x04ff);
     }
 }
 fn hover(pointer: Point, own: &HashSet<isize>) -> Rect {
@@ -987,6 +987,7 @@ struct Picker {
     first: bool,
     shown: bool,
     last_raise: i64,
+    last_render_started: Option<Instant>,
     hover: CaptureHoverPolicy,
     redraw: CaptureRedrawPolicy,
     input_health: CaptureInputHealthPolicy,
@@ -1089,6 +1090,13 @@ impl Picker {
             "hookRunningAfterStop",
             "inputPlaneRemainingAfterCleanup",
             "inputPlaneVisibleCount",
+            "captureFrameCount",
+            "captureDraggingFrameCount",
+            "captureFrameStartGapMillisecondsMax",
+            "captureFrameRenderMillisecondsTotal",
+            "captureFrameRenderMillisecondsMax",
+            "magnifierRenderMillisecondsTotal",
+            "magnifierRenderMillisecondsMax",
         ] {
             health.insert(name, 0);
         }
@@ -1118,6 +1126,7 @@ impl Picker {
             first: true,
             shown: false,
             last_raise: -250,
+            last_render_started: None,
             hover: CaptureHoverPolicy::default(),
             redraw: CaptureRedrawPolicy::default(),
             input_health: CaptureInputHealthPolicy::default(),
@@ -1128,6 +1137,14 @@ impl Picker {
     }
     fn increment(&mut self, key: &'static str) {
         *self.health.entry(key).or_default() += 1;
+    }
+    fn record_render_duration(&mut self, total: &'static str, max: &'static str, started: Instant) {
+        let elapsed = started.elapsed().as_millis().min(10_000_000) as u64;
+        let previous = self.health.get(total).copied().unwrap_or(0);
+        self.health
+            .insert(total, previous.saturating_add(elapsed).min(10_000_000));
+        let previous = self.health.get(max).copied().unwrap_or(0);
+        self.health.insert(max, previous.max(elapsed));
     }
     fn invalidate(&mut self, reason: i32, old: u32, new: u32) {
         let phase = if self.selection.finished {
@@ -1295,6 +1312,17 @@ impl Picker {
         Ok(())
     }
     fn render(&mut self, p: Point, hovered: Rect, elapsed: i64) -> Result<()> {
+        let frame_started = Instant::now();
+        if let Some(previous) = self.last_render_started.replace(frame_started) {
+            let gap = previous.elapsed().as_millis().min(10_000_000) as u64;
+            let maximum = self
+                .health
+                .get("captureFrameStartGapMillisecondsMax")
+                .copied()
+                .unwrap_or(0);
+            self.health
+                .insert("captureFrameStartGapMillisecondsMax", maximum.max(gap));
+        }
         let raise = elapsed - self.last_raise >= 250;
         if !self.shown {
             for plane in &self.planes {
@@ -1373,7 +1401,22 @@ impl Picker {
                 self.started.elapsed().as_millis() as u64,
             );
         }
+        let magnifier_started = Instant::now();
         self.render_loupe(p)?;
+        self.record_render_duration(
+            "magnifierRenderMillisecondsTotal",
+            "magnifierRenderMillisecondsMax",
+            magnifier_started,
+        );
+        self.record_render_duration(
+            "captureFrameRenderMillisecondsTotal",
+            "captureFrameRenderMillisecondsMax",
+            frame_started,
+        );
+        self.increment("captureFrameCount");
+        if self.selection.dragging {
+            self.increment("captureDraggingFrameCount");
+        }
         if self.first {
             self.health.insert(
                 "firstPickerFrameCompleteMilliseconds",
@@ -1573,7 +1616,14 @@ impl Picker {
             }
             // Retain is deliberately a no-op: throttling must never flash the
             // loupe off between updates while pointer/mailbox messages arrive.
-            wait_messages();
+            // Re-read the clock after GDI work rather than adding a second
+            // complete frame interval after every expensive paint.
+            let wait = self.redraw.wait_milliseconds(
+                self.input.armed && self.host.armed,
+                self.selection.finished,
+                self.started.elapsed().as_millis() as i64,
+            );
+            wait_messages(wait);
         }
         let result = if let Some(e) = self.failure.clone() {
             Err(e)

@@ -24,6 +24,19 @@ class MacSelectionRecoveryContract(unittest.TestCase):
         self.assertIn("platform::selected_text_from_source_cancelable(", action)
         self.assertIn('expected_macos_source.as_ref().ok_or("缺少原取词窗口")?', action)
 
+    def test_selection_cfg_branches_are_blocks_and_return_result(self):
+        selection = section(MAIN, 'let text = match worker_action.as_str() {', '"clipboard" => platform::clipboard_text(),')
+        # Rust must parse the complete token stream before cfg filtering. Two
+        # adjacent attributed bare call expressions are not separate statements.
+        # Explicit blocks are valid on every target and keep each Result as the
+        # block's tail value; adding a semicolon would instead discard it.
+        self.assertRegex(selection, r'#\[cfg\(target_os = "windows"\)\]\s*\{')
+        self.assertRegex(selection, r'#\[cfg\(target_os = "macos"\)\]\s*\{')
+        self.assertRegex(selection, r'#\[cfg\(not\(any\(target_os = "windows", target_os = "macos"\)\)\)\]\s*\{')
+        self.assertRegex(selection, r'platform::selected_text_with_strategy_cancelable\(cancel, strategy, attempt\)\s*\}')
+        self.assertRegex(selection, r'platform::selected_text_from_source_cancelable\([\s\S]*?\n\s*\)\s*\}')
+        self.assertRegex(selection, r'platform::selected_text_cancelable\(cancel\)\s*\}')
+
     def test_basic_workspace_snapshot_has_no_ax_or_content_read(self):
         snapshot = section(SWIFT, "func selectionRequestSourceSnapshot()", "func selectionRequestSourceForShortcut()")
         for forbidden in ("AXUIElementCopy", "AXValue", "activate(", "NSPasteboard", "windowTitle"):
@@ -95,6 +108,15 @@ class MacSelectionRecoveryContract(unittest.TestCase):
         capture = section(SWIFT, "func captureSelectedTextInSource(", "struct OCRLayoutLine")
         self.assertIn("try requireSelectionReadFocus(originalFocus", capture)
         self.assertIn("try requireSelectionReadFocus(currentFocus", capture)
+
+    def test_focus_fixture_pins_generic_identity_to_int(self):
+        fixture = section(SWIFT, "func selectionFocusRecoverySelfTest()", "func selectionSourceAnchorSelfTest()")
+        # Bare `==` plus an unconstrained integer-literal focus gives Swift
+        # several legal generic Focus types. Keep all seven fixture scenarios,
+        # but pin the comparator's intended generated identity type explicitly.
+        self.assertNotIn("same: ==", fixture)
+        self.assertEqual(fixture.count("same: { (left: Int, right: Int) in left == right }"), 7)
+        self.assertEqual(fixture.count("try readNewlyAvailableSelection("), 7)
 
     def test_ax_window_fallback_uses_public_focused_window_not_search(self):
         fallback = section(SWIFT, "func selectionAXCopyTicket(", "func selectionCopyTicket(")
