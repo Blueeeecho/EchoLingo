@@ -66,5 +66,10 @@ describe('display compatibility', () => {
     expect(userFacingError('SYSTEM_TRANSLATION_DOWNLOAD_REQUIRED: 请在设置中准备语言包')).toBe('请在设置中准备语言包');
     expect(userFacingError('SYSTEM_TRANSLATION_UNSUPPORTED: 当前语言组合不可用')).toBe('当前语言组合不可用');
     expect(userFacingError('服务返回 HTTP 401')).toBe('服务返回 HTTP 401');
+    expect(userFacingError('CAPTURE_DISPLAY_CHANGED: Display geometry or DPI changed; select the region again.')).toBe('截图显示环境校验未通过，已取消本次截图。请重新按截图快捷键选择区域。');
+    expect(userFacingError(new Error('CAPTURE_DISPLAY_CHANGED: physical coordinate context unavailable'))).toContain('显示环境校验未通过');
+    expect(userFacingError('CAPTURE_INPUT_HOST: host unavailable')).toBe('host unavailable');
+    expect(userFacingError('CAPTURE_PERMISSION: Access denied')).toBe('Access denied');
+    expect(userFacingError('Provider says CAPTURE_DISPLAY_CHANGED: quota error')).toBe('Provider says CAPTURE_DISPLAY_CHANGED: quota error');
   });
 });

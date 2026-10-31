@@ -43,6 +43,11 @@ const ocrDialog = $('#ocr-provider-dialog');
 const freeSetupDialog = $('#free-setup-dialog');
 const allModals = [providerDialog, confirmDialog, ocrDialog, freeSetupDialog];
 const modalReturnFocus = new Map<HTMLElement, HTMLElement | null>();
+// Suspension is not cancellation: keep the same DOM and async transaction.
+// Credentials never leave their existing in-memory form controls.
+const suspendedModals = new Map<HTMLElement, HTMLElement | null>();
+let suspendedModalView = 'settings';
+const modalActive = (modal: HTMLElement): boolean => !modal.hidden && !suspendedModals.has(modal);
 let settings = defaultSettings();
 const historyCache = new HistoryCache(
   () => desktop ? invoke<HistoryEntry[]>('get_history') : Promise.resolve([]),
@@ -97,9 +102,9 @@ let resultSource = '';
 let resultSnapshot: TranslationSnapshot | null = null;
 let pendingTranslate = false;
 let originalCapture: SourceTextEvent | null = null;
-let queuedCapture: { payload: SourceTextEvent; intentRevision: number } | null = null;
+
 interface InputFocusRequest { epoch: number; generation: number; intentRevision: number }
-let queuedInputFocus: InputFocusRequest | null = null;
+
 type NativeSettingsRequest = { presentationEpoch: number; section?: 'shortcuts' };
 let pendingSettingsOpen: NativeSettingsRequest | null = null;
 let latestSettingsOpenEpoch = -1;
@@ -178,6 +183,8 @@ function reportError(error: unknown): void { toast(userFacingError(error), 'erro
 function run(work: () => Promise<unknown>): void { void work().catch(reportError); }
 function setView(view: string, skipSystemStatusRefresh = false): void {
   if (!['translate', 'history', 'settings', 'services'].includes(view)) return;
+  // Return to the draft's owning workspace before exposing its editor again.
+  if (view !== 'translate' && suspendedModals.size) view = suspendedModalView;
   if (view !== 'translate') endSourceInputSession();
   if (currentView === 'settings' && view !== 'settings') shortcutEditor.leave();
   if (view !== currentView) focusIntentRevision += 1;
@@ -202,6 +209,7 @@ function setView(view: string, skipSystemStatusRefresh = false): void {
   if (view === 'translate') resizeSourceEditor();
   renderCoreGuidance();
   renderEngineStatus();
+  if (view !== 'translate') restoreConfigurationDialogs();
   notifyLayout();
 }
 function applyTheme(): void {
@@ -389,9 +397,7 @@ async function receiveCapturedText(payload: SourceTextEvent): Promise<void> {
   if (payload.updateVisiblePopup && (currentView !== 'translate' || !translationPresentation.presented
     || payload.presentationEpoch !== translationPresentation.epoch || visiblePopupUpdateBaseline?.epoch !== presentationEpoch
     || visiblePopupUpdateBaseline.generation !== generation)) return;
-  // Preserve an unfinished credentials editor rather than displaying it over a
-  // captured translation or silently discarding its fields. Latest capture wins.
-  if (allModals.some((modal) => !modal.hidden)) { endSourceInputSession(); queuedCapture = { payload, intentRevision: focusIntentRevision }; queuedInputFocus = null; return; }
+  suspendConfigurationDialogs();
   pendingTranslate = false; clearToast();
   setView('translate');
   const normalized = payload.mode === 'input' ? payload.text
@@ -431,7 +437,7 @@ async function receiveCapturedText(payload: SourceTextEvent): Promise<void> {
   // A valid native show acknowledgment can arrive after a newer selection has
   // already advanced the epoch. Resume may itself advance the requested epoch,
   // so compare against the accepted response, not the original capture epoch.
-  if (token !== generation || intent !== focusIntentRevision || currentView !== 'translate' || allModals.some((modal) => !modal.hidden)
+  if (token !== generation || intent !== focusIntentRevision || currentView !== 'translate' || allModals.some(modalActive)
     || (desktop && (!translationPresentation.presented || translationPresentation.epoch !== presentedEpoch))) {
     if (inputSession) endSourceInputSession(inputSession);
     return;
@@ -466,7 +472,7 @@ function endSourceInputSession(session?: number): void {
   sourceInputSession = 0;
 }
 function sourceInputSessionActive(): boolean {
-  return sourceInputSession !== 0 && currentView === 'translate' && !allModals.some((modal) => !modal.hidden);
+  return sourceInputSession !== 0 && currentView === 'translate' && !allModals.some(modalActive);
 }
 function insertIntoSource(text: string): void {
   const start = source.selectionStart ?? source.value.length;
@@ -517,7 +523,7 @@ function redirectSourceInputKey(event: KeyboardEvent): void {
 }
 function requestInputFocus(request: InputFocusRequest = { epoch: translationPresentation.epoch, generation, intentRevision: focusIntentRevision }): void {
   if (request.epoch !== translationPresentation.epoch || request.generation !== generation || request.intentRevision !== focusIntentRevision) return;
-  if (allModals.some((modal) => !modal.hidden)) { queuedInputFocus = request; queuedCapture = null; return; }
+  suspendConfigurationDialogs();
   clearPermissionGuidance(); setView('translate');
   // This request may legitimately navigate from management to the editor.
   // Bind its frame after that navigation; queued requests retain their origin.
@@ -525,7 +531,7 @@ function requestInputFocus(request: InputFocusRequest = { epoch: translationPres
   const session = beginSourceInputSession();
   requestAnimationFrame(() => {
     if (currentView !== 'translate' || intent !== focusIntentRevision || request.epoch !== translationPresentation.epoch || request.generation !== generation
-      || allModals.some((modal) => !modal.hidden) || (desktop && !translationPresentation.presented)) {
+      || allModals.some(modalActive) || (desktop && !translationPresentation.presented)) {
       endSourceInputSession(session);
       return;
     }
@@ -1238,7 +1244,52 @@ function modalFocusable(modal: HTMLElement): HTMLElement[] {
   return Array.from(modal.querySelectorAll<HTMLElement>('button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), a[href], [tabindex]:not([tabindex="-1"])'))
     .filter((element) => element.getClientRects().length > 0 && !element.closest('[hidden]'));
 }
+function updateSuspendedConfiguration(): void {
+  $('#resume-configuration').hidden = suspendedModals.size === 0;
+}
+function suspendConfigurationDialogs(): void {
+  const active = allModals.filter(modalActive);
+  if (!active.length) return;
+  suspendedModalView = currentView;
+  for (const modal of active) {
+    suspendedModals.set(modal, modal.contains(document.activeElement) ? document.activeElement as HTMLElement : null);
+    modal.dataset.modalSuspended = 'true';
+    modal.inert = true; modal.setAttribute('aria-hidden', 'true');
+    if (modal.contains(document.activeElement) && document.activeElement instanceof HTMLElement) document.activeElement.blur();
+  }
+  $('.app-shell').inert = false;
+  $('.app-shell').removeAttribute('aria-hidden');
+  document.body.classList.remove('modal-open');
+  updateSuspendedConfiguration();
+}
+function restoreConfigurationDialogs(): void {
+  if (!suspendedModals.size) return;
+  let focus: HTMLElement | null = null;
+  for (const [modal, previous] of suspendedModals) {
+    delete modal.dataset.modalSuspended;
+    modal.inert = false; modal.removeAttribute('aria-hidden');
+    if (!modal.hidden) {
+      const candidates = modalFocusable(modal);
+      focus = previous && candidates.includes(previous) ? previous : candidates[0] ?? modal;
+    }
+  }
+  suspendedModals.clear();
+  updateSuspendedConfiguration();
+  if (allModals.some(modalActive)) {
+    $('.app-shell').inert = true;
+    $('.app-shell').setAttribute('aria-hidden', 'true');
+    document.body.classList.add('modal-open');
+    if (focus?.getClientRects().length) focus.focus({ preventScroll: true });
+  }
+}
+$('#resume-configuration').addEventListener('click', () => setView(suspendedModalView));
+function resumeSuspendedDraft(): boolean {
+  if (!suspendedModals.size) return false;
+  setView(suspendedModalView);
+  return true;
+}
 function showModal(modal: HTMLElement): void {
+  if (resumeSuspendedDraft()) return;
   endSourceInputSession();
   modalReturnFocus.set(modal, document.activeElement instanceof HTMLElement ? document.activeElement : null);
   modal.hidden = false;
@@ -1251,8 +1302,12 @@ function showModal(modal: HTMLElement): void {
   $('.app-shell').setAttribute('aria-hidden', 'true');
 }
 function closeModal(modal: HTMLElement): void {
+  const suspended = suspendedModals.delete(modal);
+  delete modal.dataset.modalSuspended;
+  modal.inert = false; modal.removeAttribute('aria-hidden');
   modal.hidden = true;
-  const anotherModal = allModals.find((candidate) => !candidate.hidden);
+  updateSuspendedConfiguration();
+  const anotherModal = allModals.find(modalActive);
   if (!anotherModal) {
     $('.app-shell').inert = false;
     $('.app-shell').removeAttribute('aria-hidden');
@@ -1260,19 +1315,11 @@ function closeModal(modal: HTMLElement): void {
   }
   const previous = modalReturnFocus.get(modal);
   modalReturnFocus.delete(modal);
+  if (suspended) return; // A background completion must not steal popup focus.
   const fallback = anotherModal ? modalFocusable(anotherModal)[0] : currentView === 'services' ? document.querySelector<HTMLElement>('#managed-service-detail h2') : document.querySelector<HTMLElement>('button[data-view].active');
   if (previous?.isConnected && previous.getClientRects().length > 0) previous.focus({ preventScroll: true });
   else fallback?.focus({ preventScroll: true });
-  if (!anotherModal && queuedCapture) {
-    const capture = queuedCapture; queuedCapture = null;
-    queueMicrotask(() => {
-      if (capture.intentRevision === focusIntentRevision
-        && (capture.payload.deliveryId === undefined || sourceDeliveryInbox.isLatest(capture.payload.deliveryId))) run(() => receiveCapturedText(capture.payload));
-    });
-  } else if (!anotherModal && queuedInputFocus) {
-    const request = queuedInputFocus; queuedInputFocus = null;
-    queueMicrotask(() => requestInputFocus(request));
-  }
+
 }
 function setProviderSaving(value: boolean): void {
   providerSaving = value;
@@ -1281,6 +1328,7 @@ function setProviderSaving(value: boolean): void {
   $('#save-provider').textContent = value ? '保存中…' : '保存服务';
 }
 function openProviderDialog(provider?: Provider): void {
+  if (resumeSuspendedDraft()) return;
   if (providerSaving) return;
   if (!settingsReady) { toast('设置正在加载，请稍候。'); return; }
   if (!provider && settings.providers.length >= 12) { toast('最多可添加 12 个翻译服务。'); return; }
@@ -1313,6 +1361,7 @@ function closeProviderDialog(): void {
   editingProviderId = null; providerScopeAtOpen = null; providerLastInputScope = null; providerHadKeyAtOpen = false; providerCredentialStateAtOpen = 'missing';
 }
 function confirmAction(title: string, description: string): Promise<boolean> {
+  if (resumeSuspendedDraft()) return Promise.resolve(false);
   $('#confirm-title').textContent = title;
   $('#confirm-description').textContent = description;
   showModal(confirmDialog);
@@ -1488,7 +1537,7 @@ let freeSetup: { refresh: () => void; noteWeak: (text?: string) => void; close: 
 const ocrUi = createOcrUi({
   desktop, settings: () => settings, updateSettings,
   reloadSettings: async () => { settings = await invoke<Settings>('get_settings'); renderSettings(); },
-  showModal, closeModal, confirm: confirmAction, toast, reportError,
+  showModal, closeModal, resumeDraft: resumeSuspendedDraft, confirm: confirmAction, toast, reportError,
 });
 
 $('#service-manager-advanced').addEventListener('click', () => setView('settings'));
@@ -1760,7 +1809,7 @@ $('#confirm-accept').addEventListener('click', () => settleConfirm(true));
 confirmDialog.addEventListener('click', (event) => { if (event.target === confirmDialog) settleConfirm(false); });
 document.addEventListener('keydown', (event) => {
   if (isCompositionKey(event)) return;
-  const modal = allModals.find((candidate) => !candidate.hidden);
+  const modal = allModals.find(modalActive);
   if (modal) {
     if (event.key === 'Escape') {
       event.preventDefault(); event.stopPropagation();
@@ -1846,6 +1895,6 @@ async function initialize(): Promise<void> {
   } finally { resizeSourceEditor(); }
 }
 freeSetup = installFreeSetup({
-  desktop, settings: () => settings, updateSettings, toast, setView, reportError, showModal, closeModal,
+  desktop, settings: () => settings, updateSettings, toast, setView, reportError, showModal, closeModal, resumeDraft: resumeSuspendedDraft,
 });
 void initialize();

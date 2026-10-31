@@ -6,23 +6,9 @@ use std::sync::atomic::{AtomicBool, AtomicIsize, AtomicU32, AtomicU64, Ordering}
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
-pub const REFRESH: u32 = 0x8380;
-pub const READY: u32 = 0x8381;
-pub const ARM: u32 = 0x8382;
-pub const MOVE_ACK: u32 = 0x8383;
-pub const STOP: u32 = 0x8384;
-pub const PING: u32 = 0x8385;
-pub const END: u32 = 0x8386;
-pub const READY_ACK: u32 = 0x8390;
-pub const ARM_ACK: u32 = 0x8391;
-pub const MOVE: u32 = 0x8392;
-pub const LEFT_DOWN: u32 = 0x8393;
-pub const LEFT_UP: u32 = 0x8394;
-pub const RIGHT_DOWN: u32 = 0x8395;
-pub const RIGHT_UP: u32 = 0x8396;
-pub const STOP_ACK: u32 = 0x8397;
-pub const FAILURE: u32 = 0x8398;
-pub const PING_ACK: u32 = 0x8399;
+#[path = "windows_capture_protocol.rs"]
+mod protocol;
+pub use protocol::*;
 const ARMED: u32 = 1;
 const LEFT: u32 = 2;
 const RIGHT: u32 = 4;
@@ -154,30 +140,63 @@ pub fn initialize() {
     #[cfg(not(windows))]
     let _ = s;
 }
-#[cfg(windows)]
-pub fn wait_available(cancelled: impl Fn() -> bool) -> Result<(), String> {
-    let s = shared();
+// Waiting does not revoke a generation: its owned releases must still drain.
+// Fail visibly instead of leaving all subsequent shortcuts silently queued.
+fn await_availability(
+    mut cancelled: impl FnMut() -> bool,
+    mut idle: impl FnMut() -> bool,
+    mut elapsed: impl FnMut() -> Duration,
+    mut wait: impl FnMut() -> Result<(), String>,
+) -> Result<(), String> {
     loop {
         if cancelled() {
             return Err("CANCELLED: Native task was superseded.".into());
         }
-        if s.token.load(Ordering::SeqCst) == 0 {
+        if idle() {
             return Ok(());
         }
-        let event = s.available.load(Ordering::SeqCst);
-        if event == 0 || s.thread.load(Ordering::SeqCst) == 0 {
-            return Err("CAPTURE_INPUT_HOST: The native input listener is unavailable.".into());
+        if elapsed() >= Duration::from_secs(2) {
+            return Err("CAPTURE_INPUT_HOST: Previous capture input is still ending. Release all mouse buttons and Escape, then retry; if it persists, restart EchoLingo.".into());
         }
-        let result = unsafe { native::WaitForSingleObject(event as _, 30) };
-        if result == 0 && s.token.load(Ordering::SeqCst) != 0 {
-            std::thread::yield_now();
-        }
-        if result != 0 && result != 258 {
-            return Err(
-                "CAPTURE_INPUT_HOST: Windows could not await the previous input release.".into(),
-            );
-        }
+        wait()?;
     }
+}
+#[cfg(windows)]
+pub fn wait_available(cancelled: impl Fn() -> bool) -> Result<(), String> {
+    let s = shared();
+    let started = Instant::now();
+    await_availability(
+        cancelled,
+        || s.token.load(Ordering::SeqCst) == 0,
+        || started.elapsed(),
+        || {
+            let event = s.available.load(Ordering::SeqCst);
+            if event == 0 || s.thread.load(Ordering::SeqCst) == 0 {
+                return Err("CAPTURE_INPUT_HOST: The native input listener is unavailable.".into());
+            }
+            let result = unsafe { native::WaitForSingleObject(event as _, 30) };
+            if result == 0 && s.token.load(Ordering::SeqCst) != 0 {
+                std::thread::yield_now();
+            }
+            if result != 0 && result != 258 {
+                return Err(
+                    "CAPTURE_INPUT_HOST: Windows could not await the previous input release."
+                        .into(),
+                );
+            }
+            Ok(())
+        },
+    )
+}
+/// Bounded state only: never expose the random session token or target HWND.
+pub fn diagnostic_state() -> [u64; 4] {
+    let s = shared();
+    [
+        u64::from(s.token.load(Ordering::SeqCst) != 0),
+        u64::from(s.flags.load(Ordering::SeqCst) & BUTTONS),
+        u64::from(s.closing.load(Ordering::SeqCst)),
+        u64::from(s.end_requested.load(Ordering::SeqCst)),
+    ]
 }
 pub fn replacement_is_valid(old_unhooked: bool, error: Option<i32>) -> bool {
     old_unhooked || error == Some(1404)
@@ -577,6 +596,57 @@ impl Drop for Session {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn waiting_is_bounded_without_revoking_owned_input() {
+        use std::cell::Cell;
+        let time = Cell::new(0);
+        let s = Shared::default();
+        s.token.store(41, Ordering::SeqCst);
+        s.flags.store(LEFT, Ordering::SeqCst);
+        let result = await_availability(
+            || false,
+            || s.token.load(Ordering::SeqCst) == 0,
+            || Duration::from_millis(time.get()),
+            || {
+                time.set(time.get() + 30);
+                Ok(())
+            },
+        );
+        assert!(result.unwrap_err().starts_with("CAPTURE_INPUT_HOST:"));
+        assert_eq!(s.token.load(Ordering::SeqCst), 41);
+        assert_eq!(s.flags.load(Ordering::SeqCst), LEFT);
+        assert!(time.get() >= 2000 && time.get() < 2030);
+        s.flags.store(0, Ordering::SeqCst);
+        finish_generation(&s);
+        assert!(await_availability(
+            || false,
+            || s.token.load(Ordering::SeqCst) == 0,
+            || Duration::ZERO,
+            || panic!("idle must not wait")
+        )
+        .is_ok());
+    }
+    #[test]
+    fn waiting_cancels_before_idle_and_propagates_listener_failure() {
+        assert!(await_availability(
+            || true,
+            || true,
+            || Duration::ZERO,
+            || panic!("cancelled must not wait")
+        )
+        .unwrap_err()
+        .starts_with("CANCELLED:"));
+        assert_eq!(
+            await_availability(
+                || false,
+                || false,
+                || Duration::ZERO,
+                || Err("listener failed".into())
+            )
+            .unwrap_err(),
+            "listener failed"
+        );
+    }
     #[test]
     fn closing_generation_keeps_long_held_owned_release_after_mailbox_detach() {
         let s = Shared::default();

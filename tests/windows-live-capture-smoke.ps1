@@ -87,6 +87,12 @@ public static class EchoLingoLiveCaptureSmoke {
     [DllImport("user32.dll", SetLastError=true)] static extern bool SetWindowPos(IntPtr window, IntPtr after, int x, int y, int width, int height, uint flags);
     [DllImport("user32.dll", EntryPoint="GetWindowLongPtrW")] static extern IntPtr GetWindowLongPtr(IntPtr window, int index);
     [DllImport("user32.dll")] static extern uint SendInput(uint count, INPUT[] input, int size);
+    [DllImport("user32.dll")] static extern uint GetDpiForWindow(IntPtr window);
+    [DllImport("user32.dll", EntryPoint="SendMessageTimeoutW", SetLastError=true)]
+    static extern IntPtr SendDpiNotification(IntPtr window, uint message, IntPtr dpi, ref RECT suggested, uint flags, uint timeout, out IntPtr result);
+    [DllImport("user32.dll", EntryPoint="SendMessageTimeoutW", SetLastError=true)]
+    static extern IntPtr SendDisplayNotification(IntPtr window, uint message, IntPtr wparam, IntPtr lparam, uint flags, uint timeout, out IntPtr result);
+
     [DllImport("user32.dll")] static extern bool GetPhysicalCursorPos(out Point point);
     [DllImport("user32.dll")] static extern bool SetProcessDpiAwarenessContext(IntPtr context);
     [DllImport("user32.dll")] static extern IntPtr SetThreadDpiAwarenessContext(IntPtr context);
@@ -184,6 +190,50 @@ public static class EchoLingoLiveCaptureSmoke {
     static bool IsInputPlane(IntPtr window, int processId) {
         StringBuilder name = new StringBuilder(256); GetClassName(window, name, name.Capacity);
         return name.ToString() == "EchoLingoCaptureInputPlane-" + processId;
+    }
+    static void RequireOwnedNotificationTarget(IntPtr window, int helperPid) {
+        uint owner; GetWindowThreadProcessId(window, out owner);
+        Assert(window != IntPtr.Zero && IsWindow(window) && IsWindowVisible(window) && owner == helperPid,
+            "Notification probe must target only a visible HWND of this exact fixture helper.");
+    }
+    static void SendOwnedDpiNotification(IntPtr window, int helperPid, bool changedValue) {
+        RequireOwnedNotificationTarget(window, helperPid);
+        uint actual = GetDpiForWindow(window);
+        Assert(actual >= 96 && actual <= 768, "Unexpected fixture DPI; do not guess notification metadata.");
+        uint notified = changedValue ? (actual == 144 ? 192u : 144u) : actual;
+        RECT suggested; Assert(GetWindowRect(window, out suggested), "Cannot read owned notification target bounds.");
+        IntPtr result;
+        // A valid current RECT is supplied: no global display settings or external HWND changes.
+        Assert(SendDpiNotification(window, 0x02E0, new IntPtr((long)(notified | (notified << 16))),
+            ref suggested, 0x0002, 1500, out result) != IntPtr.Zero, "Owned DPI notification timed out.");
+        Assert(GetDpiForWindow(window) == actual, "Synthetic notification unexpectedly changed actual window DPI.");
+    }
+    static void ProbeBenignDpiNotifications(TrialContext context, Process process, Rectangle display,
+        Rectangle hover, Dictionary<string,object> metrics) {
+        List<EdgeWindow> planes = InputPlanes(process.Id, true);
+        List<EdgeWindow> edges = VisibleEdges(process.Id);
+        Assert(planes.Count > 0 && edges.Count >= 8, "DPI probe requires real ready input plane and decoration edges.");
+        foreach (bool changedValue in new bool[] { false, true }) {
+            SendOwnedDpiNotification(planes[0].Handle, process.Id, changedValue);
+            SendOwnedDpiNotification(edges[0].Handle, process.Id, changedValue);
+            WaitEdges(context, process, display, hover, Rectangle.Empty,
+                changedValue ? "different-window-dpi-notification-same-monitor" : "same-window-dpi-notification", 1500);
+            Assert(!process.HasExited, "Benign window DPI notification cancelled the real picker.");
+        }
+        metrics["sameDpiNotificationContinued"] = true;
+        metrics["differentNotificationWithUnchangedMonitorContinued"] = true;
+        metrics["notificationTargets"] = "own-helper-input-plane-and-decoration";
+        metrics["actualSystemDisplayConfigurationChanged"] = false;
+    }
+    static void ProbeDisplayInvalidation(Process process, Dictionary<string,object> metrics) {
+        List<EdgeWindow> planes = InputPlanes(process.Id, true);
+        Assert(planes.Count > 0, "Display invalidation probe requires an actual input plane.");
+        RequireOwnedNotificationTarget(planes[0].Handle, process.Id);
+        IntPtr result;
+        Assert(SendDisplayNotification(planes[0].Handle, 0x007E, IntPtr.Zero, IntPtr.Zero, 0x0002, 1500, out result) != IntPtr.Zero,
+            "Owned display-change notification timed out.");
+        metrics["displayChangeNotificationSent"] = true;
+        metrics["actualSystemDisplayConfigurationChanged"] = false;
     }
     static bool IsCaptureLoupe(IntPtr window) {
         StringBuilder title = new StringBuilder(64);
@@ -796,7 +846,7 @@ public static class EchoLingoLiveCaptureSmoke {
                 Task<string> output = process.StandardOutput.ReadToEndAsync();
                 Task<string> error = process.StandardError.ReadToEndAsync();
                 Dictionary<string, object> metrics = new Dictionary<string, object>();
-                bool capture = mode == "capture" || mode == "capture-burst" || mode == "topmost-capture", leftHeld = false;
+                bool capture = mode == "capture" || mode == "capture-burst" || mode == "topmost-capture" || mode == "dpi-notification", leftHeld = false;
                 try {
                     context.Stage = "wait-ready-overlays";
                     // Both the pointer display and eligible generated window
@@ -811,6 +861,7 @@ public static class EchoLingoLiveCaptureSmoke {
                     metrics["readyScreenEdgeCount"] = 4; metrics["readyHoverEdgeCount"] = 4;
                     metrics["readyHoverTargetHwnd"] = WindowId(hoverTarget); metrics["readyHoverPhysicalBounds"] = RectValue(hoverFrame);
                     RequireFixtureForeground(context, "selector-ready");
+                    if (mode == "dpi-notification") ProbeBenignDpiNotifications(context, process, display, hoverFrame, metrics);
                     if (mode == "topmost-capture") {
                         context.Stage = "raise-existing-generated-topmost-layer";
                         OnUi(form, delegate {
@@ -849,7 +900,9 @@ public static class EchoLingoLiveCaptureSmoke {
                     });
                     Thread.Sleep(150);
                     Move(context, "move-to-selection-origin", first); Thread.Sleep(80);
-                    if (mode == "escape-short") {
+                    if (mode == "display-change") {
+                        ProbeDisplayInvalidation(process, metrics);
+                    } else if (mode == "escape-short") {
                         INPUT down = new INPUT(); down.type = 1; down.data.keyboard.vk = 0x1B;
                         INPUT up = down; up.data.keyboard.flags = 2;
                         RequireFixtureForeground(context, "send-short-escape");
@@ -924,8 +977,24 @@ public static class EchoLingoLiveCaptureSmoke {
                         if (capture && inputBackend != "planeOnly") Assert(Convert.ToInt64(health["hookMouseDowns"]) > 0 && Convert.ToInt64(health["hookMouseUps"]) > 0,
                             "Visible blue borders did not prove a real mouse down/up capture.");
                     }
+                    if (mode == "dpi-notification") {
+                        Dictionary<string,object> dpiHealth = (Dictionary<string,object>)reply["captureHealth"];
+                        Assert(dpiHealth.ContainsKey("displayWindowDpiNotificationsVerified")
+                            && Convert.ToInt64(dpiHealth["displayWindowDpiNotificationsVerified"]) >= 2,
+                            "Production picker did not recheck both different-DPI notifications against the unchanged topology.");
+                    }
                     context.Stage = "verify-helper-response";
-                    if (!capture) {
+                    if (mode == "display-change") {
+                        Assert(!(bool)reply["ok"] && process.ExitCode != 0
+                            && ((string)reply["error"]).StartsWith("CAPTURE_DISPLAY_CHANGED:", StringComparison.Ordinal),
+                            "Display invalidation did not fail closed with its explicit classification.");
+                        Assert(!reply.ContainsKey("imageBase64"), "Invalidated capture returned image data.");
+                        Dictionary<string,object> health = (Dictionary<string,object>)reply["captureHealth"];
+                        Assert(Convert.ToInt64(health["hookRunningAfterStop"]) == 0
+                            && Convert.ToInt64(health["inputPlaneRemainingAfterCleanup"]) == 0,
+                            "Display invalidation left its native hook or input planes running.");
+                        metrics["displayChangeCleanupPassed"] = true;
+                    } else if (!capture) {
                         Assert(!(bool)reply["ok"] && process.ExitCode != 0 && ((string)reply["error"]).StartsWith("CANCELLED:", StringComparison.Ordinal), "Cancel did not return CANCELLED.");
                     } else {
                         Assert((bool)reply["ok"] && process.ExitCode == 0, "Generated fixture capture failed.");
@@ -1167,6 +1236,19 @@ public static class EchoLingoLiveCaptureSmoke {
                             context.Mode = mode; context.Stage = "reset-generated-source";
                             OnUi(form, delegate { form.BackColor = Color.FromArgb(50, 210, 110); form.Refresh(); });
                             trials.Add(Trial(context, helper, mode, Color.FromArgb(220, 70, 85)));
+                        }
+                        if (!legacy) {
+                            context.Mode = "dpi-notification";
+                            trials.Add(Trial(context, helper, "dpi-notification", Color.FromArgb(220,70,85)));
+                            context.Mode = "display-change";
+                            trials.Add(Trial(context, helper, "display-change", Color.FromArgb(220,70,85)));
+                            // Immediately start a fresh real selection, with no helper retry or settings change.
+                            context.Mode = "capture-after-display-change";
+                            Dictionary<string,object> recovered = Trial(context, helper, "capture", Color.FromArgb(220,70,85));
+                            recovered["afterDisplayInvalidation"] = true; trials.Add(recovered);
+                            report["benignDpiNotificationsPassed"] = true;
+                            report["displayChangeCancelledAndNextCapturePassed"] = true;
+                            report["actualDisplayHardwareChangesTested"] = false;
                         }
                         Dictionary<string, object> hover = HoverTrial(context, helper);
                         trials.Add(hover);

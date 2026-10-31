@@ -1904,25 +1904,29 @@ try {
   assert.equal(await page.evaluate(() => window.__qa.translationRequests.at(-1).text), captured);
   assert.equal(await page.locator('#restore-original-breaks').isHidden(), true);
 
-  // Incoming shortcuts do not reveal or discard an unfinished credentials
-  // editor. The latest captured source is presented after the editor closes.
+  // New shortcuts suspend, rather than close or block on, a live credential draft.
   await goView('settings');
   await page.getByRole('button', { name: '编辑', exact: true }).click();
   await page.locator('#provider-name').fill('QA unfinished editor');
-  const beforeQueued = await page.evaluate(() => ({ shows: window.__qa.showCalls.length, requests: window.__qa.translationRequests.length }));
-  await page.evaluate(() => window.__qa.emit('source-text', { text: '这是一段自动换行的正文，\n下一行应该连续展示。\n\n这里是新的段落。', mode: 'ocr' }));
+  await page.locator('#provider-key').fill('private-unsaved-draft');
+  const beforeQueued = await page.evaluate(() => ({ shows: window.__qa.showCalls.length, requests: window.__qa.translationRequests.length, keys: window.__qa.keyCalls, saves: window.__qa.saveCalls }));
+  await page.evaluate(() => window.__qa.emit('source-text', { text: 'Captured while editing', mode: 'ocr' }));
+  await page.waitForFunction(() => document.body.dataset.view === 'translate' && document.querySelector('#source-text').value === 'Captured while editing');
+  assert.equal(await page.locator('#provider-dialog').isVisible(), false);
+  assert.equal(await page.locator('#provider-key').inputValue(), 'private-unsaved-draft');
+  assert.equal(await page.locator('.app-shell').evaluate(el => el.inert), false);
+  await page.waitForFunction(shows => window.__qa.showCalls.length > shows, beforeQueued.shows);
+  assert.equal(await page.evaluate(() => window.__qa.keyCalls), beforeQueued.keys);
+  assert.equal(await page.evaluate(() => window.__qa.saveCalls), beforeQueued.saves);
+  await page.locator('#resume-configuration').click();
   assert.equal(await page.locator('#provider-dialog').isVisible(), true);
   assert.equal(await page.locator('#provider-name').inputValue(), 'QA unfinished editor');
-  assert.equal(await page.evaluate(() => window.__qa.showCalls.length), beforeQueued.shows);
+  assert.equal(await page.locator('#provider-key').inputValue(), 'private-unsaved-draft');
+  assert.equal(await page.locator('.app-shell').evaluate(el => el.inert), true);
   await page.locator('#cancel-provider-dialog').click();
-  await page.waitForFunction((shows) => window.__qa.showCalls.length === shows + 1, beforeQueued.shows);
-  assert.equal(await page.locator('#source-text').inputValue(), '这是一段自动换行的正文，下一行应该连续展示。\n\n这里是新的段落。');
-  assert.equal(await page.evaluate(() => window.__qa.translationRequests.length), beforeQueued.requests);
-  assert.equal(await page.evaluate(() => window.__qa.showCalls.at(-1).presentation), 'popup');
-  await page.locator('#more-toggle').click();
-  await page.locator('#restore-original-breaks').click();
-  assert.match(await page.locator('#source-text').inputValue(), /正文，\n下一行/);
-  assert.equal(await page.evaluate(() => window.__qa.translationRequests.length), beforeQueued.requests);
+  assert.equal(await page.locator('#provider-key').inputValue(), '');
+  assert.equal(await page.locator('#resume-configuration').isVisible(), false);
+  await goView('translate');
 
   // Auto-translating OCR carries origin separately from its translate mode;
   // normalize only captured OCR and retain the exact raw capture for restore.
@@ -1933,25 +1937,21 @@ try {
   assert.equal(await page.locator('#source-text').inputValue(), rawSpacedOcr);
   console.log('PASS: core shortcut recording/save/cancel/IME/navigation/late ACK/draft/failure frontend checks and OCR-origin normalization/raw restore. Isolated DOM and fake IPC only.');
 
-  // Blocked capture keeps its permission metadata while a service editor owns
-  // the window, then presents the guide after the user closes that editor.
+  // Permission guidance also presents immediately without destroying a draft.
   await goView('settings');
   await page.getByRole('button', { name: '编辑', exact: true }).click();
   await page.locator('#provider-name').fill('QA permission capture unfinished editor');
-  const beforeQueuedPermission = await page.evaluate(() => ({ shows: window.__qa.showCalls.length, requests: window.__qa.translationRequests.length, opens: window.__qa.permissionSettings.length, authorizations: window.__qa.permissionRequests.length }));
+  const beforeQueuedPermission = await page.evaluate(() => ({ requests: window.__qa.translationRequests.length, opens: window.__qa.permissionSettings.length, authorizations: window.__qa.permissionRequests.length }));
   await emitPermissionCapture();
-  assert.equal(await page.locator('#provider-dialog').isVisible(), true);
-  assert.equal(await page.locator('#provider-name').inputValue(), 'QA permission capture unfinished editor');
-  assert.equal(await page.locator('#permission-guidance').isHidden(), true);
-  assert.equal(await page.evaluate(() => window.__qa.showCalls.length), beforeQueuedPermission.shows);
-  await page.locator('#cancel-provider-dialog').click();
   await page.locator('#permission-guidance').waitFor({ state: 'visible' });
-  await page.waitForFunction((shows) => window.__qa.showCalls.length === shows + 1, beforeQueuedPermission.shows);
-  assert.equal(await page.locator('#source-text').inputValue(), '');
-  assert.equal(await page.evaluate(() => window.__qa.permissionAtShow.at(-1).visible), true);
+  assert.equal(await page.locator('#provider-dialog').isVisible(), false);
   assert.equal(await page.evaluate(() => window.__qa.translationRequests.length), beforeQueuedPermission.requests);
   assert.equal(await page.evaluate(() => window.__qa.permissionSettings.length), beforeQueuedPermission.opens);
   assert.equal(await page.evaluate(() => window.__qa.permissionRequests.length), beforeQueuedPermission.authorizations);
+  await page.locator('#resume-configuration').click();
+  assert.equal(await page.locator('#provider-name').inputValue(), 'QA permission capture unfinished editor');
+  await page.locator('#cancel-provider-dialog').click();
+  await goView('translate');
 
   // A user-triggered passive refresh clears obsolete guidance once macOS reports
   // that the corresponding permission is granted, without requesting it again.
@@ -1966,50 +1966,16 @@ try {
   assert.equal(await page.locator('#permission-guidance').isHidden(), true);
   await page.evaluate(() => { window.__qa.permissionState.screenCaptureGranted = false; });
 
-  // Alt+A is also deferred while editing a service, and then focuses only when
-  // the user has closed the editor. It must not shrink the open editor.
+  // Explicit input similarly suspends a draft, and only current intent may focus.
   await goView('settings');
-  await page.waitForFunction(() => window.__qa.layoutCalls.at(-1)?.presentation === 'management');
   await page.getByRole('button', { name: '编辑', exact: true }).click();
-  await page.locator('#provider-name').fill('QA Alt+A unfinished editor');
+  await page.locator('#provider-name').fill('QA input unfinished editor');
   await page.evaluate(() => window.__qa.emitInputFocus());
-  assert.equal(await page.locator('body').getAttribute('data-view'), 'settings');
-  assert.equal(await page.locator('#provider-name').inputValue(), 'QA Alt+A unfinished editor');
-  assert.equal(await page.evaluate(() => window.__qa.layoutCalls.at(-1).presentation), 'management');
-  await page.locator('#cancel-provider-dialog').click();
   await page.waitForFunction(() => document.body.dataset.view === 'translate' && document.activeElement.id === 'source-text');
-
-  // An Alt+A queued in an editor retains its original epoch. Closing that
-  // editor after a newer selection starts must not reissue the old focus.
-  await goView('settings');
-  await page.getByRole('button', { name: '编辑', exact: true }).click();
-  const beforeQueuedFocus = await page.evaluate(async () => {
-    const fixture = window.__qa;
-    fixture.emitInputFocus();
-    await new Promise((resolve) => setTimeout(resolve, 0));
-    fixture.nativeHide(); fixture.nativeShow();
-    return fixture.sourceFocusCalls;
-  });
+  assert.equal(await page.locator('#provider-dialog').isVisible(), false);
+  await page.locator('#resume-configuration').click();
+  assert.equal(await page.locator('#provider-name').inputValue(), 'QA input unfinished editor');
   await page.locator('#cancel-provider-dialog').click();
-  await page.evaluate(() => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve))));
-  assert.equal(await page.locator('body').getAttribute('data-view'), 'settings');
-  assert.equal(await page.evaluate(() => window.__qa.sourceFocusCalls), beforeQueuedFocus);
-  await goView('translate');
-
-  await goView('settings');
-  await page.getByRole('button', { name: '编辑', exact: true }).click();
-  await page.evaluate(async () => { window.__qa.emitInputFocus(); await new Promise((resolve) => setTimeout(resolve, 0)); });
-  const beforeQueuedRoundtrip = await page.evaluate(() => {
-    const focuses = window.__qa.sourceFocusCalls;
-    // Close queues a microtask; navigate away and back before that continuation.
-    document.querySelector('#cancel-provider-dialog').click();
-    document.querySelector('button[data-view="translate"]').click();
-    document.querySelector('button[data-view="settings"]').click();
-    return focuses;
-  });
-  await page.evaluate(() => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve))));
-  assert.equal(await page.locator('body').getAttribute('data-view'), 'settings');
-  assert.equal(await page.evaluate(() => window.__qa.sourceFocusCalls), beforeQueuedRoundtrip);
   await goView('translate');
 
   // Tray, Cmd+, and reopen use an explicit Settings event. Configuration is
@@ -3016,7 +2982,7 @@ try {
   console.log(`SHORTCUT_RELEASE_BOUNDARIES ${JSON.stringify({ scope: 'isolated DOM and existing fake IPC only', cases: releaseBoundaryResults })}`);
   assert.deepEqual(errors, []);
   console.log('PASS: native input focus events require exact backend-verified presentation metadata; an observed epoch keeps its original intent baseline across duplicate announcements, edits and navigation; fresh explicit input works while visible or in management; stale complete events, missing/malformed/future payloads and delayed verification cannot rebind focus; hidden Alt+A works with either presentation-event order. Fake IPC only.');
-  console.log('PASS: accepted popup acknowledgments, explicit input animation frames and modal queues cannot revive focus after a newer selection epoch, edit or management-view roundtrip; current empty-selection typing and current input focus remain available. Isolated DOM/IPC only, not a native WPS root-cause claim.');
+  console.log('PASS: accepted popup acknowledgments, explicit input animation frames cannot revive focus after a newer selection epoch, edit or management-view roundtrip; current empty-selection typing and current input focus remain available. Isolated DOM/IPC only, not a native WPS root-cause claim.');
   console.log('PASS: repeated pinned capture epochs keep completed source/result DOM visible through cancel/OCR/permission errors; successful OCR replaces source and auto-translates without a modeled hide/reveal; pin remains active; stale source/presentation/progress cannot overwrite; in-flight partial results are cancelled and removed. Fake IPC only, no real capture or native visibility pass.');
   console.log('PASS: marked visible-popup OCR updates cannot navigate away from settings/history, overwrite newer edits or Alt+A typing, or cancel a newer manual translation; accepted marked capture still auto-translates; ordinary unmarked source workflows remain covered.');
   console.log('PASS: show_popup IPC explicitly requests reuseVisiblePopup=false for ordinary blank/input/selection, including an already visible pinned popup; only marked pinned OCR sends true. Payload dispatch only; no native physical raise/z-order acceptance is claimed.');
@@ -3903,7 +3869,126 @@ try {
     assert.equal(await page.evaluate(() => window.__qa.settings.providers.some(p => p.id === 'qa-local')), true);
   }
   console.log('PASS: dual-platform service workspace separates multi-enabled translation from one-current OCR, keeps native capabilities, preserves secure edit/cancel/confirmation flows and failed-toggle rollback, and supports 420px master/detail navigation without key reads. Mock IPC only.');
-  console.log('PASS: persistent screenshot permission guidance prepared before presentation; click-only correct pane without authorization; retained sanitized link failure and manual path; first-use pending-open help navigation/focus; 800 px light and 420 px narrow/dark screenshots; dismiss/input/quiet Alt+D/Alt+A/stale-epoch recovery; deferred-modal permission payload and granted-status clearing; backend cancellation tickets on edit/clear/stop/Escape/close/native hide; native presentation epochs cover unallocated tickets, omitted/stale hide events, reopen overtaking pending begin and stale delayed popup fitting; backend-only cancellation clears old result state; late-ticket and replacement ordering; pending-save close/reentry guard; failure unlock; blank shortcuts; duplicate rejection; no countdown; theme/favorites and history bounds; OCR dual-key bundles/protocol isolation/no plaintext settings; documented vendor presets; origin-bound saved-key indications; minimal popup/menu/automatic source height; OCR configuration/privacy; empty-selection immediate typing; persistent source copy/speech; pin edge/icon/keyboard hit areas and drag isolation; captured source editing after completion and pending cancellation/retranslation; narrow-wrap source presentation; inconsistent permission feedback; automatic/fixed targets; Enter/ShiftEnter/IME/repeat; passive permissions; real capture and translation error preservation.');
+  // Both platform branches: all modal roles preserve memory-only drafts while
+  // fresh native deliveries immediately present the newest translation source.
+  for (const windows of [false, true]) {
+    for (const kind of ['translation', 'ocr', 'free', 'confirm']) {
+      await page.goto(`http://127.0.0.1:1420/?serviceManagerFixture=1${windows ? '&windowsSelectionFixture=1' : ''}`);
+      await page.waitForFunction(() => document.querySelector('#footer-status')?.textContent === '准备就绪');
+      await goView('settings');
+      let modal, secret;
+      if (kind === 'translation') {
+        await page.locator('#provider-list [data-service-id="qa-service"] [data-service-action="edit"]').click();
+        modal = '#provider-dialog'; secret = '#provider-key';
+      } else if (kind === 'ocr') {
+        await page.locator('#ocr-provider-list [data-service-id="qa-ocr-1"] [data-service-action="edit"]').click();
+        modal = '#ocr-provider-dialog'; secret = '#ocr-provider-key';
+      } else if (kind === 'free') {
+        await page.locator('#free-region-cn').click();
+        await page.locator('#free-translation-summary').click();
+        await page.locator('[data-free-service="siliconflow"] .free-service-actions button').first().click();
+        modal = '#free-setup-dialog'; secret = '#free-field-key';
+      } else {
+        await page.locator('#provider-list [data-service-id="qa-service"] [data-service-action="remove"]').click();
+        modal = '#confirm-dialog';
+      }
+      if (secret) await page.locator(secret).fill('private-modal-draft-not-persisted');
+      const before = await page.evaluate(() => ({ saves: window.__qa.saveCalls, keys: window.__qa.keyCalls, ocrKeys: window.__qa.ocrKeyCalls }));
+      await page.evaluate(() => {
+        window.__qa.emit('source-text', { text: 'First suspended result', mode: 'ocr' });
+        window.__qa.emit('source-text', { text: 'Newest suspended result', mode: 'ocr' });
+      });
+      await page.waitForFunction(() => document.body.dataset.view === 'translate' && document.querySelector('#source-text').value === 'Newest suspended result');
+      assert.equal(await page.locator(modal).isVisible(), false);
+      assert.equal(await page.locator(modal).evaluate(el => el.inert), true);
+      assert.equal(await page.locator(modal).getAttribute('aria-hidden'), 'true');
+      assert.equal(await page.locator('.app-shell').evaluate(el => el.inert), false);
+      await page.locator('#source-text').focus(); await page.keyboard.press('Tab');
+      assert.equal(await page.locator(modal).evaluate(el => el.contains(document.activeElement)), false);
+      assert.deepEqual(await page.evaluate(() => ({ saves: window.__qa.saveCalls, keys: window.__qa.keyCalls, ocrKeys: window.__qa.ocrKeyCalls })), before);
+      if (secret) await page.locator(secret).evaluate(el => { el.disabled = true; });
+      if (kind === 'translation') {
+        // Even a programmatic open for another provider cannot reset the live draft.
+        await page.locator('#provider-list [data-service-id="qa-local"] [data-service-action="edit"]').dispatchEvent('click');
+      } else if (kind === 'confirm') {
+        const title = await page.locator('#confirm-title').textContent();
+        await page.locator('#ocr-provider-list [data-service-id="qa-ocr-1"] [data-service-action="remove"]').dispatchEvent('click');
+        assert.equal(await page.locator('#confirm-title').textContent(), title);
+        assert.equal(await page.evaluate(() => window.__qa.settings.ocrProviders.length), 2);
+      } else await page.locator('#resume-configuration').click();
+      assert.equal(await page.locator(modal).isVisible(), true);
+      assert.equal(await page.locator(modal).evaluate(el => el.inert), false);
+      assert.equal(await page.locator(modal).evaluate(el => el.contains(document.activeElement)), true);
+      if (secret) {
+        assert.equal(await page.locator(secret).inputValue(), 'private-modal-draft-not-persisted');
+        assert.equal(await page.locator(secret).evaluate(el => el === document.activeElement), false);
+        await page.locator(secret).evaluate(el => { el.disabled = false; });
+      }
+      if (kind === 'confirm') {
+        await page.locator('#confirm-accept').click();
+        await page.waitForFunction(() => !window.__qa.settings.providers.some(p => p.id === 'qa-service'));
+        assert.equal(await page.evaluate(() => window.__qa.settings.ocrProviders.length), 2);
+      } else await page.keyboard.press('Escape');
+      assert.equal(await page.locator(modal).isVisible(), false);
+      assert.equal(await page.locator('#resume-configuration').isVisible(), false);
+      assert.equal(await page.evaluate(() => JSON.stringify(window.__qa.settings).includes('private-modal-draft')), false);
+    }
+    // An already submitted save finishes once while suspended without reviving
+    // its editor, stealing focus, or throwing away the new translation source.
+    await page.goto(`http://127.0.0.1:1420/?serviceManagerFixture=1${windows ? '&windowsSelectionFixture=1' : ''}`);
+    await page.waitForFunction(() => document.querySelector('#footer-status')?.textContent === '准备就绪');
+    await goView('settings');
+    await page.locator('#provider-list [data-service-id="qa-service"] [data-service-action="edit"]').click();
+    await page.locator('#provider-name').fill('Saved while suspended');
+    await page.evaluate(() => { window.__qa.holdSave = true; });
+    const saves = await page.evaluate(() => window.__qa.saveCalls);
+    await page.locator('#save-provider').click();
+    await page.waitForFunction(n => window.__qa.saveCalls > n, saves);
+    await page.evaluate(() => window.__qa.emit('source-text', { text: 'Result during save', mode: 'ocr' }));
+    await page.waitForFunction(() => document.body.dataset.view === 'translate');
+    await page.locator('#source-text').focus();
+    await page.evaluate(() => { window.__qa.holdSave = false; window.__qa.releaseSave(); });
+    await page.waitForFunction(() => document.querySelector('#provider-dialog').hidden);
+    assert.equal(await page.locator('#source-text').inputValue(), 'Result during save');
+    assert.equal(await page.evaluate(() => document.activeElement.id), 'source-text');
+    assert.equal(await page.locator('#resume-configuration').isVisible(), false);
+    assert.equal(await page.evaluate(() => window.__qa.saveCalls), saves + 1);
+    // A plain service detail view is not an editor and never needs suspension.
+    await page.locator('#more-toggle').click(); await page.locator('#popup-more-menu [data-view="services"]').click();
+    await page.locator('#managed-service-list [data-service-id="qa-service"] .managed-service-select').click();
+    await page.evaluate(() => window.__qa.emit('source-text', { text: 'Result from details', mode: 'ocr' }));
+    await page.waitForFunction(() => document.body.dataset.view === 'translate' && document.querySelector('#source-text').value === 'Result from details');
+    assert.equal(await page.locator('#resume-configuration').isVisible(), false);
+    // A suspended wizard keeps its existing test request. Restoring/cancelling
+    // and opening a different wizard invalidates that result, never the new draft.
+    await goView('settings');
+    await page.locator('#free-region-cn').click();
+    if (!await page.locator('#free-translation-section').evaluate(el => el.open)) await page.locator('#free-translation-summary').click();
+    await page.locator('[data-free-service="siliconflow"] .free-service-actions button').first().click();
+    await page.locator('#free-field-key').fill('private-pending-wizard');
+    await page.evaluate(() => { window.__qa.holdFreeSetupTest = true; });
+    const waits = await page.evaluate(() => window.__qa.freeSetupTestWaits);
+    await page.locator('#free-setup-next').click();
+    await page.waitForFunction(n => window.__qa.freeSetupTestWaits > n, waits);
+    await page.evaluate(() => window.__qa.emit('source-text', { text: 'While wizard tests', mode: 'ocr' }));
+    await page.waitForFunction(() => document.body.dataset.view === 'translate');
+    assert.equal(await page.locator('#free-setup-dialog').isVisible(), false);
+    assert.equal(await page.evaluate(() => window.__qa.freeSetupTestWaits), waits + 1);
+    await page.locator('#resume-configuration').click();
+    assert.equal(await page.locator('#free-setup-next').isDisabled(), true);
+    await page.locator('#free-setup-close').click();
+    await page.locator('[data-free-service="siliconflow"] .free-service-actions button').first().click();
+    await page.locator('#free-field-key').fill('private-new-wizard-draft');
+    await page.evaluate(() => { window.__qa.holdFreeSetupTest = false; window.__qa.releaseFreeSetupTest(); });
+    await page.waitForFunction(() => !window.__qa.settings.providers.some(p => p.id.startsWith('free-')));
+    assert.equal(await page.locator('#free-setup-dialog').isVisible(), true);
+    assert.equal(await page.locator('#free-field-key').inputValue(), 'private-new-wizard-draft');
+    assert.equal(await page.locator('#free-setup-next').isEnabled(), true);
+    await page.keyboard.press('Escape');
+    await goView('translate');
+  }
+  console.log('PASS: macOS/Windows modal suspension presents fresh source immediately, preserves memory-only drafts, restores accessible editing, and lets submitted saves complete without focus theft or duplicate writes. Mock IPC only.');
+  console.log('PASS: persistent screenshot permission guidance prepared before presentation; click-only correct pane without authorization; retained sanitized link failure and manual path; first-use pending-open help navigation/focus; 800 px light and 420 px narrow/dark screenshots; dismiss/input/quiet Alt+D/Alt+A/stale-epoch recovery; suspended-modal permission payload and granted-status clearing; backend cancellation tickets on edit/clear/stop/Escape/close/native hide; native presentation epochs cover unallocated tickets, omitted/stale hide events, reopen overtaking pending begin and stale delayed popup fitting; backend-only cancellation clears old result state; late-ticket and replacement ordering; pending-save close/reentry guard; failure unlock; blank shortcuts; duplicate rejection; no countdown; theme/favorites and history bounds; OCR dual-key bundles/protocol isolation/no plaintext settings; documented vendor presets; origin-bound saved-key indications; minimal popup/menu/automatic source height; OCR configuration/privacy; empty-selection immediate typing; persistent source copy/speech; pin edge/icon/keyboard hit areas and drag isolation; captured source editing after completion and pending cancellation/retranslation; narrow-wrap source presentation; inconsistent permission feedback; automatic/fixed targets; Enter/ShiftEnter/IME/repeat; passive permissions; real capture and translation error preservation.');
 } finally {
   await browser.close();
 }

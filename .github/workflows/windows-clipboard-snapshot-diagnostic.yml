@@ -1,0 +1,44 @@
+name: Isolated exact-DLL clipboard snapshot diagnostic
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/windows-clipboard-snapshot-diagnostic.yml'
+      - 'src-tauri/native/windows.ps1'
+      - 'scripts/build-windows-native-helper.ps1'
+      - 'tests/windows-clipboard-snapshot-smoke.ps1'
+      - 'tests/windows-clipboard-snapshot-smoke.cs'
+permissions:
+  contents: read
+jobs:
+  clipboard-snapshot-boundaries:
+    runs-on: windows-latest
+    timeout-minutes: 6
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - name: Compile exact production Framework DLL
+        id: native
+        shell: powershell
+        run: |
+          $dll = Join-Path $env:RUNNER_TEMP 'snapshot-production-native.dll'
+          & powershell.exe -NoProfile -STA -ExecutionPolicy Bypass -File scripts/build-windows-native-helper.ps1 -HelperPath src-tauri/native/windows.ps1 -OutputPath $dll
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $hash = (Get-FileHash -LiteralPath $dll -Algorithm SHA256).Hash.ToLowerInvariant()
+          "path=$dll" >> $env:GITHUB_OUTPUT
+          "sha=$hash" >> $env:GITHUB_OUTPUT
+          [ordered]@{ source='${{ github.sha }}'; nativeSha256=$hash; nativeBytes=(Get-Item -LiteralPath $dll).Length; browserTested=$false; applicationShortcutTested=$false; scope='Exact production DLL snapshot/publish process-boundary diagnostic; not a replacement for 21 desktop acceptance gates.' } | ConvertTo-Json | Set-Content "$env:RUNNER_TEMP/clipboard-snapshot-provenance.json"
+      - name: Twelve bounded fresh-STA snapshot and publication rounds
+        shell: powershell
+        run: |
+          & powershell.exe -NoProfile -STA -ExecutionPolicy Bypass -File tests/windows-clipboard-snapshot-smoke.ps1 -NativeAssemblyPath '${{ steps.native.outputs.path }}' -ExpectedNativeSha256 '${{ steps.native.outputs.sha }}' -OutputPath "$env:RUNNER_TEMP/clipboard-snapshot-observation.json" 2>&1 | Tee-Object "$env:RUNNER_TEMP/clipboard-snapshot-diagnostic.log"
+          exit $LASTEXITCODE
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: exact-dll-clipboard-snapshot-evidence
+          if-no-files-found: error
+          path: |
+            ${{ runner.temp }}/clipboard-snapshot-provenance.json
+            ${{ runner.temp }}/clipboard-snapshot-observation.json
+            ${{ runner.temp }}/clipboard-snapshot-diagnostic.log

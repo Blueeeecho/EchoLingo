@@ -1,0 +1,11 @@
+[package]
+name = "echolingo-windows-ocr-tests"
+version = "0.0.0"
+edition = "2021"
+publish = false
+[dependencies]
+regex = "=1.13.1"
+[target.'cfg(windows)'.dependencies]
+windows = { version = "=0.62.2", features = ["Foundation", "Globalization", "Graphics_Imaging", "Media_Ocr", "Storage_Streams", "Win32_System_WinRT", "Win32_System_Com"] }
+windows-future = "=0.3.2"
+png = "=0.18.1"

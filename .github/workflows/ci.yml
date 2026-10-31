@@ -13,6 +13,53 @@ on:
 permissions:
   contents: read
 jobs:
+  windows-rust-capture-candidate:
+    name: Isolated Rust capture candidate (native Windows runtime)
+    runs-on: windows-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Link the actual isolated child without Tauri or offline engine
+        shell: pwsh
+        run: |
+          cargo build --manifest-path src-tauri/native-capture/Cargo.toml --release --locked --target-dir "$env:RUNNER_TEMP/native-capture-candidate"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Verify fail-closed arguments and actual memory pixels
+        shell: pwsh
+        run: ./tests/windows-rust-capture-binary-smoke.ps1 -ExecutablePath "$env:RUNNER_TEMP/native-capture-candidate/release/echolingo-native-capture.exe"
+      - name: Exercise real native selector with the production input host
+        shell: pwsh
+        run: |
+          rustc --edition=2021 tests/windows-native-capture-harness.rs -O -o "$env:RUNNER_TEMP/native-capture-harness.exe"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          powershell -NoLogo -NoProfile -NonInteractive -STA -ExecutionPolicy Bypass -File tests/windows-native-capture-smoke.ps1 -NativeCapturePath "$env:RUNNER_TEMP/native-capture-candidate/release/echolingo-native-capture.exe" -HarnessPath "$env:RUNNER_TEMP/native-capture-harness.exe" -IsolatedTestSession
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Verify same-integrity topmost and modal capture pages
+        shell: pwsh
+        run: powershell -NoLogo -NoProfile -NonInteractive -STA -ExecutionPolicy Bypass -File tests/windows-capture-upper-window-smoke.ps1 -NativeCapturePath "$env:RUNNER_TEMP/native-capture-candidate/release/echolingo-native-capture.exe" -HarnessPath "$env:RUNNER_TEMP/native-capture-harness.exe" -IsolatedTestSession
+      - name: Compare shipping launcher and native child on this same runner
+        shell: pwsh
+        run: |
+          $dir = "$env:RUNNER_TEMP/native-capture-candidate"
+          powershell -NoLogo -NoProfile -NonInteractive -STA -ExecutionPolicy Bypass -File scripts/build-windows-native-helper.ps1 -HelperPath src-tauri/native/windows.ps1 -OutputPath "$dir/echolingo-windows-native.dll"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          rustc --edition=2021 tests/windows-launcher-generate.rs -O -o "$dir/generate-launcher.exe"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & "$dir/generate-launcher.exe" "$dir/echolingo-windows-launcher.ps1"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          rustc --edition=2021 tests/windows-delegated-capture-harness.rs -O -o "$dir/legacy-harness.exe"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          ./tests/windows-native-capture-ab.ps1 -NativeCapturePath "$dir/release/echolingo-native-capture.exe" -NativeHarnessPath "$env:RUNNER_TEMP/native-capture-harness.exe" -LegacyHarnessPath "$dir/legacy-harness.exe" -NativeAssemblyPath "$dir/echolingo-windows-native.dll" -HelperPath "$dir/echolingo-windows-launcher.ps1" -OutputDirectory "$env:RUNNER_TEMP/native-capture-paired-evidence" -IsolatedTestSession
+      - name: Preserve same-runner capture evidence including failures
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: native-capture-paired-evidence
+          path: ${{ runner.temp }}/native-capture-paired-evidence
+          if-no-files-found: warn
   macos-native-frame-probe:
     name: Isolated macOS native frame geometry probe
     runs-on: macos-latest
@@ -151,6 +198,17 @@ jobs:
         if: runner.os == 'Windows'
         shell: powershell
         run: powershell.exe -NoProfile -STA -ExecutionPolicy Bypass -File tests/windows-native-smoke.ps1
+      - name: Native Windows WinRT OCR candidate runtime (no fallback)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        timeout-minutes: 5
+        run: |
+          $output = & cargo test --manifest-path tests/windows-ocr-native/Cargo.toml --locked -- --test-threads=1 2>&1
+          $result = $LASTEXITCODE
+          $output | ForEach-Object { Write-Host $_ }
+          if ($result -ne 0) { exit $result }
+          $text = $output -join "`n"
+          if ($text -notmatch 'test result: ok\. 12 passed; 0 failed; 0 ignored' -or $text -notmatch 'native_generated_image_repeated_recognition_and_empty_semantics \.\.\. ok') { throw 'NATIVE_OCR_GATE: Expected all 12 Windows tests and real generated-image OCR to execute without skip.' }
       - name: Rust tests
         run: cargo test --manifest-path src-tauri/Cargo.toml
       - name: Rust formatting
@@ -181,8 +239,34 @@ jobs:
           '@
           $payloadOffset = [EchoLingoExactPayload]::Find($appBytes, $dllBytes)
           if ($payloadOffset -lt 0) { throw 'The selected complete DLL is not embedded byte-for-byte in the actual application.' }
+          $launcher = Join-Path $dll.DirectoryName 'echolingo-windows-launcher.ps1'
+          if (-not (Test-Path -LiteralPath $launcher -PathType Leaf)) { throw 'Generated Windows launcher is missing beside the accepted DLL.' }
+          $launcherBytes = [IO.File]::ReadAllBytes($launcher)
+          $launcherOffset = [EchoLingoExactPayload]::Find($appBytes, $launcherBytes)
+          if ($launcherOffset -lt 0) { throw 'The complete candidate launcher is not embedded byte-for-byte in the actual application.' }
+          [ordered]@{ launcherBytes = $launcherBytes.Length; launcherSha256 = (Get-FileHash $launcher -Algorithm SHA256).Hash.ToLowerInvariant(); completeLauncherEmbedded = $true; exactLauncherOffset = $launcherOffset } | ConvertTo-Json -Compress
           "path=$($dll.FullName)" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+          $capture = Join-Path $dll.DirectoryName 'echolingo-native-capture.exe'
+          $captureBytes = [IO.File]::ReadAllBytes($capture)
+          $captureOffset = [EchoLingoExactPayload]::Find($appBytes, $captureBytes)
+          if ($captureOffset -lt 0) { throw 'The complete Rust capture child is not embedded byte-for-byte in the actual application.' }
+          "capturePath=$capture" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+          [ordered]@{ nativeCaptureBytes = $captureBytes.Length; nativeCaptureSha256 = (Get-FileHash $capture -Algorithm SHA256).Hash.ToLowerInvariant(); completeNativeCaptureEmbedded = $true; exactNativeCaptureOffset = $captureOffset } | ConvertTo-Json -Compress
           [ordered]@{ dllBytes = $dllBytes.Length; dllSha256 = (Get-FileHash $dll.FullName -Algorithm SHA256).Hash.ToLowerInvariant(); completePayloadEmbedded = $true; exactPayloadOffset = $payloadOffset } | ConvertTo-Json -Compress
+      - name: Verify generated Windows launcher boundaries and same-DLL performance
+        if: runner.os == 'Windows'
+        timeout-minutes: 4
+        shell: powershell
+        run: |
+          rustc --test src-tauri/windows_launcher.rs -o "$env:RUNNER_TEMP/echolingo-launcher-policy.exe"
+          if ($LASTEXITCODE -ne 0) { throw 'Launcher generator policy compilation failed.' }
+          & "$env:RUNNER_TEMP/echolingo-launcher-policy.exe"
+          if ($LASTEXITCODE -ne 0) { throw 'Launcher generator boundary regression.' }
+          $output = @(& powershell.exe -NoProfile -STA -ExecutionPolicy Bypass -File tests/windows-launcher-benchmark.ps1 -NativeAssemblyPath '${{ steps.windows_native_candidate.outputs.path }}' 2>&1)
+          $fixtureExit = $LASTEXITCODE
+          $output | Out-File "$env:RUNNER_TEMP/echolingo-launcher-benchmark.log" -Encoding utf8
+          $output | Write-Output
+          exit $fixtureExit
       - name: Windows real shortcut conflict CLI probe
         id: windows_shortcut_install
         if: runner.os == 'Windows'
@@ -284,7 +368,7 @@ jobs:
         run: |
           $ErrorActionPreference = 'Continue'
           $global:LASTEXITCODE = 1
-          $output = @(& powershell.exe -NoProfile -STA -ExecutionPolicy Bypass -File tests/windows-application-smoke.ps1 -ApplicationPath src-tauri/target/release/echolingo.exe -CustomShortcutsTests 2>&1)
+          $output = @(& powershell.exe -NoProfile -STA -ExecutionPolicy Bypass -File tests/windows-application-smoke.ps1 -ApplicationPath src-tauri/target/release/echolingo.exe -CustomShortcutsTests -DefaultCapture -NativeCapturePath '${{ steps.windows_native_candidate.outputs.capturePath }}' 2>&1)
           $fixtureExit = $LASTEXITCODE
           $output | Out-File "$env:RUNNER_TEMP/echolingo-custom-shortcuts.log" -Encoding utf8
           $output | Write-Output
@@ -321,9 +405,54 @@ jobs:
         timeout-minutes: 5
         shell: powershell
         run: |
-          $output = @(& powershell.exe -NoProfile -STA -ExecutionPolicy Bypass -File tests/windows-application-smoke.ps1 -ApplicationPath src-tauri/target/release/echolingo.exe -LatestIntentTests 2>&1)
+          $output = @(& powershell.exe -NoProfile -STA -ExecutionPolicy Bypass -File tests/windows-application-smoke.ps1 -ApplicationPath src-tauri/target/release/echolingo.exe -LatestIntentTests -DefaultCapture -NativeCapturePath '${{ steps.windows_native_candidate.outputs.capturePath }}' 2>&1)
           $fixtureExit = $LASTEXITCODE
           $output | Out-File "$env:RUNNER_TEMP/echolingo-application-latest-intent.log" -Encoding utf8
+          $output | Write-Output
+          exit $fixtureExit
+      - name: Windows actual application Rust capture and OCR candidate
+        id: windows_application_native_capture
+        if: runner.os == 'Windows'
+        continue-on-error: true
+        timeout-minutes: 5
+        shell: powershell
+        run: |
+          $output = @(& powershell.exe -NoProfile -STA -ExecutionPolicy Bypass -File tests/windows-application-smoke.ps1 -ApplicationPath src-tauri/target/release/echolingo.exe -LatestIntentTests -RustCapture -NativeCapturePath '${{ steps.windows_native_candidate.outputs.capturePath }}' 2>&1)
+          $fixtureExit = $LASTEXITCODE
+          $output | Out-File "$env:RUNNER_TEMP/echolingo-application-native-capture.log" -Encoding utf8
+          $output | Write-Output
+          exit $fixtureExit
+      - name: Windows actual application native capture from a real topmost modal
+        id: windows_application_native_modal
+        if: runner.os == 'Windows'
+        continue-on-error: true
+        timeout-minutes: 5
+        shell: powershell
+        run: |
+          $output = @(& powershell.exe -NoProfile -STA -ExecutionPolicy Bypass -File tests/windows-application-smoke.ps1 -ApplicationPath src-tauri/target/release/echolingo.exe -LatestIntentTests -DefaultCapture -NativeCapturePath '${{ steps.windows_native_candidate.outputs.capturePath }}' -SourceTopmostModal 2>&1)
+          $fixtureExit = $LASTEXITCODE
+          $output | Out-File "$env:RUNNER_TEMP/echolingo-application-native-modal.log" -Encoding utf8
+          $output | Write-Output
+          exit $fixtureExit
+      - name: Windows topmost modal and actual NSIS initial-page capture
+        id: windows_capture_upper_windows
+        if: runner.os == 'Windows'
+        continue-on-error: true
+        timeout-minutes: 5
+        shell: powershell
+        run: |
+          $installers = @(Get-ChildItem src-tauri/target/release/bundle/nsis -File -Filter '*0.2.3*x64*setup.exe')
+          if ($installers.Count -ne 1) { throw 'Expected exactly one own versioned NSIS installer.' }
+          rustc --edition=2021 tests/windows-native-capture-harness.rs -O -o "$env:RUNNER_TEMP/echolingo-upper-capture-harness.exe"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $generated = @(& powershell.exe -NoProfile -STA -ExecutionPolicy Bypass -File tests/windows-capture-upper-window-smoke.ps1 -NativeCapturePath '${{ steps.windows_native_candidate.outputs.capturePath }}' -HarnessPath "$env:RUNNER_TEMP/echolingo-upper-capture-harness.exe" -IsolatedTestSession 2>&1)
+          $generatedExit = $LASTEXITCODE
+          $generated | Out-File "$env:RUNNER_TEMP/echolingo-upper-window-capture.log" -Encoding utf8
+          $generated | Write-Output
+          if ($generatedExit -ne 0) { exit $generatedExit }
+          $output = @(& powershell.exe -NoProfile -STA -ExecutionPolicy Bypass -File tests/windows-capture-upper-window-smoke.ps1 -NativeCapturePath '${{ steps.windows_native_candidate.outputs.capturePath }}' -HarnessPath "$env:RUNNER_TEMP/echolingo-upper-capture-harness.exe" -InstallerPath $installers[0].FullName -IsolatedTestSession 2>&1)
+          $fixtureExit = $LASTEXITCODE
+          $output | Out-File "$env:RUNNER_TEMP/echolingo-upper-window-capture.log" -Encoding utf8 -Append
           $output | Write-Output
           exit $fixtureExit
       - name: Windows popup outside-click and focus integration smoke
@@ -413,7 +542,7 @@ jobs:
           $outcomes = @{}
           foreach ($browserKind in @('edge','chrome')) {
             $global:LASTEXITCODE = 1
-            $output = @(& node tests/windows-browser-ocr-visibility-smoke.mjs --browser $browserKind --application $candidate --expected-application-sha256 $hash --expected-application-bytes $bytes 2>&1)
+            $output = @(& node tests/windows-browser-ocr-visibility-smoke.mjs --browser $browserKind --application $candidate --expected-application-sha256 $hash --expected-application-bytes $bytes --native-capture '${{ steps.windows_native_candidate.outputs.capturePath }}' 2>&1)
             $outcomes[$browserKind] = $LASTEXITCODE
             $output | Out-File "$env:RUNNER_TEMP/echolingo-browser-ocr-$browserKind.log" -Encoding utf8
             $output | Write-Output
@@ -453,7 +582,7 @@ jobs:
         continue-on-error: true
         timeout-minutes: 25
         shell: powershell
-        run: powershell.exe -NoProfile -STA -ExecutionPolicy Bypass -File scripts/windows-offline-translation-test.ps1
+        run: powershell.exe -NoProfile -STA -ExecutionPolicy Bypass -File scripts/windows-offline-translation-test.ps1 -NativeCapturePath '${{ steps.windows_native_candidate.outputs.capturePath }}'
       - name: Preserve offline acceptance and corresponding source evidence
         if: always() && runner.os == 'Windows'
         uses: actions/upload-artifact@v4
@@ -472,6 +601,9 @@ jobs:
             ${{ runner.temp }}/echolingo-selection-compat.log
             ${{ runner.temp }}/echolingo-selection-native-focus.log
             ${{ runner.temp }}/echolingo-application-latest-intent.log
+            ${{ runner.temp }}/echolingo-application-native-capture.log
+            ${{ runner.temp }}/echolingo-application-native-modal.log
+            ${{ runner.temp }}/echolingo-upper-window-capture.log
             ${{ runner.temp }}/echolingo-selection-rigorous.log
             ${{ runner.temp }}/echolingo-selection-budget.log
             ${{ runner.temp }}/echolingo-selection-query.log
@@ -505,6 +637,9 @@ jobs:
           $taskOutcomes = @{
             liveCapture = '${{ steps.windows_live_capture.outcome }}'
             applicationCore = '${{ steps.windows_application_core.outcome }}'
+            applicationNativeCapture = '${{ steps.windows_application_native_capture.outcome }}'
+            applicationNativeModal = '${{ steps.windows_application_native_modal.outcome }}'
+            upperWindowCapture = '${{ steps.windows_capture_upper_windows.outcome }}'
             popupVisibility = '${{ steps.windows_popup_visibility.outcome }}'
             popupResize = '${{ steps.windows_popup_resize.outcome }}'
             installedOffline = '${{ steps.windows_installed_offline.outcome }}'
@@ -1551,7 +1686,7 @@ jobs:
         run: |
           $ErrorActionPreference = 'Continue'
           $global:LASTEXITCODE = 1
-          $output = @(& node tests/windows-browser-ocr-visibility-smoke.mjs --browser '${{ matrix.browser }}' --application '${{ steps.candidate.outputs.path }}' --expected-application-sha256 8490a973c9e4f4568b851f61524a4ef8f554d8b3a506b12dd19ba34f0dd22a4b --expected-application-bytes 5825536 2>&1)
+          $output = @(& node tests/windows-browser-ocr-visibility-smoke.mjs --browser '${{ matrix.browser }}' --application '${{ steps.candidate.outputs.path }}' --expected-application-sha256 8490a973c9e4f4568b851f61524a4ef8f554d8b3a506b12dd19ba34f0dd22a4b --expected-application-bytes 5825536 --legacy-capture true 2>&1)
           $code = $LASTEXITCODE
           $output | Out-File "$env:RUNNER_TEMP/echolingo-browser-ocr-visibility.log" -Encoding utf8
           $output | Write-Output

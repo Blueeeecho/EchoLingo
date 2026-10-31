@@ -18,6 +18,7 @@ interface SetupContext {
   reportError: (error: unknown) => void;
   showModal: (modal: HTMLElement) => void;
   closeModal: (modal: HTMLElement) => void;
+  resumeDraft?: () => boolean;
 }
 
 function readState(): HintState {
@@ -204,6 +205,7 @@ export function installFreeSetup(context: SetupContext): { refresh: () => void; 
       : tx('测试并设为当前 OCR', 'Test and set as current OCR');
   };
   const openWizard = (id: string): void => {
+    if (context.resumeDraft?.()) return;
     invalidate();
     selectedPiece = serviceById(id) ?? null;
     if (!selectedPiece) return;

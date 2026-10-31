@@ -1,6 +1,6 @@
 [package]
 name = "echolingo"
-version = "0.2.2"
+version = "0.2.3"
 description = "EchoLingo: lightweight translation and offline OCR"
 authors = ["Blueeeecho"]
 edition = "2021"
@@ -29,7 +29,12 @@ tokio = { version = "1", features = ["time", "sync", "macros", "rt-multi-thread"
 keyring = { version = "3", features = ["apple-native"] }
 
 [target.'cfg(target_os = "windows")'.dependencies]
+base64 = "0.22.1"
 global-hotkey = "=0.8.0"
+png = "0.18.1"
+regex = "1.13.1"
+windows = { version = "0.62.2", features = ["Foundation", "Globalization", "Graphics_Imaging", "Media_Ocr", "Storage_Streams", "Win32_System_WinRT", "Win32_System_Com"] }
+windows-future = "0.3.2"
 keyring = { version = "3", features = ["windows-native"] }
 
 [target.'cfg(not(any(target_os = "macos", target_os = "windows")))'.dependencies]

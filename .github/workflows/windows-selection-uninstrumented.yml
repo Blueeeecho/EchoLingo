@@ -1,0 +1,84 @@
+name: Immutable 105449 uninstrumented browser selection validation
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/windows-selection-uninstrumented.yml'
+      - 'tests/windows-browser-selection-smoke.mjs'
+      - 'tests/windows-browser-selection-bridge.cs'
+      - 'tests/windows-browser-selection-bridge.ps1'
+permissions:
+  contents: read
+  actions: read
+jobs:
+  immutable-uninstrumented-selection:
+    runs-on: windows-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Require unchanged production for immutable binary reuse
+        id: source
+        shell: pwsh
+        run: |
+          git diff --quiet 105449ac03bcb71d97cb4626c117c0eaff05dbf5 HEAD -- src src-tauri resources assets index.html package.json package-lock.json .cargo
+          if ($LASTEXITCODE -gt 1) { throw 'Cannot verify immutable source comparison.' }
+          $eligible = $LASTEXITCODE -eq 0
+          "eligible=$($eligible.ToString().ToLowerInvariant())" >> $env:GITHUB_OUTPUT
+          $message = if ($eligible) { 'Fixture-only diagnostic of fixed 105449 bytes; original run passed 21/21. Not current release acceptance.' } else { 'NOT EXECUTED: production differs from fixed 105449 source. No immutable-binary acceptance claimed.' }
+          $message >> $env:GITHUB_STEP_SUMMARY
+          [ordered]@{ eligible=$eligible; tested=$false; source='105449ac03bcb71d97cb4626c117c0eaff05dbf5'; fixture='${{ github.sha }}'; scope=$message } | ConvertTo-Json | Set-Content "$env:RUNNER_TEMP/selection-uninstrumented-eligibility.json"
+          # git diff exit 1 means explicitly ineligible, not a failed diagnostic.
+          exit 0
+      - name: Verify fixed successful-run artifact provenance
+        if: steps.source.outputs.eligible == 'true'
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $headers = @{Authorization="Bearer $env:GH_TOKEN";Accept='application/vnd.github+json'}
+          $base='https://api.github.com/repos/Blueeeecho/EchoLingo'
+          $run=Invoke-RestMethod "$base/actions/runs/41093378868" -Headers $headers
+          if ($run.head_sha -ne '105449ac03bcb71d97cb4626c117c0eaff05dbf5' -or $run.run_attempt -ne 1 -or $run.status -ne 'completed' -or $run.conclusion -ne 'success') { throw 'Immutable run identity/status mismatch.' }
+          $job=Invoke-RestMethod "$base/actions/jobs/124192742876" -Headers $headers
+          $build=@($job.steps | Where-Object { $_.name -eq 'Build desktop installer' -and $_.conclusion -eq 'success' })
+          if ($job.run_id -ne 41093378868 -or $build.Count -ne 1) { throw 'Actual binary build evidence missing.' }
+          $a=Invoke-RestMethod "$base/actions/artifacts/12996756409" -Headers $headers
+          if ($a.id -ne 12996756409 -or $a.name -ne 'EchoLingo-Windows-offline-evidence' -or $a.expired -ne $false -or $a.size_in_bytes -ne 18677246 -or $a.digest -ne 'sha256:fd75af32504397d781b449af491031c8205c8aa74bc399a8adebc4a0db8bfa9b' -or $a.workflow_run.id -ne 41093378868 -or $a.workflow_run.head_sha -ne $run.head_sha) { throw 'Immutable artifact identity mismatch.' }
+      - uses: actions/download-artifact@v4
+        if: steps.source.outputs.eligible == 'true'
+        with:
+          artifact-ids: '12996756409'
+          run-id: '41093378868'
+          github-token: ${{ github.token }}
+          path: immutable-browser-candidate
+      - name: Verify exact stage executable bytes
+        if: steps.source.outputs.eligible == 'true'
+        id: candidate
+        shell: pwsh
+        run: |
+          $files=@(Get-ChildItem immutable-browser-candidate -Recurse -File -Filter echolingo.exe)
+          if ($files.Count -ne 1 -or $files[0].Length -ne 7517184 -or (Get-FileHash $files[0].FullName -Algorithm SHA256).Hash.ToLowerInvariant() -ne 'bc5281a2a945158513ccdeb215881cc4984dc990f80c0c0ffd9738d96d65c0b2') { throw 'Immutable stage mismatch.' }
+          "app=$($files[0].FullName)" >> $env:GITHUB_OUTPUT
+      - uses: actions/setup-node@v4
+        if: steps.source.outputs.eligible == 'true'
+        with:
+          node-version: '24'
+          cache: npm
+      - run: npm ci
+        if: steps.source.outputs.eligible == 'true'
+      - name: One complete 48-case matrix without clipboard probes or selection tracing
+        if: steps.source.outputs.eligible == 'true'
+        shell: powershell
+        run: |
+          & node tests/windows-browser-selection-smoke.mjs --application '${{ steps.candidate.outputs.app }}' --expected-application-sha256 bc5281a2a945158513ccdeb215881cc4984dc990f80c0c0ffd9738d96d65c0b2 --expected-application-bytes 7517184 --selection-suite same-page-mouse --browser-order edge-first --shortcut-gesture paced --clipboard-probe off 2>&1 | Tee-Object "$env:RUNNER_TEMP/selection-uninstrumented.log"
+          exit $LASTEXITCODE
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: immutable-105449-uninstrumented-selection-evidence
+          if-no-files-found: error
+          path: |
+            ${{ runner.temp }}/selection-uninstrumented-eligibility.json
+            ${{ runner.temp }}/selection-uninstrumented.log

@@ -471,6 +471,10 @@ public static class EchoLingoPopupVisibilitySmoke {
                             Require(SetThreadDpiAwarenessContext(new IntPtr(-4)) != IntPtr.Zero, "Physical fixture coordinates unavailable.");
                             string childLocal = Path.Combine(root, "Local"), childTemp = Path.Combine(root, "Temp"); Directory.CreateDirectory(childLocal); Directory.CreateDirectory(childTemp);
                             ProcessStartInfo start = new ProcessStartInfo(executable); start.UseShellExecute = false; start.CreateNoWindow = true;
+                            // Preserve this existing WinForms-plane visibility oracle as an explicit legacy comparison.
+                            // Default native screenshot visibility is verified separately with actual Edge/Chrome and actual-app fixtures.
+                            start.EnvironmentVariables["ECHOLINGO_RUST_CAPTURE"] = "0";
+                            report["captureBackendUnderTest"] = "explicit-legacy-comparison";
                             start.EnvironmentVariables["LOCALAPPDATA"] = childLocal; start.EnvironmentVariables["APPDATA"] = Path.Combine(root, "UnusedRoaming");
                             start.EnvironmentVariables["TEMP"] = childTemp; start.EnvironmentVariables["TMP"] = childTemp;
                             start.EnvironmentVariables["WEBVIEW2_USER_DATA_FOLDER"] = Path.Combine(local, "fixture-webview");

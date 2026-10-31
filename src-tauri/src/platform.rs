@@ -729,6 +729,40 @@ fn bounded_selection_health(value: &Value) -> Value {
         "copyHtmlRestoreAllocatedBytes",
         "copyHtmlRestorePayloadBytes",
         "copyHtmlRestoreSequenceChanged",
+        "copyUnicodeProbeEnabled",
+        "copyUnicodeSnapshotOlePresent",
+        "copyUnicodeSnapshotOleChars",
+        "copyUnicodeSnapshotEqual",
+        "copyUnicodeRestoreEqual",
+        "copyUnicodeSnapshotError",
+        "copyUnicodeSnapshotSeedVerified",
+        "copyUnicodeSnapshotPresent",
+        "copyUnicodeSnapshotAllocatedBytes",
+        "copyUnicodeSnapshotPayloadBytes",
+        "copyUnicodeSnapshotSequenceChanged",
+        "copyUnicodeRestoreError",
+        "copyUnicodeRestoreSeedVerified",
+        "copyUnicodeRestorePresent",
+        "copyUnicodeRestoreAllocatedBytes",
+        "copyUnicodeRestorePayloadBytes",
+        "copyUnicodeRestoreSequenceChanged",
+        "copyRtfProbeEnabled",
+        "copyRtfSnapshotOlePresent",
+        "copyRtfSnapshotOleChars",
+        "copyRtfSnapshotEqual",
+        "copyRtfRestoreEqual",
+        "copyRtfSnapshotError",
+        "copyRtfSnapshotSeedVerified",
+        "copyRtfSnapshotPresent",
+        "copyRtfSnapshotAllocatedBytes",
+        "copyRtfSnapshotPayloadBytes",
+        "copyRtfSnapshotSequenceChanged",
+        "copyRtfRestoreError",
+        "copyRtfRestoreSeedVerified",
+        "copyRtfRestorePresent",
+        "copyRtfRestoreAllocatedBytes",
+        "copyRtfRestorePayloadBytes",
+        "copyRtfRestoreSequenceChanged",
     ] {
         retain(field);
     }
@@ -761,6 +795,27 @@ fn selection_health_from_reply(
 #[cfg(any(target_os = "windows", test))]
 fn bounded_capture_health(value: &Value) -> Value {
     const FIELDS: &[&str] = &[
+        "displayWindowDpiNotificationsVerified",
+        "displayMismatchIndex",
+        "displayDeviceChanged",
+        "displayBeforeWidth",
+        "displayBeforeHeight",
+        "displayAfterWidth",
+        "displayAfterHeight",
+        "displayBeforeMonitorDpi",
+        "displayAfterMonitorDpi",
+        "displayInvalidationReason",
+        "displayInvalidationPhase",
+        "displayExpectedDpi",
+        "displayObservedDpi",
+        "displayAwareness",
+        "displayCount",
+        "displayObservedCount",
+        "displayObservedAwareness",
+        "assembliesLoadedMilliseconds",
+        "nativeTypesReadyMilliseconds",
+        "firstBordersVisibleMilliseconds",
+        "firstPickerFrameCompleteMilliseconds",
         "hookMouseDowns",
         "hookMouseUps",
         "hookMouseMoves",
@@ -777,6 +832,7 @@ fn bounded_capture_health(value: &Value) -> Value {
         "desktopMatched",
         "mismatchKind",
         "hookRunningAfterStop",
+        "hookEscapeReleaseUnconfirmed",
         "inputBackend",
         "mouseHookInstalled",
         "inputPlaneDowns",
@@ -790,6 +846,10 @@ fn bounded_capture_health(value: &Value) -> Value {
         "releaseToCleanupMilliseconds",
         "releaseToReplyMilliseconds",
         "ocrDurationMilliseconds",
+        "nativeCaptureBackend",
+        "inputWindowCancellationMessage",
+        "inputWindowCancellationPhase",
+        "decorativeCancellationNotificationsIgnored",
         "nativeHostReady",
         "nativeHostArmed",
         "nativeHostDowns",
@@ -804,7 +864,60 @@ fn bounded_capture_health(value: &Value) -> Value {
             safe.insert((*field).to_owned(), json!(number));
         }
     }
+    for field in [
+        "displayBeforeX",
+        "displayBeforeY",
+        "displayAfterX",
+        "displayAfterY",
+    ] {
+        if let Some(number) = value
+            .get(field)
+            .and_then(Value::as_i64)
+            .filter(|n| i32::try_from(*n).is_ok())
+        {
+            safe.insert(field.to_owned(), json!(number));
+        }
+    }
     Value::Object(safe)
+}
+
+/// Snapshot only: never starts a helper, takes pixels or changes input ownership.
+#[cfg(target_os = "windows")]
+pub fn capture_diagnostics() -> Result<Value, String> {
+    let mut snapshot = windows_capture_health()
+        .lock()
+        .map(|health| health.clone())
+        .map_err(|_| "CAPTURE_DIAGNOSTICS: Capture metadata is unavailable.".to_string())?;
+    if !snapshot.is_object() {
+        snapshot = json!({});
+    }
+    for (field, value) in [
+        "currentHostSessionReserved",
+        "currentHostOwnedButtons",
+        "currentHostSessionClosing",
+        "currentHostEndRequested",
+    ]
+    .into_iter()
+    .zip(crate::windows_capture_input::diagnostic_state())
+    {
+        snapshot[field] = json!(value);
+    }
+    Ok(snapshot)
+}
+
+#[cfg(target_os = "windows")]
+fn record_capture_host_state(health: &mut Value) {
+    for (field, value) in [
+        "hostSessionReserved",
+        "hostOwnedButtons",
+        "hostSessionClosing",
+        "hostEndRequested",
+    ]
+    .into_iter()
+    .zip(crate::windows_capture_input::diagnostic_state())
+    {
+        health[field] = json!(value);
+    }
 }
 
 /// Read the bounded metadata of the last selected-text attempt in this process.
@@ -1069,6 +1182,24 @@ fn run_windows(
     input: Option<&str>,
     cancel: Option<NativeCancel>,
 ) -> Result<Value, String> {
+    if mode == "capture-ocr" && rust_capture_enabled() {
+        use base64::Engine;
+        let cancellation = cancel
+            .clone()
+            .unwrap_or_else(|| std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)));
+        let image = image_response(run_windows_selection(
+            "capture-image",
+            None,
+            Some(cancellation.clone()),
+            crate::model::WindowsSelectionStrategy::Auto,
+            None,
+        )?)?;
+        let bytes = base64::engine::general_purpose::STANDARD
+            .decode(image)
+            .map_err(|_| "NATIVE_PROTOCOL: Invalid native PNG encoding.".to_owned())?;
+        let text = crate::windows_ocr::recognize_png(&bytes, cancellation)?;
+        return Ok(json!({"ok":true,"text":text,"nativeBackend":"rust-win32-winrt"}));
+    }
     run_windows_selection(
         mode,
         input,
@@ -1089,7 +1220,11 @@ fn run_windows_selection(
     use std::process::Stdio;
     use std::time::{Duration, Instant};
 
+    static CAPTURE_ATTEMPT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let started = Instant::now();
     let capture = matches!(mode, "capture-ocr" | "capture-image");
+    let capture_attempt =
+        capture.then(|| CAPTURE_ATTEMPT.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1);
     let selection = mode == "selected-text";
     let attempt = selection.then(|| attempt.unwrap_or_else(|| begin_selection_attempt(strategy)));
     let stage = |stage| {
@@ -1100,7 +1235,7 @@ fn run_windows_selection(
     stage(1);
     if capture {
         if let Ok(mut health) = windows_capture_health().lock() {
-            *health = json!({"helperResponseReceived": 0});
+            *health = json!({"helperResponseReceived": 0, "attemptId": capture_attempt, "attemptStage": 1});
         }
     }
 
@@ -1114,14 +1249,27 @@ fn run_windows_selection(
     };
     stage(2);
     if capture || mode == "selected-text" {
-        crate::windows_capture_input::wait_available(|| cancelled(cancel.as_ref()))?;
+        let available = crate::windows_capture_input::wait_available(|| cancelled(cancel.as_ref()));
+        if capture {
+            if let Ok(mut health) = windows_capture_health().lock() {
+                record_capture_host_state(&mut health);
+            }
+        }
+        available?;
     }
     stage(3);
+    let input_available_ms = started.elapsed().as_millis() as u64;
+    if capture {
+        if let Ok(mut health) = windows_capture_health().lock() {
+            health["inputAvailableMilliseconds"] = json!(input_available_ms);
+            health["attemptStage"] = json!(2);
+        }
+    }
     let mut command = native_command(mode)?;
     if selection {
         command.args(["-SelectionStrategy", strategy.native_argument()]);
     }
-    let mut cancellation = if cancel.is_some() {
+    let mut cancellation = if cancel.is_some() || (capture && rust_capture_enabled()) {
         Some(native_process::CancellationEvent::new()?)
     } else {
         None
@@ -1162,6 +1310,13 @@ fn run_windows_selection(
     }
     stage(5);
     let helper_started = Instant::now();
+    let helper_launch_ms = started.elapsed().as_millis() as u64;
+    if capture {
+        if let Ok(mut health) = windows_capture_health().lock() {
+            health["helperLaunchMilliseconds"] = json!(helper_launch_ms);
+            health["attemptStage"] = json!(3);
+        }
+    }
     if let Some(attempt) = attempt {
         update_selection_health(attempt, json!({"attemptPhase": 2}));
     }
@@ -1278,6 +1433,15 @@ fn run_windows_selection(
         if let Ok(reply) = serde_json::from_slice::<Value>(&output) {
             let mut safe = bounded_capture_health(&reply["captureHealth"]);
             safe["helperResponseReceived"] = json!(1);
+            safe["attemptId"] = json!(capture_attempt);
+            safe["attemptStage"] = json!(4);
+            safe["resultOk"] = json!(u64::from(reply["ok"].as_bool().unwrap_or(false)));
+            safe["displayChangedError"] =
+                json!(u64::from(reply["error"].as_str().is_some_and(|error| {
+                    error.starts_with("CAPTURE_DISPLAY_CHANGED:")
+                })));
+            safe["inputAvailableMilliseconds"] = json!(input_available_ms);
+            safe["helperLaunchMilliseconds"] = json!(helper_launch_ms);
             safe["helperElapsedMilliseconds"] = json!(helper_started
                 .elapsed()
                 .as_millis()
@@ -1286,6 +1450,7 @@ fn run_windows_selection(
             safe["cancellationRequested"] = json!(u64::from(cancellation_requested));
             safe["cancellationSignalled"] = json!(u64::from(cancellation_signalled));
             safe["cancellationSignalFailed"] = json!(u64::from(cancellation_signal_failed));
+            record_capture_host_state(&mut safe);
             if let Ok(mut health) = windows_capture_health().lock() {
                 *health = safe;
             }
@@ -1444,7 +1609,46 @@ fn verify_native_assembly(path: &std::path::Path, expected: &[u8]) -> Result<(),
 }
 
 #[cfg(target_os = "windows")]
+fn rust_capture_enabled() -> bool {
+    // Only an explicit diagnostic opt-out selects the legacy backend.
+    // Native failures are returned unchanged; never retry capture via PowerShell.
+    std::env::var_os("ECHOLINGO_RUST_CAPTURE").is_none_or(|value| value != "0")
+}
+
+#[cfg(target_os = "windows")]
+fn rust_capture_command() -> Result<std::process::Command, String> {
+    use sha2::{Digest, Sha256};
+    use std::os::windows::process::CommandExt;
+    static HELPER: std::sync::OnceLock<Result<std::path::PathBuf, String>> =
+        std::sync::OnceLock::new();
+    const BYTES: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/echolingo-native-capture.exe"));
+    let path = HELPER
+        .get_or_init(|| {
+            let local =
+                std::env::var_os("LOCALAPPDATA").ok_or("NATIVE: LOCALAPPDATA is unavailable.")?;
+            let folder = std::path::PathBuf::from(local).join("EchoLingo/native");
+            ensure_private_directory(&folder)?;
+            materialize(
+                &folder,
+                &format!("echolingo-capture-{:x}.exe", Sha256::digest(BYTES)),
+                BYTES,
+            )
+        })
+        .as_ref()
+        .map_err(Clone::clone)?;
+    verify_native_assembly(path,BYTES).map_err(|_|"NATIVE_BINARY: The packaged native capture executable changed or is unavailable. Restart or reinstall EchoLingo.".to_owned())?;
+    let mut command = std::process::Command::new(path);
+    command
+        .args(["-Mode", "capture-image"])
+        .creation_flags(0x08000000);
+    Ok(command)
+}
+
+#[cfg(target_os = "windows")]
 fn native_command(mode: &str) -> Result<std::process::Command, String> {
+    if mode == "capture-image" && rust_capture_enabled() {
+        return rust_capture_command();
+    }
     use sha2::{Digest, Sha256};
     use std::os::windows::process::CommandExt;
     use std::sync::OnceLock;
@@ -1458,7 +1662,10 @@ fn native_command(mode: &str) -> Result<std::process::Command, String> {
             ensure_private_directory(&folder)?;
             // Windows PowerShell 5.1 needs a BOM to decode non-ASCII source reliably.
             let mut bytes = vec![0xef, 0xbb, 0xbf];
-            bytes.extend_from_slice(include_bytes!("../native/windows.ps1"));
+            bytes.extend_from_slice(include_bytes!(concat!(
+                env!("OUT_DIR"),
+                "/echolingo-windows-launcher.ps1"
+            )));
             let script = materialize(&folder, "echolingo-native-helper.ps1", &bytes)?;
             let dll = include_bytes!(concat!(env!("OUT_DIR"), "/echolingo-windows-native.dll"));
             let digest = format!("{:x}", Sha256::digest(dll));
@@ -1693,11 +1900,14 @@ mod tests {
             "copyHtmlProbeEnabled": 1, "copyHtmlSnapshotPayloadBytes": 45,
             "copyHtmlSnapshotOleChars": 0, "copyHtmlRestoreEqual": 0,
             "copyHtmlSnapshot": "private", "copyHtmlNonce": "private",
-            "copyHtmlRestorePayloadBytes": -1, "copyHtmlSnapshotEqual": "private"
+            "copyHtmlRestorePayloadBytes": -1, "copyHtmlSnapshotEqual": "private",
+            "copyUnicodeSnapshotOleChars": 42, "copyUnicodeRestoreEqual": 0,
+            "copyRtfRestorePayloadBytes": 46, "copyUnicodeNonce": "private",
+            "copyRtfPayload": "private", "copyUnicodeRestoreError": -1
         }));
         assert_eq!(
             safe,
-            json!({"copyHtmlProbeEnabled":1,"copyHtmlSnapshotPayloadBytes":45,"copyHtmlSnapshotOleChars":0,"copyHtmlRestoreEqual":0})
+            json!({"copyHtmlProbeEnabled":1,"copyHtmlSnapshotPayloadBytes":45,"copyHtmlSnapshotOleChars":0,"copyHtmlRestoreEqual":0,"copyUnicodeSnapshotOleChars":42,"copyUnicodeRestoreEqual":0,"copyRtfRestorePayloadBytes":46})
         );
     }
 
@@ -1810,6 +2020,22 @@ mod tests {
         assert_eq!(
             super::bounded_capture_health(&serde_json::json!(null)),
             serde_json::json!({})
+        );
+    }
+
+    #[test]
+    fn capture_topology_health_accepts_signed_coordinates_but_never_content() {
+        assert_eq!(
+            super::bounded_capture_health(&json!({
+                "displayInvalidationReason": 4, "displayInvalidationPhase": 2,
+                "displayBeforeX": -1920, "displayAfterY": -300,
+                "displayBeforeY": 2147483648i64, "displayAfterX": "secret",
+                "displayExpectedDpi": 144, "displayObservedDpi": 192,
+                "monitorName": "private", "nativeTypesReadyMilliseconds": 180
+            })),
+            json!({"displayInvalidationReason":4,"displayInvalidationPhase":2,
+            "displayBeforeX":-1920,"displayAfterY":-300,"displayExpectedDpi":144,
+            "displayObservedDpi":192,"nativeTypesReadyMilliseconds":180})
         );
     }
 

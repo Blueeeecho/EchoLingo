@@ -38,6 +38,9 @@ function Write-Result($Value) {
         if ($script:HelperPhases.ContainsKey('ocrRecognizedMilliseconds')) {
             [CaptureHealth]::Set('ocrDurationMilliseconds',[long]($script:HelperPhases['ocrRecognizedMilliseconds']-$script:HelperPhases['ocrStartMilliseconds']))
         }
+        foreach ($phase in @('assembliesLoadedMilliseconds','nativeTypesReadyMilliseconds')) {
+            if ($script:HelperPhases.ContainsKey($phase)) { [CaptureHealth]::Set($phase,[long]$script:HelperPhases[$phase]) }
+        }
         $Value['captureHealth'] = [CaptureHealth]::Snapshot()
     }
     if ($PerformanceDiagnostics) {
@@ -61,9 +64,13 @@ try {
     }
     Add-Type -AssemblyName System.Windows.Forms
     Add-Type -AssemblyName System.Drawing
-    Add-Type -AssemblyName UIAutomationClient
-    Add-Type -AssemblyName UIAutomationTypes
-    Add-Type -AssemblyName WindowsBase
+    # Packaged region capture never queries UI Automation. Leave its WPF/UIA
+    # assemblies lazy; selected-text and source compilation retain explicit loads.
+    if ([string]::IsNullOrWhiteSpace($NativeAssemblyPath) -or $Mode -notin 'capture-ocr','capture-image') {
+        Add-Type -AssemblyName UIAutomationClient
+        Add-Type -AssemblyName UIAutomationTypes
+        Add-Type -AssemblyName WindowsBase
+    }
     $script:HelperPhases['assembliesLoadedMilliseconds'] = $script:HelperWatch.Elapsed.TotalMilliseconds
     if (-not [string]::IsNullOrWhiteSpace($NativeAssemblyPath)) {
         $script:NativeBackend = 'precompiled-framework-dll'
@@ -127,17 +134,17 @@ public static class CaptureHealth {
     public static void Increment(string name) { long value;values.TryGetValue(name,out value);values[name]=value+1; }
     public static void ResetSelection() {
         List<string> old = new List<string>();
-        foreach (string key in values.Keys) if (key.StartsWith("selectionQuery", StringComparison.Ordinal) || key.StartsWith("copyHtml", StringComparison.Ordinal)) old.Add(key);
+        foreach (string key in values.Keys) if (key.StartsWith("selectionQuery", StringComparison.Ordinal) || (key.StartsWith("copyHtml", StringComparison.Ordinal) || key.StartsWith("copyUnicode", StringComparison.Ordinal) || key.StartsWith("copyRtf", StringComparison.Ordinal))) old.Add(key);
         foreach (string key in old) values.Remove(key);
         values["selectionQueryCount"] = 0;
     }
     public static int ResetSelectionSelfTest() {
         Dictionary<string, long> previous = Snapshot();
         try {
-            values.Clear(); values["copyHtmlSnapshotSeedVerified"] = 1; values["copyHtmlRestoreEqual"] = 1;
+            values.Clear(); values["copyHtmlSnapshotSeedVerified"] = 1; values["copyHtmlRestoreEqual"] = 1; values["copyUnicodeSnapshotEqual"] = 1; values["copyRtfRestoreEqual"] = 1;
             values["selectionQuery1Stage"] = 11; values["unrelatedFixtureCounter"] = 7;
             ResetSelection();
-            if (values.ContainsKey("copyHtmlSnapshotSeedVerified") || values.ContainsKey("copyHtmlRestoreEqual") || values.ContainsKey("selectionQuery1Stage")) throw new Exception("PROBE_EARLY_FAILURE_STALE_HEALTH");
+            if (values.ContainsKey("copyHtmlSnapshotSeedVerified") || values.ContainsKey("copyHtmlRestoreEqual") || values.ContainsKey("copyUnicodeSnapshotEqual") || values.ContainsKey("copyRtfRestoreEqual") || values.ContainsKey("selectionQuery1Stage")) throw new Exception("PROBE_EARLY_FAILURE_STALE_HEALTH");
             if (values["selectionQueryCount"] != 0 || values["unrelatedFixtureCounter"] != 7 || values.Count != 2) throw new Exception("PROBE_RESET_CHANGED_OTHER_HEALTH");
             ResetSelection();
             if (values.Count != 2) throw new Exception("PROBE_DISABLED_ATTEMPT_ADDED_HEALTH");
@@ -274,8 +281,10 @@ public sealed class ClipboardHtmlProbe {
     [DllImport("kernel32.dll")] static extern UIntPtr GlobalSize(IntPtr value);
     [DllImport("kernel32.dll")] static extern IntPtr GlobalLock(IntPtr value);
     [DllImport("kernel32.dll")] static extern bool GlobalUnlock(IntPtr value);
-    readonly string nonce; byte[] original;
-    ClipboardHtmlProbe(string value) { nonce = value; }
+    readonly string nonce, format, prefix; byte[] original; uint snapshotSequence; bool snapshotVerified;
+    ClipboardHtmlProbe unicode, rtf;
+    ClipboardHtmlProbe(string value) : this(value, DataFormats.Html, "copyHtml") { }
+    ClipboardHtmlProbe(string value, string dataFormat, string diagnosticPrefix) { nonce = value; format = dataFormat; prefix = diagnosticPrefix; }
     public static bool ValidNonce(string value) {
         if (value == null || value.Length != 32) return false;
         foreach (char c in value) if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f'))) return false;
@@ -297,6 +306,21 @@ public sealed class ClipboardHtmlProbe {
         if (length < 0) throw new InvalidOperationException();
         byte[] result = new byte[length + 1]; Array.Copy(allocated, result, result.Length); return result;
     }
+    static byte[] UnicodePayload(byte[] allocated) {
+        if (allocated == null || allocated.Length > 65536) throw new InvalidOperationException();
+        for (int i = 0; i + 1 < allocated.Length; i += 2) if (allocated[i] == 0 && allocated[i + 1] == 0) {
+            byte[] result = new byte[i + 2]; Array.Copy(allocated, result, result.Length); return result;
+        }
+        throw new InvalidOperationException();
+    }
+    byte[] EncodedValue(string text) {
+        if (text == null || text.Length > (format == DataFormats.UnicodeText ? 32767 : 65535)) return null;
+        if (format == DataFormats.UnicodeText) return Encoding.Unicode.GetBytes(text + '\0');
+        // The generated RTF seed is ASCII. Do not invent an ANSI code-page
+        // interpretation for arbitrary RTF; unsupported input is not comparable.
+        if (format == DataFormats.Rtf) { foreach (char c in text) if (c > 127) return null; return Encoding.ASCII.GetBytes(text + '\0'); }
+        return Encoding.UTF8.GetBytes(text + '\0');
+    }
     static byte[] Memory(uint format) {
         IntPtr handle = GetClipboardData(format); if (handle == IntPtr.Zero) throw new InvalidOperationException();
         ulong length = GlobalSize(handle).ToUInt64(); if (length == 0 || length > 65536) throw new InvalidOperationException();
@@ -305,18 +329,20 @@ public sealed class ClipboardHtmlProbe {
         finally { GlobalUnlock(handle); }
     }
     byte[] ReadBoundary(string phase) {
-        string prefix = "copyHtml" + phase; uint sequence = GetClipboardSequenceNumber(); bool opened = false;
+        string prefix = this.prefix + phase; uint sequence = GetClipboardSequenceNumber(); bool opened = false;
         try {
             opened = OpenClipboard(IntPtr.Zero); if (!opened) { CaptureHealth.Set(prefix + "Error", 1); return null; }
             uint marker = RegisterClipboardFormat("EchoLingo.ClipboardProbe." + nonce);
             if (!IsClipboardFormatAvailable(marker)) { CaptureHealth.Set(prefix + "Error", 2); return null; }
             if (!MarkerMatches(Memory(marker), nonce)) { CaptureHealth.Set(prefix + "Error", 3); return null; }
             CaptureHealth.Set(prefix + "SeedVerified", 1);
-            uint html = RegisterClipboardFormat(DataFormats.Html);
+            uint html = format == DataFormats.UnicodeText ? 13u : RegisterClipboardFormat(format);
             bool present = IsClipboardFormatAvailable(html); CaptureHealth.Set(prefix + "Present", present ? 1 : 0);
             if (!present) return null;
             byte[] bytes = Memory(html); CaptureHealth.Set(prefix + "AllocatedBytes", bytes.Length);
-            byte[] payload = Payload(bytes); CaptureHealth.Set(prefix + "PayloadBytes", payload.Length); return payload;
+            byte[] payload = format == DataFormats.UnicodeText ? UnicodePayload(bytes) : Payload(bytes); CaptureHealth.Set(prefix + "PayloadBytes", payload.Length);
+            if (phase == "Snapshot") { snapshotSequence = sequence; snapshotVerified = sequence == GetClipboardSequenceNumber(); }
+            return payload;
         } catch { CaptureHealth.Set(prefix + "Error", 4); return null; }
         finally {
             CaptureHealth.Set(prefix + "SequenceChanged", sequence == GetClipboardSequenceNumber() ? 0 : 1);
@@ -326,19 +352,36 @@ public sealed class ClipboardHtmlProbe {
     public static ClipboardHtmlProbe Begin() {
         string nonce = Environment.GetEnvironmentVariable("ECHOLINGO_CLIPBOARD_DIAGNOSTIC_NONCE");
         if (!ValidNonce(nonce)) return null;
-        foreach (string field in new string[] { "copyHtmlProbeEnabled", "copyHtmlSnapshotOlePresent", "copyHtmlSnapshotOleChars", "copyHtmlSnapshotEqual", "copyHtmlRestoreEqual", "copyHtmlSnapshotError", "copyHtmlSnapshotSeedVerified", "copyHtmlSnapshotPresent", "copyHtmlSnapshotAllocatedBytes", "copyHtmlSnapshotPayloadBytes", "copyHtmlSnapshotSequenceChanged", "copyHtmlRestoreError", "copyHtmlRestoreSeedVerified", "copyHtmlRestorePresent", "copyHtmlRestoreAllocatedBytes", "copyHtmlRestorePayloadBytes", "copyHtmlRestoreSequenceChanged" }) CaptureHealth.Set(field, 0);
-        ClipboardHtmlProbe probe = new ClipboardHtmlProbe(nonce); CaptureHealth.Set("copyHtmlProbeEnabled", 1);
-        probe.original = probe.ReadBoundary("Snapshot"); return probe;
+        ClipboardHtmlProbe probe = new ClipboardHtmlProbe(nonce);
+        probe.unicode = new ClipboardHtmlProbe(nonce, DataFormats.UnicodeText, "copyUnicode");
+        probe.rtf = new ClipboardHtmlProbe(nonce, DataFormats.Rtf, "copyRtf");
+        // Fixture-only pre-OLE acquisition observations. GetClipboardData can
+        // force delayed rendering, so these measurements are not nonperturbing.
+        // Each format validates the synthetic nonce in its own held clipboard
+        // lock. The original OLE enumeration/read order and verdict are untouched.
+        probe.Initialize(); probe.unicode.Initialize(); probe.rtf.Initialize(); return probe;
     }
-    public void SnapshotValue(object value) {
-        string text = value as string; CaptureHealth.Set("copyHtmlSnapshotOlePresent", text == null ? 0 : 1);
+    void Initialize() {
+        foreach (string suffix in new string[] { "ProbeEnabled", "SnapshotOlePresent", "SnapshotOleChars", "SnapshotEqual", "RestoreEqual", "SnapshotError", "SnapshotSeedVerified", "SnapshotPresent", "SnapshotAllocatedBytes", "SnapshotPayloadBytes", "SnapshotSequenceChanged", "RestoreError", "RestoreSeedVerified", "RestorePresent", "RestoreAllocatedBytes", "RestorePayloadBytes", "RestoreSequenceChanged" }) CaptureHealth.Set(prefix + suffix, 0);
+        CaptureHealth.Set(prefix + "ProbeEnabled", 1); original = ReadBoundary("Snapshot");
+    }
+    static bool MayObserveOle(bool verified, byte[] original, uint snapshot, uint current) { return verified && original != null && snapshot == current; }
+    public void SnapshotValue(string dataFormat, object value) {
+        if (dataFormat != format) { if (unicode != null) unicode.SnapshotValue(dataFormat, value); if (rtf != null) rtf.SnapshotValue(dataFormat, value); return; }
+        // The ordinary snapshot may contain non-fixture data. Do not observe
+        // its value unless this same format's nonce and generation were proved.
+        if (!MayObserveOle(snapshotVerified, original, snapshotSequence, GetClipboardSequenceNumber())) { CaptureHealth.Set(prefix + "SnapshotError", 6); return; }
+        string text = value as string; CaptureHealth.Set(prefix + "SnapshotOlePresent", text == null ? 0 : 1);
         if (text == null) return;
-        CaptureHealth.Set("copyHtmlSnapshotOleChars", Math.Min(10000000, text.Length));
-        CaptureHealth.Set("copyHtmlSnapshotEqual", original != null && text.Length <= 65536 && Equal(original, Encoding.UTF8.GetBytes(text + '\0')) ? 1 : 0);
+        CaptureHealth.Set(prefix + "SnapshotOleChars", Math.Min(10000000, text.Length));
+        byte[] encoded = EncodedValue(text);
+        if (encoded == null) { CaptureHealth.Set(prefix + "SnapshotError", 5); return; }
+        CaptureHealth.Set(prefix + "SnapshotEqual", Equal(original, encoded) ? 1 : 0);
     }
     public void Restored() {
         byte[] restored = ReadBoundary("Restore");
-        CaptureHealth.Set("copyHtmlRestoreEqual", Equal(original, restored) ? 1 : 0);
+        CaptureHealth.Set(prefix + "RestoreEqual", Equal(original, restored) ? 1 : 0);
+        if (unicode != null) unicode.Restored(); if (rtf != null) rtf.Restored();
     }
     public static int SelfTest() {
         string nonce = "0123456789abcdef0123456789abcdef"; int count = 0;
@@ -347,6 +390,12 @@ public sealed class ClipboardHtmlProbe {
         if (!Equal(Payload(new byte[] { 65, 0, 99 }), new byte[] {65, 0}) || Equal(new byte[] {65, 0}, new byte[] {0}) || Equal(null, null)) throw new Exception("PROBE_PAYLOAD_POLICY"); count++;
         bool rejected = false; try { Payload(new byte[] {65}); } catch (InvalidOperationException) { rejected = true; }
         if (!rejected) throw new Exception("PROBE_TERMINATOR_POLICY"); count++;
+        if (!Equal(UnicodePayload(new byte[] {65,0,66,0,0,0,99}), new byte[] {65,0,66,0,0,0})) throw new Exception("PROBE_UNICODE_ALIGNED_TERMINATOR"); count++;
+        rejected = false; try { UnicodePayload(new byte[] {65,0,0}); } catch (InvalidOperationException) { rejected = true; }
+        if (!rejected) throw new Exception("PROBE_UNICODE_ODD_TERMINATOR"); count++;
+        ClipboardHtmlProbe unicode = new ClipboardHtmlProbe(nonce, DataFormats.UnicodeText, "copyUnicode"), rtf = new ClipboardHtmlProbe(nonce, DataFormats.Rtf, "copyRtf");
+        if (!Equal(unicode.EncodedValue("A\u4e2d"),new byte[]{65,0,45,78,0,0}) || rtf.EncodedValue("\u4e2d") != null || !Equal(rtf.EncodedValue("A"),new byte[]{65,0})) throw new Exception("PROBE_FORMAT_ENCODING"); count++;
+        if (MayObserveOle(false,new byte[]{0},1,1) || MayObserveOle(true,null,1,1) || MayObserveOle(true,new byte[]{0},1,2) || !MayObserveOle(true,new byte[]{0},1,1)) throw new Exception("PROBE_NONCE_GENERATION_OBSERVATION_GATE"); count++;
         return count + CaptureHealth.ResetSelectionSelfTest();
     }
 }
@@ -1176,7 +1225,7 @@ public static class EchoLingoNative {
         if (existing == null) return saved;
         foreach (string format in existing.GetFormats(false)) {
             object value = CloneClipboardValue(existing.GetData(format, false));
-            if (probe != null && format == DataFormats.Html) probe.SnapshotValue(value);
+            if (probe != null) probe.SnapshotValue(format, value);
             IDisposable disposable = value as IDisposable;
             if (disposable != null) resources.Add(disposable);
             saved.SetData(format, false, value);
@@ -1858,7 +1907,25 @@ public sealed class CaptureTopologyPolicy {
     readonly int awareness;
     int invalid;
     public bool Invalid { get { return System.Threading.Interlocked.CompareExchange(ref invalid, 0, 0) != 0; } }
-    public void Invalidate() { System.Threading.Interlocked.Exchange(ref invalid, 1); }
+    readonly object invalidationGate = new object();
+    int reason, invalidationPhase; uint beforeDpi, afterDpi;
+    public int InvalidationPhase { get { lock(invalidationGate) return invalidationPhase; } }
+    public int Reason { get { lock(invalidationGate) return reason; } }
+    public uint BeforeDpi { get { lock(invalidationGate) return beforeDpi; } }
+    public uint AfterDpi { get { lock(invalidationGate) return afterDpi; } }
+    public int Awareness { get { return awareness; } }
+    public void Invalidate() { Invalidate(1, 0, 0); }
+    public void Invalidate(int source, uint expected, uint actual, int phase = 0) {
+        lock(invalidationGate) {
+            if (Invalid) return;
+            reason=source;beforeDpi=expected;afterDpi=actual;invalidationPhase=phase;
+            System.Threading.Interlocked.Exchange(ref invalid, 1);
+        }
+    }
+    public static bool DpiMessageChanges(uint expected, long message) {
+        uint x=(uint)(message & 0xFFFF), y=(uint)((message >> 16) & 0xFFFF);
+        return expected == 0 || x != expected || y != expected;
+    }
     public CaptureDisplaySnapshot[] Displays { get { return (CaptureDisplaySnapshot[])displays.Clone(); } }
     public CaptureTopologyPolicy(CaptureDisplaySnapshot[] source, int dpiAwareness) {
         if (source == null || source.Length == 0) throw new InvalidOperationException("CAPTURE_DISPLAY_CHANGED: No capture display is available.");
@@ -1891,7 +1958,13 @@ public sealed class CaptureTopologyPolicy {
         expected.Invalidate();
         Assert(finished.Finished && !expected.Matches(new CaptureTopologyPolicy(new CaptureDisplaySnapshot[] { left, main }, 2)), "A display event after completion must invalidate even identical current geometry.");
         Assert(expected.Invalid && !expected.Matches(new CaptureTopologyPolicy(new CaptureDisplaySnapshot[] { main, left }, 2)), "An invalidated capture cannot become valid when displays return to their previous arrangement.");
-        return 7;
+        Assert(!DpiMessageChanges(144, (144L<<16)|144), "Repeated same-DPI notification is not a scale change.");
+        Assert(DpiMessageChanges(144, (192L<<16)|192) && DpiMessageChanges(144, (192L<<16)|144), "Either DPI axis changing must invalidate.");
+        CaptureTopologyPolicy fresh = new CaptureTopologyPolicy(new CaptureDisplaySnapshot[] { left, main }, 2);
+        fresh.Invalidate(4, 144, 192); fresh.Invalidate(2, 96, 96);
+        Assert(fresh.Reason==4 && fresh.BeforeDpi==144 && fresh.AfterDpi==192, "First invalidation evidence must remain stable.");
+        Assert(new CaptureTopologyPolicy(new CaptureDisplaySnapshot[] { left, main }, 2).Matches(new CaptureTopologyPolicy(new CaptureDisplaySnapshot[] { left, main }, 2)), "Next capture rebuilds topology after a cancelled generation.");
+        return 11;
     }
 }
 
@@ -2272,9 +2345,9 @@ sealed class CaptureHoverResolver {
 sealed class CaptureEdgeWindow : Form {
     [DllImport("user32.dll", SetLastError=true)] static extern bool SetWindowPos(IntPtr window, IntPtr after, int x, int y, int width, int height, uint flags);
     readonly uint expectedDpi;
-    readonly Action invalidated;
+    readonly Action<int, uint, uint> invalidated;
     static readonly Color ClearKey = Color.FromArgb(255, 0, 255);
-    public CaptureEdgeWindow(Rectangle screen, uint dpi, Action onInvalidated) {
+    public CaptureEdgeWindow(Rectangle screen, uint dpi, Action<int, uint, uint> onInvalidated) {
         expectedDpi = dpi; invalidated = onInvalidated;
         AutoScaleMode = AutoScaleMode.None;
         FormBorderStyle = FormBorderStyle.None;
@@ -2296,7 +2369,14 @@ sealed class CaptureEdgeWindow : Form {
     }
     protected override void WndProc(ref Message message) {
         if (message.Msg == 0x0021) { message.Result = new IntPtr(3); return; } // MA_NOACTIVATE
-        if (message.Msg == 0x007E || (message.Msg == 0x02E0 && (uint)(message.WParam.ToInt64() & 0xFFFF) != expectedDpi)) invalidated();
+        if (message.Msg == 0x007E) invalidated(2, 0, 0);
+        if (message.Msg == 0x02E0) {
+            if (CaptureTopologyPolicy.DpiMessageChanges(expectedDpi, message.WParam.ToInt64()))
+                invalidated(3, expectedDpi, (uint)(message.WParam.ToInt64() & 0xFFFF));
+            // Fixed physical edge bounds are managed by Present. WinForms must
+            // not apply a suggested scaled rectangle to this decorative HWND.
+            message.Result = IntPtr.Zero; return;
+        }
         base.WndProc(ref message);
     }
     public IntPtr Present(Rectangle edge, bool raise) {
@@ -2321,7 +2401,7 @@ sealed class CaptureOverlay : IDisposable {
     readonly Rectangle screen;
     readonly int index;
     readonly CaptureEdgeWindow[] edges = new CaptureEdgeWindow[12];
-    public CaptureOverlay(Rectangle display, int screenIndex, uint dpi, Action onInvalidated, Action<IntPtr> register) {
+    public CaptureOverlay(Rectangle display, int screenIndex, uint dpi, Action<int, uint, uint> onInvalidated, Action<IntPtr> register) {
         screen = display; index = screenIndex;
         try {
             for (int i = 0; i < edges.Length; i++) {
@@ -2406,6 +2486,7 @@ sealed class CaptureInputPlanes : IDisposable {
     [DllImport("user32.dll")] static extern bool DestroyWindow(IntPtr window);
     [DllImport("user32.dll")] static extern bool IsWindow(IntPtr window);
     [DllImport("user32.dll")] static extern bool IsWindowVisible(IntPtr window);
+    [DllImport("user32.dll")] static extern bool GetWindowRect(IntPtr window, out RectangleData rectangle);
     [DllImport("user32.dll")] static extern bool ClientToScreen(IntPtr window, ref Point point);
     [DllImport("user32.dll")] static extern bool GetPhysicalCursorPos(out Point point);
     [DllImport("user32.dll")] static extern IntPtr LoadCursor(IntPtr instance, IntPtr name);
@@ -2418,11 +2499,12 @@ sealed class CaptureInputPlanes : IDisposable {
     const uint Styles = 0x00200000 | 0x08000000 | 0x00000080 | 0x00000008; // NOREDIR/NOACTIVATE/TOOLWINDOW/TOPMOST
     readonly WindowProc callback;
     readonly List<IntPtr> handles = new List<IntPtr>();
+    readonly Dictionary<IntPtr,CaptureDisplaySnapshot> expectedDisplays = new Dictionary<IntPtr,CaptureDisplaySnapshot>();
     readonly object gate;
     readonly CaptureSelectionState state;
     readonly CaptureInputPolicy input;
     readonly CaptureMoveMailbox moves;
-    readonly Action invalidated;
+    readonly Action<int, uint, uint> invalidated;
     readonly IntPtr instance;
     readonly string className;
     bool registered, shown, disposed;
@@ -2441,8 +2523,8 @@ sealed class CaptureInputPlanes : IDisposable {
         uint expected = topmost ? Styles : Styles & ~0x8U;
         return (actual & expected) == expected && (actual & (0x00080000 | 0x00000020)) == 0;
     }
-    public CaptureInputPlanes(Rectangle[] displays, object selectionGate, CaptureSelectionState selection,
-        CaptureInputPolicy policy, CaptureMoveMailbox mailbox, Action onInvalidated, Action<IntPtr> register) {
+    public CaptureInputPlanes(CaptureDisplaySnapshot[] snapshots, object selectionGate, CaptureSelectionState selection,
+        CaptureInputPolicy policy, CaptureMoveMailbox mailbox, Action<int, uint, uint> onInvalidated, Action<IntPtr> register) {
         gate = selectionGate; state = selection; input = policy; moves = mailbox; invalidated = onInvalidated;
         callback = WndProc; instance = GetModuleHandle(null);
         className = "EchoLingoCaptureInputPlane-" + Process.GetCurrentProcess().Id;
@@ -2457,7 +2539,8 @@ sealed class CaptureInputPlanes : IDisposable {
             if (RegisterClassEx(ref value) == 0)
                 throw new InvalidOperationException("CAPTURE_INPUT_PLANE: Windows could not create the capture input class.");
             registered = true;
-            foreach (Rectangle display in displays) {
+            foreach (CaptureDisplaySnapshot snapshot in snapshots) {
+                Rectangle display = snapshot.Bounds;
                 if (display.Width <= 0 || display.Height <= 0 || display.Width > Int16.MaxValue || display.Height > Int16.MaxValue)
                     throw new InvalidOperationException("CAPTURE_INPUT_PLANE: The display exceeds Windows mouse-message coordinate limits.");
                 // Created hidden. Do not eat an existing source application's
@@ -2465,7 +2548,7 @@ sealed class CaptureInputPlanes : IDisposable {
                 IntPtr window = CreateWindowEx(Styles, className, "", 0x80000000, display.X, display.Y, display.Width, display.Height,
                     IntPtr.Zero, IntPtr.Zero, instance, IntPtr.Zero);
                 if (window == IntPtr.Zero) throw new InvalidOperationException("CAPTURE_INPUT_PLANE: Windows could not create a display input window.");
-                handles.Add(window); register(window);
+                handles.Add(window); expectedDisplays[window]=snapshot; register(window);
                 if (!StylesMatch(window, false))
                     throw new InvalidOperationException("CAPTURE_INPUT_PLANE: The capture input window styles could not be verified.");
             }
@@ -2500,7 +2583,17 @@ sealed class CaptureInputPlanes : IDisposable {
             if (message == 0x0021) return new IntPtr(3); // MA_NOACTIVATE; keep the actual first down.
             if (message == 0x0014) return new IntPtr(1); // No background brush or GDI surface.
             if (message == 0x000F) { PaintData paint; BeginPaint(window, out paint); EndPaint(window, ref paint); return IntPtr.Zero; }
-            if (message == 0x007E || (message == 0x02E0 && shown)) { invalidated(); return IntPtr.Zero; }
+            if (message == 0x007E) { invalidated(2, 0, 0); return IntPtr.Zero; }
+            if (message == 0x02E0 && shown) {
+                CaptureDisplaySnapshot expected; RectangleData actual;
+                bool known = expectedDisplays.TryGetValue(window, out expected);
+                bool geometry = GetWindowRect(window, out actual) && known &&
+                    Rectangle.FromLTRB(actual.left, actual.top, actual.right, actual.bottom) == expected.Bounds;
+                if (!geometry) invalidated(6, expected.Dpi, (uint)(wp.ToInt64() & 0xFFFF));
+                else if (CaptureTopologyPolicy.DpiMessageChanges(expected.Dpi, wp.ToInt64()))
+                    invalidated(4, expected.Dpi, (uint)(wp.ToInt64() & 0xFFFF));
+                return IntPtr.Zero;
+            }
             if (message == 0x001F) { lock (gate) state.Cancel(); return IntPtr.Zero; } // WM_CANCELMODE
             if (message == 0x0215) { lock (gate) state.Cancel(); return IntPtr.Zero; } // Unexpected WM_CAPTURECHANGED; never activate to recapture.
             if (message >= 0x0200 && message <= 0x020E) {
@@ -2921,6 +3014,8 @@ sealed class RegionPicker : ApplicationContext {
     readonly uint hostThread;
     readonly long hostToken;
     bool stopping, cleaned, observing;
+    int topologyVerificationInProgress;
+    int phase; // 0 construction, 1 preparation, 2 idle, 3 drag, 4 finished
     int renderedHighlight = -2;
     Rectangle renderedSelection;
     Rectangle renderedHover;
@@ -2944,7 +3039,7 @@ sealed class RegionPicker : ApplicationContext {
         try {
             wake = new CaptureWakeWindow(OnMoveWake);
             moves = new CaptureMoveMailbox(wake.Post); wake.Bind(moves);
-            planes = new CaptureInputPlanes(rectangles, selectionGate, state, input, moves, InvalidateEnvironment, handles.Add);
+            planes = new CaptureInputPlanes(displays, selectionGate, state, input, moves, InvalidateEnvironment, handles.Add);
             CaptureHealth.Set("inputPlaneCount", planes.Count);
             for (int i = 0; i < rectangles.Length; i++) overlays.Add(new CaptureOverlay(rectangles[i], i, displays[i].Dpi, InvalidateEnvironment,
                 delegate(IntPtr handle) { handles.Add(handle); hintHandles.Add(handle); }));
@@ -2966,7 +3061,53 @@ sealed class RegionPicker : ApplicationContext {
         }
         return new CaptureTopologyPolicy(displays, GetAwarenessFromDpiAwarenessContext(GetThreadDpiAwarenessContext()));
     }
-    void InvalidateEnvironment() { topology.Invalidate(); }
+    void InvalidateEnvironment(int reason, uint expected, uint actual) {
+        // A window receiving a new DPI is not proof that the desktop changed:
+        // verify every monitor's physical geometry/DPI before rejecting it.
+        // Real display broadcasts and unexpected input-window movement remain sticky.
+        if (reason == 3 || reason == 4) {
+            // Creating hidden DPI probes can pump native window messages. A
+            // reentrant notification cannot recursively verify or clear failure.
+            if (System.Threading.Interlocked.CompareExchange(ref topologyVerificationInProgress,1,0) != 0) {
+                topology.Invalidate(7, expected, actual, System.Threading.Interlocked.CompareExchange(ref phase,0,0));
+                return;
+            }
+            try {
+                CaptureTopologyPolicy observed = ReadTopology();
+                RecordComparison(observed);
+                if (topology.Matches(observed)) {
+                    CaptureHealth.Increment("displayWindowDpiNotificationsVerified");
+                    return;
+                }
+            } catch { } // An unverifiable coordinate environment is never accepted.
+            finally { System.Threading.Interlocked.Exchange(ref topologyVerificationInProgress,0); }
+        }
+        topology.Invalidate(reason, expected, actual, System.Threading.Interlocked.CompareExchange(ref phase,0,0));
+    }
+    void RecordTopology() {
+        CaptureHealth.Set("displayInvalidationReason", topology.Reason);
+        CaptureHealth.Set("displayInvalidationPhase", topology.InvalidationPhase);
+        CaptureHealth.Set("displayExpectedDpi", topology.BeforeDpi);
+        CaptureHealth.Set("displayObservedDpi", topology.AfterDpi);
+        CaptureHealth.Set("displayAwareness", topology.Awareness);
+        CaptureHealth.Set("displayCount", topology.Displays.Length);
+    }
+    void RecordComparison(CaptureTopologyPolicy current) {
+        CaptureHealth.Set("displayObservedCount", current.Displays.Length);
+        CaptureHealth.Set("displayObservedAwareness", current.Awareness);
+        CaptureDisplaySnapshot[] old = topology.Displays, now = current.Displays;
+        for (int i=0; i<Math.Min(old.Length,now.Length); i++) {
+            if (old[i].Device==now[i].Device && old[i].Bounds==now[i].Bounds && old[i].Dpi==now[i].Dpi) continue;
+            CaptureHealth.Set("displayMismatchIndex", i+1);
+            CaptureHealth.Set("displayDeviceChanged", old[i].Device==now[i].Device ? 0 : 1);
+            CaptureHealth.Set("displayBeforeX",old[i].Bounds.X);CaptureHealth.Set("displayBeforeY",old[i].Bounds.Y);
+            CaptureHealth.Set("displayAfterX",now[i].Bounds.X);CaptureHealth.Set("displayAfterY",now[i].Bounds.Y);
+            CaptureHealth.Set("displayBeforeWidth",old[i].Bounds.Width);CaptureHealth.Set("displayBeforeHeight",old[i].Bounds.Height);
+            CaptureHealth.Set("displayAfterWidth",now[i].Bounds.Width);CaptureHealth.Set("displayAfterHeight",now[i].Bounds.Height);
+            CaptureHealth.Set("displayBeforeMonitorDpi",old[i].Dpi);CaptureHealth.Set("displayAfterMonitorDpi",now[i].Dpi);
+            break;
+        }
+    }
     static string DesktopName(IntPtr desktop) {
         StringBuilder name = new StringBuilder(256); int needed;
         if (desktop == IntPtr.Zero || !GetUserObjectInformation(desktop, 2, name, name.Capacity * 2, out needed)) return null;
@@ -2989,11 +3130,16 @@ sealed class RegionPicker : ApplicationContext {
     }
     public void ValidateCaptureEnvironment() {
         ValidateInputDesktop();
-        bool valid = !topology.Invalid && topology.Matches(ReadTopology());
+        CaptureTopologyPolicy current = ReadTopology();
+        bool valid = topology.Matches(current);
+        if (!valid && !topology.Invalid) topology.Invalidate(5, 0, 0);
+        RecordTopology();
+        RecordComparison(current);
         if (!valid || topology.Invalid)
             throw new InvalidOperationException("CAPTURE_DISPLAY_CHANGED: Display geometry or DPI changed; select the region again.");
     }
     public Rectangle SelectRegion() {
+        phase=1;
         try {
             inputPump = new CaptureInputPump(selectionGate, state, input, moves, mouseHook); inputPump.Start();
             if(hostThread!=0)delegated=new CaptureDelegatedInput(hostThread,hostToken,selectionGate,state,input,moves);
@@ -3040,7 +3186,9 @@ sealed class RegionPicker : ApplicationContext {
             }
             state.Expire(elapsed);
             if (!state.Finished) state.Move(pointer);
-            finished = state.Finished; dragging = state.Dragging; highlighted = state.Highlighted; selected = state.Selected;
+            finished = state.Finished; dragging = state.Dragging;
+            System.Threading.Interlocked.Exchange(ref phase, finished ? 4 : dragging ? 3 : 2);
+            highlighted = state.Highlighted; selected = state.Selected;
             mayStop = input.MayStop(finished, elapsed); releaseExceeded = input.ReleaseGraceExceeded;
             armed = input.Armed; swallowed = input.LeftSwallowed;
         }
@@ -3107,18 +3255,19 @@ sealed class RegionPicker : ApplicationContext {
                 catch { if (magnifier != null) magnifier.Hide(); }
             }
             if (presented && raise) lastRaise = elapsed;
-            if (presented) CapturePerformance.Mark("firstBordersVisibleMilliseconds");
+            if (presented) { CapturePerformance.Mark("firstBordersVisibleMilliseconds"); CaptureHealth.Mark("firstBordersVisibleMilliseconds"); }
         }
         CapturePerformance.End(moved ? "moveFrame" : "heartbeatFrame", frameStarted);
     }
     void DisplaysChanged(object sender, EventArgs args) {
         // A separate sticky flag remains effective after state.End(). It is
         // set directly on the event thread, including while BitBlt is running.
-        InvalidateEnvironment();
+        InvalidateEnvironment(1, 0, 0);
     }
     void Cleanup() {
         if (cleaned) return;
         cleaned = true;
+        RecordTopology();
         timer.Stop();
         if (wake != null) wake.Stop();
         if(delegated!=null){
@@ -3430,7 +3579,7 @@ sealed class RegionPicker : ApplicationContext {
             selection = 'UI Automation TextPattern, then Ctrl+C with clipboard restoration'
             screenCount = [System.Windows.Forms.Screen]::AllScreens.Length
             virtualScreen = [System.Windows.Forms.SystemInformation]::VirtualScreen.ToString()
-            dpiMode = 'Per-monitor v2 requested; system-aware fallback on older Windows'
+            dpiMode = 'Per-monitor v2 requested; per-monitor v1 fallback; capture requires per-monitor awareness'
             captureSelection = 'Live transparent per-display blue border; left drag; Escape/right/120-second cancellation'
         }
     }
