@@ -27,7 +27,8 @@ let overlayFocus: { generation: number; promise: Promise<void> } | null = null;
 let zoom = 1, fit = true, composing = false, imeEscape = false, textPoint: Point | null = null;
 let gesture: { start: Point; end: Point; pointerId: number } | null = null;
 let discardResolve: ((value: boolean) => void) | null = null;
-const dirty = () => model !== null && (savedState !== model.stateId || (textOpen() && !!textInput.value.trim() && (editingIndex === null || model.operations[editingIndex]?.kind === 'text' && textInput.value !== (model.operations[editingIndex] as Extract<EditOperation, { kind: 'text' }>).text)));
+// A non-empty inline draft is unsaved even before it enters operation history.
+const dirty = () => model !== null && (savedState !== model.stateId || (textOpen() && !!textInput.value.trim()));
 function status(message: string, error = false): void { $('#editor-status').textContent = message; $('#editor-status').dataset.error = String(error); placeOverlayTools(); }
 function readableError(error: unknown): string { return error instanceof Error ? error.message : String(error); }
 function controls(): void {
@@ -303,6 +304,7 @@ canvas.addEventListener('pointerdown', async event => {
 canvas.addEventListener('pointermove', event => {
   if (moveGesture && model && original && event.pointerId === moveGesture.pointerId) {
     const p = point(event), g = moveGesture;
+    if (model.operations[g.index] !== g.original) { cancelPointer(); return; }
     g.moved = translateOperation(g.original, { x: p.x - g.start.x, y: p.y - g.start.y }, model.operationSize(g.index));
     const preview = [...model.operations]; preview[g.index] = g.moved;
     try { renderScreenshot(canvas, original, model.original, preview); selectionOutline(g.moved); rendered = null; controls(); }
@@ -323,7 +325,7 @@ canvas.addEventListener('pointerup', event => {
   if (moveGesture && model && event.pointerId === moveGesture.pointerId) {
     const g = moveGesture; moveGesture = null;
     if (canvas.hasPointerCapture(event.pointerId)) canvas.releasePointerCapture(event.pointerId);
-    try { if (JSON.stringify(g.original) !== JSON.stringify(g.moved)) model.update(g.index, g.moved); }
+    try { if (model.operations[g.index] === g.original && JSON.stringify(g.original) !== JSON.stringify(g.moved)) model.update(g.index, g.moved); }
     catch (error) { status(readableError(error), true); }
     render(); return;
   }
