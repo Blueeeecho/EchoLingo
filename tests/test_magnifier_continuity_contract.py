@@ -29,7 +29,7 @@ class MagnifierContinuityContract(unittest.TestCase):
         self.assertNotIn("w::EnableWindow", render)
         self.assertIn("let raw = &self.loupe_sample;", render)
         self.assertIn("self.loupe_sample.clear(", render)
-        self.assertIn(".copy_screen(sample.copy_offset, sample.grabbed, false)", render)
+        self.assertIn(".copy_screen_timed(sample.copy_offset, sample.grabbed, false)", render)
         self.assertEqual(NATIVE.count("Surface::preview(CaptureMagnifierSample::SIDE"), 1)
 
     def test_preview_is_device_compatible_but_png_remains_readable(self):
@@ -40,6 +40,16 @@ class MagnifierContinuityContract(unittest.TestCase):
         png = NATIVE.split("    fn png(", 1)[1].split("impl Drop for Surface", 1)[0]
         self.assertLess(png.index("self.bits.is_null()"), png.index("std::slice::from_raw_parts_mut"))
         self.assertIn("w::GdiFlush()", png)
+
+    def test_screen_sample_subphases_preserve_the_native_sequence(self):
+        sample = NATIVE.split("    fn copy_screen_timed(", 1)[1].split("    fn png(", 1)[0]
+        self.assertEqual(sample.count("w::GetDC(null_mut())"), 1)
+        self.assertEqual(sample.count("w::BitBlt("), 1)
+        self.assertEqual(sample.count("w::ReleaseDC(null_mut(), screen)"), 1)
+        self.assertLess(sample.index("w::GetDC("), sample.index("w::BitBlt("))
+        self.assertLess(sample.index("w::BitBlt("), sample.index("w::ReleaseDC("))
+        self.assertNotIn("GdiFlush", sample)
+        self.assertIn("Ok([acquire, blit, release])", sample)
 
     def test_live_color_probe_is_outside_unchanged_motion_window(self):
         fixture = (ROOT / "tests/windows-native-capture-smoke.ps1").read_text()

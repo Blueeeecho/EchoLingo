@@ -917,6 +917,14 @@ fn bounded_capture_health(value: &Value) -> Value {
         "magnifierComposeMillisecondsMax",
         "magnifierPresentMillisecondsTotal",
         "magnifierPresentMillisecondsMax",
+        "magnifierClearMillisecondsTotal",
+        "magnifierClearMillisecondsMax",
+        "magnifierGetDcMillisecondsTotal",
+        "magnifierGetDcMillisecondsMax",
+        "magnifierBitBltMillisecondsTotal",
+        "magnifierBitBltMillisecondsMax",
+        "magnifierReleaseDcMillisecondsTotal",
+        "magnifierReleaseDcMillisecondsMax",
     ] {
         if let Some(number) = value
             .get(field)
@@ -2100,9 +2108,17 @@ mod tests {
             "magnifierComposeMillisecondsMax": 4,
             "magnifierPresentMillisecondsTotal": 200,
             "magnifierPresentMillisecondsMax": 12,
+            "magnifierClearMillisecondsTotal": 30,
+            "magnifierClearMillisecondsMax": 3,
+            "magnifierGetDcMillisecondsTotal": 50,
+            "magnifierGetDcMillisecondsMax": 4,
+            "magnifierBitBltMillisecondsTotal": 490,
+            "magnifierBitBltMillisecondsMax": 30,
+            "magnifierReleaseDcMillisecondsTotal": 30,
+            "magnifierReleaseDcMillisecondsMax": 3,
             "captureFramePixels": "private", "captureFramePointer": [100, 200]
         }));
-        assert_eq!(safe.as_object().unwrap().len(), 13);
+        assert_eq!(safe.as_object().unwrap().len(), 21);
         assert_eq!(safe["captureFrameCount"], 63);
         for boundary in [0, 10_000_000] {
             let input: serde_json::Map<String, Value> = safe
@@ -2134,7 +2150,15 @@ mod tests {
                     "magnifierComposeMillisecondsTotal": invalid,
                     "magnifierComposeMillisecondsMax": invalid,
                     "magnifierPresentMillisecondsTotal": invalid,
-                    "magnifierPresentMillisecondsMax": invalid
+                    "magnifierPresentMillisecondsMax": invalid,
+                    "magnifierClearMillisecondsTotal": invalid,
+                    "magnifierClearMillisecondsMax": invalid,
+                    "magnifierGetDcMillisecondsTotal": invalid,
+                    "magnifierGetDcMillisecondsMax": invalid,
+                    "magnifierBitBltMillisecondsTotal": invalid,
+                    "magnifierBitBltMillisecondsMax": invalid,
+                    "magnifierReleaseDcMillisecondsTotal": invalid,
+                    "magnifierReleaseDcMillisecondsMax": invalid
                 })),
                 json!({})
             );

@@ -473,14 +473,26 @@ impl Surface {
         }
     }
     fn copy_screen(&self, target: Point, source: Rect, include_layered: bool) -> Result<()> {
+        self.copy_screen_timed(target, source, include_layered)
+            .map(|_| ())
+    }
+    fn copy_screen_timed(
+        &self,
+        target: Point,
+        source: Rect,
+        include_layered: bool,
+    ) -> Result<[u64; 3]> {
         if source.is_empty() {
-            return Ok(());
+            return Ok([0; 3]);
         }
         unsafe {
+            let started = Instant::now();
             let screen = w::GetDC(null_mut());
+            let acquire = started.elapsed().as_millis().min(10_000_000) as u64;
             if screen.is_null() {
                 return Err(error("CAPTURE_PIXELS"));
             }
+            let started = Instant::now();
             let ok = w::BitBlt(
                 self.dc,
                 target.x,
@@ -492,11 +504,14 @@ impl Surface {
                 source.y,
                 SRCCOPY | if include_layered { CAPTUREBLT } else { 0 },
             );
+            let blit = started.elapsed().as_millis().min(10_000_000) as u64;
+            let started = Instant::now();
             w::ReleaseDC(null_mut(), screen);
+            let release = started.elapsed().as_millis().min(10_000_000) as u64;
             if ok == 0 {
                 Err(error("CAPTURE_PIXELS"))
             } else {
-                Ok(())
+                Ok([acquire, blit, release])
             }
         }
     }
@@ -1130,6 +1145,14 @@ impl Picker {
             "magnifierComposeMillisecondsMax",
             "magnifierPresentMillisecondsTotal",
             "magnifierPresentMillisecondsMax",
+            "magnifierClearMillisecondsTotal",
+            "magnifierClearMillisecondsMax",
+            "magnifierGetDcMillisecondsTotal",
+            "magnifierGetDcMillisecondsMax",
+            "magnifierBitBltMillisecondsTotal",
+            "magnifierBitBltMillisecondsMax",
+            "magnifierReleaseDcMillisecondsTotal",
+            "magnifierReleaseDcMillisecondsMax",
         ] {
             health.insert(name, 0);
         }
@@ -1173,6 +1196,10 @@ impl Picker {
     }
     fn record_render_duration(&mut self, total: &'static str, max: &'static str, started: Instant) {
         let elapsed = started.elapsed().as_millis().min(10_000_000) as u64;
+        self.record_duration_value(total, max, elapsed);
+    }
+    fn record_duration_value(&mut self, total: &'static str, max: &'static str, elapsed: u64) {
+        let elapsed = elapsed.min(10_000_000);
         let previous = self.health.get(total).copied().unwrap_or(0);
         self.health
             .insert(total, previous.saturating_add(elapsed).min(10_000_000));
@@ -1477,9 +1504,35 @@ impl Picker {
             return Ok(());
         }
         let sample_started = Instant::now();
+        let clear_started = Instant::now();
         self.loupe_sample.clear(w::rgb(22, 26, 34));
-        self.loupe_sample
-            .copy_screen(sample.copy_offset, sample.grabbed, false)?;
+        self.record_render_duration(
+            "magnifierClearMillisecondsTotal",
+            "magnifierClearMillisecondsMax",
+            clear_started,
+        );
+        let times = self.loupe_sample.copy_screen_timed(sample.copy_offset, sample.grabbed, false)?;
+        // No extra flush or native call is added to force a phase boundary.
+        // These are wall times in the unchanged synchronous GDI call sequence.
+        for ((total, max), elapsed) in [
+            (
+                "magnifierGetDcMillisecondsTotal",
+                "magnifierGetDcMillisecondsMax",
+            ),
+            (
+                "magnifierBitBltMillisecondsTotal",
+                "magnifierBitBltMillisecondsMax",
+            ),
+            (
+                "magnifierReleaseDcMillisecondsTotal",
+                "magnifierReleaseDcMillisecondsMax",
+            ),
+        ]
+        .into_iter()
+        .zip(times)
+        {
+            self.record_duration_value(total, max, elapsed);
+        }
         self.record_render_duration(
             "magnifierSampleMillisecondsTotal",
             "magnifierSampleMillisecondsMax",
