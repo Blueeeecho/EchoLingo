@@ -64,6 +64,7 @@ private final class OverlayHostFixture: NSObject, WKNavigationDelegate {
     var completed = false
     var fullscreenVerified = false
     var stackingVerified = false
+    var metadataSamples: [String: Int] = [:]
 
     func start() {
         owner.isReleasedWhenClosed = false
@@ -123,24 +124,61 @@ private final class OverlayHostFixture: NSObject, WKNavigationDelegate {
         pendingProbe = continuation
         sourceInput.fileHandleForWriting.write(Data("probe\n".utf8))
     }
-    func checkStacking(_ panel: NSPanel) throws {
+    // A child IPC response verifies its own fullscreen state, but does not
+    // synchronize WindowServer publication of the newly ordered editor panel.
+    // Wait only for absent generated window metadata. Every sample re-probes
+    // the source and rejects wrong identity/Space/focus/visibility/order at once.
+    func awaitStacking(_ panel: NSPanel, phase: String, _ continuation: @escaping () throws -> Void) {
+        pollStacking(panel, windowNumber: panel.windowNumber, phase: phase,
+                     deadline: ProcessInfo.processInfo.systemUptime + 2, continuation)
+    }
+    func pollStacking(_ panel: NSPanel, windowNumber: Int, phase: String,
+                      deadline: TimeInterval, _ continuation: @escaping () throws -> Void) {
+        guard !completed else { return }
+        metadataSamples[phase, default: 0] += 1
+        probe { [self] in
+            try need(windowNumber > 0 && panel.windowNumber == windowNumber && content.window === panel,
+                     "\(phase): editor identity changed")
+            if let missing = try checkStacking(panel) {
+                try need(ProcessInfo.processInfo.systemUptime < deadline,
+                         "\(phase): on-screen window metadata missing after readiness deadline (\(missing))")
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { [weak self] in
+                    self?.pollStacking(panel, windowNumber: windowNumber, phase: phase,
+                                       deadline: deadline, continuation)
+                }
+            } else {
+                try continuation()
+            }
+        }
+    }
+    func checkStacking(_ panel: NSPanel) throws -> String? {
         // Window IDs/PIDs/ordering are public metadata, including without
         // screen-recording permission. Never inspect/retain titles or pixels.
-        guard let windows = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID)
-                as? [[String: Any]],
-              let overlayIndex = windows.firstIndex(where: {
-                  ($0[kCGWindowNumber as String] as? NSNumber)?.intValue == panel.windowNumber &&
-                  ($0[kCGWindowOwnerPID as String] as? NSNumber)?.int32Value == ProcessInfo.processInfo.processIdentifier
-              }),
-              let sourceIndex = windows.firstIndex(where: {
-                  ($0[kCGWindowNumber as String] as? NSNumber)?.intValue == sourceWindow &&
-                  ($0[kCGWindowOwnerPID as String] as? NSNumber)?.int32Value == source.processIdentifier
-              }) else { throw NativeError("OVERLAY_HOST_FIXTURE: on-screen window metadata missing") }
-        try need(overlayIndex < sourceIndex, "editor is behind fullscreen source")
         try need(panel.isOnActiveSpace && panel.isVisible && !owner.isVisible, "panel Space/visibility")
         try need(panel.level == .floating, "editor floating-level policy")
+        guard let windows = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID)
+                as? [[String: Any]] else { throw NativeError("OVERLAY_HOST_FIXTURE: window metadata unavailable") }
+        let overlayIndex = windows.firstIndex(where: {
+            ($0[kCGWindowNumber as String] as? NSNumber)?.intValue == panel.windowNumber
+        })
+        let sourceIndex = windows.firstIndex(where: {
+            ($0[kCGWindowNumber as String] as? NSNumber)?.intValue == sourceWindow
+        })
+        if let index = overlayIndex {
+            try need((windows[index][kCGWindowOwnerPID as String] as? NSNumber)?.int32Value == ProcessInfo.processInfo.processIdentifier,
+                     "editor metadata identity changed")
+        }
+        if let index = sourceIndex {
+            try need((windows[index][kCGWindowOwnerPID as String] as? NSNumber)?.int32Value == source.processIdentifier,
+                     "source metadata identity changed")
+        }
+        guard let overlayIndex = overlayIndex, let sourceIndex = sourceIndex else {
+            return "overlay=\(overlayIndex != nil),source=\(sourceIndex != nil)"
+        }
+        try need(overlayIndex < sourceIndex, "editor is behind fullscreen source")
         stackingVerified = true
         fullscreenVerified = true
+        return nil
     }
     func complete(_ ok: Bool, _ reason: String) {
         guard !completed else { return }
@@ -154,6 +192,7 @@ private final class OverlayHostFixture: NSObject, WKNavigationDelegate {
         emitOverlayFixture(["schema": "echolingo-macos-screenshot-overlay-host-v1", "ok": ok,
               "reason": reason, "screenCaptured": false, "permissionRequested": false,
               "clipboardWritten": false, "physicalImeTested": false,
+              "windowMetadataSamples": metadataSamples,
               "fullscreenSpaceTested": fullscreenVerified, "fullscreenStackingTested": stackingVerified])
         exit(ok ? 0 : 1)
     }
@@ -172,8 +211,7 @@ private final class OverlayHostFixture: NSObject, WKNavigationDelegate {
             try need(abs(content.frame.width - frame.width) < 1 && abs(webView.frame.width - frame.width) < 1, "webview viewport")
             try need(echoLingoShowScreenshotOverlay(pointer, Double(frame.minX), Double(y), Double(frame.width), Double(frame.height)) == 0, "show")
             try need(panel.firstResponder === webView, "webview first responder")
-            probe { [self] in
-                try checkStacking(panel)
+            awaitStacking(panel, phase: "initial") { [self] in
                 webView.evaluateJavaScript("document.getElementById('text').focus(); [innerWidth, innerHeight, document.activeElement.id]") { [weak self] result, error in
                     guard let self = self, !self.completed else { return }
                     do {
@@ -188,8 +226,7 @@ private final class OverlayHostFixture: NSObject, WKNavigationDelegate {
                         try need(echoLingoPrepareScreenshotOverlay(pointer, Double(frame.minX), Double(y), Double(frame.width), Double(frame.height)) == 0, "repeat prepare")
                         try need(echoLingoShowScreenshotOverlay(pointer, Double(frame.minX), Double(y), Double(frame.width), Double(frame.height)) == 0, "repeat show")
                         guard let repeatedPanel = self.content.window as? NSPanel else { throw NativeError("OVERLAY_HOST_FIXTURE: repeated panel missing") }
-                        self.probe {
-                            try self.checkStacking(repeatedPanel)
+                        self.awaitStacking(repeatedPanel, phase: "repeat") {
                             self.owner.close()
                             try need(self.content.window === self.owner && !NSApp.windows.contains(where: { $0 is NSPanel && $0.isVisible }), "owner-close cleanup")
                             try need(NSPasteboard.general.changeCount == clipboard, "clipboard changed")
