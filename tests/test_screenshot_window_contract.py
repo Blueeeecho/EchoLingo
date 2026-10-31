@@ -58,6 +58,21 @@ class ScreenshotWindowContract(unittest.TestCase):
         self.assertIn('captureWindowIsCurrent(expected', candidate)
         self.assertIn('screenshotWindowPolicyFixturePassed', read('src-tauri/native/macos.swift'))
 
+    def test_macos_hover_uses_actual_hit_identity_not_foreign_bounding_boxes(self):
+        swift = read('src-tauri/native/macos_capture.swift')
+        hover = swift.split('func captureHoverWindow(', 1)[1].split('func captureCurrentWindows()', 1)[0]
+        self.assertIn('NSWindow.windowNumber(at: point, belowWindowWithWindowNumber: below)', hover)
+        self.assertIn('seen.insert(hit).inserted', hover)
+        self.assertIn('matches.count == 1', hover)
+        self.assertIn('min(records.count + 1, 64)', hover)
+        self.assertIn('record[kCGWindowOwnerPID as String]) == Double(excludingPID)', hover)
+        self.assertIn('captureWindowTarget(record', hover)
+        self.assertIn('target.frame.contains(point)', hover)
+        self.assertNotIn('com.apple.dock', hover)
+        self.assertNotIn('SetForeground', hover)
+        self.assertIn('queriedBelow == [0, 53, 54]', swift)
+        self.assertIn('loopQueries == 2', swift)
+
     def test_cancel_is_registered_before_watching_and_scoped_to_operation(self):
         platform = read('src-tauri/src/platform.rs')
         fn = platform.split('fn run_macos_screenshot_cancelable', 1)[1].split('#[derive(Clone, Copy)]', 1)[0]

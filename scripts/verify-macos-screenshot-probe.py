@@ -7,7 +7,7 @@ import sys
 
 MODES = ('window-phase1', 'rectangle-phase1', 'escape-cancel', 'request-cancel', 'window-phase2')
 INDEPENDENT = ('privatePasteboardImageRoundtripPassed', 'nativePNGJPEGFileRoundtripPassed',
-               'nativeSavePanelCancelPassed', 'nativeSavePanelHiddenBeforeCapture')
+               'nativeSavePanelCancelPassed', 'nativeSavePanelHiddenBeforeCapture', 'authoritativeHitPolicyFixturePassed')
 SOURCES = {'src-tauri/native/macos.swift', 'src-tauri/native/macos_capture.swift', 'src-tauri/native/macos_window.swift'}
 
 
@@ -64,7 +64,8 @@ def verify(report):
         raise ValueError('The source readiness method must distinguish geometry from actual composite pixels')
     if setup and report.get('systemUISetupOcclusionCleared') is not True:
         raise ValueError('The original foreign-occlusion guard must clear after setup Escape')
-    if any(key.startswith('visibilityOracle') for key in report):
+    oracle_used = report.get('sourceWindowServerReadinessMethod') == 'independent-composited-pixels'
+    if oracle_used or any(key.startswith('visibilityOracle') for key in report):
         for flag in ('nativePickerStartedAfterVisibilityOracle', 'visibilityOracleHostedRunnerVerified',
                      'visibilityOraclePassed', 'visibilityOracleGeneratedOccluderRejected', 'visibilityOracleOwnedOccluderHidden',
                      'visibilityOracleOverlaySharingGuardVerified'):
@@ -84,6 +85,9 @@ def verify(report):
             or tuple(case.get('mode') for case in cases) != MODES):
         raise ValueError('All five native screenshot cases must execute in order')
     for case in cases:
+        if oracle_used and (case.get('preCaseFullCompositeVerified') is not True
+                            or case.get('postCaseFullCompositeVerified') is not True):
+            raise ValueError('Each native case requires its own current-phase full-composite proof before and after selector cleanup')
         for flag in ('ok', 'hoverOutlineVerified', 'exactOwnedSourceRevalidated'):
             if case.get(flag) is not True:
                 raise ValueError('Native screenshot case evidence is incomplete')

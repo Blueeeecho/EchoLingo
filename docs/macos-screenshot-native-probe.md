@@ -90,6 +90,16 @@ of the five capture cases. If production hover still rejects the source, the
 probe remains failed. This diagnostic is not a Dock whitelist or a product-policy
 change and does not claim all five cases have executed.
 
+When the independent pixel route is used, every native case gets a new complete
+current-phase display-composite proof immediately before selector creation and
+again after its cleanup, including cancellation cases. While the selector is
+visible, the fixture checks the exact live source identity, authoritative hit,
+and all intersecting foreign sharing metadata; only exact owned selector panels
+are exempt from that metadata guard. It does not run the no-exclusion pixel
+oracle through its own blue outline/loupe. Final native PNG pixel checks are
+unchanged, and phase2 must independently show the newly generated red pixels.
+The production hit-policy negative vectors run before any native capture probe.
+
 Five ordered cases call the production `capture-screenshot` endpoint:
 
 1. Click the visible generated green window.

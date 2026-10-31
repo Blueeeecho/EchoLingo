@@ -65,7 +65,12 @@ class MacScreenshotProbeContract(unittest.TestCase):
                       visibilityOracleOverlaySharingGuardVerified=True, visibilityOracleIntersectingSharedOverlayCount=1,
                       visibilityOracleExcludedWindowCount=0, visibilityOraclePixelBytesRetained=False,
                       visibilityOracleRegion='exact-generated-source-512x320')
+        for case in report['cases']:
+            case.update(preCaseFullCompositeVerified=True, postCaseFullCompositeVerified=True)
         self.assertEqual(module.verify(report), 0)
+        for field in ('preCaseFullCompositeVerified', 'postCaseFullCompositeVerified'):
+            invalid = copy.deepcopy(report); del invalid['cases'][0][field]
+            with self.assertRaises(ValueError): module.verify(invalid)
         for field, value in [('visibilityOraclePassed', False), ('visibilityOracleGeneratedOccluderRejected', False),
                              ('visibilityOracleOwnedOccluderHidden', False),
                              ('visibilityOracleOverlaySharingGuardVerified', False),
@@ -182,6 +187,16 @@ class MacScreenshotProbeContract(unittest.TestCase):
         self.assertIn('sharing == 1 || sharing == 2', identity)
         self.assertIn('protected or unknown-sharing overlay', identity)
         self.assertIn('verifyPixels(image', swift)
+        self.assertIn('try captureScreenshotSelfTest()', swift)
+        self.assertIn('stage: "pre-case-" + mode, occluded: false, phase: sourcePhase', swift)
+        self.assertIn('stage: "post-case-" + mode, occluded: false, phase: sourcePhase', swift)
+        live = swift.split('func verifyCaseSource()', 1)[1].split('func beginCase()', 1)[0]
+        self.assertIn('captureWindowIsCurrent(target', live)
+        self.assertIn('captureHoverWindow(records, at: point', live)
+        self.assertIn('$0 is CaptureSelectionPanel && $0.isVisible', live)
+        self.assertIn('selectorIDs.contains', live)
+        self.assertIn('sharing == 1 || sharing == 2', live)
+        self.assertNotIn('com.apple.dock', live)
         self.assertIn('owned-source-cleanup-or-cursor-restore-failed', swift)
 
 if __name__ == '__main__': unittest.main()

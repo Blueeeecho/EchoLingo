@@ -127,6 +127,8 @@ private final class ScreenshotProbe {
     var sourceOutput: FileHandle?
     var target: CaptureWindowTarget?
     var sourceScale: CGFloat = 1
+    var sourcePhase = 1
+    var preCasePixelProof: String?
     var operation: String?
     var activeCase: String?
     var caseStarted = Date()
@@ -187,6 +189,8 @@ private final class ScreenshotProbe {
 
     func start() {
         do {
+            try captureScreenshotSelfTest()
+            report["authoritativeHitPolicyFixturePassed"] = true
             try imageSerializationProbe()
             dialogCancellationProbe()
         } catch { finish("failed", reason: String(describing: error)) }
@@ -311,7 +315,7 @@ private final class ScreenshotProbe {
             let target = CaptureWindowTarget(id: number, pid: source.processIdentifier,
                                              frame: CGRect(x: x, y: y, width: width, height: height))
             if phase == 2 && self.target != target { self.finish("failed", reason: "generated-source-frame-changed"); return }
-            self.target = target; self.sourceScale = scale
+            self.target = target; self.sourceScale = scale; self.sourcePhase = phase
             var appKitState: [String: Any] = [:]
             for key in ["applicationActive", "windowKey", "windowVisible", "windowOnActiveSpace", "frontmostIsSource",
                         "applicationFinishedLaunching", "runningApplicationActive"] {
@@ -326,7 +330,7 @@ private final class ScreenshotProbe {
                 return
             }
             do {
-                try self.verifySourceVisible()
+                try self.verifyCaseSource()
                 // Only the generated source repositions the cursor, while it
                 // is foreground; all button/key events stay in this probe app.
                 let expected = CGPoint(x: target.frame.minX + 80, y: target.frame.minY + 80)
@@ -460,7 +464,7 @@ private final class ScreenshotProbe {
     }
 
     @available(macOS 14.0, *)
-    func captureVisibilityOracle(_ expected: CaptureWindowTarget, stage: String, occluded: Bool,
+    func captureVisibilityOracle(_ expected: CaptureWindowTarget, stage: String, occluded: Bool, phase: Int = 1,
                                  completion: @escaping () -> Void) {
         guard !finished else { return }
         do {
@@ -519,10 +523,10 @@ private final class ScreenshotProbe {
                                     guard let image = image else { throw NativeError("FIXTURE: oracle display image is unavailable") }
                                     try fixtureNeed(image.width == Int(512 * self.sourceScale) && image.height == Int(320 * self.sourceScale),
                                                     "oracle exact ROI dimensions differ")
-                                    try self.verifyPixels(image, phase: 1, occluder: occluded)
+                                    try self.verifyPixels(image, phase: phase, occluder: occluded)
                                     if occluded {
                                         var rejected = false
-                                        do { try self.verifyPixels(image, phase: 1) } catch { rejected = true }
+                                        do { try self.verifyPixels(image, phase: phase) } catch { rejected = true }
                                         try fixtureNeed(rejected, "unobstructed oracle accepted generated occlusion")
                                         self.report["visibilityOracleGeneratedOccluderRejected"] = true
                                     }
@@ -627,7 +631,60 @@ private final class ScreenshotProbe {
         try fixtureNeed(found, "source absent from visible z-order")
     }
 
+    func verifyCaseSource() throws {
+        if report["visibilityOraclePassed"] as? Bool != true { try verifySourceVisible(); return }
+        guard let target = target, let source = source, source.isRunning,
+              source.processIdentifier == target.pid, let records = captureCurrentWindows() else {
+            throw NativeError("FIXTURE: live case source is unavailable")
+        }
+        let ownPID = ProcessInfo.processInfo.processIdentifier
+        let primary = CGDisplayBounds(CGMainDisplayID()).height
+        try fixtureNeed(captureWindowIsCurrent(target, records: records, primaryHeight: primary, excludingPID: ownPID),
+                        "live case source identity/frame/sharing changed")
+        let point = CGPoint(x: target.frame.minX + 80, y: target.frame.minY + 80)
+        try fixtureNeed(captureHoverWindow(records, at: point, primaryHeight: primary, excludingPID: ownPID) == target,
+                        "live case actual hit no longer resolves to the exact source")
+        let selectorIDs = Set(NSApplication.shared.windows.filter { $0 is CaptureSelectionPanel && $0.isVisible }.map { $0.windowNumber })
+        for record in records {
+            if captureWindowNumber(record[kCGWindowNumber as String]) == Double(target.id) { break }
+            if captureWindowNumber(record[kCGWindowAlpha as String]) == 0 { continue }
+            guard let dictionary = record[kCGWindowBounds as String] as? [String: Any],
+                  let quartz = CGRect(dictionaryRepresentation: dictionary as CFDictionary),
+                  [quartz.minX, quartz.minY, quartz.width, quartz.height].allSatisfy({ $0.isFinite }) else {
+                throw NativeError("FIXTURE: live case overlay metadata is unavailable")
+            }
+            let frame = CGRect(x: quartz.minX, y: primary - quartz.maxY, width: quartz.width, height: quartz.height)
+            if frame.intersection(target.frame).isEmpty { continue }
+            if captureWindowNumber(record[kCGWindowOwnerPID as String]) == Double(ownPID) {
+                guard let number = captureWindowNumber(record[kCGWindowNumber as String]),
+                      selectorIDs.contains(where: { Double($0) == number }) else {
+                    throw NativeError("FIXTURE: unexpected own window overlaps the case source")
+                }
+                continue // only exact own selector panels; no foreign exemption
+            }
+            let sharing = captureWindowNumber(record[kCGWindowSharingState as String])
+            try fixtureNeed(sharing == 1 || sharing == 2, "live case has a protected or unknown-sharing overlay")
+        }
+    }
+
     func beginCase() {
+        guard !finished, index < modes.count else { if !finished { finish("passed") }; return }
+        preCasePixelProof = nil
+        let mode = modes[index]
+        if report["visibilityOraclePassed"] as? Bool == true {
+            guard #available(macOS 14.0, *), let target = target,
+                  sourcePhase == (mode == "window-phase2" ? 2 : 1),
+                  !NSApplication.shared.windows.contains(where: { $0 is CaptureSelectionPanel && $0.isVisible }) else {
+                finish("failed", reason: "case-precondition-phase-or-selector-changed"); return
+            }
+            captureVisibilityOracle(target, stage: "pre-case-" + mode, occluded: false, phase: sourcePhase) {
+                self.preCasePixelProof = mode
+                self.beginNativeCase()
+            }
+        } else { beginNativeCase() }
+    }
+
+    func beginNativeCase() {
         guard !finished, index < modes.count else { if !finished { finish("passed") }; return }
         let mode = modes[index]
         let registered = nativeResponse(mode: "--begin-native-capture")
@@ -661,7 +718,7 @@ private final class ScreenshotProbe {
               let hovered = view.hoveredWindow,
               hovered.offsetBy(dx: panel.frame.minX, dy: panel.frame.minY) == target.frame else { return }
         do {
-            try verifySourceVisible(); caseDriven = true
+            try verifyCaseSource(); caseDriven = true
             if mode == "request-cancel" {
                 guard let operation = operation else { throw NativeError("FIXTURE: missing own token") }
                 let cancelled = nativeResponse(mode: "--cancel-native-capture", input: Data(operation.utf8))
@@ -689,7 +746,7 @@ private final class ScreenshotProbe {
             try fixtureNeed(caseDriven, "native screenshot completed before own gesture was dispatched")
             try fixtureNeed(!NSApplication.shared.windows.contains(where: { $0 is CaptureSelectionPanel && $0.isVisible }), "native selector left visible panels")
             try fixtureNeed(response["text"] == nil, "F1 unexpectedly invoked OCR")
-            try verifySourceVisible()
+            try verifyCaseSource()
             var record: [String: Any] = ["mode": mode, "ok": true, "hoverOutlineVerified": true, "visiblePanelsAfter": 0,
                                           "exactOwnedSourceRevalidated": true, "ownAppKitEventDispatched": mode != "request-cancel",
                                           "nativeCancellationEndpointDispatched": mode == "request-cancel"]
@@ -711,13 +768,29 @@ private final class ScreenshotProbe {
                 record["imageWidth"] = width; record["imageHeight"] = height
                 record["generatedVisiblePixelsVerified"] = true; record["ownOverlayPixelsAbsent"] = true
             }
-            cases.append(record); index += 1; activeCase = nil
-            if index == modes.count { finish("passed") }
-            else if modes[index] == "window-phase2" {
+            if report["visibilityOraclePassed"] as? Bool == true {
+                try fixtureNeed(preCasePixelProof == mode, "case has no current full-composite precondition")
+                guard #available(macOS 14.0, *), let target = target else { throw NativeError("FIXTURE: post-case oracle is unavailable") }
+                record["preCaseFullCompositeVerified"] = true
+                let accepted = record
+                captureVisibilityOracle(target, stage: "post-case-" + mode, occluded: false, phase: sourcePhase) {
+                    var checked = accepted; checked["postCaseFullCompositeVerified"] = true
+                    self.recordCompletedCase(checked)
+                }
+            } else { recordCompletedCase(record) }
+        } catch { finish("failed", reason: String(describing: error)) }
+    }
+
+    func recordCompletedCase(_ record: [String: Any]) {
+        guard !finished else { return }
+        cases.append(record); index += 1; activeCase = nil; preCasePixelProof = nil
+        if index == modes.count { finish("passed") }
+        else if modes[index] == "window-phase2" {
+            do {
                 try sourceInput?.write(contentsOf: Data("phase2\n".utf8))
                 DispatchQueue.global(qos: .utility).async { self.readSource(phase: 2) }
-            } else { beginCase() }
-        } catch { finish("failed", reason: String(describing: error)) }
+            } catch { finish("failed", reason: "generated-source-phase-command-failed") }
+        } else { beginCase() }
     }
 
     func verifyPixels(_ image: CGImage, phase: Int, fullWindow: Bool = true, occluder: Bool = false) throws {

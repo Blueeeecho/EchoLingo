@@ -8,7 +8,7 @@ SOURCE = (ROOT / '.github/workflows/f1-fixture-reuse.yml').read_text()
 
 class F1FixtureReuseWorkflowContract(unittest.TestCase):
     def test_exact_temporary_branch_and_read_only_permissions(self):
-        self.assertIn('branches: [diagnostics/024-f1-fixture-reuse]', SOURCE)
+        self.assertIn('branches: [diagnostics/024-f1-fixture-reuse, diagnostics/024-macos-hover-repair]', SOURCE)
         self.assertNotIn('pull_request:', SOURCE)
         self.assertNotIn('workflow_run:', SOURCE)
         self.assertIn('contents: read', SOURCE)
@@ -24,7 +24,7 @@ class F1FixtureReuseWorkflowContract(unittest.TestCase):
         self.assertEqual(actual.count(condition), 1)
         actual = actual.replace(condition, '').strip()
         self.assertNotIn('[mac-probe]', ci)
-        self.assertIn("if: ${{ !contains(github.event.head_commit.message, '[mac-only]') }}", SOURCE)
+        self.assertIn("if: ${{ github.ref == 'refs/heads/diagnostics/024-f1-fixture-reuse' && !contains(github.event.head_commit.message, '[mac-only]') }}", SOURCE)
         self.assertNotIn('[mac-only]', ci)
         self.assertNotIn('[mac-only]', (ROOT / '.github/workflows/release-checks.yml').read_text())
         self.assertNotIn('[mac-probe]', (ROOT / '.github/workflows/release-checks.yml').read_text())
