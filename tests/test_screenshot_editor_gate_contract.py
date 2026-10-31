@@ -6,14 +6,18 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class ScreenshotEditorGateContract(unittest.TestCase):
-    def test_built_app_raw_gate_is_mandatory_in_both_workflows(self):
+    def test_installed_raw_gate_is_mandatory_and_duplicate_bare_is_diagnostic(self):
         for name in ['ci.yml', 'release-checks.yml']:
             source = (ROOT / '.github/workflows' / name).read_text()
             self.assertIn('id: windows_screenshot_editor', source)
+            outcomes = source.split('$taskOutcomes = @{', 1)[1].split('          }', 1)[0]
+            self.assertNotIn('screenshotEditor =', outcomes)
+            self.assertIn('installedOffline =', outcomes)
+            self.assertIn('bareScreenshotEditorBlocking = $false', source)
             self.assertIn('-ScreenshotEditorTests -DefaultCapture', source)
-            self.assertIn("screenshotEditor = '${{ steps.windows_screenshot_editor.outcome }}'", source)
-            self.assertIn('scripts/verify_screenshot_editor_report.py "$env:RUNNER_TEMP/echolingo-screenshot-editor.log" --application src-tauri/target/release/echolingo.exe', source)
-            self.assertIn('Actual F1 editor acceptance report is missing, incomplete or failed.', source)
+            self.assertIn("bareScreenshotEditor = '${{ steps.windows_screenshot_editor.outcome }}'", source)
+            self.assertIn('scripts/verify_screenshot_editor_report.py "$env:RUNNER_TEMP/echolingo-offline-validation.json" --application src-tauri/target/release/echolingo.exe --installed-acceptance', source)
+            self.assertIn('Actual installed F1 editor acceptance report is missing, incomplete or failed.', source)
             self.assertIn('echolingo-installed-screenshot-editor.log', source)
             self.assertIn("nativeCaptureContinuity = '${{ steps.windows_native_capture_continuity.outcome }}'", source)
 
@@ -23,7 +27,7 @@ class ScreenshotEditorGateContract(unittest.TestCase):
             self.assertLess(source.index('id: windows_selection_internals'), source.index('id: windows_screenshot_editor'))
             self.assertLess(source.index('id: windows_screenshot_editor'), source.index('id: windows_installed_offline'))
             self.assertEqual(source.count('id: windows_screenshot_editor'), 1)
-            self.assertIn("screenshotEditor = '${{ steps.windows_screenshot_editor.outcome }}'", source)
+            self.assertIn("bareScreenshotEditor = '${{ steps.windows_screenshot_editor.outcome }}'", source)
 
     def test_mac_probe_requires_pass_and_preserves_blocked_evidence(self):
         jobs = []

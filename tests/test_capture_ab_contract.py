@@ -23,6 +23,18 @@ def quoted_values(pattern, text, quote):
 
 
 class CaptureABContract(unittest.TestCase):
+    def test_repeated_benchmark_is_visible_nonblocking_not_a_core_substitute(self):
+        source = (ROOT / '.github/workflows/ci.yml').read_text()
+        job = source.split('  windows-rust-capture-candidate:\n', 1)[1].split('  macos-native-frame-probe:\n', 1)[0]
+        benchmark = job.split('name: Compare shipping launcher and native child', 1)[1].split('name: Preserve same-runner', 1)[0]
+        self.assertIn('continue-on-error: true', benchmark)
+        self.assertIn('id: native_capture_paired_diagnostic', benchmark)
+        self.assertIn('steps.native_capture_paired_diagnostic.outcome', job)
+        self.assertIn('Original raw failures remain failures', job)
+        standalone = job.split('name: Exercise real native selector', 1)[1].split('name: Verify isolated F1', 1)[0]
+        self.assertNotIn('continue-on-error', standalone)
+        self.assertIn('if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }', standalone)
+
     def test_preserves_all_ten_common_comparisons_in_order(self):
         common = quoted_values(r"\$common=@\(([^\n]+)\)", AB, "'")
         self.assertEqual(common, COMMON)

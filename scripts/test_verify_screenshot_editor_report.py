@@ -1,7 +1,8 @@
 import copy
 import json
+import hashlib
 import unittest
-from verify_screenshot_editor_report import EXPECTED_CASES, verify, verify_report
+from verify_screenshot_editor_report import EXPECTED_CASES, verify, verify_report, verify_installed_acceptance
 
 
 def complete(installed=False):
@@ -33,6 +34,34 @@ def complete(installed=False):
 
 
 class ScreenshotEditorReport(unittest.TestCase):
+    def installed_acceptance(self):
+        stage = b"synthetic-stage-" + b"__TAURI_BUNDLE_TYPE_VAR_UNK" + b"-tail"
+        installed = stage.replace(b"__TAURI_BUNDLE_TYPE_VAR_UNK", b"__TAURI_BUNDLE_TYPE_VAR_NSS")
+        expected = hashlib.sha256(installed).hexdigest()
+        outer = {field: True for field in ('ok', 'windowsRuntimeExecuted', 'installerExecuted', 'realModelExecuted',
+                 'installedPackageTested', 'installedScreenshotEditorVerified', 'rulesRemoved', 'ownedInstallRemoved')}
+        outer.update(mockTranslationUsed=False, applicationSha256=expected, installedScreenshotEditor=complete(True))
+        outer['installedScreenshotEditor']['applicationSha256'] = expected
+        outer['applicationIdentity'] = dict(stageSha256=hashlib.sha256(stage).hexdigest(), installedSha256=expected,
+            expectedNsisSha256=expected, markerOffset=stage.index(b'__TAURI'), stageMarker='__TAURI_BUNDLE_TYPE_VAR_UNK',
+            installedMarker='__TAURI_BUNDLE_TYPE_VAR_NSS', changedBytes=3, comparedBytes=len(stage), actualExecutablesModified=False)
+        return stage, outer
+
+    def test_required_installed_editor_is_bound_to_complete_staged_bytes(self):
+        stage, outer = self.installed_acceptance()
+        self.assertEqual(verify_installed_acceptance(json.dumps(outer), stage), outer['installedScreenshotEditor'])
+        with self.assertRaises(ValueError): verify_installed_acceptance(json.dumps(outer), stage + b'changed')
+        outer['applicationIdentity']['changedBytes'] = 4
+        with self.assertRaises(ValueError): verify_installed_acceptance(json.dumps(outer), stage)
+
+    def test_installed_coverage_and_cleanup_cannot_be_optional(self):
+        for field in ('installedScreenshotEditorVerified', 'rulesRemoved', 'ownedInstallRemoved', 'realModelExecuted'):
+            stage, outer = self.installed_acceptance(); outer[field] = False
+            with self.assertRaises(ValueError): verify_installed_acceptance(json.dumps(outer), stage)
+        stage, outer = self.installed_acceptance()
+        outer['installedScreenshotEditor']['screenshotLocalOpenPassedCases'] = 1
+        with self.assertRaises(ValueError): verify_installed_acceptance(json.dumps(outer), stage)
+
     def rejects(self, report, **kwargs):
         with self.assertRaises(ValueError): verify_report(report, **kwargs)
 

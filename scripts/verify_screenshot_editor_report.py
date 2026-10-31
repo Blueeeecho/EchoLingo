@@ -111,12 +111,49 @@ def verify(text, expected_sha=None, installed=False):
     return verify_report(reports[0], expected_sha, installed)
 
 
+def verify_installed_acceptance(text, stage_bytes):
+    """Bind the mandatory installed editor report to this complete staged app."""
+    report = json.loads(text.lstrip('\ufeff'))
+    for field in ('ok', 'windowsRuntimeExecuted', 'installerExecuted', 'realModelExecuted',
+                  'installedPackageTested', 'installedScreenshotEditorVerified',
+                  'rulesRemoved', 'ownedInstallRemoved'):
+        if report.get(field) is not True:
+            raise ValueError('Actual installed acceptance is incomplete: ' + field)
+    if report.get('mockTranslationUsed') is not False:
+        raise ValueError('Installed real-model acceptance must not be mocked')
+    marker, replacement = b'__TAURI_BUNDLE_TYPE_VAR_UNK', b'__TAURI_BUNDLE_TYPE_VAR_NSS'
+    if stage_bytes.count(marker) != 1:
+        raise ValueError('Exactly one staged Tauri bundle marker is required')
+    offset = stage_bytes.index(marker)
+    stage_sha = hashlib.sha256(stage_bytes).hexdigest()
+    installed_sha = hashlib.sha256(stage_bytes[:offset] + replacement + stage_bytes[offset + len(marker):]).hexdigest()
+    identity = report.get('applicationIdentity')
+    if not isinstance(identity, dict):
+        raise ValueError('Actual installed application identity is absent')
+    expected = dict(stageSha256=stage_sha, installedSha256=installed_sha,
+                    expectedNsisSha256=installed_sha, markerOffset=offset,
+                    stageMarker=marker.decode(), installedMarker=replacement.decode(),
+                    changedBytes=3, comparedBytes=len(stage_bytes), actualExecutablesModified=False)
+    for field, value in expected.items():
+        if type(identity.get(field)) is not type(value) or identity[field] != value:
+            raise ValueError('Installed bytes do not match the complete stage identity: ' + field)
+    if report.get('applicationSha256') != installed_sha:
+        raise ValueError('Installed application hash differs from this build')
+    return verify_report(report.get('installedScreenshotEditor'), installed_sha, installed=True)
+
+
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('report', type=Path)
     parser.add_argument('--application', type=Path, required=True)
     parser.add_argument('--installed', action='store_true')
+    parser.add_argument('--installed-acceptance', action='store_true',
+                        help='Verify nested actual NSIS editor evidence against the complete staged app')
     args = parser.parse_args()
-    expected_sha = hashlib.sha256(args.application.read_bytes()).hexdigest()
-    verify(args.report.read_text(encoding='utf-8-sig'), expected_sha, args.installed)
+    stage_bytes = args.application.read_bytes()
+    text = args.report.read_text(encoding='utf-8-sig')
+    if args.installed_acceptance:
+        verify_installed_acceptance(text, stage_bytes)
+    else:
+        verify(text, hashlib.sha256(stage_bytes).hexdigest(), args.installed)
     print('PASS: all three real F1 workflows, both native local image imports, native exports and bounded zero-OCR/provider/history evidence verified.')

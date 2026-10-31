@@ -571,7 +571,7 @@ jobs:
           $ticketOutput | Write-Output
           [ordered]@{ selectionBudgetExit = $budgetExit; selectionQueryExit = $queryExit; copyTicketExit = $ticketExit; expectedBudgetCases = 8 } | ConvertTo-Json -Compress
           if ($budgetExit -ne 0 -or $queryExit -ne 0 -or $ticketExit -ne 0) { throw 'Windows selection internal regressions failed or were incomplete.' }
-      - name: Windows actual F1 editor image clipboard and safe PNG export
+      - name: Diagnostic duplicate built-app F1 editor (installed acceptance remains mandatory)
         id: windows_screenshot_editor
         if: runner.os == 'Windows'
         continue-on-error: true
@@ -663,7 +663,6 @@ jobs:
             delegatedCapture = '${{ steps.windows_delegated_capture.outcome }}'
             nativeCaptureContinuity = '${{ steps.windows_native_capture_continuity.outcome }}'
             screenshotWindow = '${{ steps.windows_screenshot_window.outcome }}'
-            screenshotEditor = '${{ steps.windows_screenshot_editor.outcome }}'
             selectionDocument = '${{ steps.windows_selection_document.outcome }}'
             selectionCompatibility = '${{ steps.windows_selection_compat.outcome }}'
             selectionNativeFocus = '${{ steps.windows_selection_native_focus.outcome }}'
@@ -674,6 +673,9 @@ jobs:
             actualBrowserOcr = '${{ steps.windows_browser_ocr.outcome }}'
           }
           $taskOutcomes | ConvertTo-Json -Compress
+          $diagnosticOutcomes = @{ acceptancePolicy = 'core-functional-v1'; bareScreenshotEditor = '${{ steps.windows_screenshot_editor.outcome }}'; bareScreenshotEditorBlocking = $false }
+          $diagnosticOutcomes | ConvertTo-Json -Compress
+          $diagnosticOutcomes | ConvertTo-Json -Compress | Out-File $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
           # Mandatory raw inventory and continuity evidence, independently of step success.
           $global:LASTEXITCODE = 1
           & python scripts/verify-native-capture-report.py "$env:RUNNER_TEMP/echolingo-native-capture-continuity.log"
@@ -682,8 +684,8 @@ jobs:
           & python scripts/verify-screenshot-window-report.py "$env:RUNNER_TEMP/echolingo-screenshot-window.log"
           if ($LASTEXITCODE -ne 0) { throw 'Embedded F1 selector acceptance report is missing, incomplete or failed.' }
           $global:LASTEXITCODE = 1
-          & python scripts/verify_screenshot_editor_report.py "$env:RUNNER_TEMP/echolingo-screenshot-editor.log" --application src-tauri/target/release/echolingo.exe
-          if ($LASTEXITCODE -ne 0) { throw 'Actual F1 editor acceptance report is missing, incomplete or failed.' }
+          & python scripts/verify_screenshot_editor_report.py "$env:RUNNER_TEMP/echolingo-offline-validation.json" --application src-tauri/target/release/echolingo.exe --installed-acceptance
+          if ($LASTEXITCODE -ne 0) { throw 'Actual installed F1 editor acceptance report is missing, incomplete or failed.' }
           if (@($taskOutcomes.Values | Where-Object { $_ -ne 'success' }).Count -gt 0) {
             throw 'Windows desktop acceptance incomplete or failed; preview artifacts are not a passing release.'
           }

@@ -1,5 +1,5 @@
 # Exact production Rust hook/message-pump + Rust candidate picker, generated input only.
-# Generated C# oracle verifies input ownership and continuous loupe visibility/following.
+# Generated C# oracle verifies core input/capture ownership and records fine loupe quality.
 [CmdletBinding()]
 param([Parameter(Mandatory=$true)][string]$NativeCapturePath,
       [Parameter(Mandatory=$true)][string]$HarnessPath, [switch]$IsolatedTestSession)
@@ -198,6 +198,18 @@ public static class EchoLingoNativeCaptureSmoke {
         }
         report["generatedFinalTargetReadyBeforeHelper"]=true;
     }
+    // Fine visual/timing observations are non-blocking under the user's
+    // core-functional acceptance policy. Never use this for input or cleanup.
+    static void MagnifierQuality(Dictionary<string,object> report,string phase,bool passed,string code) {
+        Need(phase=="armed"||phase=="dragging","Unknown magnifier quality phase.");
+        Need(Array.IndexOf(new string[]{"stationary-refresh","motion-observer-failed","moving-color-count",
+            "moving-color-refresh","final-pixel-deadline","event-positive-control","visibility-continuity",
+            "motion-follow-density"},code)>=0,"Unknown magnifier quality diagnostic.");
+        if(passed)return;
+        List<string> issues=(List<string>)report["qualityDiagnostics"];string issue=phase+"-"+code;
+        if(!issues.Contains(issue)){Need(issues.Count<16,"Magnifier quality diagnostics exceeded their bound.");issues.Add(issue);}
+        report["qualityOk"]=false;
+    }
     sealed class MotionPixelObserver : IDisposable {
         readonly Thread worker;readonly Stopwatch clock;readonly Rectangle roi,final;
         readonly long[] changed={-1,-1,-1,-1};readonly HashSet<int> colors=new HashSet<int>();
@@ -268,12 +280,15 @@ public static class EchoLingoNativeCaptureSmoke {
             report[phase+"MagnifierMovingPixels"]=new Dictionary<string,object> {
                 {"distinctMotionPixelColors",colors.Count},{"maximumColorRefreshMilliseconds",maximumRefresh},
                 {"finalTargetPixelMatched",finalMatched},{"pixelObservations",samples},
-                {"observerStopped",stopped},{"samplePixelsStored",false},
+                {"observerStopped",stopped},{"observerFailed",failed},{"samplePixelsStored",false},
                 {"finalPointerDispatchMilliseconds",Interlocked.Read(ref finalDispatch)},
                 {"finalSnapshotEvidence",finalSnapshots}
             };
-            Need(!failed&&stopped&&colors.Count>=3&&maximumRefresh<=200&&finalMatched,
-                "Moving magnifier pixels froze, lagged, or did not match the generated final target.");
+            Need(stopped,"Moving-pixel observer did not stop.");
+            MagnifierQuality(report,phase,!failed,"motion-observer-failed");
+            MagnifierQuality(report,phase,colors.Count>=3,"moving-color-count");
+            MagnifierQuality(report,phase,maximumRefresh<=200,"moving-color-refresh");
+            MagnifierQuality(report,phase,finalMatched,"final-pixel-deadline");
         }
         public void Dispose() {stopping=true;if(!stopped)stopped=worker.Join(5000);Need(stopped,"Moving-pixel observer did not stop.");}
     }
@@ -281,7 +296,7 @@ public static class EchoLingoNativeCaptureSmoke {
         // Observe generated colors before (never inside) the timed motion
         // interval. Reuse its 200 ms final-settle bound for each fresh frame.
         Rectangle expected=new Rectangle(source.First.X+42,source.First.Y-26,156,174);
-        int changedColors=0;long maximumRefresh=0;
+        int changedColors=0;long maximumRefresh=0;bool stayedVisible=true;
         foreach(Color color in new Color[]{Color.FromArgb(70,110,210),Color.FromArgb(170,60,180),Color.FromArgb(230,150,40)}) {
             Need(GetForegroundWindow()==source.AH,"Source changed before generated live-pixel probe.");
             source.OnUi(delegate {
@@ -291,7 +306,7 @@ public static class EchoLingoNativeCaptureSmoke {
             });
             Stopwatch clock=Stopwatch.StartNew();bool fresh=false;
             while(clock.ElapsedMilliseconds<200) {
-                Need(IsWindowVisible(loupe),"Live-pixel probe lost the visible magnifier.");
+                if(!IsWindowVisible(loupe)){stayedVisible=false;Application.DoEvents();Thread.Sleep(1);continue;}
                 if(Bounds(loupe)==expected) {
                     using(Bitmap pixel=new Bitmap(3,3,PixelFormat.Format32bppArgb)) {
                         using(Graphics graphics=Graphics.FromImage(pixel))graphics.CopyFromScreen(expected.X+54,expected.Y+54,0,0,new Size(3,3),CopyPixelOperation.SourceCopy);
@@ -305,13 +320,16 @@ public static class EchoLingoNativeCaptureSmoke {
                 if(fresh)break;
                 Application.DoEvents();Thread.Sleep(1);
             }
-            Need(fresh&&clock.ElapsedMilliseconds<=200,"Generated magnifier pixels did not refresh within the existing settle bound.");
-            maximumRefresh=Math.Max(maximumRefresh,clock.ElapsedMilliseconds);changedColors++;
+            if(fresh&&clock.ElapsedMilliseconds<=200)changedColors++;
+            maximumRefresh=Math.Max(maximumRefresh,clock.ElapsedMilliseconds);
         }
         report[phase+"MagnifierLivePixels"]=new Dictionary<string,object> {
             {"generatedColorChanges",changedColors},{"maximumRefreshMilliseconds",maximumRefresh},
-            {"livePixelRefreshVerified",changedColors==3},{"samplePixelsStored",false}
+            {"livePixelRefreshVerified",changedColors==3},{"visibleThroughoutLiveProbe",stayedVisible},{"samplePixelsStored",false}
         };
+        MagnifierQuality(report,phase,changedColors==3&&maximumRefresh<=200,"stationary-refresh");
+        MagnifierQuality(report,phase,stayedVisible,"visibility-continuity");
+        Need(IsWindowVisible(loupe),"Basic magnifier visibility was lost after the live-pixel probe.");
     }
     static void ObserveMagnifierContinuity(int helper,Sources source,Dictionary<string,object> report,string phase) {
         IntPtr loupe=IntPtr.Zero;int matches=0;
@@ -394,10 +412,11 @@ public static class EchoLingoNativeCaptureSmoke {
                 {"finalTargetSettledMilliseconds",settled},{"continuousObservation",true}
             };
             pixels.Finish(report,phase);
-            Need(locations>0,"Generated magnifier motion did not prove WinEvent callback delivery.");
-            Need(invisible==0&&hides==0,"Armed magnifier hid or reappeared between complete frames.");
-            Need(moves>=20&&positions.Count>=12&&settled>=0&&Bounds(loupe)==expectedFinal,
-                "Magnifier did not continuously follow generated motion and settle at its exact physical target.");
+            MagnifierQuality(report,phase,locations>0,"event-positive-control");
+            MagnifierQuality(report,phase,invisible==0&&hides==0,"visibility-continuity");
+            MagnifierQuality(report,phase,moves>=20&&positions.Count>=12&&settled>=0&&Bounds(loupe)==expectedFinal,
+                "motion-follow-density");
+            Need(IsWindowVisible(loupe),"Basic magnifier visibility was lost after generated motion.");
         } finally {
             try {
                 if(pixels!=null)pixels.Dispose();
@@ -583,6 +602,9 @@ public static class EchoLingoNativeCaptureSmoke {
     }
     static Dictionary<string,object> Case(Host host,string kind) {
         Dictionary<string,object> report=new Dictionary<string,object>{{"mode",kind},{"ok",false}};Sources source=null;bool finished=false;
+        if(kind=="magnifier-continuity-armed-and-dragging") {
+            report["coreOk"]=false;report["qualityOk"]=true;report["qualityDiagnostics"]=new List<string>();
+        }
         try {
             source=new Sources();int oldDown=0,oldUp=0,oldClick=0;
             if(kind=="magnifier-continuity-armed-and-dragging")PrepareFinalPixelTarget(source,report);
@@ -736,6 +758,7 @@ public static class EchoLingoNativeCaptureSmoke {
                 try{source.Dispose();}catch(Exception cleanup){report["ok"]=false;report["cleanupError"]=cleanup.Message;}
             }
         }
+        if(kind=="magnifier-continuity-armed-and-dragging")report["coreOk"]=(bool)report["ok"];
         return report;
     }
     public static Dictionary<string,object> Run(string helper,string harness) {
@@ -748,7 +771,7 @@ public static class EchoLingoNativeCaptureSmoke {
             if(host.Child==0&&!host.Process.HasExited){host.Shutdown();stopped=host.Read(4000);Need((string)stopped["event"]=="stopped"&&Convert.ToInt32(stopped["completedGenerations"])==cases.Count,"Host stop/generation mismatch.");Need(host.Process.WaitForExit(4000)&&host.Process.ExitCode==0,"Production observer host failed to exit.");}
             else ok=false;
         }
-        return new Dictionary<string,object>{{"ok",ok&&cases.Count==16},{"cases",cases},{"hostShutdown",stopped},{"productionModulesImported",true},{"requestedInputBackend","delegated-exact-production"},{"userContentCaptured",false},{"clipboardAccessed",false},{"scope","Exact production hook pump/session and Rust candidate picker with generated same-integrity peers only; no Tauri/engine, physical app, elevated boundary or universal acceptance claim."}};
+        return new Dictionary<string,object>{{"ok",ok&&cases.Count==16},{"acceptancePolicy","core-functional-v1"},{"fineQualityBlocking",false},{"cases",cases},{"hostShutdown",stopped},{"productionModulesImported",true},{"requestedInputBackend","delegated-exact-production"},{"userContentCaptured",false},{"clipboardAccessed",false},{"scope","Exact production hook pump/session and Rust candidate picker with generated same-integrity peers only; no Tauri/engine, physical app, elevated boundary or universal acceptance claim."}};
     }
 }
 '@
