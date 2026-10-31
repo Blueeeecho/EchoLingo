@@ -2642,11 +2642,15 @@ mod tests {
         assert!(sources
             .iter()
             .any(|source| source["axWindowToken"].is_string()));
-        let result = super::run("selection-source-bridge-verify", Some(&input.to_string())).unwrap();
+        let result =
+            super::run("selection-source-bridge-verify", Some(&input.to_string())).unwrap();
         let diagnostic = &result["diagnostics"];
         assert_eq!(diagnostic["selectionSourceBridgeFixturePassed"], true);
         assert_eq!(diagnostic["exactSourcesMatch"], true);
-        assert_eq!(diagnostic["sourceCount"].as_u64(), Some(sources.len() as u64));
+        assert_eq!(
+            diagnostic["sourceCount"].as_u64(),
+            Some(sources.len() as u64)
+        );
         assert_eq!(diagnostic["selectionRead"], false);
         assert_eq!(diagnostic["clipboardTouched"], false);
         // This reports whether the actual locked parser/Foundation chain also
@@ -2659,15 +2663,14 @@ mod tests {
 
         let index = sources
             .iter()
-            .position(|source| source["launchIdentity"].is_string() && source["windowID"].is_number())
+            .position(|source| {
+                source["launchIdentity"].is_string() && source["windowID"].is_number()
+            })
             .unwrap();
         for key in ["launchIdentity", "pid", "windowID"] {
             let mut changed = input.clone();
             if key == "launchIdentity" {
-                let mut identity = changed["sources"][index][key]
-                    .as_str()
-                    .unwrap()
-                    .to_owned();
+                let mut identity = changed["sources"][index][key].as_str().unwrap().to_owned();
                 let last = identity.pop().unwrap();
                 identity.push(if last == '0' { '1' } else { '0' });
                 changed["sources"][index][key] = serde_json::json!(identity);

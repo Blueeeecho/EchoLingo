@@ -19,18 +19,29 @@ try {
           document.body.dataset.view = 'translate';
           const source = document.querySelector('#source-text');
           source.value = text;
+          // Match renderResults: preview starts with the result column hidden.
+          // Hidden nodes have computed styles but zero geometry/selection.
+          document.querySelector('.results-column').hidden = false;
+          document.querySelector('#popup-services').hidden = true;
           const container = document.querySelector('.results-container');
           container.innerHTML = '<article class="result-card"><p class="result-text"></p></article>';
           const result = container.querySelector('.result-text');
           renderTranslationParagraphs(result, text);
           const run = result.querySelector('.result-text-run') ?? result;
           const props = ['fontFamily', 'fontSize', 'fontWeight', 'lineHeight', 'letterSpacing', 'padding', 'margin', 'textAlign', 'textAlignLast', 'whiteSpace', 'wordBreak', 'overflowWrap'];
+          const box = element => {
+            const rect = element.getBoundingClientRect(), style = getComputedStyle(element);
+            return { left: rect.left, width: rect.width, height: rect.height,
+              display: style.display, paddingLeft: style.paddingLeft, borderLeft: style.borderLeftWidth };
+          };
           const styles = element => Object.fromEntries(props.map(prop => [prop, getComputedStyle(element)[prop]]));
           const selection = window.getSelection(), range = document.createRange();
           range.selectNodeContents(result); selection.removeAllRanges(); selection.addRange(range);
           const selected = selection.toString(); selection.removeAllRanges();
           return { source: styles(source), result: styles(result), runHeight: getComputedStyle(run).lineHeight,
-            sourceLeft: source.getBoundingClientRect().left, resultLeft: result.getBoundingClientRect().left,
+            boxes: { source: box(source), result: box(result),
+              sourceColumn: box(source.closest('.source-column')), resultCard: box(result.closest('.result-card')),
+              resultsColumn: box(result.closest('.results-column')) },
             sourceText: source.value, resultText: result.textContent, selected, compact: result.dataset.paragraphSpacing,
             overflow: source.scrollWidth > source.clientWidth + 1 || result.scrollWidth > result.clientWidth + 1 };
         }, { platform, text });
@@ -40,7 +51,11 @@ try {
         assert.deepEqual(metrics.source, metrics.result, `${platform}/${width}: shared text styling`);
         assert.equal(metrics.source.fontSize, platform === 'windows' ? '16px' : '14px');
         assert.ok(Math.abs(parseFloat(metrics.source.lineHeight) / parseFloat(metrics.source.fontSize) - 1.45) < .01);
-        assert.ok(Math.abs(metrics.sourceLeft - metrics.resultLeft) < 1, 'matching left text inset');
+        const geometryContext = `${platform}/${width}: ${JSON.stringify(metrics.boxes)}`;
+        assert.ok(metrics.boxes.source.width > 0 && metrics.boxes.result.width > 0,
+          `both text panels must be laid out: ${geometryContext}`);
+        assert.ok(Math.abs(metrics.boxes.source.left - metrics.boxes.result.left) < 1,
+          `matching left text inset: ${geometryContext}`);
         assert.equal(metrics.sourceText, text); assert.equal(metrics.resultText, text); assert.equal(metrics.selected, text);
         assert.equal(metrics.overflow, false);
         if (text.includes('```')) assert.equal(metrics.compact, 'literal');

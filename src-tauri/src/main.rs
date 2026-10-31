@@ -2406,7 +2406,8 @@ fn visible_action_error(action: &str, error: &str) -> Option<String> {
         // when this request is still current. Never expose native identities.
         if error.starts_with("SOURCE_CHANGED:") {
             return Some(
-                "无法确认原取词窗口，已停止取词。请在原窗口重新选词，或手动复制后翻译剪贴板。".into(),
+                "无法确认原取词窗口，已停止取词。请在原窗口重新选词，或手动复制后翻译剪贴板。"
+                    .into(),
             );
         }
         // A shortcut with no obtainable selection is also the user's manual
@@ -4750,7 +4751,11 @@ mod tests {
             .publish(&old, || panic!("stale source failure reopened popup"))
             .is_none());
         assert!(controller
-            .publish(&current, || action_failure_presentation("selection", error, 47))
+            .publish(&current, || action_failure_presentation(
+                "selection",
+                error,
+                47
+            ))
             .flatten()
             .is_some());
     }
