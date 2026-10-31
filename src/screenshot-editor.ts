@@ -344,7 +344,11 @@ canvas.addEventListener('contextlost', event => {
   status('图片画布已中断，已禁用贴图、复制和保存。正在等待画布恢复；也可以重新打开图片。', true);
 });
 canvas.addEventListener('contextrestored', () => { if (render()) status('图片画布已恢复。'); });
-function cancelPointer(): void { const moving = !!moveGesture; moveGesture = null; clearGesture(); if (moving) render(); }
+function cancelPointer(): void {
+  const moving = moveGesture; moveGesture = null;
+  if (moving && canvas.hasPointerCapture(moving.pointerId)) canvas.releasePointerCapture(moving.pointerId);
+  clearGesture(); if (moving) render();
+}
 canvas.addEventListener('pointercancel', cancelPointer); canvas.addEventListener('lostpointercapture', cancelPointer);
 canvas.addEventListener('dblclick', event => {
   if (busy || loading || !model || !['select', 'text'].includes(tool)) return;
@@ -353,7 +357,7 @@ canvas.addEventListener('dblclick', event => {
 });
 $('#delete-edit').addEventListener('click', () => {
   if (busy || !model || selectedIndex === null || textOpen()) return;
-  try { model.remove(selectedIndex); selectedIndex = null; render(); status('已删除标注，可撤销。'); } catch (error) { status(readableError(error), true); }
+  try { cancelPointer(); model.remove(selectedIndex); selectedIndex = null; render(); status('已删除标注，可撤销。'); } catch (error) { status(readableError(error), true); }
 });
 for (const button of document.querySelectorAll<HTMLButtonElement>('.editor-toolbar button[data-tool]')) button.addEventListener('click', () => chooseTool(button.dataset.tool as Tool));
 textInput.addEventListener('compositionstart', () => { composing = true; }); textInput.addEventListener('compositionend', () => { composing = false; });

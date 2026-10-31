@@ -137,6 +137,23 @@ try {
     await page.locator('#annotation-text').fill('字'.repeat(2000)); assert.equal(await page.locator('#annotation-text').inputValue().then(x => x.length), 2000);
     await page.locator('#cancel-text').click();
 
+    // Delete while a drag is held must cancel the draft movement before index
+    // removal; otherwise pointerup could overwrite the following annotation.
+    await fresh(320, 240);
+    await drag('rectangle', [20, 20], [70, 50]);
+    const firstRectangle = await pixels();
+    await drag('rectangle', [150, 100], [200, 140]);
+    const bothRectangles = await pixels();
+    await page.locator('[data-tool="select"]').click();
+    const movingBounds = await page.locator('#image-canvas').boundingBox();
+    const moveXY = (x, y) => [movingBounds.x + x * movingBounds.width / 320, movingBounds.y + y * movingBounds.height / 240];
+    await page.mouse.move(...moveXY(25, 25)); await page.mouse.down(); await page.mouse.move(...moveXY(35, 35));
+    await page.keyboard.press('Delete'); const deletionRaster = await pixels();
+    await page.mouse.move(...moveXY(45, 45)); await page.mouse.up();
+    assert.deepEqual(await pixels(), deletionRaster, 'late drag events cannot mutate the next object after deletion');
+    await page.locator('#undo-edit').click(); assert.deepEqual(await pixels(), bothRectangles, 'one undo restores only the deleted object');
+    await page.locator('#undo-edit').click(); assert.deepEqual(await pixels(), firstRectangle);
+
     // New annotation interactions use a nonmodal inline editor and one shared
     // history. Coordinates are source pixels at both DPRs, not CSS pixel guesses.
     await fresh(320, 240);
