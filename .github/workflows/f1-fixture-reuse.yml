@@ -87,8 +87,10 @@ jobs:
         shell: pwsh
         run: |
           'This is fixture-only diagnosis against source-equal immutable existing bytes. It is not release acceptance. The final combined PR head still requires all normal native, browser, installed and release gates; this workflow does not rebuild, publish, merge or change repository settings.' | Add-Content "$env:GITHUB_STEP_SUMMARY"
+          'The Mac native diagnostic runs only with an explicitly authorized [mac-probe] commit marker. A skipped Mac diagnostic is not capture acceptance; the normal CI and release Mac gate remain unconditional.' | Add-Content "$env:GITHUB_STEP_SUMMARY"
 
   macos-screenshot-native-probe:
+    if: contains(github.event.head_commit.message, '[mac-probe]')
     name: macOS native screenshot capture (permission block is not a pass)
     runs-on: macos-latest
     timeout-minutes: 8

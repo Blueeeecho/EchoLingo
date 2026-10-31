@@ -48,6 +48,13 @@ describe('actual Windows screenshot fixture source wiring (not native acceptance
     expect(fixture).toContain('if(!sameGeneration())return "generation-changed-preserved"');
     expect(fixture).toContain('finally{CloseClipboard();}');
   });
+  it('claims only its immediate native seed publication after close and reports bounded phase evidence', () => {
+    for (const required of ['seed-publication-close', 'sequenceBeforeSet', 'sequenceAfterSet', 'sequenceBeforeClose', 'sequenceAfterClose', 'sequenceOnReopen', 'sequenceAfterRead', 'seedAttempt', 'copyAttempt', 'copyPhase', 'leaseFormat', 'Observations.Count<48', 'ownerIsGeneratedSource', 'formatsMatch', 'contentMatches', 'observed!=0&&observed==after&&own&&formats&&content', 'Never rebase a later changed generation', 'SeedUnchanged()', 'next!=1&&next!=7&&next!=13&&next!=16']) expect(fixture).toContain(required);
+    expect(fixture).not.toContain('Clipboard.GetText()');
+    expect(fixture).toContain('bool same=lockedRead&&digest!=null');
+    expect(fixture).toContain('RecordState("seed-verified-close")');
+    expect(fixture).toContain('RecordState("image-verified-close")');
+  });
   it('refuses ambiguous accessibility names and releases an owned edit gesture promptly', () => {
     expect(fixture).toContain('Assert(matches.Count<=1');
     expect(fixture).toContain('finally{if(ForegroundPid()==app.Id)');

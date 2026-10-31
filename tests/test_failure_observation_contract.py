@@ -11,7 +11,7 @@ class FailureObservationContract(unittest.TestCase):
     def test_plane_observation_does_not_change_strict_live_style_gate(self):
         self.assertIn('if ((style&required)!=required || (style&(0x00080000L|0x20L))!=0)', APP)
         self.assertIn('throw new InputPlaneStyleException', APP)
-        self.assertIn('if (rejectedHelper!=0 && owner==rejectedHelper && !exists)', APP)
+        self.assertIn('if (PreviouslyVerifiedPlaneDestroyed(window,owner,parent))', APP)
         body = APP.split('static Dictionary<string,object> PlaneFailureIdentity(', 1)[1].split('static long hiddenPlaneStyleChecks', 1)[0]
         for forbidden in ('SetWindowLong', 'ShowWindow', 'SetWindowPos', 'SendInput', 'Thread.Sleep', 'GetWindowText', 'MainModule.FileName'):
             self.assertNotIn(forbidden, body)

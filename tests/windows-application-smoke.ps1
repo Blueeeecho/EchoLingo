@@ -297,8 +297,40 @@ public static partial class EchoLingoApplicationSmoke {
         }catch(Exception error){result["observationErrorType"]=error.GetType().Name;}
         return result;
     }
+    // Called only after exact class, parent and native-child generation verification.
+    // An EnumWindows row is not a lifetime lease. Missing/reused identity is never
+    // a ready plane; only a consistently absent row may be omitted from this scan.
+    static bool ConclusiveDestroyedPlaneRow(bool verifiedOwnedRow, bool existsBefore,
+        uint ownerBefore, uint threadBefore, int classLength, uint ownerAfter, uint threadAfter, bool existsAfter) {
+        return verifiedOwnedRow && !existsBefore && ownerBefore==0 && threadBefore==0
+            && classLength==0 && ownerAfter==0 && threadAfter==0 && !existsAfter;
+    }
+    static bool PreviouslyVerifiedPlaneDestroyed(IntPtr window, uint verifiedOwner, int verifiedParent) {
+        bool verifiedOwnedRow=verifiedOwner!=0 && verifiedParent>0
+            && (!RustCapture || VerifiedNativeChildren.ContainsKey(verifiedOwner));
+        bool existsBefore=IsWindow(window);
+        uint before,after;uint beforeThread=GetWindowThreadProcessId(window,out before);
+        StringBuilder name=new StringBuilder(256);int length=GetClassName(window,name,name.Capacity);
+        uint afterThread=GetWindowThreadProcessId(window,out after);
+        bool existsAfter=IsWindow(window);
+        return ConclusiveDestroyedPlaneRow(verifiedOwnedRow,existsBefore,before,beforeThread,length,after,afterThread,existsAfter);
+    }
+    static void VerifyDestroyedPlaneRowClassifier() {
+        Assert(ConclusiveDestroyedPlaneRow(true,false,0,0,0,0,0,false),"Verified destroyed plane row was not omitted.");
+        Assert(!ConclusiveDestroyedPlaneRow(false,false,0,0,0,0,0,false)
+            && !ConclusiveDestroyedPlaneRow(true,true,0,0,0,0,0,false)
+            && !ConclusiveDestroyedPlaneRow(true,false,1,0,0,0,0,false)
+            && !ConclusiveDestroyedPlaneRow(true,false,0,1,0,0,0,false)
+            && !ConclusiveDestroyedPlaneRow(true,false,0,0,1,0,0,false)
+            && !ConclusiveDestroyedPlaneRow(true,false,0,0,-1,0,0,false)
+            && !ConclusiveDestroyedPlaneRow(true,false,0,0,0,1,0,false)
+            && !ConclusiveDestroyedPlaneRow(true,false,0,0,0,0,1,false)
+            && !ConclusiveDestroyedPlaneRow(true,false,0,0,0,0,0,true),
+            "Live, reused, unverified or uncertain plane row was incorrectly omitted.");
+    }
     static long hiddenPlaneStyleChecks, hiddenPlaneWithoutTopmostChecks, visiblePlaneStyleChecks;
     static long destroyedRejectedStyleRowsSkipped, destroyedRejectedRectangleRowsSkipped;
+    static long destroyedOwnedStyleRowsSkipped, destroyedOwnedRectangleRowsSkipped;
     static List<AppEdge> AppInputPlanes(int appId, bool visibleOnly, uint edgeHelper=0, uint rejectedHelper=0) {
         List<AppEdge> result = new List<AppEdge>();
         Dictionary<uint,int> parents = new Dictionary<uint,int>();
@@ -316,11 +348,15 @@ public static partial class EchoLingoApplicationSmoke {
             long style=GetWindowLongPtr(window,-20).ToInt64(), required=0x00200000L|0x08000000L|0x80L|(requireTopmost?8L:0L);
             if (requireTopmost) visiblePlaneStyleChecks++; else { hiddenPlaneStyleChecks++; if ((style&8)==0) hiddenPlaneWithoutTopmostChecks++; }
             if ((style&required)!=required || (style&(0x00080000L|0x20L))!=0) {
-                // EnumWindows does not keep a cancelled helper's HWND alive.
-                // Skip only its conclusively destroyed row; every live plane
-                // and every row not owned by the exact rejected helper fails.
+                // The same destroy race occurs during ordinary Escape cleanup,
+                // not only when rejecting a superseded helper. Never return this
+                // row as ready, and keep live/reused/uncertain rows fail-closed.
+                if (PreviouslyVerifiedPlaneDestroyed(window,owner,parent)) {
+                    destroyedOwnedStyleRowsSkipped++;
+                    if (rejectedHelper!=0 && owner==rejectedHelper) destroyedRejectedStyleRowsSkipped++;
+                    return true;
+                }
                 bool exists=IsWindow(window);
-                if (rejectedHelper!=0 && owner==rejectedHelper && !exists) { destroyedRejectedStyleRowsSkipped++; return true; }
                 throw new InputPlaneStyleException(new Dictionary<string,object> {
                     {"identityAfterFailure",PlaneFailureIdentity(window,owner,parent,style)},
                     {"scanPhase",visibleOnly?1:0},{"visibleAtStyleRead",visible},{"topmostRequired",requireTopmost},
@@ -334,7 +370,11 @@ public static partial class EchoLingoApplicationSmoke {
             }
             RECT r;
             if (!GetWindowRect(window,out r)) {
-                if (rejectedHelper!=0 && owner==rejectedHelper && !IsWindow(window)) { destroyedRejectedRectangleRowsSkipped++; return true; }
+                if (PreviouslyVerifiedPlaneDestroyed(window,owner,parent)) {
+                    destroyedOwnedRectangleRowsSkipped++;
+                    if (rejectedHelper!=0 && owner==rejectedHelper) destroyedRejectedRectangleRowsSkipped++;
+                    return true;
+                }
                 Assert(false,"Cannot inspect actual input plane rectangle.");
             }
             result.Add(new AppEdge { Handle=window, ProcessId=owner, ParentProcessId=parent, Bounds=Rectangle.FromLTRB(r.left,r.top,r.right,r.bottom) }); return true;
@@ -894,7 +934,10 @@ public static partial class EchoLingoApplicationSmoke {
         Assert(!latest||!offline,"Latest-intent extra tests are mock-only.");
         Assert(!customBindings||(!offline&&!latest),"Loaded-custom-bindings workflows require their own mock-only run.");
         Offline = offline; ActualTranslations.Clear(); hiddenPlaneStyleChecks=hiddenPlaneWithoutTopmostChecks=visiblePlaneStyleChecks=0;
+        VerifyDestroyedPlaneRowClassifier();
+        destroyedOwnedStyleRowsSkipped=destroyedOwnedRectangleRowsSkipped=destroyedRejectedStyleRowsSkipped=destroyedRejectedRectangleRowsSkipped=0;
         Dictionary<string, object> report = new Dictionary<string, object>(); List<string> passed = new List<string>();
+        report["destroyedPlaneRowClassifierVerified"]=true;
         report["screenshotEditorTestsRequested"] = screenshotEditor;
         if(screenshotEditor){report["startupSettingsWrittenDirectly"]=true;report["settingsUiSaveTested"]=false;report["defaultDesktopLocationTested"]=false;}
         report["ok"] = false; report["passed"] = passed; report["actualApplicationTested"] = false;
@@ -1121,7 +1164,7 @@ public static partial class EchoLingoApplicationSmoke {
             }
         } catch (Exception error) { report["error"] = error.Message; }
         finally {
-            report["inputPlaneStyleChecks"]=new Dictionary<string,object>{{"hidden",hiddenPlaneStyleChecks},{"hiddenWithoutTopmost",hiddenPlaneWithoutTopmostChecks},{"visibleRequiringTopmost",visiblePlaneStyleChecks},{"visiblePlanesStillRequireTopmost",true},{"hiddenPlanesCannotSatisfyReadiness",true},{"destroyedRejectedStyleRowsSkipped",destroyedRejectedStyleRowsSkipped},{"destroyedRejectedRectangleRowsSkipped",destroyedRejectedRectangleRowsSkipped},{"destroyedRowsCannotSatisfyReadiness",true}};
+            report["inputPlaneStyleChecks"]=new Dictionary<string,object>{{"hidden",hiddenPlaneStyleChecks},{"hiddenWithoutTopmost",hiddenPlaneWithoutTopmostChecks},{"visibleRequiringTopmost",visiblePlaneStyleChecks},{"visiblePlanesStillRequireTopmost",true},{"hiddenPlanesCannotSatisfyReadiness",true},{"destroyedRejectedStyleRowsSkipped",destroyedRejectedStyleRowsSkipped},{"destroyedRejectedRectangleRowsSkipped",destroyedRejectedRectangleRowsSkipped},{"destroyedOwnedStyleRowsSkipped",destroyedOwnedStyleRowsSkipped},{"destroyedOwnedRectangleRowsSkipped",destroyedOwnedRectangleRowsSkipped},{"destroyedRowsCannotSatisfyReadiness",true}};
             for (int index = owned.Count - 1; index >= 0; index--) {
                 try { CleanDirectory(owned[index], token); }
                 catch (Exception error) { report["ok"] = false; report["directoryCleanupError"] = error.Message; }

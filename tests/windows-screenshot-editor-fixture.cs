@@ -11,6 +11,7 @@ public static partial class EchoLingoApplicationSmoke {
     [DllImport("user32.dll")] static extern uint GetClipboardSequenceNumber();
     [DllImport("user32.dll")] static extern IntPtr GetClipboardOwner();
     [DllImport("user32.dll")] static extern bool IsClipboardFormatAvailable(uint format);
+    [DllImport("user32.dll",SetLastError=true)] static extern uint EnumClipboardFormats(uint previous);
     [DllImport("user32.dll")] static extern IntPtr GetClipboardData(uint format);
     [DllImport("user32.dll")] static extern IntPtr SetClipboardData(uint format,IntPtr data);
     [DllImport("kernel32.dll")] static extern IntPtr GlobalAlloc(uint flags,UIntPtr bytes);
@@ -37,7 +38,20 @@ public static partial class EchoLingoApplicationSmoke {
         Assert(ScreenshotReclaim(delegate{return true;},delegate{return true;},delegate{return false;})=="clear-failed-preserved","Clipboard cleanup failure was hidden.");return 5;
     }
     sealed class ScreenshotClipboardLease {
-        readonly IntPtr source;uint generation,format;string digest;IntPtr owner;bool initialized;
+        readonly IntPtr source;uint generation,format;string digest;IntPtr owner;bool initialized;int seedAttempt,copyAttempt;string copyPhase="cancel-baseline";
+        public readonly List<Dictionary<string,object>> Observations=new List<Dictionary<string,object>>();
+        void Record(Dictionary<string,object> row){Assert(Observations.Count<48,"Screenshot clipboard diagnostic bound exceeded.");row["seedAttempt"]=seedAttempt;row["copyAttempt"]=copyAttempt;row["copyPhase"]=copyPhase;row["leaseFormat"]=format;Observations.Add(row);}
+        public void BeginCopy(string phase){copyAttempt++;copyPhase=phase;}
+        void RecordState(string phase,bool lockedRead=false){uint sequence=GetClipboardSequenceNumber();IntPtr currentOwner=GetClipboardOwner();bool same=lockedRead&&digest!=null&&generation!=0&&sequence==generation&&currentOwner==owner;
+            Record(new Dictionary<string,object>{{"phase",phase},{"expectedSequence",generation},{"observedSequence",sequence},{"ownerMatchesLease",currentOwner==owner},{"ownerIsGeneratedSource",currentOwner==source},{"expectedFormatAvailable",format!=0&&IsClipboardFormatAvailable(format)},{"formatCount",lockedRead?Math.Min(256,CountClipboardFormats()):-1},{"contentCompared",same},{"contentMatches",same&&SameContent()}});}
+        static bool SeedFormatsMatch(){bool unicode=false;uint previous=0;int count=0;
+            while(true){ScreenshotSetLastError(0);uint next=EnumClipboardFormats(previous);if(next==0){Assert(Marshal.GetLastWin32Error()==0,"Clipboard format enumeration failed; preserved.");break;}
+                Assert(++count<=16,"Clipboard format inventory exceeded fixture bound; preserved.");
+                // Windows may synthesize ANSI/OEM text and locale from our sole
+                // CF_UNICODETEXT publication. No registered/other format allowed.
+                if(next!=1&&next!=7&&next!=13&&next!=16)return false;unicode|=next==13;previous=next;}
+            return unicode;
+        }
         public ScreenshotClipboardLease(IntPtr window){source=window;}
         static string LockedDigest(uint kind) {
             IntPtr memory=GetClipboardData(kind);Assert(memory!=IntPtr.Zero,"Owned clipboard payload disappeared.");
@@ -50,15 +64,33 @@ public static partial class EchoLingoApplicationSmoke {
         bool SameGeneration(){return digest!=null&&generation!=0&&GetClipboardSequenceNumber()==generation&&GetClipboardOwner()==owner;}
         bool SameContent(){return IsClipboardFormatAvailable(format)&&LockedDigest(format)==digest;}
         public void RequireEmpty(){Assert(OpenClipboard(source),"Initial screenshot clipboard is busy; preserved.");try{Assert(EmptyLocked(),"FRESH_EMPTY_CLIPBOARD_REQUIRED");initialized=true;}finally{CloseClipboard();}}
-        public string Seed() {
-            string text="ECHOLINGO_GENERATED_SCREENSHOT_"+Guid.NewGuid().ToString("N");byte[] bytes=Encoding.Unicode.GetBytes(text+'\0');
+        public void Seed() {
+            seedAttempt++;string text="ECHOLINGO_GENERATED_SCREENSHOT_"+Guid.NewGuid().ToString("N");byte[] bytes=Encoding.Unicode.GetBytes(text+'\0');
             IntPtr memory=GlobalAlloc(0x42,new UIntPtr((uint)bytes.Length));Assert(memory!=IntPtr.Zero,"Could not allocate generated clipboard sentinel.");bool transferred=false,opened=false;
+            string publishedDigest=null;uint beforeSet=0,afterSet=0,beforeClose=0;bool publicationClosed=false;
             try{IntPtr pointer=GlobalLock(memory);Assert(pointer!=IntPtr.Zero,"Could not lock generated clipboard sentinel.");try{Marshal.Copy(bytes,0,pointer,bytes.Length);}finally{GlobalUnlock(memory);}
-                Assert(OpenClipboard(source),"Screenshot seed clipboard is busy; preserved.");opened=true;
+                Assert(OpenClipboard(source),"Screenshot seed clipboard is busy; preserved.");opened=true;RecordState("before-seed",true);
                 Assert(initialized&&(digest==null?EmptyLocked():SameGeneration()&&SameContent()),"Screenshot seed refused to overwrite a changed clipboard.");
-                Assert(EmptyClipboard(),"Could not publish generated clipboard sentinel.");Assert(SetClipboardData(13,memory)!=IntPtr.Zero,"Could not publish generated clipboard sentinel.");transferred=true;
-                format=13;owner=source;generation=GetClipboardSequenceNumber();digest=LockedDigest(format);Assert(SameGeneration(),"Generated clipboard sentinel changed while locked.");return text;
-            }finally{if(opened)CloseClipboard();if(!transferred)GlobalFree(memory);}
+                Assert(EmptyClipboard(),"Could not publish generated clipboard sentinel.");beforeSet=GetClipboardSequenceNumber();Assert(SetClipboardData(13,memory)!=IntPtr.Zero,"Could not publish generated clipboard sentinel.");transferred=true;afterSet=GetClipboardSequenceNumber();
+                publishedDigest=LockedDigest(13);beforeClose=GetClipboardSequenceNumber();
+            }finally{if(opened){publicationClosed=CloseClipboard();Record(new Dictionary<string,object>{{"phase","seed-publication-close"},{"sequenceBeforeSet",beforeSet},{"sequenceAfterSet",afterSet},{"sequenceBeforeClose",beforeClose},{"sequenceAfterClose",GetClipboardSequenceNumber()},{"closed",publicationClosed},{"ownerIsGeneratedSource",GetClipboardOwner()==source}});}if(!transferred)GlobalFree(memory);}
+            // Publication may advance the sequence at CloseClipboard. Claim only
+            // at this one immediate boundary: reopen once, require our exact
+            // HWND + unique nonce digest + text-only format inventory, then a
+            // stable nonzero sequence. Never rebase a later changed generation.
+            Assert(publicationClosed,"Published screenshot seed could not close; preserved.");
+            Assert(OpenClipboard(source),"Published screenshot seed could not be verified; preserved.");
+            try{uint observed=GetClipboardSequenceNumber();bool own=GetClipboardOwner()==source,formats=own&&SeedFormatsMatch();bool content=formats&&LockedDigest(13)==publishedDigest;
+                uint after=GetClipboardSequenceNumber();Record(new Dictionary<string,object>{{"phase","seed-publication-verify"},{"sequenceBeforeClose",beforeClose},{"sequenceOnReopen",observed},{"sequenceAfterRead",after},{"ownerIsGeneratedSource",own},{"formatsMatch",formats},{"contentCompared",formats},{"contentMatches",content}});
+                Assert(observed!=0&&observed==after&&own&&formats&&content,"Published screenshot seed identity changed; preserved.");
+                generation=observed;format=13;owner=source;digest=publishedDigest;
+            }finally{CloseClipboard();RecordState("seed-verified-close");}
+            Assert(SameGeneration(),"Verified screenshot seed changed after its read-only close; preserved.");
+        }
+        public bool SeedUnchanged() {
+            Assert(OpenClipboard(source),"Screenshot cancellation clipboard is busy; preserved.");
+            try{RecordState("after-cancel",true);return format==13&&SameGeneration()&&SeedFormatsMatch()&&SameContent();}
+            finally{CloseClipboard();}
         }
         // Arboard uses a null clipboard owner. Do not mistake an unrelated HWND
         // for our app. Content is claimed only after the guarded Copy action and
@@ -66,16 +98,16 @@ public static partial class EchoLingoApplicationSmoke {
         public void ObserveImage(uint observedGeneration,Func<bool> generatedPixelsMatch) {
             Assert(generatedPixelsMatch(),"Clipboard image does not match the generated fixture content; preserved.");
             Assert(OpenClipboard(source),"Copied image clipboard is busy; preserved.");
-            try{Assert(observedGeneration!=0&&GetClipboardSequenceNumber()==observedGeneration&&observedGeneration!=generation,"Copied image generation changed before ownership verification; preserved.");
+            try{Record(new Dictionary<string,object>{{"phase","image-claim"},{"sequenceBeforeOleRead",observedGeneration},{"sequenceAfterOleRead",GetClipboardSequenceNumber()},{"priorOwnedSequence",generation}});Assert(observedGeneration!=0&&GetClipboardSequenceNumber()==observedGeneration&&observedGeneration!=generation,"Copied image generation changed before ownership verification; preserved.");
                 uint imageFormat=IsClipboardFormatAvailable(17)?17U:8U;Assert(IsClipboardFormatAvailable(imageFormat),"Copied image has no bounded DIB payload.");
                 string value=LockedDigest(imageFormat);Assert(GetClipboardSequenceNumber()==observedGeneration,"Copied image generation changed while locked.");
-                generation=observedGeneration;format=imageFormat;owner=GetClipboardOwner();digest=value;
-            }finally{CloseClipboard();}
+                generation=observedGeneration;format=imageFormat;owner=GetClipboardOwner();digest=value;RecordState("image-claim-complete",true);
+            }finally{CloseClipboard();RecordState("image-verified-close");}
         }
         public string Cleanup() {
             if(!initialized)return "not-initialized-preserved";
             if(!OpenClipboard(source))return "clipboard-busy-preserved";
-            try{if(digest==null)return EmptyLocked()?"already-empty":"unclaimed-content-preserved";return ScreenshotReclaim(SameGeneration,SameContent,EmptyClipboard);}
+            try{RecordState("cleanup",true);if(digest==null)return EmptyLocked()?"already-empty":"unclaimed-content-preserved";return ScreenshotReclaim(SameGeneration,SameContent,EmptyClipboard);}
             finally{CloseClipboard();}
         }
     }
@@ -139,7 +171,7 @@ public static partial class EchoLingoApplicationSmoke {
         ((ValuePattern)raw).SetValue(path);edit.SetFocus();
         Assert(GetForegroundWindow()==modal&&ForegroundPid()==app.Id,"Native Open lost focus before submitting the generated path; no key sent.");Send(new INPUT[]{Key(0x0D,false),Key(0x0D,true)});
         WaitFor(delegate{AutomationElement copy=ScreenshotButton(editor,"\u590d\u5236");return !IsWindowVisible(modal)&&IsWindowVisible(editor)&&copy!=null&&copy.Current.IsEnabled&&Element(editor,expected.Width+" \u00d7 "+expected.Height+" px")!=null;},15,"Successful native Open did not install the generated local image session.",app);
-        using(Bitmap copied=ScreenshotClipboard(app,editor,expected.Size,delegate(Bitmap actual){return ScreenshotPixelsEqual(actual,expected);})) {
+        using(Bitmap copied=ScreenshotClipboard(app,editor,expected.Size,delegate(Bitmap actual){return ScreenshotPixelsEqual(actual,expected);},"local-"+format)) {
             for(int y=0;y<expected.Height;y++)for(int x=0;x<expected.Width;x++)Assert(copied.GetPixel(x,y).ToArgb()==expected.GetPixel(x,y).ToArgb(),"Native local image Open changed generated decoded pixels.");
             HashSet<string> existing=new HashSet<string>(Directory.GetFiles(output,"*.png"),StringComparer.OrdinalIgnoreCase);
             ScreenshotInvoke(app,editor,"\u4fdd\u5b58");WaitFor(delegate{return Directory.GetFiles(output,"*.png").Length==existing.Count+1&&ScreenshotButton(editor,"\u4fdd\u5b58").Current.IsEnabled;},15,"Opened local image did not save as a new PNG.",app);
@@ -158,8 +190,8 @@ public static partial class EchoLingoApplicationSmoke {
             if(actual.GetPixel(x,y).ToArgb()!=expected.ToArgb())return false;
         }return true;
     }
-    static Bitmap ScreenshotClipboard(Process app,IntPtr editor,Size expected,Func<Bitmap,bool> generatedPixelsMatch) {
-        ScreenshotOwnedClipboard.Seed();ScreenshotInvoke(app,editor,"\u590d\u5236");
+    static Bitmap ScreenshotClipboard(Process app,IntPtr editor,Size expected,Func<Bitmap,bool> generatedPixelsMatch,string copyPhase) {
+        ScreenshotOwnedClipboard.BeginCopy(copyPhase);ScreenshotOwnedClipboard.Seed();ScreenshotInvoke(app,editor,"\u590d\u5236");
         Bitmap result=null;bool accepted=false;
         try{WaitFor(delegate{
             uint generation=GetClipboardSequenceNumber();
@@ -199,7 +231,7 @@ public static partial class EchoLingoApplicationSmoke {
     }
     static void ScreenshotEditorWorkflow(Form form,Panel image,Process app,MockServer server,string history,string output,ProcessStartInfo start,string executable,string roaming,string token,List<string> passed,Dictionary<string,object> report,Func<int> sourceEvents) {
         IntPtr source=IntPtr.Zero;OnUi(form,delegate{source=form.Handle;});ScreenshotOwnedClipboard=new ScreenshotClipboardLease(source);bool completed=false;
-        report["screenshotClipboardPolicySelfTests"]=ScreenshotClipboardPolicyTests();
+        report["screenshotClipboardPolicySelfTests"]=ScreenshotClipboardPolicyTests();report["screenshotClipboardObservations"]=ScreenshotOwnedClipboard.Observations;
         try{ScreenshotOwnedClipboard.RequireEmpty();ScreenshotEditorWorkflowBody(form,image,app,server,history,output,start,executable,roaming,token,passed,report,sourceEvents);completed=true;}
         finally{string outcome;try{outcome=ScreenshotOwnedClipboard.Cleanup();}catch(Exception error){outcome="cleanup-error-"+error.GetType().Name;}ScreenshotOwnedClipboard=null;if(ScreenshotExpectedWindow!=null){ScreenshotExpectedWindow.Dispose();ScreenshotExpectedWindow=null;}
             report["screenshotClipboardCleanup"]=outcome;report["screenshotOwnedClipboardCleared"]=outcome=="verified-owned-generation-cleared"||outcome=="already-empty";
@@ -216,12 +248,12 @@ public static partial class EchoLingoApplicationSmoke {
         Assert(CaptureNumber(before,"ocrInvocationCount")==0,"OCR was invoked before the isolated F1 workflow.");
         Point first=Point.Empty,last=Point.Empty;OnUi(form,delegate{first=image.PointToScreen(new Point(20,20));last=image.PointToScreen(new Point(660,130));});
         Size selected=new Size(last.X-first.X,last.Y-first.Y);Assert(selected==new Size(640,110),"Generated screenshot region dimensions changed.");
-        string cancelSentinel=ScreenshotOwnedClipboard.Seed();
+        ScreenshotOwnedClipboard.Seed();
         Dictionary<string,object> cancelled=ScreenshotPicker(form,image,app,first,0);uint cancelledPid=Convert.ToUInt32(cancelled["helperProcessId"]);
         RequireForeground(form);Send(new INPUT[]{Key(0x1B,false),Key(0x1B,true)});
         WaitFor(delegate{return AppOverlays(app.Id)==0&&ProcessExited(cancelledPid);},10,"Cancelled F1 left native windows/process behind.",app);
         IntPtr editor=ScreenshotWindow(app.Id);Assert(editor==IntPtr.Zero||!IsWindowVisible(editor),"Cancelled F1 unexpectedly opened the editor.");
-        Assert(Clipboard.ContainsText()&&Clipboard.GetText()==cancelSentinel,"Cancelled F1 mutated the clipboard.");
+        Assert(ScreenshotOwnedClipboard.SeedUnchanged(),"Cancelled F1 mutated the clipboard.");
         Assert(Directory.GetFiles(output).Length==0,"Cancelled F1 saved a file.");cancelled["ok"]=true;cancelled["case"]="escape-cancel";cases.Add(cancelled);
 
         Dictionary<string,object> dragged=ScreenshotPicker(form,image,app,first,cancelledPid);uint dragPid=Convert.ToUInt32(dragged["helperProcessId"]);
@@ -233,7 +265,7 @@ public static partial class EchoLingoApplicationSmoke {
         ScreenshotDrag(app,editor,"\u88c1\u526a",selected,new Point(8,8),new Point(selected.Width-8,selected.Height-8));
         Size cropped=new Size(selected.Width-16,selected.Height-16);
         WaitFor(delegate{return Element(editor,cropped.Width+" \u00d7 "+cropped.Height+" px")!=null;},10,"Actual pixel crop dimensions did not render before export.",app);
-        using(Bitmap copied=ScreenshotClipboard(app,editor,cropped,ScreenshotCroppedPixels)) {
+        using(Bitmap copied=ScreenshotClipboard(app,editor,cropped,ScreenshotCroppedPixels,"cropped-edits")) {
             Assert(copied.GetPixel(12,12).ToArgb()==Color.FromArgb(228,93,104).ToArgb(),"Real editor solid mask did not replace generated source pixels.");
             Assert(copied.GetPixel(100,70).ToArgb()==Color.FromArgb(23,101,199).ToArgb(),"Generated blue source pixels were not retained outside redaction.");
             Assert(copied.GetPixel(cropped.Width-20,cropped.Height-20).ToArgb()==Color.FromArgb(210,60,90).ToArgb(),"Generated second source color was not retained after crop.");
@@ -246,7 +278,7 @@ public static partial class EchoLingoApplicationSmoke {
         }
         ScreenshotCancelFileDialog(app,editor,"\u53e6\u5b58\u4e3a");ScreenshotCancelFileDialog(app,editor,"\u6253\u5f00\u56fe\u7247");
         Assert(Directory.GetFiles(output,"*.png").Length==2,"Cancelled native file dialog wrote an unexpected export.");
-        using(Bitmap retained=ScreenshotClipboard(app,editor,cropped,ScreenshotCroppedPixels))Assert(retained.GetPixel(12,12).ToArgb()==Color.FromArgb(228,93,104).ToArgb(),"Cancelled Open discarded edited image pixels.");
+        using(Bitmap retained=ScreenshotClipboard(app,editor,cropped,ScreenshotCroppedPixels,"after-native-cancel"))Assert(retained.GetPixel(12,12).ToArgb()==Color.FromArgb(228,93,104).ToArgb(),"Cancelled Open discarded edited image pixels.");
         dragged["nativeSaveAsCancelPreservedImage"]=true;dragged["nativeOpenCancelPreservedImage"]=true;
         string inputs=Path.Combine(Path.GetDirectoryName(output),"GeneratedImageInputs");Assert(!Directory.Exists(inputs),"Generated image input directory already exists.");Directory.CreateDirectory(inputs);
         List<Dictionary<string,object>> opened=new List<Dictionary<string,object>>();
@@ -266,7 +298,7 @@ public static partial class EchoLingoApplicationSmoke {
         Dictionary<string,object> clicked=ScreenshotPicker(form,image,app,first,dragPid,true);RequireForeground(form);Send(new INPUT[]{down,up});
         WaitFor(delegate{return IsWindowVisible(editor)&&Element(editor,ScreenshotCanvasName)!=null&&AppOverlays(app.Id)==0;},25,"Click-visible-window F1 did not open editor.",app);
         int[] windowSize=(int[])clicked["expectedWindowDimensions"];
-        using(Bitmap copy=ScreenshotClipboard(app,editor,new Size(windowSize[0],windowSize[1]),delegate(Bitmap actual){return ScreenshotExpectedWindow!=null&&ScreenshotPixelsEqual(actual,ScreenshotExpectedWindow);})) { clicked["visibleWindowPixelSize"]=new int[]{copy.Width,copy.Height}; }
+        using(Bitmap copy=ScreenshotClipboard(app,editor,new Size(windowSize[0],windowSize[1]),delegate(Bitmap actual){return ScreenshotExpectedWindow!=null&&ScreenshotPixelsEqual(actual,ScreenshotExpectedWindow);},"clicked-window")) { clicked["visibleWindowPixelSize"]=new int[]{copy.Width,copy.Height}; }
         ScreenshotInvoke(app,editor,"\u5173\u95ed\u622a\u56fe\u7f16\u8f91\u5668");ScreenshotInvoke(app,editor,"\u7ee7\u7eed\u7f16\u8f91");Assert(IsWindowVisible(editor),"Cancel in unsaved close discarded the editor.");
         ScreenshotInvoke(app,editor,"\u5173\u95ed\u622a\u56fe\u7f16\u8f91\u5668");ScreenshotInvoke(app,editor,"\u4e22\u5f03\u5e76\u5173\u95ed");WaitFor(delegate{return !IsWindowVisible(editor);},10,"Explicit discard did not close unsaved editor.",app);
         Assert(Directory.GetFiles(output,"*.png").Length==4,"Closing an unsaved screenshot auto-saved or lost an earlier explicit export.");report["screenshotFinalExportCount"]=4;clicked["case"]="click-window-close-cancel-confirm";clicked["ok"]=true;cases.Add(clicked);

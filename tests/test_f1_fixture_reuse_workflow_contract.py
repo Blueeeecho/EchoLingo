@@ -19,7 +19,12 @@ class F1FixtureReuseWorkflowContract(unittest.TestCase):
     def test_quick_mac_probe_is_identical_to_strict_full_ci_job(self):
         ci = (ROOT / '.github/workflows/ci.yml').read_text()
         expected = ci.split('  macos-screenshot-native-probe:\n', 1)[1].split('  desktop:\n', 1)[0].strip()
-        actual = SOURCE.split('  macos-screenshot-native-probe:\n', 1)[1].strip()
+        actual = SOURCE.split('  macos-screenshot-native-probe:\n', 1)[1]
+        condition = "    if: contains(github.event.head_commit.message, '[mac-probe]')\n"
+        self.assertEqual(actual.count(condition), 1)
+        actual = actual.replace(condition, '').strip()
+        self.assertNotIn('[mac-probe]', ci)
+        self.assertNotIn('[mac-probe]', (ROOT / '.github/workflows/release-checks.yml').read_text())
         self.assertEqual(actual, expected)
 
     def test_all_production_changes_fail_and_pins_are_not_inputs(self):
