@@ -1,12 +1,14 @@
 #!/usr/bin/env python3
 """Compare immutable generated installer bytes; do not launch or rebuild them."""
 import hashlib
+import argparse
 import importlib.util
 import json
 import os
 from pathlib import Path
 import struct
 import subprocess
+import shutil
 import zipfile
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -35,6 +37,9 @@ def sections(data):
 
 
 def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--source', type=Path, help='Original clean product checkout for static reinspection')
+    args = parser.parse_args()
     temporary = Path(os.environ['RUNNER_TEMP'])
     archive = temporary / 'original-windows-build.zip'
     assert archive.stat().st_size == 79796541 and sha(archive.read_bytes()) == ARCHIVE_SHA
@@ -88,6 +93,36 @@ def main():
               'packageAccepted': False, 'appExecuted': False, 'productRebuilt': False}
     (output / 'BYTE-DIAGNOSIS.json').write_text(json.dumps(report, indent=2) + '\n', encoding='utf-8')
     print(json.dumps(report, indent=2))
+    if args.source is not None:
+        source = args.source.resolve(strict=True)
+        identity = subprocess.check_output(['git', '-C', source, 'rev-parse', 'HEAD', 'HEAD^{tree}'], text=True).splitlines()
+        assert identity == [SOURCE, TREE]
+        run_url = f"https://github.com/Blueeeecho/EchoLingo/actions/runs/{os.environ['GITHUB_RUN_ID']}"
+        checks = inspector.inspect('Windows', output / 'EchoLingo_0.2.6_x64-setup.exe', output / 'echolingo.exe',
+                                   output / 'inspection', run_url, locked_build_passed=True, focused_tests_passed=True, root=source)
+        candidate = temporary / 'reinspected-windows-candidate'
+        candidate.mkdir()
+        installer = candidate / 'EchoLingo_0.2.6_x64-setup.exe'
+        shutil.copyfile(output / installer.name, installer)
+        offline = temporary / 'candidate-offline-evidence'
+        source_zip = candidate / 'EchoLingo-offline-engine-source.zip'
+        shutil.copyfile(offline / source_zip.name, source_zip)
+        subprocess.run(['python', str(source / 'scripts/verify-candidate-package.py'), '--platform', 'Windows',
+                        '--installer', str(installer), '--application', str(output / 'inspection/echolingo.exe'),
+                        '--checks-json', str(output / 'inspection/checks.json'), '--output', str(candidate / 'CANDIDATE-MANIFEST.json'),
+                        '--run-url', run_url, '--offline-staging-manifest', str(offline / 'baseline-reuse.json'),
+                        '--offline-source-archive', str(source_zip)], cwd=source, check=True)
+        proof = {'schemaVersion': 1, 'sourceCommit': SOURCE, 'sourceTree': TREE,
+                 'buildRunUrl': 'https://github.com/Blueeeecho/EchoLingo/actions/runs/41195400127',
+                 'inspectionRunUrl': run_url, 'inspectionCommit': os.environ['GITHUB_SHA'],
+                 'inputArtifact': {'id': 13040982741, 'name': 'EchoLingo-0.2.6-UNVERIFIED-build-Windows',
+                                   'size': 79796541, 'sha256': ARCHIVE_SHA},
+                 'installerSha256': checks['installerSha256'], 'applicationSha256': checks['applicationSha256'],
+                 'applicationIdentity': json.loads((output / 'inspection/nsis-application-identity.json').read_text(encoding='utf-8')),
+                 'productRebuilt': False, 'binaryModified': False, 'installedAcceptance': False,
+                 'originalInspectionOutcome': 'failure'}
+        (candidate / 'REINSPECTION-MANIFEST.Windows.json').write_text(json.dumps(proof, indent=2) + '\n', encoding='utf-8')
+        print('Original Windows package passed static reinspection; no rebuild, modification, installation or launch.')
 
 
 if __name__ == '__main__':

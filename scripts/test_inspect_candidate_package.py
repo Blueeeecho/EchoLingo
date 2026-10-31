@@ -291,12 +291,13 @@ class CandidateInspectionTests(unittest.TestCase):
             installer = root / "EchoLingo_0.2.6_x64-setup.exe"
             built = root / "echolingo.exe"
             installer.write_bytes(b"generated installer container")
-            built.write_bytes(pe())
+            built.write_bytes(pe() + b"__TAURI_BUNDLE_TYPE_VAR_UNK")
+            original_bytes = built.read_bytes()
             identity = ("a" * 40, "b" * 40)
             def extract(_, output, expected_size):
                 self.assertEqual(expected_size, built.stat().st_size)
                 path = output / "echolingo.exe"
-                path.write_bytes(built.read_bytes())
+                path.write_bytes(built.read_bytes().replace(b"__TAURI_BUNDLE_TYPE_VAR_UNK", b"__TAURI_BUNDLE_TYPE_VAR_NSS"))
                 return path
             with mock.patch.object(MODULE.sys, "platform", "win32"), mock.patch.object(MODULE, "source_identity", return_value=identity), mock.patch.object(MODULE, "inspect_windows", side_effect=extract):
                 report = MODULE.inspect("Windows", installer, built, root / "inspection", "https://github.com/a/b/actions/runs/1",
@@ -306,6 +307,11 @@ class CandidateInspectionTests(unittest.TestCase):
                 self.assertEqual(report["applicationSha256"], report["extractedApplicationSha256"])
                 self.assertTrue(all(value is True for value in report["checks"].values()))
                 self.assertEqual(json.loads((root / "inspection/checks.json").read_text()), report)
+                nsis = json.loads((root / "inspection/nsis-application-identity.json").read_text())
+                self.assertEqual(nsis["packagedSha256"], report["applicationSha256"])
+                self.assertNotEqual(nsis["stageSha256"], nsis["packagedSha256"])
+                self.assertIs(nsis["actualExecutablesModified"], False)
+                self.assertEqual(built.read_bytes(), original_bytes)
                 with self.assertRaises(MODULE.InspectionError):
                     MODULE.inspect("Windows", installer, built, root / "inspection", "https://github.com/a/b/actions/runs/1",
                                    locked_build_passed=True, focused_tests_passed=True)
@@ -318,6 +324,61 @@ class CandidateInspectionTests(unittest.TestCase):
                     MODULE.inspect("Windows", installer, built, root / "mismatch", "https://github.com/a/b/actions/runs/1",
                                    locked_build_passed=True, focused_tests_passed=True)
                 self.assertFalse((root / "mismatch/checks.json").exists())
+
+    def test_nsis_identity_is_exact_full_marker_and_complete_file_hash(self):
+        stage = b"generated-header\0__TAURI_BUNDLE_TYPE_VAR_UNK\0generated-tail"
+        packaged = stage.replace(b"__TAURI_BUNDLE_TYPE_VAR_UNK", b"__TAURI_BUNDLE_TYPE_VAR_NSS")
+        result = MODULE.nsis_application_identity(stage, packaged)
+        self.assertEqual(result["markerOffset"], stage.index(b"__TAURI"))
+        self.assertEqual(result["changedBytes"], 3)
+        self.assertEqual(result["comparedBytes"], len(stage))
+        self.assertEqual(result["expectedNsisSha256"], result["packagedSha256"])
+        self.assertIs(result["actualExecutablesModified"], False)
+        # No other byte, region, resource, checksum, timestamp, or append may
+        # differ. A three-byte exception without the unique full token fails.
+        invalid = [(stage, stage), (stage, packaged + b"x"), (stage, packaged[:-1]),
+                   (stage, b"x" + packaged[1:]), (stage, packaged[:-1] + b"x"),
+                   (stage, packaged.replace(b"NSS", b"MSI")),
+                   (stage + b"__TAURI_BUNDLE_TYPE_VAR_UNK", packaged + b"__TAURI_BUNDLE_TYPE_VAR_NSS"),
+                   (b"prefixUNKtail", b"prefixNSStail"),
+                   (stage + b"__TAURI_BUNDLE_TYPE_VAR_NSS", packaged + b"__TAURI_BUNDLE_TYPE_VAR_NSS"),
+                   (stage, packaged.replace(b"__TAURI", b"__tAURI"))]
+        for original, extracted in invalid:
+            with self.subTest(original=original, extracted=extracted), self.assertRaises(MODULE.InspectionError):
+                MODULE.nsis_application_identity(original, extracted)
+
+    def test_nsis_marker_contract_is_gated_to_exact_locked_cli(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            packages = {name: {"version": "2.12.4"} for name in
+                        ("node_modules/@tauri-apps/cli", "node_modules/@tauri-apps/cli-win32-x64-msvc")}
+            path = root / "package-lock.json"
+            path.write_text(json.dumps({"packages": packages}))
+            MODULE.require_pinned_nsis_cli(root)
+            for name in packages:
+                invalid = json.loads(json.dumps(packages))
+                invalid[name]["version"] = "2.12.5"
+                path.write_text(json.dumps({"packages": invalid}))
+                with self.assertRaises(MODULE.InspectionError):
+                    MODULE.require_pinned_nsis_cli(root)
+
+    def test_nsis_comparison_does_not_relax_macos_byte_identity(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            installer = root / "EchoLingo_0.2.6_aarch64.dmg"
+            built = root / "echolingo"
+            installer.write_bytes(b"generated-container")
+            built.write_bytes(b"generated-__TAURI_BUNDLE_TYPE_VAR_UNK")
+            def extract(_, output):
+                target = output / "echolingo"
+                target.write_bytes(built.read_bytes().replace(b"_UNK", b"_NSS"))
+                return target
+            with mock.patch.object(MODULE.sys, "platform", "darwin"), mock.patch.object(MODULE, "source_identity", return_value=("a" * 40, "b" * 40)), mock.patch.object(MODULE, "inspect_macos", side_effect=extract):
+                with self.assertRaisesRegex(MODULE.InspectionError, "does not match"):
+                    MODULE.inspect("macOS", installer, built, root / "output", "https://github.com/a/b/actions/runs/1",
+                                   locked_build_passed=True, focused_tests_passed=True)
+            self.assertFalse((root / "output/checks.json").exists())
+            self.assertFalse((root / "output/nsis-application-identity.json").exists())
 
     def test_source_gate_uses_clean_tracked_exact_commit_tree_and_version(self):
         with tempfile.TemporaryDirectory() as folder:

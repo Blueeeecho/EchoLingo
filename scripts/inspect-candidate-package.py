@@ -385,6 +385,46 @@ def inspect_macos(installer, output):
     return target
 
 
+def nsis_application_identity(stage, packaged):
+    """Derive the complete NSIS variant in memory; never patch either file.
+
+    Pinned tauri-cli 2.12.4 patches this full token before bundling, then
+    restores the stage executable. See its bundle.rs lines 35-89, 142-201:
+    https://github.com/tauri-apps/tauri/blob/tauri-cli-v2.12.4/crates/tauri-bundler/src/bundle.rs
+    """
+    marker = b"__TAURI_BUNDLE_TYPE_VAR_UNK"
+    replacement = b"__TAURI_BUNDLE_TYPE_VAR_NSS"
+    require(0 < len(stage) <= MAX_EXECUTABLE and len(packaged) == len(stage),
+            "NSIS application length differs from the complete fresh application")
+    require(stage.count(marker) == 1 and stage.count(replacement) == 0,
+            "Expected exactly one fresh Tauri unknown bundle marker")
+    offset = stage.index(marker)
+    require(packaged.count(replacement) == 1 and packaged.count(marker) == 0
+            and packaged[offset:offset + len(marker)] == replacement,
+            "Packaged NSIS marker does not match the verified fresh marker location")
+    expected = hashlib.sha256()
+    expected.update(stage[:offset])
+    expected.update(replacement)
+    expected.update(stage[offset + len(marker):])
+    expected_hash = expected.hexdigest()
+    packaged_hash = hashlib.sha256(packaged).hexdigest()
+    require(expected_hash == packaged_hash,
+            "Installer application differs beyond the exact pinned Tauri NSIS bundle marker")
+    return {"schemaVersion": 1, "method": "tauri-cli-2.12.4-nsis-bundle-marker",
+            "stageSha256": hashlib.sha256(stage).hexdigest(), "packagedSha256": packaged_hash,
+            "expectedNsisSha256": expected_hash, "markerOffset": offset,
+            "stageMarker": marker.decode("ascii"), "packagedMarker": replacement.decode("ascii"),
+            "changedBytes": 3, "comparedBytes": len(stage), "actualExecutablesModified": False}
+
+
+def require_pinned_nsis_cli(root):
+    lock = json.loads((Path(root) / "package-lock.json").read_text(encoding="utf-8"))
+    packages = lock.get("packages", {})
+    require(all(packages.get(name, {}).get("version") == "2.12.4" for name in
+                ("node_modules/@tauri-apps/cli", "node_modules/@tauri-apps/cli-win32-x64-msvc")),
+            "NSIS marker comparison requires the audited locked Tauri CLI 2.12.4")
+
+
 def inspect(platform, installer, built_application, output, run_url, *, locked_build_passed=False,
             focused_tests_passed=False, root=ROOT):
     require(locked_build_passed is True and focused_tests_passed is True, "Locked build and focused-test attestations are required")
@@ -410,7 +450,14 @@ def inspect(platform, installer, built_application, output, run_url, *, locked_b
     output = output.resolve(strict=True)
     application = inspect_windows(installer, output, built_application.stat().st_size) if platform == "Windows" else inspect_macos(installer, output)
     extracted_hash = sha256(regular_file(application))
-    require(extracted_hash == built_hash, "Installer application does not match freshly built application")
+    nsis_identity = None
+    if platform == "Windows":
+        require_pinned_nsis_cli(root)
+        nsis_identity = nsis_application_identity(built_application.read_bytes(), application.read_bytes())
+        require(nsis_identity["stageSha256"] == built_hash and nsis_identity["packagedSha256"] == extracted_hash,
+                "Application bytes changed during NSIS identity comparison")
+    else:
+        require(extracted_hash == built_hash, "Installer application does not match freshly built application")
     require(sha256(installer) == installer_hash and sha256(built_application) == built_hash, "Build inputs changed during inspection")
     require(source_identity(root) == (commit, tree), "Source identity changed during inspection")
     report = {"schemaVersion": 1, "platform": platform, "version": VERSION,
@@ -421,6 +468,10 @@ def inspect(platform, installer, built_application, output, run_url, *, locked_b
               "applicationMetadata": {"version": VERSION, "architecture": "x64" if platform == "Windows" else "arm64"},
               "installerSha256": installer_hash, "applicationSha256": extracted_hash,
               "extractedApplicationSha256": extracted_hash}
+    if nsis_identity is not None:
+        with (output / "nsis-application-identity.json").open("x", encoding="utf-8") as stream:
+            json.dump(nsis_identity, stream, indent=2)
+            stream.write("\n")
     with (output / "checks.json").open("x", encoding="utf-8") as stream:
         json.dump(report, stream, indent=2)
         stream.write("\n")

@@ -1,4 +1,4 @@
-name: Diagnose immutable Windows candidate byte difference
+name: Reinspect immutable 0.2.6 Windows package
 on:
   push:
     branches: [verify/026-windows-package]
@@ -6,7 +6,8 @@ permissions:
   contents: read
   actions: read
 jobs:
-  diagnose-windows-package:
+  reinspect-windows-package:
+    name: Reinspect the original 0.2.6 Windows bytes without rebuilding
     runs-on: windows-latest
     timeout-minutes: 10
     steps:
@@ -15,11 +16,18 @@ jobs:
           ref: ${{ github.sha }}
           fetch-depth: 0
           persist-credentials: false
+          path: inspection-tools
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: d91b59505f81d766eca25a8cff4764c278542275
+          persist-credentials: false
+          path: product-source
       - uses: actions/setup-python@v5
         with:
           python-version: '3.13'
       - name: Require the pinned product tree and diagnosis-only additions
         shell: bash
+        working-directory: inspection-tools
         run: |
           set -euo pipefail
           python - <<'PY'
@@ -27,8 +35,10 @@ jobs:
           source='d91b59505f81d766eca25a8cff4764c278542275'
           assert subprocess.check_output(['git','rev-parse',source+'^{tree}'],text=True).strip() == '2898ee1bad7f1d73d408d2ad5fc136cfc869fe3a'
           changed=set(subprocess.check_output(['git','diff','--name-only',source,'HEAD'],text=True).splitlines())
-          assert changed == {'.github/workflows/diagnose-026-windows-package.yml','scripts/diagnose-026-windows-package.py'}
+          assert changed == {'.github/workflows/diagnose-026-windows-package.yml','scripts/diagnose-026-windows-package.py','scripts/inspect-candidate-package.py','scripts/test_inspect_candidate_package.py'}
           PY
+          python scripts/check-repository.py
+          python scripts/test_inspect_candidate_package.py
       - name: Download only the immutable generated Windows build
         uses: actions/github-script@v7
         with:
@@ -36,6 +46,16 @@ jobs:
             const fs=require('node:fs'), path=require('node:path'), crypto=require('node:crypto');
             if(context.repo.owner!=='Blueeeecho'||context.repo.repo!=='EchoLingo'||context.ref!=='refs/heads/verify/026-windows-package'||context.eventName!=='push')throw new Error('Wrong diagnosis context');
             const base={owner:'Blueeeecho',repo:'EchoLingo'};
+            const {data:run}=await github.rest.actions.getWorkflowRun({...base,run_id:41195400127});
+            if(run.repository.id!==1432139657||run.head_sha!=='d91b59505f81d766eca25a8cff4764c278542275'||run.head_branch!=='fix/025-macos-recovery-integration'||run.event!=='push'||run.run_attempt!==1||run.conclusion!=='failure')throw new Error('Wrong original source run');
+            const {data:{jobs}}=await github.rest.actions.listJobsForWorkflowRun({...base,run_id:41195400127,per_page:100});
+            for(const id of [124520436757,124520436887])if(jobs.find(j=>j.id===id)?.conclusion!=='success')throw new Error('Original native tests did not pass');
+            const windows=jobs.find(j=>j.id===124521433185);
+            if(!windows||windows.conclusion!=='failure')throw new Error('Original inspection failure must remain explicit');
+            for(const [name,outcome] of [['Build fresh application and installer with locked dependencies','success'],['Execute Windows native policy and shared current-request regression','success'],['Verify the Windows capture child actually embedded in this fresh application','success'],['Inspect fresh installer bytes without installing or launching the application','failure'],['Upload unverified build diagnosis separately from candidates','success']]) {
+              const steps=windows.steps.filter(s=>s.name===name);
+              if(steps.length!==1||steps[0].conclusion!==outcome)throw new Error('Original Windows outcome changed');
+            }
             const {data:artifact}=await github.rest.actions.getArtifact({...base,artifact_id:13040982741});
             const sha='4787f328c08f8b9e4afd9a2881efcac192047cc38e73c5a9ae3add1b86116618';
             if(artifact.expired||artifact.workflow_run.id!==41195400127||artifact.workflow_run.head_sha!=='d91b59505f81d766eca25a8cff4764c278542275'||artifact.name!=='EchoLingo-0.2.6-UNVERIFIED-build-Windows'||artifact.size_in_bytes!==79796541||artifact.digest!==`sha256:${sha}`)throw new Error('Wrong original artifact');
@@ -43,14 +63,38 @@ jobs:
             const bytes=Buffer.from(data);
             if(bytes.length!==79796541||crypto.createHash('sha256').update(bytes).digest('hex')!==sha)throw new Error('Original bytes changed');
             fs.writeFileSync(path.join(process.env.RUNNER_TEMP,'original-windows-build.zip'),bytes,{flag:'wx'});
-      - name: Compare known executable bytes without accepting modifying or launching them
-        run: python scripts/diagnose-026-windows-package.py
-      - name: Preserve generated byte metadata only
+      - name: Restage only the exact unchanged offline resources and corresponding public source
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs=require('node:fs'),path=require('node:path'),crypto=require('node:crypto');
+            const base={owner:'Blueeeecho',repo:'EchoLingo'};
+            const {data:run}=await github.rest.actions.getWorkflowRun({...base,run_id:41178655504});
+            if(run.conclusion!=='success'||run.head_sha!=='4b8c5f5ac67e07cc4005812963b2c02acdd14d5d')throw new Error('Pinned resource run mismatch');
+            const directory=path.join(process.env.RUNNER_TEMP,'candidate-offline-inputs');fs.mkdirSync(directory);
+            for(const [id,name,hash] of [[13034542412,'windows.zip','da42d05739744f5eafa71f9758d6a045b42020403d4228f3007d9bbda92fbb25'],[13034970610,'evidence.zip','2520b83f54d3774b75c0cc1c6fc3f3105f0c9fb380800d94ac73001e36295285']]) {
+              const {data:artifact}=await github.rest.actions.getArtifact({...base,artifact_id:id});
+              if(artifact.expired||artifact.workflow_run.id!==41178655504||artifact.digest!==`sha256:${hash}`)throw new Error('Pinned resource artifact mismatch');
+              const {data}=await github.rest.actions.downloadArtifact({...base,artifact_id:id,archive_format:'zip'});
+              const bytes=Buffer.from(data);if(crypto.createHash('sha256').update(bytes).digest('hex')!==hash)throw new Error('Resource bytes changed');
+              fs.writeFileSync(path.join(directory,name),bytes,{flag:'wx'});
+            }
+      - name: Stage the original hash-verified model engine license and source bytes
+        shell: pwsh
+        working-directory: product-source
+        run: |
+          python scripts/stage-language-patch-resources.py --windows-zip "$env:RUNNER_TEMP/candidate-offline-inputs/windows.zip" --evidence-zip "$env:RUNNER_TEMP/candidate-offline-inputs/evidence.zip" --output-dir "$env:RUNNER_TEMP/candidate-offline-evidence"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Reinspect complete expected NSIS bytes without modifying or launching them
+        run: python inspection-tools/scripts/diagnose-026-windows-package.py --source product-source
+      - name: Preserve only the verified original Windows installer and explicit two-run provenance
         uses: actions/upload-artifact@v4
         with:
-          name: windows-026-package-byte-diagnosis
+          name: EchoLingo-0.2.6-candidate-Windows-reinspected
           if-no-files-found: error
           path: |
-            ${{ runner.temp }}/windows-package-byte-diagnosis/BYTE-DIAGNOSIS.json
-            ${{ runner.temp }}/windows-package-byte-diagnosis/7z-listing.txt
-            ${{ runner.temp }}/windows-package-byte-diagnosis/UNVERIFIED-BUILD.json
+            ${{ runner.temp }}/reinspected-windows-candidate/EchoLingo_0.2.6_x64-setup.exe
+            ${{ runner.temp }}/reinspected-windows-candidate/EchoLingo-offline-engine-source.zip
+            ${{ runner.temp }}/reinspected-windows-candidate/CANDIDATE-MANIFEST.json
+            ${{ runner.temp }}/reinspected-windows-candidate/CANDIDATE-MANIFEST.json.sha256
+            ${{ runner.temp }}/reinspected-windows-candidate/REINSPECTION-MANIFEST.Windows.json
