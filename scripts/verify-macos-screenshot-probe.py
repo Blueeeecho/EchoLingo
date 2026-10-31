@@ -56,6 +56,8 @@ def verify(report):
     if (status != 'passed' or report.get('ok') is not True or report.get('captureCasesPassed') is not True
             or report.get('screenCapturePreflightGranted') is not True or report.get('nativeProcessExitCode') != 0):
         raise ValueError('Native capture pass lacks successful permission/runtime evidence')
+    if type(report.get('sourcePhaseAcknowledged')) is not int or report['sourcePhaseAcknowledged'] != 2:
+        raise ValueError('The generated source must acknowledge exact phase2 before its native capture')
     if (report.get('sourceWindowServerReady') is not True
             or type(report.get('sourceReadinessObservations')) is not int
             or report['sourceReadinessObservations'] <= 0):
@@ -80,6 +82,14 @@ def verify(report):
         if (type(report.get('visibilityOracleIntersectingSharedOverlayCount')) is not int
                 or report['visibilityOracleIntersectingSharedOverlayCount'] < 0):
             raise ValueError('The independent oracle must record its protected-overlay metadata guard')
+        if (report.get('phase2CurrentCompositeVerified') is not True
+                or report.get('phase2ReadinessUsedSingleDeadline') is not True
+                or type(report.get('phase2ReadinessMismatchCategory')) is not int or report['phase2ReadinessMismatchCategory'] != 0
+                or type(report.get('phase2ReadinessObservations')) is not int
+                or type(report.get('phase2KnownPriorPhaseObservations')) is not int
+                or report['phase2KnownPriorPhaseObservations'] < 0
+                or report['phase2ReadinessObservations'] != report['phase2KnownPriorPhaseObservations'] + 1):
+            raise ValueError('Phase2 requires exact current composite pixels within one unchanged readiness deadline')
     cases = report.get('cases')
     if (not isinstance(cases, list) or len(cases) != len(MODES) or any(not isinstance(case, dict) for case in cases)
             or tuple(case.get('mode') for case in cases) != MODES):

@@ -99,6 +99,15 @@ are exempt from that metadata guard. It does not run the no-exclusion pixel
 oracle through its own blue outline/loupe. Final native PNG pixel checks are
 unchanged, and phase2 must independently show the newly generated red pixels.
 The production hit-policy negative vectors run before any native capture probe.
+The phase2 source ACK is not assumed to mean the compositor has already published
+the red frame. Its pre-case oracle may make further read-only observations only
+while **every pixel and fiducial exactly matches known phase1**. These observations
+share the original single eight-second oracle deadline; arbitrary/misaligned/
+occluded pixels, identity/protection changes or deadline expiry fail immediately.
+The real picker is armed only after full exact red pixels are visible, is never
+retried, and must still return its own exact red PNG. Reports retain numeric
+observation counts and mismatch category (0=current, 1=known previous, 2=unknown),
+never image bytes or sample colors.
 After native completion, AppKit must still report no visible selectors. The
 fixture then observes only the current case's recorded selector IDs/PID/frames
 until WindowServer removes them, for at most one second within the existing

@@ -17,6 +17,7 @@ def passed():
                   screenCapturePreflightGranted=True, nativeProcessExitCode=0, cases=[],
                   sourceWindowServerReady=True, sourceReadinessObservations=1,
                   sourceWindowServerReadinessMethod='exact-geometric-metadata',
+                  sourcePhaseAcknowledged=2,
                   fixtureBinarySha256='1' * 64, productionSourceSha256={path: '2' * 64 for path in module.SOURCES})
     for flag in ('permissionRequested', 'securitySettingsChanged', 'generalClipboardTouched', 'userContentCaptured',
                  'physicalF1Tested', 'packagedEditorTested', 'rustClipboardBackendTested',
@@ -66,6 +67,8 @@ class MacScreenshotProbeContract(unittest.TestCase):
                       visibilityOracleOverlaySharingGuardVerified=True, visibilityOracleIntersectingSharedOverlayCount=1,
                       visibilityOracleExcludedWindowCount=0, visibilityOraclePixelBytesRetained=False,
                       visibilityOracleRegion='exact-generated-source-512x320')
+        report.update(phase2CurrentCompositeVerified=True, phase2ReadinessUsedSingleDeadline=True,
+                      phase2ReadinessMismatchCategory=0, phase2ReadinessObservations=3, phase2KnownPriorPhaseObservations=2)
         for case in report['cases']:
             case.update(preCaseFullCompositeVerified=True, postCaseFullCompositeVerified=True)
         self.assertEqual(module.verify(report), 0)
@@ -79,6 +82,9 @@ class MacScreenshotProbeContract(unittest.TestCase):
                              ('sourceWindowServerReadinessMethod', 'exact-geometric-metadata'),
                              ('visibilityOracleHostedRunnerVerified', False), ('visibilityOracleExcludedWindowCount', 1),
                              ('visibilityOraclePixelBytesRetained', True), ('visibilityOracleRegion', 'smaller-patch'),
+                             ('sourcePhaseAcknowledged', 1), ('phase2CurrentCompositeVerified', False),
+                             ('phase2ReadinessUsedSingleDeadline', False), ('phase2ReadinessMismatchCategory', 1),
+                             ('phase2ReadinessObservations', 1), ('phase2KnownPriorPhaseObservations', -1),
                              ('cases', [])]:
             invalid = copy.deepcopy(report); invalid[field] = value
             with self.assertRaises(ValueError): module.verify(invalid)
@@ -209,6 +215,11 @@ class MacScreenshotProbeContract(unittest.TestCase):
         self.assertIn('try captureScreenshotSelfTest()', swift)
         self.assertIn('stage: "pre-case-" + mode, occluded: false, phase: sourcePhase', swift)
         self.assertIn('stage: "post-case-" + mode, occluded: false, phase: sourcePhase', swift)
+        self.assertIn('readinessDeadline ?? Date().addingTimeInterval(8)', swift)
+        self.assertIn('readinessDeadline: deadline, priorPhaseObservations: priorPhaseObservations + 1', swift)
+        self.assertIn('stage == "pre-case-window-phase2", phase == 2, !occluded', swift)
+        self.assertIn('self.operation == nil, self.activeCase == nil', swift)
+        self.assertIn('if priorMatched && Date() < deadline', swift)
         live = swift.split('func verifyCaseSource()', 1)[1].split('func beginCase()', 1)[0]
         self.assertIn('captureWindowIsCurrent(target', live)
         self.assertIn('captureHoverWindow(records, at: point', live)

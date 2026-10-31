@@ -318,6 +318,7 @@ private final class ScreenshotProbe {
                                              frame: CGRect(x: x, y: y, width: width, height: height))
             if phase == 2 && self.target != target { self.finish("failed", reason: "generated-source-frame-changed"); return }
             self.target = target; self.sourceScale = scale; self.sourcePhase = phase
+            self.report["sourcePhaseAcknowledged"] = phase
             var appKitState: [String: Any] = [:]
             for key in ["applicationActive", "windowKey", "windowVisible", "windowOnActiveSpace", "frontmostIsSource",
                         "applicationFinishedLaunching", "runningApplicationActive"] {
@@ -467,9 +468,12 @@ private final class ScreenshotProbe {
 
     @available(macOS 14.0, *)
     func captureVisibilityOracle(_ expected: CaptureWindowTarget, stage: String, occluded: Bool, phase: Int = 1,
+                                 readinessDeadline: Date? = nil, priorPhaseObservations: Int = 0,
                                  completion: @escaping () -> Void) {
         guard !finished else { return }
+        let deadline = readinessDeadline ?? Date().addingTimeInterval(8)
         do {
+            try fixtureNeed(Date() <= deadline, "visibility oracle exceeded its absolute deadline")
             let screen = try oracleSourceIdentity(expected)
             guard let number = screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber else {
                 throw NativeError("FIXTURE: oracle display ID is unavailable")
@@ -496,13 +500,14 @@ private final class ScreenshotProbe {
             try verifyOracleWindows()
             let token = UUID(); oracleToken = token
             report["visibilityOracleStage"] = stage
-            DispatchQueue.main.asyncAfter(deadline: .now() + 8) {
+            DispatchQueue.main.asyncAfter(deadline: .now() + max(0, deadline.timeIntervalSinceNow)) {
                 if !self.finished && self.oracleToken == token { self.finish("failed", reason: "visible-pixel-oracle-timeout") }
             }
             SCShareableContent.getExcludingDesktopWindows(false, onScreenWindowsOnly: true) { content, _ in
                 DispatchQueue.main.async {
                     guard !self.finished, self.oracleToken == token else { return }
                     do {
+                        try fixtureNeed(Date() <= deadline, "visibility oracle exceeded its absolute deadline")
                         try verifyOracleWindows()
                         guard let display = content?.displays.first(where: { $0.displayID == displayID }) else {
                             throw NativeError("FIXTURE: oracle display content is unavailable")
@@ -521,11 +526,44 @@ private final class ScreenshotProbe {
                                 guard !self.finished, self.oracleToken == token else { return }
                                 self.oracleToken = nil
                                 do {
+                                    try fixtureNeed(Date() <= deadline, "visibility oracle exceeded its absolute deadline")
                                     try verifyOracleWindows()
                                     guard let image = image else { throw NativeError("FIXTURE: oracle display image is unavailable") }
                                     try fixtureNeed(image.width == Int(512 * self.sourceScale) && image.height == Int(320 * self.sourceScale),
                                                     "oracle exact ROI dimensions differ")
-                                    try self.verifyPixels(image, phase: phase, occluder: occluded)
+                                    do { try self.verifyPixels(image, phase: phase, occluder: occluded) }
+                                    catch {
+                                        // Only phase2's PRECONDITION can observe a
+                                        // still-composited, exact known phase1.
+                                        // Never retry a real picker/capture, an
+                                        // arbitrary mismatch, or an unknown cover.
+                                        if stage == "pre-case-window-phase2", phase == 2, !occluded,
+                                           self.sourcePhase == 2, self.cases.count == 4, self.index == 4,
+                                           self.operation == nil, self.activeCase == nil {
+                                            var priorMatched = false
+                                            do { try self.verifyPixels(image, phase: 1) ; priorMatched = true } catch {}
+                                            self.report["phase2ReadinessObservations"] = priorPhaseObservations + 1
+                                            self.report["phase2KnownPriorPhaseObservations"] = priorPhaseObservations + (priorMatched ? 1 : 0)
+                                            self.report["phase2ReadinessMismatchCategory"] = priorMatched ? 1 : 2
+                                            self.report["phase2CurrentCompositeVerified"] = false
+                                            if priorMatched && Date() < deadline {
+                                                DispatchQueue.main.asyncAfter(deadline: .now() + 0.025) {
+                                                    self.captureVisibilityOracle(expected, stage: stage, occluded: false, phase: 2,
+                                                        readinessDeadline: deadline, priorPhaseObservations: priorPhaseObservations + 1,
+                                                        completion: completion)
+                                                }
+                                                return
+                                            }
+                                        }
+                                        throw error
+                                    }
+                                    if stage == "pre-case-window-phase2" {
+                                        self.report["phase2ReadinessObservations"] = priorPhaseObservations + 1
+                                        self.report["phase2KnownPriorPhaseObservations"] = priorPhaseObservations
+                                        self.report["phase2ReadinessMismatchCategory"] = 0
+                                        self.report["phase2CurrentCompositeVerified"] = true
+                                        self.report["phase2ReadinessUsedSingleDeadline"] = true
+                                    }
                                     if occluded {
                                         var rejected = false
                                         do { try self.verifyPixels(image, phase: phase) } catch { rejected = true }
@@ -534,6 +572,7 @@ private final class ScreenshotProbe {
                                     }
                                     // Only scalar results survive this closure;
                                     // the CGImage and normalized pixel buffer do not.
+                                    try fixtureNeed(Date() <= deadline, "visibility oracle exceeded its absolute deadline")
                                     completion()
                                 } catch { self.finish("failed", reason: String(describing: error)) }
                             }
