@@ -125,10 +125,16 @@ pub fn resolve(text: &str, source: &str, target: &str) -> Result<Option<Plan>, S
             target: "en",
         }));
     }
+    // Keep the short ASCII-text behavior, but do not reject English merely
+    // because OCR or a borrowed word contributed a non-ASCII letter. The local
+    // classifier must positively identify English; other/uncertain languages
+    // still require an explicit choice. Never rewrite the captured text.
     if text
         .chars()
         .filter(|c| c.is_alphabetic())
         .all(|c| c.is_ascii_alphabetic())
+        || whatlang::detect(text)
+            .is_some_and(|info| info.is_reliable() && info.lang() == whatlang::Lang::Eng)
     {
         return Ok(Some(Plan::Translate {
             source: "en",
@@ -263,6 +269,39 @@ mod tests {
                 target: "zh-Hans"
             }
         );
+    }
+    #[test]
+    fn english_prose_with_ocr_noise_or_borrowed_words_keeps_english_direction() {
+        let prose = "Please read the report and preserve the original paragraph boundaries. Do not change the numbers or code when translating this text.";
+        for text in [
+            format!("{prose}\u{0105}Xy"),
+            format!("{prose}\u{00e9}"),
+            format!("{prose}\u{03b1}"),
+            "Please read the café menu and tell me whether the vegetarian option is available today.".into(),
+        ] {
+            assert_eq!(
+                automatic(&text),
+                Plan::Translate {
+                    source: "en",
+                    target: "zh-Hans"
+                },
+                "{text}"
+            );
+            assert_eq!(resolve(&text, "fr", "de").unwrap(), None);
+        }
+    }
+    #[test]
+    fn extended_alphabet_does_not_make_other_languages_english() {
+        for text in [
+            "Veuillez lire le résumé du rapport et conserver les paragraphes, les chiffres et la ponctuation du texte original.",
+            "Proszę przeczytać ten dokument i zachować jego oryginalny układ oraz wszystkie liczby. To jest tekst napisany po polsku.",
+            "Пожалуйста, прочитайте этот документ и сохраните исходные абзацы, числа и знаки препинания.",
+            "こんにちは、ありがとうございます。おはようございます。",
+            "\u{0105}\u{00e9}\u{017a}\u{03b1}",
+        ] {
+            assert!(resolve(text, "auto", "auto").is_err(), "{text}");
+            assert_eq!(resolve(text, "auto", "en").unwrap(), None);
+        }
     }
     #[test]
     fn manual_language_choices_keep_multilingual_behavior() {

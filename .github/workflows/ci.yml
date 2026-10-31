@@ -13,9 +13,42 @@ on:
 permissions:
   contents: read
 jobs:
+  validation-mode:
+    runs-on: ubuntu-latest
+    outputs:
+      mode: ${{ steps.scope.outputs.mode }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Select only the exact reviewed language patch or the unchanged full suite
+        id: scope
+        run: python3 scripts/verify-language-patch.py --select
+  language-patch-targeted:
+    needs: validation-mode
+    if: needs.validation-mode.outputs.mode == 'language-routing-patch-v1'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+      - run: python3 scripts/verify-language-patch.py
+      - run: python3 scripts/prepare-release-assets.py --check-version
+      - run: python3 scripts/check-repository.py
+      - run: python3 -m unittest discover -s scripts -p 'test_*language_patch*.py' -v
+      - run: cargo test --manifest-path tests/language-routing-patch/Cargo.toml --locked
+      - name: Preserve changed-source formatting before native package builds
+        run: rustfmt --edition 2021 --check src-tauri/src/bilingual_input.rs
   rust-input-preparation:
+    needs: validation-mode
     name: Reviewable Rust lock and formatting inputs (not runtime acceptance)
-    if: github.event_name == 'pull_request'
+    if: needs.validation-mode.outputs.mode != 'language-routing-patch-v1' && github.event_name == 'pull_request'
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -59,6 +92,8 @@ jobs:
         shell: bash
         run: git diff --exit-code -- src-tauri
   windows-rust-capture-candidate:
+    needs: validation-mode
+    if: needs.validation-mode.outputs.mode != 'language-routing-patch-v1'
     name: Isolated Rust capture candidate (native Windows runtime)
     runs-on: windows-latest
     timeout-minutes: 10
@@ -134,6 +169,8 @@ jobs:
         shell: bash
         run: echo 'Repeated A/B capture benchmark outcome ${{ steps.native_capture_paired_diagnostic.outcome }} is diagnostic only under core-functional-v1. Original raw failures remain failures; standalone capture/input/cleanup and installed editor acceptance are mandatory.' >> "$GITHUB_STEP_SUMMARY"
   macos-native-frame-probe:
+    needs: validation-mode
+    if: needs.validation-mode.outputs.mode != 'language-routing-patch-v1'
     name: Isolated macOS native frame geometry probe
     runs-on: macos-latest
     timeout-minutes: 5
@@ -161,6 +198,8 @@ jobs:
           path: ${{ runner.temp }}/native-edge-diagnostic.log
           if-no-files-found: warn
   macos-screenshot-native-probe:
+    needs: validation-mode
+    if: needs.validation-mode.outputs.mode != 'language-routing-patch-v1'
     name: macOS native screenshot capture (permission block is not a pass)
     runs-on: macos-latest
     timeout-minutes: 8
@@ -188,7 +227,8 @@ jobs:
           echo 'Native capture probe outcome: ${{ steps.macos_f1_native_probe.outcome }}. This is not physical F1 or packaged editor acceptance. Permission-blocked capture remains a failed gate; no security settings are changed.' >> "$GITHUB_STEP_SUMMARY"
           python3 scripts/verify-macos-screenshot-probe.py "$RUNNER_TEMP/macos-f1-native-probe/report.json" 2>&1 | tee -a "$GITHUB_STEP_SUMMARY"
   desktop:
-    if: github.event.inputs.mode != 'windows-popup-diagnostics' && github.event.inputs.mode != 'windows-popup-current-diagnostics' && github.event.inputs.mode != 'windows-application-diagnostics' && github.event.inputs.mode != 'windows-input-plane-experiment' && github.event.inputs.mode != 'windows-native-diagnostics' && github.event.inputs.mode != 'windows-shortcuts-ui-diagnostics' && github.event.inputs.mode != 'windows-shortcuts-ui-medium-diagnostics' && github.event.inputs.mode != 'windows-shortcuts-current-diagnostics' && github.event.inputs.mode != 'windows-shortcuts-workflows-diagnostics' && github.event.inputs.mode != 'windows-delegated-diagnostics' && github.event.inputs.mode != 'windows-browser-diagnostics' && github.event.inputs.mode != 'windows-selection-same-page-diagnostics' && github.event.inputs.mode != 'windows-selection-browser-app-diagnostics' && github.event.inputs.mode != 'windows-browser-ocr-visibility-diagnostics' && github.event.inputs.mode != 'windows-selection-cold-edge-diagnostics' && github.event.inputs.mode != 'windows-selection-paced-edge-diagnostics' && github.event.inputs.mode != 'windows-selection-nonbrowser-app-diagnostics' && github.event.inputs.mode != 'windows-latest-intent-diagnostics' && github.event.inputs.mode != 'windows-selection-application-diagnostics' && github.event.inputs.mode != 'windows-selection-clipboard-diagnostics' && github.event.inputs.mode != 'windows-selection-notepad-diagnostics' && github.event.inputs.mode != 'windows-selection-budget-diagnostics' && github.event.inputs.mode != 'windows-selection-context-diagnostics' && github.event.inputs.mode != 'windows-wps-selection-diagnostics' && github.event.inputs.mode != 'windows-focus-resize-current-diagnostics' && github.event.inputs.mode != 'windows-priority-input-diagnostics' && github.event.inputs.mode != 'windows-priority-candidate-diagnostics'
+    needs: validation-mode
+    if: needs.validation-mode.outputs.mode != 'language-routing-patch-v1' && github.event.inputs.mode != 'windows-popup-diagnostics' && github.event.inputs.mode != 'windows-popup-current-diagnostics' && github.event.inputs.mode != 'windows-application-diagnostics' && github.event.inputs.mode != 'windows-input-plane-experiment' && github.event.inputs.mode != 'windows-native-diagnostics' && github.event.inputs.mode != 'windows-shortcuts-ui-diagnostics' && github.event.inputs.mode != 'windows-shortcuts-ui-medium-diagnostics' && github.event.inputs.mode != 'windows-shortcuts-current-diagnostics' && github.event.inputs.mode != 'windows-shortcuts-workflows-diagnostics' && github.event.inputs.mode != 'windows-delegated-diagnostics' && github.event.inputs.mode != 'windows-browser-diagnostics' && github.event.inputs.mode != 'windows-selection-same-page-diagnostics' && github.event.inputs.mode != 'windows-selection-browser-app-diagnostics' && github.event.inputs.mode != 'windows-browser-ocr-visibility-diagnostics' && github.event.inputs.mode != 'windows-selection-cold-edge-diagnostics' && github.event.inputs.mode != 'windows-selection-paced-edge-diagnostics' && github.event.inputs.mode != 'windows-selection-nonbrowser-app-diagnostics' && github.event.inputs.mode != 'windows-latest-intent-diagnostics' && github.event.inputs.mode != 'windows-selection-application-diagnostics' && github.event.inputs.mode != 'windows-selection-clipboard-diagnostics' && github.event.inputs.mode != 'windows-selection-notepad-diagnostics' && github.event.inputs.mode != 'windows-selection-budget-diagnostics' && github.event.inputs.mode != 'windows-selection-context-diagnostics' && github.event.inputs.mode != 'windows-wps-selection-diagnostics' && github.event.inputs.mode != 'windows-focus-resize-current-diagnostics' && github.event.inputs.mode != 'windows-priority-input-diagnostics' && github.event.inputs.mode != 'windows-priority-candidate-diagnostics'
     strategy:
       fail-fast: false
       matrix:
@@ -840,7 +880,8 @@ jobs:
           }
 
   frontend-interactions:
-    if: github.event.inputs.mode != 'windows-popup-diagnostics' && github.event.inputs.mode != 'windows-popup-current-diagnostics' && github.event.inputs.mode != 'windows-application-diagnostics' && github.event.inputs.mode != 'windows-input-plane-experiment' && github.event.inputs.mode != 'windows-native-diagnostics' && github.event.inputs.mode != 'windows-shortcuts-ui-diagnostics' && github.event.inputs.mode != 'windows-shortcuts-ui-medium-diagnostics' && github.event.inputs.mode != 'windows-shortcuts-current-diagnostics' && github.event.inputs.mode != 'windows-shortcuts-workflows-diagnostics' && github.event.inputs.mode != 'windows-delegated-diagnostics' && github.event.inputs.mode != 'windows-browser-diagnostics' && github.event.inputs.mode != 'windows-selection-same-page-diagnostics' && github.event.inputs.mode != 'windows-selection-browser-app-diagnostics' && github.event.inputs.mode != 'windows-browser-ocr-visibility-diagnostics' && github.event.inputs.mode != 'windows-selection-cold-edge-diagnostics' && github.event.inputs.mode != 'windows-selection-paced-edge-diagnostics' && github.event.inputs.mode != 'windows-selection-nonbrowser-app-diagnostics' && github.event.inputs.mode != 'windows-latest-intent-diagnostics' && github.event.inputs.mode != 'windows-selection-application-diagnostics' && github.event.inputs.mode != 'windows-selection-clipboard-diagnostics' && github.event.inputs.mode != 'windows-selection-notepad-diagnostics' && github.event.inputs.mode != 'windows-selection-budget-diagnostics' && github.event.inputs.mode != 'windows-selection-context-diagnostics' && github.event.inputs.mode != 'windows-wps-selection-diagnostics' && github.event.inputs.mode != 'windows-focus-resize-current-diagnostics' && github.event.inputs.mode != 'windows-priority-input-diagnostics' && github.event.inputs.mode != 'windows-priority-candidate-diagnostics'
+    needs: validation-mode
+    if: needs.validation-mode.outputs.mode != 'language-routing-patch-v1' && github.event.inputs.mode != 'windows-popup-diagnostics' && github.event.inputs.mode != 'windows-popup-current-diagnostics' && github.event.inputs.mode != 'windows-application-diagnostics' && github.event.inputs.mode != 'windows-input-plane-experiment' && github.event.inputs.mode != 'windows-native-diagnostics' && github.event.inputs.mode != 'windows-shortcuts-ui-diagnostics' && github.event.inputs.mode != 'windows-shortcuts-ui-medium-diagnostics' && github.event.inputs.mode != 'windows-shortcuts-current-diagnostics' && github.event.inputs.mode != 'windows-shortcuts-workflows-diagnostics' && github.event.inputs.mode != 'windows-delegated-diagnostics' && github.event.inputs.mode != 'windows-browser-diagnostics' && github.event.inputs.mode != 'windows-selection-same-page-diagnostics' && github.event.inputs.mode != 'windows-selection-browser-app-diagnostics' && github.event.inputs.mode != 'windows-browser-ocr-visibility-diagnostics' && github.event.inputs.mode != 'windows-selection-cold-edge-diagnostics' && github.event.inputs.mode != 'windows-selection-paced-edge-diagnostics' && github.event.inputs.mode != 'windows-selection-nonbrowser-app-diagnostics' && github.event.inputs.mode != 'windows-latest-intent-diagnostics' && github.event.inputs.mode != 'windows-selection-application-diagnostics' && github.event.inputs.mode != 'windows-selection-clipboard-diagnostics' && github.event.inputs.mode != 'windows-selection-notepad-diagnostics' && github.event.inputs.mode != 'windows-selection-budget-diagnostics' && github.event.inputs.mode != 'windows-selection-context-diagnostics' && github.event.inputs.mode != 'windows-wps-selection-diagnostics' && github.event.inputs.mode != 'windows-focus-resize-current-diagnostics' && github.event.inputs.mode != 'windows-priority-input-diagnostics' && github.event.inputs.mode != 'windows-priority-candidate-diagnostics'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
