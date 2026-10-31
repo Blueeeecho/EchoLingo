@@ -7,7 +7,7 @@
   <meta name="theme-color" content="#10131c" media="(prefers-color-scheme: dark)">
   <meta name="color-scheme" content="light dark">
   <meta name="description" content="EchoLingo · 回声译，轻量桌面翻译工具：选词快捷翻译、无感 OCR、Windows 中英离线翻译与自定义服务。A lightweight desktop translator for selection hotkeys, seamless OCR, offline Chinese–English on Windows, and custom services.">
-  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self'; font-src 'self'; connect-src 'none'; base-uri 'self'; form-action 'none'; object-src 'none'">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self'; font-src 'self'; connect-src https://api.github.com; base-uri 'self'; form-action 'none'; object-src 'none'">
   <meta name="referrer" content="strict-origin-when-cross-origin">
   <meta property="og:type" content="website">
   <meta property="og:locale" content="zh_CN">
@@ -24,6 +24,7 @@
   <link rel="stylesheet" href="./styles.css">
   <script src="./lang.js"></script>
   <script src="./app.js" defer></script>
+  <script src="./downloads.js" defer></script>
   <title>EchoLingo · 回声译</title>
 </head>
 <body>
@@ -241,6 +242,19 @@
           <p class="section-kicker">04</p>
           <h2 id="download-title"><span class="lang-zh">为你的电脑而做。</span><span class="lang-en">Built for the computer you are using.</span></h2>
           <p class="section-intro"><span class="lang-zh">Windows 与 macOS 0.2.3 内测版现已开放下载。升级前先从托盘或菜单栏完整退出旧版。</span><span class="lang-en">The 0.2.3 internal preview is now available for Windows and macOS. Quit the previous version from the tray or menu bar before you upgrade.</span></p>
+        </div>
+        <div class="download-stats" id="download-stats" aria-labelledby="download-stats-title" aria-describedby="download-stats-note">
+          <div class="download-stats-heading">
+            <h3 id="download-stats-title"><span class="lang-zh">每一次下载，都是一份支持。</span><span class="lang-en">Every download means a little more support.</span></h3>
+            <a href="https://github.com/Blueeeecho/EchoLingo/releases" target="_blank" rel="noopener noreferrer">GitHub Releases <svg class="i" aria-hidden="true"><use href="#i-external"/></svg></a>
+          </div>
+          <dl class="download-stats-grid">
+            <div><dt><span class="lang-zh">累计安装包下载</span><span class="lang-en">Total installer downloads</span></dt><dd data-download-count="total">—</dd></div>
+            <div><dt>Windows</dt><dd data-download-count="windows">—</dd></div>
+            <div><dt>macOS</dt><dd data-download-count="macos">—</dd></div>
+          </dl>
+          <p class="download-stats-note" id="download-stats-note"><span class="lang-zh">统计 GitHub 当前公开版本（含内测）的安装包下载次数，不是独立用户数。不含源码、校验文件及已删除的安装包。</span><span class="lang-en">Installer downloads across currently published GitHub releases, including previews—not unique users. Excludes source code, checksum files, and deleted installers.</span></p>
+          <p class="download-stats-status" role="status"><span class="lang-zh" data-download-status="zh">启用 JavaScript 后显示下载量；不影响下载安装。</span><span class="lang-en" data-download-status="en">Enable JavaScript to view counts; installer links work without it.</span></p>
         </div>
         <div class="platform-grid">
           <article class="platform-card">

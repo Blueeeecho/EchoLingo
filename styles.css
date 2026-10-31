@@ -261,6 +261,22 @@ html[data-locale="en"] [data-set-locale="en"],
 .privacy-section .text-link { font-size: 15px; }
 
 .download-section { background: color-mix(in srgb, var(--soft) 80%, var(--bg)); border-block: 1px solid var(--line); }
+.download-stats { margin-bottom: 24px; padding: 22px; border: 1px solid var(--line); border-radius: var(--radius); background: var(--card); }
+.download-stats-heading { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px 20px; }
+.download-stats-heading h3 { font-size: 16px; }
+.download-stats-heading a { display: inline-flex; align-items: center; gap: 5px; color: var(--mint-ink); font-size: 13px; font-weight: 650; }
+.download-stats-heading a:hover { text-decoration: underline; text-underline-offset: 3px; }
+.download-stats-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 16px; margin: 22px 0 16px; }
+.download-stats-grid > div + div { padding-left: 20px; border-left: 1px solid var(--line); }
+.download-stats-grid dt { color: var(--muted); font-size: 13px; }
+.download-stats-grid dd { margin: 4px 0 0; color: var(--mint-ink); font-size: clamp(24px, 4vw, 36px); font-weight: 750; font-variant-numeric: tabular-nums; line-height: 1.25; overflow-wrap: anywhere; }
+.download-stats-note, .download-stats-status { color: var(--muted); font-size: 12px; }
+.download-stats-status { margin-top: 5px; min-height: 1.7em; }
+@media (max-width: 540px) {
+  .download-stats { padding: 18px; }
+  .download-stats-grid { gap: 10px; }
+  .download-stats-grid > div + div { padding-left: 10px; }
+}
 .platform-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px; }
 .platform-card { display: flex; flex-direction: column; gap: 10px; }
 .platform-card .button { margin-top: auto; }
