@@ -395,9 +395,7 @@ fn write_json(path: &Path, value: &impl Serialize) -> Result<(), String> {
         use std::os::unix::fs::OpenOptionsExt;
         options.mode(0o600);
     }
-    let file = options
-        .open(&tmp)
-        .map_err(|_| "无法写入本地数据目录")?;
+    let file = options.open(&tmp).map_err(|_| "无法写入本地数据目录")?;
     struct TemporaryFile(PathBuf);
     impl Drop for TemporaryFile {
         fn drop(&mut self) {
