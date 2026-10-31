@@ -1,13 +1,13 @@
 // Explicit isolated-runner probe linked to the production native screenshot API.
 // Own AppKit events are NOT a physical/global F1 or packaged-editor test.
 // No TCC grants/prompts, general clipboard, arbitrary source-window capture, or
-// captured image bytes. A guarded one-shot global Escape can dismiss ordinary
-// Dock UI during isolated setup only; capture gestures remain own-AppKit events.
+// captured image bytes. The hosted-CI visibility oracle reads only the bounded
+// generated-source ROI in memory; capture gestures remain own-AppKit events.
 import AppKit
-import ApplicationServices
 import CoreGraphics
 import Foundation
 import ImageIO
+import ScreenCaptureKit
 
 private func fixtureNeed(_ value: Bool, _ reason: String) throws {
     if !value { throw NativeError("FIXTURE: " + reason) }
@@ -25,6 +25,15 @@ private final class FixtureColorView: NSView {
     override func draw(_ dirtyRect: NSRect) {
         NSColor(srgbRed: phase == 1 ? 0 : 1, green: phase == 1 ? 1 : 0, blue: 0, alpha: 1).setFill()
         bounds.fill()
+        // Spatial fiducials disambiguate a wrong crop, shift or output scaling.
+        NSColor(srgbRed: 0, green: 0, blue: 1, alpha: 1).setFill()
+        CGRect(x: 8, y: 8, width: 16, height: 16).fill()
+        CGRect(x: 8, y: 296, width: 16, height: 16).fill()
+        NSColor(srgbRed: 1, green: 1, blue: 0, alpha: 1).setFill()
+        CGRect(x: 488, y: 8, width: 16, height: 16).fill()
+        CGRect(x: 488, y: 296, width: 16, height: 16).fill()
+        NSColor(srgbRed: 1, green: 1, blue: 1, alpha: 1).setFill()
+        CGRect(x: 248, y: 152, width: 16, height: 16).fill()
     }
 }
 
@@ -124,7 +133,9 @@ private final class ScreenshotProbe {
     var caseDriven = false
     var timer: Timer?
     var finished = false
-    var setupEscapeConsidered = false
+    var oracleAttempted = false
+    var oracleToken: UUID?
+    var oracleOccluder: NSWindow?
     var owner: NSWindow?
     var savePanel: NSSavePanel?
     let modes = ["window-phase1", "rectangle-phase1", "escape-cancel", "request-cancel", "window-phase2"]
@@ -135,6 +146,7 @@ private final class ScreenshotProbe {
     func finish(_ status: String, reason: String? = nil) {
         guard !finished else { return }; finished = true
         timer?.invalidate(); timer = nil
+        oracleToken = nil; oracleOccluder?.close(); oracleOccluder = nil
         if let operation = operation {
             _ = nativeResponse(mode: "--cancel-native-capture", input: Data(operation.utf8))
             _ = nativeResponse(mode: "--end-native-capture", input: Data(operation.utf8))
@@ -337,20 +349,15 @@ private final class ScreenshotProbe {
             try fixtureNeed(abs(actual.x - point.x) <= 1 && abs(actual.y - point.y) <= 1,
                             "generated pointer position was not retained")
             report["sourceWindowServerReady"] = true
-            if report["globalSystemUISetupEventDispatched"] as? Bool == true {
-                report["systemUISetupOcclusionCleared"] = true
-                report["systemUISetupAfter"] = ["exactSourceRevalidated": true, "foreignOcclusionAbsent": true]
-            }
+            report["sourceWindowServerReadinessMethod"] = "exact-geometric-metadata"
             beginCase()
         } catch {
             if Date() >= deadline {
-                if !setupEscapeConsidered && dismissKnownDockUIOnce() {
-                    awaitInitialSource(deadline: Date().addingTimeInterval(2), observations: observations + 1)
+                if !oracleAttempted {
+                    oracleAttempted = true
+                    report["geometricVisibilityFailure"] = String(describing: error)
+                    beginVisibilityOracle()
                     return
-                }
-                if report["globalSystemUISetupEventDispatched"] as? Bool == true,
-                   let after = report["sourceOccluderDiagnostic"] {
-                    report["systemUISetupAfter"] = after
                 }
                 finish("failed", reason: String(describing: error)); return
             }
@@ -360,53 +367,175 @@ private final class ScreenshotProbe {
         }
     }
 
-    func dismissKnownDockUIOnce() -> Bool {
-        // Explicit isolated CI setup only. This never changes capture policy,
-        // raises a source above system UI, grants trust, or ignores an overlap.
-        guard !setupEscapeConsidered else { return false }; setupEscapeConsidered = true
+    func oracleSourceIdentity(_ expected: CaptureWindowTarget) throws -> NSScreen {
+        report["visibilityOracleOverlaySharingGuardVerified"] = false
+        try fixtureNeed(CGPreflightScreenCaptureAccess(), "visibility oracle permission is not preapproved")
+        guard let source = source, source.isRunning, source.processIdentifier == expected.pid,
+              target == expected, expected.frame.width == 512, expected.frame.height == 320,
+              let records = captureCurrentWindows(),
+              captureWindowIsCurrent(expected, records: records, primaryHeight: CGDisplayBounds(CGMainDisplayID()).height,
+                                     excludingPID: ProcessInfo.processInfo.processIdentifier),
+              let screen = NSScreen.screens.first(where: { $0.frame.contains(expected.frame) }),
+              screen.backingScaleFactor == sourceScale else { throw NativeError("FIXTURE: oracle source identity/display changed") }
+        // A no-exclusion API still honors OS content protection. Never treat a
+        // protected/unknown sharing overlay omitted by the OS as transparency.
+        let primary = CGDisplayBounds(CGMainDisplayID()).height
+        var sharedOverlays = 0
+        for record in records {
+            if captureWindowNumber(record[kCGWindowNumber as String]) == Double(expected.id) { break }
+            if captureWindowNumber(record[kCGWindowAlpha as String]) == 0 { continue }
+            guard let dictionary = record[kCGWindowBounds as String] as? [String: Any],
+                  let quartz = CGRect(dictionaryRepresentation: dictionary as CFDictionary),
+                  [quartz.minX, quartz.minY, quartz.width, quartz.height].allSatisfy({ $0.isFinite }) else {
+                throw NativeError("FIXTURE: oracle overlay metadata is unavailable")
+            }
+            let frame = CGRect(x: quartz.minX, y: primary - quartz.maxY, width: quartz.width, height: quartz.height)
+            if !frame.intersection(expected.frame).isEmpty {
+                let sharing = captureWindowNumber(record[kCGWindowSharingState as String])
+                try fixtureNeed(sharing == 1 || sharing == 2, "oracle cannot prove pixels through a protected or unknown-sharing overlay")
+                sharedOverlays += 1
+            }
+        }
+        report["visibilityOracleOverlaySharingGuardVerified"] = true
+        report["visibilityOracleIntersectingSharedOverlayCount"] = sharedOverlays
+        return screen
+    }
+
+    func beginVisibilityOracle() {
         let environment = ProcessInfo.processInfo.environment
-        guard environment["GITHUB_ACTIONS"] == "true",
-              environment["RUNNER_ENVIRONMENT"] == "github-hosted" else { return false }
-        guard cases.isEmpty, index == 0, operation == nil, let target = target,
-              let source = source, source.isRunning, source.processIdentifier == target.pid else { return false }
-        // Refresh the ORIGINAL exact identity/z-order/overlap guard immediately
-        // before considering input; a cached diagnostic is not authority.
-        report.removeValue(forKey: "sourceOccluderDiagnostic")
-        do { try verifySourceVisible(); return false } catch {}
-        guard let obstruction = report["sourceOccluderDiagnostic"] as? [String: Any],
-              obstruction["ownerBundleIdentifier"] as? String == "com.apple.dock",
-              obstruction["ownerExecutablePath"] as? String == "/System/Library/CoreServices/Dock.app/Contents/MacOS/Dock",
-              obstruction["layer"] as? Double == 20, obstruction["alpha"] as? Double == 1,
-              let bounds = obstruction["appKitFrame"] as? [CGFloat], bounds.count == 4,
-              NSScreen.screens.contains(where: {
-                  $0.frame == CGRect(x: bounds[0], y: bounds[1], width: bounds[2], height: bounds[3])
-                      && $0.frame.contains(target.frame)
-              }),
-              NSWorkspace.shared.frontmostApplication?.processIdentifier == target.pid,
-              let application = NSRunningApplication(processIdentifier: target.pid), application.isActive,
-              !application.isTerminated else { return false }
-        let trusted = AXIsProcessTrusted() // preflight only; no prompt/options/grant
-        report["systemUISetupAccessibilityPreflightGranted"] = trusted
-        guard trusted else { return false }
-        let modifiers: CGEventFlags = [.maskShift, .maskControl, .maskAlternate, .maskCommand]
-        guard CGEventSource.flagsState(.combinedSessionState).intersection(modifiers).isEmpty,
-              !CGEventSource.keyState(.combinedSessionState, key: 53),
-              let down = CGEvent(keyboardEventSource: nil, virtualKey: 53, keyDown: true),
-              let up = CGEvent(keyboardEventSource: nil, virtualKey: 53, keyDown: false) else { return false }
-        report["systemUISetupBefore"] = obstruction
-        report["systemUISetupGitHubHosted"] = true
-        report["systemUISetupExactDockOwnerVerified"] = true
-        report["systemUISetupGeneratedSourceFrontmost"] = true
-        report["systemUISetupExactSourceRevalidated"] = true
-        report["systemUISetupOcclusionCleared"] = false
-        report["ownAppKitEventsOnly"] = false
-        report["globalSystemUISetupEventDispatched"] = true
-        report["globalSystemUISetupEscapePairs"] = 1
-        down.flags = []; up.flags = []
-        // Both events are allocated before posting; always pair the one down.
-        defer { up.post(tap: .cghidEventTap) }
-        down.post(tap: .cghidEventTap)
-        return true
+        guard environment["GITHUB_ACTIONS"] == "true", environment["RUNNER_ENVIRONMENT"] == "github-hosted",
+              #available(macOS 14.0, *), let target = target, cases.isEmpty, operation == nil,
+              report["nativeSavePanelHiddenBeforeCapture"] as? Bool == true,
+              !NSApplication.shared.windows.contains(where: { $0 is CaptureSelectionPanel && $0.isVisible }) else {
+            finish("failed", reason: "bounded-visible-pixel-oracle-unavailable"); return
+        }
+        report["visibilityOracleHostedRunnerVerified"] = true
+        report["visibilityOracleExcludedWindowCount"] = 0
+        report["visibilityOraclePixelBytesRetained"] = false
+        report["visibilityOracleRegion"] = "exact-generated-source-512x320"
+        // First prove the entire live source with no window exclusions. Then
+        // add our own normal-level occluder and prove both its exact pixels and
+        // rejection by the unobstructed-source oracle. Finally remove it and
+        // independently prove the full original source again.
+        captureVisibilityOracle(target, stage: "unobstructed", occluded: false) {
+            let rectangle = CGRect(x: target.frame.minX + 224, y: target.frame.minY + 128, width: 64, height: 64)
+            let window = FixtureWindow(contentRect: rectangle, styleMask: [.borderless], backing: .buffered, defer: false)
+            window.isReleasedWhenClosed = false; window.level = .normal; window.hasShadow = false
+            window.isOpaque = true; window.backgroundColor = NSColor(srgbRed: 1, green: 0, blue: 1, alpha: 1)
+            window.sharingType = .readOnly; window.animationBehavior = .none
+            self.oracleOccluder = window; window.orderFrontRegardless(); window.displayIfNeeded()
+            DispatchQueue.main.async {
+                self.captureVisibilityOracle(target, stage: "generated-occlusion", occluded: true) {
+                    window.orderOut(nil); window.close()
+                    guard !window.isVisible else { self.finish("failed", reason: "owned-oracle-occluder-remained-visible"); return }
+                    self.report["visibilityOracleOwnedOccluderHidden"] = true
+                    self.oracleOccluder = nil
+                    DispatchQueue.main.async {
+                        self.captureVisibilityOracle(target, stage: "restored", occluded: false) {
+                            self.report["visibilityOraclePassed"] = true
+                            let point = CGPoint(x: target.frame.minX + 80, y: target.frame.minY + 80)
+                            let hit = NSWindow.windowNumber(at: point, belowWindowWithWindowNumber: 0)
+                            let candidate = captureCurrentWindows().flatMap {
+                                captureHoverWindow($0, at: point, primaryHeight: CGDisplayBounds(CGMainDisplayID()).height,
+                                                   excludingPID: ProcessInfo.processInfo.processIdentifier)
+                            }
+                            let diagnostic: [String: Any] = ["osMouseDownWindowID": hit,
+                                "osMouseDownMatchesSource": hit == Int(target.id),
+                                "productionCandidatePresent": candidate != nil,
+                                "productionCandidateMatchesSource": candidate == target,
+                                "productionCandidateWindowID": candidate.map { Int($0.id) } ?? 0]
+                            self.report["visibilityOracleHitDiagnostic"] = diagnostic
+                            // A proof is not a forced picker target or a capture
+                            // pass. Start the actual unmodified native API; it
+                            // must still produce all five normal case outcomes.
+                            self.report["sourceWindowServerReady"] = true
+                            self.report["sourceWindowServerReadinessMethod"] = "independent-composited-pixels"
+                            self.report["nativePickerStartedAfterVisibilityOracle"] = true
+                            self.beginCase()
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    @available(macOS 14.0, *)
+    func captureVisibilityOracle(_ expected: CaptureWindowTarget, stage: String, occluded: Bool,
+                                 completion: @escaping () -> Void) {
+        guard !finished else { return }
+        do {
+            let screen = try oracleSourceIdentity(expected)
+            guard let number = screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber else {
+                throw NativeError("FIXTURE: oracle display ID is unavailable")
+            }
+            let displayID = CGDirectDisplayID(number.uint32Value), displayFrame = screen.frame
+            let roi = CGRect(x: expected.frame.minX - displayFrame.minX, y: displayFrame.maxY - expected.frame.maxY,
+                             width: expected.frame.width, height: expected.frame.height)
+            func verifyOracleWindows() throws {
+                let currentScreen = try self.oracleSourceIdentity(expected)
+                try fixtureNeed(currentScreen.frame == displayFrame
+                    && (currentScreen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber)?.uint32Value == displayID,
+                    "oracle display identity/frame changed")
+                if occluded {
+                    guard let window = self.oracleOccluder, window.isVisible, window.windowNumber > 0,
+                          window.frame == CGRect(x: expected.frame.minX + 224, y: expected.frame.minY + 128, width: 64, height: 64),
+                          let records = captureCurrentWindows() else { throw NativeError("FIXTURE: owned oracle occluder changed") }
+                    let identity = CaptureWindowTarget(id: CGWindowID(window.windowNumber),
+                        pid: ProcessInfo.processInfo.processIdentifier, frame: window.frame)
+                    try fixtureNeed(captureWindowIsCurrent(identity, records: records,
+                        primaryHeight: CGDisplayBounds(CGMainDisplayID()).height, excludingPID: expected.pid),
+                        "owned oracle occluder identity/frame/sharing changed")
+                }
+            }
+            try verifyOracleWindows()
+            let token = UUID(); oracleToken = token
+            report["visibilityOracleStage"] = stage
+            DispatchQueue.main.asyncAfter(deadline: .now() + 8) {
+                if !self.finished && self.oracleToken == token { self.finish("failed", reason: "visible-pixel-oracle-timeout") }
+            }
+            SCShareableContent.getExcludingDesktopWindows(false, onScreenWindowsOnly: true) { content, _ in
+                DispatchQueue.main.async {
+                    guard !self.finished, self.oracleToken == token else { return }
+                    do {
+                        try verifyOracleWindows()
+                        guard let display = content?.displays.first(where: { $0.displayID == displayID }) else {
+                            throw NativeError("FIXTURE: oracle display content is unavailable")
+                        }
+                        // Independent visible DISPLAY composition, excluding
+                        // NOTHING. Never an isolated/backing-window capture.
+                        let filter = SCContentFilter(display: display, excludingWindows: [])
+                        if #available(macOS 14.2, *) { filter.includeMenuBar = true }
+                        let configuration = SCStreamConfiguration()
+                        configuration.sourceRect = roi
+                        configuration.width = Int(expected.frame.width * self.sourceScale)
+                        configuration.height = Int(expected.frame.height * self.sourceScale)
+                        configuration.scalesToFit = false; configuration.showsCursor = false
+                        SCScreenshotManager.captureImage(contentFilter: filter, configuration: configuration) { image, _ in
+                            DispatchQueue.main.async {
+                                guard !self.finished, self.oracleToken == token else { return }
+                                self.oracleToken = nil
+                                do {
+                                    try verifyOracleWindows()
+                                    guard let image = image else { throw NativeError("FIXTURE: oracle display image is unavailable") }
+                                    try fixtureNeed(image.width == Int(512 * self.sourceScale) && image.height == Int(320 * self.sourceScale),
+                                                    "oracle exact ROI dimensions differ")
+                                    try self.verifyPixels(image, phase: 1, occluder: occluded)
+                                    if occluded {
+                                        var rejected = false
+                                        do { try self.verifyPixels(image, phase: 1) } catch { rejected = true }
+                                        try fixtureNeed(rejected, "unobstructed oracle accepted generated occlusion")
+                                        self.report["visibilityOracleGeneratedOccluderRejected"] = true
+                                    }
+                                    // Only scalar results survive this closure;
+                                    // the CGImage and normalized pixel buffer do not.
+                                    completion()
+                                } catch { self.finish("failed", reason: String(describing: error)) }
+                            }
+                        }
+                    } catch { self.finish("failed", reason: String(describing: error)) }
+                }
+            }
+        } catch { finish("failed", reason: String(describing: error)) }
     }
 
     func sourceIdentityDiagnostic(_ target: CaptureWindowTarget, records: [[String: Any]],
@@ -473,7 +602,7 @@ private final class ScreenshotProbe {
                     "quartzFrame": [quartz.minX, quartz.minY, quartz.width, quartz.height],
                     "sameGeneratedSourceProcess": captureWindowNumber(record[kCGWindowOwnerPID as String]) == Double(target.pid)]
                 for (label, key) in [("pid", kCGWindowOwnerPID), ("windowID", kCGWindowNumber),
-                                     ("layer", kCGWindowLayer), ("alpha", kCGWindowAlpha)] {
+                                     ("layer", kCGWindowLayer), ("alpha", kCGWindowAlpha), ("sharing", kCGWindowSharingState)] {
                     if let value = captureWindowNumber(record[key as String]) { occluder[label] = value }
                 }
                 // Read-only identity of this single obstructing PID, requested
@@ -578,7 +707,7 @@ private final class ScreenshotProbe {
                 let width = Int((mode == "rectangle-phase1" ? 120 : target.frame.width) * sourceScale)
                 let height = Int((mode == "rectangle-phase1" ? 80 : target.frame.height) * sourceScale)
                 try fixtureNeed(image.width == width && image.height == height, "real screenshot dimensions differ from exact source/drag frame")
-                try verifyPixels(image, phase: mode == "window-phase2" ? 2 : 1)
+                try verifyPixels(image, phase: mode == "window-phase2" ? 2 : 1, fullWindow: mode != "rectangle-phase1")
                 record["imageWidth"] = width; record["imageHeight"] = height
                 record["generatedVisiblePixelsVerified"] = true; record["ownOverlayPixelsAbsent"] = true
             }
@@ -591,7 +720,7 @@ private final class ScreenshotProbe {
         } catch { finish("failed", reason: String(describing: error)) }
     }
 
-    func verifyPixels(_ image: CGImage, phase: Int) throws {
+    func verifyPixels(_ image: CGImage, phase: Int, fullWindow: Bool = true, occluder: Bool = false) throws {
         let row = image.width * 4
         var bytes = [UInt8](repeating: 0, count: row * image.height)
         let success = bytes.withUnsafeMutableBytes { storage -> Bool in
@@ -601,10 +730,22 @@ private final class ScreenshotProbe {
             context.draw(image, in: CGRect(x: 0, y: 0, width: image.width, height: image.height)); return true
         }
         try fixtureNeed(success, "captured pixel normalization failed")
-        let expected = phase == 1 ? [0, 255, 0] : [255, 0, 0]
         // Every pixel, including edges: blue outlines, loupe plates, frozen
         // phase-1 pixels, and accidental desktop pixels must fail the probe.
         for offset in stride(from: 0, to: bytes.count, by: 4) {
+            let x = CGFloat((offset / 4) % image.width) / sourceScale
+            let y = CGFloat((offset / 4) / image.width) / sourceScale
+            var expected = phase == 1 ? [0, 255, 0] : [255, 0, 0]
+            if fullWindow {
+                // Vertically symmetric markers make bitmap row conventions
+                // irrelevant without allowing shifted/cropped/scaled regions.
+                if (8..<24).contains(y) || (296..<312).contains(y) {
+                    if (8..<24).contains(x) { expected = [0, 0, 255] }
+                    if (488..<504).contains(x) { expected = [255, 255, 0] }
+                }
+                if (248..<264).contains(x) && (152..<168).contains(y) { expected = [255, 255, 255] }
+                if occluder && (224..<288).contains(x) && (128..<192).contains(y) { expected = [255, 0, 255] }
+            }
             try fixtureNeed((0..<3).allSatisfy { abs(Int(bytes[offset + $0]) - expected[$0]) <= 5 }
                             && bytes[offset + 3] >= 250, "captured image is not solely current generated visible pixels")
         }

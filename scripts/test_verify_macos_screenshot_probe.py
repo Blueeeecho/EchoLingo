@@ -16,6 +16,7 @@ def passed():
                   ownedSourceCleanupConfirmed=True, captureCasesPassed=True,
                   screenCapturePreflightGranted=True, nativeProcessExitCode=0, cases=[],
                   sourceWindowServerReady=True, sourceReadinessObservations=1,
+                  sourceWindowServerReadinessMethod='exact-geometric-metadata',
                   fixtureBinarySha256='1' * 64, productionSourceSha256={path: '2' * 64 for path in module.SOURCES})
     for flag in ('permissionRequested', 'securitySettingsChanged', 'generalClipboardTouched', 'userContentCaptured',
                  'physicalF1Tested', 'packagedEditorTested', 'rustClipboardBackendTested',
@@ -53,6 +54,26 @@ class MacScreenshotProbeContract(unittest.TestCase):
                              ('systemUISetupGeneratedSourceFrontmost', False),
                              ('systemUISetupExactSourceRevalidated', False),
                              ('systemUISetupOcclusionCleared', False)]:
+            invalid = copy.deepcopy(report); invalid[field] = value
+            with self.assertRaises(ValueError): module.verify(invalid)
+
+    def test_pixel_oracle_never_replaces_actual_five_native_cases(self):
+        report = passed()
+        report.update(nativePickerStartedAfterVisibilityOracle=True, visibilityOracleHostedRunnerVerified=True,
+                      visibilityOraclePassed=True, visibilityOracleGeneratedOccluderRejected=True,
+                      visibilityOracleOwnedOccluderHidden=True, sourceWindowServerReadinessMethod='independent-composited-pixels',
+                      visibilityOracleOverlaySharingGuardVerified=True, visibilityOracleIntersectingSharedOverlayCount=1,
+                      visibilityOracleExcludedWindowCount=0, visibilityOraclePixelBytesRetained=False,
+                      visibilityOracleRegion='exact-generated-source-512x320')
+        self.assertEqual(module.verify(report), 0)
+        for field, value in [('visibilityOraclePassed', False), ('visibilityOracleGeneratedOccluderRejected', False),
+                             ('visibilityOracleOwnedOccluderHidden', False),
+                             ('visibilityOracleOverlaySharingGuardVerified', False),
+                             ('visibilityOracleIntersectingSharedOverlayCount', -1),
+                             ('sourceWindowServerReadinessMethod', 'exact-geometric-metadata'),
+                             ('visibilityOracleHostedRunnerVerified', False), ('visibilityOracleExcludedWindowCount', 1),
+                             ('visibilityOraclePixelBytesRetained', True), ('visibilityOracleRegion', 'smaller-patch'),
+                             ('cases', [])]:
             invalid = copy.deepcopy(report); invalid[field] = value
             with self.assertRaises(ValueError): module.verify(invalid)
 
@@ -139,18 +160,27 @@ class MacScreenshotProbeContract(unittest.TestCase):
         self.assertIn('captureWindowIsCurrent(target', swift)
         for forbidden in ('CGRequestScreenCaptureAccess(', 'AXIsProcessTrustedWithOptions(', 'NSPasteboard.general', 'CGWindowListCreateImage('):
             self.assertNotIn(forbidden, swift)
-        setup = swift.split('func dismissKnownDockUIOnce()', 1)[1].split('func sourceIdentityDiagnostic(', 1)[0]
-        self.assertEqual(setup.count('.post(tap:'), 2)
-        self.assertEqual(swift.count('.post(tap:'), 2)
-        self.assertIn('AXIsProcessTrusted()', setup)
-        self.assertIn('guard !setupEscapeConsidered', setup)
-        self.assertIn('environment["GITHUB_ACTIONS"] == "true"', setup)
-        self.assertIn('environment["RUNNER_ENVIRONMENT"] == "github-hosted"', setup)
-        self.assertIn('cases.isEmpty, index == 0, operation == nil', setup)
-        self.assertIn('try verifySourceVisible()', setup)
-        self.assertIn('"/System/Library/CoreServices/Dock.app/Contents/MacOS/Dock"', setup)
-        self.assertIn('NSWorkspace.shared.frontmostApplication?.processIdentifier == target.pid', setup)
-        self.assertIn('defer { up.post(tap: .cghidEventTap) }', setup)
+        self.assertNotIn('.post(tap:', swift)
+        oracle = swift.split('func beginVisibilityOracle()', 1)[1].split('func sourceIdentityDiagnostic(', 1)[0]
+        self.assertIn('environment["GITHUB_ACTIONS"] == "true"', oracle)
+        self.assertIn('environment["RUNNER_ENVIRONMENT"] == "github-hosted"', oracle)
+        self.assertIn('cases.isEmpty, operation == nil', oracle)
+        self.assertIn('SCContentFilter(display: display, excludingWindows: [])', oracle)
+        self.assertIn('configuration.sourceRect = roi', oracle)
+        self.assertIn('configuration.scalesToFit = false', oracle)
+        self.assertIn('self.oracleToken == token', oracle)
+        self.assertGreaterEqual(oracle.count('try verifyOracleWindows()'), 3)
+        self.assertIn('stage: "generated-occlusion", occluded: true', oracle)
+        self.assertIn('visibilityOracleGeneratedOccluderRejected', oracle)
+        self.assertIn('guard !window.isVisible else', oracle)
+        self.assertIn('independent-composited-pixels', oracle)
+        self.assertIn('NSWindow.windowNumber(at: point, belowWindowWithWindowNumber: 0)', oracle)
+        self.assertIn('captureHoverWindow($0, at: point', oracle)
+        for forbidden in ('desktopIndependentWindow', 'captureScreenKitImage(', 'captureNativeRegionImage(', '.candidate ='):
+            self.assertNotIn(forbidden, oracle)
+        identity = swift.split('func oracleSourceIdentity(', 1)[1].split('func beginVisibilityOracle()', 1)[0]
+        self.assertIn('sharing == 1 || sharing == 2', identity)
+        self.assertIn('protected or unknown-sharing overlay', identity)
         self.assertIn('verifyPixels(image', swift)
         self.assertIn('owned-source-cleanup-or-cursor-restore-failed', swift)
 

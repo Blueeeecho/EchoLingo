@@ -38,10 +38,11 @@ public static partial class EchoLingoApplicationSmoke {
         Assert(ScreenshotReclaim(delegate{return true;},delegate{return true;},delegate{return false;})=="clear-failed-preserved","Clipboard cleanup failure was hidden.");return 5;
     }
     sealed class ScreenshotClipboardLease {
-        readonly IntPtr source;uint generation,format;string digest;IntPtr owner;bool initialized;int seedAttempt,copyAttempt;string copyPhase="cancel-baseline";
+        readonly IntPtr source;uint generation,format;string digest;IntPtr owner;bool initialized;int seedAttempt,copyAttempt,readOnlyObservationRetries;string copyPhase="cancel-baseline";
         public readonly List<Dictionary<string,object>> Observations=new List<Dictionary<string,object>>();
-        void Record(Dictionary<string,object> row){Assert(Observations.Count<48,"Screenshot clipboard diagnostic bound exceeded.");row["seedAttempt"]=seedAttempt;row["copyAttempt"]=copyAttempt;row["copyPhase"]=copyPhase;row["leaseFormat"]=format;Observations.Add(row);}
-        public void BeginCopy(string phase){copyAttempt++;copyPhase=phase;}
+        void Record(Dictionary<string,object> row){Assert(Observations.Count<48,"Screenshot clipboard diagnostic bound exceeded.");row["seedAttempt"]=seedAttempt;row["copyAttempt"]=copyAttempt;row["copyPhase"]=copyPhase;row["leaseFormat"]=format;row["readOnlyObservationRetries"]=readOnlyObservationRetries;Observations.Add(row);}
+        public void BeginCopy(string phase){copyAttempt++;copyPhase=phase;readOnlyObservationRetries=0;}
+        public bool StableImageRead(uint before,uint after){bool stable=before!=0&&before!=generation&&before==after;if(!stable)readOnlyObservationRetries++;return stable;}
         void RecordState(string phase,bool lockedRead=false){uint sequence=GetClipboardSequenceNumber();IntPtr currentOwner=GetClipboardOwner();bool same=lockedRead&&digest!=null&&generation!=0&&sequence==generation&&currentOwner==owner;
             Record(new Dictionary<string,object>{{"phase",phase},{"expectedSequence",generation},{"observedSequence",sequence},{"ownerMatchesLease",currentOwner==owner},{"ownerIsGeneratedSource",currentOwner==source},{"expectedFormatAvailable",format!=0&&IsClipboardFormatAvailable(format)},{"formatCount",lockedRead?Math.Min(256,CountClipboardFormats()):-1},{"contentCompared",same},{"contentMatches",same&&SameContent()}});}
         static bool SeedFormatsMatch(){bool unicode=false;uint previous=0;int count=0;
@@ -95,14 +96,15 @@ public static partial class EchoLingoApplicationSmoke {
         // Arboard uses a null clipboard owner. Do not mistake an unrelated HWND
         // for our app. Content is claimed only after the guarded Copy action and
         // independent generated-image validation, then hashed under the lock.
-        public void ObserveImage(uint observedGeneration,Func<bool> generatedPixelsMatch) {
+        public bool ObserveImage(uint observedGeneration,Func<bool> generatedPixelsMatch) {
             Assert(generatedPixelsMatch(),"Clipboard image does not match the generated fixture content; preserved.");
-            Assert(OpenClipboard(source),"Copied image clipboard is busy; preserved.");
-            try{Record(new Dictionary<string,object>{{"phase","image-claim"},{"sequenceBeforeOleRead",observedGeneration},{"sequenceAfterOleRead",GetClipboardSequenceNumber()},{"priorOwnedSequence",generation}});Assert(observedGeneration!=0&&GetClipboardSequenceNumber()==observedGeneration&&observedGeneration!=generation,"Copied image generation changed before ownership verification; preserved.");
+            if(!OpenClipboard(source)){readOnlyObservationRetries++;return false;}bool claimed=false;
+            try{uint current=GetClipboardSequenceNumber();if(!StableImageRead(observedGeneration,current))return false;
                 uint imageFormat=IsClipboardFormatAvailable(17)?17U:8U;Assert(IsClipboardFormatAvailable(imageFormat),"Copied image has no bounded DIB payload.");
-                string value=LockedDigest(imageFormat);Assert(GetClipboardSequenceNumber()==observedGeneration,"Copied image generation changed while locked.");
-                generation=observedGeneration;format=imageFormat;owner=GetClipboardOwner();digest=value;RecordState("image-claim-complete",true);
-            }finally{CloseClipboard();RecordState("image-verified-close");}
+                string value=LockedDigest(imageFormat);if(!StableImageRead(observedGeneration,GetClipboardSequenceNumber()))return false;
+                Record(new Dictionary<string,object>{{"phase","image-claim"},{"sequenceBeforeOleRead",observedGeneration},{"sequenceAfterOleRead",current},{"priorOwnedSequence",generation}});
+                generation=observedGeneration;format=imageFormat;owner=GetClipboardOwner();digest=value;claimed=true;RecordState("image-claim-complete",true);return true;
+            }finally{CloseClipboard();if(claimed)RecordState("image-verified-close");}
         }
         public string Cleanup() {
             if(!initialized)return "not-initialized-preserved";
@@ -195,9 +197,13 @@ public static partial class EchoLingoApplicationSmoke {
         Bitmap result=null;bool accepted=false;
         try{WaitFor(delegate{
             uint generation=GetClipboardSequenceNumber();
+            // The one UIA Copy is asynchronous. Observe only; never resend it.
+            if(!ScreenshotOwnedClipboard.StableImageRead(generation,generation))return false;
             try { if(!Clipboard.ContainsImage())return false;using(Image image=Clipboard.GetImage()){if(image==null)return false;result=new Bitmap(image);}
+                uint after=GetClipboardSequenceNumber();
+                if(!ScreenshotOwnedClipboard.StableImageRead(generation,after)){result.Dispose();result=null;return false;}
                 Assert(result.Size==expected,"Clipboard pixels have wrong dimensions after real crop.");
-                ScreenshotOwnedClipboard.ObserveImage(generation,delegate{return generatedPixelsMatch(result);});return true; }
+                if(!ScreenshotOwnedClipboard.ObserveImage(generation,delegate{return generatedPixelsMatch(result);})){result.Dispose();result=null;return false;}return true; }
             catch(System.Runtime.InteropServices.ExternalException){if(result!=null){result.Dispose();result=null;}return false;}
         },10,"Actual editor Copy did not publish an image to the system clipboard.",app);accepted=true;return result;}
         finally{if(!accepted&&result!=null)result.Dispose();}

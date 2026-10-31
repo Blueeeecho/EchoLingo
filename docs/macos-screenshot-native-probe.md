@@ -52,26 +52,43 @@ The generated source
 places the cursor inside itself using the public non-event-generating cursor
 position API, then restores its original position on exit. All mouse-button and
 Escape events **used for capture cases** go only through the fixture application's
-own AppKit dispatcher. A separately reported setup exception can send exactly one
-global Escape pair to dismiss ordinary Dock UI on a disposable GitHub-hosted runner:
+own AppKit dispatcher. The earlier one-shot hosted-CI Escape did not clear the
+observed Dock rectangle; it is no longer dispatched. The global-setup report
+fields remain explicitly false/zero.
 
-- Both `GITHUB_ACTIONS=true` and `RUNNER_ENVIRONMENT=github-hosted` are required.
-  A local Mac invocation, even with `--isolated-test-session`, never gets this
-  global-input exception.
-- Only before any capture operation/case, after the original readiness wait fails.
-- Fresh exact generated source PID/window/frame/sharing, source foreground ownership,
-  and a full-display layer-20 obstruction owned by the exact `com.apple.dock`
-  bundle and `/System/Library/CoreServices/Dock.app/Contents/MacOS/Dock` executable.
-- Existing `AXIsProcessTrusted()` must be true, no Escape/modifier may be held,
-  and both key events must be allocated before posting; no prompt or trust change.
-- The **original, unchanged** no-foreign-occlusion predicate must clear afterward.
-  A persistent obstruction still fails. No repeat, Dock exemption, window raising,
-  foreign process termination, security-warning acceptance or capture fallback.
+### Independent hosted-CI visibility diagnostic
 
-Reports distinguish `captureGesturesOwnAppKitOnly` from
-`globalSystemUISetupEventDispatched` and the exact zero/one Escape-pair count.
-`ownAppKitEventsOnly` is false if the global setup pair was dispatched. This setup
-action is not physical/global F1 acceptance and does not grant product permissions.
+Only with both `GITHUB_ACTIONS=true` and `RUNNER_ENVIRONMENT=github-hosted`, a failed
+geometric visibility precondition may run a separate ScreenCaptureKit **display**
+composite oracle. Existing screen-recording preflight must remain granted. It
+captures exactly the generated 512×320 logical-point ROI, with its measured
+backing scale and no smaller crop stretched into that size. **No windows are
+excluded**, and no isolated/backing-window capture or production capture helper is
+used. Every pixel must match the generated phase color and spatial fiducials.
+
+The oracle runs before selector creation, never while own blue outlines/loupe are
+visible. It verifies source PID/window/frame/sharing, display ID/frame and scale
+before and after each asynchronous image, has bounded timeouts, and discards late
+callbacks. Every intersecting nonzero/unknown-alpha window above the source must
+have explicit sharing1/2 before and after the read; protected/unknown-sharing
+covers fail rather than letting OS omission masquerade as transparency. The
+successful guard and intersecting shared-overlay count are recorded numerically.
+A generated normal-level magenta occluder must appear in exactly its
+known 64×64 region and must fail the unobstructed-source comparison; closing it
+must restore the complete original pixel pattern. No window is raised above the
+Dock or security UI. Any unexpected pixel/identity or unavailable API fails.
+
+A failed bounded visibility read may transiently contain non-generated pixels
+from that ROI on this disposable CI desktop. Images and normalized pixels stay
+in memory only, are discarded immediately, and are never written, logged,
+returned or retained in artifacts. Only scalar match outcomes survive.
+
+The source-point OS mouse-down hit ID and unmodified production hover-candidate
+ID are then reported separately. A positive visibility oracle only starts the
+**real unmodified native picker**; it never injects a candidate or satisfies any
+of the five capture cases. If production hover still rejects the source, the
+probe remains failed. This diagnostic is not a Dock whitelist or a product-policy
+change and does not claim all five cases have executed.
 
 Five ordered cases call the production `capture-screenshot` endpoint:
 
@@ -82,7 +99,7 @@ Five ordered cases call the production `capture-screenshot` endpoint:
 5. Capture the same window after it repaints red, proving fresh pixels and reentry.
 
 The probe verifies exact image dimensions and every PNG pixel against the
-current generated color, catching blue outlines, loupe plates, old frames and
+current generated color and fiducials, catching blue outlines, loupe plates, old frames and
 unexpected desktop pixels. Cancel cases must return no image. Every case requires
 no remaining visible capture panels and exact source revalidation. Reports contain
 only scalar metadata, never PNG/base64/pixel content. The owned source must exit
@@ -121,8 +138,8 @@ does not re-label those as physical-display tests.
 - [Apple: running-application identity](https://developer.apple.com/documentation/appkit/nsrunningapplication)
   provides the exact-PID bundle and executable metadata for obstruction diagnostics;
   identifying a system owner never exempts its window from the capture guard.
-- [Apple: existing Accessibility trust](https://developer.apple.com/documentation/applicationservices/1460720-axisprocesstrusted)
-  is queried without prompting before the optional isolated setup Escape.
-- [Apple: posting Quartz events](https://developer.apple.com/documentation/coregraphics/cgevent/post(tap:))
-  describes the separately disclosed global setup event stream; capture gestures
-  continue to use only the fixture's local AppKit dispatch.
+- [Apple: ScreenCaptureKit display filters](https://developer.apple.com/documentation/screencapturekit/sccontentfilter/init(display:excludingwindows:))
+  defines the independent composite oracle; its exclusion array is empty.
+- [Apple: actual window hit-testing](https://developer.apple.com/documentation/appkit/nswindow/windownumber(at:belowwindowwithwindownumber:))
+  skips point transparency and mouse-ignoring windows. Hit testing is reported
+  independently, never used alone as proof of visible pixel contents.

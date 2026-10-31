@@ -7,6 +7,7 @@ permissions:
   actions: read
 jobs:
   windows-f1-fixture-reuse:
+    if: ${{ !contains(github.event.head_commit.message, '[mac-only]') }}
     name: Exact existing Windows bytes, fixture diagnostics only
     runs-on: windows-latest
     timeout-minutes: 20

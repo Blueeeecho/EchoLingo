@@ -55,6 +55,25 @@ describe('actual Windows screenshot fixture source wiring (not native acceptance
     expect(fixture).toContain('RecordState("seed-verified-close")');
     expect(fixture).toContain('RecordState("image-verified-close")');
   });
+  it('observes asynchronous Copy with stable-generation reads and never resends the UIA action', () => {
+    expect(fixture).toContain('before!=0&&before!=generation&&before==after');
+    expect(fixture).toContain('StableImageRead(generation,generation)');
+    expect(fixture).toContain('StableImageRead(generation,after)){result.Dispose();result=null;return false;}');
+    expect(fixture).toContain('if(!StableImageRead(observedGeneration,current))return false;');
+    expect(fixture).toContain('if(!StableImageRead(observedGeneration,GetClipboardSequenceNumber()))return false;');
+    const copy = fixture.slice(fixture.indexOf('static Bitmap ScreenshotClipboard('), fixture.indexOf('static void ScreenshotPng('));
+    expect(copy.match(/ScreenshotInvoke\(/g)).toHaveLength(1);
+    expect(copy.indexOf('ScreenshotInvoke(')).toBeLessThan(copy.indexOf('WaitFor(delegate'));
+    expect(copy).toContain('},10,');
+  });
+  it('executes the actual C# stable-read predicate against pending, racing and complete generations', () => {
+    // This integer/boolean expression is shared syntax in C# and JavaScript;
+    // extract the implementation rather than test a separately copied formula.
+    const expression = fixture.match(/public bool StableImageRead\(uint before,uint after\)\{bool stable=([^;]+);/)?.[1];
+    expect(expression).toBeDefined();
+    const stable = new Function('generation', 'before', 'after', `return ${expression};`) as (generation: number, before: number, after: number) => boolean;
+    for (const [before, after, expected] of [[10, 10, false], [10, 15, false], [15, 15, true], [15, 16, false], [0, 0, false]] as const) expect(stable(10, before, after)).toBe(expected);
+  });
   it('refuses ambiguous accessibility names and releases an owned edit gesture promptly', () => {
     expect(fixture).toContain('Assert(matches.Count<=1');
     expect(fixture).toContain('finally{if(ForegroundPid()==app.Id)');

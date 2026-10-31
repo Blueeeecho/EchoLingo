@@ -24,6 +24,9 @@ class F1FixtureReuseWorkflowContract(unittest.TestCase):
         self.assertEqual(actual.count(condition), 1)
         actual = actual.replace(condition, '').strip()
         self.assertNotIn('[mac-probe]', ci)
+        self.assertIn("if: ${{ !contains(github.event.head_commit.message, '[mac-only]') }}", SOURCE)
+        self.assertNotIn('[mac-only]', ci)
+        self.assertNotIn('[mac-only]', (ROOT / '.github/workflows/release-checks.yml').read_text())
         self.assertNotIn('[mac-probe]', (ROOT / '.github/workflows/release-checks.yml').read_text())
         self.assertEqual(actual, expected)
 

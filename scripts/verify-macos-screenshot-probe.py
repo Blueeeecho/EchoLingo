@@ -60,8 +60,25 @@ def verify(report):
             or type(report.get('sourceReadinessObservations')) is not int
             or report['sourceReadinessObservations'] <= 0):
         raise ValueError('Exact generated WindowServer source readiness was not observed')
+    if report.get('sourceWindowServerReadinessMethod') not in ('exact-geometric-metadata', 'independent-composited-pixels'):
+        raise ValueError('The source readiness method must distinguish geometry from actual composite pixels')
     if setup and report.get('systemUISetupOcclusionCleared') is not True:
         raise ValueError('The original foreign-occlusion guard must clear after setup Escape')
+    if any(key.startswith('visibilityOracle') for key in report):
+        for flag in ('nativePickerStartedAfterVisibilityOracle', 'visibilityOracleHostedRunnerVerified',
+                     'visibilityOraclePassed', 'visibilityOracleGeneratedOccluderRejected', 'visibilityOracleOwnedOccluderHidden',
+                     'visibilityOracleOverlaySharingGuardVerified'):
+            if report.get(flag) is not True:
+                raise ValueError('Independent full-ROI positive/negative visibility proof is incomplete')
+        if (type(report.get('visibilityOracleExcludedWindowCount')) is not int
+                or report['visibilityOracleExcludedWindowCount'] != 0
+                or report.get('visibilityOraclePixelBytesRetained') is not False
+                or report.get('visibilityOracleRegion') != 'exact-generated-source-512x320'
+                or report.get('sourceWindowServerReadinessMethod') != 'independent-composited-pixels'):
+            raise ValueError('Visibility oracle must retain no pixels and exclude no windows from the exact source ROI')
+        if (type(report.get('visibilityOracleIntersectingSharedOverlayCount')) is not int
+                or report['visibilityOracleIntersectingSharedOverlayCount'] < 0):
+            raise ValueError('The independent oracle must record its protected-overlay metadata guard')
     cases = report.get('cases')
     if (not isinstance(cases, list) or len(cases) != len(MODES) or any(not isinstance(case, dict) for case in cases)
             or tuple(case.get('mode') for case in cases) != MODES):
