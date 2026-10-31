@@ -51,6 +51,18 @@ class FixtureReuseContract(unittest.TestCase):
         self.assertIn('$report.ok=$false; $report.installCleanupError', SOURCE)
         self.assertRegex(SOURCE, r'if \(-not \$report\.ok\) \{ exit 1 \}')
 
+    def test_process_launch_uses_one_concrete_path_and_preserves_phase_evidence(self):
+        self.assertIn('$pythonCommands=@(Get-Command python.exe -CommandType Application', SOURCE)
+        self.assertIn('$python=$pythonCommands[0].Path', SOURCE)
+        self.assertNotIn('Get-Command python -CommandType Application -ErrorAction Stop).Source', SOURCE)
+        self.assertIn('$start.FileName=$Executable; $start.Arguments=$Arguments; $start.WorkingDirectory=$workingDirectory', SOURCE)
+        self.assertIn('executableFileExists=[IO.File]::Exists($Executable)', SOURCE)
+        self.assertIn('$script:report.processLaunches.Count -lt 10', SOURCE)
+        self.assertLess(SOURCE.index("Run-Captured 'python-runtime-preflight'"), SOURCE.index("Run-Fixtures 'bare'"))
+        self.assertEqual(SOURCE.count("Run-Captured 'python-runtime-preflight'"), 1)
+        self.assertIn("Run-Captured ($Name + '-strict-f1-verifier') $python", SOURCE)
+        self.assertIn('$start.UseShellExecute=$false', SOURCE)
+
     def test_powershell_here_string_and_basic_delimiters_are_balanced(self):
         # Not a PowerShell parser: actual AST parse is mandatory in Windows CI.
         self.assertEqual(SOURCE.count("@'"), 1)

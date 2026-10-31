@@ -28,7 +28,7 @@ $report = [ordered]@{
     ok=$false; diagnosticOnly=$true; releaseAcceptance=$false; rebuilt=$false; retries=0
     immutableSourceCommit=$SourceCommit; immutableRunId=$SourceRun
     evidenceArtifactId='13031215832'; installerArtifactId='13030374934'
-    fixtures=@(); ownedWorkRemoved=$false; ownedInstallRemoved=$false; unchangedArtifactsAfterTests=$false
+    fixtures=@(); processLaunches=@(); ownedWorkRemoved=$false; ownedInstallRemoved=$false; unchangedArtifactsAfterTests=$false
     securitySettingsChanged=$false; offlineEngineExecuted=$false
 }
 function Require([bool]$Condition, [string]$Message) { if (-not $Condition) { throw ('F1_REUSE: ' + $Message) } }
@@ -82,11 +82,22 @@ function Run-Captured([string]$Name, [string]$Executable, [string]$Arguments, [i
     $stdoutPath = Join-Path $OutputDirectory ($Name + '.stdout.log')
     $stderrPath = Join-Path $OutputDirectory ($Name + '.stderr.log')
     try {
-        $start = [Diagnostics.ProcessStartInfo]::new($Executable, $Arguments)
+        # A command lookup can expose multiple applications. Never join paths
+        # implicitly or ask Process.Start to resolve a shell alias.
+        Require ($script:report.processLaunches.Count -lt 10) 'Process launch evidence exceeds its fixed bound.'
+        $workingDirectory=[IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
+        $launch=[ordered]@{name=$Name; executablePathRooted=[IO.Path]::IsPathRooted($Executable); executableFileExists=[IO.File]::Exists($Executable); workingDirectoryExists=[IO.Directory]::Exists($workingDirectory); started=$false}
+        $script:report.processLaunches += $launch
+        Require ($launch.executablePathRooted -and $launch.executableFileExists -and $launch.workingDirectoryExists) ($Name + ' resolved executable or working directory is unavailable.')
+        $executableItem=Get-Item -LiteralPath $Executable -Force
+        Require (-not $executableItem.PSIsContainer -and ($executableItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -eq 0) ($Name + ' executable is not a regular file.')
+        $start = [Diagnostics.ProcessStartInfo]::new()
+        $start.FileName=$Executable; $start.Arguments=$Arguments; $start.WorkingDirectory=$workingDirectory
         $start.UseShellExecute=$false; $start.CreateNoWindow=$true
         $start.RedirectStandardOutput=$true; $start.RedirectStandardError=$true
         $start.StandardOutputEncoding=$utf8; $start.StandardErrorEncoding=$utf8
         $process = [Diagnostics.Process]::Start($start)
+        $launch.started=$true
         $out = $process.StandardOutput.ReadToEndAsync(); $err = $process.StandardError.ReadToEndAsync()
         if (-not $process.WaitForExit($TimeoutMs)) {
             $timedOut=$true
@@ -169,7 +180,12 @@ public static class EchoLingoF1ReuseDirectory {
     Check-File $capture $CaptureBytes $CaptureSha
     $report.captureSlice=[ordered]@{offset=$CaptureOffset; bytes=$CaptureBytes; sha256=$CaptureSha; extractedWithoutRebuild=$true}
     $powershell=Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
-    $python=(Get-Command python -CommandType Application -ErrorAction Stop).Source
+    $pythonCommands=@(Get-Command python.exe -CommandType Application -ErrorAction Stop)
+    Require ($pythonCommands.Count -ge 1) 'No concrete Python application was resolved.'
+    $python=$pythonCommands[0].Path
+    Require (-not [string]::IsNullOrWhiteSpace($python) -and [IO.Path]::GetExtension($python) -ieq '.exe') 'Python resolution did not return an executable path.'
+    $report.pythonCommandCount=$pythonCommands.Count
+    $null=Run-Captured 'python-runtime-preflight' $python '--version' 60000
     $shortcutScript=(Resolve-Path -LiteralPath (Join-Path $PSScriptRoot '..\tests\windows-shortcuts-uia-smoke.ps1')).Path
     $applicationScript=(Resolve-Path -LiteralPath (Join-Path $PSScriptRoot '..\tests\windows-application-smoke.ps1')).Path
     $verifier=(Resolve-Path -LiteralPath (Join-Path $PSScriptRoot 'verify_screenshot_editor_report.py')).Path
