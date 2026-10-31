@@ -39,6 +39,14 @@ def verify(text):
         raise ValueError("All 16 distinct native-capture cases must pass")
     continuity = next(case for case in cases if case["mode"] == "magnifier-continuity-armed-and-dragging")
     for phase in ("armed", "dragging"):
+        pixels = continuity.get(phase + "MagnifierLivePixels")
+        if (not isinstance(pixels, dict) or pixels.get("livePixelRefreshVerified") is not True
+                or pixels.get("samplePixelsStored") is not False
+                or type(pixels.get("generatedColorChanges")) is not int
+                or pixels["generatedColorChanges"] != 3
+                or type(pixels.get("maximumRefreshMilliseconds")) is not int
+                or not 0 <= pixels["maximumRefreshMilliseconds"] <= 200):
+            raise ValueError("Both magnifier phases require fresh generated pixels within 200 ms")
         evidence = continuity.get(phase + "MagnifierContinuity")
         if not isinstance(evidence, dict):
             raise ValueError("Both magnifier phases require continuous evidence")
@@ -58,4 +66,4 @@ def verify(text):
 
 if __name__ == "__main__":
     verify(Path(sys.argv[1]).read_text(encoding="utf-8-sig"))
-    print("PASS: all 16 native-capture cases and both continuous magnifier phases verified.")
+    print("PASS: all 16 native-capture cases, live pixels and both continuous magnifier phases verified.")

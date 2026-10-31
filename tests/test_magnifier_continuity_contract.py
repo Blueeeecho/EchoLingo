@@ -28,9 +28,26 @@ class MagnifierContinuityContract(unittest.TestCase):
         self.assertNotIn("Surface::new", render)
         self.assertNotIn("w::EnableWindow", render)
         self.assertIn("let raw = &self.loupe_sample;", render)
-        self.assertIn("raw.clear(", render)
-        self.assertIn("raw.copy_screen(", render)
-        self.assertEqual(NATIVE.count("let loupe_sample = Surface::new("), 1)
+        self.assertIn("self.loupe_sample.clear(", render)
+        self.assertIn(".copy_screen(sample.copy_offset, sample.grabbed, false)", render)
+        self.assertEqual(NATIVE.count("Surface::preview(CaptureMagnifierSample::SIDE"), 1)
+
+    def test_preview_is_device_compatible_but_png_remains_readable(self):
+        self.assertIn("Some(Surface::preview(156, 174)?)", NATIVE)
+        self.assertIn("w::CreateCompatibleBitmap(screen, width, height)", NATIVE)
+        self.assertNotIn("w::CreateCompatibleBitmap(dc, width, height)", NATIVE)
+        self.assertIn("let mut image = Surface::new(selected.width, selected.height)?", NATIVE)
+        png = NATIVE.split("    fn png(", 1)[1].split("impl Drop for Surface", 1)[0]
+        self.assertLess(png.index("self.bits.is_null()"), png.index("std::slice::from_raw_parts_mut"))
+        self.assertIn("w::GdiFlush()", png)
+
+    def test_live_color_probe_is_outside_unchanged_motion_window(self):
+        fixture = (ROOT / "tests/windows-native-capture-smoke.ps1").read_text()
+        self.assertIn("VerifyLiveMagnifierPixels(loupe,source,report,phase);", fixture)
+        self.assertIn("changedColors==3", fixture)
+        self.assertIn("clock.ElapsedMilliseconds<200", fixture)
+        self.assertIn("while(clock.ElapsedMilliseconds<956)", fixture)
+        self.assertIn("positions.Count>=12", fixture)
 
     def test_live_fixture_observes_stationary_motion_and_drag_events(self):
         fixture = (ROOT / "tests/windows-native-capture-smoke.ps1").read_text()

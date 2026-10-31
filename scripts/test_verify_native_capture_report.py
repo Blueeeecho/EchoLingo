@@ -13,6 +13,10 @@ def complete_report():
     cases = [{"mode": mode, "ok": True} for mode in sorted(REPORT.EXPECTED_MODES)]
     case = next(case for case in cases if case["mode"] == "magnifier-continuity-armed-and-dragging")
     for phase in ("armed", "dragging"):
+        case[phase + "MagnifierLivePixels"] = {
+            "generatedColorChanges": 3, "maximumRefreshMilliseconds": 50,
+            "livePixelRefreshVerified": True, "samplePixelsStored": False,
+        }
         case[phase + "MagnifierContinuity"] = {
             "durationMilliseconds": 956, "visibilitySamples": 300, "invisibleSamples": 0,
             "hideEvents": 0, "locationEvents": 25, "eventObserverPositiveControl": True,
@@ -66,6 +70,36 @@ class CaptureReportTests(unittest.TestCase):
             del report[field]
             with self.subTest(field=field), self.assertRaises(ValueError):
                 REPORT.verify(json.dumps(report))
+
+    def test_live_pixels_are_mandatory_bounded_and_non_private(self):
+        for phase in ("armed", "dragging"):
+            for field, value in (("generatedColorChanges", 2), ("generatedColorChanges", True),
+                                 ("maximumRefreshMilliseconds", -1), ("maximumRefreshMilliseconds", 201),
+                                 ("maximumRefreshMilliseconds", True), ("maximumRefreshMilliseconds", None),
+                                 ("livePixelRefreshVerified", False), ("samplePixelsStored", True)):
+                report = complete_report()
+                case = next(case for case in report["cases"] if case["mode"].startswith("magnifier-continuity"))
+                case[phase + "MagnifierLivePixels"][field] = value
+                with self.subTest(phase=phase, field=field, value=value), self.assertRaises(ValueError):
+                    REPORT.verify(json.dumps(report))
+            for field in (None, "generatedColorChanges", "maximumRefreshMilliseconds",
+                          "livePixelRefreshVerified", "samplePixelsStored"):
+                report = complete_report()
+                case = next(case for case in report["cases"] if case["mode"].startswith("magnifier-continuity"))
+                if field is None:
+                    del case[phase + "MagnifierLivePixels"]
+                else:
+                    del case[phase + "MagnifierLivePixels"][field]
+                with self.subTest(phase=phase, missing=field), self.assertRaises(ValueError):
+                    REPORT.verify(json.dumps(report))
+
+    def test_live_pixel_refresh_boundary_is_inclusive(self):
+        for boundary in (0, 200):
+            report = complete_report()
+            case = next(case for case in report["cases"] if case["mode"].startswith("magnifier-continuity"))
+            for phase in ("armed", "dragging"):
+                case[phase + "MagnifierLivePixels"]["maximumRefreshMilliseconds"] = boundary
+            self.assertEqual(REPORT.verify(json.dumps(report)), report)
 
 
 if __name__ == "__main__":

@@ -377,6 +377,14 @@ struct Surface {
 // intentionally not Send/Sync. WM_PAINT borrows it only during synchronous redraw.
 impl Surface {
     fn new(width: i32, height: i32) -> Result<Self> {
+        Self::allocate(width, height, true)
+    }
+    fn preview(width: i32, height: i32) -> Result<Self> {
+        // Preview pixels stay in GDI: do not force the screen through a
+        // CPU-readable DIB on every live frame. PNG output still uses new().
+        Self::allocate(width, height, false)
+    }
+    fn allocate(width: i32, height: i32, readable: bool) -> Result<Self> {
         if width <= 0
             || height <= 0
             || (width as usize)
@@ -406,8 +414,23 @@ impl Surface {
             colors: [0],
         };
         let mut bits = null_mut();
-        let bitmap = unsafe { w::CreateDIBSection(dc, &info, 0, &mut bits, null_mut(), 0) };
-        if bitmap.is_null() || bits.is_null() {
+        let bitmap = if readable {
+            unsafe { w::CreateDIBSection(dc, &info, 0, &mut bits, null_mut(), 0) }
+        } else {
+            unsafe {
+                let screen = w::GetDC(null_mut());
+                if screen.is_null() {
+                    w::DeleteDC(dc);
+                    return Err(error("CAPTURE_BITMAP"));
+                }
+                // Use the display DC, not the memory DC's initial monochrome
+                // bitmap. Acquisition and release remain on this UI thread.
+                let bitmap = w::CreateCompatibleBitmap(screen, width, height);
+                w::ReleaseDC(null_mut(), screen);
+                bitmap
+            }
+        };
+        if bitmap.is_null() || (readable && bits.is_null()) {
             unsafe {
                 if !bitmap.is_null() {
                     w::DeleteObject(bitmap);
@@ -478,6 +501,9 @@ impl Surface {
         }
     }
     fn png(&mut self) -> Result<Vec<u8>> {
+        if self.bits.is_null() {
+            return Err(error("CAPTURE_BITMAP_NOT_READABLE"));
+        }
         if unsafe { w::GdiFlush() } == 0 {
             return Err(error("CAPTURE_BITMAP_SYNC"));
         }
@@ -1069,8 +1095,9 @@ impl Picker {
             canvas.clone(),
         )?;
         own.insert(loupe.hwnd as isize);
-        let loupe_sample = Surface::new(CaptureMagnifierSample::SIDE, CaptureMagnifierSample::SIDE)?;
-        *canvas.lock().map_err(|_| error("CAPTURE_BITMAP"))? = Some(Surface::new(156, 174)?);
+        let loupe_sample =
+            Surface::preview(CaptureMagnifierSample::SIDE, CaptureMagnifierSample::SIDE)?;
+        *canvas.lock().map_err(|_| error("CAPTURE_BITMAP"))? = Some(Surface::preview(156, 174)?);
         let mut input = CaptureInputPolicy::default();
         input.resync_released_buttons(down(1), down(2));
         input.resync_escape(down(0x1b));
@@ -1097,6 +1124,12 @@ impl Picker {
             "captureFrameRenderMillisecondsMax",
             "magnifierRenderMillisecondsTotal",
             "magnifierRenderMillisecondsMax",
+            "magnifierSampleMillisecondsTotal",
+            "magnifierSampleMillisecondsMax",
+            "magnifierComposeMillisecondsTotal",
+            "magnifierComposeMillisecondsMax",
+            "magnifierPresentMillisecondsTotal",
+            "magnifierPresentMillisecondsMax",
         ] {
             health.insert(name, 0);
         }
@@ -1443,10 +1476,18 @@ impl Picker {
             self.loupe.hide();
             return Ok(());
         }
-        let raw = &self.loupe_sample;
-        raw.clear(w::rgb(22, 26, 34));
-        raw.copy_screen(sample.copy_offset, sample.grabbed, false)?;
+        let sample_started = Instant::now();
+        self.loupe_sample.clear(w::rgb(22, 26, 34));
+        self.loupe_sample
+            .copy_screen(sample.copy_offset, sample.grabbed, false)?;
+        self.record_render_duration(
+            "magnifierSampleMillisecondsTotal",
+            "magnifierSampleMillisecondsMax",
+            sample_started,
+        );
+        let compose_started = Instant::now();
         {
+            let raw = &self.loupe_sample;
             let canvas = self.canvas.lock().map_err(|_| error("CAPTURE_BITMAP"))?;
             let canvas = canvas.as_ref().ok_or_else(|| error("CAPTURE_BITMAP"))?;
             canvas.clear(w::rgb(22, 26, 34));
@@ -1501,6 +1542,12 @@ impl Picker {
                 w::SelectObject(canvas.dc, oldfont);
             }
         }
+        self.record_render_duration(
+            "magnifierComposeMillisecondsTotal",
+            "magnifierComposeMillisecondsMax",
+            compose_started,
+        );
+        let present_started = Instant::now();
         set_bounds(self.loupe.hwnd, TOPMOST, place, POS | 0x40)?;
         unsafe {
             // Disabled once at construction; repeating EnableWindow(false)
@@ -1508,6 +1555,11 @@ impl Picker {
             w::InvalidateRect(self.loupe.hwnd, null(), 0);
             w::UpdateWindow(self.loupe.hwnd);
         }
+        self.record_render_duration(
+            "magnifierPresentMillisecondsTotal",
+            "magnifierPresentMillisecondsMax",
+            present_started,
+        );
         Ok(())
     }
     fn select(&mut self) -> Result<Rect> {

@@ -19,6 +19,7 @@ using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.Drawing;
+using System.Drawing.Imaging;
 using System.IO;
 using System.Runtime.InteropServices;
 using System.Text;
@@ -165,6 +166,42 @@ public static class EchoLingoNativeCaptureSmoke {
     delegate void WinEventCallback(IntPtr hook,uint eventType,IntPtr window,int objectId,int childId,uint thread,uint time);
     [DllImport("user32.dll")] static extern IntPtr SetWinEventHook(uint first,uint last,IntPtr module,WinEventCallback callback,uint process,uint thread,uint flags);
     [DllImport("user32.dll")] static extern bool UnhookWinEvent(IntPtr hook);
+    static void VerifyLiveMagnifierPixels(IntPtr loupe,Sources source,Dictionary<string,object> report,string phase) {
+        // Observe generated colors before (never inside) the timed motion
+        // interval. Reuse its 200 ms final-settle bound for each fresh frame.
+        Rectangle expected=new Rectangle(source.First.X+42,source.First.Y-26,156,174);
+        int changedColors=0;long maximumRefresh=0;
+        foreach(Color color in new Color[]{Color.FromArgb(70,110,210),Color.FromArgb(170,60,180),Color.FromArgb(230,150,40)}) {
+            Need(GetForegroundWindow()==source.AH,"Source changed before generated live-pixel probe.");
+            source.OnUi(delegate {
+                Button button=(Button)source.A.Controls[0];button.BackColor=color;
+                button.FlatAppearance.MouseOverBackColor=color;button.FlatAppearance.MouseDownBackColor=color;
+                button.Refresh();
+            });
+            Stopwatch clock=Stopwatch.StartNew();bool fresh=false;
+            while(clock.ElapsedMilliseconds<200) {
+                Need(IsWindowVisible(loupe),"Live-pixel probe lost the visible magnifier.");
+                if(Bounds(loupe)==expected) {
+                    using(Bitmap pixel=new Bitmap(3,3,PixelFormat.Format32bppArgb)) {
+                        using(Graphics graphics=Graphics.FromImage(pixel))graphics.CopyFromScreen(expected.X+54,expected.Y+54,0,0,new Size(3,3),CopyPixelOperation.SourceCopy);
+                        fresh=true;
+                        for(int y=0;y<3;y++)for(int x=0;x<3;x++) {
+                            Color actual=pixel.GetPixel(x,y);
+                            fresh&=Math.Abs(actual.R-color.R)<=2&&Math.Abs(actual.G-color.G)<=2&&Math.Abs(actual.B-color.B)<=2;
+                        }
+                    }
+                }
+                if(fresh)break;
+                Application.DoEvents();Thread.Sleep(1);
+            }
+            Need(fresh&&clock.ElapsedMilliseconds<=200,"Generated magnifier pixels did not refresh within the existing settle bound.");
+            maximumRefresh=Math.Max(maximumRefresh,clock.ElapsedMilliseconds);changedColors++;
+        }
+        report[phase+"MagnifierLivePixels"]=new Dictionary<string,object> {
+            {"generatedColorChanges",changedColors},{"maximumRefreshMilliseconds",maximumRefresh},
+            {"livePixelRefreshVerified",changedColors==3},{"samplePixelsStored",false}
+        };
+    }
     static void ObserveMagnifierContinuity(int helper,Sources source,Dictionary<string,object> report,string phase) {
         IntPtr loupe=IntPtr.Zero;int matches=0;
         EnumWindows(delegate(IntPtr window,IntPtr unused) {
@@ -172,6 +209,7 @@ public static class EchoLingoNativeCaptureSmoke {
             if(pid==helper&&Loupe(window)){loupe=window;matches++;}return true;
         },IntPtr.Zero);
         Need(matches==1&&IsWindowVisible(loupe),"Continuity requires one visible loupe from this exact helper.");
+        VerifyLiveMagnifierPixels(loupe,source,report,phase);
         int hides=0,shows=0,locations=0,motionLocations=0,invisible=0,samples=0,moves=0;
         int motionSamples=0,motionTransitions=0;Point? previousMotion=null;
         long previousSample=-1,maximumSampleGap=0;

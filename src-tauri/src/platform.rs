@@ -911,6 +911,12 @@ fn bounded_capture_health(value: &Value) -> Value {
         "captureFrameRenderMillisecondsMax",
         "magnifierRenderMillisecondsTotal",
         "magnifierRenderMillisecondsMax",
+        "magnifierSampleMillisecondsTotal",
+        "magnifierSampleMillisecondsMax",
+        "magnifierComposeMillisecondsTotal",
+        "magnifierComposeMillisecondsMax",
+        "magnifierPresentMillisecondsTotal",
+        "magnifierPresentMillisecondsMax",
     ] {
         if let Some(number) = value
             .get(field)
@@ -2088,9 +2094,15 @@ mod tests {
             "captureFrameRenderMillisecondsMax": 46,
             "magnifierRenderMillisecondsTotal": 870,
             "magnifierRenderMillisecondsMax": 38,
+            "magnifierSampleMillisecondsTotal": 600,
+            "magnifierSampleMillisecondsMax": 30,
+            "magnifierComposeMillisecondsTotal": 70,
+            "magnifierComposeMillisecondsMax": 4,
+            "magnifierPresentMillisecondsTotal": 200,
+            "magnifierPresentMillisecondsMax": 12,
             "captureFramePixels": "private", "captureFramePointer": [100, 200]
         }));
-        assert_eq!(safe.as_object().unwrap().len(), 7);
+        assert_eq!(safe.as_object().unwrap().len(), 13);
         assert_eq!(safe["captureFrameCount"], 63);
         for boundary in [0, 10_000_000] {
             let input: serde_json::Map<String, Value> = safe
@@ -2116,7 +2128,13 @@ mod tests {
                     "captureFrameRenderMillisecondsTotal": invalid,
                     "captureFrameRenderMillisecondsMax": invalid,
                     "magnifierRenderMillisecondsTotal": invalid,
-                    "magnifierRenderMillisecondsMax": invalid
+                    "magnifierRenderMillisecondsMax": invalid,
+                    "magnifierSampleMillisecondsTotal": invalid,
+                    "magnifierSampleMillisecondsMax": invalid,
+                    "magnifierComposeMillisecondsTotal": invalid,
+                    "magnifierComposeMillisecondsMax": invalid,
+                    "magnifierPresentMillisecondsTotal": invalid,
+                    "magnifierPresentMillisecondsMax": invalid
                 })),
                 json!({})
             );
