@@ -1733,7 +1733,11 @@ $<HTMLSelectElement>('#windows-selection-strategy').addEventListener('change', (
   const choice = (event.target as HTMLSelectElement).value === 'auto' ? 'auto' : 'copy';
   run(async () => { try { await updateSettings((next) => { next.windowsSelectionStrategy = choice; }); } finally { renderSettings(); } });
 });
-$<HTMLSelectElement>('#theme-select').addEventListener('change', (event) => run(() => updateSettings((next) => { next.theme = (event.target as HTMLSelectElement).value as Settings['theme']; })));
+$<HTMLSelectElement>('#theme-select').addEventListener('change', (event) => {
+  // Earlier queued saves re-render this control before our mutation executes.
+  const theme = (event.target as HTMLSelectElement).value as Settings['theme'];
+  run(() => updateSettings((next) => { next.theme = theme; }));
+});
 $<HTMLInputElement>('#save-history').addEventListener('change', (event) => {
   const value = (event.target as HTMLInputElement).checked;
   run(async () => { try { await updateSettings((next) => { next.saveHistory = value; }); toast(value ? '已开启翻译历史。' : '已关闭历史保存；已有记录可在历史页面删除。'); } finally { renderSettings(); } });
