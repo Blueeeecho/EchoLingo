@@ -2401,6 +2401,14 @@ fn visible_action_error(action: &str, error: &str) -> Option<String> {
         return None;
     }
     if action == "selection" {
+        // An unverifiable source is not an explicit user cancellation. Keep
+        // the identity guard closed, but explain the failure in a blank editor
+        // when this request is still current. Never expose native identities.
+        if error.starts_with("SOURCE_CHANGED:") {
+            return Some(
+                "无法确认原取词窗口，已停止取词。请在原窗口重新选词，或手动复制后翻译剪贴板。".into(),
+            );
+        }
         // A shortcut with no obtainable selection is also the user's manual
         // input shortcut. Permission setup belongs in Settings, not a toast on
         // an otherwise empty popup. Preserve a warning only if the clipboard
@@ -4221,6 +4229,7 @@ mod tests {
             "CLIPBOARD_RESTORE_FAILED_SUFFIX: Not a restoration failure",
             "NATIVE_CANCEL_SIGNAL: Generated fixture",
             "CANCELLED: Generated fixture",
+            "SOURCE_CHANGED: Generated source identity mismatch",
             "HTTP 503",
         ] {
             assert!(clipboard_restoration_notice(error).is_none());
@@ -4720,6 +4729,30 @@ mod tests {
         assert_eq!(failure.source, empty_selection_payload(45));
         assert_eq!(failure.error.as_deref(), Some(error));
         assert!(failure.source.get("permissionRequired").is_none());
+    }
+    #[test]
+    fn source_identity_failure_is_actionable_but_superseded_selection_stays_quiet() {
+        let error = "SOURCE_CHANGED: Generated private source identity";
+        let failure = action_failure_presentation("selection", error, 46).unwrap();
+        assert_eq!(failure.source, empty_selection_payload(46));
+        assert!(failure.source.get("permissionRequired").is_none());
+        let message = failure.error.unwrap();
+        assert!(message.contains("重新选词"));
+        assert!(!message.contains("Generated") && !message.contains("private"));
+        let cancelled = finish_native_text::<String>(Err(error.into()), true).unwrap_err();
+        assert_eq!(cancelled, translation_requests::CANCELLED);
+        assert!(action_failure_presentation("selection", &cancelled, 46).is_none());
+
+        let controller = native_tasks::Controller::default();
+        let old = controller.begin().unwrap();
+        let current = controller.begin().unwrap();
+        assert!(controller
+            .publish(&old, || panic!("stale source failure reopened popup"))
+            .is_none());
+        assert!(controller
+            .publish(&current, || action_failure_presentation("selection", error, 47))
+            .flatten()
+            .is_some());
     }
     #[test]
     fn empty_selection_is_quiet_but_other_actions_keep_actionable_errors() {

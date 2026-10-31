@@ -68,8 +68,9 @@ final class SelectionTrace {
         "role", "roleStatus", "subrole", "subroleStatus", "selectedTextStatus", "selectedTextEmpty",
         "rangeStatus", "rangeState", "rangeLength", "rangeTextStatus", "pluralStatus", "pluralState", "rangeCount", "positiveRangeCount",
         "decision", "documentContainer", "opaqueDocument", "copyIssued", "probeNodes", "probeRoot", "copyStrategy", "windowMatches",
-        "requestSourceAnchored", "requestSourceMatches", "secureInputEnabled", "accessibilityGranted", "clipboardChanged",
-        "windowTicketSource", "windowTicketReason", "windowRecordsCount"
+        "requestSourceAnchored", "requestSourceMatches", "requestSourceReason", "secureInputEnabled", "accessibilityGranted", "clipboardChanged",
+        "windowTicketSource", "windowTicketReason", "windowRecordsCount",
+        "probeStep", "childrenStatus", "childrenCount", "selectedChildrenStatus", "selectedChildrenCount"
     ]
     private let start = ProcessInfo.processInfo.systemUptime
     private let startedAtUnixMs = Date().timeIntervalSince1970 * 1000
@@ -113,7 +114,7 @@ final class SelectionTrace {
         (ProcessInfo.processInfo.systemUptime - start) * 1000
     }
     func snapshot(state: String = "running", errorCategory: String? = nil) -> [String: Any] {
-        let categories: Set<String> = ["PERMISSION", "SELECTION", "SELECTION_UNAVAILABLE", "NO_SELECTION", "CANCELLED", "CLIPBOARD",
+        let categories: Set<String> = ["PERMISSION", "SELECTION", "SELECTION_UNAVAILABLE", "NO_SELECTION", "CANCELLED", "SOURCE_CHANGED", "CLIPBOARD",
             "CLIPBOARD_CHANGED", "CLIPBOARD_RESTORE_FAILED", "CLIPBOARD_RESTORE_SKIPPED"]
         let category = errorCategory.map { categories.contains($0) ? $0 : "NATIVE" }
         return ["schemaVersion": 2, "state": state, "phase": phase,
@@ -139,8 +140,68 @@ struct SelectionRequestSource: Codable, Equatable {
     let pid: pid_t
     let bundleIdentifier: String
     let windowID: CGWindowID?
-    let launchedAt: TimeInterval?
+    // JSON numbers can change one ULP in the Swift -> Rust -> Swift bridge.
+    // Preserve every launch-time bit instead of weakening lifetime equality.
+    let launchIdentity: String?
     var axWindowToken: String? = nil
+}
+
+extension SelectionRequestSource {
+    private enum WireKeys: String, CodingKey {
+        case pid, bundleIdentifier, windowID, launchIdentity, axWindowToken, launchedAt
+    }
+    init(from decoder: Decoder) throws {
+        let values = try decoder.container(keyedBy: WireKeys.self)
+        // Do not interpret an old numeric lifetime proof as a missing proof.
+        guard !values.contains(.launchedAt) else {
+            throw DecodingError.dataCorruptedError(forKey: .launchedAt, in: values,
+                debugDescription: "Numeric selection launch identities are unsupported.")
+        }
+        self.init(pid: try values.decode(pid_t.self, forKey: .pid),
+            bundleIdentifier: try values.decode(String.self, forKey: .bundleIdentifier),
+            windowID: try values.decodeIfPresent(CGWindowID.self, forKey: .windowID),
+            launchIdentity: try values.decodeIfPresent(String.self, forKey: .launchIdentity),
+            axWindowToken: try values.decodeIfPresent(String.self, forKey: .axWindowToken))
+    }
+}
+
+func selectionLaunchIdentity(_ launchedAt: TimeInterval?) -> String? {
+    launchedAt.map {
+        let bits = String($0.bitPattern, radix: 16)
+        return String(repeating: "0", count: 16 - bits.count) + bits
+    }
+}
+
+func validSelectionLaunchIdentity(_ identity: String) -> Bool {
+    guard identity.utf8.count == 16,
+          identity.utf8.allSatisfy({ (48...57).contains($0) || (97...102).contains($0) }),
+          let bits = UInt64(identity, radix: 16) else { return false }
+    return Double(bitPattern: bits).isFinite
+}
+
+func validSelectionRequestSource(_ source: SelectionRequestSource) -> Bool {
+    source.pid > 0 && !source.bundleIdentifier.isEmpty && source.windowID != 0
+        && ((source.windowID != nil) != (source.axWindowToken != nil))
+        && (source.axWindowToken.map({ UUID(uuidString: $0) != nil }) ?? true)
+        && (source.launchIdentity.map(validSelectionLaunchIdentity) ?? true)
+}
+
+enum SelectionRequestSourceRejection: String {
+    case snapshotUnavailable, pidMismatch, bundleMismatch, launchIdentityMismatch
+    case cgWindowUnavailable, cgWindowMismatch, axTokenUnavailable, axWindowUnavailable, axWindowMismatch
+}
+
+func selectionRequestSourceRejection(_ expected: SelectionRequestSource,
+                                     _ current: SelectionRequestSource?) -> SelectionRequestSourceRejection? {
+    guard let current else { return .snapshotUnavailable }
+    guard expected.pid > 0, expected.pid == current.pid else { return .pidMismatch }
+    guard expected.bundleIdentifier == current.bundleIdentifier else { return .bundleMismatch }
+    guard expected.launchIdentity == current.launchIdentity else { return .launchIdentityMismatch }
+    if let expectedWindow = expected.windowID {
+        guard let currentWindow = current.windowID else { return .cgWindowUnavailable }
+        guard expectedWindow == currentWindow else { return .cgWindowMismatch }
+    }
+    return nil
 }
 
 // Opaque AX identities cannot cross JSON. Keep a tiny, short-lived registry;
@@ -197,12 +258,12 @@ func selectionRequestSourceSnapshot() throws -> SelectionRequestSource {
               application.processIdentifier > 0,
               application.processIdentifier != ProcessInfo.processInfo.processIdentifier,
               let bundle = application.bundleIdentifier, !bundle.isEmpty else {
-            throw NativeError("CANCELLED: 请先在原应用中选中文字，再按取词快捷键。")
+            throw NativeError("SOURCE_CHANGED: 请先在原应用中选中文字，再按取词快捷键。")
         }
         let source = SelectionApplicationSnapshot(pid: application.processIdentifier, bundleIdentifier: bundle)
         return SelectionRequestSource(pid: application.processIdentifier, bundleIdentifier: bundle,
             windowID: selectionCGCopyTicket(source: source)?.windowID,
-            launchedAt: application.launchDate?.timeIntervalSince1970)
+            launchIdentity: selectionLaunchIdentity(application.launchDate?.timeIntervalSince1970))
     }
 }
 
@@ -228,9 +289,7 @@ func selectionRequestSourceForShortcut() throws -> SelectionRequestSource {
 }
 
 func selectionRequestSourceMatches(_ expected: SelectionRequestSource, _ current: SelectionRequestSource) -> Bool {
-    expected.pid > 0 && expected.pid == current.pid && expected.bundleIdentifier == current.bundleIdentifier
-        && expected.launchedAt == current.launchedAt
-        && (expected.windowID == nil || expected.windowID == current.windowID)
+    selectionRequestSourceRejection(expected, current) == nil
 }
 
 func selectionAnchoredWindowMatches<Window>(_ expected: Window?, _ current: Window?, same: (Window, Window) -> Bool) -> Bool {
@@ -238,18 +297,26 @@ func selectionAnchoredWindowMatches<Window>(_ expected: Window?, _ current: Wind
     return same(expected, current)
 }
 
+func selectionRequestAXRejection<Window>(_ retained: Window?, _ current: Window?,
+                                        same: (Window, Window) -> Bool) -> SelectionRequestSourceRejection? {
+    guard let retained else { return .axTokenUnavailable }
+    guard let current else { return .axWindowUnavailable }
+    return same(retained, current) ? nil : .axWindowMismatch
+}
+
 func requireSelectionRequestSource(_ expected: SelectionRequestSource?, trace: SelectionTrace? = nil) throws {
     guard let expected else { return }
-    var matches = (try? selectionRequestSourceSnapshot()).map { selectionRequestSourceMatches(expected, $0) } ?? false
-    if matches, expected.windowID == nil {
+    var rejection = selectionRequestSourceRejection(expected, try? selectionRequestSourceSnapshot())
+    if rejection == nil, expected.windowID == nil {
         if let window = SelectionRequestWindowStore.window(for: expected) {
             let current = focusedSelectionWindow(applicationPID: expected.pid, trace: trace,
                 deadline: ProcessInfo.processInfo.systemUptime + 0.09).value
-            matches = selectionAnchoredWindowMatches(window, current, same: { CFEqual($0, $1) })
-        } else { matches = false }
+            rejection = selectionRequestAXRejection(window, current, same: { CFEqual($0, $1) })
+        } else { rejection = .axTokenUnavailable }
     }
-    trace?.record("request-source-recheck", ["requestSourceAnchored": true, "requestSourceMatches": matches])
-    guard matches else { throw NativeError("CANCELLED: 原取词窗口已改变，请重新选词。") }
+    trace?.record("request-source-recheck", ["requestSourceAnchored": true, "requestSourceMatches": rejection == nil,
+        "requestSourceReason": rejection?.rawValue ?? "verified"])
+    guard rejection == nil else { throw NativeError("SOURCE_CHANGED: 无法确认原取词窗口，请在原应用重新选词后重试。") }
 }
 
 struct SelectionApplicationSnapshot {
@@ -934,6 +1001,111 @@ func selectionMixedTextStillSelected(_ original: String, current: String?) -> Bo
     !original.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && current == original
 }
 
+// QQ can select separate chat items while its focused AXGroup reports a
+// zero text range. A selected-children set is explicit selection evidence;
+// unrelated positive descendants must still be rejected as ambiguous.
+func selectionChatGroupSupported(bundleIdentifier: String?, role: String?) -> Bool {
+    bundleIdentifier == "com.tencent.qq" && role == "AXGroup"
+}
+
+func selectionGroupIsValid<Node>(_ nodes: [Node], same: (Node, Node) -> Bool) -> Bool {
+    guard (2...64).contains(nodes.count) else { return false }
+    return nodes.indices.allSatisfy { index in !nodes[..<index].contains { same($0, nodes[index]) } }
+}
+
+// Read every selected item twice, and recheck the ordered set and context.
+// nil is only the absence of a multi-selection. Once a multi-selection is
+// reported, incomplete/stale evidence fails closed instead of returning part
+// of it or requesting a synthetic copy.
+func readVerifiedSelectionGroup<Node>(children: () throws -> [Node]?, same: (Node, Node) -> Bool,
+                                      contextIsCurrent: () -> Bool, withinBudget: () -> Bool,
+                                      read: (Node) throws -> String?) throws -> String? {
+    guard withinBudget(), contextIsCurrent() else { throw unavailableSelectionError(reason: "selectedChildrenContext") }
+    guard let original = try children(), original.count >= 2 else { return nil }
+    guard selectionGroupIsValid(original, same: same) else { throw unavailableSelectionError(reason: "selectedChildrenInvalid") }
+    var texts = [String]()
+    for child in original {
+        guard withinBudget(), let text = try read(child), !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            throw unavailableSelectionError(reason: "selectedChildNoPositiveText")
+        }
+        texts.append(text)
+    }
+    guard withinBudget(), contextIsCurrent(), let current = try children(), current.count == original.count,
+          zip(original, current).allSatisfy({ same($0.0, $0.1) }) else {
+        throw unavailableSelectionError(reason: "selectedChildrenChanged")
+    }
+    for (child, text) in zip(original, texts) {
+        guard withinBudget(), try read(child) == text else { throw unavailableSelectionError(reason: "selectedChildTextChanged") }
+    }
+    guard withinBudget(), contextIsCurrent(), let final = try children(), final.count == original.count,
+          zip(original, final).allSatisfy({ same($0.0, $0.1) }), withinBudget(), contextIsCurrent() else {
+        throw unavailableSelectionError(reason: "selectedChildrenChanged")
+    }
+    return texts.joined(separator: "\n")
+}
+
+func selectedChatChildren(_ root: AXUIElement, deadline: TimeInterval, trace: SelectionTrace) throws -> [AXUIElement]? {
+    try requireSelectionQueryBudget(deadline)
+    var count: CFIndex = 0
+    let status = AXUIElementGetAttributeValueCount(root, kAXSelectedChildrenAttribute as CFString, &count)
+    trace.record("selection-chat-children", ["selectedChildrenStatus": status.rawValue, "selectedChildrenCount": count])
+    if unavailableSelectionRange(status) { return nil }
+    guard status == .success, count >= 0, count <= 64 else {
+        throw unavailableSelectionError(trace: trace, reason: "selectedChildrenCountInvalid")
+    }
+    guard count >= 2 else { return [] }
+    try requireSelectionQueryBudget(deadline)
+    var values: CFArray?
+    let valuesStatus = AXUIElementCopyAttributeValues(root, kAXSelectedChildrenAttribute as CFString, 0, count, &values)
+    trace.record("selection-chat-children", ["selectedChildrenStatus": valuesStatus.rawValue, "selectedChildrenCount": count])
+    guard valuesStatus == .success, let values, CFArrayGetCount(values) == count else {
+        throw unavailableSelectionError(trace: trace, reason: "selectedChildrenValuesInvalid")
+    }
+    var children = [AXUIElement]()
+    for index in 0..<count {
+        guard let pointer = CFArrayGetValueAtIndex(values, index) else { throw unavailableSelectionError() }
+        let value = Unmanaged<CFTypeRef>.fromOpaque(pointer).takeUnretainedValue()
+        guard CFGetTypeID(value) == AXUIElementGetTypeID() else { throw unavailableSelectionError() }
+        children.append(value as! AXUIElement)
+    }
+    return children
+}
+
+func recoverSelectedChatChildren(root: AXUIElement, rootRole: String, source: SelectionApplicationSnapshot,
+                                 ticket: SelectionCopyTicket?, initialWindow: AXUIElement?, deadline: TimeInterval,
+                                 trace: SelectionTrace, contextIsCurrent: () -> Bool) throws -> String? {
+    guard selectionChatGroupSupported(bundleIdentifier: source.bundleIdentifier, role: rootRole),
+          let pid = source.pid, let ticket, let initialWindow else { return nil }
+    func current() -> Bool {
+        guard selectionQueryBudgetAvailable(deadline), AXIsProcessTrusted(), !IsSecureEventInputEnabled(),
+              contextIsCurrent(), selectionCopyTicket(source: source, matching: ticket) == ticket,
+              let currentRole = try? selectionRecoveryRole(root, applicationPID: pid, deadline: deadline), currentRole == rootRole,
+              let window = focusedSelectionWindow(applicationPID: pid, deadline: deadline).value,
+              CFEqual(initialWindow, window),
+              let rootWindow = selectionOwningWindow(root, role: rootRole, applicationPID: pid, deadline: deadline).value else { return false }
+        return CFEqual(rootWindow, initialWindow) && selectionQueryBudgetAvailable(deadline)
+    }
+    return try readVerifiedSelectionGroup(children: { try selectedChatChildren(root, deadline: deadline, trace: trace) },
+        same: { CFEqual($0, $1) }, contextIsCurrent: current,
+        withinBudget: { selectionQueryBudgetAvailable(deadline) }, read: { child in
+            try requireSelectionQueryBudget(deadline)
+            guard AXUIElementSetMessagingTimeout(child, 0.03) == .success,
+                  selectionElementOwnerMatches(child, pid),
+                  let window = selectionOwningWindow(child, applicationPID: pid, deadline: deadline).value,
+                  CFEqual(initialWindow, window) else { throw unavailableSelectionError(reason: "selectedChildWindowUnverified") }
+            // AXSelectedChildren contains first-order children, not arbitrary
+            // elements in another subtree or a previously selected window.
+            try requireSelectionQueryBudget(deadline)
+            var parent: CFTypeRef?
+            let status = AXUIElementCopyAttributeValue(child, kAXParentAttribute as CFString, &parent)
+            guard status == .success, let parent, CFGetTypeID(parent) == AXUIElementGetTypeID(),
+                  CFEqual(root, parent) else { throw unavailableSelectionError(reason: "selectedChildParentUnverified") }
+            return try accessibilitySelection(element: child, bundleIdentifier: source.bundleIdentifier,
+                trace: trace, phase: "ax-chat-selected-child", deadline: deadline,
+                requireNonEditableCandidate: true, requireTextTarget: true)
+        })
+}
+
 func recoverySelection(originalFocus: AXUIElement?, source: SelectionApplicationSnapshot,
                        sourceWindowTicket: SelectionCopyTicket?, trace: SelectionTrace) throws -> String {
     guard let pid = source.pid, pid > 0 else { throw unavailableSelectionError(trace: trace, reason: "probeSourceUnavailable") }
@@ -957,9 +1129,9 @@ func recoverySelection(originalFocus: AXUIElement?, source: SelectionApplication
         }
         rootRole = role
     } catch is SelectionProbeBudgetExpired { throw SelectionCompatibilityRequired(reason: "rootResourceLimit") }
-    // One optional initial window read, not another tree walk. Its only use is
-    // the new positive-selection/empty-editor branch; an unavailable proof does
-    // not authorize that branch or relax any existing copy guard.
+    // One optional initial window read, not another tree walk. Positive
+    // selection groups and the empty-editor branch require this proof; an
+    // unavailable proof does not authorize either or relax any copy guard.
     let windowProofStarted = ProcessInfo.processInfo.systemUptime
     let initialWindow: SelectionQuery<AXUIElement> = sourceWindowTicket == nil ? .unavailable
         : selectionOwningWindow(root, role: rootRole, applicationPID: pid, deadline: deadline)
@@ -968,6 +1140,7 @@ func recoverySelection(originalFocus: AXUIElement?, source: SelectionApplication
     // The one extra AX message has its own 30 ms per-object timeout.
     deadline += ProcessInfo.processInfo.systemUptime - windowProofStarted
     var observedContextChange = false
+    var requestSourceFailure: NativeError?
     var focusBecameAvailable = false
     var hardContextFailure = false
     var knownBlockedTarget = false
@@ -976,6 +1149,10 @@ func recoverySelection(originalFocus: AXUIElement?, source: SelectionApplication
     var selectedCandidateRole: String?
     func contextIsCurrent() -> Bool {
         do { try requireSelectionRequestSource(source.requestSource, trace: trace) }
+        catch let error as NativeError {
+            if error.message.hasPrefix("SOURCE_CHANGED:") { requestSourceFailure = error }
+            observedContextChange = true; return false
+        }
         catch { observedContextChange = true; return false }
         let current = selectionApplicationSnapshot(trace: trace, phase: "foreground-selection-probe")
         guard let currentPID = current.pid, currentPID > 0 else { hardContextFailure = true; return false }
@@ -1001,23 +1178,65 @@ func recoverySelection(originalFocus: AXUIElement?, source: SelectionApplication
         if !same { observedContextChange = true }
         return same
     }
+    if selectionChatGroupSupported(bundleIdentifier: source.bundleIdentifier, role: rootRole) {
+        let chatProbeStarted = ProcessInfo.processInfo.systemUptime
+        do {
+            if let text = try recoverSelectedChatChildren(root: root, rootRole: rootRole, source: source,
+                ticket: sourceWindowTicket, initialWindow: initialWindow.value, deadline: deadline, trace: trace,
+                contextIsCurrent: contextIsCurrent) {
+                trace.record("selection-chat-multiple", ["decision": "verifiedSelectedChildren"])
+                return text
+            }
+            // An unsupported/absent optional API must not shorten the original
+            // traversal and make it hit resourceLimit before seeing a known
+            // empty/protected target. Failed/expired probes still fail closed.
+            deadline += ProcessInfo.processInfo.systemUptime - chatProbeStarted
+        } catch is SelectionProbeBudgetExpired {
+            // This optional positive-evidence route never authorizes Copy.
+            throw unavailableSelectionError(trace: trace, reason: "selectedChildrenResourceLimit")
+        } catch {
+            if observedContextChange { throw requestSourceFailure ?? NativeError("CANCELLED: 原取词窗口或焦点已改变，请重新选择。") }
+            throw error
+        }
+    }
     let (result, count) = probeUniqueSelection(root: root, same: { CFEqual($0, $1) },
         contextIsCurrent: contextIsCurrent,
         withinBudget: { selectionQueryBudgetAvailable(deadline) }) { element, remaining in
+        // Keep per-node metadata private unless this node fails. This avoids
+        // flooding the retained trace or discarding the initial source proof.
+        let nodeTrace = SelectionTrace(publish: false)
+        var probeStep = "owner"
+        var childFields = [String: Any]()
+        func invalid() -> SelectionProbeObservation<AXUIElement>? {
+            if let events = nodeTrace.snapshot()["events"] as? [[String: Any]] {
+                for event in events where (event["phase"] as? String) != "started" {
+                    trace.record("selection-probe-ax", event)
+                }
+            }
+            var fields = childFields
+            fields["probeStep"] = probeStep
+            fields["decision"] = "probeInvalid"
+            trace.record("selection-probe-detail", fields)
+            return nil
+        }
         func limited() -> SelectionProbeObservation<AXUIElement> {
             SelectionProbeObservation(text: nil, children: [], protected: false, resourceLimit: true)
         }
         do {
             try requireSelectionQueryBudget(deadline)
             guard AXUIElementSetMessagingTimeout(element, 0.03) == .success,
-                  selectionElementOwnerMatches(element, pid) else { return nil }
+                  selectionElementOwnerMatches(element, pid) else { return invalid() }
             var role: CFTypeRef?, subrole: CFTypeRef?
             try requireSelectionQueryBudget(deadline)
+            probeStep = "role"
             let roleStatus = AXUIElementCopyAttributeValue(element, kAXRoleAttribute as CFString, &role)
+            nodeTrace.record("role", ["roleStatus": roleStatus.rawValue, "role": role as? String as Any? ?? NSNull()])
             let roleQuery = selectionTextQuery(status: roleStatus, value: role)
             try requireUsableSelectionQuery(roleQuery)
             try requireSelectionQueryBudget(deadline)
+            probeStep = "subrole"
             let subroleStatus = AXUIElementCopyAttributeValue(element, kAXSubroleAttribute as CFString, &subrole)
+            nodeTrace.record("subrole", ["subroleStatus": subroleStatus.rawValue, "subrole": subrole as? String as Any? ?? NSNull()])
             let subroleQuery = selectionTextQuery(status: subroleStatus, value: subrole)
             try requireUsableSelectionQuery(subroleQuery)
             let sensitive = subroleQuery.value == kAXSecureTextFieldSubrole as String
@@ -1025,6 +1244,7 @@ func recoverySelection(originalFocus: AXUIElement?, source: SelectionApplication
             // target. Only original or explicitly AXFocused nodes block copy.
             var sourceTarget = originalFocus.map { CFEqual($0, element) } ?? false
             if !sourceTarget && (sensitive || selectionEditableRole(roleQuery.value)) {
+                probeStep = "focused"
                 sourceTarget = try selectionNodeExplicitlyFocused(element, deadline: deadline)
             }
             do { try requireSelectionCopyTarget(role: roleQuery.value, subrole: subroleQuery.value) }
@@ -1033,7 +1253,9 @@ func recoverySelection(originalFocus: AXUIElement?, source: SelectionApplication
                 return SelectionProbeObservation(text: nil, children: [], protected: true)
             }
             var text: String?
-            do { text = try accessibilitySelection(element: element, bundleIdentifier: source.bundleIdentifier, deadline: deadline) }
+            probeStep = "selectionAttributes"
+            do { text = try accessibilitySelection(element: element, bundleIdentifier: source.bundleIdentifier,
+                trace: nodeTrace, phase: "selectionAttributes", deadline: deadline) }
             catch let error as NativeError where error.message.hasPrefix("NO_SELECTION:") {
                 if selectionTargetBlocksCompatibility(isSourceTarget: sourceTarget, role: roleQuery.value, emptySelection: true) { knownEmptyEditor = true }
             }
@@ -1047,29 +1269,35 @@ func recoverySelection(originalFocus: AXUIElement?, source: SelectionApplication
             }
             var childCount: CFIndex = 0
             try requireSelectionQueryBudget(deadline)
+            probeStep = "childrenCount"
             let countStatus = AXUIElementGetAttributeValueCount(element, kAXChildrenAttribute as CFString, &childCount)
+            childFields = ["childrenStatus": countStatus.rawValue, "childrenCount": childCount]
             if unavailableSelectionRange(countStatus) { return SelectionProbeObservation(text: nil, children: [], protected: false) }
-            guard countStatus == .success, childCount >= 0 else { return nil }
+            guard countStatus == .success, childCount >= 0 else { return invalid() }
             guard childCount <= remaining else { return limited() }
             guard childCount > 0 else { return SelectionProbeObservation(text: nil, children: [], protected: false) }
             var values: CFArray?
             try requireSelectionQueryBudget(deadline)
-            guard AXUIElementCopyAttributeValues(element, kAXChildrenAttribute as CFString, 0, childCount, &values) == .success,
-                  let values, CFArrayGetCount(values) == childCount else { return nil }
+            probeStep = "childrenValues"
+            let childrenStatus = AXUIElementCopyAttributeValues(element, kAXChildrenAttribute as CFString, 0, childCount, &values)
+            childFields["childrenStatus"] = childrenStatus.rawValue
+            guard childrenStatus == .success,
+                  let values, CFArrayGetCount(values) == childCount else { return invalid() }
             var children = [AXUIElement]()
+            probeStep = "childrenType"
             for index in 0..<childCount {
-                guard let pointer = CFArrayGetValueAtIndex(values, index) else { return nil }
+                guard let pointer = CFArrayGetValueAtIndex(values, index) else { return invalid() }
                 let child = Unmanaged<CFTypeRef>.fromOpaque(pointer).takeUnretainedValue()
-                guard CFGetTypeID(child) == AXUIElementGetTypeID() else { return nil }
+                guard CFGetTypeID(child) == AXUIElementGetTypeID() else { return invalid() }
                 children.append(child as! AXUIElement)
             }
             return SelectionProbeObservation(text: nil, children: children, protected: false)
         } catch is SelectionProbeBudgetExpired { return limited() }
-        catch { return nil }
+        catch { return invalid() }
     }
     trace.record("selection-probe", ["decision": observedContextChange ? "sourceChanged" : result.state, "probeNodes": count,
         "probeRoot": originalFocus == nil ? "focusedWindow" : "focusContainer"])
-    if observedContextChange { throw NativeError("CANCELLED: 原取词窗口或焦点已改变，请重新选择。") }
+    if observedContextChange { throw requestSourceFailure ?? NativeError("CANCELLED: 原取词窗口或焦点已改变，请重新选择。") }
     if focusBecameAvailable && !hardContextFailure && !knownBlockedTarget && !knownEmptyEditor {
         throw SelectionFocusBecameAvailable()
     }
@@ -1105,7 +1333,7 @@ func recoverySelection(originalFocus: AXUIElement?, source: SelectionApplication
         trace.record("selection-mixed-window", ["windowMatches": mixedWindowVerified,
             "decision": mixedWindowVerified ? "verifiedPositiveSelection" : "mixedSelectionWindowUnverified"])
     }
-    if observedContextChange { throw NativeError("CANCELLED: 原取词窗口或焦点已改变，请重新选择。") }
+    if observedContextChange { throw requestSourceFailure ?? NativeError("CANCELLED: 原取词窗口或焦点已改变，请重新选择。") }
     switch selectionRecoveryDisposition(result, contextVerified: !hardContextFailure, blockedTarget: knownBlockedTarget,
                                         emptyEditor: knownEmptyEditor, mixedWindowVerified: mixedWindowVerified,
                                         candidateEditable: selectionEditableRole(selectedCandidateRole)) {
@@ -1485,7 +1713,7 @@ func captureSelectedText(trace: SelectionTrace, requestSource: SelectionRequestS
     if let requestSource {
         try requireSelectionForeground(requestSource.pid, foregroundPID)
         guard source.bundleIdentifier == requestSource.bundleIdentifier else {
-            throw NativeError("CANCELLED: 原取词应用已改变，请重新选词。")
+            throw NativeError("SOURCE_CHANGED: 原取词应用已改变，请重新选词。")
         }
     }
     // Snapshot while the original source is still foreground, not after a slow
@@ -1809,9 +2037,11 @@ func selectionPolicySelfTest() throws {
     try selectionCopyPolicySelfTest()
     try selectionRecoverySelfTest()
     try selectionMixedRecoverySelfTest()
+    try selectionChatMultiSelectionSelfTest()
     try selectionCompatibilitySelfTest()
     try selectionFocusRecoverySelfTest()
     try selectionSourceAnchorSelfTest()
+    try selectionSourceBridgeSelfTest()
     try selectionTraceRetentionSelfTest()
     try selectionAXWindowTicketSelfTest()
     try selectionWindowAnchorSelfTest()
@@ -1819,7 +2049,7 @@ func selectionPolicySelfTest() throws {
 
 func selectionWindowAnchorSelfTest() throws {
     func source(_ token: String, pid: pid_t = 42, bundle: String = "fixture.source", launch: TimeInterval = 100) -> SelectionRequestSource {
-        var value = SelectionRequestSource(pid: pid, bundleIdentifier: bundle, windowID: nil, launchedAt: launch)
+        var value = SelectionRequestSource(pid: pid, bundleIdentifier: bundle, windowID: nil, launchIdentity: selectionLaunchIdentity(launch))
         value.axWindowToken = token
         return value
     }
@@ -1958,26 +2188,26 @@ func selectionFocusRecoverySelfTest() throws {
 }
 
 func selectionSourceAnchorSelfTest() throws {
-    let original = SelectionRequestSource(pid: 42, bundleIdentifier: "fixture.source", windowID: 7, launchedAt: 100)
+    let original = SelectionRequestSource(pid: 42, bundleIdentifier: "fixture.source", windowID: 7, launchIdentity: selectionLaunchIdentity(100))
     let cases: [(SelectionRequestSource, Bool)] = [
         (original, true),
-        (SelectionRequestSource(pid: 43, bundleIdentifier: "fixture.source", windowID: 7, launchedAt: 100), false),
-        (SelectionRequestSource(pid: 42, bundleIdentifier: "fixture.other", windowID: 7, launchedAt: 100), false),
-        (SelectionRequestSource(pid: 42, bundleIdentifier: "fixture.source", windowID: 8, launchedAt: 100), false),
-        (SelectionRequestSource(pid: 42, bundleIdentifier: "fixture.source", windowID: nil, launchedAt: 100), false),
-        (SelectionRequestSource(pid: 42, bundleIdentifier: "fixture.source", windowID: 7, launchedAt: 101), false),
-        (SelectionRequestSource(pid: 42, bundleIdentifier: "fixture.source", windowID: 7, launchedAt: nil), false)
+        (SelectionRequestSource(pid: 43, bundleIdentifier: "fixture.source", windowID: 7, launchIdentity: selectionLaunchIdentity(100)), false),
+        (SelectionRequestSource(pid: 42, bundleIdentifier: "fixture.other", windowID: 7, launchIdentity: selectionLaunchIdentity(100)), false),
+        (SelectionRequestSource(pid: 42, bundleIdentifier: "fixture.source", windowID: 8, launchIdentity: selectionLaunchIdentity(100)), false),
+        (SelectionRequestSource(pid: 42, bundleIdentifier: "fixture.source", windowID: nil, launchIdentity: selectionLaunchIdentity(100)), false),
+        (SelectionRequestSource(pid: 42, bundleIdentifier: "fixture.source", windowID: 7, launchIdentity: selectionLaunchIdentity(101)), false),
+        (SelectionRequestSource(pid: 42, bundleIdentifier: "fixture.source", windowID: 7, launchIdentity: selectionLaunchIdentity(nil)), false)
     ]
     for (current, accepted) in cases {
         guard selectionRequestSourceMatches(original, current) == accepted else {
             throw NativeError("SELF_TEST: Queued selection adopted a newer app/window/process instance.")
         }
     }
-    let unavailableWindow = SelectionRequestSource(pid: 42, bundleIdentifier: "fixture.source", windowID: nil, launchedAt: 100)
+    let unavailableWindow = SelectionRequestSource(pid: 42, bundleIdentifier: "fixture.source", windowID: nil, launchIdentity: selectionLaunchIdentity(100))
     guard selectionRequestSourceMatches(unavailableWindow, original) else {
         throw NativeError("SELF_TEST: Request-time app identity incorrectly required an unavailable window list.")
     }
-    let unknownLaunch = SelectionRequestSource(pid: 42, bundleIdentifier: "fixture.source", windowID: 7, launchedAt: nil)
+    let unknownLaunch = SelectionRequestSource(pid: 42, bundleIdentifier: "fixture.source", windowID: 7, launchIdentity: selectionLaunchIdentity(nil))
     guard !selectionRequestSourceMatches(unknownLaunch, original), selectionRequestSourceMatches(unknownLaunch, unknownLaunch) else {
         throw NativeError("SELF_TEST: Selection source silently adopted a changed process-lifetime proof.")
     }
@@ -1988,13 +2218,117 @@ func selectionSourceAnchorSelfTest() throws {
         }
     }
     for invalid in ["{}", "{\"pid\":0,\"bundleIdentifier\":\"fixture\"}",
-                    "{\"pid\":42,\"bundleIdentifier\":\"fixture\",\"windowID\":0}"] {
+                    "{\"pid\":42,\"bundleIdentifier\":\"fixture\",\"windowID\":0}",
+                    "{\"pid\":42,\"bundleIdentifier\":\"fixture\",\"windowID\":7,\"launchedAt\":100}",
+                    "{\"pid\":42,\"bundleIdentifier\":\"fixture\",\"windowID\":7,\"launchIdentity\":100}",
+                    "{\"pid\":42,\"bundleIdentifier\":\"fixture\",\"windowID\":7,\"launchIdentity\":\"7ff0000000000000\"}",
+                    "{\"pid\":42,\"bundleIdentifier\":\"fixture\",\"windowID\":7,\"launchIdentity\":\"not-an-identity\"}"] {
         let response = nativeResponse(mode: "--selected-text", input: Data(invalid.utf8))
         guard response["ok"] as? Bool == false,
               (response["error"] as? String)?.hasPrefix("NATIVE_INPUT:") == true else {
             throw NativeError("SELF_TEST: Invalid source input reached a live selection query.")
         }
     }
+}
+
+// Fixed public fixture values only. No live application, AX element, selection,
+// permission, date/time or clipboard state is consulted by either bridge mode.
+struct SelectionSourceBridgeFixture: Codable {
+    let sources: [SelectionRequestSource]
+    let legacyLaunchValues: [Double]
+}
+
+func selectionSourceBridgeFixture() -> SelectionSourceBridgeFixture {
+    let raw = [Double(bitPattern: 0x41dab958c4000009), Double(bitPattern: 0x41dab958c400000e),
+               Double(bitPattern: 0x41dab958c4000013), Double(bitPattern: 0x41dab958c400001c)]
+    let values = raw + raw.map { Date(timeIntervalSince1970: $0).timeIntervalSince1970 } + [100, -1.25]
+    var sources = [SelectionRequestSource]()
+    for (index, value) in values.enumerated() {
+        let identity = selectionLaunchIdentity(value)
+        sources.append(SelectionRequestSource(pid: 42, bundleIdentifier: "fixture.source",
+            windowID: CGWindowID(index + 7), launchIdentity: identity))
+        sources.append(SelectionRequestSource(pid: 42, bundleIdentifier: "fixture.source",
+            windowID: nil, launchIdentity: identity,
+            axWindowToken: String(format: "00000000-0000-4000-8000-%012d", index + 1)))
+    }
+    sources.append(SelectionRequestSource(pid: 42, bundleIdentifier: "fixture.source", windowID: 99, launchIdentity: nil))
+    sources.append(SelectionRequestSource(pid: 42, bundleIdentifier: "fixture.source", windowID: nil, launchIdentity: nil,
+        axWindowToken: "00000000-0000-4000-8000-000000000099"))
+    return SelectionSourceBridgeFixture(sources: sources, legacyLaunchValues: values)
+}
+
+func verifySelectionSourceBridgeFixture(_ input: SelectionSourceBridgeFixture) throws -> [String: Any] {
+    let expected = selectionSourceBridgeFixture()
+    guard input.sources == expected.sources, input.sources.allSatisfy(validSelectionRequestSource),
+          input.legacyLaunchValues.count == expected.legacyLaunchValues.count,
+          input.legacyLaunchValues.allSatisfy({ $0.isFinite }) else {
+        throw NativeError("SELF_TEST: Selection source bridge changed an exact source identity.")
+    }
+    var anchors = SelectionWindowAnchors<Int>()
+    for (index, source) in expected.sources.enumerated() where source.axWindowToken != nil {
+        anchors.insert(source: source, window: index, now: 0)
+        guard anchors.window(for: input.sources[index], now: 1) == index else {
+            throw NativeError("SELF_TEST: Selection source bridge lost its exact AX token identity.")
+        }
+    }
+    let numericMismatches = zip(input.legacyLaunchValues, expected.legacyLaunchValues)
+        .filter { $0.0.bitPattern != $0.1.bitPattern }.count
+    return ["selectionSourceBridgeFixturePassed": true, "sourceCount": expected.sources.count,
+        "exactSourcesMatch": true, "legacyNumericMismatchCount": numericMismatches,
+        "selectionRead": false, "clipboardTouched": false]
+}
+
+func selectionSourceBridgeSelfTest() throws {
+    func expect(_ condition: Bool) throws {
+        if !condition { throw NativeError("SELF_TEST: Exact launch identity or source rejection reason failed.") }
+    }
+    let fixture = selectionSourceBridgeFixture()
+    let encoded = try JSONEncoder().encode(fixture)
+    _ = try verifySelectionSourceBridgeFixture(JSONDecoder().decode(SelectionSourceBridgeFixture.self, from: encoded))
+    let original = fixture.sources[0]
+    let bits = UInt64(original.launchIdentity!, radix: 16)!
+    let mutations: [(SelectionRequestSource, SelectionRequestSourceRejection)] = [
+        (SelectionRequestSource(pid: 43, bundleIdentifier: original.bundleIdentifier, windowID: original.windowID,
+            launchIdentity: original.launchIdentity), .pidMismatch),
+        (SelectionRequestSource(pid: original.pid, bundleIdentifier: "fixture.other", windowID: original.windowID,
+            launchIdentity: original.launchIdentity), .bundleMismatch),
+        (SelectionRequestSource(pid: original.pid, bundleIdentifier: original.bundleIdentifier, windowID: original.windowID,
+            launchIdentity: selectionLaunchIdentity(Double(bitPattern: bits ^ 1))), .launchIdentityMismatch),
+        (SelectionRequestSource(pid: original.pid, bundleIdentifier: original.bundleIdentifier, windowID: original.windowID,
+            launchIdentity: nil), .launchIdentityMismatch),
+        (SelectionRequestSource(pid: original.pid, bundleIdentifier: original.bundleIdentifier, windowID: 98,
+            launchIdentity: original.launchIdentity), .cgWindowMismatch),
+        (SelectionRequestSource(pid: original.pid, bundleIdentifier: original.bundleIdentifier, windowID: nil,
+            launchIdentity: original.launchIdentity), .cgWindowUnavailable)
+    ]
+    try expect(selectionRequestSourceRejection(original, nil) == .snapshotUnavailable)
+    try expect(selectionRequestAXRejection(nil, 1, same: { (left: Int, right: Int) in left == right }) == .axTokenUnavailable)
+    try expect(selectionRequestAXRejection(1, nil, same: { (left: Int, right: Int) in left == right }) == .axWindowUnavailable)
+    try expect(selectionRequestAXRejection(1, 2, same: { (left: Int, right: Int) in left == right }) == .axWindowMismatch)
+    try expect(selectionRequestAXRejection(1, 1, same: { (left: Int, right: Int) in left == right }) == nil)
+    for (mutation, reason) in mutations {
+        try expect(selectionRequestSourceRejection(original, mutation) == reason)
+        var sources = fixture.sources
+        sources[0] = mutation
+        do {
+            _ = try verifySelectionSourceBridgeFixture(SelectionSourceBridgeFixture(sources: sources,
+                legacyLaunchValues: fixture.legacyLaunchValues))
+            throw NativeError("SELF_TEST: Mutated selection source bridge was accepted.")
+        } catch let error as NativeError {
+            guard error.message == "SELF_TEST: Selection source bridge changed an exact source identity." else { throw error }
+        }
+    }
+    for identity in ["", "41DAB958C4000009", "41dab958c400009", "41dab958c40000090", "7ff0000000000000", "7ff8000000000000"] {
+        try expect(!validSelectionLaunchIdentity(identity))
+    }
+    try expect(selectionLaunchIdentity(nil) == nil && selectionLaunchIdentity(0) == "0000000000000000")
+    try expect(validSelectionLaunchIdentity(selectionLaunchIdentity(-1.25)!))
+    let anchored = fixture.sources[1]
+    var anchors = SelectionWindowAnchors<Int>()
+    anchors.insert(source: anchored, window: 7, now: 0)
+    let changed = SelectionRequestSource(pid: anchored.pid, bundleIdentifier: anchored.bundleIdentifier, windowID: nil,
+        launchIdentity: selectionLaunchIdentity(Double(bitPattern: bits ^ 1)), axWindowToken: anchored.axWindowToken)
+    try expect(anchors.window(for: anchored, now: 1) == 7 && anchors.window(for: changed, now: 1) == nil)
 }
 
 func selectionTraceRetentionSelfTest() throws {
@@ -2107,6 +2441,81 @@ func selectionRecoverySelfTest() throws {
     let data = try JSONSerialization.data(withJSONObject: trace.snapshot(errorCategory: "SELECTION_UNAVAILABLE"))
     let report = String(decoding: data, as: UTF8.self)
     try expect(!report.contains("private selection sentinel") && report.contains("SELECTION_UNAVAILABLE"))
+}
+
+func selectionChatMultiSelectionSelfTest() throws {
+    func expect(_ condition: Bool) throws {
+        if !condition { throw NativeError("SELF_TEST: Explicit chat multi-selection policy failed.") }
+    }
+    func rejected(_ operation: () throws -> String?) -> Bool {
+        do { _ = try operation(); return false } catch { return true }
+    }
+    func read(_ children: [Int]?, context: () -> Bool = { true }, budget: () -> Bool = { true },
+              text: (Int) throws -> String? = { "selected item \($0)" }) throws -> String? {
+        try readVerifiedSelectionGroup(children: { children }, same: { (left: Int, right: Int) in left == right },
+            contextIsCurrent: context, withinBudget: budget, read: text)
+    }
+    try expect(selectionChatGroupSupported(bundleIdentifier: "com.tencent.qq", role: "AXGroup"))
+    for bundle in ["com.tencent.xinWeChat", "com.kingsoft.wpsoffice.mac", "fixture.editor", nil] as [String?] {
+        try expect(!selectionChatGroupSupported(bundleIdentifier: bundle, role: "AXGroup"))
+    }
+    for role in ["AXTextField", "AXTextArea", "AXSearchField", "AXComboBox", "AXWindow", "AXButton", nil] as [String?] {
+        try expect(!selectionChatGroupSupported(bundleIdentifier: "com.tencent.qq", role: role))
+    }
+    try expect(try read([1, 2]) == "selected item 1\nselected item 2")
+    try expect(try read([2, 1]) == "selected item 2\nselected item 1")
+    try expect(try read([1, 2], text: { _ in "same selected text" }) == "same selected text\nsame selected text")
+    try expect(try read(nil) == nil)
+    try expect(try read([]) == nil)
+    try expect(try read([1]) == nil)
+    try expect(rejected { try read([1, 1]) })
+    try expect(rejected { try read(Array(0...64)) })
+    try expect(rejected { try read([1, 2], context: { false }) })
+    try expect(rejected { try read([1, 2], budget: { false }) })
+    try expect(rejected { try read([1, 2], text: { $0 == 1 ? "first" : nil }) })
+    try expect(rejected { try read([1, 2], text: { $0 == 1 ? "first" : " \n" }) })
+    try expect(rejected { try read([1, 2], text: { _ in throw unavailableSelectionError() }) })
+    var contextChecks = 0
+    try expect(rejected { try read([1, 2], context: { contextChecks += 1; return contextChecks == 1 }) })
+    for changedAt in [2, 3] {
+        var childReads = 0
+        try expect(rejected {
+            try readVerifiedSelectionGroup(children: {
+                childReads += 1
+                return childReads < changedAt ? [1, 2] : [2, 1]
+            }, same: { (left: Int, right: Int) in left == right }, contextIsCurrent: { true },
+                withinBudget: { true }, read: { "selected item \($0)" })
+        })
+    }
+    var textReads = 0
+    try expect(rejected { try read([1, 2], text: { id in
+        textReads += 1
+        return textReads <= 2 ? "selected item \(id)" : "changed selection"
+    }) })
+    var available = true
+    try expect(rejected { try read([1, 2], budget: { available }, text: { id in
+        available = false
+        return "selected item \(id)"
+    }) })
+    // The existing WeChat/generic traversal remains unique-only. This path
+    // never reclassifies ambiguity, invalid metadata or a partial traversal as
+    // permission to copy, and the ordinary editable zero range stays empty.
+    typealias Node = SelectionProbeObservation<Int>
+    let graph = [0: Node(text: nil, children: [1, 2], protected: false),
+                 1: Node(text: "first", children: [], protected: false),
+                 2: Node(text: "second", children: [], protected: false)]
+    let result = probeUniqueSelection(root: 0, same: { $0 == $1 }, contextIsCurrent: { true }) { id, _ in graph[id] }.0
+    try expect(result == .ambiguous)
+    try expect(!selectionProbeAllowsCompatibility(result, knownUnsafeTarget: false))
+    try expect(!selectionProbeAllowsCompatibility(.incomplete, knownUnsafeTarget: false))
+    try expect(selectionDecision(selectedText: nil, selectedRange: CFRange(location: 0, length: 0), rangeText: nil) == .empty)
+    let trace = SelectionTrace(publish: false)
+    trace.record("selection-probe-detail", ["probeStep": "childrenValues", "childrenStatus": AXError.cannotComplete.rawValue,
+        "childrenCount": 2, "selectedText": "private multi-selection sentinel", "windowTitle": "private multi-selection sentinel"])
+    trace.record("selection-chat-children", ["selectedChildrenStatus": 0, "selectedChildrenCount": 2])
+    let serialized = String(decoding: try JSONSerialization.data(withJSONObject: trace.snapshot()), as: UTF8.self)
+    try expect(serialized.contains("childrenValues") && serialized.contains("selectedChildrenCount"))
+    try expect(!serialized.contains("private multi-selection sentinel"))
 }
 
 func selectionMixedRecoverySelfTest() throws {
@@ -3802,6 +4211,7 @@ func selfTest(input: Data = Data()) throws -> [String: Any] {
             "selectionQueryPolicyFixturePassed": true, "selectionTracePrivacyFixturePassed": true,
             "selectionCopyCompletionFixturePassed": true, "selectionRecoveryFixturePassed": true,
             "controlledSelectionCopyFixturePassed": true, "mixedSelectionRecoveryFixturePassed": true,
+            "chatMultiSelectionFixturePassed": true, "qqInteractiveMultiSelectionTested": false,
             "selectionFocusRecoveryFixturePassed": true, "selectionSourceAnchorFixturePassed": true,
             "selectionTraceRetentionFixturePassed": true, "selectionAXWindowTicketFixturePassed": true,
             "selectionWindowAnchorFixturePassed": true,
@@ -3820,16 +4230,22 @@ func nativeResponse(mode: String, input: Data = Data()) -> [String: Any] {
             let source = try selectionRequestSourceForShortcut()
             let encoded = try JSONEncoder().encode(source)
             return ["ok": true, "source": try JSONSerialization.jsonObject(with: encoded)]
+        case "--selection-source-bridge-fixture":
+            let encoded = try JSONEncoder().encode(selectionSourceBridgeFixture())
+            guard var fixture = try JSONSerialization.jsonObject(with: encoded) as? [String: Any] else {
+                throw NativeError("SELF_TEST: Selection source fixture could not be encoded.")
+            }
+            fixture["ok"] = true
+            return fixture
+        case "--selection-source-bridge-verify":
+            let fixture = try JSONDecoder().decode(SelectionSourceBridgeFixture.self, from: input)
+            return ["ok": true, "diagnostics": try verifySelectionSourceBridgeFixture(fixture)]
         case "--selected-text":
             let source: SelectionRequestSource?
             if input.isEmpty { source = nil }
             else {
                 guard let decoded = try? JSONDecoder().decode(SelectionRequestSource.self, from: input),
-                      decoded.pid > 0, !decoded.bundleIdentifier.isEmpty,
-                      decoded.windowID != 0,
-                      (decoded.windowID != nil) != (decoded.axWindowToken != nil),
-                      decoded.axWindowToken.map({ UUID(uuidString: $0) != nil }) ?? true,
-                      decoded.launchedAt.map({ $0.isFinite }) ?? true else {
+                      validSelectionRequestSource(decoded) else {
                     throw NativeError("NATIVE_INPUT: Invalid selection request source.")
                 }
                 source = decoded
@@ -3847,6 +4263,7 @@ func nativeResponse(mode: String, input: Data = Data()) -> [String: Any] {
                     "selectionQueryPolicyFixturePassed": true, "selectionTracePrivacyFixturePassed": true,
                     "selectionCopyCompletionFixturePassed": true, "selectionRecoveryFixturePassed": true,
             "controlledSelectionCopyFixturePassed": true, "mixedSelectionRecoveryFixturePassed": true,
+            "chatMultiSelectionFixturePassed": true, "qqInteractiveMultiSelectionTested": false,
             "selectionFocusRecoveryFixturePassed": true, "selectionSourceAnchorFixturePassed": true,
             "selectionTraceRetentionFixturePassed": true, "selectionAXWindowTicketFixturePassed": true,
             "selectionWindowAnchorFixturePassed": true,
@@ -4000,7 +4417,7 @@ struct EchoLingoNativeCLI {
             application.run()
             return
         }
-        let readsInput = ["--copy", "--detect-language", "--system-translation-status", "--system-translate", "--prepare-system-translation", "--cancel-system-translation"].contains(mode)
+        let readsInput = ["--copy", "--detect-language", "--system-translation-status", "--system-translate", "--prepare-system-translation", "--cancel-system-translation", "--selection-source-bridge-verify"].contains(mode)
         let input = readsInput ? FileHandle.standardInput.readDataToEndOfFile() : Data()
         let response = nativeResponse(mode: mode, input: input)
         emit(response)

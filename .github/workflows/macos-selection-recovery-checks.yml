@@ -1,0 +1,166 @@
+name: Focused macOS selection recovery candidate
+on:
+  push:
+    branches: [fix/025-macos-recovery-integration]
+permissions:
+  contents: read
+concurrency:
+  group: macos-selection-recovery-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  native-selection-recovery:
+    runs-on: macos-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Require the exact candidate scope without changing release guards
+        id: guard
+        shell: bash
+        run: |
+          set -euo pipefail
+          base=da0b5d03060a62ea120d931cc6c9eede5af66a7f
+          test "$(git rev-parse "$base^{tree}")" = e97d7f177bc9f13df830e43d4d6303f50a9229bb
+          git merge-base --is-ancestor "$base" HEAD
+          python3 - <<'PY'
+          import subprocess
+          allowed = {
+              '.github/workflows/macos-selection-recovery-checks.yml',
+              'src-tauri/native/macos.swift', 'src-tauri/native/macos_capture.swift',
+              'src-tauri/src/main.rs', 'src-tauri/src/platform.rs',
+              'src/popup-focus.test.ts', 'src/popup-focus.ts', 'src/styles.css',
+              'tests/frontend-interactions.mjs', 'tests/test_macos_ocr_hover_contract.py',
+              'tests/reading-typography.mjs',
+              'tests/macos-native-self-test.sh', 'tests/test_macos_chat_multiselection_contract.py',
+              'tests/test_macos_selection_recovery_contract.py',
+              'tests/test_macos_recovery_workflow_contract.py',
+          }
+          changed = set(subprocess.check_output(['git', 'diff', '--name-only',
+              'da0b5d03060a62ea120d931cc6c9eede5af66a7f', 'HEAD'], text=True).splitlines())
+          if changed - allowed:
+              raise SystemExit('Unreviewed candidate paths: ' + ', '.join(sorted(changed - allowed)))
+          PY
+          python3 scripts/check-repository.py
+          mkdir -p "$RUNNER_TEMP/macos-selection-recovery"
+          git rev-parse HEAD HEAD^{tree} > "$RUNNER_TEMP/macos-selection-recovery/source.txt"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri -> target
+      - name: Record the actual native toolchain
+        shell: bash
+        run: |
+          set -euo pipefail
+          { sw_vers; xcodebuild -version; swiftc --version; xcrun --show-sdk-version; rustc --version; cargo --version; } > "$RUNNER_TEMP/macos-selection-recovery/toolchain.txt"
+      - name: Verify source contracts and publication hygiene
+        id: contracts
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -euo pipefail
+          { python3 -m unittest discover -s tests -p 'test_macos_selection_recovery_contract.py' -v;
+            python3 -m unittest discover -s tests -p 'test_macos_ocr_hover_contract.py' -v;
+            python3 -m unittest discover -s tests -p 'test_macos_chat_multiselection_contract.py' -v;
+            python3 -m unittest discover -s tests -p 'test_macos_recovery_workflow_contract.py' -v;
+          } 2>&1 | tee "$RUNNER_TEMP/macos-selection-recovery/contracts.log"
+      - name: Typecheck and execute frontend unit regressions
+        id: frontend
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -euo pipefail
+          { npm ci; npm run check; npm test; npm run build; } 2>&1 | tee "$RUNNER_TEMP/macos-selection-recovery/frontend.log"
+      - name: Verify synthetic source and result typography in Chromium
+        id: typography
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -euo pipefail
+          {
+            npx --no-install playwright install chromium
+            npm run dev > "$RUNNER_TEMP/macos-selection-recovery/dev-server.log" 2>&1 &
+            server=$!
+            trap 'kill "$server" 2>/dev/null || true' EXIT
+            ready=0
+            for attempt in $(seq 1 40); do
+              if curl --silent --fail http://127.0.0.1:1420/ > /dev/null; then ready=1; break; fi
+              sleep .5
+            done
+            test "$ready" = 1
+            node tests/reading-typography.mjs
+          } 2>&1 | tee "$RUNNER_TEMP/macos-selection-recovery/typography.log"
+      - name: Check official formatting and preserve a reviewable patch
+        id: formatting
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -euo pipefail
+          trap 'git restore --worktree -- src-tauri' EXIT
+          cargo fmt --manifest-path src-tauri/Cargo.toml
+          git diff --binary -- src-tauri > "$RUNNER_TEMP/macos-selection-recovery/rustfmt.patch"
+          status=0
+          cargo fmt --manifest-path src-tauri/Cargo.toml --check 2>&1 | tee "$RUNNER_TEMP/macos-selection-recovery/rustfmt.log" || status=$?
+          if ! git diff --quiet -- src-tauri; then status=1; fi
+          # Tests below must exercise committed HEAD, never a formatted working copy.
+          git restore --worktree -- src-tauri
+          git diff --exit-code -- src-tauri
+          exit "$status"
+      - name: Compile Swift and execute generated native policy fixtures
+        id: swift
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash tests/macos-native-self-test.sh 2>&1 | tee "$RUNNER_TEMP/macos-selection-recovery/native-self-test.log"
+      - name: Execute the production Swift Rust Swift JSON bridge
+        id: bridge
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo test --manifest-path src-tauri/Cargo.toml --locked mac_selection_source_identity_survives_real_swift_rust_swift_json_bridge -- --nocapture 2>&1 | tee "$RUNNER_TEMP/macos-selection-recovery/source-bridge.log"
+          grep -q 'test result: ok. 1 passed' "$RUNNER_TEMP/macos-selection-recovery/source-bridge.log"
+          grep -q 'legacyNumericMismatchCount=' "$RUNNER_TEMP/macos-selection-recovery/source-bridge.log"
+      - name: Keep source failure feedback current and true cancellation quiet
+        id: failure
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo test --manifest-path src-tauri/Cargo.toml --locked source_identity_failure_is_actionable_but_superseded_selection_stays_quiet -- --nocapture 2>&1 | tee "$RUNNER_TEMP/macos-selection-recovery/source-failure.log"
+          grep -q 'test result: ok. 1 passed' "$RUNNER_TEMP/macos-selection-recovery/source-failure.log"
+      - name: Preserve only generated source and synthetic-test evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: macos-selection-recovery-evidence
+          if-no-files-found: warn
+          path: |
+            ${{ runner.temp }}/macos-selection-recovery/source.txt
+            ${{ runner.temp }}/macos-selection-recovery/toolchain.txt
+            ${{ runner.temp }}/macos-selection-recovery/contracts.log
+            ${{ runner.temp }}/macos-selection-recovery/frontend.log
+            ${{ runner.temp }}/macos-selection-recovery/typography.log
+            ${{ runner.temp }}/macos-selection-recovery/rustfmt.patch
+            ${{ runner.temp }}/macos-selection-recovery/rustfmt.log
+            ${{ runner.temp }}/macos-selection-recovery/native-self-test.log
+            ${{ runner.temp }}/macos-selection-recovery/source-bridge.log
+            ${{ runner.temp }}/macos-selection-recovery/source-failure.log
+      - name: Require every executed candidate gate without claiming release acceptance
+        if: always()
+        shell: bash
+        env:
+          GATES: ${{ steps.guard.outcome }} ${{ steps.contracts.outcome }} ${{ steps.frontend.outcome }} ${{ steps.typography.outcome }} ${{ steps.formatting.outcome }} ${{ steps.swift.outcome }} ${{ steps.bridge.outcome }} ${{ steps.failure.outcome }}
+        run: |
+          set -euo pipefail
+          echo 'Focused source/synthetic/native bridge checks only. No installed Codex/Feishu/QQ selection, hover pixels, performance, package or release acceptance is claimed.' >> "$GITHUB_STEP_SUMMARY"
+          for outcome in $GATES; do test "$outcome" = success; done

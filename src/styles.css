@@ -5,6 +5,9 @@
   /* Shared reading density for source, translated text and history; UI help
      and controls retain their independent spacing. */
   --reading-line-height: 1.45;
+  --reading-font-family: "Times New Roman", Times, -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+  --reading-font-size: 14px;
+  --reading-inline-inset: 10px;
   --bg: #f6f7fb; --surface: #fff; --surface-soft: #fafafd; --surface-hover: #f2f0fb;
   --text: #292b3e; --muted: #9294a6; --secondary: #74778b; --border: #ececf3;
   --accent: #7862d8; --accent-hover: #6650c5; --accent-soft: #eeebfa; --teal: #479d96;
@@ -20,18 +23,11 @@
   font-family: "Microsoft YaHei UI", "Microsoft YaHei", "Segoe UI", sans-serif;
   text-rendering: auto;
 }
-/* Use the installed Windows Chinese reading font in both text panels. */
-:root[data-platform="windows"] body[data-view="translate"] #source-text,
-:root[data-platform="windows"] body[data-view="translate"] .result-text {
-  font-family: "SimSun", "宋体", "NSimSun", "Microsoft YaHei", serif;
-  font-size: 16px;
-  font-weight: 400;
-  line-height: var(--reading-line-height);
-}
-/* Latin glyphs in translated output use the requested installed typeface;
-   CJK output keeps its existing platform reading-font fallback. */
-:root[data-platform="windows"] body[data-view="translate"] .result-text {
-  font-family: "Times New Roman", Times, "SimSun", "宋体", "NSimSun", "Microsoft YaHei", serif;
+/* Share the requested Latin face and installed CJK fallbacks in both panels.
+   Actual glyphs still depend on the script and fonts installed on the OS. */
+:root[data-platform="windows"] {
+  --reading-font-family: "Times New Roman", Times, "SimSun", "宋体", "NSimSun", "Microsoft YaHei", serif;
+  --reading-font-size: 16px;
 }
 * { box-sizing: border-box; }
 body { margin: 0; min-width: 480px; }
@@ -266,7 +262,7 @@ body[data-view="translate"] main { min-height: 0; }
 body[data-view="translate"] .view { min-height: 0; }
 body[data-view="translate"] .results-column { min-height: 0; max-height: none; padding: 0; background: transparent; overflow: visible; }
 body[data-view="translate"] .results-container { gap: 8px; padding-top: 8px; }
-body[data-view="translate"] .result-card { margin: 0; padding: 9px 10px 8px; border: 1px solid var(--border); border-radius: 6px; background: var(--surface-soft); box-shadow: none; }
+body[data-view="translate"] .result-card { margin: 0; padding: 9px var(--reading-inline-inset) 8px; border: 1px solid var(--border); border-radius: 6px; background: var(--surface-soft); box-shadow: none; }
 body[data-view="translate"] .result-card:focus-visible { outline: 1px solid var(--ring); outline-offset: -1px; }
 body[data-view="translate"] .result-card-header { display: flex; align-items: center; min-height: 19px; gap: 9px; margin-bottom: 4px; }
 body[data-view="translate"] .result-provider { font-size: 10px; line-height: 1.5; color: var(--secondary); font-weight: 450; gap: 6px; }
@@ -281,7 +277,7 @@ body[data-view="translate"] .result-loading { min-height: 0; height: 28px; opaci
 body[data-view="translate"] .toast { bottom: 10px; max-width: calc(100vw - 24px); padding: 8px 12px; font-size: 10px; border-radius: 6px; }
 /* A quiet blank editor still offers a comfortable place to start typing. */
 body[data-view="translate"] main { padding: 5px 9px 7px; }
-body[data-view="translate"] .source-column { padding: 6px 29px 6px 8px; background: var(--surface-soft); border: 1px solid var(--border); border-radius: 6px; }
+body[data-view="translate"] .source-column { padding: 6px 29px 6px var(--reading-inline-inset); background: var(--surface-soft); border: 1px solid var(--border); border-radius: 6px; }
 body[data-view="translate"] .source-column:focus-within { border-color: var(--accent-soft); }
 body[data-view="translate"] #source-text { font-size: 14px; line-height: var(--reading-line-height); }
 body[data-view="translate"] #source-text:focus-visible { box-shadow: none; }
@@ -381,6 +377,19 @@ body[data-view="translate"] .result-provider { font-size: 10px; }
 .free-setup-fields label { display: flex; flex-direction: column; gap: 4px; font-size: 11px; }
 .free-setup-fields input { font-size: 12px; border: 1px solid var(--border); border-radius: 7px; padding: 8px 10px; background: var(--surface-soft); }
 
+/* One reading style for the editable source and translated prose. Keep the
+   source's right-side action clearance and the result's compact blank-line
+   renderer; neither should change literal text, selection or code whitespace. */
+body[data-view="translate"] #source-text,
+body[data-view="translate"] .result-text {
+  font-family: var(--reading-font-family);
+  font-size: var(--reading-font-size);
+  font-weight: 400;
+  line-height: var(--reading-line-height);
+  letter-spacing: 0;
+  padding: 0;
+  margin: 0;
+}
 /* Keep prose aligned while preserving explicit lines and long technical text. */
 body[data-view="translate"] #source-text, body[data-view="translate"] .result-text { text-align: justify; text-align-last: left; text-justify: inter-word; white-space: pre-wrap; word-break: normal; overflow-wrap: anywhere; }
 
@@ -400,9 +409,9 @@ body[data-view="translate"] #source-text, body[data-view="translate"] .result-te
 .result-text .result-paragraph-break { display: inline; line-height: .35; white-space: pre-wrap; }
 .free-service-warning { padding: 8px 10px; border-left: 3px solid var(--danger); color: var(--text); background: var(--surface-soft); font-size: 12px; line-height: 1.6; }
 
-/* Native popup restoration is not keyboard navigation. Do not move focus or
-   suppress keyboard cues on source fields, menus, or management controls. */
-body[data-popup-focus-managed="true"] .popup-toolbar > .icon-button:focus-visible:not([data-keyboard-focus]) { outline: none; }
+/* Native window restoration is not keyboard navigation. Scope this to header
+   icons; source fields, menus, settings forms and dialogs keep native cues. */
+body[data-popup-focus-managed="true"] :is(.popup-toolbar, .management-header) > .icon-button:focus-visible:not([data-keyboard-focus]) { outline: none; }
 
 /* Dedicated service workspace. Advanced settings and secure credential editors
    retain their established transactions; this view never reads stored keys. */

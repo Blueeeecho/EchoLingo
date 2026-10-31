@@ -1,8 +1,8 @@
-// WebViews may restore the first toolbar button as :focus-visible when a
-// native popup opens. Keep its focus (and source selection) untouched; only
-// distinguish deliberate keyboard interaction from restored/programmatic focus.
+// WebViews may restore the first header button as :focus-visible when a
+// native popup or management window opens. Keep focus and source selection
+// untouched; distinguish keyboard interaction from restored/programmatic focus.
 export function installPopupFocusRing(): () => void {
-  const selector = '.popup-toolbar > .icon-button';
+  const selector = '.popup-toolbar > .icon-button, .management-header > .icon-button';
   document.body.dataset.popupFocusManaged = 'true';
   const capture = { capture: true };
   let marked: HTMLElement | null = null;

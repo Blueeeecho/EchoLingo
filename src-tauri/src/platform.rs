@@ -2623,6 +2623,67 @@ mod tests {
 
     #[cfg(target_os = "macos")]
     #[test]
+    fn mac_selection_source_identity_survives_real_swift_rust_swift_json_bridge() {
+        // Exact production C ABI and Rust Value parse/reserialization, using
+        // generated Date values only. No AX, source application or clipboard.
+        let fixture = super::run("selection-source-bridge-fixture", None).unwrap();
+        let input = serde_json::json!({
+            "sources": fixture["sources"].clone(),
+            "legacyLaunchValues": fixture["legacyLaunchValues"].clone(),
+        });
+        let sources = input["sources"].as_array().unwrap();
+        assert!(sources.len() >= 6);
+        assert!(sources
+            .iter()
+            .any(|source| source["launchIdentity"].is_string()));
+        assert!(sources
+            .iter()
+            .any(|source| source["launchIdentity"].is_null()));
+        assert!(sources
+            .iter()
+            .any(|source| source["axWindowToken"].is_string()));
+        let result = super::run("selection-source-bridge-verify", Some(&input.to_string())).unwrap();
+        let diagnostic = &result["diagnostics"];
+        assert_eq!(diagnostic["selectionSourceBridgeFixturePassed"], true);
+        assert_eq!(diagnostic["exactSourcesMatch"], true);
+        assert_eq!(diagnostic["sourceCount"].as_u64(), Some(sources.len() as u64));
+        assert_eq!(diagnostic["selectionRead"], false);
+        assert_eq!(diagnostic["clipboardTouched"], false);
+        // This reports whether the actual locked parser/Foundation chain also
+        // reproduces the old floating-number drift; the fixed string identity
+        // must remain exact even if future parser features remove that drift.
+        eprintln!(
+            "generated selection-source bridge: legacyNumericMismatchCount={}",
+            diagnostic["legacyNumericMismatchCount"]
+        );
+
+        let index = sources
+            .iter()
+            .position(|source| source["launchIdentity"].is_string() && source["windowID"].is_number())
+            .unwrap();
+        for key in ["launchIdentity", "pid", "windowID"] {
+            let mut changed = input.clone();
+            if key == "launchIdentity" {
+                let mut identity = changed["sources"][index][key]
+                    .as_str()
+                    .unwrap()
+                    .to_owned();
+                let last = identity.pop().unwrap();
+                identity.push(if last == '0' { '1' } else { '0' });
+                changed["sources"][index][key] = serde_json::json!(identity);
+            } else {
+                let value = changed["sources"][index][key].as_u64().unwrap();
+                changed["sources"][index][key] = serde_json::json!(value + 1);
+            }
+            assert!(
+                super::run("selection-source-bridge-verify", Some(&changed.to_string())).is_err(),
+                "changed {key} must not pass source identity verification"
+            );
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
     fn mac_capture_selector_fixture_checks_geometry_without_capturing_the_desktop() {
         let result = super::run("capture-selection-self-test", None).unwrap();
         assert_eq!(result["diagnostics"]["captureSelectionFixturePassed"], true);

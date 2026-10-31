@@ -176,6 +176,15 @@ struct CaptureSelectorState {
     private(set) var selection: CGRect?
     private(set) var outcome: CaptureSelectorOutcome?
 
+    // The window outline is a hint in both modes. Only F1 can retain a
+    // pressed window as a click target; OCR remains a free rectangle drag.
+    var canQueryWindowHint: Bool { outcome == nil && anchor == nil }
+    var windowHint: CaptureWindowTarget? {
+        guard outcome == nil else { return nil }
+        if anchor == nil { return candidate }
+        return purpose == .screenshot && !dragExceeded ? pressedWindow : nil
+    }
+
     mutating func receive(_ event: CaptureSelectorEvent) {
         guard outcome == nil else { return }
         switch event {
@@ -192,7 +201,7 @@ struct CaptureSelectorState {
             highlightedDisplay = captureDisplay(at: point, displays: displays)
             guard anchor == nil else { return }
             anchor = point
-            pressedWindow = candidate.flatMap { $0.frame.contains(point) ? $0 : nil }
+            pressedWindow = purpose == .screenshot ? candidate.flatMap { $0.frame.contains(point) ? $0 : nil } : nil
             dragExceeded = false
             selection = nil
         case .leftDrag(let point):
@@ -556,7 +565,7 @@ final class CaptureSelectionSession {
             break
         }
         if operation?.isCancelled == true { state.receive(.cancel) }
-        if state.purpose == .screenshot && state.anchor == nil {
+        if state.canQueryWindowHint {
             let now = Date()
             let isPress: Bool
             if case .leftDown = event { isPress = true } else { isPress = false }
@@ -589,8 +598,7 @@ final class CaptureSelectionSession {
         for (geometry, panel, view) in panels {
             let pointerOnDisplay = state.highlightedDisplay == geometry.id
             let highlight = pointerOnDisplay && state.purpose == .region
-            let hoverTarget = state.anchor == nil ? state.candidate : (state.dragExceeded ? nil : state.pressedWindow)
-            let hovered = hoverTarget?.frame.intersection(geometry.frame)
+            let hovered = state.windowHint?.frame.intersection(geometry.frame)
             let localHovered = hovered.flatMap { rectangle -> CGRect? in
                 if rectangle.isEmpty || rectangle.isNull { return nil }
                 return rectangle.offsetBy(dx: -geometry.frame.minX, dy: -geometry.frame.minY)
@@ -609,12 +617,15 @@ final class CaptureSelectionSession {
                 default: return true
                 }
             }()
-            if view.highlighted != highlight || view.selection != local || view.hoveredWindow != localHovered || pointerMoved {
+            let loupeChanged = view.selection != local || pointerMoved
+            if view.highlighted != highlight || view.hoveredWindow != localHovered || loupeChanged {
                 view.highlighted = highlight
                 view.hoveredWindow = localHovered
                 view.selection = local
                 view.loupeAnchor = localPointer
-                if let localPointer = localPointer {
+                // Metadata-only hint changes redraw the outline without
+                // taking another magnifier sample at an unchanged pointer.
+                if loupeChanged, let localPointer = localPointer {
                     let number = panel.windowNumber
                     let windowID: CGWindowID = number > 0 ? CGWindowID(number) : 0
                     if let image = captureLoupeImage(at: pointer, windowID: windowID) {
@@ -624,7 +635,7 @@ final class CaptureSelectionSession {
                         } else { label = "3×" }
                         view.loupe = CaptureLoupe(image: image, frame: captureLoupeFrame(anchor: localPointer, viewSize: view.bounds.size), label: label)
                     } else { view.loupe = nil }
-                } else { view.loupe = nil }
+                } else if localPointer == nil { view.loupe = nil }
                 view.needsDisplay = true
             }
         }
@@ -892,6 +903,7 @@ func captureSelectionSelfTest() throws {
     cancelled.receive(.leftUp(CGPoint(x: 200, y: 200)))
     try expect(cancelled.outcome == .cancelled)
     try captureScreenshotSelfTest()
+    try captureWindowHintSelfTest()
     try captureLegacyExclusionSelfTest()
     try captureSelectionDeadlineSelfTest()
     try captureOverlayBehaviorSelfTest()
@@ -982,6 +994,57 @@ func captureSelectionDeadlineSelfTest() throws {
     var presentationCount = 0
     if delayed.begin(at: deadline.addingTimeInterval(30)) { presentationCount += 1 }
     try expect(presentationCount == 0)
+}
+
+// Pure mode/visual policy: sharing a decorative hint must not enable OCR
+// whole-window clicks or make an unavailable hint a prerequisite for dragging.
+func captureWindowHintSelfTest() throws {
+    func expect(_ value: Bool) throws {
+        if !value { throw NativeError("SELF_TEST: Capture window hint policy fixture failed.") }
+    }
+    let display = CaptureDisplayGeometry(id: 1, frame: CGRect(x: 0, y: 0, width: 1440, height: 900), scale: 2)
+    let target = CaptureWindowTarget(id: 51, pid: 41, frame: CGRect(x: 100, y: 100, width: 500, height: 300))
+    let anchor = CGPoint(x: 200, y: 200), end = CGPoint(x: 400, y: 350)
+    let rectangle = captureRectangle(anchor, end)
+    for purpose in [CapturePurpose.region, .screenshot] {
+        var state = CaptureSelectorState(displays: [display], purpose: purpose)
+        try expect(state.canQueryWindowHint && state.windowHint == nil)
+        state.candidate = target
+        state.receive(.move(anchor))
+        try expect(state.canQueryWindowHint && state.windowHint == target)
+        state.receive(.leftDown(anchor))
+        try expect(!state.canQueryWindowHint)
+        try expect(state.windowHint == (purpose == .screenshot ? target : nil))
+        try expect(state.pressedWindow == (purpose == .screenshot ? target : nil))
+        state.receive(.leftUp(anchor))
+        if purpose == .region {
+            // Repeated OCR clicks stay armed; they never capture the hint.
+            try expect(state.outcome == nil && state.anchor == nil && state.windowHint == target)
+            state.receive(.leftDown(anchor)); state.receive(.leftUp(anchor))
+            try expect(state.outcome == nil && state.canQueryWindowHint)
+        } else {
+            try expect(state.outcome == .windowSelected(target))
+            try expect(!state.canQueryWindowHint && state.windowHint == nil)
+        }
+        var drag = CaptureSelectorState(displays: [display], purpose: purpose, candidate: target)
+        drag.receive(.leftDown(anchor)); drag.receive(.leftDrag(end))
+        try expect(!drag.canQueryWindowHint && drag.windowHint == nil)
+        drag.receive(.leftUp(end))
+        try expect(drag.outcome == .selected(rectangle) && drag.windowHint == nil)
+        var cancelled = CaptureSelectorState(displays: [display], purpose: purpose, candidate: target)
+        cancelled.receive(.cancel); cancelled.receive(.leftDown(anchor))
+        try expect(cancelled.outcome == .cancelled && !cancelled.canQueryWindowHint && cancelled.windowHint == nil)
+        // No stale target after cancel/restart. Missing/protected/unsupported
+        // metadata resolves to nil and cannot block a new rectangle selection.
+        var unavailable = CaptureSelectorState(displays: [display], purpose: purpose)
+        try expect(unavailable.canQueryWindowHint && unavailable.windowHint == nil)
+        unavailable.receive(.leftDown(anchor)); unavailable.receive(.leftDrag(end)); unavailable.receive(.leftUp(end))
+        try expect(unavailable.outcome == .selected(rectangle))
+    }
+    // OCR retains its original 2-point ROI minimum, not F1's 4-point click jitter.
+    var small = CaptureSelectorState(displays: [display], candidate: target)
+    small.receive(.leftDown(anchor)); small.receive(.leftUp(CGPoint(x: 203, y: 203)))
+    try expect(small.outcome == .selected(CGRect(x: 200, y: 200, width: 3, height: 3)))
 }
 
 // Pure metadata, geometry, gesture and cancellation fixtures. No window-server
