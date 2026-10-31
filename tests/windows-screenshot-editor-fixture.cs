@@ -21,6 +21,8 @@ public static partial class EchoLingoApplicationSmoke {
     [DllImport("kernel32.dll")] static extern bool GlobalUnlock(IntPtr memory);
     static ScreenshotClipboardLease ScreenshotOwnedClipboard;
     static Bitmap ScreenshotExpectedWindow;
+    static List<Dictionary<string,object>> ScreenshotNativeOpenObservations;
+    [DllImport("user32.dll")] static extern int GetDlgCtrlID(IntPtr window);
     [DllImport("dwmapi.dll")] static extern int DwmFlush();
     // The native adapter holds OpenClipboard for the entire policy call.
     static string ScreenshotReclaim(Func<bool> sameGeneration,Func<bool> sameContent,Func<bool> clear) {
@@ -161,14 +163,45 @@ public static partial class EchoLingoApplicationSmoke {
         Send(new INPUT[]{Key(0x1B,false),Key(0x1B,true)});
         WaitFor(delegate{AutomationElement save=ScreenshotButton(editor,"\u4fdd\u5b58");return !IsWindowVisible(modal)&&IsWindowVisible(editor)&&save!=null&&save.Current.IsEnabled;},10,"Cancelled native screenshot file dialog did not restore the editor.",app);
     }
+    static Dictionary<string,object> ScreenshotOpenControlMetadata(AutomationElement element,int process) {
+        bool own=element.Current.ProcessId==process;Dictionary<string,object> row=new Dictionary<string,object>{{"processMatches",own}};if(!own)return row;
+        string id=element.Current.AutomationId;int numeric=0;bool digits=id.Length>0&&id.Length<=8;foreach(char c in id)digits=digits&&c>='0'&&c<='9';if(digits)Int32.TryParse(id,out numeric);
+        string name=element.Current.ClassName;string[] classes=new string[]{"Edit","ComboBox","ComboBoxEx32","DirectUIHWND","DUIViewWndClassName","#32770"};
+        row["controlTypeId"]=element.Current.ControlType.Id;row["numericAutomationId"]=numeric;row["automationIdIsNumeric"]=digits;row["automationIdIsFileNameControlHost"]=id=="FileNameControlHost";row["classKind"]=Array.IndexOf(classes,name)+1;
+        row["controlViewElement"]=element.Current.IsControlElement;row["contentViewElement"]=element.Current.IsContentElement;row["offscreen"]=element.Current.IsOffscreen;row["enabled"]=element.Current.IsEnabled;row["keyboardFocus"]=element.Current.HasKeyboardFocus;
+        IntPtr window=new IntPtr(element.Current.NativeWindowHandle);row["hasNativeWindow"]=window!=IntPtr.Zero;row["nativeControlId"]=window==IntPtr.Zero?0:GetDlgCtrlID(window);
+        object value;bool supports=element.TryGetCurrentPattern(ValuePattern.Pattern,out value);row["supportsValuePattern"]=supports;if(supports)row["readOnly"]=((ValuePattern)value).Current.IsReadOnly;
+        // No UIA Name/Value/text or unknown identifier/class string is read out.
+        return row;
+    }
+    static void ScreenshotDescribeOpenDialog(Process app,IntPtr editor,IntPtr modal,string format) {
+        if(ScreenshotNativeOpenObservations==null||ScreenshotNativeOpenObservations.Count>=2)return;
+        Dictionary<string,object> observation=new Dictionary<string,object>{{"format",format},{"afterSelectorFailure",true}};ScreenshotNativeOpenObservations.Add(observation);
+        try{uint pid;GetWindowThreadProcessId(modal,out pid);StringBuilder name=new StringBuilder(128),title=new StringBuilder(128);GetClassName(modal,name,name.Capacity);GetWindowText(modal,title,title.Capacity);
+            bool own=pid==app.Id,dialog=name.ToString()=="#32770",caption=title.ToString()=="\u6253\u5f00\u672c\u5730 PNG / JPEG \u56fe\u7247",parent=GetWindow(modal,4)==editor,foreground=GetForegroundWindow()==modal;
+            observation["processMatches"]=own;observation["classMatches"]=dialog;observation["titleMatchesExpected"]=caption;observation["ownerIsEditor"]=parent;observation["foregroundMatches"]=foreground;observation["visible"]=IsWindowVisible(modal);
+            if(!own||!dialog||!caption||!parent||!foreground)return;
+            AutomationElement root=AutomationElement.FromHandle(modal);AutomationElementCollection controls=root.FindAll(TreeScope.Descendants,new OrCondition(new PropertyCondition(AutomationElement.ControlTypeProperty,ControlType.Edit),new PropertyCondition(AutomationElement.ControlTypeProperty,ControlType.ComboBox)));
+            observation["controlCountCapped"]=Math.Min(controls.Count,32);observation["inventoryTruncated"]=controls.Count>32;List<Dictionary<string,object>> rows=new List<Dictionary<string,object>>();observation["controls"]=rows;int visibleEdits=0,matching1001=0,matching1001VisibleEnabled=0;
+            for(int i=0;i<controls.Count&&i<32;i++){
+                Dictionary<string,object> row=ScreenshotOpenControlMetadata(controls[i],app.Id);rows.Add(row);
+                if(Convert.ToBoolean(row["processMatches"])&&Convert.ToInt32(row["controlTypeId"])==ControlType.Edit.Id){bool visible=!Convert.ToBoolean(row["offscreen"]);if(visible)visibleEdits++;if(Convert.ToInt32(row["numericAutomationId"])==1001){matching1001++;if(visible&&Convert.ToBoolean(row["enabled"]))matching1001VisibleEnabled++;}}
+                List<Dictionary<string,object>> ancestors=new List<Dictionary<string,object>>();row["ancestors"]=ancestors;
+                AutomationElement current=controls[i];for(int depth=0;depth<4;depth++){current=TreeWalker.RawViewWalker.GetParent(current);if(current==null)break;if(Automation.Compare(current,root)){row["reachedModalRoot"]=true;break;}
+                    Dictionary<string,object> ancestor=ScreenshotOpenControlMetadata(current,app.Id);ancestors.Add(ancestor);if(!Convert.ToBoolean(ancestor["processMatches"]))break;}
+            }
+            observation["visibleEditCount"]=visibleEdits;observation["matching1001Count"]=matching1001;observation["matching1001VisibleEnabledCount"]=matching1001VisibleEnabled;
+        }catch(Exception error){observation["diagnosticExceptionHresult"]=error.HResult;}
+    }
     static Dictionary<string,object> ScreenshotOpenGenerated(Process app,IntPtr editor,string path,string format,Bitmap expected,string output) {
         Assert(File.Exists(path)&&(File.GetAttributes(path)&FileAttributes.ReparsePoint)==0,"Generated image input is missing or redirected.");
         byte[] original=File.ReadAllBytes(path);Assert(original.Length>0&&original.Length<65536,"Generated image input exceeds its fixture bound.");
         ScreenshotInvoke(app,editor,"\u6253\u5f00\u56fe\u7247");IntPtr modal=IntPtr.Zero;
         WaitFor(delegate{modal=GetForegroundWindow();StringBuilder name=new StringBuilder(128);GetClassName(modal,name,name.Capacity);return modal!=editor&&ForegroundPid()==app.Id&&name.ToString()=="#32770";},10,"Generated file Open did not show an owned native dialog.",app);
         AutomationElement edit=null;
-        WaitFor(delegate{AutomationElementCollection edits=AutomationElement.FromHandle(modal).FindAll(TreeScope.Descendants,new AndCondition(new PropertyCondition(AutomationElement.ControlTypeProperty,ControlType.Edit),new PropertyCondition(AutomationElement.AutomationIdProperty,"1001")));
-            Assert(edits.Count<=1,"Native Open file-name Edit is ambiguous; no blind input was sent.");if(edits.Count==0)return false;edit=edits[0];return edit.Current.IsEnabled&&!edit.Current.IsOffscreen;},10,"Native Open needs one verified file-name Edit (AutomationId 1001); no blind input was sent.",app);
+        try{WaitFor(delegate{AutomationElementCollection edits=AutomationElement.FromHandle(modal).FindAll(TreeScope.Descendants,new AndCondition(new PropertyCondition(AutomationElement.ControlTypeProperty,ControlType.Edit),new PropertyCondition(AutomationElement.AutomationIdProperty,"1001")));
+            Assert(edits.Count<=1,"Native Open file-name Edit is ambiguous; no blind input was sent.");if(edits.Count==0)return false;edit=edits[0];return edit.Current.IsEnabled&&!edit.Current.IsOffscreen;},10,"Native Open needs one verified file-name Edit (AutomationId 1001); no blind input was sent.",app);}
+        catch{ScreenshotDescribeOpenDialog(app,editor,modal,format);throw;}
         Assert(edit.Current.ProcessId==app.Id,"Native file-name Edit belongs to another process.");object raw;Assert(edit.TryGetCurrentPattern(ValuePattern.Pattern,out raw)&&!((ValuePattern)raw).Current.IsReadOnly,"Native file-name Edit is not writable.");
         ((ValuePattern)raw).SetValue(path);edit.SetFocus();
         Assert(GetForegroundWindow()==modal&&ForegroundPid()==app.Id,"Native Open lost focus before submitting the generated path; no key sent.");Send(new INPUT[]{Key(0x0D,false),Key(0x0D,true)});
@@ -238,6 +271,7 @@ public static partial class EchoLingoApplicationSmoke {
     static void ScreenshotEditorWorkflow(Form form,Panel image,Process app,MockServer server,string history,string output,ProcessStartInfo start,string executable,string roaming,string token,List<string> passed,Dictionary<string,object> report,Func<int> sourceEvents) {
         IntPtr source=IntPtr.Zero;OnUi(form,delegate{source=form.Handle;});ScreenshotOwnedClipboard=new ScreenshotClipboardLease(source);bool completed=false;
         report["screenshotClipboardPolicySelfTests"]=ScreenshotClipboardPolicyTests();report["screenshotClipboardObservations"]=ScreenshotOwnedClipboard.Observations;
+        ScreenshotNativeOpenObservations=new List<Dictionary<string,object>>();report["screenshotNativeOpenObservations"]=ScreenshotNativeOpenObservations;
         try{ScreenshotOwnedClipboard.RequireEmpty();ScreenshotEditorWorkflowBody(form,image,app,server,history,output,start,executable,roaming,token,passed,report,sourceEvents);completed=true;}
         finally{string outcome;try{outcome=ScreenshotOwnedClipboard.Cleanup();}catch(Exception error){outcome="cleanup-error-"+error.GetType().Name;}ScreenshotOwnedClipboard=null;if(ScreenshotExpectedWindow!=null){ScreenshotExpectedWindow.Dispose();ScreenshotExpectedWindow=null;}
             report["screenshotClipboardCleanup"]=outcome;report["screenshotOwnedClipboardCleared"]=outcome=="verified-owned-generation-cleared"||outcome=="already-empty";

@@ -74,6 +74,13 @@ describe('actual Windows screenshot fixture source wiring (not native acceptance
     const stable = new Function('generation', 'before', 'after', `return ${expression};`) as (generation: number, before: number, after: number) => boolean;
     for (const [before, after, expected] of [[10, 10, false], [10, 15, false], [15, 15, true], [15, 16, false], [0, 0, false]] as const) expect(stable(10, before, after)).toBe(expected);
   });
+  it('observes a failed owned native Open selector without logging names, values or changing input', () => {
+    const describe = fixture.slice(fixture.indexOf('static Dictionary<string,object> ScreenshotOpenControlMetadata('), fixture.indexOf('static Dictionary<string,object> ScreenshotOpenGenerated('));
+    for (const required of ['titleMatchesExpected', 'ownerIsEditor', 'foregroundMatches', 'numericAutomationId', 'nativeControlId', 'ControlType.Edit', 'ControlType.ComboBox', 'depth<4', 'i<32', 'ScreenshotNativeOpenObservations.Count>=2']) expect(describe).toContain(required);
+    for (const forbidden of ['.Current.Name', '.Current.Value', '.SetValue(', '.Invoke()', 'Send(', '.SetFocus(']) expect(describe).not.toContain(forbidden);
+    expect(fixture).toContain('catch{ScreenshotDescribeOpenDialog(app,editor,modal,format);throw;}');
+    expect(fixture).toContain('AutomationElement.AutomationIdProperty,"1001"');
+  });
   it('refuses ambiguous accessibility names and releases an owned edit gesture promptly', () => {
     expect(fixture).toContain('Assert(matches.Count<=1');
     expect(fixture).toContain('finally{if(ForegroundPid()==app.Id)');
