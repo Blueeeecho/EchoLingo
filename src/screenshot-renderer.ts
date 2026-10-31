@@ -1,9 +1,17 @@
-import { mosaicPixels, wrapText, type EditOperation, type Size } from './screenshot-model';
+import { mosaicPixels, wrapText, operationBounds, screenshotTextFont, type EditOperation, type Size, type Point } from './screenshot-model';
 const context = (canvas: HTMLCanvasElement) => {
   const ctx = canvas.getContext('2d', { willReadFrequently: true });
   if (!ctx) throw new Error('无法创建图片画布，请重新打开截图窗口。');
   return ctx;
 };
+function drawBadge(ctx: CanvasRenderingContext2D, point: Point, size: number, number: number, color: string): void {
+  ctx.fillStyle = color; ctx.beginPath(); ctx.arc(point.x, point.y, size / 2, 0, Math.PI * 2); ctx.fill();
+  // Legible labels on both very dark and very light chosen colors.
+  const rgb = [1, 3, 5].map(i => parseInt(color.slice(i, i + 2), 16));
+  ctx.fillStyle = rgb[0] * .299 + rgb[1] * .587 + rgb[2] * .114 > 160 ? '#111111' : '#ffffff';
+  ctx.font = `600 ${screenshotTextFont(size * (number > 999 ? .32 : number > 99 ? .42 : .55))}`;
+  ctx.textAlign = 'center'; ctx.textBaseline = 'middle'; ctx.fillText(String(number), point.x, point.y);
+}
 /** Each render starts with the immutable decoded source. Crops change actual
  * canvas dimensions, not a viewport or exported hidden layer. */
 export function renderScreenshot(canvas: HTMLCanvasElement, original: CanvasImageSource, size: Size, operations: readonly EditOperation[]): void {
@@ -26,15 +34,22 @@ export function renderScreenshot(canvas: HTMLCanvasElement, original: CanvasImag
         if (operation.solid) ctx.fillRect(x, y, width, height);
         else { ctx.lineWidth = operation.width; const inset = Math.min(width / 2, height / 2, operation.width / 2);
           ctx.strokeRect(x + inset, y + inset, Math.max(0, width - 2 * inset), Math.max(0, height - 2 * inset)); }
-      } else if (operation.kind === 'arrow') {
+      } else if (operation.kind === 'arrow' || operation.kind === 'numbered-arrow') {
         const { start, end, width } = operation, angle = Math.atan2(end.y - start.y, end.x - start.x), head = Math.max(10, width * 4);
         ctx.lineWidth = width; ctx.lineCap = 'round'; ctx.lineJoin = 'round';
         ctx.beginPath(); ctx.moveTo(start.x, start.y); ctx.lineTo(end.x, end.y); ctx.stroke();
         ctx.beginPath(); ctx.moveTo(end.x, end.y);
         ctx.lineTo(end.x - head * Math.cos(angle - Math.PI / 6), end.y - head * Math.sin(angle - Math.PI / 6));
         ctx.lineTo(end.x - head * Math.cos(angle + Math.PI / 6), end.y - head * Math.sin(angle + Math.PI / 6)); ctx.closePath(); ctx.fill();
+        if (operation.kind === 'numbered-arrow') drawBadge(ctx, operation.start, operation.size, operation.number, operation.color);
+      } else if (operation.kind === 'number') {
+        drawBadge(ctx, operation.point, operation.size, operation.number, operation.color);
       } else if (operation.kind === 'text') {
-        ctx.font = `${operation.size}px -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif`;
+        ctx.font = screenshotTextFont(operation.size);
+        if (operation.background) {
+          const bounds = operationBounds(operation, text => ctx.measureText(text).width);
+          ctx.fillStyle = operation.background; ctx.fillRect(bounds.x, bounds.y, bounds.width, bounds.height); ctx.fillStyle = operation.color;
+        }
         ctx.textBaseline = 'top'; const lineHeight = operation.size * 1.35;
         const lines = wrapText(operation.text, operation.maxWidth, text => ctx.measureText(text).width);
         lines.forEach((line, index) => { const y = operation.point.y + index * lineHeight;

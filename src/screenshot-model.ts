@@ -5,7 +5,9 @@ export interface Rect extends Point, Size {}
 export type EditOperation =
   | { kind: 'rectangle'; rect: Rect; color: string; width: number; solid: boolean }
   | { kind: 'arrow'; start: Point; end: Point; color: string; width: number }
-  | { kind: 'text'; point: Point; text: string; color: string; size: number; maxWidth: number }
+  | { kind: 'text'; point: Point; text: string; color: string; size: number; maxWidth: number; background?: string }
+  | { kind: 'number'; point: Point; number: number; size: number; color: string }
+  | { kind: 'numbered-arrow'; start: Point; end: Point; number: number; size: number; color: string; width: number }
   | { kind: 'mosaic'; rect: Rect; blockSize: number }
   | { kind: 'crop'; rect: Rect };
 export const MAX_PIXELS = 32_000_000;
@@ -22,7 +24,8 @@ function operationCost(operation: EditOperation, size: Size): number {
   if (operation.kind === 'crop') return operation.rect.width * operation.rect.height * 2;
   if (operation.kind === 'rectangle') return operation.solid ? operation.rect.width * operation.rect.height
     : Math.min(operation.rect.width * operation.rect.height, (operation.rect.width + operation.rect.height) * operation.width * 2);
-  if (operation.kind === 'arrow') return Math.hypot(operation.end.x - operation.start.x, operation.end.y - operation.start.y) * operation.width * 6 + operation.width ** 2 * 32;
+  if (operation.kind === 'number') return operation.size ** 2;
+  if (operation.kind === 'arrow' || operation.kind === 'numbered-arrow') return Math.hypot(operation.end.x - operation.start.x, operation.end.y - operation.start.y) * operation.width * 6 + operation.width ** 2 * 32 + (operation.kind === 'numbered-arrow' ? operation.size ** 2 : 0);
   const lines = operation.text.split('\n').reduce((sum, line) => sum + Math.max(1, Math.ceil([...line].length / Math.max(1, Math.floor(operation.maxWidth / operation.size)))), 0);
   return operation.maxWidth * Math.min(size.height - operation.point.y, lines * operation.size * 1.35);
 }
@@ -60,10 +63,13 @@ export function validateOperation(operation: EditOperation, size: Size): void {
   if ('rect' in operation && !validRect(operation.rect, size)) throw new Error('请在图片内选择有效区域。');
   if ('color' in operation && !/^#[0-9a-f]{6}$/i.test(operation.color)) throw new Error('颜色无效。');
   if ('width' in operation && (!finite(operation.width) || operation.width < 1 || operation.width > 64)) throw new Error('线宽无效。');
-  if (operation.kind === 'arrow' && (!validPoint(operation.start, size) || !validPoint(operation.end, size))) throw new Error('箭头超出图片。');
+  if ((operation.kind === 'arrow' || operation.kind === 'numbered-arrow') && (!validPoint(operation.start, size) || !validPoint(operation.end, size))) throw new Error('箭头超出图片。');
   if (operation.kind === 'text' && (!validPoint(operation.point, size) || !operation.text.trim() || operation.text.length > MAX_TEXT
     || !finite(operation.size) || operation.size < 8 || operation.size > 256 || !finite(operation.maxWidth)
     || operation.maxWidth < 1 || operation.maxWidth > size.width)) throw new Error('文字或字号无效（最多 2000 字）。');
+  if (operation.kind === 'text' && operation.background !== undefined && !/^#[0-9a-f]{6}$/i.test(operation.background)) throw new Error('备注底色无效。');
+  if ((operation.kind === 'number' || operation.kind === 'numbered-arrow') && (!Number.isSafeInteger(operation.number) || operation.number < 1 || operation.number > 9999
+    || !finite(operation.size) || operation.size < 12 || operation.size > 256 || (operation.kind === 'number' && !validPoint(operation.point, size)))) throw new Error('序号或大小无效。');
   if (operation.kind === 'mosaic' && (!Number.isSafeInteger(operation.blockSize) || operation.blockSize < 4 || operation.blockSize > 128)) throw new Error('马赛克大小无效。');
 }
 function immutableOperation(operation: EditOperation): EditOperation {
@@ -74,29 +80,85 @@ function immutableOperation(operation: EditOperation): EditOperation {
   for (const value of Object.values(copy)) if (value && typeof value === 'object') Object.freeze(value);
   return Object.freeze(copy);
 }
-/** Immutable source + typed edits; at most 100 undo steps and 500 total operations.
- * No per-edit bitmap snapshots and no image bytes in settings/history/storage. */
+/** Bounded structural snapshots: each state shares immutable operations, never pixels.
+ * Editing an older annotation preserves its z-order, including later redactions. */
 export class ScreenshotDocument {
   readonly original: Readonly<Size>;
-  private nodes: { id: number; operation: EditOperation }[] = [];
+  private states: { id: number; operations: readonly EditOperation[] }[] = [{ id: 0, operations: Object.freeze([]) }];
   private cursor = 0;
-  private floor = 0;
   private nextId = 1;
   constructor(size: Size) { validateSize(size); this.original = Object.freeze({ width: size.width, height: size.height }); }
-  get operations(): readonly EditOperation[] { return this.nodes.slice(0, this.cursor).map(node => node.operation); }
-  get stateId(): number { return this.cursor ? this.nodes[this.cursor - 1].id : 0; }
-  get canUndo(): boolean { return this.cursor > this.floor; }
-  get canRedo(): boolean { return this.cursor < this.nodes.length; }
-  get size(): Size { return this.operations.reduce((size, op) => op.kind === 'crop' ? { width: op.rect.width, height: op.rect.height } : size, { ...this.original }); }
-  append(operation: EditOperation): void {
-    validateOperation(operation, this.size);
-    if (this.cursor >= MAX_OPERATIONS) throw new Error('已达到 500 步编辑上限。请保存图片，再打开已保存的图片继续编辑。');
-    if (replayCost(this.original, [...this.operations, operation]) > MAX_REPLAY_PIXELS) throw new Error('这张大图的编辑量已达到安全上限。请保存图片，再打开保存结果继续编辑。');
-    this.nodes.splice(this.cursor, this.nodes.length - this.cursor, { id: this.nextId++, operation: immutableOperation(operation) });
-    this.cursor++; this.floor = Math.max(this.floor, this.cursor - MAX_UNDO);
+  get operations(): readonly EditOperation[] { return this.states[this.cursor].operations; }
+  get stateId(): number { return this.states[this.cursor].id; }
+  get canUndo(): boolean { return this.cursor > 0; }
+  get canRedo(): boolean { return this.cursor < this.states.length - 1; }
+  get size(): Size { return this.operationSize(this.operations.length); }
+  // Count even crop-hidden numbers: undoing a crop must not reveal duplicates.
+  get nextNumber(): number { return this.operations.reduce((n, op) => 'number' in op ? Math.max(n, op.number + 1) : n, 1); }
+  operationSize(index: number): Size {
+    if (!Number.isSafeInteger(index) || index < 0 || index > this.operations.length) throw new Error('标注位置无效。');
+    return this.operations.slice(0, index).reduce((size, op) => op.kind === 'crop' ? { width: op.rect.width, height: op.rect.height } : size, { ...this.original });
+  }
+  operationOffset(index: number): Point {
+    this.operationSize(index);
+    return this.operations.slice(index + 1).reduce((offset, op) => op.kind === 'crop' ? { x: offset.x + op.rect.x, y: offset.y + op.rect.y } : offset, { x: 0, y: 0 });
+  }
+  private commit(operations: readonly EditOperation[]): void {
+    if (operations.length > MAX_OPERATIONS) throw new Error('已达到 500 步编辑上限。请保存图片，再打开已保存的图片继续编辑。');
+    let size: Size = this.original;
+    for (const operation of operations) { validateOperation(operation, size); if (operation.kind === 'crop') size = operation.rect; }
+    if (replayCost(this.original, operations) > MAX_REPLAY_PIXELS) throw new Error('这张大图的编辑量已达到安全上限。请保存图片，再打开保存结果继续编辑。');
+    this.states.splice(this.cursor + 1, this.states.length, { id: this.nextId++, operations: Object.freeze([...operations]) });
+    this.cursor++;
+    if (this.states.length > MAX_UNDO + 1) { this.states.shift(); this.cursor--; }
+  }
+  append(operation: EditOperation): void { this.commit([...this.operations, immutableOperation(operation)]); }
+  update(index: number, operation: EditOperation): void {
+    const previous = this.operations[index];
+    if (!previous || previous.kind === 'crop' || operation.kind === 'crop' || previous.kind !== operation.kind) throw new Error('不能修改裁剪或不存在的标注。');
+    const operations = [...this.operations]; operations[index] = immutableOperation(operation); this.commit(operations);
+  }
+  remove(index: number): void {
+    const previous = this.operations[index];
+    if (!previous || previous.kind === 'crop') throw new Error('不能删除裁剪或不存在的标注。');
+    this.commit(this.operations.filter((_, i) => i !== index));
   }
   undo(): boolean { if (!this.canUndo) return false; this.cursor--; return true; }
   redo(): boolean { if (!this.canRedo) return false; this.cursor++; return true; }
+}
+
+export type TextMeasure = (text: string) => number;
+/** Geometry is in the operation's original coordinate stage, before later crops.
+ * Pass a measure function using screenshotTextFont(op.size) for exact text bounds. */
+export function operationBounds(operation: EditOperation, measure?: TextMeasure): Rect {
+  if ('rect' in operation) return { ...operation.rect };
+  if (operation.kind === 'text') {
+    const textMeasure = measure ?? ((text: string) => [...text].length * operation.size);
+    const lines = wrapText(operation.text, operation.maxWidth, textMeasure);
+    return { x: operation.point.x, y: operation.point.y, width: Math.max(1, ...lines.map(textMeasure)), height: lines.length * operation.size * 1.35 };
+  }
+  if (operation.kind === 'number') return { x: operation.point.x - operation.size / 2, y: operation.point.y - operation.size / 2, width: operation.size, height: operation.size };
+  const padding = operation.kind === 'numbered-arrow' ? Math.max(operation.size / 2, operation.width * 4, 10) : Math.max(operation.width * 4, 10);
+  return { x: Math.min(operation.start.x, operation.end.x) - padding, y: Math.min(operation.start.y, operation.end.y) - padding,
+    width: Math.abs(operation.end.x - operation.start.x) + padding * 2, height: Math.abs(operation.end.y - operation.start.y) + padding * 2 };
+}
+/** Clamp one common delta, so number+arrow cannot split or distort during a drag.
+ * Text may already wrap/clip; keep its wrapping width when moving its anchor. */
+export function translateOperation(operation: EditOperation, delta: Point, size: Size): EditOperation {
+  if (!finite(delta.x) || !finite(delta.y)) throw new Error('移动位置无效。');
+  if (operation.kind === 'crop') throw new Error('裁剪不能作为标注移动。');
+  let anchors: Point[];
+  if ('rect' in operation) anchors = [{ x: operation.rect.x, y: operation.rect.y }, { x: operation.rect.x + operation.rect.width, y: operation.rect.y + operation.rect.height }];
+  else if ('start' in operation) anchors = [operation.start, operation.end];
+  else anchors = [operation.point];
+  let dx = clamp(delta.x, -Math.min(...anchors.map(p => p.x)), size.width - Math.max(...anchors.map(p => p.x)));
+  let dy = clamp(delta.y, -Math.min(...anchors.map(p => p.y)), size.height - Math.max(...anchors.map(p => p.y)));
+  if ('rect' in operation) { dx = Math.round(dx); dy = Math.round(dy); return { ...operation, rect: { ...operation.rect, x: operation.rect.x + dx, y: operation.rect.y + dy } }; }
+  if ('start' in operation) return { ...operation, start: { x: operation.start.x + dx, y: operation.start.y + dy }, end: { x: operation.end.x + dx, y: operation.end.y + dy } };
+  return { ...operation, point: { x: operation.point.x + dx, y: operation.point.y + dy } };
+}
+export function screenshotTextFont(size: number): string {
+  return `${size}px -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif`;
 }
 /** Real pixel replacement (not a reversible CSS blur). Transparent samples are
  * alpha-weighted; the mosaic is opaque so hidden RGB cannot survive redaction. */
