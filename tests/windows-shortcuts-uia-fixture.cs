@@ -79,7 +79,7 @@ public static class EchoLingoShortcutsUiaFixture {
     sealed class Fixture {
         readonly string executable, token=Guid.NewGuid().ToString("N"); readonly Stopwatch watch=Stopwatch.StartNew();
         readonly List<string> owned=new List<string>(); readonly List<object> cases=new List<object>(), probes=new List<object>();
-        readonly List<object> buttonPatterns=new List<object>(),jobStops=new List<object>();
+        readonly List<object> buttonPatterns=new List<object>(),jobStops=new List<object>(),visibilityOperations=new List<object>();
         readonly List<string> cleanupErrors=new List<string>(); readonly JavaScriptSerializer json=new JavaScriptSerializer();
         readonly Dictionary<string,object> report=new Dictionary<string,object>();
         UiWorker ui; Process app; IntPtr job,main; string settingsPath,local,stage="claim-generated-data"; int keySends,valueWrites,launches,staleReadObservations;
@@ -146,10 +146,64 @@ public static class EchoLingoShortcutsUiaFixture {
             for(int i=0;i<all.Count;i++) { ui.Rpc("read-control-offscreen");bool offscreen=all[i].Current.IsOffscreen;ui.Check();if(!offscreen) { Need(result==null,"UIA_TARGET_NOT_UNIQUE"); result=all[i]; } }
             return result;
         }
+        void RevealActionTarget(string name,ControlType type) {
+            Need((type==ControlType.Button&&(name==Save||name==Record))||(type==ControlType.Edit&&(name==Selection||name==Ocr)),"SCROLL_TARGET_NOT_ALLOWLISTED");
+            ui.Call(delegate {
+                ui.Check();OwnMain();ui.Rpc("scroll-own-root-from-handle");AutomationElement root=AutomationElement.FromHandle(main);ui.Check();
+                ui.Rpc("find-exact-scroll-target");AutomationElementCollection matches=root.FindAll(TreeScope.Descendants,new AndCondition(new PropertyCondition(AutomationElement.NameProperty,name),new PropertyCondition(AutomationElement.ControlTypeProperty,type)));ui.Check();
+                Need(matches.Count==1,"SCROLL_TARGET_NOT_UNIQUE");AutomationElement target=matches[0];
+                ui.Rpc("read-scroll-target-offscreen");bool offscreen=target.Current.IsOffscreen;ui.Check();
+                Dictionary<string,object> observation=new Dictionary<string,object>{{"target",name==Save?2:name==Record?1:name==Selection?3:4},{"initiallyOffscreen",offscreen},{"scrollRequests",0}};
+                Need(visibilityOperations.Count<32,"SCROLL_OPERATIONS_NOT_BOUNDED");visibilityOperations.Add(observation);
+                if(!offscreen)return true;
+                object raw;ui.Rpc("query-scroll-item-pattern");bool item=target.TryGetCurrentPattern(ScrollItemPattern.Pattern,out raw);ui.Check();
+                if(item) {
+                    // One semantic scroll, never a focus change or a retried click.
+                    OwnMain();ui.Rpc("scroll-exact-item-into-view");((ScrollItemPattern)raw).ScrollIntoView();ui.Check();
+                    observation["method"]=1;
+                } else {
+                    // Prove the complete ancestor chain ends at this exact owned
+                    // root before changing any scroll container. No desktop-wide search.
+                    List<AutomationElement> ancestors=new List<AutomationElement>();AutomationElement cursor=target;bool reached=false;
+                    for(int depth=0;depth<32;depth++) {
+                        ui.Rpc("read-scroll-parent");cursor=TreeWalker.ControlViewWalker.GetParent(cursor);ui.Check();
+                        Need(cursor!=null,"SCROLL_TARGET_LEFT_OWN_ROOT");ancestors.Add(cursor);
+                        ui.Rpc("compare-scroll-root");reached=Automation.Compare(cursor,root);ui.Check();if(reached)break;
+                    }
+                    Need(reached,"SCROLL_TARGET_LEFT_OWN_ROOT");ScrollPattern container=null;AutomationElement scrollElement=null;
+                    foreach(AutomationElement ancestor in ancestors) {
+                        ui.Rpc("query-owned-scroll-pattern");bool supported=ancestor.TryGetCurrentPattern(ScrollPattern.Pattern,out raw);ui.Check();
+                        if(!supported)continue;ScrollPattern candidate=(ScrollPattern)raw;
+                        ui.Rpc("read-owned-vertical-scroll");bool vertical=candidate.Current.VerticallyScrollable;ui.Check();
+                        if(vertical){container=candidate;scrollElement=ancestor;break;}
+                    }
+                    Need(container!=null,"OWNED_SCROLL_PATTERN_MISSING");OwnMain();
+                    // Use this exact target's geometry, not a guessed page end:
+                    // other settings sections can extend below the Save action.
+                    ui.Rpc("read-owned-scroll-geometry");System.Windows.Rect viewport=scrollElement.Current.BoundingRectangle,targetBounds=target.Current.BoundingRectangle;
+                    double current=container.Current.VerticalScrollPercent,view=container.Current.VerticalViewSize;ui.Check();
+                    Need(!viewport.IsEmpty&&!targetBounds.IsEmpty&&viewport.Height>0&&targetBounds.Height>0,"SCROLL_GEOMETRY_UNAVAILABLE");
+                    double percent=CenteredScrollPercent(current,view,viewport.Height,targetBounds.Top+targetBounds.Height/2,viewport.Top+viewport.Height/2);
+                    ui.Rpc("scroll-owned-shortcut-container");container.SetScrollPercent(ScrollPattern.NoScroll,percent);ui.Check();
+                    observation["method"]=2;
+                }
+                observation["scrollRequests"]=1;OwnMain();return true;
+            });
+            // Discard the pre-scroll element. Only a fresh visible exact-name
+            // target can be invoked or written; scrolling cannot bypass this gate.
+            Wait(delegate{return ui.Call(delegate{return Find(name,type)!=null;});},2000,"SHORTCUT_TARGET_NOT_VISIBLE_AFTER_SCROLL");
+        }
+        static double CenteredScrollPercent(double current,double view,double height,double target,double center) {
+            foreach(double value in new double[]{current,view,height,target,center})Need(!Double.IsNaN(value)&&!Double.IsInfinity(value),"SCROLL_GEOMETRY_NOT_FINITE");
+            Need(current>=0&&current<=100&&view>0&&view<100&&height>0,"SCROLL_GEOMETRY_OUT_OF_RANGE");
+            double range=height*(100/view-1);
+            Need(range>0&&!Double.IsInfinity(range),"SCROLL_RANGE_UNAVAILABLE");
+            return Math.Max(0,Math.Min(100,current+(target-center)*100/range));
+        }
         string Field(string name) { return ui.Call(delegate { AutomationElement e=Find(name,ControlType.Edit);Need(e!=null,"SHORTCUT_FIELD_NOT_VISIBLE");object p;ui.Rpc("query-value-pattern");Need(e.TryGetCurrentPattern(ValuePattern.Pattern,out p),"SHORTCUT_VALUE_PATTERN_MISSING");ui.Check();ui.Rpc("read-shortcut-value");string v=((ValuePattern)p).Current.Value;ui.Check();return v; }); }
         bool FieldsVisible() { return ui.Call(delegate { return Find(Selection,ControlType.Edit)!=null&&Find(Ocr,ControlType.Edit)!=null; }); }
-        void Fill(string name,string value) { ui.Call(delegate { AutomationElement e=Find(name,ControlType.Edit);Need(e!=null,"SHORTCUT_FIELD_NOT_VISIBLE");object p;ui.Rpc("query-value-pattern");Need(e.TryGetCurrentPattern(ValuePattern.Pattern,out p),"SHORTCUT_VALUE_PATTERN_MISSING");ui.Check();ui.Rpc("read-shortcut-readonly");Need(!((ValuePattern)p).Current.IsReadOnly,"SHORTCUT_FIELD_READONLY");ui.Check();ui.Rpc("set-shortcut-value");((ValuePattern)p).SetValue(value);ui.Check();return true; });valueWrites++;Wait(delegate { return FieldsVisible()&&Field(name)==value; },5000,"SHORTCUT_VALUE_WRITE_NOT_APPLIED"); }
-        void Invoke(string name) { ui.Call(delegate {
+        void Fill(string name,string value) { RevealActionTarget(name,ControlType.Edit);ui.Call(delegate { AutomationElement e=Find(name,ControlType.Edit);Need(e!=null,"SHORTCUT_FIELD_NOT_VISIBLE");object p;ui.Rpc("query-value-pattern");Need(e.TryGetCurrentPattern(ValuePattern.Pattern,out p),"SHORTCUT_VALUE_PATTERN_MISSING");ui.Check();ui.Rpc("read-shortcut-readonly");Need(!((ValuePattern)p).Current.IsReadOnly,"SHORTCUT_FIELD_READONLY");ui.Check();ui.Rpc("set-shortcut-value");((ValuePattern)p).SetValue(value);ui.Check();return true; });valueWrites++;Wait(delegate { return FieldsVisible()&&Field(name)==value; },5000,"SHORTCUT_VALUE_WRITE_NOT_APPLIED"); }
+        void Invoke(string name) { RevealActionTarget(name,ControlType.Button);ui.Call(delegate {
             AutomationElement e=Find(name,ControlType.Button);Need(e!=null,"SHORTCUT_BUTTON_NOT_VISIBLE");object invocation,toggle;
             ui.Rpc("query-invoke-pattern");bool supportsInvoke=e.TryGetCurrentPattern(InvokePattern.Pattern,out invocation);ui.Check();
             ui.Rpc("query-toggle-pattern");bool supportsToggle=e.TryGetCurrentPattern(TogglePattern.Pattern,out toggle);ui.Check();
@@ -334,7 +388,7 @@ public static class EchoLingoShortcutsUiaFixture {
                 if(cleanupErrors.Count!=0) report["ok"]=false;
                 report["stage"]=stage;report["elapsedMilliseconds"]=watch.ElapsedMilliseconds;report["cases"]=cases;report["casesExecuted"]=cases.Count;report["casesExpected"]=6;report["nativeRegistrationProbes"]=probes;
                 report["nativeKeySends"]=keySends;report["actualWindowsSendInput"]=keySends>0;report["valuePatternWrites"]=valueWrites;report["applicationLaunches"]=launches;report["cleanupErrors"]=cleanupErrors;report["ownedDataRemoved"]=cleanupErrors.Count==0;
-                report["buttonPatternMetadata"]=buttonPatterns;report["ownedJobStops"]=jobStops;
+                report["buttonPatternMetadata"]=buttonPatterns;report["ownedJobStops"]=jobStops;report["targetVisibilityOperations"]=visibilityOperations;
                 report["staleReadObservations"]=staleReadObservations;report["uiaExceptionCount"]=ui==null?0:ui.ExceptionCount;report["uiaExceptionMetadata"]=ui==null?new object[0]:ui.Failures;
             }
             return report;

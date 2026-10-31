@@ -19,8 +19,19 @@ def verify(report):
                  'rustClipboardBackendTested', 'physicalMultiDisplayTested', 'monitorGapRuntimeTested'):
         if report.get(flag) is not False:
             raise ValueError('Native probe scope is missing or overstated: ' + flag)
-    if report.get('productionNativeEntryPoint') != 'capture-screenshot' or report.get('ownAppKitEventsOnly') is not True:
+    if (report.get('productionNativeEntryPoint') != 'capture-screenshot'
+            or report.get('captureGesturesOwnAppKitOnly') is not True):
         raise ValueError('Missing exact native entry point or scoped AppKit event evidence')
+    setup = report.get('globalSystemUISetupEventDispatched')
+    if (type(setup) is not bool or report.get('ownAppKitEventsOnly') is not (not setup)
+            or type(report.get('globalSystemUISetupEscapePairs')) is not int
+            or report['globalSystemUISetupEscapePairs'] != int(setup)):
+        raise ValueError('Global setup input must be explicitly scoped to zero or one Escape pair')
+    if setup:
+        for flag in ('systemUISetupGitHubHosted', 'systemUISetupAccessibilityPreflightGranted', 'systemUISetupExactDockOwnerVerified',
+                     'systemUISetupGeneratedSourceFrontmost', 'systemUISetupExactSourceRevalidated'):
+            if report.get(flag) is not True:
+                raise ValueError('Global setup Escape lacks preapproved trust and exact source/Dock ownership')
     digest = lambda value: isinstance(value, str) and re.fullmatch('[0-9a-f]{64}', value) is not None
     sources = report.get('productionSourceSha256')
     if (not digest(report.get('fixtureBinarySha256')) or not isinstance(sources, dict)
@@ -49,6 +60,8 @@ def verify(report):
             or type(report.get('sourceReadinessObservations')) is not int
             or report['sourceReadinessObservations'] <= 0):
         raise ValueError('Exact generated WindowServer source readiness was not observed')
+    if setup and report.get('systemUISetupOcclusionCleared') is not True:
+        raise ValueError('The original foreign-occlusion guard must clear after setup Escape')
     cases = report.get('cases')
     if (not isinstance(cases, list) or len(cases) != len(MODES) or any(not isinstance(case, dict) for case in cases)
             or tuple(case.get('mode') for case in cases) != MODES):

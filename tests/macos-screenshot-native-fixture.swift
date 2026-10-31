@@ -1,8 +1,10 @@
 // Explicit isolated-runner probe linked to the production native screenshot API.
 // Own AppKit events are NOT a physical/global F1 or packaged-editor test.
-// No TCC grants/prompts, AX access, global button/key injection, general clipboard
-// access, arbitrary source-window capture, or captured image bytes in reports.
+// No TCC grants/prompts, general clipboard, arbitrary source-window capture, or
+// captured image bytes. A guarded one-shot global Escape can dismiss ordinary
+// Dock UI during isolated setup only; capture gestures remain own-AppKit events.
 import AppKit
+import ApplicationServices
 import CoreGraphics
 import Foundation
 import ImageIO
@@ -105,7 +107,9 @@ private final class ScreenshotProbe {
         "status": "running", "permissionRequested": false, "securitySettingsChanged": false,
         "generalClipboardTouched": false, "userContentCaptured": false,
         "physicalF1Tested": false, "packagedEditorTested": false, "rustClipboardBackendTested": false,
-        "ownAppKitEventsOnly": true, "productionNativeEntryPoint": "capture-screenshot",
+        "ownAppKitEventsOnly": true, "captureGesturesOwnAppKitOnly": true,
+        "globalSystemUISetupEventDispatched": false, "globalSystemUISetupEscapePairs": 0,
+        "productionNativeEntryPoint": "capture-screenshot",
         "physicalMultiDisplayTested": false, "monitorGapRuntimeTested": false
     ]
     var cases: [[String: Any]] = []
@@ -120,6 +124,7 @@ private final class ScreenshotProbe {
     var caseDriven = false
     var timer: Timer?
     var finished = false
+    var setupEscapeConsidered = false
     var owner: NSWindow?
     var savePanel: NSSavePanel?
     let modes = ["window-phase1", "rectangle-phase1", "escape-cancel", "request-cancel", "window-phase2"]
@@ -332,13 +337,76 @@ private final class ScreenshotProbe {
             try fixtureNeed(abs(actual.x - point.x) <= 1 && abs(actual.y - point.y) <= 1,
                             "generated pointer position was not retained")
             report["sourceWindowServerReady"] = true
+            if report["globalSystemUISetupEventDispatched"] as? Bool == true {
+                report["systemUISetupOcclusionCleared"] = true
+                report["systemUISetupAfter"] = ["exactSourceRevalidated": true, "foreignOcclusionAbsent": true]
+            }
             beginCase()
         } catch {
-            if Date() >= deadline { finish("failed", reason: String(describing: error)); return }
+            if Date() >= deadline {
+                if !setupEscapeConsidered && dismissKnownDockUIOnce() {
+                    awaitInitialSource(deadline: Date().addingTimeInterval(2), observations: observations + 1)
+                    return
+                }
+                if report["globalSystemUISetupEventDispatched"] as? Bool == true,
+                   let after = report["sourceOccluderDiagnostic"] {
+                    report["systemUISetupAfter"] = after
+                }
+                finish("failed", reason: String(describing: error)); return
+            }
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.025) {
                 self.awaitInitialSource(deadline: deadline, observations: observations + 1)
             }
         }
+    }
+
+    func dismissKnownDockUIOnce() -> Bool {
+        // Explicit isolated CI setup only. This never changes capture policy,
+        // raises a source above system UI, grants trust, or ignores an overlap.
+        guard !setupEscapeConsidered else { return false }; setupEscapeConsidered = true
+        let environment = ProcessInfo.processInfo.environment
+        guard environment["GITHUB_ACTIONS"] == "true",
+              environment["RUNNER_ENVIRONMENT"] == "github-hosted" else { return false }
+        guard cases.isEmpty, index == 0, operation == nil, let target = target,
+              let source = source, source.isRunning, source.processIdentifier == target.pid else { return false }
+        // Refresh the ORIGINAL exact identity/z-order/overlap guard immediately
+        // before considering input; a cached diagnostic is not authority.
+        report.removeValue(forKey: "sourceOccluderDiagnostic")
+        do { try verifySourceVisible(); return false } catch {}
+        guard let obstruction = report["sourceOccluderDiagnostic"] as? [String: Any],
+              obstruction["ownerBundleIdentifier"] as? String == "com.apple.dock",
+              obstruction["ownerExecutablePath"] as? String == "/System/Library/CoreServices/Dock.app/Contents/MacOS/Dock",
+              obstruction["layer"] as? Double == 20, obstruction["alpha"] as? Double == 1,
+              let bounds = obstruction["appKitFrame"] as? [CGFloat], bounds.count == 4,
+              NSScreen.screens.contains(where: {
+                  $0.frame == CGRect(x: bounds[0], y: bounds[1], width: bounds[2], height: bounds[3])
+                      && $0.frame.contains(target.frame)
+              }),
+              NSWorkspace.shared.frontmostApplication?.processIdentifier == target.pid,
+              let application = NSRunningApplication(processIdentifier: target.pid), application.isActive,
+              !application.isTerminated else { return false }
+        let trusted = AXIsProcessTrusted() // preflight only; no prompt/options/grant
+        report["systemUISetupAccessibilityPreflightGranted"] = trusted
+        guard trusted else { return false }
+        let modifiers: CGEventFlags = [.maskShift, .maskControl, .maskAlternate, .maskCommand]
+        guard CGEventSource.flagsState(.combinedSessionState).intersection(modifiers).isEmpty,
+              !CGEventSource.keyState(.combinedSessionState, key: 53),
+              let down = CGEvent(keyboardEventSource: nil, virtualKey: 53, keyDown: true),
+              let up = CGEvent(keyboardEventSource: nil, virtualKey: 53, keyDown: false) else { return false }
+        report["systemUISetupBefore"] = obstruction
+        report["systemUISetupGitHubHosted"] = true
+        report["systemUISetupExactDockOwnerVerified"] = true
+        report["systemUISetupGeneratedSourceFrontmost"] = true
+        report["systemUISetupExactSourceRevalidated"] = true
+        report["systemUISetupOcclusionCleared"] = false
+        report["ownAppKitEventsOnly"] = false
+        report["globalSystemUISetupEventDispatched"] = true
+        report["globalSystemUISetupEscapePairs"] = 1
+        down.flags = []; up.flags = []
+        // Both events are allocated before posting; always pair the one down.
+        defer { up.post(tap: .cghidEventTap) }
+        down.post(tap: .cghidEventTap)
+        return true
     }
 
     func sourceIdentityDiagnostic(_ target: CaptureWindowTarget, records: [[String: Any]],

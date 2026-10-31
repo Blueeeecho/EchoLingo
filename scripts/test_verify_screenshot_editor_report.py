@@ -9,6 +9,8 @@ def complete(installed=False):
         'defaultCaptureWithoutEnvironmentRequested', 'captureBackendEnvironmentAbsent', 'rustCaptureRequested',
         'uiAutomationSelectorsUsed', 'screenshotOutputIsOwnedTemporaryDirectory',
         'ownApplicationTreeStopped', 'ownedDirectoriesRemoved')}
+    report.update(screenshotOwnedClipboardCleared=True, screenshotClipboardPolicySelfTests=5,
+        screenshotClipboardCleanup='verified-owned-generation-cleared')
     report.update(installedPackageTested=installed, desktopDirectoryWritten=False, credentialsCreated=False,
         translationBackend='not-invoked-local-image-only', applicationSha256='a'*64, expectedNativeCaptureSha256='b'*64,
         screenshotNetworkEvidenceScope='configured-loopback-provider-trap; no global packet capture',
@@ -77,6 +79,15 @@ class ScreenshotEditorReport(unittest.TestCase):
                       'nativeSaveAsCancelPreservedImage','nativeOpenCancelPreservedImage','savedPngCount','copiedPixelSize'):
             report=complete();del report['screenshotCases'][1][field];self.rejects(report)
         report=complete();report['screenshotCases'][2]['visibleWindowPixelSize']=[699,200];self.rejects(report)
+
+    def test_finally_cleanup_requires_exact_owned_image_generation(self):
+        for field, values in (
+            ('screenshotOwnedClipboardCleared', (None, False)),
+            ('screenshotClipboardPolicySelfTests', (None, True, 4)),
+            ('screenshotClipboardCleanup', (None, 'already-empty', 'foreign-generation-preserved')),
+        ):
+            for value in values:
+                report=complete();report[field]=value;self.rejects(report)
 
     def test_actual_local_png_and_jpeg_open_are_mandatory(self):
         for field in ('screenshotLocalOpenRequiredCases', 'screenshotLocalOpenPassedCases',

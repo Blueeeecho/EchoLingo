@@ -51,8 +51,27 @@ hidden, closed, or exempted from the occlusion guard.
 The generated source
 places the cursor inside itself using the public non-event-generating cursor
 position API, then restores its original position on exit. All mouse-button and
-Escape events go only through the fixture application's own AppKit dispatcher;
-there is no system-wide key/button injection or Accessibility automation.
+Escape events **used for capture cases** go only through the fixture application's
+own AppKit dispatcher. A separately reported setup exception can send exactly one
+global Escape pair to dismiss ordinary Dock UI on a disposable GitHub-hosted runner:
+
+- Both `GITHUB_ACTIONS=true` and `RUNNER_ENVIRONMENT=github-hosted` are required.
+  A local Mac invocation, even with `--isolated-test-session`, never gets this
+  global-input exception.
+- Only before any capture operation/case, after the original readiness wait fails.
+- Fresh exact generated source PID/window/frame/sharing, source foreground ownership,
+  and a full-display layer-20 obstruction owned by the exact `com.apple.dock`
+  bundle and `/System/Library/CoreServices/Dock.app/Contents/MacOS/Dock` executable.
+- Existing `AXIsProcessTrusted()` must be true, no Escape/modifier may be held,
+  and both key events must be allocated before posting; no prompt or trust change.
+- The **original, unchanged** no-foreign-occlusion predicate must clear afterward.
+  A persistent obstruction still fails. No repeat, Dock exemption, window raising,
+  foreign process termination, security-warning acceptance or capture fallback.
+
+Reports distinguish `captureGesturesOwnAppKitOnly` from
+`globalSystemUISetupEventDispatched` and the exact zero/one Escape-pair count.
+`ownAppKitEventsOnly` is false if the global setup pair was dispatched. This setup
+action is not physical/global F1 acceptance and does not grant product permissions.
 
 Five ordered cases call the production `capture-screenshot` endpoint:
 
@@ -102,3 +121,8 @@ does not re-label those as physical-display tests.
 - [Apple: running-application identity](https://developer.apple.com/documentation/appkit/nsrunningapplication)
   provides the exact-PID bundle and executable metadata for obstruction diagnostics;
   identifying a system owner never exempts its window from the capture guard.
+- [Apple: existing Accessibility trust](https://developer.apple.com/documentation/applicationservices/1460720-axisprocesstrusted)
+  is queried without prompting before the optional isolated setup Escape.
+- [Apple: posting Quartz events](https://developer.apple.com/documentation/coregraphics/cgevent/post(tap:))
+  describes the separately disclosed global setup event stream; capture gestures
+  continue to use only the fixture's local AppKit dispatch.

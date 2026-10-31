@@ -18,6 +18,12 @@ def verify_report(report, expected_sha=None, installed=False):
                   'ownApplicationTreeStopped', 'ownedDirectoriesRemoved'):
         if report.get(field) is not True:
             raise ValueError('Required real F1 application evidence is absent: ' + field)
+    if report.get('screenshotOwnedClipboardCleared') is not True:
+        raise ValueError('Exact owned image clipboard generation must be cleared in fixture cleanup')
+    if report.get('screenshotClipboardCleanup') != 'verified-owned-generation-cleared':
+        raise ValueError('Successful F1 workflows require exact owned-generation cleanup, not unknown or empty clipboard')
+    if type(report.get('screenshotClipboardPolicySelfTests')) is not int or report['screenshotClipboardPolicySelfTests'] != 5:
+        raise ValueError('All five clipboard ownership policy self-tests are required')
     if report.get('installedPackageTested') is not installed:
         raise ValueError('Built and installed application coverage must not be conflated')
     if report.get('desktopDirectoryWritten') is not False or report.get('credentialsCreated') is not False:

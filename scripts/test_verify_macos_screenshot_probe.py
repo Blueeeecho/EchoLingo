@@ -11,6 +11,8 @@ spec.loader.exec_module(module)
 def passed():
     report = dict(schema='echolingo-macos-screenshot-native-v1', ok=True, status='passed',
                   productionNativeEntryPoint='capture-screenshot', ownAppKitEventsOnly=True,
+                  captureGesturesOwnAppKitOnly=True, globalSystemUISetupEventDispatched=False,
+                  globalSystemUISetupEscapePairs=0,
                   ownedSourceCleanupConfirmed=True, captureCasesPassed=True,
                   screenCapturePreflightGranted=True, nativeProcessExitCode=0, cases=[],
                   sourceWindowServerReady=True, sourceReadinessObservations=1,
@@ -35,6 +37,24 @@ def passed():
 class MacScreenshotProbeContract(unittest.TestCase):
     def test_full_native_evidence_is_passed(self):
         self.assertEqual(module.verify(passed()), 0)
+
+    def test_global_setup_escape_is_single_scoped_and_never_an_occlusion_exemption(self):
+        report = passed()
+        report.update(ownAppKitEventsOnly=False, globalSystemUISetupEventDispatched=True,
+                      globalSystemUISetupEscapePairs=1, systemUISetupOcclusionCleared=True)
+        for flag in ('systemUISetupGitHubHosted', 'systemUISetupAccessibilityPreflightGranted', 'systemUISetupExactDockOwnerVerified',
+                     'systemUISetupGeneratedSourceFrontmost', 'systemUISetupExactSourceRevalidated'):
+            report[flag] = True
+        self.assertEqual(module.verify(report), 0)
+        for field, value in [('ownAppKitEventsOnly', True), ('globalSystemUISetupEscapePairs', 2),
+                             ('systemUISetupGitHubHosted', False),
+                             ('systemUISetupAccessibilityPreflightGranted', False),
+                             ('systemUISetupExactDockOwnerVerified', False),
+                             ('systemUISetupGeneratedSourceFrontmost', False),
+                             ('systemUISetupExactSourceRevalidated', False),
+                             ('systemUISetupOcclusionCleared', False)]:
+            invalid = copy.deepcopy(report); invalid[field] = value
+            with self.assertRaises(ValueError): module.verify(invalid)
 
     def test_window_server_readiness_is_required_without_weakening_capture(self):
         for field, value in [('sourceWindowServerReady', False), ('sourceReadinessObservations', 0)]:
@@ -117,8 +137,20 @@ class MacScreenshotProbeContract(unittest.TestCase):
         self.assertIn('nativeResponse(mode: "--capture-screenshot"', swift)
         self.assertIn('NSApplication.shared.sendEvent(event)', swift)
         self.assertIn('captureWindowIsCurrent(target', swift)
-        for forbidden in ('CGRequestScreenCaptureAccess(', 'AXIsProcessTrustedWithOptions(', '.post(tap:', 'NSPasteboard.general', 'CGWindowListCreateImage('):
+        for forbidden in ('CGRequestScreenCaptureAccess(', 'AXIsProcessTrustedWithOptions(', 'NSPasteboard.general', 'CGWindowListCreateImage('):
             self.assertNotIn(forbidden, swift)
+        setup = swift.split('func dismissKnownDockUIOnce()', 1)[1].split('func sourceIdentityDiagnostic(', 1)[0]
+        self.assertEqual(setup.count('.post(tap:'), 2)
+        self.assertEqual(swift.count('.post(tap:'), 2)
+        self.assertIn('AXIsProcessTrusted()', setup)
+        self.assertIn('guard !setupEscapeConsidered', setup)
+        self.assertIn('environment["GITHUB_ACTIONS"] == "true"', setup)
+        self.assertIn('environment["RUNNER_ENVIRONMENT"] == "github-hosted"', setup)
+        self.assertIn('cases.isEmpty, index == 0, operation == nil', setup)
+        self.assertIn('try verifySourceVisible()', setup)
+        self.assertIn('"/System/Library/CoreServices/Dock.app/Contents/MacOS/Dock"', setup)
+        self.assertIn('NSWorkspace.shared.frontmostApplication?.processIdentifier == target.pid', setup)
+        self.assertIn('defer { up.post(tap: .cghidEventTap) }', setup)
         self.assertIn('verifyPixels(image', swift)
         self.assertIn('owned-source-cleanup-or-cursor-restore-failed', swift)
 

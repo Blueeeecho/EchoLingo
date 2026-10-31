@@ -248,20 +248,6 @@ jobs:
           $output | Out-File "$env:RUNNER_TEMP/echolingo-screenshot-window.log" -Encoding utf8
           $output | Write-Output
           exit $fixtureExit
-      - name: Windows actual F1 editor image clipboard and safe PNG export
-        id: windows_screenshot_editor
-        if: runner.os == 'Windows'
-        continue-on-error: true
-        timeout-minutes: 8
-        shell: powershell
-        run: |
-          $ErrorActionPreference = 'Continue'
-          $global:LASTEXITCODE = 1
-          $output = @(& powershell.exe -NoProfile -STA -ExecutionPolicy Bypass -File tests/windows-application-smoke.ps1 -ApplicationPath src-tauri/target/release/echolingo.exe -ScreenshotEditorTests -DefaultCapture -NativeCapturePath '${{ steps.windows_native_candidate.outputs.capturePath }}' 2>&1)
-          $fixtureExit = $LASTEXITCODE
-          $output | Out-File "$env:RUNNER_TEMP/echolingo-screenshot-editor.log" -Encoding utf8
-          $output | Write-Output
-          exit $fixtureExit
       - name: Verify generated Windows launcher boundaries and same-DLL performance
         if: runner.os == 'Windows'
         timeout-minutes: 4
@@ -585,6 +571,20 @@ jobs:
           $ticketOutput | Write-Output
           [ordered]@{ selectionBudgetExit = $budgetExit; selectionQueryExit = $queryExit; copyTicketExit = $ticketExit; expectedBudgetCases = 8 } | ConvertTo-Json -Compress
           if ($budgetExit -ne 0 -or $queryExit -ne 0 -or $ticketExit -ne 0) { throw 'Windows selection internal regressions failed or were incomplete.' }
+      - name: Windows actual F1 editor image clipboard and safe PNG export
+        id: windows_screenshot_editor
+        if: runner.os == 'Windows'
+        continue-on-error: true
+        timeout-minutes: 8
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Continue'
+          $global:LASTEXITCODE = 1
+          $output = @(& powershell.exe -NoProfile -STA -ExecutionPolicy Bypass -File tests/windows-application-smoke.ps1 -ApplicationPath src-tauri/target/release/echolingo.exe -ScreenshotEditorTests -DefaultCapture -NativeCapturePath '${{ steps.windows_native_candidate.outputs.capturePath }}' 2>&1)
+          $fixtureExit = $LASTEXITCODE
+          $output | Out-File "$env:RUNNER_TEMP/echolingo-screenshot-editor.log" -Encoding utf8
+          $output | Write-Output
+          exit $fixtureExit
       - name: Windows installed NSIS real offline-model acceptance
         id: windows_installed_offline
         if: runner.os == 'Windows'
