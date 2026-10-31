@@ -199,6 +199,17 @@ try {
       assert.deepEqual(raster, finalAnnotations, collection + ' contains the same flattened annotations/crop/mask');
     }
 
+    // A pending draft on an otherwise saved image is still unsaved work.
+    await page.locator('[data-tool="text"]').click(); await clickImage(100, 30);
+    await page.locator('#annotation-text').fill('尚未提交的备注');
+    assert.equal(await page.locator('#save-indicator').textContent(), '未保存');
+    await page.locator('#close-editor').click();
+    assert.equal(await page.locator('#discard-dialog').isVisible(), true);
+    await page.locator('#discard-cancel').click();
+    assert.equal(await page.locator('#annotation-text').inputValue(), '尚未提交的备注');
+    await page.locator('#cancel-text').click();
+    assert.equal(await page.locator('#save-indicator').textContent(), '已保存');
+
     // Mosaic modifies actual pixels; solid masks replace RGB and alpha fully.
     await fresh(); await drag('mosaic', [8, 8], [24, 24]);
     const mosaicked = await pixels(), at = (image, x, y) => image.data.slice((y * image.width + x) * 4, (y * image.width + x) * 4 + 4);

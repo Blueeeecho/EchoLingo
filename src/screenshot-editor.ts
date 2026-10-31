@@ -27,7 +27,7 @@ let overlayFocus: { generation: number; promise: Promise<void> } | null = null;
 let zoom = 1, fit = true, composing = false, imeEscape = false, textPoint: Point | null = null;
 let gesture: { start: Point; end: Point; pointerId: number } | null = null;
 let discardResolve: ((value: boolean) => void) | null = null;
-const dirty = () => model !== null && savedState !== model.stateId;
+const dirty = () => model !== null && (savedState !== model.stateId || (textOpen() && !!textInput.value.trim() && (editingIndex === null || model.operations[editingIndex]?.kind === 'text' && textInput.value !== (model.operations[editingIndex] as Extract<EditOperation, { kind: 'text' }>).text)));
 function status(message: string, error = false): void { $('#editor-status').textContent = message; $('#editor-status').dataset.error = String(error); placeOverlayTools(); }
 function readableError(error: unknown): string { return error instanceof Error ? error.message : String(error); }
 function controls(): void {
@@ -120,7 +120,7 @@ function clearGesture(): void {
   if (gesture && canvas.hasPointerCapture(gesture.pointerId)) canvas.releasePointerCapture(gesture.pointerId);
   gesture = null; $('#gesture-rect').setAttribute('visibility', 'hidden'); $('#gesture-line').setAttribute('visibility', 'hidden');
 }
-function cancelText(): void { textDialog.hidden = true; textInput.value = ''; textPoint = null; editingIndex = null; composing = false; imeEscape = false; }
+function cancelText(): void { textDialog.hidden = true; textInput.value = ''; textPoint = null; editingIndex = null; composing = false; imeEscape = false; controls(); }
 function annotationBounds(op: EditOperation): OverlayRect {
   if (op.kind !== 'text') return operationBounds(op);
   const ctx = canvas.getContext('2d')!; ctx.save(); ctx.font = screenshotTextFont(op.size);
@@ -154,7 +154,12 @@ function placeTextEditor(): void {
   if (!textOpen() || !textPoint || !model) return;
   const r = canvas.getBoundingClientRect(), offset = editingIndex === null ? { x: 0, y: 0 } : model.operationOffset(editingIndex);
   const monitor = overlayToolBounds(innerWidth, innerHeight, session?.overlay?.toolbarBounds);
-  textDialog.style.maxWidth = `${Math.max(80, monitor.width - 16)}px`;
+  textDialog.style.maxWidth = `${Math.max(1, monitor.width - 16)}px`;
+  textDialog.style.maxHeight = `${Math.max(1, monitor.height - 16)}px`;
+  const displaySize = Number($<HTMLSelectElement>('#edit-font-size').value) * r.width / model.size.width;
+  textInput.style.font = screenshotTextFont(Math.max(8, displaySize));
+  textInput.style.color = $<HTMLInputElement>('#edit-color').value;
+  textInput.style.backgroundColor = $<HTMLSelectElement>('#note-style').value || 'var(--surface)';
   const box = clampOverlayBox(r.x + (textPoint.x - offset.x) * r.width / model.size.width,
     r.y + (textPoint.y - offset.y) * r.height / model.size.height, textDialog.offsetWidth, textDialog.offsetHeight,
     { x: monitor.x + 8, y: monitor.y + 8, width: Math.max(1, monitor.width - 16), height: Math.max(1, monitor.height - 16) });
@@ -172,7 +177,7 @@ function beginText(p: Point, index: number | null = null): void {
     $<HTMLSelectElement>('#note-style').value = op.background ?? '';
   }
   $('#text-count').textContent = `${textInput.value.length} / 2000`;
-  textDialog.hidden = false; placeTextEditor(); textInput.focus();
+  textDialog.hidden = false; placeTextEditor(); controls(); textInput.focus();
 }
 function commitText(): boolean {
   if (!textOpen()) return true;
@@ -352,7 +357,7 @@ $('#delete-edit').addEventListener('click', () => {
 });
 for (const button of document.querySelectorAll<HTMLButtonElement>('.editor-toolbar button[data-tool]')) button.addEventListener('click', () => chooseTool(button.dataset.tool as Tool));
 textInput.addEventListener('compositionstart', () => { composing = true; }); textInput.addEventListener('compositionend', () => { composing = false; });
-textInput.addEventListener('input', () => { $('#text-count').textContent = `${textInput.value.length} / 2000`; placeTextEditor(); });
+textInput.addEventListener('input', () => { $('#text-count').textContent = `${textInput.value.length} / 2000`; controls(); placeTextEditor(); });
 $('#text-form').addEventListener('submit', event => { event.preventDefault(); if (commitText()) canvas.focus(); });
 textInput.addEventListener('keydown', event => {
   if (event.isComposing || event.keyCode === 229 || composing) { if (event.key === 'Escape') imeEscape = true; return; }
@@ -362,8 +367,8 @@ textInput.addEventListener('keydown', event => {
 $('#cancel-text').addEventListener('click', () => { if (!composing) { cancelText(); canvas.focus(); } });
 $('#discard-cancel').addEventListener('click', () => resolveDiscard(false)); $('#discard-confirm').addEventListener('click', () => resolveDiscard(true));
 discardDialog.addEventListener('cancel', event => { event.preventDefault(); resolveDiscard(false); });
-$('#undo-edit').addEventListener('click', () => { if (!busy && !textOpen() && model?.undo()) { selectedIndex = null; cancelPointer(); if (render()) status('已撤销。'); } });
-$('#redo-edit').addEventListener('click', () => { if (!busy && !textOpen() && model?.redo()) { selectedIndex = null; cancelPointer(); if (render()) status('已重做。'); } });
+$('#undo-edit').addEventListener('click', () => { if (!busy && commitText() && model?.undo()) { selectedIndex = null; cancelPointer(); if (render()) status('已撤销。'); } });
+$('#redo-edit').addEventListener('click', () => { if (!busy && commitText() && model?.redo()) { selectedIndex = null; cancelPointer(); if (render()) status('已重做。'); } });
 function changeZoom(value: number): void { fit = false; zoom = Math.max(0.05, Math.min(4, value)); applyZoom(); }
 $('#zoom-in').addEventListener('click', () => changeZoom(zoom * 1.25)); $('#zoom-out').addEventListener('click', () => changeZoom(zoom / 1.25));
 $('#zoom-actual').addEventListener('click', () => changeZoom(1)); $('#zoom-fit').addEventListener('click', () => { fit = true; applyZoom(); });
@@ -371,6 +376,7 @@ new ResizeObserver(() => { if (fit || inplace()) applyZoom(); }).observe(workspa
 new ResizeObserver(placeOverlayTools).observe($('.editor-toolbar'));
 new ResizeObserver(placeTextEditor).observe(textDialog);
 window.addEventListener('resize', placeTextEditor);
+for (const selector of ['#edit-font-size', '#edit-color', '#note-style']) $(selector).addEventListener('input', placeTextEditor);
 async function exportImage(action: 'copy' | 'save' | 'saveAs' | 'pin'): Promise<void> {
   if (action === 'saveAs' && inplace()) {
     status('原地截图使用设置中的保存目录；请在设置修改目录'); return;
