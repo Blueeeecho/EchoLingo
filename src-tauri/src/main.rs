@@ -3660,7 +3660,9 @@ fn main() {
                 api.prevent_close();
                 let _ = window.emit("screenshot-close-requested", ());
             }
-            tauri::WindowEvent::CloseRequested { .. } if screenshot_pins::is_pin(window.label()) => {
+            tauri::WindowEvent::CloseRequested { .. }
+                if screenshot_pins::is_pin(window.label()) =>
+            {
                 // Reference windows close independently; never hide/cancel the translator.
             }
             tauri::WindowEvent::Destroyed if screenshot_pins::is_pin(window.label()) => {

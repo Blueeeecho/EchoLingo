@@ -261,7 +261,12 @@ fn position_reference(
     Ok(())
 }
 pub fn destroyed(app: &tauri::AppHandle, label: &str) {
-    if let Ok(mut entries) = app.state::<super::AppState>().screenshot_pins.entries.lock() {
+    if let Ok(mut entries) = app
+        .state::<super::AppState>()
+        .screenshot_pins
+        .entries
+        .lock()
+    {
         if let Some(mut entry) = entries.remove(label) {
             if let Some(reply) = entry.ready.take() {
                 let _ = reply.send(Err(CLOSED.into()));
@@ -355,7 +360,9 @@ pub async fn pin_screenshot_image(
             .state::<super::AppState>()
             .screenshots
             .pin_source_geometry(session_id)?;
-        let editor = handle.get_webview_window("screenshot-editor").ok_or(CLOSED)?;
+        let editor = handle
+            .get_webview_window("screenshot-editor")
+            .ok_or(CLOSED)?;
         // Do not hold registry/image locks while constructing a WebView.
         // Keep it hidden until the actual source monitor/usable frame is applied.
         let window = tauri::WebviewWindowBuilder::new(
@@ -528,7 +535,13 @@ mod tests {
         };
         assert_eq!(capture_monitor(capture, &monitors), Some(1));
         assert_eq!(
-            capture_monitor(Rect { x: 8000.0, ..capture }, &monitors),
+            capture_monitor(
+                Rect {
+                    x: 8000.0,
+                    ..capture
+                },
+                &monitors
+            ),
             None,
         );
     }
@@ -563,7 +576,9 @@ mod tests {
         let frame = placement(area, None, (1600, 1000), 2.0, 2.0, decoration).unwrap();
         assert_inside(frame, area, decoration);
         assert!(frame.width <= 1440.0);
-        assert!((frame.x - (area.x + (area.width - frame.width - decoration.0) / 2.0)).abs() < 0.001);
+        assert!(
+            (frame.x - (area.x + (area.width - frame.width - decoration.0) / 2.0)).abs() < 0.001
+        );
         // Mac capture coordinates remain logical points even for a Retina bitmap.
         let mac_area = Rect {
             x: -1920.0,
@@ -588,13 +603,17 @@ mod tests {
         assert_inside(frame, area, decoration);
         assert!(frame.width < 200.0 && frame.height < 120.0);
         assert!(placement(
-            Rect { height: 20.0, ..area },
+            Rect {
+                height: 20.0,
+                ..area
+            },
             None,
             (80, 40),
             1.0,
             1.0,
             decoration,
-        ).is_err());
+        )
+        .is_err());
     }
     #[test]
     fn pin_exact_fit_rounding_never_inverts_clamp_bounds() {
