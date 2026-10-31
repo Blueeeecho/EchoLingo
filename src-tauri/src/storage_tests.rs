@@ -64,18 +64,58 @@ fn json_create_and_replace_preserve_unicode_and_remove_temporary_file() {
 }
 
 #[test]
-fn json_temporary_file_failure_keeps_original_bytes() {
+fn json_failed_replacement_keeps_destination_and_cleans_temporary_file() {
     let fixture = StorageFixture::new();
     let path = fixture.file();
-    let original = b"{\"fixture\":\"original data, never a user record\"}\n";
-    fs::write(&path, original).unwrap();
-    // A directory at the temporary-file name reliably prevents opening it on
-    // both platforms, including elevated test accounts that ignore chmod.
-    let blocked = path.with_extension("json.tmp");
-    fs::create_dir(&blocked).unwrap();
+    fs::create_dir(&path).unwrap();
+    let original = path.join("original");
+    fs::write(&original, b"preserved").unwrap();
     assert!(write_json(&path, &serde_json::json!({"fixture": "replacement"})).is_err());
-    assert_eq!(fs::read(&path).unwrap(), original);
-    assert!(blocked.is_dir());
+    assert_eq!(fs::read(&original).unwrap(), b"preserved");
+    assert_eq!(fs::read_dir(&fixture.0).unwrap().count(), 1);
+}
+
+#[cfg(unix)]
+#[test]
+fn json_write_never_follows_a_legacy_temporary_symlink() {
+    let fixture = StorageFixture::new();
+    let path = fixture.file();
+    let victim = fixture.0.join("unrelated.txt");
+    fs::write(&victim, b"must not truncate").unwrap();
+    std::os::unix::fs::symlink(&victim, path.with_extension("json.tmp")).unwrap();
+    write_json(&path, &serde_json::json!({"saved": true})).unwrap();
+    assert_eq!(fs::read(&victim).unwrap(), b"must not truncate");
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(&fs::read(path).unwrap()).unwrap(),
+        serde_json::json!({"saved": true})
+    );
+}
+
+#[test]
+fn json_concurrent_replacements_are_complete_and_do_not_share_temporary_files() {
+    let fixture = StorageFixture::new();
+    let path = fixture.file();
+    let barrier = std::sync::Arc::new(std::sync::Barrier::new(8));
+    std::thread::scope(|scope| {
+        for writer in 0..8 {
+            let path = &path;
+            let barrier = barrier.clone();
+            scope.spawn(move || {
+                barrier.wait();
+                for _ in 0..8 {
+                    write_json(
+                        path,
+                        &serde_json::json!({"writer": writer, "text": "x".repeat(65536)}),
+                    )
+                    .unwrap();
+                    let value: serde_json::Value =
+                        serde_json::from_slice(&fs::read(path).unwrap()).unwrap();
+                    assert_eq!(value["text"].as_str().unwrap().len(), 65536);
+                }
+            });
+        }
+    });
+    assert_eq!(fs::read_dir(&fixture.0).unwrap().count(), 1);
 }
 
 #[test]

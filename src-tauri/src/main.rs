@@ -378,20 +378,36 @@ fn locked<T>(m: &Mutex<T>) -> Result<std::sync::MutexGuard<'_, T>, String> {
         .map_err(|_| "内部状态锁异常，请重新启动应用".into())
 }
 fn write_json(path: &Path, value: &impl Serialize) -> Result<(), String> {
-    let tmp = path.with_extension("json.tmp");
     let bytes = serde_json::to_vec_pretty(value).map_err(|_| "无法序列化设置")?;
-    let mut file = fs::OpenOptions::new()
-        .write(true)
-        .create(true)
-        .truncate(true)
-        .open(&tmp)
-        .map_err(|_| "无法写入本地数据目录")?;
+    // A shared truncate-open .json.tmp can corrupt overlapping writes and
+    // follows a pre-existing symlink. Each invocation exclusively creates its
+    // own same-directory file, with private permissions from the first open.
+    let mut nonce = [0_u8; 16];
+    getrandom::fill(&mut nonce).map_err(|_| "无法创建本地临时文件")?;
+    let suffix: String = nonce.iter().map(|byte| format!("{byte:02x}")).collect();
+    let mut name = path.file_name().ok_or("无效本地数据路径")?.to_os_string();
+    name.push(format!(".{suffix}.tmp"));
+    let tmp = path.with_file_name(name);
+    let mut options = fs::OpenOptions::new();
+    options.write(true).create_new(true);
     #[cfg(unix)]
     {
-        use std::os::unix::fs::PermissionsExt;
-        file.set_permissions(fs::Permissions::from_mode(0o600))
-            .map_err(|_| "无法设置数据文件权限")?;
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
     }
+    let file = options
+        .open(&tmp)
+        .map_err(|_| "无法写入本地数据目录")?;
+    struct TemporaryFile(PathBuf);
+    impl Drop for TemporaryFile {
+        fn drop(&mut self) {
+            let _ = fs::remove_file(&self.0);
+        }
+    }
+    // Declared before the file binding below so Windows closes the handle
+    // before cleanup on an early write/sync error.
+    let _temporary = TemporaryFile(tmp.clone());
+    let mut file = file;
     use std::io::Write;
     file.write_all(&bytes).map_err(|_| "无法写入本地数据")?;
     file.sync_all().map_err(|_| "无法同步本地数据")?;
@@ -5317,7 +5333,9 @@ mod tests {
         let settings_before = fs::read(&settings_path).unwrap();
         let history_before = fs::read(&history_path).unwrap();
         // A directory reliably blocks the history replacement on both platforms.
-        fs::create_dir(history_path.with_extension("json.tmp")).unwrap();
+        let preserved_history = directory.join("preserved-history.json");
+        fs::rename(&history_path, &preserved_history).unwrap();
+        fs::create_dir(&history_path).unwrap();
         let mut changed = current.clone();
         changed.max_history = 1;
         assert!(
@@ -5326,7 +5344,7 @@ mod tests {
         assert_eq!(current.max_history, 20);
         assert_eq!(history.len(), 3);
         assert_eq!(fs::read(&settings_path).unwrap(), settings_before);
-        assert_eq!(fs::read(&history_path).unwrap(), history_before);
+        assert_eq!(fs::read(&preserved_history).unwrap(), history_before);
         fs::remove_dir_all(directory).unwrap();
     }
     #[test]
