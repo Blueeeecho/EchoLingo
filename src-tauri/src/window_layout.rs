@@ -2769,8 +2769,14 @@ mod tests {
         assert_eq!(anchored_popup_height(available, area, 2.0, 300.0), 300.0);
         // A moved/detached screen or fewer than 160 points below the anchor
         // must fall back to normal placement, never create an unreadable box.
-        assert_eq!(anchored_popup_height(available, area, 2.0, 700.0), available);
-        assert_eq!(anchored_popup_height(available, area, 2.0, -901.0), available);
+        assert_eq!(
+            anchored_popup_height(available, area, 2.0, 700.0),
+            available
+        );
+        assert_eq!(
+            anchored_popup_height(available, area, 2.0, -901.0),
+            available
+        );
         let tiny = Bounds {
             x: 0.0,
             y: 0.0,
