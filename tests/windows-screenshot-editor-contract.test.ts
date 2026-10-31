@@ -79,7 +79,7 @@ describe('actual Windows screenshot fixture source wiring (not native acceptance
     for (const required of ['titleMatchesExpected', 'ownerIsEditor', 'foregroundMatches', 'numericAutomationId', 'nativeControlId', 'ControlType.Edit', 'ControlType.ComboBox', 'depth<4', 'i<32', 'ScreenshotNativeOpenObservations.Count>=2']) expect(describe).toContain(required);
     for (const forbidden of ['.Current.Name', '.Current.Value', '.SetValue(', '.Invoke()', 'Send(', '.SetFocus(']) expect(describe).not.toContain(forbidden);
     expect(fixture).toContain('catch{ScreenshotDescribeOpenDialog(app,editor,modal,format);throw;}');
-    expect(fixture).toContain('AutomationElement.AutomationIdProperty,"1001"');
+    expect(fixture).toContain('AutomationElement.AutomationIdProperty,"1148"');
   });
   it('waits for an owned initialized native Cancel target before one Escape and preserves its phases', () => {
     const cancellation = fixture.slice(fixture.indexOf('static Dictionary<string,object> ScreenshotCancelState('), fixture.indexOf('static Dictionary<string,object> ScreenshotOpenControlMetadata('));
@@ -89,6 +89,27 @@ describe('actual Windows screenshot fixture source wiring (not native acceptance
     expect(cancellation).not.toContain('.SetFocus(');
     expect(cancellation).not.toContain('Thread.Sleep');
     expect(cancellation.match(/},10,/g)).toHaveLength(2);
+  });
+  it('selects only the observed native filename1148 Edit/ComboBox/ComboBoxEx32 chain', () => {
+    const selector = fixture.slice(fixture.indexOf('static bool ScreenshotOwnOpenDialog('), fixture.indexOf('static bool ScreenshotPixelsEqual('));
+    for (const required of ['node.Current.AutomationId!="1148"', 'GetDlgCtrlID(window)==1148', 'GetAncestor(window,2)==modal', 'ControlType.Edit,"Edit"', 'ControlType.ComboBox,"ComboBox"', 'ControlType.Pane,"ComboBoxEx32"', 'Automation.Compare(parent,root)', 'ScreenshotOwnOpenDialog(app,editor,modal)', 'Assert(edits.Count<=1', 'edit.Current.HasKeyboardFocus']) expect(selector).toContain(required);
+    expect(selector).not.toContain('AutomationIdProperty,"1001"');
+    expect(selector.match(/\.SetValue\(path\)/g)).toHaveLength(1);
+    expect(selector.match(/Send\(new INPUT/g)).toHaveLength(1);
+    expect(selector).not.toContain('ControlType.Edit),Condition.TrueCondition');
+  });
+  it('executes the actual filename-node identity predicates against observed and unrelated edits', () => {
+    const nodeCode = fixture.slice(fixture.indexOf('static bool ScreenshotFilenameNode('), fixture.indexOf('static bool ScreenshotFilenameChain('));
+    const rejected = nodeCode.match(/if\(([^;]+)\)return false;/)?.[1];
+    const native = nodeCode.match(/return (window!=[^;]+);/)?.[1];
+    expect(rejected).toBeDefined(); expect(native).toBeDefined();
+    const identity = new Function('node', 'type', 'className', 'process', `return !(${rejected});`);
+    const nativeIdentity = new Function('window', 'pid', 'process', 'modal', 'GetDlgCtrlID', 'GetAncestor', 'IntPtr', `return ${native};`);
+    const current = { ProcessId: 42, ControlType: 50004, ClassName: 'Edit', AutomationId: '1148', IsEnabled: true, IsOffscreen: false };
+    expect(identity({ Current: current }, 50004, 'Edit', 42)).toBe(true);
+    for (const patch of [{ AutomationId: '1001' }, { AutomationId: '' }, { ControlType: 50003 }, { ClassName: 'ComboBox' }, { ProcessId: 43 }, { IsEnabled: false }, { IsOffscreen: true }]) expect(identity({ Current: { ...current, ...patch } }, 50004, 'Edit', 42)).toBe(false);
+    expect(nativeIdentity(101, 42, 42, 100, () => 1148, () => 100, { Zero: 0 })).toBe(true);
+    for (const [window, pid, id, root] of [[0, 42, 1148, 100], [101, 43, 1148, 100], [101, 42, 1001, 100], [101, 42, 1148, 999]]) expect(nativeIdentity(window, pid, 42, 100, () => id, () => root, { Zero: 0 })).toBe(false);
   });
   it('refuses ambiguous accessibility names and releases an owned edit gesture promptly', () => {
     expect(fixture).toContain('Assert(matches.Count<=1');

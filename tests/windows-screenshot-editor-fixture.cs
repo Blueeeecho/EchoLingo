@@ -219,18 +219,37 @@ public static partial class EchoLingoApplicationSmoke {
             observation["visibleEditCount"]=visibleEdits;observation["matching1001Count"]=matching1001;observation["matching1001VisibleEnabledCount"]=matching1001VisibleEnabled;
         }catch(Exception error){observation["diagnosticExceptionHresult"]=error.HResult;}
     }
+    static bool ScreenshotOwnOpenDialog(Process app,IntPtr editor,IntPtr modal) {
+        uint pid,editorPid;GetWindowThreadProcessId(modal,out pid);GetWindowThreadProcessId(editor,out editorPid);StringBuilder name=new StringBuilder(128),title=new StringBuilder(128);GetClassName(modal,name,name.Capacity);GetWindowText(modal,title,title.Capacity);
+        return modal!=IntPtr.Zero&&pid==app.Id&&editorPid==app.Id&&name.ToString()=="#32770"&&title.ToString()=="\u6253\u5f00\u672c\u5730 PNG / JPEG \u56fe\u7247"&&GetWindow(modal,4)==editor&&GetForegroundWindow()==modal&&IsWindowVisible(modal)&&IsWindowEnabled(modal)&&!IsWindowEnabled(editor);
+    }
+    static bool ScreenshotFilenameNode(AutomationElement node,ControlType type,string className,int process,IntPtr modal) {
+        if(node==null||node.Current.ProcessId!=process||node.Current.ControlType!=type||node.Current.ClassName!=className||node.Current.AutomationId!="1148"||!node.Current.IsEnabled||node.Current.IsOffscreen)return false;
+        IntPtr window=new IntPtr(node.Current.NativeWindowHandle);uint pid;GetWindowThreadProcessId(window,out pid);
+        return window!=IntPtr.Zero&&pid==process&&GetDlgCtrlID(window)==1148&&GetAncestor(window,2)==modal;
+    }
+    static bool ScreenshotFilenameChain(AutomationElement edit,AutomationElement root,int process,IntPtr modal) {
+        // Observed on the same immutable app/runtime in focused run41175312570:
+        // Edit1148 -> ComboBox1148 -> ComboBoxEx32/Pane1148 -> exact modal root.
+        // Address/search/detail edits in that dialog do not satisfy this chain.
+        if(!ScreenshotFilenameNode(edit,ControlType.Edit,"Edit",process,modal))return false;
+        AutomationElement combo=TreeWalker.RawViewWalker.GetParent(edit);if(!ScreenshotFilenameNode(combo,ControlType.ComboBox,"ComboBox",process,modal))return false;
+        AutomationElement host=TreeWalker.RawViewWalker.GetParent(combo);if(!ScreenshotFilenameNode(host,ControlType.Pane,"ComboBoxEx32",process,modal))return false;
+        AutomationElement parent=TreeWalker.RawViewWalker.GetParent(host);return parent!=null&&Automation.Compare(parent,root);
+    }
     static Dictionary<string,object> ScreenshotOpenGenerated(Process app,IntPtr editor,string path,string format,Bitmap expected,string output) {
         Assert(File.Exists(path)&&(File.GetAttributes(path)&FileAttributes.ReparsePoint)==0,"Generated image input is missing or redirected.");
         byte[] original=File.ReadAllBytes(path);Assert(original.Length>0&&original.Length<65536,"Generated image input exceeds its fixture bound.");
         ScreenshotInvoke(app,editor,"\u6253\u5f00\u56fe\u7247");IntPtr modal=IntPtr.Zero;
         WaitFor(delegate{modal=GetForegroundWindow();StringBuilder name=new StringBuilder(128);GetClassName(modal,name,name.Capacity);return modal!=editor&&ForegroundPid()==app.Id&&name.ToString()=="#32770";},10,"Generated file Open did not show an owned native dialog.",app);
         AutomationElement edit=null;
-        try{WaitFor(delegate{AutomationElementCollection edits=AutomationElement.FromHandle(modal).FindAll(TreeScope.Descendants,new AndCondition(new PropertyCondition(AutomationElement.ControlTypeProperty,ControlType.Edit),new PropertyCondition(AutomationElement.AutomationIdProperty,"1001")));
-            Assert(edits.Count<=1,"Native Open file-name Edit is ambiguous; no blind input was sent.");if(edits.Count==0)return false;edit=edits[0];return edit.Current.IsEnabled&&!edit.Current.IsOffscreen;},10,"Native Open needs one verified file-name Edit (AutomationId 1001); no blind input was sent.",app);}
+        try{WaitFor(delegate{if(!ScreenshotOwnOpenDialog(app,editor,modal))return false;AutomationElement root=AutomationElement.FromHandle(modal);AutomationElementCollection edits=root.FindAll(TreeScope.Descendants,new AndCondition(new PropertyCondition(AutomationElement.ControlTypeProperty,ControlType.Edit),new PropertyCondition(AutomationElement.AutomationIdProperty,"1148")));
+            Assert(edits.Count<=1,"Native Open file-name Edit is ambiguous; no blind input was sent.");if(edits.Count==0)return false;edit=edits[0];return ScreenshotFilenameChain(edit,root,app.Id,modal);},10,"Native Open needs the observed unique Edit/ComboBox/ComboBoxEx32 1148 chain; no blind input was sent.",app);}
         catch{ScreenshotDescribeOpenDialog(app,editor,modal,format);throw;}
         Assert(edit.Current.ProcessId==app.Id,"Native file-name Edit belongs to another process.");object raw;Assert(edit.TryGetCurrentPattern(ValuePattern.Pattern,out raw)&&!((ValuePattern)raw).Current.IsReadOnly,"Native file-name Edit is not writable.");
+        Assert(ScreenshotOwnOpenDialog(app,editor,modal)&&ScreenshotFilenameChain(edit,AutomationElement.FromHandle(modal),app.Id,modal),"Native Open target identity changed before writing the generated path.");
         ((ValuePattern)raw).SetValue(path);edit.SetFocus();
-        Assert(GetForegroundWindow()==modal&&ForegroundPid()==app.Id,"Native Open lost focus before submitting the generated path; no key sent.");Send(new INPUT[]{Key(0x0D,false),Key(0x0D,true)});
+        Assert(ScreenshotOwnOpenDialog(app,editor,modal)&&edit.Current.HasKeyboardFocus,"Native Open lost focus before submitting the generated path; no key sent.");Send(new INPUT[]{Key(0x0D,false),Key(0x0D,true)});
         WaitFor(delegate{AutomationElement copy=ScreenshotButton(editor,"\u590d\u5236");return !IsWindowVisible(modal)&&IsWindowVisible(editor)&&copy!=null&&copy.Current.IsEnabled&&Element(editor,expected.Width+" \u00d7 "+expected.Height+" px")!=null;},15,"Successful native Open did not install the generated local image session.",app);
         using(Bitmap copied=ScreenshotClipboard(app,editor,expected.Size,delegate(Bitmap actual){return ScreenshotPixelsEqual(actual,expected);},"local-"+format)) {
             for(int y=0;y<expected.Height;y++)for(int x=0;x<expected.Width;x++)Assert(copied.GetPixel(x,y).ToArgb()==expected.GetPixel(x,y).ToArgb(),"Native local image Open changed generated decoded pixels.");
