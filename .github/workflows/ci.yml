@@ -68,6 +68,7 @@ jobs:
           persist-credentials: false
       - uses: dtolnay/rust-toolchain@stable
       - name: Link the actual isolated child without Tauri or offline engine
+        id: native_candidate_build
         shell: pwsh
         run: |
           cargo build --manifest-path src-tauri/native-capture/Cargo.toml --release --locked --target-dir "$env:RUNNER_TEMP/native-capture-candidate"
@@ -82,6 +83,27 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           powershell -NoLogo -NoProfile -NonInteractive -STA -ExecutionPolicy Bypass -File tests/windows-native-capture-smoke.ps1 -NativeCapturePath "$env:RUNNER_TEMP/native-capture-candidate/release/echolingo-native-capture.exe" -HarnessPath "$env:RUNNER_TEMP/native-capture-harness.exe" -IsolatedTestSession
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Verify isolated F1 window selection with exact production input
+        if: ${{ !cancelled() && steps.native_candidate_build.outcome == 'success' }}
+        shell: pwsh
+        run: |
+          rustc --edition=2021 tests/windows-native-capture-harness.rs -O -o "$env:RUNNER_TEMP/screenshot-window-harness.exe"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $global:LASTEXITCODE = 1
+          $output = @(& powershell -NoLogo -NoProfile -NonInteractive -STA -ExecutionPolicy Bypass -File tests/windows-screenshot-window-smoke.ps1 -NativeCapturePath "$env:RUNNER_TEMP/native-capture-candidate/release/echolingo-native-capture.exe" -HarnessPath "$env:RUNNER_TEMP/screenshot-window-harness.exe" -IsolatedTestSession 2>&1)
+          $fixtureExit = $LASTEXITCODE
+          $output | Out-File "$env:RUNNER_TEMP/isolated-screenshot-window.log" -Encoding utf8
+          $output | Write-Output
+          python scripts/verify-screenshot-window-report.py "$env:RUNNER_TEMP/isolated-screenshot-window.log"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          if ($fixtureExit -ne 0) { exit $fixtureExit }
+      - name: Preserve isolated F1 selector evidence including failures
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: isolated-screenshot-window-evidence
+          path: ${{ runner.temp }}/isolated-screenshot-window.log
+          if-no-files-found: warn
       - name: Verify same-integrity topmost and modal capture pages
         shell: pwsh
         run: powershell -NoLogo -NoProfile -NonInteractive -STA -ExecutionPolicy Bypass -File tests/windows-capture-upper-window-smoke.ps1 -NativeCapturePath "$env:RUNNER_TEMP/native-capture-candidate/release/echolingo-native-capture.exe" -HarnessPath "$env:RUNNER_TEMP/native-capture-harness.exe" -IsolatedTestSession
@@ -265,11 +287,11 @@ jobs:
           $text = $output -join "`n"
           if ($text -notmatch 'test result: ok\. 12 passed; 0 failed; 0 ignored' -or $text -notmatch 'native_generated_image_repeated_recognition_and_empty_semantics \.\.\. ok') { throw 'NATIVE_OCR_GATE: Expected all 12 Windows tests and real generated-image OCR to execute without skip.' }
       - name: Rust tests
-        run: cargo test --manifest-path src-tauri/Cargo.toml
+        run: cargo test --manifest-path src-tauri/Cargo.toml --locked
       - name: Rust formatting
         run: cargo fmt --manifest-path src-tauri/Cargo.toml --check
       - name: Build desktop installer
-        run: npm run tauri build -- --bundles ${{ runner.os == 'Windows' && 'nsis' || 'dmg' }}
+        run: npm run tauri build -- --bundles ${{ runner.os == 'Windows' && 'nsis' || 'dmg' }} -- --locked
       - name: Identify the actual embedded precompiled Windows helper
         id: windows_native_candidate
         if: runner.os == 'Windows'
@@ -323,6 +345,23 @@ jobs:
           $output = @(& powershell.exe -NoProfile -STA -ExecutionPolicy Bypass -File tests/windows-native-capture-smoke.ps1 -NativeCapturePath '${{ steps.windows_native_candidate.outputs.capturePath }}' -HarnessPath "$env:RUNNER_TEMP/echolingo-native-capture-harness.exe" -IsolatedTestSession 2>&1)
           $fixtureExit = $LASTEXITCODE
           $output | Out-File "$env:RUNNER_TEMP/echolingo-native-capture-continuity.log" -Encoding utf8
+          $output | Write-Output
+          exit $fixtureExit
+      - name: Windows embedded F1 visible-window selector and cancellation
+        id: windows_screenshot_window
+        if: runner.os == 'Windows'
+        continue-on-error: true
+        timeout-minutes: 8
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          & rustc --edition=2021 tests/windows-native-capture-harness.rs -O -o "$env:RUNNER_TEMP/echolingo-screenshot-window-harness.exe"
+          if ($LASTEXITCODE -ne 0) { throw 'F1 native capture harness compilation failed.' }
+          $ErrorActionPreference = 'Continue'
+          $global:LASTEXITCODE = 1
+          $output = @(& powershell.exe -NoProfile -STA -ExecutionPolicy Bypass -File tests/windows-screenshot-window-smoke.ps1 -NativeCapturePath '${{ steps.windows_native_candidate.outputs.capturePath }}' -HarnessPath "$env:RUNNER_TEMP/echolingo-screenshot-window-harness.exe" -IsolatedTestSession 2>&1)
+          $fixtureExit = $LASTEXITCODE
+          $output | Out-File "$env:RUNNER_TEMP/echolingo-screenshot-window.log" -Encoding utf8
           $output | Write-Output
           exit $fixtureExit
       - name: Verify generated Windows launcher boundaries and same-DLL performance
@@ -668,6 +707,7 @@ jobs:
             ${{ runner.temp }}/echolingo-custom-shortcuts.log
             ${{ runner.temp }}/echolingo-native-delegated-capture.log
             ${{ runner.temp }}/echolingo-native-capture-continuity.log
+            ${{ runner.temp }}/echolingo-screenshot-window.log
             ${{ runner.temp }}/echolingo-helper-performance.log
             ${{ runner.temp }}/echolingo-popup-resize.log
             ${{ runner.temp }}/echolingo-selection-document.log
@@ -722,6 +762,7 @@ jobs:
             helperPerformance = '${{ steps.windows_helper_performance.outcome }}'
             delegatedCapture = '${{ steps.windows_delegated_capture.outcome }}'
             nativeCaptureContinuity = '${{ steps.windows_native_capture_continuity.outcome }}'
+            screenshotWindow = '${{ steps.windows_screenshot_window.outcome }}'
             selectionDocument = '${{ steps.windows_selection_document.outcome }}'
             selectionCompatibility = '${{ steps.windows_selection_compat.outcome }}'
             selectionNativeFocus = '${{ steps.windows_selection_native_focus.outcome }}'
@@ -736,6 +777,9 @@ jobs:
           $global:LASTEXITCODE = 1
           & python scripts/verify-native-capture-report.py "$env:RUNNER_TEMP/echolingo-native-capture-continuity.log"
           if ($LASTEXITCODE -ne 0) { throw 'Embedded native capture acceptance report is missing, incomplete or failed.' }
+          $global:LASTEXITCODE = 1
+          & python scripts/verify-screenshot-window-report.py "$env:RUNNER_TEMP/echolingo-screenshot-window.log"
+          if ($LASTEXITCODE -ne 0) { throw 'Embedded F1 selector acceptance report is missing, incomplete or failed.' }
           if (@($taskOutcomes.Values | Where-Object { $_ -ne 'success' }).Count -gt 0) {
             throw 'Windows desktop acceptance incomplete or failed; preview artifacts are not a passing release.'
           }

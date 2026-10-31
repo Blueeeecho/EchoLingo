@@ -32,6 +32,8 @@ with open(sys.argv[1], encoding="utf-8") as report_file:
 assert report.get("ok") is True, "Native self-test did not report success"
 checks = report.get("diagnostics", {})
 for required in (
+    "screenshotWindowPolicyFixturePassed",
+    "screenshotCancellationFixturePassed",
     "mixedSelectionRecoveryFixturePassed",
     "selectionFocusRecoveryFixturePassed",
     "selectionSourceAnchorFixturePassed",

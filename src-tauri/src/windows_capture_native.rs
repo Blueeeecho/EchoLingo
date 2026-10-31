@@ -23,6 +23,8 @@ const SRCCOPY: u32 = 0x00CC0020;
 const CAPTUREBLT: u32 = 0x40000000;
 const MAX_PIXELS: usize = 32_000_000;
 pub struct Request {
+    pub purpose: CapturePurpose,
+    pub owner_process: u32,
     pub host_thread: u32,
     pub host_token: i64,
     pub cancellation: String,
@@ -158,7 +160,7 @@ unsafe extern "system" fn window_proc(hwnd: w::H, msg: u32, wp: usize, lp: isize
             }
             return Some(0);
         }
-        if msg >= wire::READY_ACK && msg <= wire::PING_ACK {
+        if msg >= wire::READY_ACK && msg <= wire::DRAG_EXCURSION {
             node.inbox.push(Event::Wire(msg, wp, lp));
             return Some(0);
         }
@@ -916,7 +918,7 @@ fn wait_messages(milliseconds: u32) {
         w::MsgWaitForMultipleObjects(0, null(), 0, milliseconds, 0x04ff);
     }
 }
-fn hover(pointer: Point, own: &HashSet<isize>) -> Rect {
+fn hover_target(pointer: Point, own: &HashSet<isize>, owner: u32) -> Option<CaptureWindowTarget> {
     unsafe {
         let desktop = w::GetDesktopWindow();
         let hit = w::WindowFromPoint(w::Point {
@@ -933,7 +935,7 @@ fn hover(pointer: Point, own: &HashSet<isize>) -> Rect {
                     || w::IsWindow(root) == 0
                     || w::GetAncestor(root, 2) != root
                 {
-                    return Rect::default();
+                    return None;
                 }
                 if !own.contains(&(root as isize))
                     && w::IsWindowVisible(root) != 0
@@ -941,7 +943,7 @@ fn hover(pointer: Point, own: &HashSet<isize>) -> Rect {
                 {
                     let mut bounds = w::Rect::default();
                     if w::GetWindowRect(root, &mut bounds) == 0 {
-                        return Rect::default();
+                        return None;
                     }
                     if from_rect(bounds).contains(pointer) {
                         let ex = w::GetWindowLongPtrW(root, -20);
@@ -953,28 +955,33 @@ fn hover(pointer: Point, own: &HashSet<isize>) -> Rect {
                 root = w::GetWindow(root, 2);
             }
         }
+        window_target(root, Some(pointer), own, owner)
+    }
+}
+fn window_target(root: w::H, pointer: Option<Point>, own: &HashSet<isize>, owner: u32) -> Option<CaptureWindowTarget> {
+    unsafe {
         if root.is_null()
-            || root == desktop
+            || root == w::GetDesktopWindow()
             || root == w::GetShellWindow()
             || own.contains(&(root as isize))
             || w::IsWindowVisible(root) == 0
             || w::IsIconic(root) != 0
         {
-            return Rect::default();
+            return None;
         }
         let mut pid = 0;
         let thread = w::GetWindowThreadProcessId(root, &mut pid);
-        if thread == 0 || pid == 0 || pid == std::process::id() {
-            return Rect::default();
+        if thread == 0 || pid == 0 || pid == std::process::id() || pid == owner {
+            return None;
         }
         let mut name = [0u16; 256];
         let length = w::GetClassNameW(root, name.as_mut_ptr(), 256);
         if length <= 0 {
-            return Rect::default();
+            return None;
         }
         let name = String::from_utf16_lossy(&name[..length as usize]);
         if CaptureHoverPolicy::shell_class(&name) {
-            return Rect::default();
+            return None;
         }
         let mut cloak = 0u32;
         let mut frame = w::Rect::default();
@@ -987,23 +994,28 @@ fn hover(pointer: Point, own: &HashSet<isize>) -> Rect {
                 std::mem::size_of::<w::Rect>() as u32,
             ) != 0
         {
-            return Rect::default();
+            return None;
         }
         let mut affinity = 0;
-        let excluded = w::GetWindowDisplayAffinity(root, &mut affinity) != 0
-            && (affinity == 1 || affinity == 0x11);
+        let affinity_known = w::GetWindowDisplayAffinity(root, &mut affinity) != 0;
+        // Microsoft documents failure for ordinary non-layered windows. For a
+        // layered window unknown affinity is ambiguous, so do not offer it.
+        let layered = w::GetWindowLongPtrW(root, -20) & 0x80000 != 0;
+        let excluded = (affinity_known && affinity != 0) || (layered && !affinity_known);
         let mut after = 0;
         let bounds = from_rect(frame);
         if excluded
             || w::IsWindow(root) == 0
             || w::GetAncestor(root, 2) != root
-            || w::GetWindowThreadProcessId(root, &mut after) == 0
+            || w::GetWindowThreadProcessId(root, &mut after) != thread
             || after != pid
-            || !bounds.contains(pointer)
+            || w::IsWindowVisible(root) == 0 || w::IsIconic(root) != 0
+            || !bounds.valid()
+            || pointer.is_some_and(|point| !bounds.contains(point))
         {
-            Rect::default()
+            None
         } else {
-            bounds
+            Some(CaptureWindowTarget { window: root as usize, process: pid, thread, frame: bounds })
         }
     }
 }
@@ -1017,6 +1029,8 @@ struct Picker {
     // One fixed-size source bitmap per picker, not a new GDI DC/DIB per frame.
     loupe_sample: Surface,
     own: HashSet<isize>,
+    owner_process: u32,
+    purpose: CapturePurpose,
     topology: CaptureTopologyPolicy,
     selection: CaptureSelectionState,
     input: CaptureInputPolicy,
@@ -1065,9 +1079,9 @@ impl Picker {
         let inbox = Arc::new(Inbox::default());
         let canvas = Arc::new(Mutex::new(None));
         let topology = topology(&class, &inbox, &canvas)?;
-        let selection = CaptureSelectionState::new(
+        let selection = CaptureSelectionState::with_purpose(
             topology.displays().iter().map(|d| d.bounds).collect(),
-            pointer()?,
+            pointer()?, request.purpose,
         )
         .map_err(str::to_owned)?;
         let mailbox = Window::new(
@@ -1171,6 +1185,8 @@ impl Picker {
             loupe,
             loupe_sample,
             own,
+            owner_process: request.owner_process,
+            purpose: request.purpose,
             topology,
             selection,
             input,
@@ -1236,6 +1252,27 @@ impl Picker {
             self.invalidate(5, 0, 0);
             return Err(error("CAPTURE_DISPLAY_CHANGED"));
         }
+        Ok(())
+    }
+    fn validate_window(&self) -> Result<()> {
+        if let Some(expected) = self.selection.selected_window {
+            let current = window_target(expected.window as _, None, &self.own, self.owner_process);
+            if !capture_window_is_current(expected, current) {
+                return Err(error("CAPTURE_WINDOW_CHANGED"));
+            }
+        }
+        Ok(())
+    }
+    fn mouse(&mut self, kind: u32, p: Point) -> Result<()> {
+        if kind == 0x201 && self.purpose == CapturePurpose::Screenshot && !self.selection.dragging {
+            let target = hover_target(p, &self.own, self.owner_process);
+            let dpi = self.topology.displays().iter().find(|d| d.bounds.contains(p)).map_or(96, |d| d.dpi);
+            self.selection.set_window_candidate(target, dpi);
+        }
+        self.input.mouse(kind, p, &mut self.selection);
+        // Once released, a changed/closed/reused/protected target is an error,
+        // not permission to capture the stale coordinates or a replacement.
+        if kind == 0x202 { self.validate_window()?; }
         Ok(())
     }
     fn events(&mut self) -> Result<()> {
@@ -1313,7 +1350,7 @@ impl Picker {
                     } else {
                         "inputPlaneUps"
                     });
-                    self.input.mouse(kind, p, &mut self.selection);
+                    self.mouse(kind, p)?;
                 }
                 Event::Wire(kind, token, value) => {
                     if token != self.host.token as usize {
@@ -1342,9 +1379,14 @@ impl Picker {
                                 return Err(self.host.fail());
                             }
                         }
+                        wire::DRAG_EXCURSION => {
+                            self.selection.note_drag_excursion(((value as u64) >> 32) as i32, value as u32 as i32);
+                        }
                         wire::MOVE => {
                             self.host.send(wire::MOVE_ACK)?;
                             self.increment("nativeHostMoves");
+                            let p = Point::new(((value as u64) >> 32) as i32, value as u32 as i32);
+                            self.selection.move_to(p);
                         }
                         wire::LEFT_DOWN | wire::LEFT_UP | wire::RIGHT_DOWN | wire::RIGHT_UP => {
                             let p = Point::new(((value as u64) >> 32) as i32, value as u32 as i32);
@@ -1359,7 +1401,7 @@ impl Picker {
                             } else {
                                 "nativeHostUps"
                             });
-                            self.input.mouse(mouse, p, &mut self.selection);
+                            self.mouse(mouse, p)?;
                         }
                         _ => {}
                     }
@@ -1511,7 +1553,9 @@ impl Picker {
             "magnifierClearMillisecondsMax",
             clear_started,
         );
-        let times = self.loupe_sample.copy_screen_timed(sample.copy_offset, sample.grabbed, false)?;
+        let times =
+            self.loupe_sample
+                .copy_screen_timed(sample.copy_offset, sample.grabbed, false)?;
         // No extra flush or native call is added to force a phase boundary.
         // These are wall times in the unchanged synchronous GDI call sequence.
         for ((total, max), elapsed) in [
@@ -1705,7 +1749,7 @@ impl Picker {
                 }
                 let hovered = if !self.selection.dragging && self.selection.highlighted >= 0 {
                     if self.hover.begin_query(elapsed) {
-                        self.hover.set_frame(hover(p, &self.own));
+                        self.hover.set_frame(hover_target(p, &self.own, self.owner_process).map_or(Rect::default(), |target| target.frame));
                     }
                     self.hover.current(p, elapsed, true)
                 } else {
@@ -1877,9 +1921,23 @@ pub fn run(request: Request) -> CapturedResult {
             }
         }
         picker.validate()?;
+        picker.validate_window()?;
         let mut image = Surface::new(selected.width, selected.height)?;
-        image.copy_screen(Point::new(0, 0), selected, true)?;
+        if request.purpose == CapturePurpose::Screenshot {
+            // Copy only real display intersections. Offscreen window portions
+            // and holes between monitors never become readable hidden content.
+            image.clear(w::rgb(255, 255, 255));
+            for display in picker.topology.displays() {
+                let visible = selected.intersect(display.bounds);
+                if visible.valid() {
+                    image.copy_screen(Point::new(visible.x - selected.x, visible.y - selected.y), visible, true)?;
+                }
+            }
+        } else {
+            image.copy_screen(Point::new(0, 0), selected, true)?;
+        }
         picker.validate()?;
+        picker.validate_window()?;
         if picker.cancel.requested()? {
             return Err("CANCELLED: Native task was superseded.".into());
         }

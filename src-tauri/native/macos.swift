@@ -2771,7 +2771,8 @@ func recognize(_ handler: VNImageRequestHandler) throws -> String {
     return text
 }
 
-func withCapturedRegion<T>(_ operation: (CGImage) throws -> T) throws -> T {
+func withCapturedRegion<T>(purpose: CapturePurpose = .region, cancellation: CaptureScreenshotOperation? = nil,
+                           _ operation: (CGImage) throws -> T) throws -> T {
     // Hotkeys only inspect permission. Requests must come from the explicit
     // Settings action; never reopen a system prompt on each capture attempt.
     guard CGPreflightScreenCaptureAccess() else {
@@ -2780,7 +2781,10 @@ func withCapturedRegion<T>(_ operation: (CGImage) throws -> T) throws -> T {
     // The transparent selector and screenshot API now share this application's
     // process identity. Images stay in memory and are released after OCR/API
     // encoding; neither a helper process nor a temporary screenshot is created.
-    return try operation(captureNativeRegionImage())
+    if cancellation?.isCancelled == true { throw NativeError("CANCELLED: 截图请求已取消。") }
+    let image = try captureNativeRegionImage(purpose: purpose, operation: cancellation)
+    if cancellation?.isCancelled == true { throw NativeError("CANCELLED: 截图请求已取消。") }
+    return try operation(image)
 }
 
 func captureOCR() throws -> String {
@@ -2799,8 +2803,8 @@ func encodePNG(_ data: Data) throws -> String {
     return data.base64EncodedString()
 }
 
-func captureImage() throws -> String {
-    return try withCapturedRegion { image in
+func captureImage(purpose: CapturePurpose = .region, cancellation: CaptureScreenshotOperation? = nil) throws -> String {
+    return try withCapturedRegion(purpose: purpose, cancellation: cancellation) { image in
         let png = NSMutableData()
         guard let destination = CGImageDestinationCreateWithData(png, "public.png" as CFString, 1, nil) else {
             throw NativeError("CAPTURE: 无法创建截图图像。")
@@ -3790,7 +3794,7 @@ func selfTest(input: Data = Data()) throws -> [String: Any] {
             "ocrFixtureElapsedMs": recognitionMilliseconds,
             "ocrFixtureTimingScope": "Generated 1100x160 image; Vision recognize only; excludes capture, image drawing and application startup",
             "pngBase64RoundtripPassed": true, "paragraphGeometryFixturePassed": true,
-            "selectionPolicyFixturePassed": true, "captureSelectionFixturePassed": true, "captureSelectionDeadlineFixturePassed": true, "systemTranslationPolicyFixturePassed": true, "selectionForegroundFixturePassed": true,
+            "selectionPolicyFixturePassed": true, "captureSelectionFixturePassed": true, "captureSelectionDeadlineFixturePassed": true, "screenshotWindowPolicyFixturePassed": true, "screenshotCancellationFixturePassed": true, "systemTranslationPolicyFixturePassed": true, "selectionForegroundFixturePassed": true,
             "opaqueOfficeSelectionPolicyFixturePassed": true, "wpsSplitGroupPolicyFixturePassed": true,
             "selectionMetadataPolicyFixturePassed": true,
             "selectionClassificationPolicyFixturePassed": true,
@@ -3851,7 +3855,7 @@ func nativeResponse(mode: String, input: Data = Data()) -> [String: Any] {
                     "wpsInteractiveSelectionTested": false, "codexInteractiveSelectionTested": false, "wechatInteractiveSelectionTested": false]]
         case "--capture-selection-self-test":
             try captureSelectionSelfTest()
-            return ["ok": true, "diagnostics": ["captureSelectionFixturePassed": true, "captureSelectionDeadlineFixturePassed": true, "screenCaptured": false, "permissionRequested": false]]
+            return ["ok": true, "diagnostics": ["captureSelectionFixturePassed": true, "captureSelectionDeadlineFixturePassed": true, "screenshotWindowPolicyFixturePassed": true, "screenshotCancellationFixturePassed": true, "screenCaptured": false, "permissionRequested": false]]
         case "--capture-selector-preview":
             // Explicit development-only UI preview. It never checks/requests
             // TCC, enumerates shareable content, captures pixels or invokes OCR.
@@ -3863,6 +3867,21 @@ func nativeResponse(mode: String, input: Data = Data()) -> [String: Any] {
                      "displayCount": plan.displays.count, "scale": plan.scale]]
         case "--capture-ocr": return ["ok": true, "text": try captureOCR()]
         case "--capture-image": return ["ok": true, "imageBase64": try captureImage()]
+        case "--begin-native-capture":
+            return ["ok": true, "operationId": try CaptureScreenshotOperations.shared.begin()]
+        case "--cancel-native-capture", "--end-native-capture", "--capture-screenshot":
+            guard input.count <= 64, let id = String(data: input, encoding: .utf8), UUID(uuidString: id) != nil else {
+                throw NativeError("CAPTURE_ARGUMENT: Invalid screenshot operation.")
+            }
+            if mode == "--end-native-capture" {
+                CaptureScreenshotOperations.shared.end(id)
+                return ["ok": true]
+            }
+            guard let operation = CaptureScreenshotOperations.shared.lookup(id) else {
+                throw NativeError("CANCELLED: Screenshot operation has ended.")
+            }
+            if mode == "--cancel-native-capture" { operation.cancel(); return ["ok": true] }
+            return ["ok": true, "imageBase64": try captureImage(purpose: .screenshot, cancellation: operation)]
         case "--clipboard":
             guard let text = NSPasteboard.general.string(forType: .string), !text.isEmpty else {
                 throw NativeError("CLIPBOARD_EMPTY: The clipboard does not contain text.")

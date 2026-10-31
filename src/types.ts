@@ -26,7 +26,7 @@ export interface OcrProvider {
   id: string; name: string; kind: 'baidu' | 'tencent' | 'youdao' | 'google' | 'azure-vision' | 'ocrspace' | 'openai-vision' | 'http-json'; baseUrl: string; model: string; prompt: string;
   authHeader: string; authPrefix: string; requestTemplate: string; responsePath: string; region?: string; hasKey?: boolean; credentialState?: CredentialState;
 }
-export type Action = 'selection' | 'capture' | 'ocr' | 'silentOcr' | 'input' | 'clipboard';
+export type Action = 'screenshot' | 'selection' | 'capture' | 'ocr' | 'silentOcr' | 'input' | 'clipboard';
 export type ShortcutAction = Exclude<Action, 'clipboard'>;
 export interface ShortcutRegistration { action: ShortcutAction; combo?: string; active: boolean; error?: string | null }
 export interface Settings {
@@ -39,6 +39,7 @@ export interface Settings {
   shortcutDefaultsVersion?: number;
   shortcuts: Record<ShortcutAction, string>;
   shortcutRegistration?: ShortcutRegistration[];
+  screenshotSaveDirectory?: string;
   windowsSelectionStrategy?: 'copy' | 'auto';
   saveHistory: boolean;
   automaticUpdateChecks?: boolean;

@@ -68,6 +68,11 @@ pub fn capture_ocr_cancelable(cancel: NativeCancel) -> Result<String, String> {
 pub fn capture_image_cancelable(cancel: NativeCancel) -> Result<String, String> {
     image_response(run_cancelable("capture-image", cancel)?)
 }
+/// F1 screenshot only: hover/click a visible window or drag a rectangle.
+/// OCR and translation continue to use the existing drag-only capture mode.
+pub fn capture_screenshot_cancelable(cancel: NativeCancel) -> Result<String, String> {
+    image_response(run_cancelable("capture-screenshot", cancel)?)
+}
 fn cancellable_text(mode: &str, cancel: NativeCancel) -> Result<String, String> {
     run_cancelable(mode, cancel)?
         .get("text")
@@ -85,6 +90,10 @@ fn run_cancelable(mode: &str, cancel: NativeCancel) -> Result<Value, String> {
     }
     #[cfg(not(target_os = "windows"))]
     {
+        #[cfg(target_os = "macos")]
+        if mode == "capture-screenshot" {
+            return run_macos_screenshot_cancelable(cancel);
+        }
         let result = run(mode, None);
         if cancelled(Some(&cancel)) {
             Err(NATIVE_CANCELLED.into())
@@ -92,6 +101,47 @@ fn run_cancelable(mode: &str, cancel: NativeCancel) -> Result<Value, String> {
             result
         }
     }
+}
+
+#[cfg(target_os = "macos")]
+fn run_macos_screenshot_cancelable(cancel: NativeCancel) -> Result<Value, String> {
+    use std::sync::{Arc, atomic::{AtomicBool, Ordering}};
+    // Register before the watcher can cancel, so cancellation cannot get lost
+    // while AppKit presentation is queued. Tokens isolate repeated F1 requests.
+    let operation = run("begin-native-capture", None)?
+        .get("operationId").and_then(Value::as_str).filter(|id| id.len() == 36)
+        .ok_or("NATIVE_PROTOCOL: Missing screenshot operation.")?.to_owned();
+    let finished = Arc::new(AtomicBool::new(false));
+    let watching = finished.clone();
+    let cancellation = cancel.clone();
+    let watched_operation = operation.clone();
+    let watcher = std::thread::Builder::new().name("screenshot-cancel".into()).spawn(move || {
+        while !watching.load(Ordering::SeqCst) {
+            if cancellation.load(Ordering::SeqCst) {
+                // Cancellation is outside the serialized capture lock. Swift
+                // only flips this request's flag; its own main-thread session
+                // disposes panels/monitors, never another request's selector.
+                return run("cancel-native-capture", Some(&watched_operation)).map(|_| ());
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        Ok(())
+    });
+    let watcher = match watcher {
+        Ok(watcher) => watcher,
+        Err(_) => {
+            let _ = run("end-native-capture", Some(&operation));
+            return Err("CAPTURE: Could not start screenshot cancellation watcher.".into());
+        }
+    };
+    let result = if cancelled(Some(&cancel)) { Err(NATIVE_CANCELLED.into()) }
+        else { run("capture-screenshot", Some(&operation)) };
+    finished.store(true, Ordering::SeqCst);
+    let cancellation_result = watcher.join().map_err(|_| "CAPTURE: Screenshot cancellation watcher failed.");
+    let cleanup = run("end-native-capture", Some(&operation));
+    cancellation_result??;
+    cleanup?;
+    if cancelled(Some(&cancel)) { Err(NATIVE_CANCELLED.into()) } else { result }
 }
 
 #[derive(Clone, Copy)]
@@ -1292,7 +1342,7 @@ fn run_windows_selection(
 
     static CAPTURE_ATTEMPT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let started = Instant::now();
-    let capture = matches!(mode, "capture-ocr" | "capture-image");
+    let capture = matches!(mode, "capture-ocr" | "capture-image" | "capture-screenshot");
     let capture_attempt =
         capture.then(|| CAPTURE_ATTEMPT.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1);
     let selection = mode == "selected-text";
@@ -1339,7 +1389,7 @@ fn run_windows_selection(
     if selection {
         command.args(["-SelectionStrategy", strategy.native_argument()]);
     }
-    let mut cancellation = if cancel.is_some() || (capture && rust_capture_enabled()) {
+    let mut cancellation = if cancel.is_some() || (capture && (rust_capture_enabled() || mode == "capture-screenshot")) {
         Some(native_process::CancellationEvent::new()?)
     } else {
         None
@@ -1407,7 +1457,7 @@ fn run_windows_selection(
         })
     };
     // An 8 MiB PNG expands to about 10.7 MiB of base64 plus the JSON envelope.
-    let output_limit = if mode == "capture-image" { 12 } else { 4 } * 1024 * 1024;
+    let output_limit = if matches!(mode, "capture-image" | "capture-screenshot") { 12 } else { 4 } * 1024 * 1024;
     let output_thread = read_pipe(Box::new(stdout), output_limit);
     let error_thread = read_pipe(Box::new(stderr), 4 * 1024 * 1024);
     let input_thread = if let Some(text) = input {
@@ -1419,7 +1469,7 @@ fn run_windows_selection(
     };
     // Helpers cancel their own picker after 120 seconds and OCR after 30 seconds.
     // The longer outer limit gives them time to dispose images and temporary files.
-    let limit = if matches!(mode, "capture-ocr" | "capture-image") {
+    let limit = if matches!(mode, "capture-ocr" | "capture-image" | "capture-screenshot") {
         180
     } else {
         60
@@ -1596,7 +1646,7 @@ fn run(mode: &str, input: Option<&str>) -> Result<Value, String> {
     static CAPTURE: Mutex<()> = Mutex::new(());
     let _capture = if matches!(
         mode,
-        "selected-text" | "clipboard" | "copy" | "capture-ocr" | "capture-image"
+        "selected-text" | "clipboard" | "copy" | "capture-ocr" | "capture-image" | "capture-screenshot"
     ) {
         Some(
             CAPTURE
@@ -1686,7 +1736,7 @@ fn rust_capture_enabled() -> bool {
 }
 
 #[cfg(target_os = "windows")]
-fn rust_capture_command() -> Result<std::process::Command, String> {
+fn rust_capture_command(mode: &str) -> Result<std::process::Command, String> {
     use sha2::{Digest, Sha256};
     use std::os::windows::process::CommandExt;
     static HELPER: std::sync::OnceLock<Result<std::path::PathBuf, String>> =
@@ -1709,15 +1759,17 @@ fn rust_capture_command() -> Result<std::process::Command, String> {
     verify_native_assembly(path,BYTES).map_err(|_|"NATIVE_BINARY: The packaged native capture executable changed or is unavailable. Restart or reinstall EchoLingo.".to_owned())?;
     let mut command = std::process::Command::new(path);
     command
-        .args(["-Mode", "capture-image"])
+        .args(["-Mode", mode, "-CaptureOwnerProcessId", &std::process::id().to_string()])
         .creation_flags(0x08000000);
     Ok(command)
 }
 
 #[cfg(target_os = "windows")]
 fn native_command(mode: &str) -> Result<std::process::Command, String> {
-    if mode == "capture-image" && rust_capture_enabled() {
-        return rust_capture_command();
+    if mode == "capture-screenshot" || (mode == "capture-image" && rust_capture_enabled()) {
+        // Screenshot mode has no legacy fallback: a failed native/security
+        // check must never retry through a less restrictive capture backend.
+        return rust_capture_command(mode);
     }
     use sha2::{Digest, Sha256};
     use std::os::windows::process::CommandExt;
@@ -2026,6 +2078,7 @@ mod tests {
             super::selected_text_cancelable(Arc::new(AtomicBool::new(true))),
             super::capture_ocr_cancelable(Arc::new(AtomicBool::new(true))),
             super::capture_image_cancelable(Arc::new(AtomicBool::new(true))),
+            super::capture_screenshot_cancelable(Arc::new(AtomicBool::new(true))),
         ] {
             assert_eq!(result.unwrap_err(), super::NATIVE_CANCELLED);
         }

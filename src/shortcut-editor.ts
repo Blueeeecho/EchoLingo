@@ -17,9 +17,9 @@ interface Context {
 }
 export interface NativeRecordedShortcut { leaseId: number; shortcut: string; modifiersDown: number | null }
 interface Session { id: number; action: ShortcutAction; held: Set<string>; modifiers: boolean; modifierEvidence: boolean; releasedEvidence: boolean; candidate: string | null; cancelled: boolean }
-const core = [['selection', '选词翻译', '在其他应用中选中文字后翻译。'], ['silentOcr', '无感 OCR', '拖选屏幕区域，识别后自动翻译。']] as const;
+const core = [['selection', '选词翻译', '在其他应用中选中文字后翻译。'], ['silentOcr', '无感 OCR', '拖选屏幕区域，识别后自动翻译。'], ['screenshot', '截图编辑', '悬停选择窗口或拖选区域，打开独立图片编辑器；不识别、不上传。']] as const;
 const extra = [['capture', '截图翻译'], ['ocr', '截图识别'], ['input', '输入翻译']] as const;
-const actions: ShortcutAction[] = ['selection', 'silentOcr', 'capture', 'ocr', 'input'];
+const actions: ShortcutAction[] = ['selection', 'silentOcr', 'screenshot', 'capture', 'ocr', 'input'];
 const bindingsKey = (values: Bindings) => JSON.stringify(actions.map((action) => values[action]));
 
 // A registered main key can consume DOM events. Reconcile only modifier
@@ -54,7 +54,7 @@ export function createShortcutEditor(context: Context) {
     ? 'Alt+D、Alt+S 在本应用运行时优先，退出后交还其他程序。其他组合若被占用会保留原绑定。'
     : 'macOS 不能强制覆盖其他应用已经注册的全局快捷键。被占用时请更换组合，或退出占用它的应用。');
   const intro = form.closest('.settings-card')?.querySelector('.settings-card-heading p');
-  if (intro) intro.textContent = '自定义选词翻译与无感 OCR 的全局快捷键。';
+  if (intro) intro.textContent = '自定义选词翻译、无感 OCR 和独立截图编辑的全局快捷键。';
   form.addEventListener('submit', (event) => event.preventDefault());
   const status = (message: string, error = false) => {
     const note = !error && message.startsWith('已记录 ') && session?.candidate
@@ -257,6 +257,7 @@ export function createShortcutEditor(context: Context) {
     receiveNative,
     render(values: Bindings, loaded: boolean, registrations?: ShortcutRegistration[]) {
       ready = loaded;
+      values = { ...values, screenshot: values.screenshot ?? '' };
       const key = bindingsKey(values);
       if (key !== base || inputs.size === 0) {
         const drafts = new Map<ShortcutAction, string>();

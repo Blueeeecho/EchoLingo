@@ -16,3 +16,5 @@ pub const RIGHT_UP: u32 = 0x8396;
 pub const STOP_ACK: u32 = 0x8397;
 pub const FAILURE: u32 = 0x8398;
 pub const PING_ACK: u32 = 0x8399;
+// Max absolute movement since left down, sent before left up; survives coalesced MOVE.
+pub const DRAG_EXCURSION: u32 = 0x839a;

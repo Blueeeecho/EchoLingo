@@ -12,12 +12,93 @@ struct CaptureDisplayGeometry: Equatable {
     let scale: CGFloat
 }
 
+enum CapturePurpose: Equatable { case region, screenshot }
+
+struct CaptureWindowTarget: Equatable {
+    let id: CGWindowID
+    let pid: Int32
+    // AppKit global logical points, not Retina pixels.
+    let frame: CGRect
+}
+
 struct CaptureRegionPlan {
     let region: CGRect
     let scale: CGFloat
     let pixelWidth: Int
     let pixelHeight: Int
     let displays: [CaptureDisplayGeometry]
+    var window: CaptureWindowTarget? = nil
+}
+
+// Strict projection of public WindowServer metadata. Never read window names.
+func captureWindowNumber(_ value: Any?) -> Double? {
+    guard let number = value as? NSNumber, CFGetTypeID(number) != CFBooleanGetTypeID() else { return nil }
+    let value = number.doubleValue
+    return value.isFinite ? value : nil
+}
+
+func captureWindowTarget(_ record: [String: Any], primaryHeight: CGFloat, excludingPID: Int32) -> CaptureWindowTarget? {
+    guard let pid = captureWindowNumber(record[kCGWindowOwnerPID as String]), pid > 0,
+          pid <= Double(Int32.max), pid.rounded(.towardZero) == pid, Int32(pid) != excludingPID,
+          let id = captureWindowNumber(record[kCGWindowNumber as String]), id > 0,
+          id <= Double(UInt32.max), id.rounded(.towardZero) == id,
+          captureWindowNumber(record[kCGWindowLayer as String]) == 0,
+          record[kCGWindowIsOnscreen as String] as? Bool == true,
+          let alpha = captureWindowNumber(record[kCGWindowAlpha as String]), alpha > 0, alpha <= 1,
+          let sharing = captureWindowNumber(record[kCGWindowSharingState as String]), sharing == 1 || sharing == 2,
+          let dictionary = record[kCGWindowBounds as String] as? [String: Any],
+          let quartz = CGRect(dictionaryRepresentation: dictionary as CFDictionary),
+          [quartz.minX, quartz.minY, quartz.width, quartz.height, primaryHeight].allSatisfy({ $0.isFinite }),
+          quartz.width >= 2, quartz.height >= 2 else { return nil }
+    return CaptureWindowTarget(id: CGWindowID(id), pid: Int32(pid),
+        frame: CGRect(x: quartz.minX, y: primaryHeight - quartz.maxY, width: quartz.width, height: quartz.height))
+}
+
+func captureHoverWindow(_ records: [[String: Any]], at point: CGPoint, primaryHeight: CGFloat,
+                        excludingPID: Int32) -> CaptureWindowTarget? {
+    // CGWindowListCopyWindowInfo preserves front-to-back order. Own selectors
+    // are skipped; a foreign ineligible window at the pointer blocks retargeting
+    // through it to a different application below.
+    for record in records {
+        if captureWindowNumber(record[kCGWindowOwnerPID as String]) == Double(excludingPID) { continue }
+        guard let dictionary = record[kCGWindowBounds as String] as? [String: Any],
+              let quartz = CGRect(dictionaryRepresentation: dictionary as CFDictionary),
+              [quartz.minX, quartz.minY, quartz.width, quartz.height].allSatisfy({ $0.isFinite }) else { return nil }
+        let frame = CGRect(x: quartz.minX, y: primaryHeight - quartz.maxY, width: quartz.width, height: quartz.height)
+        guard frame.contains(point) else { continue }
+        if captureWindowNumber(record[kCGWindowAlpha as String]) == 0 { continue }
+        return captureWindowTarget(record, primaryHeight: primaryHeight, excludingPID: excludingPID)
+    }
+    return nil
+}
+
+func captureCurrentWindows() -> [[String: Any]]? {
+    CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID) as? [[String: Any]]
+}
+
+func captureWindowIsCurrent(_ expected: CaptureWindowTarget, records: [[String: Any]],
+                            primaryHeight: CGFloat, excludingPID: Int32) -> Bool {
+    records.contains { record in
+        captureWindowTarget(record, primaryHeight: primaryHeight, excludingPID: excludingPID) == expected
+    }
+}
+
+func captureValidateWindow(_ expected: CaptureWindowTarget?) throws {
+    guard let expected = expected else { return }
+    guard CGPreflightScreenCaptureAccess(), let records = captureCurrentWindows(),
+          captureWindowIsCurrent(expected, records: records, primaryHeight: CGDisplayBounds(CGMainDisplayID()).height,
+                                 excludingPID: ProcessInfo.processInfo.processIdentifier) else {
+        throw NativeError("CAPTURE_WINDOW_CHANGED: 窗口已移动、关闭或无法安全截图，请重新选择。")
+    }
+}
+
+func captureVisibleWindowRectangle(_ frame: CGRect, displays: [CaptureDisplayGeometry]) -> CGRect {
+    let parts = displays.map { frame.intersection($0.frame) }.filter { !$0.isNull && !$0.isEmpty }
+    guard let first = parts.first else { return .null }
+    let visible = parts.dropFirst().reduce(first) { $0.union($1) }
+    // Stay inside the selected window, even if WindowServer reports fractions.
+    return CGRect(x: ceil(visible.minX), y: ceil(visible.minY),
+                  width: floor(visible.maxX) - ceil(visible.minX), height: floor(visible.maxY) - ceil(visible.minY))
 }
 
 func captureRectangle(_ first: CGPoint, _ second: CGPoint) -> CGRect {
@@ -70,11 +151,16 @@ enum CaptureSelectorEvent {
 
 enum CaptureSelectorOutcome: Equatable {
     case selected(CGRect)
+    case windowSelected(CaptureWindowTarget)
     case cancelled
 }
 
 struct CaptureSelectorState {
     let displays: [CaptureDisplayGeometry]
+    var purpose: CapturePurpose = .region
+    var candidate: CaptureWindowTarget?
+    private(set) var pressedWindow: CaptureWindowTarget?
+    private(set) var dragExceeded = false
     private(set) var highlightedDisplay: CGDirectDisplayID?
     private(set) var anchor: CGPoint?
     private(set) var selection: CGRect?
@@ -87,18 +173,31 @@ struct CaptureSelectorState {
             outcome = .cancelled
         case .move(let point):
             highlightedDisplay = captureDisplay(at: point, displays: displays)
+            if purpose == .screenshot, let anchor = anchor {
+                dragExceeded = dragExceeded || abs(point.x - anchor.x) > 4 || abs(point.y - anchor.y) > 4
+                if dragExceeded { selection = captureRectangle(anchor, point) }
+            }
         case .leftDown(let point):
             guard captureDisplay(at: point, displays: displays) != nil else { return }
             highlightedDisplay = captureDisplay(at: point, displays: displays)
+            guard anchor == nil else { return }
             anchor = point
+            pressedWindow = candidate.flatMap { $0.frame.contains(point) ? $0 : nil }
+            dragExceeded = false
             selection = nil
         case .leftDrag(let point):
             highlightedDisplay = captureDisplay(at: point, displays: displays)
-            if let anchor = anchor { selection = captureRectangle(anchor, point) }
+            if let anchor = anchor {
+                dragExceeded = dragExceeded || abs(point.x - anchor.x) > 4 || abs(point.y - anchor.y) > 4
+                selection = captureRectangle(anchor, point)
+            }
         case .leftUp(let point):
             guard let anchor = anchor else { return }
             let rectangle = captureRectangle(anchor, point)
-            if rectangle.width >= 2 && rectangle.height >= 2 {
+            dragExceeded = dragExceeded || rectangle.width > 4 || rectangle.height > 4
+            if purpose == .screenshot && !dragExceeded {
+                outcome = pressedWindow.map { .windowSelected($0) } ?? .cancelled
+            } else if rectangle.width >= 2 && rectangle.height >= 2 {
                 selection = rectangle
                 outcome = .selected(rectangle)
             } else {
@@ -108,6 +207,33 @@ struct CaptureSelectorState {
                 selection = nil
             }
         }
+    }
+}
+
+final class CaptureScreenshotOperation {
+    private let lock = NSLock()
+    private var cancelled = false
+    var isCancelled: Bool { lock.lock(); defer { lock.unlock() }; return cancelled }
+    func cancel() { lock.lock(); cancelled = true; lock.unlock() }
+}
+
+final class CaptureScreenshotOperations {
+    static let shared = CaptureScreenshotOperations()
+    private let lock = NSLock()
+    private var operations: [String: CaptureScreenshotOperation] = [:]
+    func begin() throws -> String {
+        lock.lock(); defer { lock.unlock() }
+        guard operations.count < 16 else { throw NativeError("CAPTURE_BUSY: 截图请求仍在结束。") }
+        let id = UUID().uuidString
+        operations[id] = CaptureScreenshotOperation()
+        return id
+    }
+    func lookup(_ id: String) -> CaptureScreenshotOperation? {
+        lock.lock(); defer { lock.unlock() }; return operations[id]
+    }
+    func end(_ id: String) {
+        lock.lock(); let operation = operations.removeValue(forKey: id); lock.unlock()
+        operation?.cancel()
     }
 }
 
@@ -124,13 +250,23 @@ final class CaptureResultWaiter<T> {
         condition.signal()
     }
 
-    func wait(until deadline: Date) throws -> T {
+    func wait(until deadline: Date, cancelled: (() -> Bool)? = nil) throws -> T {
         guard !Thread.isMainThread else {
             throw NativeError("CAPTURE: 截图需要由应用后台任务启动。")
         }
         condition.lock()
         defer { condition.unlock() }
-        while result == nil && Date() < deadline { _ = condition.wait(until: deadline) }
+        while result == nil && Date() < deadline {
+            if cancelled?() == true {
+                abandoned = true
+                throw NativeError("CANCELLED: 截图请求已取消。")
+            }
+            _ = condition.wait(until: cancelled == nil ? deadline : min(deadline, Date().addingTimeInterval(0.05)))
+        }
+        if cancelled?() == true {
+            abandoned = true
+            throw NativeError("CANCELLED: 截图请求已取消。")
+        }
         guard let result = result else {
             abandoned = true
             throw NativeError("CANCELLED: 截图操作超时，已取消。")
@@ -247,6 +383,7 @@ struct CaptureLoupe {
 final class CaptureSelectionView: NSView {
     var highlighted = false
     var selection: CGRect?
+    var hoveredWindow: CGRect?
     var loupeAnchor: CGPoint?
     var loupe: CaptureLoupe?
     override var isOpaque: Bool { false }
@@ -261,6 +398,11 @@ final class CaptureSelectionView: NSView {
             let edge = NSBezierPath(rect: bounds.insetBy(dx: 1, dy: 1))
             edge.lineWidth = 2
             edge.stroke()
+        }
+        if let hoveredWindow = hoveredWindow, !hoveredWindow.isEmpty {
+            let outline = NSBezierPath(rect: hoveredWindow.insetBy(dx: 1, dy: 1))
+            outline.lineWidth = 2
+            outline.stroke()
         }
         if let selection = selection, !selection.isEmpty {
             let outline = NSBezierPath(rect: selection.insetBy(dx: 0.75, dy: 0.75))
@@ -318,16 +460,20 @@ final class CaptureSelectionSession {
     fileprivate let lifetime: CaptureSelectionLifetime
     private var completed = false
     private var pointer = NSEvent.mouseLocation
+    private var lastWindowQuery = Date.distantPast
+    private let operation: CaptureScreenshotOperation?
 
     init(displays: [CaptureDisplayGeometry], waiter: CaptureResultWaiter<CaptureRegionPlan>,
-         lifetime: CaptureSelectionLifetime) {
-        self.state = CaptureSelectorState(displays: displays)
+         lifetime: CaptureSelectionLifetime, purpose: CapturePurpose = .region,
+         operation: CaptureScreenshotOperation? = nil) {
+        self.state = CaptureSelectorState(displays: displays, purpose: purpose)
+        self.operation = operation
         self.waiter = waiter
         self.lifetime = lifetime
     }
 
     func show() throws {
-        guard lifetime.canPresent() else { throw NativeError("CANCELLED: 截图操作超时或已取消。") }
+        guard lifetime.canPresent(), operation?.isCancelled != true else { throw NativeError("CANCELLED: 截图操作超时或已取消。") }
         guard !state.displays.isEmpty else { throw NativeError("CAPTURE: 未找到可截图的屏幕。") }
         for geometry in state.displays {
             let panel = CaptureSelectionPanel(contentRect: geometry.frame,
@@ -356,6 +502,8 @@ final class CaptureSelectionSession {
             case .leftMouseDown: self.receive(.leftDown(point))
             case .leftMouseDragged: self.receive(.leftDrag(point))
             case .leftMouseUp: self.receive(.leftUp(point))
+            case .rightMouseDown:
+                if self.state.purpose == .screenshot { self.receive(.cancel) }
             default: break
             }
             return nil
@@ -365,10 +513,10 @@ final class CaptureSelectionSession {
         for (_, panel, _) in panels {
             // Recheck immediately before each visible mutation; creating the
             // backing panels may itself have consumed the remaining budget.
-            guard lifetime.canPresent() else { throw NativeError("CANCELLED: 截图操作超时或已取消。") }
+            guard lifetime.canPresent(), operation?.isCancelled != true else { throw NativeError("CANCELLED: 截图操作超时或已取消。") }
             panel.orderFrontRegardless()
         }
-        guard lifetime.canPresent() else { throw NativeError("CANCELLED: 截图操作超时或已取消。") }
+        guard lifetime.canPresent(), operation?.isCancelled != true else { throw NativeError("CANCELLED: 截图操作超时或已取消。") }
         if let panel = panels.first(where: { $0.0.id == state.highlightedDisplay }) ?? panels.first {
             panel.1.makeKey()
             panel.1.makeFirstResponder(panel.2)
@@ -397,6 +545,19 @@ final class CaptureSelectionSession {
         case .cancel:
             break
         }
+        if operation?.isCancelled == true { state.receive(.cancel) }
+        if state.purpose == .screenshot && state.anchor == nil {
+            let now = Date()
+            let isPress: Bool
+            if case .leftDown = event { isPress = true } else { isPress = false }
+            if isPress || now.timeIntervalSince(lastWindowQuery) >= 0.08 {
+                lastWindowQuery = now
+                state.candidate = captureCurrentWindows().flatMap {
+                    captureHoverWindow($0, at: pointer, primaryHeight: CGDisplayBounds(CGMainDisplayID()).height,
+                                       excludingPID: ProcessInfo.processInfo.processIdentifier)
+                }
+            } else if state.candidate?.frame.contains(pointer) != true { state.candidate = nil }
+        }
         state.receive(event)
         if let outcome = state.outcome {
             switch outcome {
@@ -404,17 +565,32 @@ final class CaptureSelectionSession {
             case .selected(let rectangle):
                 do { finish(.success(try capturePlan(rectangle, displays: state.displays))) }
                 catch { finish(.failure(error)) }
+            case .windowSelected(let window):
+                do {
+                    try captureValidateWindow(window)
+                    let rectangle = captureVisibleWindowRectangle(window.frame, displays: state.displays)
+                    var plan = try capturePlan(rectangle, displays: state.displays)
+                    plan.window = window
+                    finish(.success(plan))
+                } catch { finish(.failure(error)) }
             }
             return
         }
         for (geometry, panel, view) in panels {
-            let highlight = state.highlightedDisplay == geometry.id
+            let pointerOnDisplay = state.highlightedDisplay == geometry.id
+            let highlight = pointerOnDisplay && state.purpose == .region
+            let hoverTarget = state.anchor == nil ? state.candidate : (state.dragExceeded ? nil : state.pressedWindow)
+            let hovered = hoverTarget?.frame.intersection(geometry.frame)
+            let localHovered = hovered.flatMap { rectangle -> CGRect? in
+                if rectangle.isEmpty || rectangle.isNull { return nil }
+                return rectangle.offsetBy(dx: -geometry.frame.minX, dy: -geometry.frame.minY)
+            }
             let clipped = state.selection?.intersection(geometry.frame)
             let local = clipped.flatMap { rectangle -> CGRect? in
                 if rectangle.isEmpty || rectangle.isNull { return nil }
                 return rectangle.offsetBy(dx: -geometry.frame.minX, dy: -geometry.frame.minY)
             }
-            let localPointer = geometry.frame.contains(pointer) && highlight
+            let localPointer = geometry.frame.contains(pointer) && pointerOnDisplay
                 ? CGPoint(x: pointer.x - geometry.frame.minX, y: pointer.y - geometry.frame.minY) : nil
             let pointerMoved: Bool = {
                 switch (view.loupeAnchor, localPointer) {
@@ -423,8 +599,9 @@ final class CaptureSelectionSession {
                 default: return true
                 }
             }()
-            if view.highlighted != highlight || view.selection != local || pointerMoved {
+            if view.highlighted != highlight || view.selection != local || view.hoveredWindow != localHovered || pointerMoved {
                 view.highlighted = highlight
+                view.hoveredWindow = localHovered
                 view.selection = local
                 view.loupeAnchor = localPointer
                 if let localPointer = localPointer {
@@ -463,12 +640,12 @@ final class CaptureSelectionSession {
     }
 }
 
-func selectNativeCaptureRegion() throws -> CaptureRegionPlan {
+func selectNativeCaptureRegion(purpose: CapturePurpose = .region, operation: CaptureScreenshotOperation? = nil) throws -> CaptureRegionPlan {
     guard !Thread.isMainThread else { throw NativeError("CAPTURE: 截图需要由应用后台任务启动。") }
     let waiter = CaptureResultWaiter<CaptureRegionPlan>()
     let lifetime = CaptureSelectionLifetime(deadline: Date().addingTimeInterval(120))
     DispatchQueue.main.async {
-        guard lifetime.begin() else {
+        guard lifetime.begin(), operation?.isCancelled != true else {
             waiter.finish(.failure(NativeError("CANCELLED: 截图操作超时或已取消。")))
             return
         }
@@ -481,12 +658,12 @@ func selectNativeCaptureRegion() throws -> CaptureRegionPlan {
             guard let number = screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber else { return nil }
             return CaptureDisplayGeometry(id: number.uint32Value, frame: screen.frame, scale: screen.backingScaleFactor)
         }
-        let selection = CaptureSelectionSession(displays: screens, waiter: waiter, lifetime: lifetime)
+        let selection = CaptureSelectionSession(displays: screens, waiter: waiter, lifetime: lifetime, purpose: purpose, operation: operation)
         activeCaptureSelection = selection
         do { try selection.show() }
         catch { selection.finish(.failure(error)) }
     }
-    do { return try waiter.wait(until: lifetime.deadline) }
+    do { return try waiter.wait(until: lifetime.deadline, cancelled: operation.map { operation in { operation.isCancelled } }) }
     catch {
         lifetime.finish()
         DispatchQueue.main.async {
@@ -509,14 +686,15 @@ private func captureFailure(_ error: Error?) -> NativeError {
 }
 
 @available(macOS 14.0, *)
-func captureScreenKitImage(_ plan: CaptureRegionPlan) throws -> CGImage {
+func captureScreenKitImage(_ plan: CaptureRegionPlan, operation: CaptureScreenshotOperation? = nil) throws -> CGImage {
+    try captureValidateWindow(plan.window)
     let deadline = Date().addingTimeInterval(15)
     let contentWaiter = CaptureResultWaiter<SCShareableContent>()
     SCShareableContent.getExcludingDesktopWindows(false, onScreenWindowsOnly: true) { content, error in
         if let content = content { contentWaiter.finish(.success(content)) }
         else { contentWaiter.finish(.failure(captureFailure(error))) }
     }
-    let content = try contentWaiter.wait(until: deadline)
+    let content = try contentWaiter.wait(until: deadline, cancelled: operation.map { operation in { operation.isCancelled } })
     let ownWindows = content.windows.filter { $0.owningApplication?.processID == ProcessInfo.processInfo.processIdentifier }
     guard let context = CGContext(data: nil, width: plan.pixelWidth, height: plan.pixelHeight,
                                   bitsPerComponent: 8, bytesPerRow: plan.pixelWidth * 4,
@@ -527,6 +705,7 @@ func captureScreenKitImage(_ plan: CaptureRegionPlan) throws -> CGImage {
     context.setFillColor(CGColor(gray: 1, alpha: 1))
     context.fill(CGRect(x: 0, y: 0, width: plan.pixelWidth, height: plan.pixelHeight))
     for geometry in plan.displays {
+        try captureValidateWindow(plan.window)
         guard Date() < deadline,
               let display = content.displays.first(where: { $0.displayID == geometry.id }) else {
             throw NativeError("CAPTURE: 屏幕配置已变化或截图超时，请重新框选。")
@@ -546,13 +725,14 @@ func captureScreenKitImage(_ plan: CaptureRegionPlan) throws -> CGImage {
             if let image = image { imageWaiter.finish(.success(image)) }
             else { imageWaiter.finish(.failure(captureFailure(error))) }
         }
-        let image = try imageWaiter.wait(until: deadline)
+        let image = try imageWaiter.wait(until: deadline, cancelled: operation.map { operation in { operation.isCancelled } })
         let destination = CGRect(x: (part.minX - plan.region.minX) * plan.scale,
                                  y: (part.minY - plan.region.minY) * plan.scale,
                                  width: part.width * plan.scale, height: part.height * plan.scale)
         context.draw(image, in: destination)
     }
     guard let image = context.makeImage() else { throw NativeError("CAPTURE: 无法完成截图图像。") }
+    try captureValidateWindow(plan.window)
     return image
 }
 
@@ -594,9 +774,11 @@ func captureLegacyWindowArray(_ ids: [CGWindowID]) throws -> CFArray {
     return array
 }
 
-func captureNativeRegionImage() throws -> CGImage {
-    let plan = try selectNativeCaptureRegion()
-    if #available(macOS 14.0, *) { return try captureScreenKitImage(plan) }
+func captureNativeRegionImage(purpose: CapturePurpose = .region, operation: CaptureScreenshotOperation? = nil) throws -> CGImage {
+    let plan = try selectNativeCaptureRegion(purpose: purpose, operation: operation)
+    if operation?.isCancelled == true { throw NativeError("CANCELLED: 截图请求已取消。") }
+    try captureValidateWindow(plan.window)
+    if #available(macOS 14.0, *) { return try captureScreenKitImage(plan, operation: operation) }
     // Legacy path is restricted to macOS 12/13; new macOS releases use the
     // public ScreenCaptureKit screenshot API without a child TCC identity.
     let primaryHeight = CGDisplayBounds(CGMainDisplayID()).height
@@ -610,10 +792,41 @@ func captureNativeRegionImage() throws -> CGImage {
         throw NativeError("CAPTURE: 没有可用于区域截图的外部窗口，请重新框选。")
     }
     let windows = try captureLegacyWindowArray(ids)
+    if purpose == .screenshot {
+        // The legacy window-array API can include backing pixels outside real
+        // displays. Compose only display intersections, just like ScreenKit;
+        // blank monitor gaps are never reconstructed from window contents.
+        guard let context = CGContext(data: nil, width: plan.pixelWidth, height: plan.pixelHeight,
+                                      bitsPerComponent: 8, bytesPerRow: plan.pixelWidth * 4,
+                                      space: CGColorSpaceCreateDeviceRGB(),
+                                      bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else {
+            throw NativeError("CAPTURE_TOO_LARGE: 无法分配截图内存，请缩小区域后重试。")
+        }
+        context.setFillColor(CGColor(gray: 1, alpha: 1))
+        context.fill(CGRect(x: 0, y: 0, width: plan.pixelWidth, height: plan.pixelHeight))
+        for geometry in plan.displays {
+            if operation?.isCancelled == true { throw NativeError("CANCELLED: 截图请求已取消。") }
+            try captureValidateWindow(plan.window)
+            let part = plan.region.intersection(geometry.frame)
+            let source = CGRect(x: part.minX, y: primaryHeight - part.maxY, width: part.width, height: part.height)
+            guard let image = CGImage(windowListFromArrayScreenBounds: source, windowArray: windows,
+                                      imageOption: [.bestResolution, .boundsIgnoreFraming]) else {
+                throw NativeError("CAPTURE: macOS 未能完成可见区域截图。")
+            }
+            let destination = CGRect(x: (part.minX - plan.region.minX) * plan.scale,
+                                     y: (part.minY - plan.region.minY) * plan.scale,
+                                     width: part.width * plan.scale, height: part.height * plan.scale)
+            context.draw(image, in: destination)
+        }
+        try captureValidateWindow(plan.window)
+        guard let image = context.makeImage() else { throw NativeError("CAPTURE: 无法完成截图图像。") }
+        return image
+    }
     guard let image = CGImage(windowListFromArrayScreenBounds: rectangle, windowArray: windows,
                               imageOption: [.bestResolution, .boundsIgnoreFraming]) else {
         throw NativeError("CAPTURE: macOS 未能完成区域截图，请检查屏幕录制权限。")
     }
+    try captureValidateWindow(plan.window)
     return image
 }
 
@@ -668,6 +881,7 @@ func captureSelectionSelfTest() throws {
     cancelled.receive(.cancel)
     cancelled.receive(.leftUp(CGPoint(x: 200, y: 200)))
     try expect(cancelled.outcome == .cancelled)
+    try captureScreenshotSelfTest()
     try captureLegacyExclusionSelfTest()
     try captureSelectionDeadlineSelfTest()
     try captureOverlayBehaviorSelfTest()
@@ -758,4 +972,79 @@ func captureSelectionDeadlineSelfTest() throws {
     var presentationCount = 0
     if delayed.begin(at: deadline.addingTimeInterval(30)) { presentationCount += 1 }
     try expect(presentationCount == 0)
+}
+
+// Pure metadata, geometry, gesture and cancellation fixtures. No window-server
+// queries, capture APIs, permissions, synthetic input or general clipboard.
+func captureScreenshotSelfTest() throws {
+    func expect(_ value: Bool) throws {
+        if !value { throw NativeError("SELF_TEST: F1 screenshot window policy fixture failed.") }
+    }
+    let primary = CaptureDisplayGeometry(id: 1, frame: CGRect(x: 0, y: 0, width: 1440, height: 900), scale: 2)
+    let left = CaptureDisplayGeometry(id: 2, frame: CGRect(x: -1920, y: -180, width: 1920, height: 1080), scale: 1)
+    let displays = [primary, left]
+    let quartz = CGRect(x: -200, y: 400, width: 500, height: 300)
+    let record: [String: Any] = [kCGWindowOwnerPID as String: NSNumber(value: 41),
+        kCGWindowNumber as String: NSNumber(value: 51), kCGWindowLayer as String: NSNumber(value: 0),
+        kCGWindowIsOnscreen as String: true, kCGWindowAlpha as String: NSNumber(value: 1.0),
+        kCGWindowSharingState as String: NSNumber(value: 1),
+        kCGWindowBounds as String: quartz.dictionaryRepresentation]
+    guard let target = captureWindowTarget(record, primaryHeight: 900, excludingPID: 91) else {
+        throw NativeError("SELF_TEST: F1 screenshot valid metadata was rejected.")
+    }
+    try expect(target.frame == CGRect(x: -200, y: 200, width: 500, height: 300))
+    try expect(captureHoverWindow([record], at: CGPoint(x: -100, y: 250), primaryHeight: 900, excludingPID: 91) == target)
+    try expect(captureWindowTarget(record, primaryHeight: 900, excludingPID: 41) == nil)
+    for (key, value) in [(kCGWindowOwnerPID as String, NSNumber(value: true) as Any),
+                         (kCGWindowNumber as String, NSNumber(value: 0) as Any),
+                         (kCGWindowLayer as String, NSNumber(value: 3) as Any),
+                         (kCGWindowIsOnscreen as String, false as Any),
+                         (kCGWindowAlpha as String, NSNumber(value: 0) as Any),
+                         (kCGWindowSharingState as String, NSNumber(value: 0) as Any)] {
+        var invalid = record; invalid[key] = value
+        try expect(captureWindowTarget(invalid, primaryHeight: 900, excludingPID: 91) == nil)
+        try expect(!captureWindowIsCurrent(target, records: [invalid], primaryHeight: 900, excludingPID: 91))
+    }
+    var protected = record; protected.removeValue(forKey: kCGWindowSharingState as String)
+    try expect(captureHoverWindow([protected, record], at: CGPoint(x: -100, y: 250), primaryHeight: 900, excludingPID: 91) == nil)
+    var own = record; own[kCGWindowOwnerPID as String] = NSNumber(value: 91)
+    try expect(captureHoverWindow([own, record], at: CGPoint(x: -100, y: 250), primaryHeight: 900, excludingPID: 91) == target)
+    for key in [kCGWindowNumber as String, kCGWindowOwnerPID as String] {
+        var replaced = record; replaced[key] = NSNumber(value: 999)
+        try expect(!captureWindowIsCurrent(target, records: [replaced], primaryHeight: 900, excludingPID: 91))
+    }
+    var moved = record; moved[kCGWindowBounds as String] = quartz.offsetBy(dx: 1, dy: 0).dictionaryRepresentation
+    try expect(!captureWindowIsCurrent(target, records: [moved], primaryHeight: 900, excludingPID: 91))
+    try expect(!captureWindowIsCurrent(target, records: [], primaryHeight: 900, excludingPID: 91))
+    let anchor = CGPoint(x: -100, y: 250)
+    var click = CaptureSelectorState(displays: displays, purpose: .screenshot, candidate: target)
+    click.receive(.leftDown(anchor)); click.candidate = nil
+    click.receive(.leftUp(CGPoint(x: -96, y: 253)))
+    try expect(click.outcome == .windowSelected(target))
+    var missing = CaptureSelectorState(displays: displays, purpose: .screenshot)
+    missing.receive(.leftDown(anchor)); missing.receive(.leftUp(CGPoint(x: -96, y: 254)))
+    try expect(missing.outcome == .cancelled)
+    var drag = CaptureSelectorState(displays: displays, purpose: .screenshot, candidate: target)
+    drag.receive(.leftDown(anchor)); drag.receive(.leftDrag(CGPoint(x: 30, y: 330)))
+    drag.receive(.leftUp(CGPoint(x: 30, y: 330)))
+    try expect(drag.outcome == .selected(CGRect(x: -100, y: 250, width: 130, height: 80)))
+    var returned = CaptureSelectorState(displays: displays, purpose: .screenshot, candidate: target)
+    returned.receive(.leftDown(anchor)); returned.receive(.leftDrag(CGPoint(x: -50, y: 300)))
+    returned.receive(.leftUp(CGPoint(x: -97, y: 253)))
+    try expect(returned.outcome == .selected(CGRect(x: -100, y: 250, width: 3, height: 3)))
+    var cancelled = CaptureSelectorState(displays: displays, purpose: .screenshot, candidate: target)
+    cancelled.receive(.leftDown(anchor)); cancelled.receive(.cancel); cancelled.receive(.leftUp(anchor))
+    try expect(cancelled.outcome == .cancelled)
+    let clipped = captureVisibleWindowRectangle(CGRect(x: -2000, y: -200, width: 2200, height: 500), displays: displays)
+    try expect(clipped == CGRect(x: -1920, y: -180, width: 2120, height: 480))
+    let plan = try capturePlan(target.frame, displays: displays)
+    try expect(plan.scale == 2 && plan.pixelWidth == 1000 && plan.pixelHeight == 600 && plan.displays.count == 2)
+    let operations = CaptureScreenshotOperations()
+    let first = try operations.begin(), second = try operations.begin()
+    guard let old = operations.lookup(first), let current = operations.lookup(second) else {
+        throw NativeError("SELF_TEST: F1 cancellation token was not registered.")
+    }
+    old.cancel(); try expect(old.isCancelled && !current.isCancelled)
+    operations.end(first); try expect(operations.lookup(first) == nil && !current.isCancelled)
+    operations.end(second); try expect(current.isCancelled && operations.lookup(second) == nil)
 }

@@ -441,3 +441,8 @@ body[data-popup-focus-managed="true"] .popup-toolbar > .icon-button:focus-visibl
 
 /* Keep live credential drafts out of layout/accessibility while a shortcut is presented. */
 [data-modal-suspended="true"] { display: none !important; }
+
+/* A user-selected screenshot folder can be a long Unicode/UNC path. */
+#screenshot-settings .preference-row > span { min-width: 0; }
+#screenshot-folder { overflow-wrap: anywhere; }
+#screenshot-settings .preference-row > button { flex-shrink: 0; }

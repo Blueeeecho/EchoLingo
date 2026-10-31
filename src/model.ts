@@ -8,14 +8,14 @@ export const LANGUAGES: ReadonlyArray<readonly [string, string]> = [
   ['es', 'Español'], ['ru', 'Русский'], ['pt', 'Português'], ['it', 'Italiano'],
 ];
 export const SHORTCUT_LABELS = {
-  selection: '划词翻译', capture: '截图翻译', ocr: '截图识别', silentOcr: '无感 OCR', input: '输入翻译',
+  screenshot: '截图编辑', selection: '划词翻译', capture: '截图翻译', ocr: '截图识别', silentOcr: '无感 OCR', input: '输入翻译',
 } as const;
 export const defaultSettings = (): Settings => ({
   providers: [], sourceLanguage: 'auto', targetLanguage: 'auto', languageDirectionVersion: 1,
   shortcutDefaultsVersion: 2,
-  windowsSelectionStrategy: 'copy',
+  windowsSelectionStrategy: 'copy', screenshotSaveDirectory: '',
   automaticUpdateChecks: false, includePrereleaseUpdates: true,
-  shortcuts: { selection: 'Alt+D', capture: '', ocr: '', silentOcr: 'Alt+S', input: '' },
+  shortcuts: { selection: 'Alt+D', capture: '', ocr: '', silentOcr: 'Alt+S', screenshot: 'F1', input: '' },
   saveHistory: true, theme: 'system', maxHistory: 20, autoHideSeconds: 0, ocrProviders: [], activeOcrProviderId: null,
 });
 export function filterHistory(entries: HistoryEntry[], query: string, favoritesOnly: boolean): HistoryEntry[] {

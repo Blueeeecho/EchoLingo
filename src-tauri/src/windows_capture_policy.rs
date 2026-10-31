@@ -81,10 +81,33 @@ impl Rect {
     }
 }
 
+/// F1 is additive: translation/OCR retain their drag-only selection contract.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum CapturePurpose {
+    #[default]
+    Region,
+    Screenshot,
+}
+
+/// Scalar identity only; never contains titles, text, or window contents.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CaptureWindowTarget {
+    pub window: usize,
+    pub process: u32,
+    pub thread: u32,
+    pub frame: Rect,
+}
+
 #[derive(Clone, Debug)]
 pub struct CaptureSelectionState {
     screens: Vec<Rect>,
     origin: Point,
+    purpose: CapturePurpose,
+    click_threshold: i32,
+    drag_exceeded: bool,
+    candidate: Option<CaptureWindowTarget>,
+    pressed_window: Option<CaptureWindowTarget>,
+    pub selected_window: Option<CaptureWindowTarget>,
     pub desktop: Rect,
     pub dragging: bool,
     pub finished: bool,
@@ -94,6 +117,9 @@ pub struct CaptureSelectionState {
 }
 impl CaptureSelectionState {
     pub fn new(screens: Vec<Rect>, pointer: Point) -> Result<Self, &'static str> {
+        Self::with_purpose(screens, pointer, CapturePurpose::Region)
+    }
+    pub fn with_purpose(screens: Vec<Rect>, pointer: Point, purpose: CapturePurpose) -> Result<Self, &'static str> {
         let mut desktop = *screens.first().ok_or("CAPTURE: No display is available.")?;
         for screen in &screens {
             if !screen.valid() {
@@ -106,6 +132,12 @@ impl CaptureSelectionState {
         let mut state = Self {
             screens,
             origin: Point::default(),
+            purpose,
+            click_threshold: 4,
+            drag_exceeded: false,
+            candidate: None,
+            pressed_window: None,
+            selected_window: None,
             desktop,
             dragging: false,
             finished: false,
@@ -115,6 +147,22 @@ impl CaptureSelectionState {
         };
         state.move_to(pointer);
         Ok(state)
+    }
+    /// Supplied from a fresh native hit-test immediately before button down.
+    pub fn set_window_candidate(&mut self, candidate: Option<CaptureWindowTarget>, dpi: u32) {
+        if !self.dragging && !self.finished {
+            self.candidate = candidate;
+            // Four logical pixels of jitter on the display where the press began.
+            self.click_threshold = ((4 * dpi.clamp(96, 768) + 95) / 96) as i32;
+        }
+    }
+    pub fn note_drag_excursion(&mut self, dx: i32, dy: i32) {
+        if self.dragging && !self.finished {
+            self.drag_exceeded |= dx > self.click_threshold || dy > self.click_threshold;
+        }
+    }
+    pub fn is_window_click(&self) -> bool {
+        self.purpose == CapturePurpose::Screenshot && !self.drag_exceeded
     }
     fn clamp(&self, p: Point) -> Point {
         Point::new(
@@ -133,6 +181,9 @@ impl CaptureSelectionState {
             .map_or(-1, |i| i as i32);
         if self.dragging {
             let end = self.clamp(p);
+            // Sticky: moving away and returning must never turn a drag into a click.
+            self.drag_exceeded |= (i64::from(p.x) - i64::from(self.origin.x)).abs() > i64::from(self.click_threshold)
+                || (i64::from(p.y) - i64::from(self.origin.y)).abs() > i64::from(self.click_threshold);
             // Retain zero-width/height while dragging, just like Rectangle.FromLTRB.
             self.selected = Rect::new(
                 self.origin.x.min(end.x),
@@ -151,6 +202,9 @@ impl CaptureSelectionState {
             return;
         }
         self.origin = self.clamp(p);
+        self.drag_exceeded = false;
+        self.pressed_window = self.candidate.filter(|target| target.frame.contains(p));
+        self.selected_window = None;
         self.selected = Rect::default();
         self.dragging = true;
     }
@@ -161,6 +215,14 @@ impl CaptureSelectionState {
         self.move_to(p);
         self.dragging = false;
         self.finished = true;
+        if self.is_window_click() {
+            if let Some(target) = self.pressed_window {
+                self.selected = target.frame.intersect(self.desktop);
+                self.selected_window = Some(target);
+            } else {
+                self.selected = Rect::default();
+            }
+        }
         self.cancelled = self.selected.width < 3 || self.selected.height < 3;
     }
     pub fn cancel(&mut self) {
@@ -854,6 +916,12 @@ impl CaptureHoverPolicy {
         }
     }
 }
+/// Re-query at release and around pixel copy. Never retarget a stale click.
+pub fn capture_window_is_current(expected: CaptureWindowTarget, current: Option<CaptureWindowTarget>) -> bool {
+    expected.window != 0 && expected.process != 0 && expected.thread != 0
+        && expected.frame.valid() && current == Some(expected)
+}
+
 /// Keep every hint above every input plane after EACH native positioning call.
 /// render_hints returns the FIRST raised visible hint (bottom of the hint set).
 /// Callers must propagate render failure without repairing input above absent hints.
@@ -1036,7 +1104,10 @@ mod supplemental_tests {
         let mut visible = false;
         let mut renders = 0;
         let mut retained = 0;
-        assert_eq!(redraw.frame_action(false, false, 0), CaptureFrameAction::Hide);
+        assert_eq!(
+            redraw.frame_action(false, false, 0),
+            CaptureFrameAction::Hide
+        );
         // Frequent pointer/mailbox events wake the loop between its 16 ms
         // paints. Every one of those ticks must retain the last visible frame.
         for elapsed in 0..=1000 {
@@ -1517,5 +1588,87 @@ mod window_cancellation_tests {
         assert!(!capture_window_cancels(false, 0x001f)); // EnableWindow(loupe,false)
         assert!(capture_window_cancels(true, 0x001f)); // genuine input cancellation
         assert!(capture_window_cancels(true, 0x0215)); // never activate to recapture
+    }
+}
+
+#[cfg(test)]
+mod screenshot_window_tests {
+    use super::*;
+    fn target() -> CaptureWindowTarget {
+        CaptureWindowTarget { window: 41, process: 42, thread: 43, frame: Rect::new(-200, -100, 500, 300) }
+    }
+    fn screenshot() -> CaptureSelectionState {
+        let mut state = CaptureSelectionState::with_purpose(vec![Rect::new(-300, -200, 1000, 800)], Point::new(0, 0), CapturePurpose::Screenshot).unwrap();
+        state.set_window_candidate(Some(target()), 96);
+        state
+    }
+    #[test]
+    fn screenshot_click_keeps_button_down_candidate_with_jitter() {
+        let mut state = screenshot();
+        state.begin(Point::new(0, 0));
+        state.set_window_candidate(None, 96); // cannot replace a pressed ticket
+        state.end(Point::new(4, -3));
+        assert!(!state.cancelled);
+        assert_eq!(state.selected, target().frame);
+        assert_eq!(state.selected_window, Some(target()));
+    }
+    #[test]
+    fn screenshot_drag_takes_precedence_even_after_returning_to_anchor() {
+        let mut state = screenshot();
+        state.begin(Point::new(0, 0));
+        state.move_to(Point::new(40, 10));
+        state.end(Point::new(2, 2));
+        assert!(state.cancelled);
+        assert_eq!(state.selected_window, None);
+        let mut state = screenshot();
+        state.begin(Point::new(0, 0));
+        state.end(Point::new(-150, 120));
+        assert_eq!(state.selected, Rect::new(-150, 0, 150, 120));
+        assert_eq!(state.selected_window, None);
+    }
+    #[test]
+    fn screenshot_click_without_candidate_never_captures_a_small_jitter_rect() {
+        let mut state = screenshot();
+        state.set_window_candidate(None, 96);
+        state.begin(Point::new(0, 0)); state.end(Point::new(4, 4));
+        assert!(state.cancelled);
+    }
+    #[test]
+    fn region_click_semantics_are_unchanged() {
+        let mut state = CaptureSelectionState::new(vec![Rect::new(-300, -200, 1000, 800)], Point::new(0, 0)).unwrap();
+        state.set_window_candidate(Some(target()), 96);
+        state.begin(Point::new(0, 0)); state.end(Point::new(0, 0));
+        assert!(state.cancelled); assert_eq!(state.selected_window, None);
+    }
+    #[test]
+    fn screenshot_threshold_scales_and_window_is_clipped_to_visible_desktop() {
+        let mut state = screenshot();
+        let partly_offscreen = CaptureWindowTarget { frame: Rect::new(-400, -300, 500, 500), ..target() };
+        state.set_window_candidate(Some(partly_offscreen), 192);
+        state.begin(Point::new(0, 0)); state.end(Point::new(8, 8));
+        assert_eq!(state.selected, Rect::new(-300, -200, 400, 400));
+        assert_eq!(state.selected_window, Some(partly_offscreen));
+    }
+    #[test]
+    fn window_identity_geometry_and_permission_loss_fail_closed() {
+        let expected = target();
+        assert!(capture_window_is_current(expected, Some(expected)));
+        for current in [None, Some(CaptureWindowTarget { window: 9, ..expected }),
+            Some(CaptureWindowTarget { process: 9, ..expected }), Some(CaptureWindowTarget { thread: 9, ..expected }),
+            Some(CaptureWindowTarget { frame: Rect::new(-199, -100, 500, 300), ..expected })] {
+            assert!(!capture_window_is_current(expected, current));
+        }
+    }
+    #[test]
+    fn coalesced_drag_excursion_cannot_turn_into_window_click() {
+        let mut state = screenshot(); state.begin(Point::new(0, 0));
+        state.note_drag_excursion(50, 10); state.end(Point::new(3, 3));
+        assert_eq!(state.selected, Rect::new(0, 0, 3, 3));
+        assert_eq!(state.selected_window, None);
+    }
+    #[test]
+    fn screenshot_cancel_cannot_be_reactivated_by_late_release() {
+        let mut state = screenshot(); state.begin(Point::new(0, 0)); state.cancel(); state.end(Point::new(1, 1));
+        assert!(state.finished && state.cancelled); assert_eq!(state.selected_window, None);
     }
 }

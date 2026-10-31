@@ -19,10 +19,10 @@ try {
       sourceLanguage: 'auto', targetLanguage: 'zh-Hans',
       // Explicit custom bindings test every entry point; these are not product defaults.
       shortcutDefaultsVersion: 2,
-      shortcuts: { selection: 'Alt+D', capture: 'Alt+S', ocr: 'Alt+Shift+S', silentOcr: 'Alt+C', input: 'Alt+A' },
+      shortcuts: { selection: 'Alt+D', capture: 'Alt+S', ocr: 'Alt+Shift+S', silentOcr: 'Alt+C', input: 'Alt+A', screenshot: 'F1' },
       saveHistory: true, theme: 'light', maxHistory: 20, autoHideSeconds: 0, ocrProviders: [], activeOcrProviderId: null,
     };
-    if (new URL(location.href).searchParams.has('twoShortcutDefaultsFixture')) state.shortcuts = { selection: 'Alt+D', capture: '', ocr: '', silentOcr: 'Alt+S', input: '' };
+    if (new URL(location.href).searchParams.has('twoShortcutDefaultsFixture')) state.shortcuts = { selection: 'Alt+D', capture: '', ocr: '', silentOcr: 'Alt+S', input: '', screenshot: 'F1' };
     if (new URL(location.href).searchParams.has('serviceManagerFixture')) {
       state.providers.push({ id: 'qa-local', name: 'QA built-in translation', kind: new URL(location.href).searchParams.has('windowsSelectionFixture') ? 'offline' : 'system', baseUrl: '', model: '', enabled: true, prompt: '' });
       state.ocrProviders = [1, 2].map(n => ({ id: `qa-ocr-${n}`, name: `QA OCR ${n}`, kind: 'http-json', baseUrl: 'https://example.invalid/ocr', model: '', prompt: '', authHeader: '', authPrefix: '', requestTemplate: '{"image":"{imageBase64}"}', responsePath: '/text', region: '' }));
@@ -127,6 +127,11 @@ try {
         if (command === 'plugin:event|unlisten') { listeners.delete(args.event); return; }
         if (command === 'frontend_input_diagnostics_enabled') { fixture.inputDiagnosticRecords = []; return new URLSearchParams(location.search).has('inputDiagnosticsFixture'); }
         if (command === 'record_frontend_input_diagnostic') { if (fixture.holdInputDiagnostics) await new Promise(resolve => { fixture.releaseInputDiagnostics = resolve; }); fixture.inputDiagnosticRecords.push(structuredClone(args.record)); return; }
+        if (command === 'get_screenshot_directory') return { path: fixture.settings.screenshotSaveDirectory || '/fixture/Desktop', isDefault: !fixture.settings.screenshotSaveDirectory };
+        if (command === 'choose_screenshot_directory') { const next = (fixture.screenshotDirectoryChoices ?? []).shift() ?? null; if (next) fixture.settings.screenshotSaveDirectory = next.isDefault ? '' : next.path; return next; }
+        if (command === 'reset_screenshot_directory') { fixture.settings.screenshotSaveDirectory = ''; return { path: '/fixture/Desktop', isDefault: true }; }
+        if (command === 'open_screenshot_image') { fixture.screenshotOpenCalls = (fixture.screenshotOpenCalls ?? 0) + 1; return null; }
+        if (command === 'run_action') { (fixture.actionCalls ??= []).push(args.action); return; }
         if (command === 'get_settings') { fixture.settingsReads++; if (sourceBoot === 'edit' && fixture.settingsReads === 1) { fixture.bootSettingsWaits++; await new Promise(resolve => { fixture.releaseBootSettings = resolve; }); } for (const provider of fixture.settings.providers) decorateCredential(provider, translationKeys); for (const provider of fixture.settings.ocrProviders) decorateCredential(provider, ocrKeys); const value = structuredClone(fixture.settings); if (fixture.registrationOverride !== undefined) value.shortcutRegistration = structuredClone(fixture.registrationOverride); return value; }
         if (command === 'get_history') {
           fixture.historyReads++;
@@ -1253,7 +1258,7 @@ try {
 
   // Recorder uses an acknowledged bounded native lease; these assertions exercise
   // the frontend/fake IPC only, not OS-wide shortcut registration.
-  assert.equal(await page.locator('[data-shortcut-record]').count(), 2);
+  assert.equal(await page.locator('[data-shortcut-record]').count(), 3);
   const beforeRecordedSave = await page.evaluate(() => window.__qa.saveCalls);
   await page.locator('[data-shortcut-record="selection"]').click();
   await page.waitForFunction(() => window.__qa.shortcutLeases.at(-1)?.active === true);
@@ -1297,13 +1302,13 @@ try {
   await page.locator('#shortcut-feedback').getByText('QA unavailable shortcut: input', { exact: false }).waitFor();
   assert.equal(await page.evaluate(() => window.__qa.saveCalls), beforeManualRows.saves + 4);
   assert.deepEqual(await page.evaluate(() => window.__qa.settings.shortcuts), beforeManualRows.shortcuts);
-  assert.deepEqual(await page.evaluate(() => window.__qa.shortcutRetryActions.at(-1)), ['selection', 'silentOcr', 'capture', 'ocr', 'input']);
+  assert.deepEqual(await page.evaluate(() => window.__qa.shortcutRetryActions.at(-1)), ['selection', 'silentOcr', 'screenshot', 'capture', 'ocr', 'input']);
   await page.evaluate(() => { window.__qa.unavailableShortcutActions = []; });
   await page.locator('#shortcut-selection').fill('Control+Shift+t');
   await page.locator('#save-shortcuts').click();
   await page.waitForFunction((count) => window.__qa.saveCalls === count + 5 && !document.querySelector('#save-shortcuts').disabled, beforeManualRows.saves);
   assert.deepEqual(await page.evaluate(() => window.__qa.settings.shortcuts), beforeManualRows.shortcuts);
-  assert.deepEqual(await page.evaluate(() => window.__qa.shortcutRetryActions.at(-1)), ['selection', 'silentOcr', 'capture', 'ocr', 'input']);
+  assert.deepEqual(await page.evaluate(() => window.__qa.shortcutRetryActions.at(-1)), ['selection', 'silentOcr', 'screenshot', 'capture', 'ocr', 'input']);
   // A backend registration/save rejection must retain both the committed
   // binding and the editable candidate; it must not claim success.
   await page.locator('input[name="selection"]').fill('Ctrl+Shift+K');
@@ -3555,7 +3560,7 @@ try {
     await page.locator('#shortcut-selection').waitFor();
     assert.equal(await page.locator('#shortcut-selection').inputValue(), 'Alt+D');
     assert.equal(await page.locator('#shortcut-silentOcr').inputValue(), 'Alt+S');
-    assert.deepEqual(await page.evaluate(() => Object.values(window.__qa.settings.shortcuts).filter(Boolean)), ['Alt+D', 'Alt+S']);
+    assert.deepEqual(await page.evaluate(() => Object.values(window.__qa.settings.shortcuts).filter(Boolean)), ['Alt+D', 'Alt+S', 'F1']);
     await page.locator('#shortcut-advanced > summary').click();
     assert.equal(await page.locator('input[name="input"]').inputValue(), '');
     assert.equal(await page.locator('input[name="ocr"]').inputValue(), '');
@@ -3571,10 +3576,29 @@ try {
     await page.locator('#save-shortcuts').click();
     await page.locator('#shortcut-feedback').getByText('不同操作不能使用相同的快捷键。', { exact: false }).waitFor();
     assert.equal(await page.evaluate(() => window.__qa.saveCalls), saves);
-    for (const key of ['selection', 'silentOcr', 'input', 'ocr']) await page.locator(`input[name="${key}"]`).fill('');
+    for (const key of ['selection', 'silentOcr', 'screenshot', 'input', 'ocr']) await page.locator(`input[name="${key}"]`).fill('');
     await page.locator('#save-shortcuts').click();
     await page.waitForFunction(() => Object.values(window.__qa.settings.shortcuts).every(value => value === ''));
   }
+  // Screenshot settings use narrow dialogs, preserve cancellation and persist
+  // the chosen folder without placing image data in settings/history.
+  const screenshotSettingsBefore = await page.evaluate(() => ({ writes: window.__qa.settingsWrites.length, translations: window.__qa.translationRequests.length }));
+  await page.locator('#screenshot-choose-folder').click();
+  await page.getByText('已取消，保存位置未改变。', { exact: true }).waitFor();
+  assert.equal(await page.evaluate(() => window.__qa.settingsWrites.length), screenshotSettingsBefore.writes);
+  await page.evaluate(() => { window.__qa.screenshotDirectoryChoices = [{ path: '/fixture/用户/截图', isDefault: false }]; });
+  await page.locator('#screenshot-choose-folder').click();
+  await page.waitForFunction(() => window.__qa.settings.screenshotSaveDirectory === '/fixture/用户/截图' && !document.querySelector('#screenshot-choose-folder').disabled);
+  assert.match(await page.locator('#screenshot-folder').textContent(), /用户\/截图/);
+  await page.locator('#screenshot-reset-folder').click();
+  await page.waitForFunction(() => window.__qa.settings.screenshotSaveDirectory === '' && !document.querySelector('#screenshot-reset-folder').disabled);
+  assert.match(await page.locator('#screenshot-folder').textContent(), /桌面（默认）/);
+  await page.locator('#screenshot-open-local').click();
+  await page.waitForFunction(() => window.__qa.screenshotOpenCalls === 1);
+  await page.locator('#screenshot-start').click();
+  await page.waitForFunction(() => window.__qa.actionCalls?.at(-1) === 'screenshot');
+  assert.equal(await page.evaluate(() => window.__qa.translationRequests.length), screenshotSettingsBefore.translations);
+  assert.equal(await page.evaluate(() => JSON.stringify(window.__qa.settings).includes('pngBase64')), false);
   // Production main.ts/panel-layout and real pin handler, with native resize
   // events at the IPC boundary. Native policy itself has Rust/AppKit fixtures.
   for (const platform of ['macos', 'windows']) {
