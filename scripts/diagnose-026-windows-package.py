@@ -63,7 +63,10 @@ def main():
     target = output / 'extracted-echolingo.exe'
     inspector.extract_windows_member(inspector.tool('7z'), output / 'EchoLingo_0.2.6_x64-setup.exe', member, target)
     extracted = target.read_bytes()
-    repeated = output / 'repeated-echolingo.exe'
+    # Each invocation owns a new directory, including its exclusive stderr file.
+    repeat_dir = output / 'repeated'
+    repeat_dir.mkdir()
+    repeated = repeat_dir / 'echolingo.exe'
     inspector.extract_windows_member(inspector.tool('7z'), output / 'EchoLingo_0.2.6_x64-setup.exe', member, repeated)
     version = inspector.checked_command([inspector.tool('7z'), 'i']).stdout.decode('utf-8', errors='replace').splitlines()[:8]
     offsets = [index for index, (a, b) in enumerate(zip(original, extracted)) if a != b]
