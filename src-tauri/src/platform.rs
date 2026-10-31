@@ -853,13 +853,6 @@ fn bounded_capture_health(value: &Value) -> Value {
         "nativeTypesReadyMilliseconds",
         "firstBordersVisibleMilliseconds",
         "firstPickerFrameCompleteMilliseconds",
-        "captureFrameCount",
-        "captureDraggingFrameCount",
-        "captureFrameStartGapMillisecondsMax",
-        "captureFrameRenderMillisecondsTotal",
-        "captureFrameRenderMillisecondsMax",
-        "magnifierRenderMillisecondsTotal",
-        "magnifierRenderMillisecondsMax",
         "hookMouseDowns",
         "hookMouseUps",
         "hookMouseMoves",
@@ -906,6 +899,25 @@ fn bounded_capture_health(value: &Value) -> Value {
     for field in FIELDS {
         if let Some(number) = value.get(field).and_then(Value::as_u64) {
             safe.insert((*field).to_owned(), json!(number));
+        }
+    }
+    // Frame metrics have a deliberately tighter schema than the legacy capture
+    // counters. Enforce it at the helper boundary, not only at their producer.
+    for field in [
+        "captureFrameCount",
+        "captureDraggingFrameCount",
+        "captureFrameStartGapMillisecondsMax",
+        "captureFrameRenderMillisecondsTotal",
+        "captureFrameRenderMillisecondsMax",
+        "magnifierRenderMillisecondsTotal",
+        "magnifierRenderMillisecondsMax",
+    ] {
+        if let Some(number) = value
+            .get(field)
+            .and_then(Value::as_u64)
+            .filter(|number| *number <= 10_000_000)
+        {
+            safe.insert(field.to_owned(), json!(number));
         }
     }
     for field in [
@@ -2080,6 +2092,16 @@ mod tests {
         }));
         assert_eq!(safe.as_object().unwrap().len(), 7);
         assert_eq!(safe["captureFrameCount"], 63);
+        for boundary in [0, 10_000_000] {
+            let input: serde_json::Map<String, Value> = safe
+                .as_object()
+                .unwrap()
+                .keys()
+                .map(|field| (field.clone(), json!(boundary)))
+                .collect();
+            let input = Value::Object(input);
+            assert_eq!(super::bounded_capture_health(&input), input);
+        }
         for invalid in [
             json!(-1),
             json!(10_000_001),
