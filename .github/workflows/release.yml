@@ -8,6 +8,7 @@ on:
 # Build jobs retain read-only repository access. Only the final publish job writes.
 permissions:
   contents: read
+  actions: read
 concurrency:
   group: echolingo-prerelease-0.2.4
   cancel-in-progress: false
@@ -15,8 +16,16 @@ jobs:
   release-inputs:
     if: github.repository == 'Blueeeecho/EchoLingo' && (github.ref == 'refs/heads/main' || github.ref == 'refs/tags/0.2.4')
     runs-on: ubuntu-latest
+    outputs:
+      mode: ${{ steps.scope.outputs.mode }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Select the exact fixed language patch or full validation
+        id: scope
+        run: python3 scripts/verify-language-patch.py --select
       - name: Verify the one authorized release version
         run: |
           python3 scripts/prepare-release-assets.py --check-version
@@ -39,13 +48,19 @@ jobs:
                 throw new Error('Existing release tag does not identify this exact commit.');
               }
             } catch (error) { if (error.status !== 404) throw error; }
-  # Reuse every existing desktop/UI acceptance gate, not a smaller release suite.
-  # Artifacts stay in this same run, so no additional actions:read scope is needed.
+  # Default releases retain all gates. The fixed reviewed language-only patch
+  # rebuilds new bytes while explicitly reusing pinned prior visual acceptance.
   verify:
     needs: release-inputs
+    if: needs.release-inputs.outputs.mode != 'language-routing-patch-v1'
     uses: ./.github/workflows/release-checks.yml
+  language-patch:
+    needs: release-inputs
+    if: needs.release-inputs.outputs.mode == 'language-routing-patch-v1'
+    uses: ./.github/workflows/language-patch-checks.yml
   publish:
-    needs: [release-inputs, verify]
+    needs: [release-inputs, verify, language-patch]
+    if: always() && needs.release-inputs.result == 'success' && ((needs.verify.result == 'success' && needs.language-patch.result == 'skipped') || (needs.language-patch.result == 'success' && needs.verify.result == 'skipped'))
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -60,15 +75,25 @@ jobs:
           name: EchoLingo-macOS
           path: release-inputs/EchoLingo-macOS
       - uses: actions/download-artifact@v4
+        if: needs.release-inputs.outputs.mode != 'language-routing-patch-v1'
         with:
           name: EchoLingo-Windows-offline-evidence
           path: release-inputs/EchoLingo-Windows-offline-evidence
+      - uses: actions/download-artifact@v4
+        if: needs.release-inputs.outputs.mode == 'language-routing-patch-v1'
+        with:
+          pattern: EchoLingo-language-patch-*
+          merge-multiple: true
+          path: release-inputs/EchoLingo-language-patch-evidence
       - name: Verify tested bytes and prepare checksums
         env:
+          VALIDATION_MODE: ${{ needs.release-inputs.outputs.mode }}
           RELEASE_COMMIT: ${{ github.sha }}
           RELEASE_RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
-          python3 scripts/prepare-release-assets.py --artifacts release-inputs --output release-assets --commit "$RELEASE_COMMIT" --run-url "$RELEASE_RUN_URL"
+          extra=()
+          if [ "$VALIDATION_MODE" = language-routing-patch-v1 ]; then extra=(--language-patch); fi
+          python3 scripts/prepare-release-assets.py "${extra[@]}" --artifacts release-inputs --output release-assets --commit "$RELEASE_COMMIT" --run-url "$RELEASE_RUN_URL"
       - name: Preserve verified publication inputs
         uses: actions/upload-artifact@v4
         with:
@@ -106,7 +131,7 @@ jobs:
             const names = fs.readdirSync(directory).sort();
             if (JSON.stringify(names) !== JSON.stringify(expectedNames)) throw new Error('Unexpected public asset inventory.');
             const runUrl = `${context.serverUrl}/${owner}/${repo}/actions/runs/${context.runId}`;
-            const body = fs.readFileSync('docs/releases/0.2.4.zh-CN.md', 'utf8') + `\n\n源码提交：\`${context.sha}\`\n\n[完整构建与验收记录](${runUrl})\n`;
+            const body = fs.readFileSync('docs/releases/0.2.4.zh-CN.md', 'utf8') + `\n\n源码提交：\`${context.sha}\`\n\n[构建、补丁测试与复用验收范围](${runUrl})\n`;
             const { data: release } = await github.rest.repos.createRelease({ owner, repo, tag_name: tag, target_commitish: context.sha, name: '0.2.4 内测版', body, draft: true, prerelease: true, make_latest: 'false' });
             for (const name of names) {
               const bytes = fs.readFileSync(path.join(directory, name));

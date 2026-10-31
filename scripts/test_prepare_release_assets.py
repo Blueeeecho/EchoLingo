@@ -65,7 +65,7 @@ class ReleaseAssetsTests(unittest.TestCase):
         start = ci.index("  macos-screenshot-native-probe:\n")
         end = ci.index("\n  windows-popup-diagnostics:", start)
         expected = ci[start:end]
-        expected = "\n".join(line for line in expected.split("\n") if not line.startswith("    if: github.event.inputs.mode"))
+        expected = "\n".join(line for line in expected.split("\n") if not line.startswith("    if: github.event.inputs.mode") and line != "    needs: validation-mode" and not line.startswith("    if: needs.validation-mode.outputs.mode"))
         old_matrix = "os: ${{ fromJSON(github.event.inputs.mode == 'macos-preview' && '[\"macos-latest\"]' || github.event.inputs.mode == 'windows-preview' && '[\"windows-latest\"]' || '[\"windows-latest\",\"macos-latest\"]') }}"
         self.assertIn(old_matrix, expected)
         expected = expected.replace(old_matrix, "os: [windows-latest, macos-latest]")
@@ -89,7 +89,7 @@ class ReleaseAssetsTests(unittest.TestCase):
         self.assertIn(f"tags: ['{RELEASE.VERSION}']", workflow)
         self.assertIn(f"refs/tags/{RELEASE.VERSION}", workflow)
         self.assertIn("branches: [main]", workflow)
-        self.assertIn("needs: [release-inputs, verify]", workflow)
+        self.assertIn("needs: [release-inputs, verify, language-patch]", workflow)
         self.assertIn("draft: true, prerelease: true", workflow)
         self.assertIn("main.object.sha !== context.sha", workflow)
         self.assertIn("already exists; inspect it instead of overwriting", workflow)

@@ -10,7 +10,8 @@
     "check": "tsc --noEmit",
     "test": "vitest run --passWithNoTests",
     "tauri": "tauri",
-    "test:ui": "node tests/frontend-interactions.mjs && node tests/screenshot-editor.mjs"
+    "test:ui": "node tests/frontend-interactions.mjs && node tests/screenshot-editor.mjs",
+    "test:language-routing": "cargo test --manifest-path src-tauri/Cargo.toml --locked bilingual_input && cargo test --manifest-path src-tauri/Cargo.toml --locked language_detection"
   },
   "dependencies": {
     "@tauri-apps/api": "^2.9.0"

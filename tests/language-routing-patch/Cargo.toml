@@ -1,0 +1,9 @@
+[package]
+name = "echolingo-language-probe"
+version = "0.0.0"
+edition = "2021"
+[dependencies]
+whatlang = "=0.18.0"
+
+[dev-dependencies]
+tokio = { version = "=1.54.1", features = ["macros", "rt"] }
