@@ -1,0 +1,40 @@
+name: Focused language routing dependency probe
+on:
+  push:
+    branches: [diagnostics/024-language-routing-probe]
+permissions:
+  contents: read
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Run only the generated language corpus using the exact official dependency
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          test "$GITHUB_REPOSITORY" = Blueeeecho/EchoLingo
+          mkdir "$RUNNER_TEMP/language-routing-probe"
+          git rev-parse HEAD HEAD^{tree} > "$RUNNER_TEMP/language-routing-probe/source.txt"
+          rustc --version > "$RUNNER_TEMP/language-routing-probe/toolchain.txt"
+          sha256sum tests/language-routing-probe/Cargo.toml tests/language-routing-probe/src/main.rs > "$RUNNER_TEMP/language-routing-probe/inputs.sha256"
+          cargo generate-lockfile --manifest-path tests/language-routing-probe/Cargo.toml
+          cp tests/language-routing-probe/Cargo.lock "$RUNNER_TEMP/language-routing-probe/Cargo.lock"
+          cargo run --manifest-path tests/language-routing-probe/Cargo.toml --locked 2>&1 | tee "$RUNNER_TEMP/language-routing-probe/output.log"
+          sha256sum "$RUNNER_TEMP/language-routing-probe/Cargo.lock" > "$RUNNER_TEMP/language-routing-probe/lock.sha256"
+      - name: Preserve actual detection results and generated registry lock
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: language-routing-probe
+          path: ${{ runner.temp }}/language-routing-probe
+          if-no-files-found: error
+      - name: State diagnostic scope
+        if: always()
+        run: echo 'Synthetic dependency corpus probe only. Not application, installer, or release acceptance; no repository writes or screenshots.' >> "$GITHUB_STEP_SUMMARY"
