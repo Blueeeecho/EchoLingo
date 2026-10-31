@@ -62,6 +62,18 @@ class MacRecoveryWorkflowContract(unittest.TestCase):
         self.assertLess(preflight.index(title), preflight.index('cargo test --manifest-path'))
         self.assertNotIn('TAURI_CONFIG', preflight)
 
+    def test_failed_inspection_preserves_only_explicit_unverified_build_evidence(self):
+        failure = SOURCE.split('      - name: Preserve generated build bytes only', 1)[1].split('      - name: Preserve only verified testing-candidate', 1)[0]
+        self.assertEqual(failure.count("steps.package_build.outcome == 'success' && steps.package_inspection.outcome == 'failure'"), 2)
+        self.assertIn('UNVERIFIED-build-${{ runner.os }}', failure)
+        self.assertIn("'releaseReady': False", failure)
+        self.assertIn('EchoLingo.app.tar.gz', failure)
+        artifact = failure.split('          name: EchoLingo-0.2.6-UNVERIFIED-build-${{ runner.os }}', 1)[1]
+        self.assertNotIn('*', artifact)
+        self.assertNotIn('test-results', artifact)
+        self.assertNotIn('diagnostics.json', artifact)
+        self.assertEqual(artifact.count('${{ runner.temp }}/candidate-unverified-build/'), 7)
+
     def test_candidate_packages_require_native_success_and_do_not_publish(self):
         packages = SOURCE.split('  candidate-installers:', 1)[1]
         self.assertIn('needs: [native-selection-recovery, windows-native-preflight]', packages)

@@ -1,5 +1,6 @@
 """Generated static fixtures only: no installers, native apps or permission APIs."""
 import importlib.util
+import io
 import json
 from pathlib import Path
 import plistlib
@@ -43,6 +44,49 @@ class CandidateInspectionTests(unittest.TestCase):
         self.assertEqual(selected["Path"], "$_OUTDIR\\echolingo.exe")
         self.assertEqual(selected["normalizedPath"], "$_OUTDIR/echolingo.exe")
         self.assertEqual(selected["size"], 512)
+
+    def test_unknown_ignored_nsis_sizes_do_not_weaken_selected_application_bounds(self):
+        for ignored in ({"Path": "uninstall.exe", "Attributes": "A"},
+                        entry("resources/model.bin", Size=""),
+                        {"Path": "resources", "Attributes": "D"}):
+            with self.subTest(ignored=ignored):
+                selected = MODULE.parse_7z_listing(listing(entry(), ignored))
+                self.assertEqual(selected["normalizedPath"], "echolingo.exe")
+                self.assertEqual(selected["size"], 512)
+        for selected in ({"Path": "echolingo.exe", "Attributes": "A"}, entry(Size="")):
+            with self.subTest(selected=selected), self.assertRaisesRegex(MODULE.InspectionError, "Application member size"):
+                MODULE.parse_7z_listing(listing(selected, entry("resources/model.bin")))
+
+    def test_selected_missing_nsis_size_is_bounded_by_fresh_binary_not_archive_metadata(self):
+        unknown = listing({"Path": "echolingo.exe", "Attributes": "A"})
+        self.assertEqual(MODULE.parse_7z_listing(unknown, 512)["size"], 512)
+        self.assertEqual(MODULE.parse_7z_listing(listing(entry(Size="")), 512)["size"], 512)
+        with self.assertRaisesRegex(MODULE.InspectionError, "differs from fresh"):
+            MODULE.parse_7z_listing(listing(entry(Size="513")), 512)
+        for size in (0, -1, True, MODULE.MAX_EXECUTABLE + 1):
+            with self.subTest(size=size), self.assertRaises(MODULE.InspectionError):
+                MODULE.parse_7z_listing(unknown, size)
+
+    def test_extraction_reads_at_most_one_byte_past_known_size_and_requires_exact_length(self):
+        class Stream(io.BytesIO):
+            def read(self, size):
+                self.requests.append(size)
+                return super().read(size)
+        for payload in (b"ab", b"abc", b"abcdef"):
+            with self.subTest(payload=payload), tempfile.TemporaryDirectory() as folder:
+                stream = Stream(payload)
+                stream.requests = []
+                process = mock.Mock(stdout=stream)
+                process.wait.return_value = 0
+                process.poll.return_value = 0
+                with mock.patch.object(MODULE.subprocess, "Popen", return_value=process):
+                    args = ("7z", "generated.exe", {"Path": "echolingo.exe", "size": 3}, Path(folder) / "app.exe")
+                    if len(payload) == 3:
+                        MODULE.extract_windows_member(*args)
+                        self.assertEqual(args[-1].read_bytes(), payload)
+                    else:
+                        with self.assertRaises(MODULE.InspectionError): MODULE.extract_windows_member(*args)
+                self.assertTrue(stream.requests and all(0 < size <= 4 for size in stream.requests))
 
     def test_unsafe_paths_rejected_before_extraction(self):
         for path in ("../echolingo.exe", "folder/../echolingo.exe", "/echolingo.exe", "\\echolingo.exe",
@@ -166,6 +210,47 @@ class CandidateInspectionTests(unittest.TestCase):
         with self.assertRaisesRegex(MODULE.InspectionError, "output exceeds limit"):
             MODULE.checked_command([sys.executable, "-c", "print('x' * 2048)"], maximum_bytes=32)
 
+    def test_hdiutil_errors_name_verb_and_bound_redact_stderr_not_stdout(self):
+        result = subprocess.CompletedProcess(["/usr/bin/hdiutil", "attach", "/generated-owned/build/own.dmg"], 1,
+                    b"license text must not be logged", b"hdiutil: attach failed: /generated-owned/build/own.dmg permission denied\n" + b"x" * 4096)
+        message = MODULE.command_failure(result)
+        self.assertIn("hdiutil attach failed (exit 1)", message)
+        self.assertIn("permission denied", message)
+        self.assertNotIn("/generated-owned", message)
+        self.assertNotIn("license text", message)
+        self.assertLess(len(message), 600)
+
+    def test_failed_attach_prompt_and_cleanup_keep_primary_failure(self):
+        with tempfile.TemporaryDirectory() as folder:
+            mount = Path(folder) / "mount"
+            calls = []
+            def execute(command, **_):
+                calls.append(command)
+                if command[1] == "attach":
+                    return subprocess.CompletedProcess(command, 1, b"generated prompt, not a plist",
+                                                       b"hdiutil: attach failed - permission denied")
+                if command[1] == "detach":
+                    raise MODULE.InspectionError("hdiutil detach failed (exit 1); stderr: not mounted")
+                return subprocess.CompletedProcess(command, 0, b"", b"")
+            with mock.patch.object(MODULE, "tool", return_value="hdiutil"), mock.patch.object(MODULE, "checked_command", side_effect=execute):
+                with self.assertRaisesRegex(MODULE.InspectionError, "hdiutil attach failed.*permission denied.*cleanup also failed.*hdiutil detach"):
+                    with MODULE.readonly_dmg(Path(folder) / "fixture.dmg", mount):
+                        self.fail("Failed attach must not yield")
+            self.assertEqual(calls[-1], ["hdiutil", "detach", str(mount)])
+
+    def test_cleanup_failure_without_primary_still_fails_inspection(self):
+        with tempfile.TemporaryDirectory() as folder:
+            mount = Path(folder) / "mount"
+            def execute(command, **_):
+                if command[1] == "attach":
+                    data = {"system-entities": [{"dev-entry": "/dev/disk9"}, {"dev-entry": "/dev/disk9s1", "mount-point": str(mount)}]}
+                    return subprocess.CompletedProcess(command, 0, plistlib.dumps(data), b"")
+                if command[1] == "detach": raise MODULE.InspectionError("generated detach failure")
+                return subprocess.CompletedProcess(command, 0, b"", b"")
+            with mock.patch.object(MODULE, "tool", return_value="hdiutil"), mock.patch.object(MODULE, "checked_command", side_effect=execute):
+                with self.assertRaisesRegex(MODULE.InspectionError, "generated detach failure"):
+                    with MODULE.readonly_dmg(Path(folder) / "fixture.dmg", mount): pass
+
     def test_failed_attach_detaches_its_reported_unmounted_device(self):
         with tempfile.TemporaryDirectory() as folder:
             calls = []
@@ -208,7 +293,8 @@ class CandidateInspectionTests(unittest.TestCase):
             installer.write_bytes(b"generated installer container")
             built.write_bytes(pe())
             identity = ("a" * 40, "b" * 40)
-            def extract(_, output):
+            def extract(_, output, expected_size):
+                self.assertEqual(expected_size, built.stat().st_size)
                 path = output / "echolingo.exe"
                 path.write_bytes(built.read_bytes())
                 return path
@@ -223,7 +309,7 @@ class CandidateInspectionTests(unittest.TestCase):
                 with self.assertRaises(MODULE.InspectionError):
                     MODULE.inspect("Windows", installer, built, root / "inspection", "https://github.com/a/b/actions/runs/1",
                                    locked_build_passed=True, focused_tests_passed=True)
-            def mismatch(_, output):
+            def mismatch(_, output, expected_size):
                 target = output / "echolingo.exe"
                 target.write_bytes(b"different bytes")
                 return target

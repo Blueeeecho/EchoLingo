@@ -44,6 +44,27 @@ def require(condition, message):
         raise InspectionError(message)
 
 
+def command_failure(result):
+    args = [str(item) for item in result.args]
+    name = Path(args[0]).name
+    label = name
+    detail = ""
+    if name == "hdiutil" and len(args) > 1 and args[1] in {"verify", "attach", "detach"}:
+        label += " " + args[1]
+        # Only this system tool's error stream is surfaced, never attachment
+        # stdout (which may contain a license), plist contents or archive data.
+        # Bound output and redact absolute paths/URLs/control characters first.
+        text = (result.stderr or b"")[:2048].decode("utf-8", errors="replace")
+        for argument in sorted(args[2:], key=len, reverse=True):
+            if Path(argument).is_absolute():
+                text = text.replace(argument, "<path>")
+        text = re.sub(r"https?://\S+", "<url>", text)
+        text = re.sub(r"(?:[A-Za-z]:[\\/]|/)[^\s\"'<>]+", "<path>", text)
+        text = " ".join("".join(c if c.isprintable() else " " for c in text).split())[:512]
+        detail = "; stderr: " + (text or "<empty>")
+    return f"{label} failed (exit {result.returncode}){detail}"
+
+
 def checked_command(command, *, env=None, check=True, maximum_bytes=MAX_LISTING):
     # Bound stdout while reading (not after capture_output has allocated it).
     # stderr is a private temporary stream, never a candidate-content log.
@@ -63,7 +84,7 @@ def checked_command(command, *, env=None, check=True, maximum_bytes=MAX_LISTING)
             errors.seek(0)
             result = subprocess.CompletedProcess(args, code, b"".join(chunks), errors.read(maximum_bytes))
             if check:
-                require(code == 0, f"{Path(args[0]).name} failed (exit {code})")
+                require(code == 0, command_failure(result))
             return result
         finally:
             timer.cancel()
@@ -121,7 +142,7 @@ def member_path(value):
     return "/".join(parts)
 
 
-def parse_7z_listing(text):
+def parse_7z_listing(text, expected_application_size=None):
     """Parse 7z l -slt, retaining exact member names for literal extraction."""
     require(len(text.encode("utf-8")) <= MAX_LISTING, "Archive listing exceeds limit")
     text = text.replace("\r\n", "\n")
@@ -151,9 +172,13 @@ def parse_7z_listing(text):
         require(record.get("Anti", "-") in ("", "-"), "Deleted archive member")
         require(record.get("Alternate Stream", "-") in ("", "-"), "Alternate data stream")
         size_text = record.get("Size", "")
-        require(re.fullmatch(r"[0-9]+", size_text) is not None, "Missing archive member size")
+        # The official NSIS handler can leave kpidSize unset when unknown.
+        # Ignored members are never extracted; only the selected app needs a
+        # numeric size to bound and verify its stdout-only extraction.
+        # https://github.com/ip7z/7zip/blob/main/CPP/7zip/Archive/Nsis/NsisHandler.cpp
+        require(not size_text or re.fullmatch(r"[0-9]+", size_text) is not None, "Invalid archive member size")
         record["normalizedPath"] = path
-        record["size"] = int(size_text)
+        record["size"] = int(size_text) if size_text else None
         record["directory"] = record.get("Folder") == "+" or "D" in attributes
         records.append(record)
         require(len(records) <= MAX_MEMBERS, "Too many archive members")
@@ -165,7 +190,14 @@ def parse_7z_listing(text):
     candidates = [r for r in records if r["normalizedPath"].split("/")[-1].casefold() == "echolingo.exe"]
     require(len(candidates) == 1 and not candidates[0]["directory"], "Expected exactly one echolingo.exe member")
     selected = candidates[0]
-    require(0 < selected["size"] <= MAX_EXECUTABLE, "Application member exceeds size limit")
+    if expected_application_size is not None:
+        require(type(expected_application_size) is int and 0 < expected_application_size <= MAX_EXECUTABLE,
+                "Fresh application size exceeds limit")
+        require(selected["size"] is None or selected["size"] == expected_application_size,
+                "Application listing size differs from fresh application")
+        selected["size"] = expected_application_size
+    require(type(selected["size"]) is int and 0 < selected["size"] <= MAX_EXECUTABLE,
+            "Application member size is missing or exceeds limit")
     return selected
 
 
@@ -179,12 +211,14 @@ def extract_windows_member(seven_zip, installer, member, target):
         timer.start()
         try:
             total = 0
-            for chunk in iter(lambda: process.stdout.read(1024 * 1024), b""):
+            # At most one byte past the exact known application length is read
+            # to detect an oversized stream. No archive-controlled allocation.
+            for chunk in iter(lambda: process.stdout.read(min(1024 * 1024, member["size"] - total + 1)), b""):
                 total += len(chunk)
-                require(total <= member["size"] and total <= MAX_EXECUTABLE, "Extracted application exceeds declared size")
+                require(total <= member["size"] and total <= MAX_EXECUTABLE, "Extracted application exceeds expected size")
                 output.write(chunk)
             require(process.wait(timeout=5) == 0, "7-Zip extraction failed")
-            require(total == member["size"], "Extracted application size differs from listing")
+            require(total == member["size"], "Extracted application size differs from fresh application")
         finally:
             timer.cancel()
             if process.poll() is None:
@@ -219,10 +253,11 @@ def verify_windows_version(value):
                 and value[key] == [0, 2, 6, 0], "Windows numeric file/product version is not 0.2.6")
 
 
-def inspect_windows(installer, output):
+def inspect_windows(installer, output, expected_application_size):
     seven_zip = tool("7z")
     listing = checked_command([seven_zip, "l", "-slt", "-sccUTF-8", "--", installer]).stdout.decode("utf-8")
-    member = parse_7z_listing(listing)
+    (output / "7z-listing.txt").write_text(listing, encoding="utf-8")
+    member = parse_7z_listing(listing, expected_application_size)
     target = output / "echolingo.exe"
     extract_windows_member(seven_zip, installer, member, target)
     verify_pe(target)
@@ -289,6 +324,7 @@ def readonly_dmg(installer, mountpoint):
     checked_command([hdiutil, "verify", installer])
     mountpoint.mkdir()
     detach_target = str(mountpoint)
+    primary_error = None
     # Even an attach failure may leave a mount behind. Always attempt cleanup
     # of only the freshly owned mountpoint/device, never a pre-existing volume.
     try:
@@ -297,12 +333,28 @@ def readonly_dmg(installer, mountpoint):
         # A failed attach can still report an allocated but unmounted device.
         # Retain that exact operation's device before checking mount/exit state.
         if result.stdout:
-            detach_target = attachment_device(result.stdout)
-        require(result.returncode == 0, "Disk-image attachment failed")
+            try:
+                detach_target = attachment_device(result.stdout)
+            except (ValueError, TypeError, plistlib.InvalidFileException):
+                # Nonzero attach may emit a human-readable prompt rather than
+                # plist. Preserve its real error; do not parse a device from text.
+                if result.returncode == 0:
+                    raise InspectionError("hdiutil attach returned invalid device metadata")
+        require(result.returncode == 0, command_failure(result))
         validate_attach_result(result.stdout, mountpoint)
         yield mountpoint
+    except BaseException as error:
+        primary_error = error
+        raise
     finally:
-        checked_command([hdiutil, "detach", detach_target])
+        try:
+            checked_command([hdiutil, "detach", detach_target])
+        except Exception as cleanup_error:
+            if primary_error is None:
+                raise
+            # A failed attach commonly has nothing to detach. Cleanup remains
+            # required and scoped, but must not replace the actionable failure.
+            raise InspectionError(f"{primary_error}; cleanup also failed: {cleanup_error}") from primary_error
 
 
 def inspect_macos(installer, output):
@@ -356,7 +408,7 @@ def inspect(platform, installer, built_application, output, run_url, *, locked_b
     require(not output.exists() and not output.is_symlink(), "Inspection output must be a new directory")
     output.mkdir(parents=True)
     output = output.resolve(strict=True)
-    application = inspect_windows(installer, output) if platform == "Windows" else inspect_macos(installer, output)
+    application = inspect_windows(installer, output, built_application.stat().st_size) if platform == "Windows" else inspect_macos(installer, output)
     extracted_hash = sha256(regular_file(application))
     require(extracted_hash == built_hash, "Installer application does not match freshly built application")
     require(sha256(installer) == installer_hash and sha256(built_application) == built_hash, "Build inputs changed during inspection")

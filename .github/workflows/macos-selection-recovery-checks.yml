@@ -390,6 +390,7 @@ jobs:
           cargo fmt --manifest-path src-tauri/Cargo.toml --check
           cargo fmt --manifest-path src-tauri/native-capture/Cargo.toml --check
       - name: Build fresh application and installer with locked dependencies
+        id: package_build
         run: npm run tauri build -- --bundles ${{ runner.os == 'Windows' && 'nsis' || 'app,dmg' }} -- --locked
       - name: Verify the Windows capture child actually embedded in this fresh application
         if: runner.os == 'Windows'
@@ -411,6 +412,7 @@ jobs:
           PY
           pwsh -NoProfile -File tests/windows-rust-capture-binary-smoke.ps1 -ExecutablePath "$RUNNER_TEMP/candidate-embedded-capture.exe"
       - name: Inspect fresh installer bytes without installing or launching the application
+        id: package_inspection
         shell: bash
         env:
           CANDIDATE_RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
@@ -424,7 +426,7 @@ jobs:
             application=src-tauri/target/release/bundle/macos/EchoLingo.app/Contents/MacOS/echolingo
           fi
           test "${#files[@]}" -eq 1
-          python scripts/inspect-candidate-package.py --platform "$RUNNER_OS" --installer "${files[0]}" --built-application "$application" --output-dir "$RUNNER_TEMP/candidate-inspection" --run-url "$CANDIDATE_RUN_URL" --locked-build-passed --focused-tests-passed
+          python scripts/inspect-candidate-package.py --platform "$RUNNER_OS" --installer "${files[0]}" --built-application "$application" --output-dir "$RUNNER_TEMP/candidate-inspection" --run-url "$CANDIDATE_RUN_URL" --locked-build-passed --focused-tests-passed 2>&1 | tee "$RUNNER_TEMP/candidate-inspection.log"
           mkdir "$RUNNER_TEMP/candidate-artifacts"
           cp "${files[0]}" "$RUNNER_TEMP/candidate-artifacts/"
           extra=()
@@ -437,6 +439,52 @@ jobs:
           fi
           python scripts/verify-candidate-package.py --platform "$RUNNER_OS" --installer "$RUNNER_TEMP/candidate-artifacts/$(basename "${files[0]}")" --application "$extracted" --checks-json "$RUNNER_TEMP/candidate-inspection/checks.json" --output "$RUNNER_TEMP/candidate-artifacts/CANDIDATE-MANIFEST.json" --run-url "$CANDIDATE_RUN_URL" "${extra[@]}"
           git diff --exit-code
+      - name: Preserve generated build bytes only for failed-inspection diagnosis
+        if: always() && steps.package_build.outcome == 'success' && steps.package_inspection.outcome == 'failure'
+        shell: bash
+        run: |
+          set -euo pipefail
+          output="$RUNNER_TEMP/candidate-unverified-build"
+          mkdir "$output"
+          if [ "$RUNNER_OS" = macOS ]; then
+            files=(src-tauri/target/release/bundle/dmg/*.dmg)
+            tar -czf "$output/EchoLingo.app.tar.gz" -C src-tauri/target/release/bundle/macos EchoLingo.app
+          else
+            files=(src-tauri/target/release/bundle/nsis/*.exe)
+            cp src-tauri/target/release/echolingo.exe "$output/"
+            if [ -f "$RUNNER_TEMP/candidate-inspection/7z-listing.txt" ]; then
+              cp "$RUNNER_TEMP/candidate-inspection/7z-listing.txt" "$output/"
+            fi
+          fi
+          test "${#files[@]}" -eq 1
+          cp "${files[0]}" "$output/"
+          cp "$RUNNER_TEMP/candidate-inspection.log" "$output/inspection.log"
+          python - <<'PYDIAG'
+          import hashlib, json, os, pathlib, subprocess
+          output = pathlib.Path(os.environ['RUNNER_TEMP']) / 'candidate-unverified-build'
+          source = subprocess.check_output(['git', 'rev-parse', 'HEAD', 'HEAD^{tree}'], text=True).splitlines()
+          files = [{'name': p.name, 'size': p.stat().st_size, 'sha256': hashlib.sha256(p.read_bytes()).hexdigest()}
+                   for p in sorted(output.iterdir()) if p.is_file()]
+          data = {'schemaVersion': 1, 'version': '0.2.6', 'scope': 'UNVERIFIED build bytes for failed-inspection diagnosis only',
+                  'releaseReady': False, 'sourceCommit': source[0], 'sourceTree': source[1],
+                  'runUrl': f"https://github.com/{os.environ['GITHUB_REPOSITORY']}/actions/runs/{os.environ['GITHUB_RUN_ID']}",
+                  'files': files}
+          (output / 'UNVERIFIED-BUILD.json').write_text(json.dumps(data, indent=2) + '\n', encoding='utf-8')
+          PYDIAG
+      - name: Upload unverified build diagnosis separately from candidates
+        if: always() && steps.package_build.outcome == 'success' && steps.package_inspection.outcome == 'failure'
+        uses: actions/upload-artifact@v4
+        with:
+          name: EchoLingo-0.2.6-UNVERIFIED-build-${{ runner.os }}
+          if-no-files-found: error
+          path: |
+            ${{ runner.temp }}/candidate-unverified-build/EchoLingo_0.2.6_aarch64.dmg
+            ${{ runner.temp }}/candidate-unverified-build/EchoLingo.app.tar.gz
+            ${{ runner.temp }}/candidate-unverified-build/EchoLingo_0.2.6_x64-setup.exe
+            ${{ runner.temp }}/candidate-unverified-build/echolingo.exe
+            ${{ runner.temp }}/candidate-unverified-build/7z-listing.txt
+            ${{ runner.temp }}/candidate-unverified-build/inspection.log
+            ${{ runner.temp }}/candidate-unverified-build/UNVERIFIED-BUILD.json
       - name: Preserve only verified testing-candidate installers and provenance
         uses: actions/upload-artifact@v4
         with:
