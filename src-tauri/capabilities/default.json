@@ -4,7 +4,8 @@
   "description": "Only the bundled local EchoLingo window",
   "windows": [
     "main",
-    "screenshot-editor"
+    "screenshot-editor",
+    "screenshot-pin-*"
   ],
   "permissions": [
     "core:default"

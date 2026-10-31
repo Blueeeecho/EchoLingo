@@ -109,7 +109,7 @@ function render(): boolean {
     applyZoom(); controls(); return true;
   } catch (error) {
     frame.hidden = true; canvas.width = canvas.height = 1; controls();
-    status(`图片绘制失败，已禁用复制和保存。请撤销本次编辑，或重新打开图片：${readableError(error)}`, true);
+    status(`图片绘制失败，已禁用贴图、复制和保存。请撤销本次编辑，或重新打开图片：${readableError(error)}`, true);
     return false;
   }
 }
@@ -148,7 +148,7 @@ async function acceptSession(value: ScreenshotSession | null): Promise<void> {
     if (image.naturalWidth !== value.width || image.naturalHeight !== value.height) throw new Error('图片尺寸不一致，无法安全打开。');
     original = image; model = new ScreenshotDocument(value); fit = true;
     frame.hidden = false; $('#empty-state').hidden = true; loading = false; const drawn = render();
-    if (drawn) status(value.overlay ? '✓ / Enter 复制并完成 · × / Esc 取消 · ↓ 保存到截图目录' : replaced ? '已打开新图片；上一张未保存的编辑已丢弃。图片仅在点击保存后写入文件。' : '仅在本机编辑，不识别文字、不上传图片。保存为合并后的 PNG；复制为合并后的图片。');
+    if (drawn) status(value.overlay ? '贴图 固定到桌面 · ✓ / Enter 复制并完成 · × / Esc 取消 · ↓ 保存' : replaced ? '已打开新图片；上一张未保存的编辑已丢弃。图片仅在点击保存后写入文件。' : '仅在本机编辑，不识别文字、不上传图片。保存为合并后的 PNG；复制为合并后的图片。');
     if (desktop) await invoke('screenshot_editor_ready', { sessionId: value.id });
   } catch (error) {
     if (token !== generation) return;
@@ -233,7 +233,7 @@ canvas.addEventListener('pointerup', event => {
 });
 canvas.addEventListener('contextlost', event => {
   event.preventDefault(); rendered = null; clearGesture(); frame.hidden = true; controls();
-  status('图片画布已中断，已禁用复制和保存。正在等待画布恢复；也可以重新打开图片。', true);
+  status('图片画布已中断，已禁用贴图、复制和保存。正在等待画布恢复；也可以重新打开图片。', true);
 });
 canvas.addEventListener('contextrestored', () => { if (render()) status('图片画布已恢复。'); });
 canvas.addEventListener('pointercancel', clearGesture); canvas.addEventListener('lostpointercapture', clearGesture);
@@ -260,26 +260,33 @@ $('#zoom-in').addEventListener('click', () => changeZoom(zoom * 1.25)); $('#zoom
 $('#zoom-actual').addEventListener('click', () => changeZoom(1)); $('#zoom-fit').addEventListener('click', () => { fit = true; applyZoom(); });
 new ResizeObserver(() => { if (fit || inplace()) applyZoom(); }).observe(workspace);
 new ResizeObserver(placeOverlayTools).observe($('.editor-toolbar'));
-async function exportImage(action: 'copy' | 'save' | 'saveAs'): Promise<void> {
+async function exportImage(action: 'copy' | 'save' | 'saveAs' | 'pin'): Promise<void> {
   if (action === 'saveAs' && inplace()) {
     status('原地截图使用设置中的保存目录；请在设置修改目录'); return;
   }
   if (!session || !model || busy || loading) return;
-  if (!exportReady()) { status('当前图片尚未完整绘制，不能复制或保存。请撤销或重新打开图片。', true); return; }
-  if (!desktop) { status('请在桌面应用中复制或保存图片。'); return; }
+  if (!exportReady()) { status('当前图片尚未完整绘制，不能贴图、复制或保存。请撤销或重新打开图片。', true); return; }
+  if (!desktop) { status('请在桌面应用中贴图、复制或保存图片。'); return; }
   clearGesture(); const token = generation, sessionId = session.id, state = model.stateId;
-  busy = true; controls(); status(action === 'copy' ? '正在复制图片…' : '正在准备保存…');
+  busy = true; controls(); status(action === 'pin' ? '正在固定图片…' : action === 'copy' ? '正在复制图片…' : '正在准备保存…');
   try {
     const pngBase64 = await flattenedPng(canvas);
     if (token !== generation || session?.id !== sessionId || !exportReady() || model.stateId !== state) return;
-    if (action === 'copy') { await invoke('copy_screenshot_image', { sessionId, pngBase64 }); if (token === generation) { status('已复制合并后的图片。剪贴板不包含原图或编辑图层。'); if (inplace()) await dismissAfterExport(sessionId, token, '图片已复制到剪贴板'); } }
+    if (action === 'pin') {
+      await invoke('pin_screenshot_image', { sessionId, pngBase64 });
+      if (token === generation) {
+        status('图片已固定到桌面；未保存文件，也未更改剪贴板。');
+        if (inplace()) await dismissAfterExport(sessionId, token, '图片已固定到桌面');
+      }
+    }
+    else if (action === 'copy') { await invoke('copy_screenshot_image', { sessionId, pngBase64 }); if (token === generation) { status('已复制合并后的图片。剪贴板不包含原图或编辑图层。'); if (inplace()) await dismissAfterExport(sessionId, token, '图片已复制到剪贴板'); } }
     else {
       nativeDialog = action === 'saveAs'; controls();
       const result = await invoke<{ path: string; fileName?: string } | null>('save_screenshot_image', { sessionId, pngBase64, saveAs: action === 'saveAs' });
       if (token !== generation) return;
       if (result) { savedState = state; status(`已保存：${result.path}`); if (inplace()) await dismissAfterExport(sessionId, token, `图片已保存：${result.path}`); } else status('已取消保存，图片和编辑内容仍保留。');
     }
-  } catch (error) { if (token === generation) status(`未完成${action === 'copy' ? '复制' : '保存'}：${readableError(error)}`, true); }
+  } catch (error) { if (token === generation) status(`未完成${action === 'pin' ? '贴图' : action === 'copy' ? '复制' : '保存'}：${readableError(error)}`, true); }
   finally { if (token === generation) { busy = false; nativeDialog = false; controls(); } }
 }
 async function openImage(): Promise<void> {
@@ -307,7 +314,7 @@ async function dismissAfterExport(sessionId: number, token: number, completed: s
   catch (error) {
     // The explicit clipboard/file operation has committed. Never label it a
     // failed export or retry it merely because native dismissal failed.
-    if (token === generation) status(`${completed}；退出失败，请点击 × 关闭，无需再次复制或保存：${readableError(error)}`, true);
+    if (token === generation) status(`${completed}；退出失败，请点击 × 关闭，无需再次贴图、复制或保存：${readableError(error)}`, true);
   }
 }
 async function closeEditor(): Promise<void> {
@@ -327,6 +334,8 @@ async function closeEditor(): Promise<void> {
   try { if (desktop) await invoke('close_screenshot_editor', { sessionId: session?.id ?? null }); if (token === generation) await acceptSession(null); }
   catch (error) { status(`无法关闭窗口：${readableError(error)}`, true); }
 }
+$('#overlay-pin').addEventListener('click', () => void exportImage('pin'));
+$('#pin-image').addEventListener('click', () => void exportImage('pin'));
 $('#overlay-copy').addEventListener('click', () => void exportImage('copy'));
 $('#overlay-save').addEventListener('click', () => void exportImage('save'));
 $('#overlay-cancel').addEventListener('click', () => void closeEditor());

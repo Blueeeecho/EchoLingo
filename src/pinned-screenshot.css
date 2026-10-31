@@ -1,0 +1,14 @@
+:root { font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif; color-scheme:light; --surface:#fff; --bg:#f6f7fb; --text:#292b3e; --secondary:#74778b; --border:#e7e7ef; --accent:#7862d8; --soft:#eeebfa; color:var(--text); background:var(--bg); }
+@media(prefers-color-scheme:dark) { :root { color-scheme:dark; --surface:#20212d; --bg:#171821; --text:#e4e4ef; --secondary:#a3a4b7; --border:#30313e; --accent:#aa96f0; --soft:#342d4d; } }
+* { box-sizing:border-box; } [hidden] { display:none!important; }
+body { margin:0; height:100vh; display:flex; flex-direction:column; overflow:hidden; font-size:11px; }
+header { flex:none; min-height:38px; padding:3px 7px 3px 10px; display:flex; align-items:center; justify-content:space-between; gap:6px; background:var(--surface); border-bottom:1px solid var(--border); }
+#image-info { color:var(--secondary); font-variant-numeric:tabular-nums; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+.actions { display:flex; flex-shrink:0; gap:3px; } button { display:flex; gap:4px; align-items:center; justify-content:center; font:inherit; color:inherit; cursor:pointer; min-height:30px; min-width:30px; padding:5px; border:0; border-radius:6px; background:transparent; }
+button:hover { background:var(--soft); } button:disabled { opacity:.4; cursor:default; } button:focus-visible { outline:2px solid var(--accent); outline-offset:-2px; }
+.pin-icon { width:16px; height:16px; fill:none; stroke:currentColor; stroke-width:1.8; stroke-linecap:round; stroke-linejoin:round; transform:rotate(-35deg); }
+button[aria-pressed=true] { color:var(--accent); } button[aria-pressed=true] .pin-icon { transform:none; fill:currentColor; }
+#close-pin { font-size:21px; } #close-pin:hover { color:#c65360; }
+main { flex:1; min-height:0; min-width:0; display:flex; align-items:center; justify-content:center; overflow:hidden; }
+img { width:100%; height:100%; object-fit:contain; user-select:none; }
+#pin-status { flex:none; margin:0; padding:7px 10px; overflow-wrap:anywhere; color:var(--secondary); max-height:40vh; overflow:auto; }
