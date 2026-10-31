@@ -21,7 +21,9 @@ public static partial class EchoLingoApplicationSmoke {
     [DllImport("kernel32.dll")] static extern bool GlobalUnlock(IntPtr memory);
     static ScreenshotClipboardLease ScreenshotOwnedClipboard;
     static Bitmap ScreenshotExpectedWindow;
-    static List<Dictionary<string,object>> ScreenshotNativeOpenObservations;
+    static List<Dictionary<string,object>> ScreenshotNativeOpenObservations,ScreenshotNativeCancelObservations;
+    [StructLayout(LayoutKind.Sequential)] struct ScreenshotGuiThreadInfo {public uint size,flags;public IntPtr active,focus,capture,menuOwner,moveSize,caret;public RECT caretRect;}
+    [DllImport("user32.dll")] static extern bool GetGUIThreadInfo(uint thread,ref ScreenshotGuiThreadInfo info);
     [DllImport("user32.dll")] static extern int GetDlgCtrlID(IntPtr window);
     [DllImport("dwmapi.dll")] static extern int DwmFlush();
     // The native adapter holds OpenClipboard for the entire policy call.
@@ -156,12 +158,36 @@ public static partial class EchoLingoApplicationSmoke {
         try{Thread.Sleep(60);ScreenshotMove(app,editor,b);Thread.Sleep(60);}
         finally{if(ForegroundPid()==app.Id){INPUT up=new INPUT();up.data.mouse.flags=4;Send(new INPUT[]{up});}}
     }
+    static Dictionary<string,object> ScreenshotCancelState(Process app,IntPtr editor,IntPtr modal,string caption) {
+        Dictionary<string,object> state=new Dictionary<string,object>{{"ready",false},{"dialogVisible",true},{"editorVisible",false},{"editorEnabled",false},{"savePresent",false},{"saveEnabled",false},{"editorDomInspected",false}};
+        try{uint pid,editorPid;uint thread=GetWindowThreadProcessId(modal,out pid);GetWindowThreadProcessId(editor,out editorPid);
+            StringBuilder name=new StringBuilder(128),title=new StringBuilder(128);GetClassName(modal,name,name.Capacity);GetWindowText(modal,title,title.Capacity);
+            bool exists=modal!=IntPtr.Zero&&IsWindow(modal),own=exists&&pid==app.Id,parent=GetWindow(modal,4)==editor,foreground=GetForegroundWindow()==modal,dialog=name.ToString()=="#32770",expected=title.ToString()==caption;
+            state["dialogExists"]=exists;state["dialogVisible"]=exists&&IsWindowVisible(modal);state["dialogEnabled"]=exists&&IsWindowEnabled(modal);state["dialogProcessMatches"]=own;state["ownerIsEditor"]=parent;state["classMatches"]=dialog;state["titleMatchesExpected"]=expected;
+            state["foregroundIsDialog"]=foreground;state["foregroundIsEditor"]=GetForegroundWindow()==editor;state["editorVisible"]=IsWindowVisible(editor);state["editorEnabled"]=IsWindowEnabled(editor);state["editorProcessMatches"]=editorPid==app.Id;
+            ScreenshotGuiThreadInfo info=new ScreenshotGuiThreadInfo();info.size=(uint)Marshal.SizeOf(typeof(ScreenshotGuiThreadInfo));bool queried=own&&thread!=0&&GetGUIThreadInfo(thread,ref info);bool focus=queried&&info.focus!=IntPtr.Zero&&GetAncestor(info.focus,2)==modal;
+            state["focusQuerySucceeded"]=queried;state["focusWithinModal"]=focus;state["guiFlags"]=queried?info.flags:0;
+            if(editorPid==app.Id&&IsWindowVisible(editor)&&IsWindowEnabled(editor)){AutomationElement save=ScreenshotButton(editor,"\u4fdd\u5b58");state["editorDomInspected"]=true;state["savePresent"]=save!=null;if(save!=null){state["saveEnabled"]=save.Current.IsEnabled;state["saveOffscreen"]=save.Current.IsOffscreen;}}
+            if(!own||!dialog||!expected||!parent||!foreground||!IsWindowVisible(modal)||!IsWindowEnabled(modal)||IsWindowEnabled(editor)||!focus)return state;
+            // IDCANCEL is the native dialog cancellation action. Read its typed
+            // accessibility readiness; do not invoke it or change keyboard focus.
+            AutomationElementCollection buttons=AutomationElement.FromHandle(modal).FindAll(TreeScope.Descendants,new AndCondition(new PropertyCondition(AutomationElement.ControlTypeProperty,ControlType.Button),new PropertyCondition(AutomationElement.AutomationIdProperty,"2")));
+            state["cancelButtonCount"]=Math.Min(buttons.Count,8);if(buttons.Count!=1)return state;
+            AutomationElement cancel=buttons[0];object pattern;bool cancelOwn=cancel.Current.ProcessId==app.Id,enabled=cancel.Current.IsEnabled,visible=!cancel.Current.IsOffscreen,supports=cancel.TryGetCurrentPattern(InvokePattern.Pattern,out pattern);
+            state["cancelProcessMatches"]=cancelOwn;state["cancelEnabled"]=enabled;state["cancelVisible"]=visible;state["cancelSupportsInvoke"]=supports;state["ready"]=cancelOwn&&enabled&&visible&&supports;
+        }catch(Exception error){state["snapshotExceptionHresult"]=error.HResult;}return state;
+    }
     static void ScreenshotCancelFileDialog(Process app,IntPtr editor,string buttonName) {
+        string phase=buttonName=="\u53e6\u5b58\u4e3a"?"save-as":"open";
+        string caption=phase=="save-as"?"\u53e6\u5b58 PNG\uff08\u540c\u540d\u6587\u4ef6\u5c06\u81ea\u52a8\u7f16\u53f7\uff0c\u4e0d\u8986\u76d6\uff09":"\u6253\u5f00\u672c\u5730 PNG / JPEG \u56fe\u7247";
+        Assert(ScreenshotNativeCancelObservations.Count<2,"Native cancellation diagnostic bound exceeded.");Dictionary<string,object> observation=new Dictionary<string,object>{{"phase",phase},{"escapePresses",0}};ScreenshotNativeCancelObservations.Add(observation);
         ScreenshotInvoke(app,editor,buttonName);IntPtr modal=IntPtr.Zero;
-        WaitFor(delegate{modal=GetForegroundWindow();StringBuilder name=new StringBuilder(128);GetClassName(modal,name,name.Capacity);return modal!=editor&&ForegroundPid()==app.Id&&name.ToString()=="#32770";},10,"Native screenshot file dialog did not own the expected process foreground.",app);
-        Assert(ForegroundPid()==app.Id&&GetForegroundWindow()==modal,"Native dialog lost ownership before cancellation; no key sent.");
-        Send(new INPUT[]{Key(0x1B,false),Key(0x1B,true)});
-        WaitFor(delegate{AutomationElement save=ScreenshotButton(editor,"\u4fdd\u5b58");return !IsWindowVisible(modal)&&IsWindowVisible(editor)&&save!=null&&save.Current.IsEnabled;},10,"Cancelled native screenshot file dialog did not restore the editor.",app);
+        try{WaitFor(delegate{modal=GetForegroundWindow();Dictionary<string,object> state=ScreenshotCancelState(app,editor,modal,caption);observation["beforeEscape"]=state;return Convert.ToBoolean(state["ready"]);},10,"Native "+phase+" dialog did not become an initialized, focused cancellation target; no key sent.",app);
+            Assert(ForegroundPid()==app.Id&&GetForegroundWindow()==modal&&GetWindow(modal,4)==editor&&IsWindowEnabled(modal)&&!IsWindowEnabled(editor),"Native dialog lost ownership before cancellation; no key sent.");
+            Send(new INPUT[]{Key(0x1B,false),Key(0x1B,true)});observation["escapePresses"]=1;
+            WaitFor(delegate{Dictionary<string,object> state=ScreenshotCancelState(app,editor,modal,caption);observation["afterEscape"]=state;return !Convert.ToBoolean(state["dialogVisible"])&&Convert.ToBoolean(state["editorVisible"])&&Convert.ToBoolean(state["editorEnabled"])&&Convert.ToBoolean(state["savePresent"])&&Convert.ToBoolean(state["saveEnabled"]);},10,"Cancelled native "+phase+" dialog did not restore the editor.",app);
+            observation["restored"]=true;
+        }catch{observation["failureState"]=ScreenshotCancelState(app,editor,modal,caption);throw;}
     }
     static Dictionary<string,object> ScreenshotOpenControlMetadata(AutomationElement element,int process) {
         bool own=element.Current.ProcessId==process;Dictionary<string,object> row=new Dictionary<string,object>{{"processMatches",own}};if(!own)return row;
@@ -272,6 +298,7 @@ public static partial class EchoLingoApplicationSmoke {
         IntPtr source=IntPtr.Zero;OnUi(form,delegate{source=form.Handle;});ScreenshotOwnedClipboard=new ScreenshotClipboardLease(source);bool completed=false;
         report["screenshotClipboardPolicySelfTests"]=ScreenshotClipboardPolicyTests();report["screenshotClipboardObservations"]=ScreenshotOwnedClipboard.Observations;
         ScreenshotNativeOpenObservations=new List<Dictionary<string,object>>();report["screenshotNativeOpenObservations"]=ScreenshotNativeOpenObservations;
+        ScreenshotNativeCancelObservations=new List<Dictionary<string,object>>();report["screenshotNativeCancelObservations"]=ScreenshotNativeCancelObservations;
         try{ScreenshotOwnedClipboard.RequireEmpty();ScreenshotEditorWorkflowBody(form,image,app,server,history,output,start,executable,roaming,token,passed,report,sourceEvents);completed=true;}
         finally{string outcome;try{outcome=ScreenshotOwnedClipboard.Cleanup();}catch(Exception error){outcome="cleanup-error-"+error.GetType().Name;}ScreenshotOwnedClipboard=null;if(ScreenshotExpectedWindow!=null){ScreenshotExpectedWindow.Dispose();ScreenshotExpectedWindow=null;}
             report["screenshotClipboardCleanup"]=outcome;report["screenshotOwnedClipboardCleared"]=outcome=="verified-owned-generation-cleared"||outcome=="already-empty";

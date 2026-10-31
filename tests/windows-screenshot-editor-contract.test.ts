@@ -81,6 +81,15 @@ describe('actual Windows screenshot fixture source wiring (not native acceptance
     expect(fixture).toContain('catch{ScreenshotDescribeOpenDialog(app,editor,modal,format);throw;}');
     expect(fixture).toContain('AutomationElement.AutomationIdProperty,"1001"');
   });
+  it('waits for an owned initialized native Cancel target before one Escape and preserves its phases', () => {
+    const cancellation = fixture.slice(fixture.indexOf('static Dictionary<string,object> ScreenshotCancelState('), fixture.indexOf('static Dictionary<string,object> ScreenshotOpenControlMetadata('));
+    for (const required of ['ownerIsEditor', 'titleMatchesExpected', 'focusWithinModal', 'cancelSupportsInvoke', 'IsWindowEnabled(editor)', 'AutomationElement.AutomationIdProperty,"2"', 'beforeEscape', 'afterEscape', 'failureState', 'escapePresses', 'ScreenshotNativeCancelObservations.Count<2']) expect(cancellation).toContain(required);
+    expect(cancellation.match(/Send\(new INPUT/g)).toHaveLength(1);
+    expect(cancellation).not.toContain('.Invoke()');
+    expect(cancellation).not.toContain('.SetFocus(');
+    expect(cancellation).not.toContain('Thread.Sleep');
+    expect(cancellation.match(/},10,/g)).toHaveLength(2);
+  });
   it('refuses ambiguous accessibility names and releases an owned edit gesture promptly', () => {
     expect(fixture).toContain('Assert(matches.Count<=1');
     expect(fixture).toContain('finally{if(ForegroundPid()==app.Id)');
