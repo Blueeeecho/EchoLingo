@@ -56,6 +56,7 @@
       </a>
       <nav class="site-nav" aria-label="Primary">
         <a href="#features"><span class="lang-zh">功能</span><span class="lang-en">Features</span></a>
+        <a href="#screenshot"><span class="lang-zh">F1 截图</span><span class="lang-en">F1 Capture</span></a>
         <a href="#services"><span class="lang-zh">翻译方式</span><span class="lang-en">Services</span></a>
         <a href="#download"><span class="lang-zh">下载</span><span class="lang-en">Download</span></a>
         <a href="#guide"><span class="lang-zh">指南</span><span class="lang-en">Guide</span></a>
@@ -87,6 +88,11 @@
           <li><span class="lang-zh">中英离线翻译</span><span class="lang-en">Offline Chinese–English</span></li>
           <li><span class="lang-zh">自定义翻译服务</span><span class="lang-en">Custom services</span></li>
         </ul>
+        <a class="capture-entry" href="#screenshot">
+          <kbd>F1</kbd>
+          <span><strong><span class="lang-zh">也能全局截图</span><span class="lang-en">Global screenshots, too</span></strong><span class="capture-entry-note"><span class="lang-zh">截窗口、标重点、复制或保存</span><span class="lang-en">Capture, annotate, copy or save</span></span></span>
+          <svg class="i" aria-hidden="true"><use href="#i-arrow"/></svg>
+        </a>
         <p class="hero-platforms" aria-label="Platforms">
           <span><svg class="i" aria-hidden="true"><use href="#i-windows"/></svg> Windows</span>
           <span><svg class="i" aria-hidden="true"><use href="#i-mac"/></svg> macOS</span>
@@ -171,7 +177,24 @@
           <p class="feature-note"><span class="lang-zh">翻译与 OCR 分别配置。密钥保存在系统凭据库，不会写入历史。</span><span class="lang-en">Translation and OCR are configured separately. Keys stay in the system credential store and are not written into history.</span></p>
         </article>
       </div>
-      <p class="feature-note" id="screenshot-extra"><span class="lang-zh"><strong>顺手的小工具：</strong>按 <kbd title="独立截图与本地编辑">F1</kbd> 截取可见窗口或拖选区域，再做标注、裁剪、复制或保存。它不替代翻译与 OCR，也不调用云服务。</span><span class="lang-en"><strong>A handy extra:</strong> press <kbd title="Separate screenshot and local editor">F1</kbd> to capture a visible window or drag a region, then annotate, crop, copy, or save. It stays separate from translation and OCR and does not call cloud services.</span></p>
+
+    </section>
+
+    <section class="container capture-section" id="screenshot" aria-labelledby="screenshot-title">
+      <div class="capture-panel" id="screenshot-extra">
+        <div class="capture-copy">
+          <p class="section-kicker"><span class="lang-zh">翻译之外，也能顺手截图</span><span class="lang-en">Beyond translation</span></p>
+          <h2 id="screenshot-title"><span class="lang-zh">按 F1，把重点留在图里。</span><span class="lang-en">Press F1. Keep the picture.</span></h2>
+          <p class="capture-lead"><span class="lang-zh">留一张报错、圈出要改的地方，或分享眼前的画面。无需翻译时，回声译也有独立的全局截图入口。</span><span class="lang-en">Capture an error, point out a change, or share what is on screen. When you do not need a translation, EchoLingo has a separate global screenshot shortcut.</span></p>
+          <div class="capture-distinction"><span><kbd>Alt + S</kbd> <span class="lang-zh">识字并翻译</span><span class="lang-en">Read &amp; translate</span></span><span><kbd>F1</kbd> <span class="lang-zh">截图并编辑</span><span class="lang-en">Capture &amp; edit</span></span></div>
+          <p class="feature-note"><span class="lang-zh">应用运行时可用；快捷键可在设置中修改，部分键盘需配合 Fn。全程本机处理，不调用 OCR、翻译或上传服务。</span><span class="lang-en">Available while the app is running. Change the shortcut in Settings; some keyboards need Fn. Capture and editing stay local, without OCR, translation, or uploads.</span></p>
+        </div>
+        <ol class="capture-steps">
+          <li><span class="capture-step-number" aria-hidden="true">01</span><div><h3><span class="lang-zh">截窗口，或框选一块</span><span class="lang-en">A window or a region</span></h3><p><span class="lang-zh">F1 唤起，悬停看轮廓；点击选窗口，或拖动框选。Esc 取消。</span><span class="lang-en">Press F1, hover for an outline, then click a window or drag a region. Esc cancels.</span></p></div></li>
+          <li><span class="capture-step-number" aria-hidden="true">02</span><div><h3><span class="lang-zh">在独立编辑器里标重点</span><span class="lang-en">Mark it in a separate editor</span></h3><p><span class="lang-zh">矩形、箭头、文字、裁剪与遮挡。敏感内容请用实心遮挡，而非马赛克。</span><span class="lang-en">Rectangles, arrows, text, cropping and redaction. Use solid redaction, not mosaic, for sensitive content.</span></p></div></li>
+          <li><span class="capture-step-number" aria-hidden="true">03</span><div><h3><span class="lang-zh">复制图片，或保存 PNG</span><span class="lang-en">Copy the image or save a PNG</span></h3><p><span class="lang-zh">复制后粘贴到聊天或文档；也可保存到自选文件夹。不会自动保存。</span><span class="lang-en">Copy into a chat or document, or save to a folder you choose. Nothing is saved automatically.</span></p></div></li>
+        </ol>
+      </div>
     </section>
 
     <section class="section container services-section" id="services" aria-labelledby="services-title">
