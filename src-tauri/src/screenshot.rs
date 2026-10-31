@@ -578,9 +578,9 @@ pub async fn close_screenshot_editor(
         if state.screenshots.dialog_active.load(Ordering::SeqCst) {
             return Err("SCREENSHOT_DIALOG: 请先取消或完成系统文件对话框".to_owned());
         }
-        state.screenshots.dismiss_current(session_id, || {
-            super::screenshot_overlay::hide(&window)
-        })?;
+        state
+            .screenshots
+            .dismiss_current(session_id, || super::screenshot_overlay::hide(&window))?;
         // Ordinary committed Save/Copy can finish without retaining the window.
         // Invalidate only this editor, not an unrelated newer OCR task.
         emit_cleared(&handle, session_id);

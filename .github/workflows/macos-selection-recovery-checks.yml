@@ -225,6 +225,9 @@ jobs:
         with:
           node-version: '24'
           cache: npm
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
       - uses: dtolnay/rust-toolchain@stable
       - uses: swatinem/rust-cache@v2
         with:
@@ -236,6 +239,46 @@ jobs:
           git merge-base --is-ancestor da0b5d03060a62ea120d931cc6c9eede5af66a7f HEAD
           python scripts/check-repository.py
           git diff --exit-code
+      - name: Verify only unchanged offline resource inputs may be reused
+        if: runner.os == 'Windows'
+        shell: bash
+        run: |
+          set -euo pipefail
+          git diff --exit-code 4b8c5f5ac67e07cc4005812963b2c02acdd14d5d HEAD -- \
+            scripts/offline-engine scripts/prepare-offline-models.py scripts/test_prepare_offline_models.py \
+            scripts/prepare-offline-notices.py scripts/package-offline-source.py \
+            scripts/audit-windows-resources.py \
+            resources/offline-translation src-tauri/tauri.windows.conf.json LICENSE LICENSING.md
+          git diff --exit-code da0b5d03060a62ea120d931cc6c9eede5af66a7f HEAD -- scripts/stage-language-patch-resources.py
+      - name: Download pinned offline resources and corresponding source without old app reuse
+        if: runner.os == 'Windows'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('node:fs');
+            const path = require('node:path');
+            const pins = [
+              [13034542412, 'windows.zip', 'da42d05739744f5eafa71f9758d6a045b42020403d4228f3007d9bbda92fbb25'],
+              [13034970610, 'evidence.zip', '2520b83f54d3774b75c0cc1c6fc3f3105f0c9fb380800d94ac73001e36295285']
+            ];
+            const directory = path.join(process.env.RUNNER_TEMP, 'candidate-offline-inputs');
+            fs.mkdirSync(directory);
+            const { data: run } = await github.rest.actions.getWorkflowRun({owner:'Blueeeecho',repo:'EchoLingo',run_id:41178655504});
+            if (run.conclusion !== 'success' || run.head_sha !== '4b8c5f5ac67e07cc4005812963b2c02acdd14d5d') throw new Error('Pinned resource run mismatch');
+            for (const [id,name,hash] of pins) {
+              const { data: artifact } = await github.rest.actions.getArtifact({owner:'Blueeeecho',repo:'EchoLingo',artifact_id:id});
+              if (artifact.expired || artifact.workflow_run.id !== 41178655504 || artifact.digest !== `sha256:${hash}`) throw new Error('Pinned resource artifact mismatch');
+              const { data } = await github.rest.actions.downloadArtifact({owner:'Blueeeecho',repo:'EchoLingo',artifact_id:id,archive_format:'zip'});
+              fs.writeFileSync(path.join(directory,name), Buffer.from(data));
+            }
+      - name: Extract only hash-verified offline engine models licenses and source
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          python scripts/stage-language-patch-resources.py --windows-zip "$env:RUNNER_TEMP/candidate-offline-inputs/windows.zip" --evidence-zip "$env:RUNNER_TEMP/candidate-offline-inputs/evidence.zip" --output-dir "$env:RUNNER_TEMP/candidate-offline-evidence"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          python scripts/audit-windows-resources.py --staged
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - run: npm ci
       - run: npm run build
       - name: Compile actual Windows helper child and app test binary

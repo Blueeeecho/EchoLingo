@@ -51,6 +51,17 @@ class MacRecoveryWorkflowContract(unittest.TestCase):
         self.assertIn('overlay-policy.log', SOURCE)
         self.assertIn('overlay-host.log', SOURCE)
 
+    def test_windows_preflight_stages_the_same_pinned_resources_as_packaging(self):
+        preflight = SOURCE.split('  windows-native-preflight:', 1)[1].split('  candidate-installers:', 1)[0]
+        packages = SOURCE.split('  candidate-installers:', 1)[1]
+        title = '      - name: Verify only unchanged offline resource inputs may be reused'
+        staged = lambda job: job.split(title, 1)[1].split('      - run: npm ci', 1)[0]
+        self.assertEqual(staged(preflight), staged(packages))
+        self.assertIn('scripts/stage-language-patch-resources.py', staged(preflight))
+        self.assertIn('artifact.digest !==', staged(preflight))
+        self.assertLess(preflight.index(title), preflight.index('cargo test --manifest-path'))
+        self.assertNotIn('TAURI_CONFIG', preflight)
+
     def test_candidate_packages_require_native_success_and_do_not_publish(self):
         packages = SOURCE.split('  candidate-installers:', 1)[1]
         self.assertIn('needs: [native-selection-recovery, windows-native-preflight]', packages)
