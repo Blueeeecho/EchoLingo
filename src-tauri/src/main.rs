@@ -2552,6 +2552,12 @@ fn start_action(app: tauri::AppHandle, action: String) {
     } else {
         Ok(None)
     };
+    #[cfg(target_os = "macos")]
+    let macos_selection_source = if action == "selection" {
+        platform::macos_selection_source().map(Some)
+    } else {
+        Ok(None)
+    };
     #[cfg(target_os = "windows")]
     if let Some((_, attempt)) = selection_attempt {
         platform::record_selection_source(attempt, source_snapshot.is_ok(), None);
@@ -2609,6 +2615,8 @@ fn start_action(app: tauri::AppHandle, action: String) {
             }
             #[cfg(target_os = "windows")]
             let expected_source = source_snapshot?;
+            #[cfg(target_os = "macos")]
+            let expected_macos_source = macos_selection_source?;
             #[cfg(target_os = "windows")]
             if let Some(source) = &expected_source {
                 let current = source.is_current();
@@ -2648,7 +2656,11 @@ fn start_action(app: tauri::AppHandle, action: String) {
                 None
             };
             #[cfg(not(target_os = "windows"))]
-            std::thread::sleep(Duration::from_millis(180));
+            if worker_action != "selection" {
+                // Selection already waits for modifier release before Copy.
+                // Do not postpone its initial AX/focus read by another 180 ms.
+                std::thread::sleep(Duration::from_millis(180));
+            }
             if worker_request.cancelled() {
                 return Err(translation_requests::CANCELLED.into());
             }
@@ -2666,7 +2678,12 @@ fn start_action(app: tauri::AppHandle, action: String) {
                         let (strategy, attempt) = selection_attempt.ok_or("缺少取词任务")?;
                         platform::selected_text_with_strategy_cancelable(cancel, strategy, attempt)
                     }
-                    #[cfg(not(target_os = "windows"))]
+                    #[cfg(target_os = "macos")]
+                    platform::selected_text_from_source_cancelable(
+                        cancel,
+                        expected_macos_source.as_ref().ok_or("缺少原取词窗口")?,
+                    )
+                    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
                     platform::selected_text_cancelable(cancel)
                 }
                 "clipboard" => platform::clipboard_text(),
@@ -3171,7 +3188,7 @@ async fn fit_window_with_visibility(
     presentation: String,
     content_height: f64,
     content_width: Option<f64>,
-) -> Result<(), String> {
+) -> Result<Option<window_layout::LayoutViewport>, String> {
     #[cfg(target_os = "windows")]
     let mode_changed = matches!(presentation.as_str(), "popup" | "management")
         && state.is_popup() != (presentation == "popup");

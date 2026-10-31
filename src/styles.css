@@ -241,7 +241,14 @@ body[data-view="translate"] .main-shell { min-height: 0; height: auto; }
 body[data-view="translate"] .popup-toolbar { display: flex; }
 body[data-view="translate"] .management-header, body[data-view="translate"] .preview-banner, body[data-view="translate"] .app-footer { display: none !important; }
 body[data-view="translate"] main { flex: none; width: 100%; max-width: none; margin: 0; padding: 4px 8px 6px; min-height: 0; overflow: visible; }
-body[data-view="translate"] .view { animation: none; max-height: calc(100vh - 46px); margin-right: 12px; overflow-y: auto; overscroll-behavior: contain; }
+body[data-view="translate"] .view { animation: none; max-height: calc(100vh - 46px); margin-right: 12px; overflow-y: auto; scrollbar-gutter: stable; overscroll-behavior: contain; }
+/* macOS “Always” scrollbars otherwise narrow the text only while the old
+   viewport overflows, changing line breaks again after each native height fit.
+   Older supported WebKit has no scrollbar-gutter; reserve its classic gutter
+   with overflow:scroll instead. Overlay scrollbars still consume no width. */
+@supports not (scrollbar-gutter: stable) {
+  body[data-view="translate"] .view { overflow-y: scroll; }
+}
 body[data-view="translate"] .translator-panel { margin: 0; padding: 0; background: transparent; border: 0; border-radius: 0; box-shadow: none; }
 body[data-view="translate"] .source-column { position: relative; display: block; padding: 1px 29px 2px 4px; border: 0; border-radius: 0; background: transparent; }
 body[data-view="translate"] #source-text { display: block; width: 100%; height: 25px; min-height: 25px; max-height: 180px; resize: none; padding: 0; border: 0; border-radius: 0; font-size: 14px; line-height: var(--reading-line-height); background: transparent; letter-spacing: 0; }

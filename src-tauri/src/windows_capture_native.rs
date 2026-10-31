@@ -973,6 +973,8 @@ struct Picker {
     planes: Vec<Window>,
     edges: Vec<Window>,
     loupe: Window,
+    // One fixed-size source bitmap per picker, not a new GDI DC/DIB per frame.
+    loupe_sample: Surface,
     own: HashSet<isize>,
     topology: CaptureTopologyPolicy,
     selection: CaptureSelectionState,
@@ -1066,6 +1068,7 @@ impl Picker {
             canvas.clone(),
         )?;
         own.insert(loupe.hwnd as isize);
+        let loupe_sample = Surface::new(CaptureMagnifierSample::SIDE, CaptureMagnifierSample::SIDE)?;
         *canvas.lock().map_err(|_| error("CAPTURE_BITMAP"))? = Some(Surface::new(156, 174)?);
         let mut input = CaptureInputPolicy::default();
         input.resync_released_buttons(down(1), down(2));
@@ -1102,6 +1105,7 @@ impl Picker {
             planes,
             edges,
             loupe,
+            loupe_sample,
             own,
             topology,
             selection,
@@ -1396,7 +1400,7 @@ impl Picker {
             self.loupe.hide();
             return Ok(());
         }
-        let raw = Surface::new(CaptureMagnifierSample::SIDE, CaptureMagnifierSample::SIDE)?;
+        let raw = &self.loupe_sample;
         raw.clear(w::rgb(22, 26, 34));
         raw.copy_screen(sample.copy_offset, sample.grabbed, false)?;
         {
@@ -1456,7 +1460,8 @@ impl Picker {
         }
         set_bounds(self.loupe.hwnd, TOPMOST, place, POS | 0x40)?;
         unsafe {
-            w::EnableWindow(self.loupe.hwnd, 0);
+            // Disabled once at construction; repeating EnableWindow(false)
+            // sends redundant WM_CANCELMODE notifications on every frame.
             w::InvalidateRect(self.loupe.hwnd, null(), 0);
             w::UpdateWindow(self.loupe.hwnd);
         }
@@ -1523,6 +1528,11 @@ impl Picker {
             self.health.insert("physicalLeftDown", u64::from(down(1)));
             self.health
                 .insert("dragging", u64::from(self.selection.dragging));
+            let frame_action = self.redraw.frame_action(
+                self.input.armed && self.host.armed,
+                self.selection.finished,
+                elapsed,
+            );
             if self.selection.finished {
                 if self.finished_at.is_none() {
                     self.finished_at = Some(Instant::now());
@@ -1540,7 +1550,7 @@ impl Picker {
                     }
                     break;
                 }
-            } else if self.input.armed && self.host.armed && self.redraw.is_due(elapsed) {
+            } else if frame_action == CaptureFrameAction::Render {
                 self.redraw.presented(elapsed);
                 if elapsed - self.last_raise >= 250 {
                     input_desktop()?;
@@ -1558,9 +1568,11 @@ impl Picker {
                     self.failure = Some(e);
                     self.selection.cancel();
                 }
-            } else {
+            } else if frame_action == CaptureFrameAction::Hide {
                 self.loupe.hide();
             }
+            // Retain is deliberately a no-op: throttling must never flash the
+            // loupe off between updates while pointer/mailbox messages arrive.
             wait_messages();
         }
         let result = if let Some(e) = self.failure.clone() {

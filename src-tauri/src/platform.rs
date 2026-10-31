@@ -19,6 +19,37 @@ fn cancelled(cancel: Option<&NativeCancel>) -> bool {
 pub fn selected_text_cancelable(cancel: NativeCancel) -> Result<String, String> {
     cancellable_text("selected-text", cancel)
 }
+
+/// Snapshot at the shortcut, not when a queued worker finally starts. The
+/// Swift endpoint reads process/window identity, never text. If CG z-order
+/// cannot identify the source, it anchors the public AX focused window now.
+#[cfg(target_os = "macos")]
+pub fn macos_selection_source() -> Result<Value, String> {
+    run("selection-source", None)?
+        .get("source")
+        .filter(|value| value.is_object())
+        .cloned()
+        .ok_or_else(|| "NATIVE_PROTOCOL: Missing selection request source.".into())
+}
+
+#[cfg(target_os = "macos")]
+pub fn selected_text_from_source_cancelable(
+    cancel: NativeCancel,
+    source: &Value,
+) -> Result<String, String> {
+    if cancelled(Some(&cancel)) {
+        return Err(NATIVE_CANCELLED.into());
+    }
+    let result = run("selected-text", Some(&source.to_string()));
+    if cancelled(Some(&cancel)) {
+        return Err(NATIVE_CANCELLED.into());
+    }
+    result?
+        .get("text")
+        .and_then(Value::as_str)
+        .map(str::to_owned)
+        .ok_or_else(|| "NATIVE_PROTOCOL: Native helper returned no text field.".into())
+}
 #[cfg(target_os = "windows")]
 pub fn selected_text_with_strategy_cancelable(
     cancel: NativeCancel,
@@ -705,6 +736,12 @@ fn bounded_selection_health(value: &Value) -> Value {
         "copyProtectionProbeMilliseconds",
         "copyProtectionUnknown",
         "copySnapshotOutcome",
+        "copySnapshotStage",
+        "copySnapshotFailureKind",
+        "copySnapshotFormatKind",
+        "copySnapshotFormatCount",
+        "copySnapshotFormatsSaved",
+        "copySnapshotEmptyMarkers",
         "copyDispatchInserted",
         "copyOwnInputObserved",
         "copyOwnerOutcome",
@@ -2086,6 +2123,10 @@ mod tests {
             "copyNativeSelectionKnown": 1, "copyNativeSelectionNonempty": 1,
             "copyProtectionProbe": 2, "copyProtectionProbeMilliseconds": 250,
             "copyProtectionUnknown": 1, "copySnapshotOutcome": 1,
+            "copySnapshotStage": 4, "copySnapshotFailureKind": 4,
+            "copySnapshotFormatKind": 7, "copySnapshotFormatCount": 4,
+            "copySnapshotFormatsSaved": 2, "copySnapshotEmptyMarkers": 1,
+            "copySnapshotFormatName": "private", "copySnapshotExceptionMessage": "private",
             "copyDispatchInserted": 4, "copyOwnInputObserved": 1,
             "copyOwnerOutcome": 1, "copyClipboardRestored": 1, "copyTerminalReason": 0,
             "copyClipboardOutcome": 3, "copyWaitElapsedMilliseconds": 1200,
@@ -2093,8 +2134,10 @@ mod tests {
             "copyNativeFocusProcess": 2468, "copyNativeForeground": 1234,
             "actionResultNonempty": 1
         }));
-        assert_eq!(safe.as_object().unwrap().len(), 28);
+        assert_eq!(safe.as_object().unwrap().len(), 34);
         assert_eq!(safe["copyDispatchInserted"], 4);
+        assert_eq!(safe["copySnapshotFailureKind"], 4);
+        assert_eq!(safe["copySnapshotEmptyMarkers"], 1);
         assert_eq!(safe["copyClipboardOutcome"], 3);
         assert_eq!(safe["copyWaitElapsedMilliseconds"], 1200);
         for invalid in [
@@ -2107,7 +2150,9 @@ mod tests {
         ] {
             assert_eq!(
                 super::bounded_selection_health(
-                    &json!({"copyTerminalReason": invalid, "copyClipboardOutcome": invalid, "copyWaitElapsedMilliseconds": invalid})
+                    &json!({"copyTerminalReason": invalid, "copyClipboardOutcome": invalid, "copyWaitElapsedMilliseconds": invalid,
+                        "copySnapshotStage": invalid, "copySnapshotFailureKind": invalid, "copySnapshotFormatKind": invalid,
+                        "copySnapshotFormatCount": invalid, "copySnapshotFormatsSaved": invalid, "copySnapshotEmptyMarkers": invalid})
                 ),
                 json!({})
             );

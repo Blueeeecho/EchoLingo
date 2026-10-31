@@ -38,3 +38,15 @@ powershell.exe -NoProfile -STA -ExecutionPolicy Bypass -File tests/windows-nativ
 - 核对剪贴板恢复、权限提示、取消操作和窗口宽度调整。
 
 自动构建或隔离界面测试不能证明所有目标应用、输入法和显示配置均已通过这些交互检查。
+
+### Windows 放大镜连续性
+
+截图成功不等于放大镜跟随正常。`tests/windows-native-capture-smoke.ps1` 的连续性场景分别在待选择和拖拽期间，持续观察静止、连续移动、停稳三个阶段：进程限定的窗口隐藏事件与高频可见性采样均不能发现中途隐藏，运动中必须观察到连续的位置更新，停稳后须匹配准确的物理坐标。旧的“等待某一帧出现”就绪检查不能代替此检查。
+
+帧生命周期的纯 Rust 回归可单独运行：
+
+```sh
+cargo test --manifest-path src-tauri/native-capture/Cargo.toml --locked
+```
+
+纯策略测试覆盖节流间隙保留上一帧，以及取消、结束、未就绪时隐藏；它不证明实际 Windows 帧率。原生桌面夹具需在隔离生成窗口环境运行，也不能代替目标设备上的高 DPI、多显示器和真实鼠标跟随验收。

@@ -27,3 +27,13 @@ Windows 版在应用运行时优先处理默认的 `Alt+D`、`Alt+S`。它们使
 4. 在“权限与诊断”中运行诊断，提交问题时附应用版本、Windows 版本和复现步骤。
 
 应用的取词诊断只保留阶段、结果是否为空等数值，不记录原文、窗口标题、剪贴板文本或 API 凭据。提交其他截图或日志前，请自行检查其中是否含有个人内容。
+
+## 剪贴板格式完整性
+
+复制兼容模式在发送 `Ctrl+C` 前保存原剪贴板的全部格式。只有完整快照、来源核对和剪贴板代次检查成功，才允许派发复制；新复制、保护字段和恢复所有权边界保持有效。
+
+Chromium 发布的 `WebKit Smart Paste Format` 是存在性标记。本实现仅在该精确格式的空值通过同代次原生只读检查后保留存在语义；原生错误或非空数据句柄不会被当成空标记。恢复使用包含单个 `0x00` 字节的独立流，非空标记保留原数据。其他未知空格式、不可读取的延迟格式和不能安全克隆的对象仍安全停止，不丢弃格式以换取成功。
+
+参考：[Chromium Windows 剪贴板实现](https://chromium.googlesource.com/chromium/src/+/main/ui/base/clipboard/clipboard_win.cc)、[Chromium 标记消费者](https://chromium.googlesource.com/chromium/src/+/1490d3e4fdaf6d438abfd6bc3b4db2aee753966a/content/browser/renderer_host/clipboard_host_impl.cc)、[Windows 零长度全局内存语义](https://learn.microsoft.com/en-us/windows/win32/api/winbase/nf-winbase-globalalloc)。
+
+诊断只使用有限数值表示快照阶段、格式类别、计数和失败类型，不输出实际格式名称、对象类型、异常文本或剪贴板内容。原生测试必须覆盖已知标记保留、未知格式拒绝及剪贴板恢复；静态测试不能代替实际 Windows 执行。

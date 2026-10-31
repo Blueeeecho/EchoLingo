@@ -111,7 +111,7 @@ let latestSettingsOpenEpoch = -1;
 let confirmResolve: ((value: boolean) => void) | null = null;
 const cleanupListeners: Array<() => void> = [];
 const prefersDark = window.matchMedia('(prefers-color-scheme: dark)');
-const panelLayout = installPanelLayout(desktop, () => translationPresentation);
+const panelLayout = installPanelLayout(desktop, () => translationPresentation, resizeSourceEditor);
 let layoutQueued = false;
 function notifyLayout(): void {
   if (layoutQueued) return;

@@ -186,11 +186,15 @@ struct Bounds {
     height: f64,
 }
 
-#[derive(Clone, Copy, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 struct Constraints {
     management: bool,
     scale: f64,
     area: Bounds,
+}
+
+fn constraints_need_update(previous: Option<Constraints>, next: Constraints) -> bool {
+    previous != Some(next)
 }
 
 #[cfg(any(target_os = "windows", test))]
@@ -372,6 +376,20 @@ fn available_size(area: Bounds, scale: f64, management: bool) -> (f64, f64) {
         area.height / scale - 24.0 - frame.1,
     )
 }
+// Once a popup is visible, new streamed lines must not push its reading anchor
+// upward at the bottom edge. Grow into the remaining work area, then scroll.
+// Initial placement, manual height and an invalid/offscreen anchor keep the
+// ordinary full-work-area clamp so monitor changes cannot strand the window.
+fn anchored_popup_height(available: f64, area: Bounds, scale: f64, top: f64) -> f64 {
+    let remaining = (area.y + area.height - top) / scale;
+    let minimum = 160.0_f64.min(available);
+    if top >= area.y && remaining >= minimum {
+        available.min(remaining)
+    } else {
+        available
+    }
+}
+
 fn content_size(management: bool, height: f64, width: f64, available: (f64, f64)) -> (f64, f64) {
     let max_width = available.0.max(1.0);
     let max_height = available.1.max(1.0);
@@ -1090,13 +1108,37 @@ mod native_resize {
     }
 }
 
+#[derive(Clone, Copy, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LayoutViewport {
+    width: f64,
+    height: f64,
+    scale_factor: f64,
+    presentation_epoch: u64,
+}
+
+#[cfg(target_os = "macos")]
+fn layout_viewport(window: &WebviewWindow, presentation_epoch: u64) -> Result<LayoutViewport, String> {
+    let scale_factor = window.scale_factor().map_err(|_| "无法读取窗口比例")?;
+    let size = window
+        .inner_size()
+        .map_err(|_| "无法读取窗口大小")?
+        .to_logical::<f64>(scale_factor);
+    Ok(LayoutViewport {
+        width: size.width,
+        height: size.height,
+        scale_factor,
+        presentation_epoch,
+    })
+}
+
 pub async fn fit(
     window: &WebviewWindow,
     state: &LayoutState,
     management: bool,
     height: f64,
     content_width: Option<f64>,
-) -> Result<(), String> {
+) -> Result<Option<LayoutViewport>, String> {
     #[cfg(any(target_os = "windows", target_os = "macos"))]
     {
         // Keep the sizing-loop test and all resulting HWND mutations on the
@@ -1121,7 +1163,8 @@ pub async fn fit(
                 let state = app.state::<LayoutState>();
                 #[cfg(target_os = "windows")]
                 let value = native_resize::install(&native, &state)
-                    .and_then(|_| fit_inner(&native, &state, management, height, content_width));
+                    .and_then(|_| fit_inner(&native, &state, management, height, content_width))
+                    .map(|_| None);
                 #[cfg(target_os = "windows")]
                 let _ = reply.send(value);
                 #[cfg(target_os = "macos")]
@@ -1238,7 +1281,8 @@ pub async fn fit(
                                                 height,
                                                 content_width,
                                             )
-                                        });
+                                        })
+                                        .and_then(|_| layout_viewport(&native, gate_epoch).map(Some));
                                 let _ = reply.send(value);
                             });
                         });
@@ -1249,7 +1293,7 @@ pub async fn fit(
         return result.await.map_err(|_| "窗口布局已中断")?;
     }
     #[cfg(not(any(target_os = "windows", target_os = "macos")))]
-    fit_inner(window, state, management, height, content_width)
+    fit_inner(window, state, management, height, content_width).map(|_| None)
 }
 
 #[cfg(target_os = "macos")]
@@ -1490,12 +1534,17 @@ fn fit_inner(
         .presentation()?;
     #[cfg(target_os = "macos")]
     install_mac_resize_observer(window)?;
+    let manual = state.manual_height.lock().map_err(|_| "窗口布局状态异常")?;
+    let automatic_height = !management
+        && !manual
+            .saved
+            .is_some_and(|(epoch, _)| epoch == presentation.epoch);
     let height = if management {
         height
     } else {
-        let manual = state.manual_height.lock().map_err(|_| "窗口布局状态异常")?;
         manual.height(presentation.epoch, height)
     };
+    drop(manual);
     let previous = state.management.load(Ordering::SeqCst);
     let (scale, area) = window_geometry(window)?;
     let old_size = window
@@ -1504,7 +1553,13 @@ fn fit_inner(
         .to_logical::<f64>(scale);
     let mut popup = state.popup.lock().map_err(|_| "窗口布局状态异常")?;
     let changed = popup.observe_user_width(!previous, old_size.width, content_width, scale, area);
-    let available = available_size(area, scale, management);
+    let mut available = available_size(area, scale, management);
+    if automatic_height && !previous && presentation.presented && window.is_visible().unwrap_or(false)
+    {
+        if let Ok(position) = window.outer_position() {
+            available.1 = anchored_popup_height(available.1, area, scale, f64::from(position.y));
+        }
+    }
     let (width, height) = presentation_size(
         previous,
         management,
@@ -1518,9 +1573,12 @@ fn fit_inner(
         scale,
         area,
     };
-    let constraints_changed = !cfg!(target_os = "windows")
-        || *state.constraints.lock().map_err(|_| "窗口布局状态异常")? != Some(next_constraints);
+    let constraints_changed = constraints_need_update(
+        *state.constraints.lock().map_err(|_| "窗口布局状态异常")?,
+        next_constraints,
+    );
     if constraints_changed {
+        let available = available_size(area, scale, management);
         window
             .set_min_size(Some(LogicalSize::new(
                 MIN_POPUP_WIDTH.min(available.0.max(1.0)),
@@ -1617,7 +1675,7 @@ pub async fn fit_window(
     presentation: String,
     content_height: f64,
     content_width: Option<f64>,
-) -> Result<(), String> {
+) -> Result<Option<LayoutViewport>, String> {
     if window.label() != "main" {
         return Err("窗口不可用".into());
     }
@@ -2668,6 +2726,92 @@ mod tests {
         assert!(!current_layout_request(b, 3, true, Some(false)));
         assert!(current_layout_request(3, 3, false, Some(false)));
     }
+    #[test]
+    fn streamed_growth_preserves_a_visible_bottom_edge_reading_anchor() {
+        let area = Bounds {
+            x: 0.0,
+            y: 24.0,
+            width: 1440.0,
+            height: 876.0,
+        };
+        let available = available_size(area, 1.0, false);
+        let bounded = (
+            available.0,
+            anchored_popup_height(available.1, area, 1.0, 600.0),
+        );
+        for measured in [240.0, 260.3, 280.6, 300.9, 600.0, 160.0] {
+            let (width, height) = content_size(false, measured, 680.0, bounded);
+            assert!(height <= 300.0);
+            assert_eq!(
+                anchor_in_work_area(area, 300.0, 600.0, width, height),
+                (300, 600)
+            );
+        }
+    }
+
+    #[test]
+    fn anchored_growth_handles_retina_negative_origins_and_invalid_anchors() {
+        let area = Bounds {
+            x: -2880.0,
+            y: -900.0,
+            width: 2880.0,
+            height: 1800.0,
+        };
+        let available = available_size(area, 2.0, false).1;
+        assert_eq!(anchored_popup_height(available, area, 2.0, 300.0), 300.0);
+        // A moved/detached screen or fewer than 160 points below the anchor
+        // must fall back to normal placement, never create an unreadable box.
+        assert_eq!(anchored_popup_height(available, area, 2.0, 700.0), available);
+        assert_eq!(anchored_popup_height(available, area, 2.0, -901.0), available);
+        let tiny = Bounds {
+            x: 0.0,
+            y: 0.0,
+            width: 300.0,
+            height: 150.0,
+        };
+        assert_eq!(anchored_popup_height(126.0, tiny, 1.0, 0.0), 126.0);
+    }
+
+    #[test]
+    fn constraint_cache_changes_only_for_presentation_scale_or_work_area() {
+        let first = Constraints {
+            management: false,
+            scale: 2.0,
+            area: Bounds {
+                x: -2880.0,
+                y: 0.0,
+                width: 2880.0,
+                height: 1800.0,
+            },
+        };
+        assert!(!constraints_need_update(Some(first), first));
+        assert!(constraints_need_update(None, first));
+        assert!(constraints_need_update(
+            Some(first),
+            Constraints {
+                management: true,
+                ..first
+            }
+        ));
+        assert!(constraints_need_update(
+            Some(first),
+            Constraints {
+                scale: 1.0,
+                ..first
+            }
+        ));
+        assert!(constraints_need_update(
+            Some(first),
+            Constraints {
+                area: Bounds {
+                    x: 0.0,
+                    ..first.area
+                },
+                ..first
+            }
+        ));
+    }
+
     #[test]
     fn manual_height_respects_user_size_only_in_same_presentation() {
         let mut manual = ManualPopupHeight::default();

@@ -33,6 +33,11 @@ assert report.get("ok") is True, "Native self-test did not report success"
 checks = report.get("diagnostics", {})
 for required in (
     "mixedSelectionRecoveryFixturePassed",
+    "selectionFocusRecoveryFixturePassed",
+    "selectionSourceAnchorFixturePassed",
+    "selectionTraceRetentionFixturePassed",
+    "selectionAXWindowTicketFixturePassed",
+    "selectionWindowAnchorFixturePassed",
     "selectionRecoveryFixturePassed",
     "controlledSelectionCopyFixturePassed",
     "protectedSelectionFixturePassed",

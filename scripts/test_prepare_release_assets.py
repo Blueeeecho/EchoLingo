@@ -19,8 +19,8 @@ class ReleaseAssetsTests(unittest.TestCase):
         self.root = Path(self.temp.name)
         self.artifacts = self.root / "artifacts"
         self.output = self.root / "public"
-        self.windows = self.artifacts / "EchoLingo-Windows/nsis/EchoLingo_0.2.3_x64-setup.exe"
-        self.macos = self.artifacts / "EchoLingo-macOS/dmg/EchoLingo_0.2.3_aarch64.dmg"
+        self.windows = self.artifacts / "EchoLingo-Windows/nsis/EchoLingo_0.2.4_x64-setup.exe"
+        self.macos = self.artifacts / "EchoLingo-macOS/dmg/EchoLingo_0.2.4_aarch64.dmg"
         self.report_path = self.artifacts / "EchoLingo-Windows-offline-evidence/temp/echolingo-offline-validation.json"
         for path, data in [(self.windows, b"accepted Windows installer"), (self.macos, b"tested Mac installer")]:
             path.parent.mkdir(parents=True)
@@ -79,6 +79,42 @@ class ReleaseAssetsTests(unittest.TestCase):
         self.assertIn(f"docs/releases/{RELEASE.VERSION}.zh-CN.md", workflow)
         self.assertTrue((root / f"docs/releases/{RELEASE.VERSION}.zh-CN.md").is_file())
 
+    def test_native_capture_continuity_requires_embedded_bytes_and_raw_report(self):
+        root = Path(__file__).resolve().parents[1]
+        for name in ("ci.yml", "release-checks.yml"):
+            workflow = (root / ".github/workflows" / name).read_text()
+            desktop = workflow.split("  desktop:\n", 1)[1].split("\n  frontend-interactions:", 1)[0]
+            gate = desktop.split("      - name: Windows embedded capture child continuous magnifier and input ownership", 1)[1].split("      - name:", 1)[0]
+            self.assertIn("id: windows_native_capture_continuity", gate)
+            self.assertIn("-NativeCapturePath '${{ steps.windows_native_candidate.outputs.capturePath }}'", gate)
+            self.assertIn("tests/windows-native-capture-smoke.ps1", gate)
+            self.assertIn("exit $fixtureExit", gate)
+            self.assertIn("nativeCaptureContinuity = '${{ steps.windows_native_capture_continuity.outcome }}'", desktop)
+            self.assertIn('python scripts/verify-native-capture-report.py "$env:RUNNER_TEMP/echolingo-native-capture-continuity.log"', desktop)
+            self.assertIn("Embedded native capture acceptance report is missing, incomplete or failed.", desktop)
+            self.assertLess(desktop.index("completeNativeCaptureEmbedded = $true"), desktop.index("id: windows_native_capture_continuity"))
+
+    def test_version_guard_includes_native_capture_package_and_lock(self):
+        root = Path(__file__).resolve().parents[1]
+        import shutil
+        files = ("package.json", "package-lock.json", "src-tauri/tauri.conf.json",
+                 "src-tauri/Cargo.toml", "src-tauri/Cargo.lock",
+                 "src-tauri/native-capture/Cargo.toml", "src-tauri/native-capture/Cargo.lock")
+        with tempfile.TemporaryDirectory() as directory:
+            copy = Path(directory)
+            for name in files:
+                destination = copy / name
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copyfile(root / name, destination)
+            RELEASE.check_version(copy)
+            for name in files[-2:]:
+                path = copy / name
+                original = path.read_text()
+                path.write_text(original.replace('version = "0.2.4"', 'version = "0.2.3"'))
+                with self.subTest(name=name), self.assertRaises(ValueError):
+                    RELEASE.check_version(copy)
+                path.write_text(original)
+
     def test_versions_are_consistent(self):
         RELEASE.check_version()
 
@@ -90,10 +126,10 @@ class ReleaseAssetsTests(unittest.TestCase):
         publisher = (root / "scripts/publish-macos-first-release.cjs").read_text()
         self.assertIn("tag: '0.2.1'", publisher)
         self.assertIn("Release exists; no overwrite", publisher)
-        self.assertEqual(RELEASE.VERSION, "0.2.3")
+        self.assertEqual(RELEASE.VERSION, "0.2.4")
 
     def test_refuses_previous_version_installer_filename(self):
-        self.windows.rename(self.windows.with_name("EchoLingo_0.2.2_x64-setup.exe"))
+        self.windows.rename(self.windows.with_name("EchoLingo_0.2.3_x64-setup.exe"))
         with self.assertRaisesRegex(ValueError, "version or architecture"):
             self.prepare()
 
@@ -102,7 +138,7 @@ class ReleaseAssetsTests(unittest.TestCase):
         self.assertFalse(manifest["rebuiltAfterValidation"])
         self.assertEqual(len(manifest["files"]), 3)
         self.assertEqual(len(list(self.output.iterdir())), 5)
-        self.assertEqual((self.output / "EchoLingo_0.2.3_windows_x64-setup.exe").read_bytes(), self.windows.read_bytes())
+        self.assertEqual((self.output / "EchoLingo_0.2.4_windows_x64-setup.exe").read_bytes(), self.windows.read_bytes())
         self.assertNotIn(str(self.root), (self.output / "RELEASE-MANIFEST.json").read_text())
         for line in (self.output / "SHA256SUMS.txt").read_text().splitlines():
             digest, name = line.split("  ", 1)

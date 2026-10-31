@@ -685,11 +685,27 @@ impl CaptureTopologyPolicy {
             && self.displays == other.displays
     }
 }
+/// Skipping a throttled repaint is not a request to hide its last complete frame.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CaptureFrameAction {
+    Hide,
+    Retain,
+    Render,
+}
 #[derive(Default, Debug)]
 pub struct CaptureRedrawPolicy {
     presented: Option<i64>,
 }
 impl CaptureRedrawPolicy {
+    pub fn frame_action(&self, armed: bool, finished: bool, elapsed: i64) -> CaptureFrameAction {
+        if !armed || finished {
+            CaptureFrameAction::Hide
+        } else if self.is_due(elapsed) {
+            CaptureFrameAction::Render
+        } else {
+            CaptureFrameAction::Retain
+        }
+    }
     pub fn is_due(&self, elapsed: i64) -> bool {
         elapsed >= 0
             && self
@@ -968,6 +984,61 @@ mod supplemental_tests {
         for t in [6000, 120000] {
             assert_eq!(h.observe(true, false, true, true, false, t), 0);
         }
+    }
+    #[test]
+    fn magnifier_retains_every_throttled_frame_until_disarmed_or_finished() {
+        let mut redraw = CaptureRedrawPolicy::default();
+        let mut visible = false;
+        let mut renders = 0;
+        let mut retained = 0;
+        assert_eq!(redraw.frame_action(false, false, 0), CaptureFrameAction::Hide);
+        // Frequent pointer/mailbox events wake the loop between its 16 ms
+        // paints. Every one of those ticks must retain the last visible frame.
+        for elapsed in 0..=1000 {
+            match redraw.frame_action(true, false, elapsed) {
+                CaptureFrameAction::Render => {
+                    redraw.presented(elapsed);
+                    visible = true;
+                    renders += 1;
+                }
+                CaptureFrameAction::Retain => retained += 1,
+                CaptureFrameAction::Hide => visible = false,
+            }
+            assert!(visible, "armed frame disappeared at {elapsed} ms");
+        }
+        assert_eq!(renders, 63);
+        assert_eq!(retained, 938);
+        // Same-time/reordered notifications cannot erase a complete frame.
+        for elapsed in [1000, 999, -1] {
+            assert_eq!(
+                redraw.frame_action(true, false, elapsed),
+                CaptureFrameAction::Retain
+            );
+        }
+        for elapsed in [1000, 1008, 2000] {
+            assert_eq!(
+                redraw.frame_action(false, false, elapsed),
+                CaptureFrameAction::Hide
+            );
+            assert_eq!(
+                redraw.frame_action(true, true, elapsed),
+                CaptureFrameAction::Hide
+            );
+            assert_eq!(
+                redraw.frame_action(false, true, elapsed),
+                CaptureFrameAction::Hide
+            );
+        }
+        // Re-arming after suspension renders afresh when due, then retains.
+        assert_eq!(
+            redraw.frame_action(true, false, 2000),
+            CaptureFrameAction::Render
+        );
+        redraw.presented(2000);
+        assert_eq!(
+            redraw.frame_action(true, false, 2001),
+            CaptureFrameAction::Retain
+        );
     }
     #[test]
     fn hover_oracle_exact_metadata_throttle_and_no_stale_frame() {

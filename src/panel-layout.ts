@@ -3,12 +3,13 @@ import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 import { nextPopupContentHeight } from './popup-growth';
 import { PopupDragController } from './popup-drag';
 import { installPopupFocusRing } from './popup-focus';
+import { layoutViewport, viewportMatches, waitForViewport, type LayoutViewport } from './popup-viewport';
 
 export interface TranslationPresentation { epoch: number; presented: boolean }
 
 // Read intrinsic content rather than viewport height, so a short translation
 // can shrink again after a long result. Requests are coalesced and serialized.
-export function installPanelLayout(desktop: boolean, getPresentation: () => TranslationPresentation): { dispose: () => void; presentPopup: (presentationEpoch: number, focusInput?: boolean, reuseVisiblePopup?: boolean) => Promise<TranslationPresentation | null>; presentManagement: (presentationEpoch: number) => Promise<TranslationPresentation | null> } {
+export function installPanelLayout(desktop: boolean, getPresentation: () => TranslationPresentation, preparePopupContent: () => void = () => {}): { dispose: () => void; presentPopup: (presentationEpoch: number, focusInput?: boolean, reuseVisiblePopup?: boolean) => Promise<TranslationPresentation | null>; presentManagement: (presentationEpoch: number) => Promise<TranslationPresentation | null> } {
   if (!desktop) return { dispose: () => {}, presentPopup: async () => null, presentManagement: async () => null };
   const disposeFocusRing = installPopupFocusRing();
   let frame = 0, pending = false, disposed = false, last = '';
@@ -17,6 +18,12 @@ export function installPanelLayout(desktop: boolean, getPresentation: () => Tran
   let committedPopupHeight = 0;
   let fittedPopupEpoch: number | null = null;
   let inFlight: Promise<void> | null = null;
+  let nativeViewport: LayoutViewport | null = null;
+  let lastFitError: unknown = null;
+  let presentationWait: AbortController | null = null;
+  let revealRevision = 0;
+  const viewportChecks = new Set<() => void>();
+  const checkViewport = (): void => { for (const check of [...viewportChecks]) check(); };
   let nativeSizingRevision: number | null = null, completedSizingRevision = 0;
   let unlistenSizing: UnlistenFn | null = null;
   const nativeSizingSupported = /Win/.test(navigator.platform);
@@ -47,16 +54,25 @@ export function installPanelLayout(desktop: boolean, getPresentation: () => Tran
       while (pending && !disposed) {
         if (nativeSizingRevision !== null) break;
         pending = false;
-        const payload = measure(), key = JSON.stringify(payload);
+        const payload = measure(), key = JSON.stringify({ ...payload, scaleFactor: window.devicePixelRatio, presentationEpoch: getPresentation().epoch });
         if (key === last) continue;
         const measuredRevision = invalidation;
-        try { await invoke('fit_window', payload); if (measuredRevision === invalidation) last = key; }
-        catch { /* Keep translation usable if OS window sizing is unavailable. */ }
+        try {
+          const geometry = await invoke<unknown>('fit_window', payload);
+          if (measuredRevision === invalidation) { last = key; lastFitError = null; nativeViewport = layoutViewport(geometry); checkViewport(); }
+        }
+        catch (error) {
+          if (measuredRevision === invalidation) { lastFitError = error; nativeViewport = null; }
+          // Background layout failures do not discard the visible translation.
+          // Explicit presentation below reports the error instead of claiming
+          // an old geometry acknowledgement belongs to the new source.
+        }
       }
     })().finally(() => { inFlight = null; });
     return inFlight;
   };
   const schedule = (): void => {
+    checkViewport();
     pending = true;
     if (nativeSizingRevision !== null) return;
     if (disposed || frame) return;
@@ -89,6 +105,17 @@ export function installPanelLayout(desktop: boolean, getPresentation: () => Tran
   document.querySelectorAll('.view').forEach((view) => observer.observe(view));
   window.addEventListener('echolingo:layout', schedule);
   window.addEventListener('resize', schedule);
+  // A same-point-size move between 1x/2x displays need not resize the CSS
+  // viewport. Re-arm the resolution query so native constraints/ACK refresh.
+  const scaleMedia = (): MediaQueryList => matchMedia(`(resolution: ${window.devicePixelRatio}dppx), (-webkit-device-pixel-ratio: ${window.devicePixelRatio})`);
+  let scaleQuery = scaleMedia();
+  const changedScale = (): void => {
+    scaleQuery.removeEventListener('change', changedScale);
+    scaleQuery = scaleMedia();
+    scaleQuery.addEventListener('change', changedScale);
+    schedule();
+  };
+  scaleQuery.addEventListener('change', changedScale);
   type ResizeDirection = 'west' | 'east' | 'north' | 'south' | 'north-west' | 'north-east' | 'south-west' | 'south-east';
   interface ResizeRequest { width: number; height: number; direction: ResizeDirection; presentationEpoch: number; management: boolean; modalOpen: boolean }
   interface ResizeGesture extends ResizeRequest { edge: HTMLElement; pointerId: number; startX: number; startY: number }
@@ -261,12 +288,13 @@ export function installPanelLayout(desktop: boolean, getPresentation: () => Tran
   schedule();
   const dispose = (): void => {
     disposeFocusRing();
-    disposed = true; cancelPopupDrag(); clearGesture(); widthViewObserver.disconnect(); observer.disconnect(); cancelAnimationFrame(frame);
+    disposed = true; presentationWait?.abort(); cancelPopupDrag(); clearGesture(); widthViewObserver.disconnect(); observer.disconnect(); cancelAnimationFrame(frame);
     unlistenSizing?.(); unlistenSizing = null;
     unlistenUserResize?.(); unlistenUserResize = null;
     document.body.classList.remove('popup-resize-enabled');
     window.removeEventListener('echolingo:layout', schedule);
     window.removeEventListener('resize', schedule);
+    scaleQuery.removeEventListener('change', changedScale);
     window.removeEventListener('blur', cancelWidth);
     window.removeEventListener('echolingo:layout', checkWidthPresentation);
     document.removeEventListener('pointerdown', drag);
@@ -284,8 +312,16 @@ export function installPanelLayout(desktop: boolean, getPresentation: () => Tran
     document.removeEventListener('lostpointercapture', cancelWidth);
     document.removeEventListener('visibilitychange', checkWidthPresentation);
   };
-  const preparePresentation = async (): Promise<boolean> => {
+  const preparePresentation = async (epoch: number, management: boolean): Promise<boolean> => {
+    presentationWait?.abort();
+    if (nativeViewport && nativeViewport.presentationEpoch !== epoch) {
+      invalidation++; last = ''; nativeViewport = null;
+    }
+    const waiter = new AbortController(); presentationWait = waiter;
+    const current = (): boolean => !disposed && !waiter.signal.aborted && epoch >= getPresentation().epoch
+      && (document.body.dataset.view !== 'translate') === management;
     do {
+      if (!current()) return false;
       if (nativeSizingSupported) {
         let completed: number;
         try { completed = await invoke<number>('wait_for_window_sizing'); } catch { return false; }
@@ -296,25 +332,51 @@ export function installPanelLayout(desktop: boolean, getPresentation: () => Tran
         if (nativeSizingRevision !== null && nativeSizingRevision <= completed) { nativeSizingRevision = null; last = ''; }
         if (nativeSizingRevision !== null) continue;
       }
+      // Auto-sized source editors may have queued a resize for the next frame.
+      // Flush that content measurement at the adopted width before revealing.
+      const preparedWidth = window.innerWidth;
+      if (!management) preparePopupContent();
       cancelAnimationFrame(frame); frame = 0; pending = true;
       await drain();
-    } while (nativeSizingRevision !== null && !disposed);
-    return !disposed;
+      if (!current()) return false;
+      if (lastFitError) throw lastFitError;
+      // The WebView may adopt native width before the IPC reply, with its
+      // textarea resize callback still queued. A matching viewport alone does
+      // not prove content was measured at that width.
+      if (preparedWidth !== window.innerWidth) continue;
+      if (nativeViewport && nativeViewport.presentationEpoch !== epoch) return false;
+      const ready = (): boolean => !nativeViewport || viewportMatches(nativeViewport, {
+        width: window.innerWidth, height: window.innerHeight, scaleFactor: window.devicePixelRatio,
+      });
+      if (!ready()) {
+        if (!await waitForViewport({ ready, current, signal: waiter.signal,
+          subscribe: check => { viewportChecks.add(check); return () => viewportChecks.delete(check); },
+        })) return false;
+        // Width adoption changes wrapping; fit that actual DOM before reveal,
+        // not the previous management/restored-width layout. No extra frame wait.
+        pending = true;
+        continue;
+      }
+      if (nativeSizingRevision === null) return true;
+    } while (current());
+    return false;
   };
   const presentPopup = async (presentationEpoch: number, focusInput = false, reuseVisiblePopup = false): Promise<TranslationPresentation | null> => {
+    const reveal = ++revealRevision;
     if (fittedPopupEpoch !== presentationEpoch) {
       // Native manual height belongs only to its presentation. Equal content
       // dimensions in a new translation must still restore automatic fitting.
       fittedPopupEpoch = presentationEpoch; invalidation++; last = ''; committedPopupHeight = 0;
     }
-    if (!await preparePresentation()) return null;
+    if (!await preparePresentation(presentationEpoch, false) || reveal !== revealRevision) return null;
     // The source event has switched the DOM and fitted its content before the
     // native window is shown, so a previous settings page cannot flash first.
     if (!disposed && document.body.dataset.view === 'translate' && presentationEpoch >= getPresentation().epoch) return invoke<TranslationPresentation>('show_popup', { presentationEpoch, focusInput, reuseVisiblePopup });
     return null;
   };
   const presentManagement = async (presentationEpoch: number): Promise<TranslationPresentation | null> => {
-    if (!await preparePresentation()) return null;
+    const reveal = ++revealRevision;
+    if (!await preparePresentation(presentationEpoch, true) || reveal !== revealRevision) return null;
     // A tray/Dock/menu Settings action is explicit: prepare management first,
     // then allow the native command to activate only this requested view.
     if (!disposed && document.body.dataset.view === 'settings' && presentationEpoch >= getPresentation().epoch) return invoke<TranslationPresentation>('show_management', { presentationEpoch });

@@ -45,6 +45,7 @@ export function errorMessage(error: unknown): string {
 export function userFacingError(error: unknown): string {
   if (/^CAPTURE_DISPLAY_CHANGED:/i.test(errorMessage(error).trim())) return '截图显示环境校验未通过，已取消本次截图。请重新按截图快捷键选择区域。';
   if (/^SELECTION_UNAVAILABLE:/i.test(errorMessage(error).trim())) return '当前应用未提供可验证的选区。请先按 ⌘C，再使用菜单栏的“翻译剪贴板”或浮窗更多里的“剪贴板翻译”；也可使用截图识别。';
+  if (/^CLIPBOARD: Cannot preserve (?:all clipboard formats|clipboard format)/i.test(errorMessage(error).trim())) return '为保留原剪贴板的全部格式，本次未发送复制快捷键。请手动复制所选文字，再使用“翻译剪贴板”，或使用截图识别。';
   if (/^COPY_NO_UPDATE:/i.test(errorMessage(error).trim())) return '已发送复制快捷键，但目标应用没有及时更新剪贴板。请在原应用选中文字后手动按 Ctrl+C 验证，或使用截图识别。';
   return errorMessage(error).replace(/^(?:SYSTEM_TRANSLATION_[A-Z_]+|NATIVE_[A-Z_]+|CAPTURE(?:_[A-Z_]+)?):\s*/, '');
 }

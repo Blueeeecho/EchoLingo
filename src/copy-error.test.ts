@@ -27,3 +27,22 @@ describe('unverifiable macOS selection', () => {
     expect(message).not.toContain('权限');
   });
 });
+
+describe('clipboard preservation failure', () => {
+  it('explains that no copy was sent and offers explicit safe routes', () => {
+    const message = userFacingError('CLIPBOARD: Cannot preserve all clipboard formats. generated diagnostic');
+    expect(message).toContain('未发送复制快捷键');
+    expect(message).toContain('翻译剪贴板');
+    expect(message).toContain('截图识别');
+    expect(message).not.toContain('generated diagnostic');
+    expect(message).not.toContain('管理员');
+    expect(message).not.toContain('未选中');
+  });
+  it('handles Error values and native single-format failures without exposing details', () => {
+    const error = new Error(' CLIPBOARD: Cannot preserve clipboard format generated-private-format.');
+    expect(userFacingError(error)).toContain('原剪贴板');
+    expect(userFacingError(error)).not.toContain('generated-private-format');
+    expect(userFacingError('CLIPBOARD: Text exceeds safety limit.')).toBe('CLIPBOARD: Text exceeds safety limit.');
+    expect(userFacingError('CLIPBOARD_CHANGED: generated change')).toBe('CLIPBOARD_CHANGED: generated change');
+  });
+});
