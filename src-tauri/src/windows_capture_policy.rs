@@ -1506,7 +1506,10 @@ mod magnifier_sampling_tests {
         let desktop = Rect::new(0, 0, 1920, 1080);
         let mut policy = CaptureSamplePolicy::default();
         let first = policy
-            .begin(CaptureMagnifierSample::new(Point::new(100, 100), desktop), 0)
+            .begin(
+                CaptureMagnifierSample::new(Point::new(100, 100), desktop),
+                0,
+            )
             .unwrap();
         for x in 101..150 {
             assert!(policy

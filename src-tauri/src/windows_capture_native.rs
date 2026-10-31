@@ -1749,13 +1749,9 @@ impl Picker {
         let request = self
             .sample_policy
             .begin(sample, self.started.elapsed().as_millis() as i64);
-        let place = magnifier_place_avoiding(
-            p,
-            sample.bounds,
-            area,
-            self.sample_policy.pending_bounds(),
-        )
-        .ok_or_else(|| error("CAPTURE_MAGNIFIER_PLACEMENT"))?;
+        let place =
+            magnifier_place_avoiding(p, sample.bounds, area, self.sample_policy.pending_bounds())
+                .ok_or_else(|| error("CAPTURE_MAGNIFIER_PLACEMENT"))?;
         let mut fresh = self
             .sample_policy
             .displayed_age(self.started.elapsed().as_millis() as i64)
