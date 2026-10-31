@@ -258,6 +258,38 @@ class CandidateInspectionTests(unittest.TestCase):
             with self.assertRaises(MODULE.InspectionError):
                 MODULE.source_identity(root)
 
+    def test_source_manifests_use_utf8_even_with_cp1252_default(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            (root / "src-tauri").mkdir()
+            manifests = {
+                "package.json": '{"version":"0.2.6","description":"描述"}',
+                "src-tauri/tauri.conf.json": '{"version":"0.2.6","productName":"描述"}',
+                "src-tauri/Cargo.toml": '[package]\nversion="0.2.6"\ndescription="描述"\n',
+            }
+            for name, content in manifests.items():
+                (root / name).write_text(content, encoding="utf-8")
+            identity = ("a" * 40, "b" * 40)
+            outputs = [str(root), "", "\n".join(identity)]
+            git_results = [subprocess.CompletedProcess([], 0, value.encode("utf-8"), b"") for value in outputs]
+            original_read_text = Path.read_text
+            reads = []
+
+            def cp1252_default(path, encoding=None, errors=None):
+                reads.append((path.relative_to(root).as_posix(), encoding))
+                return original_read_text(path, encoding="cp1252" if encoding is None else encoding, errors=errors)
+
+            with mock.patch.object(Path, "read_text", cp1252_default):
+                # These real UTF-8 bytes cannot be decoded using Windows' default
+                # code page; explicit per-file encoding must bypass that default.
+                for name in manifests:
+                    with self.subTest(name=name), self.assertRaises(UnicodeDecodeError):
+                        (root / name).read_text()
+                reads.clear()
+                with mock.patch.object(MODULE, "checked_command", side_effect=git_results):
+                    self.assertEqual(MODULE.source_identity(root), identity)
+            self.assertEqual(reads, [(name, "utf-8") for name in manifests])
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -103,9 +103,9 @@ def source_identity(root=ROOT):
     require(not git("status", "--porcelain=v1", "--untracked-files=no"), "Tracked checkout is not clean")
     commit, tree = git("rev-parse", "HEAD", "HEAD^{tree}").splitlines()
     require(all(re.fullmatch(r"[0-9a-f]{40}", value) for value in (commit, tree)), "Invalid source identity")
-    versions = [json.loads((root / "package.json").read_text())["version"],
-                json.loads((root / "src-tauri/tauri.conf.json").read_text())["version"],
-                tomllib.loads((root / "src-tauri/Cargo.toml").read_text())["package"]["version"]]
+    versions = [json.loads((root / "package.json").read_text(encoding="utf-8"))["version"],
+                json.loads((root / "src-tauri/tauri.conf.json").read_text(encoding="utf-8"))["version"],
+                tomllib.loads((root / "src-tauri/Cargo.toml").read_text(encoding="utf-8"))["package"]["version"]]
     require(versions == [VERSION] * 3, "Only the exact 0.2.6 candidate may be inspected")
     return commit, tree
 

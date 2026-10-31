@@ -67,6 +67,8 @@ class MacRecoveryWorkflowContract(unittest.TestCase):
         self.assertIn('needs: [native-selection-recovery, windows-native-preflight]', packages)
         self.assertIn('os: [windows-latest, macos-latest]', packages)
         self.assertIn('npm run tauri build -- --bundles', packages)
+        self.assertIn("runner.os == 'Windows' && 'nsis' || 'app,dmg'", packages)
+        self.assertIn('bundle/macos/EchoLingo.app/Contents/MacOS/echolingo', packages)
         self.assertIn('-- --locked', packages)
         self.assertIn('inspect-candidate-package.py', packages)
         self.assertIn('verify-candidate-package.py', packages)

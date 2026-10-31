@@ -390,7 +390,7 @@ jobs:
           cargo fmt --manifest-path src-tauri/Cargo.toml --check
           cargo fmt --manifest-path src-tauri/native-capture/Cargo.toml --check
       - name: Build fresh application and installer with locked dependencies
-        run: npm run tauri build -- --bundles ${{ runner.os == 'Windows' && 'nsis' || 'dmg' }} -- --locked
+        run: npm run tauri build -- --bundles ${{ runner.os == 'Windows' && 'nsis' || 'app,dmg' }} -- --locked
       - name: Verify the Windows capture child actually embedded in this fresh application
         if: runner.os == 'Windows'
         shell: bash
