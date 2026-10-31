@@ -58,6 +58,8 @@ class MacScreenshotOverlayContract(unittest.TestCase):
 
     def test_fullscreen_fixture_is_external_and_checks_native_window_order(self):
         fixture = (ROOT / "tests/macos-screenshot-overlay-host-fixture.swift").read_text()
+        self.assertIn('private func emitOverlayFixture(', fixture)
+        self.assertNotIn('func emit(', fixture)
         self.assertIn('source.arguments = ["--isolated-test-session", "--fullscreen-source"]', fixture)
         self.assertIn("window.toggleFullScreen(nil)", fixture)
         self.assertIn('window.styleMask.contains(.fullScreen)', fixture)

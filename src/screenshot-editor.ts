@@ -12,7 +12,7 @@ const $ = <T extends Element = HTMLElement>(selector: string) => document.queryS
 const canvas = $<HTMLCanvasElement>('#image-canvas'), frame = $('#canvas-frame'), workspace = $('#editor-workspace');
 const textDialog = $<HTMLDialogElement>('#text-dialog'), discardDialog = $<HTMLDialogElement>('#discard-dialog');
 const textInput = $<HTMLTextAreaElement>('#annotation-text');
-const desktop = isTauri();
+const desktop = isTauri(), windows = /Win/i.test(navigator.platform);
 let session: Omit<ScreenshotSession, 'pngBase64'> | null = null, original: HTMLImageElement | null = null, model: ScreenshotDocument | null = null;
 let latestId = -1, generation = 0, savedState: number | null = null, busy = false, nativeDialog = false, loading = false, tool: Tool = 'rectangle';
 let rendered: { generation: number; stateId: number } | null = null;
@@ -20,6 +20,7 @@ const inplace = () => !!session?.overlay;
 const exportReady = () => !!model && rendered?.generation === generation && rendered.stateId === model.stateId;
 let decoding: HTMLImageElement | null = null;
 let textFocusPending = false;
+let overlayFocus: { generation: number; promise: Promise<void> } | null = null;
 let zoom = 1, fit = true, composing = false, imeEscape = false, textPoint: Point | null = null;
 let gesture: { start: Point; end: Point; pointerId: number } | null = null;
 let discardResolve: ((value: boolean) => void) | null = null;
@@ -131,7 +132,7 @@ async function acceptSession(value: ScreenshotSession | null): Promise<void> {
   if (value) latestId = value.id;
   const replaced = dirty(), token = ++generation;
   if (decoding) { decoding.src = ''; decoding = null; } // Cancel superseded image decode work.
-  clearGesture(); cancelText(); resolveDiscard(false); textFocusPending = false; busy = false; nativeDialog = false; loading = !!value;
+  clearGesture(); cancelText(); resolveDiscard(false); textFocusPending = false; overlayFocus = null; busy = false; nativeDialog = false; loading = !!value;
   session = null; original = null; model = null; savedState = null; rendered = null;
   canvas.width = canvas.height = 1; frame.hidden = true; $('#empty-state').hidden = !!value; controls();
   if (!value) { setPresentation(); status('截图已取消。使用截图快捷键重新截图，或打开本地图片。'); return; }
@@ -159,7 +160,7 @@ async function acceptSession(value: ScreenshotSession | null): Promise<void> {
 }
 function chooseTool(next: Tool): void {
   clearGesture(); tool = next;
-  for (const button of document.querySelectorAll<HTMLButtonElement>('[data-tool]')) button.setAttribute('aria-pressed', String(button.dataset.tool === tool));
+  for (const button of document.querySelectorAll<HTMLButtonElement>('.editor-toolbar button[data-tool]')) button.setAttribute('aria-pressed', String(button.dataset.tool === tool));
   $('#text-size-label').hidden = next !== 'text'; $('#mosaic-size-label').hidden = next !== 'mosaic';
   const hints: Record<Tool, string> = { select: '选择工具进行标注，或点击 ✓ 复制并完成。', rectangle: '拖动绘制矩形。所有标注均以原始图片像素为准。', arrow: '从起点拖向终点，绘制箭头。', text: '点击图片放置文字；支持中文输入法和多行文字。', mosaic: '拖动选择马赛克区域。敏感文字建议使用实心遮挡。', solid: '拖动绘制不透明色块，彻底遮挡区域内的像素。', crop: '拖动选择保留范围；松开立即裁剪，可撤销。' };
   $('#tool-hint').textContent = hints[next]; canvas.dataset.tool = next; placeOverlayTools();
@@ -169,6 +170,27 @@ function append(operation: EditOperation): void {
   try { model?.append(operation); if (render()) status(operation.kind === 'crop' ? '已裁剪实际像素。可撤销；导出不会包含裁剪掉的部分。' : '标注已添加。尚未写入文件。'); }
   catch (error) { status(readableError(error), true); }
 }
+function requestOverlayFocus(): Promise<void> {
+  if (!desktop || !inplace() || !session) return Promise.resolve();
+  if (overlayFocus?.generation === generation) return overlayFocus.promise;
+  const token = generation, sessionId = session.id;
+  const promise = invoke<void>('focus_screenshot_overlay', { sessionId });
+  overlayFocus = { generation: token, promise };
+  // Retain successful focus for this session; a failed explicit click can retry.
+  void promise.catch(() => { if (overlayFocus?.promise === promise) overlayFocus = null; });
+  return promise;
+}
+function focusFromEditorPointer(event: PointerEvent): void {
+  if (!windows || event.button !== 0 || !inplace() || busy || loading || !model || dialogOpen(textDialog) || composing) return;
+  if (event.target instanceof Element && (event.target.closest('.inplace-actions') || event.target.closest('button:disabled'))) return;
+  const token = generation;
+  // Do not await: ordinary pointer capture/drawing must begin synchronously.
+  void requestOverlayFocus().catch(error => {
+    if (token === generation) status(`无法接管编辑快捷键，可再次点击重试：${readableError(error)}`, true);
+  });
+}
+$('.editor-toolbar').addEventListener('pointerdown', focusFromEditorPointer, true);
+canvas.addEventListener('pointerdown', focusFromEditorPointer, true);
 canvas.addEventListener('pointerdown', async event => {
   if (event.button !== 0 || busy || loading || !model || tool === 'select') return;
   const start = point(event); canvas.focus({ preventScroll: true });
@@ -176,7 +198,7 @@ canvas.addEventListener('pointerdown', async event => {
     const token = generation;
     if (desktop && inplace()) {
       textFocusPending = true;
-      try { await invoke('focus_screenshot_overlay', { sessionId: session?.id }); }
+      try { await requestOverlayFocus(); }
       catch (error) { if (token === generation) status(`无法输入标注：${readableError(error)}`, true); return; }
       finally { if (token === generation) textFocusPending = false; }
       if (token !== generation || busy || !model || tool !== 'text') return;
@@ -215,7 +237,7 @@ canvas.addEventListener('contextlost', event => {
 });
 canvas.addEventListener('contextrestored', () => { if (render()) status('图片画布已恢复。'); });
 canvas.addEventListener('pointercancel', clearGesture); canvas.addEventListener('lostpointercapture', clearGesture);
-for (const button of document.querySelectorAll<HTMLButtonElement>('[data-tool]')) button.addEventListener('click', () => chooseTool(button.dataset.tool as Tool));
+for (const button of document.querySelectorAll<HTMLButtonElement>('.editor-toolbar button[data-tool]')) button.addEventListener('click', () => chooseTool(button.dataset.tool as Tool));
 textInput.addEventListener('compositionstart', () => { composing = true; }); textInput.addEventListener('compositionend', () => { composing = false; });
 textInput.addEventListener('input', () => { $('#text-count').textContent = `${textInput.value.length} / 2000`; });
 $('#text-form').addEventListener('submit', event => {

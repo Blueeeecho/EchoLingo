@@ -165,7 +165,7 @@ jobs:
         run: |
           set -euo pipefail
           cargo test --manifest-path src-tauri/Cargo.toml --locked screenshot_overlay -- --nocapture 2>&1 | tee "$RUNNER_TEMP/macos-selection-recovery/overlay-policy.log"
-          grep -q 'test result: ok. 5 passed; 0 failed' "$RUNNER_TEMP/macos-selection-recovery/overlay-policy.log"
+          grep -q 'test result: ok. 6 passed; 0 failed' "$RUNNER_TEMP/macos-selection-recovery/overlay-policy.log"
       - name: Execute the production Swift Rust Swift JSON bridge
         id: bridge
         continue-on-error: true
@@ -246,7 +246,7 @@ jobs:
           $output | Out-File "$env:RUNNER_TEMP/windows-native-preflight.log" -Encoding utf8
           $output | ForEach-Object { Write-Host $_ }
           if ($code -ne 0) { exit $code }
-          if (($output -join "`n") -notmatch 'test result: ok\. 5 passed; 0 failed') { throw 'All five geometry and input-ownership regressions must execute.' }
+          if (($output -join "`n") -notmatch 'test result: ok\. 6 passed; 0 failed') { throw 'All six geometry, lifecycle and input-ownership regressions must execute.' }
       - name: Preserve only compiler and generated policy evidence
         if: always()
         uses: actions/upload-artifact@v4
@@ -339,7 +339,7 @@ jobs:
           $code = $LASTEXITCODE
           $output | ForEach-Object { Write-Host $_ }
           if ($code -ne 0) { exit $code }
-          if (($output -join "`n") -notmatch 'test result: ok\. 5 passed; 0 failed') { throw 'All five geometry and input-ownership regressions must execute.' }
+          if (($output -join "`n") -notmatch 'test result: ok\. 6 passed; 0 failed') { throw 'All six geometry, lifecycle and input-ownership regressions must execute.' }
       - name: Require committed Rust formatting without rewriting source
         shell: bash
         run: |

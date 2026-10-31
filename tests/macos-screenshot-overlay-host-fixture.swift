@@ -7,7 +7,7 @@ import WebKit
 private func need(_ condition: Bool, _ message: String) throws {
     if !condition { throw NativeError("OVERLAY_HOST_FIXTURE: " + message) }
 }
-private func emit(_ value: [String: Any]) {
+private func emitOverlayFixture(_ value: [String: Any]) {
     let encoded = (try? JSONSerialization.data(withJSONObject: value, options: [.sortedKeys])) ?? Data()
     FileHandle.standardOutput.write(encoded + Data([10]))
 }
@@ -17,7 +17,7 @@ private func emit(_ value: [String: Any]) {
 private final class FullscreenSource: NSObject, NSWindowDelegate {
     var window: NSWindow!
     func start() {
-        guard let screen = NSScreen.screens.first else { emit(["event": "error"]); exit(1) }
+        guard let screen = NSScreen.screens.first else { emitOverlayFixture(["event": "error"]); exit(1) }
         window = NSWindow(contentRect: screen.frame.insetBy(dx: 80, dy: 80),
             styleMask: [.titled, .closable, .resizable, .miniaturizable], backing: .buffered, defer: false)
         window.isReleasedWhenClosed = false
@@ -42,9 +42,9 @@ private final class FullscreenSource: NSObject, NSWindowDelegate {
     func windowDidEnterFullScreen(_ notification: Notification) {
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { self.snapshot("ready") }
     }
-    func windowDidFailToEnterFullScreen(_ window: NSWindow) { emit(["event": "error"]); exit(1) }
+    func windowDidFailToEnterFullScreen(_ window: NSWindow) { emitOverlayFixture(["event": "error"]); exit(1) }
     func snapshot(_ event: String) {
-        emit(["event": event, "pid": ProcessInfo.processInfo.processIdentifier,
+        emitOverlayFixture(["event": event, "pid": ProcessInfo.processInfo.processIdentifier,
               "window": window.windowNumber, "fullscreen": window.styleMask.contains(.fullScreen),
               "activeSpace": window.isOnActiveSpace, "visible": window.isVisible])
     }
@@ -151,7 +151,7 @@ private final class OverlayHostFixture: NSObject, WKNavigationDelegate {
         owner.close()
         sourceOutput.fileHandleForReading.readabilityHandler = nil
         if source.isRunning { source.terminate(); source.waitUntilExit() }
-        emit(["schema": "echolingo-macos-screenshot-overlay-host-v1", "ok": ok,
+        emitOverlayFixture(["schema": "echolingo-macos-screenshot-overlay-host-v1", "ok": ok,
               "reason": reason, "screenCaptured": false, "permissionRequested": false,
               "clipboardWritten": false, "physicalImeTested": false,
               "fullscreenSpaceTested": fullscreenVerified, "fullscreenStackingTested": stackingVerified])

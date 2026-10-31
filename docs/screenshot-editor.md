@@ -26,7 +26,8 @@ F1 不调用 OCR、翻译、云服务或翻译历史，工具栏没有 OCR 按�
   Retina/DPR 只影响显示映射，不改变输出像素。
 - Ctrl/Command Z 撤销，Shift Ctrl/Command Z 或 Ctrl/Command Y 重做。
   文字框中 Enter 换行、Ctrl/Command Enter 添加；中文输入法组合期间不会完成截图。
-  仅明确进入文字标注时请求原生文本焦点。
+  Windows 初次呈现不激活；主动点击工具栏或画布后才接管常规编辑快捷键。
+  文字标注仍等待焦点就绪再显示输入框；普通绘制不等待异步焦点请求。
 
 ### 本地图片仍使用普通编辑模式
 
@@ -37,12 +38,15 @@ F1 不调用 OCR、翻译、云服务或翻译历史，工具栏没有 OCR 按�
 ## 原生宿主边界
 
 macOS 使用不激活应用的 **NSPanel** 宿主复用同一 WKWebView；不把普通 NSWindow 的
-collection behavior 当作全屏旁挂能力。显式文字输入请求焦点，初次呈现不抢占前台应用。
+collection behavior 当作全屏旁挂能力。NSPanel 初次只借用键盘，不激活前台 App；
+文字输入仍遵守显式交互与输入法优先规则。
 Windows 在当前 Rust 截图子进程结束后，由父应用的原位 overlay 承接编辑，使用不激活
-呈现和会话限定的 Enter/Esc 转发；并非保留原截图子进程的窗口。
+呈现和会话限定的 Enter/Esc 转发。主动点击编辑工具或画布后，常规撤销、保存及工具键
+进入 WebView；初次呈现绝不自动请求激活。并非保留原截图子进程的窗口。
 
 锁定依赖 Tauri **2.12.5** / Wry **0.57.1** 的透明 WebView 实现内部使用
-`drawsBackground`。项目显式启用 `macos-private-api` 兼容特性，目标是直接分发 DMG，
+`drawsBackground`。项目显式启用 `macos-private-api` 兼容特性，并将
+`app.macOSPrivateApi` 配置同步设为 `true` 以满足构建特性校验，目标是直接分发 DMG，
 **不宣称符合 Mac App Store 审核要求**。透明呈现和全屏空间行为仍须原生验证。
 
 ## 隐私与资源边界

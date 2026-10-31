@@ -69,45 +69,95 @@ pub fn capture_image_cancelable(cancel: NativeCancel) -> Result<String, String> 
     image_response(run_cancelable("capture-image", cancel)?)
 }
 #[derive(Clone, Debug, serde::Deserialize)]
-pub struct ScreenshotScreen { pub x: f64, pub y: f64, pub width: f64, pub height: f64 }
+pub struct ScreenshotScreen {
+    pub x: f64,
+    pub y: f64,
+    pub width: f64,
+    pub height: f64,
+}
 #[derive(Clone, Debug, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ScreenshotGeometry {
-    pub x: f64, pub y: f64, pub width: f64, pub height: f64,
-    pub screen_x: f64, pub screen_y: f64, pub screen_width: f64, pub screen_height: f64,
+    pub x: f64,
+    pub y: f64,
+    pub width: f64,
+    pub height: f64,
+    pub screen_x: f64,
+    pub screen_y: f64,
+    pub screen_width: f64,
+    pub screen_height: f64,
     pub scale: f64,
     #[serde(default)]
     pub screens: Vec<ScreenshotScreen>,
 }
 impl ScreenshotGeometry {
     pub fn validate(&self) -> Result<(), String> {
-        let values = [self.x, self.y, self.width, self.height, self.screen_x, self.screen_y, self.screen_width, self.screen_height, self.scale];
-        if values.iter().any(|v| !v.is_finite()) || self.width <= 0.0 || self.height <= 0.0
-            || self.screen_width <= 0.0 || self.screen_height <= 0.0 || self.scale <= 0.0 || self.scale > 8.0
-            || self.screen_width > 65536.0 || self.screen_height > 65536.0
-            || self.x < self.screen_x - 1.0 || self.y < self.screen_y - 1.0
+        let values = [
+            self.x,
+            self.y,
+            self.width,
+            self.height,
+            self.screen_x,
+            self.screen_y,
+            self.screen_width,
+            self.screen_height,
+            self.scale,
+        ];
+        if values.iter().any(|v| !v.is_finite())
+            || self.width <= 0.0
+            || self.height <= 0.0
+            || self.screen_width <= 0.0
+            || self.screen_height <= 0.0
+            || self.scale <= 0.0
+            || self.scale > 8.0
+            || self.screen_width > 65536.0
+            || self.screen_height > 65536.0
+            || self.x < self.screen_x - 1.0
+            || self.y < self.screen_y - 1.0
             || self.x + self.width > self.screen_x + self.screen_width + 1.0
-            || self.y + self.height > self.screen_y + self.screen_height + 1.0 {
+            || self.y + self.height > self.screen_y + self.screen_height + 1.0
+        {
             return Err("SCREENSHOT_GEOMETRY: 无法验证原地截图坐标，请重新截图".into());
         }
-        if self.screens.len() > 64 || self.screens.iter().any(|screen| {
-            [screen.x, screen.y, screen.width, screen.height].iter().any(|v| !v.is_finite())
-                || screen.width <= 0.0 || screen.height <= 0.0 || screen.x < self.screen_x - 1.0 || screen.y < self.screen_y - 1.0
-                || screen.x + screen.width > self.screen_x + self.screen_width + 1.0
-                || screen.y + screen.height > self.screen_y + self.screen_height + 1.0
-        }) { return Err("SCREENSHOT_GEOMETRY: 截图显示器边界无效".into()); }
+        if self.screens.len() > 64
+            || self.screens.iter().any(|screen| {
+                [screen.x, screen.y, screen.width, screen.height]
+                    .iter()
+                    .any(|v| !v.is_finite())
+                    || screen.width <= 0.0
+                    || screen.height <= 0.0
+                    || screen.x < self.screen_x - 1.0
+                    || screen.y < self.screen_y - 1.0
+                    || screen.x + screen.width > self.screen_x + self.screen_width + 1.0
+                    || screen.y + screen.height > self.screen_y + self.screen_height + 1.0
+            })
+        {
+            return Err("SCREENSHOT_GEOMETRY: 截图显示器边界无效".into());
+        }
         Ok(())
     }
 }
-pub fn capture_screenshot_with_geometry_cancelable(cancel: NativeCancel) -> Result<(String, ScreenshotGeometry), String> {
+pub fn capture_screenshot_with_geometry_cancelable(
+    cancel: NativeCancel,
+) -> Result<(String, ScreenshotGeometry), String> {
     let response = run_cancelable("capture-screenshot", cancel)?;
-    let mut geometry: ScreenshotGeometry = serde_json::from_value(response.get("captureGeometry").cloned()
-        .ok_or("SCREENSHOT_GEOMETRY: 原生截图未返回选区位置")?)
-        .map_err(|_| "SCREENSHOT_GEOMETRY: 原生截图选区位置无效")?;
-    geometry.screens = serde_json::from_value(response.get("captureScreens").cloned()
-        .ok_or("SCREENSHOT_GEOMETRY: 原生截图未返回显示器边界")?)
-        .map_err(|_| "SCREENSHOT_GEOMETRY: 原生截图显示器边界无效")?;
-    if geometry.screens.is_empty() { return Err("SCREENSHOT_GEOMETRY: 截图显示器已不可用".into()); }
+    let mut geometry: ScreenshotGeometry = serde_json::from_value(
+        response
+            .get("captureGeometry")
+            .cloned()
+            .ok_or("SCREENSHOT_GEOMETRY: 原生截图未返回选区位置")?,
+    )
+    .map_err(|_| "SCREENSHOT_GEOMETRY: 原生截图选区位置无效")?;
+    geometry.screens = serde_json::from_value(
+        response
+            .get("captureScreens")
+            .cloned()
+            .ok_or("SCREENSHOT_GEOMETRY: 原生截图未返回显示器边界")?,
+    )
+    .map_err(|_| "SCREENSHOT_GEOMETRY: 原生截图显示器边界无效")?;
+    if geometry.screens.is_empty() {
+        return Err("SCREENSHOT_GEOMETRY: 截图显示器已不可用".into());
+    }
     geometry.validate()?;
     Ok((image_response(response)?, geometry))
 }

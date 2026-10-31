@@ -47,7 +47,7 @@ class MacRecoveryWorkflowContract(unittest.TestCase):
     def test_in_place_editor_has_real_host_and_pure_policy_gates(self):
         self.assertIn('bash tests/macos-screenshot-overlay-host-fixture.sh', SOURCE)
         self.assertIn('node tests/screenshot-editor.mjs', SOURCE)
-        self.assertIn('test result: ok. 5 passed; 0 failed', SOURCE)
+        self.assertIn('test result: ok. 6 passed; 0 failed', SOURCE)
         self.assertIn('overlay-policy.log', SOURCE)
         self.assertIn('overlay-host.log', SOURCE)
 

@@ -47,7 +47,10 @@ class CandidatePackageTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
-        self.folder = Path(self.temp.name)
+        # Canonicalize only the directory this fixture just created. On macOS,
+        # tempfile can return /var/... although /var is a system alias for
+        # /private/var. Production artifact paths must still reject links.
+        self.folder = Path(self.temp.name).resolve(strict=True)
         self.root = self.folder / "source"
         self.root.mkdir()
         files = {
@@ -173,6 +176,23 @@ class CandidatePackageTests(unittest.TestCase):
         parent.symlink_to(self.root, target_is_directory=True)
         with self.assertRaisesRegex(ValueError, "Symlink"):
             VERIFY.identity(parent / "package.json")
+
+    def test_owned_fixture_temp_root_can_be_canonicalized_without_relaxing_guard(self):
+        actual = self.folder / "actual-temp-root"
+        actual.mkdir()
+        alias = self.folder / "system-temp-alias"
+        try:
+            alias.symlink_to(actual, target_is_directory=True)
+        except OSError:
+            self.skipTest("Synthetic symlink creation is unavailable")
+        # Reproduce macOS /var -> /private/var on any host. Only a path returned
+        # by our own TemporaryDirectory is canonicalized; the raw alias remains
+        # forbidden when supplied as a production artifact path.
+        with tempfile.TemporaryDirectory(dir=alias) as temporary:
+            canonical = Path(temporary).resolve(strict=True)
+            self.assertEqual(VERIFY.no_links(canonical), canonical)
+            with self.assertRaisesRegex(ValueError, "Symlink"):
+                VERIFY.no_links(temporary)
 
     def test_output_is_never_overwritten(self):
         self.args.output.write_text("keep")

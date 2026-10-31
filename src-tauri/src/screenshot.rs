@@ -92,6 +92,21 @@ impl Controller {
             .ok_or(STALE)?;
         operation(image)
     }
+    fn dismiss_current(
+        &self,
+        id: Option<u64>,
+        dismiss: impl FnOnce() -> Result<(), String>,
+    ) -> Result<(), String> {
+        let mut state = super::locked(&self.state)?;
+        if state.intent != id {
+            return Err(STALE.into());
+        }
+        // Preserve the session on native dismissal failure so X can retry. The
+        // same lock prevents an older close from hiding a newer capture.
+        dismiss()?;
+        *state = SessionState::default();
+        Ok(())
+    }
     #[cfg(test)]
     fn install(&self, session: Session, file_name: String) -> Result<(), String> {
         self.install_and_publish(session, file_name, |_| Ok(()))
@@ -158,7 +173,12 @@ pub fn invalidate(app: &tauri::AppHandle) {
         let _ = app.run_on_main_thread(move || {
             // A queued dismissal must never hide a newer committed screenshot.
             let state = handle.state::<super::AppState>();
-            if state.screenshots.state.lock().is_ok_and(|state| state.image.is_none()) {
+            if state
+                .screenshots
+                .state
+                .lock()
+                .is_ok_and(|state| state.image.is_none())
+            {
                 if let Some(window) = handle.get_webview_window(LABEL) {
                     let _ = super::screenshot_overlay::hide(&window);
                 }
@@ -519,18 +539,28 @@ pub async fn screenshot_editor_ready(
     })
     .await?
 }
-/// Only an explicit click into screenshot text entry invokes this command.
+/// Only an explicit interaction with the screenshot invokes this command.
 /// Initial capture presentation must remain nonactivating.
 #[tauri::command]
-pub async fn focus_screenshot_overlay(window: tauri::WebviewWindow, app: tauri::AppHandle, session_id: u64) -> Result<(), String> {
+pub async fn focus_screenshot_overlay(
+    window: tauri::WebviewWindow,
+    app: tauri::AppHandle,
+    session_id: u64,
+) -> Result<(), String> {
     ensure_editor(&window)?;
     let handle = app.clone();
     dialog(&app, move || {
-        handle.state::<super::AppState>().screenshots.with_image(session_id, |image| {
-            if image.public.capture_geometry.is_none() { return Err(STALE.into()); }
-            super::screenshot_overlay::focus_text(&window)
-        })
-    }).await?
+        handle
+            .state::<super::AppState>()
+            .screenshots
+            .with_image(session_id, |image| {
+                if image.public.capture_geometry.is_none() {
+                    return Err(STALE.into());
+                }
+                super::screenshot_overlay::focus_text(&window)
+            })
+    })
+    .await?
 }
 #[tauri::command]
 pub async fn close_screenshot_editor(
@@ -548,16 +578,13 @@ pub async fn close_screenshot_editor(
         if state.screenshots.dialog_active.load(Ordering::SeqCst) {
             return Err("SCREENSHOT_DIALOG: 请先取消或完成系统文件对话框".to_owned());
         }
-        let mut screenshot = super::locked(&state.screenshots.state)?;
-        if screenshot.intent != session_id {
-            return Err(STALE.into());
-        }
-        *screenshot = SessionState::default();
+        state.screenshots.dismiss_current(session_id, || {
+            super::screenshot_overlay::hide(&window)
+        })?;
         // Ordinary committed Save/Copy can finish without retaining the window.
         // Invalidate only this editor, not an unrelated newer OCR task.
-        drop(screenshot);
         emit_cleared(&handle, session_id);
-        super::screenshot_overlay::hide(&window)
+        Ok(())
     })
     .await?
 }
@@ -580,14 +607,15 @@ pub async fn save_screenshot_image(
         .operations
         .try_acquire()
         .map_err(|_| "SCREENSHOT_BUSY: 请先完成当前图片操作")?;
-    let name = state
-        .screenshots
-        .with_image(session_id, |image| {
-            if save_as && image.public.capture_geometry.is_some() {
-                return Err("SCREENSHOT_DIALOG: 原地截图使用设置中的保存目录；请先完成或取消截图再更改目录".into());
-            }
-            Ok(image.file_name.clone())
-        })?;
+    let name = state.screenshots.with_image(session_id, |image| {
+        if save_as && image.public.capture_geometry.is_some() {
+            return Err(
+                "SCREENSHOT_DIALOG: 原地截图使用设置中的保存目录；请先完成或取消截图再更改目录"
+                    .into(),
+            );
+        }
+        Ok(image.file_name.clone())
+    })?;
     let destination = directory(&app);
     let path = if save_as {
         #[cfg(any(target_os = "macos", target_os = "windows"))]
@@ -735,20 +763,32 @@ async fn publish(
     let geometry = session.capture_geometry.clone();
     session.overlay = dialog(app, move || {
         let state = handle.state::<super::AppState>();
-        if !state.screenshots.current(id) { return Err(STALE.to_owned()); }
-        let window = handle.get_webview_window(LABEL).ok_or("SCREENSHOT_WINDOW: 编辑器窗口不存在")?;
+        if !state.screenshots.current(id) {
+            return Err(STALE.to_owned());
+        }
+        let window = handle
+            .get_webview_window(LABEL)
+            .ok_or("SCREENSHOT_WINDOW: 编辑器窗口不存在")?;
         if let Some(geometry) = geometry {
             match super::screenshot_overlay::prepare(&window, &geometry) {
                 Ok(layout) => Ok(Some(layout)),
-                Err(error) => { let _ = super::screenshot_overlay::hide(&window); Err(error) }
+                Err(error) => {
+                    let _ = super::screenshot_overlay::hide(&window);
+                    Err(error)
+                }
             }
         } else {
             super::screenshot_overlay::hide(&window)?;
-            window.set_size(tauri::LogicalSize::new(1080.0, 760.0)).map_err(|_| "SCREENSHOT_WINDOW: 无法恢复编辑器尺寸")?;
-            window.center().map_err(|_| "SCREENSHOT_WINDOW: 无法定位图片编辑器")?;
+            window
+                .set_size(tauri::LogicalSize::new(1080.0, 760.0))
+                .map_err(|_| "SCREENSHOT_WINDOW: 无法恢复编辑器尺寸")?;
+            window
+                .center()
+                .map_err(|_| "SCREENSHOT_WINDOW: 无法定位图片编辑器")?;
             Ok(None)
         }
-    }).await??;
+    })
+    .await??;
     let state = app.state::<super::AppState>();
     state
         .native_tasks
@@ -787,7 +827,11 @@ pub async fn open_screenshot_image(
             .operations
             .try_acquire()
             .map_err(|_| "SCREENSHOT_BUSY: 请先完成当前图片操作")?;
-        if super::locked(&state.screenshots.state)?.image.as_ref().is_some_and(|image| image.public.capture_geometry.is_some()) {
+        if super::locked(&state.screenshots.state)?
+            .image
+            .as_ref()
+            .is_some_and(|image| image.public.capture_geometry.is_some())
+        {
             return Err("SCREENSHOT_DIALOG: 请先完成或取消原地截图，再打开本地图片".into());
         }
         if let Some(id) = session_id {
@@ -920,10 +964,19 @@ pub fn start_capture(app: tauri::AppHandle) {
             let handle = app.clone();
             let hide_id = request.id();
             dialog(&app, move || {
-                if !handle.state::<super::AppState>().screenshots.current(hide_id) { return Err(STALE.to_owned()); }
-                if let Some(window) = handle.get_webview_window(LABEL) { super::screenshot_overlay::hide(&window)?; }
+                if !handle
+                    .state::<super::AppState>()
+                    .screenshots
+                    .current(hide_id)
+                {
+                    return Err(STALE.to_owned());
+                }
+                if let Some(window) = handle.get_webview_window(LABEL) {
+                    super::screenshot_overlay::hide(&window)?;
+                }
                 Ok(())
-            }).await??;
+            })
+            .await??;
             #[cfg(target_os = "macos")]
             super::verify_capture_application_policy(&app).await?;
             let worker_app = app.clone();
@@ -935,7 +988,9 @@ pub fn start_capture(app: tauri::AppHandle) {
                     return Err(STALE.into());
                 }
                 let (encoded, geometry) =
-                    super::platform::capture_screenshot_with_geometry_cancelable(worker_request.cancellation())?;
+                    super::platform::capture_screenshot_with_geometry_cancelable(
+                        worker_request.cancellation(),
+                    )?;
                 let captured_at = super::now();
                 if worker_request.cancelled() {
                     return Err(STALE.into());
@@ -1097,6 +1152,28 @@ mod tests {
         controller.begin(3).unwrap(); // explicit new F1 still supersedes
         controller.cancel_pending();
         assert!(!controller.current(3));
+        assert!(controller.with_image(1, |_| Ok(())).is_err());
+    }
+    #[test]
+    fn screenshot_overlay_close_failure_preserves_session_and_stale_close_never_hides() {
+        let controller = Controller::default();
+        controller.begin(1).unwrap();
+        controller
+            .install(
+                make_session(1, &png(), 1, None).unwrap(),
+                "first.png".into(),
+            )
+            .unwrap();
+        assert!(controller
+            .dismiss_current(Some(1), || Err("native hide failed".into()))
+            .is_err());
+        assert!(controller.with_image(1, |_| Ok(())).is_ok());
+        assert!(controller
+            .dismiss_current(Some(2), || panic!("stale close must not hide"))
+            .is_err());
+        assert!(controller.with_image(1, |_| Ok(())).is_ok());
+        controller.dismiss_current(Some(1), || Ok(())).unwrap();
+        assert!(!controller.current(1));
         assert!(controller.with_image(1, |_| Ok(())).is_err());
     }
     #[test]

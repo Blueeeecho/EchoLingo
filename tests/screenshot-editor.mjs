@@ -18,6 +18,7 @@ try {
     });
     await page.addInitScript(() => {
       window.isTauri = true;
+      Object.defineProperty(navigator, 'platform', { configurable: true, get: () => 'Win32' });
       if (new URL(location.href).searchParams.has('fallbackDialog')) for (const name of ['showModal', 'close']) Object.defineProperty(HTMLDialogElement.prototype, name, { configurable: true, value: undefined });
       const callbacks = new Map(), listeners = new Map(); let callbackId = 0, nextId = 0;
       const image = (width = 96, height = 64) => {
@@ -58,7 +59,10 @@ try {
             if (mode === 'newer') q.publish(80, 48);
             return snapshot;
           }
-          if (command === 'focus_screenshot_overlay') return;
+          if (command === 'focus_screenshot_overlay') {
+            if (q.holdFocus) await new Promise(resolve => { q.releaseFocus = resolve; });
+            if (q.focusError) throw new Error('QA focus failed'); return;
+          }
           if (command === 'screenshot_editor_ready') { q.ready.push(args.sessionId); return; }
           if (command === 'open_screenshot_image') {
             if (q.openError) throw new Error('QA damaged local image');
@@ -85,7 +89,7 @@ try {
       await page.waitForFunction(id => window.__screenshotQA.ready.includes(id), id); return id;
     };
     const drag = async (tool, start, end) => {
-      await page.locator(`[data-tool="${tool}"]`).click();
+      await page.locator(`.editor-toolbar button[data-tool="${tool}"]`).click();
       const bounds = await page.locator('#image-canvas').boundingBox();
       const size = await page.locator('#image-canvas').evaluate(c => [c.width, c.height]);
       const xy = p => [bounds.x + p[0] * bounds.width / size[0], bounds.y + p[1] * bounds.height / size[1]];
@@ -110,7 +114,7 @@ try {
 
     // Native textarea handles Chinese composition; neither Enter nor Ctrl+Enter
     // may prematurely commit an active IME candidate. Text is plain, not HTML.
-    await fresh(); await page.locator('[data-tool="text"]').click();
+    await fresh(); await page.locator('.editor-toolbar button[data-tool="text"]').click();
     await page.locator('#image-canvas').click({ position: { x: 5, y: 5 } });
     await page.locator('#annotation-text').fill('中文标注\n<script>alert(1)</script>');
     await page.locator('#annotation-text').dispatchEvent('compositionstart');
@@ -124,7 +128,7 @@ try {
     assert.equal(await page.locator('#text-dialog').evaluate(d => d.open), true, 'compositionend before the Escape default must retain text');
     await page.locator('#apply-text').click(); assert.equal(await page.locator('#text-dialog').evaluate(d => d.open), false);
     assert.equal(await page.locator('#undo-edit').isEnabled(), true);
-    await page.locator('[data-tool="text"]').click(); await page.locator('#image-canvas').click({ position: { x: 5, y: 5 } });
+    await page.locator('.editor-toolbar button[data-tool="text"]').click(); await page.locator('#image-canvas').click({ position: { x: 5, y: 5 } });
     await page.locator('#annotation-text').fill('字'.repeat(2000)); assert.equal(await page.locator('#annotation-text').inputValue().then(x => x.length), 2000);
     await page.locator('#cancel-text').click();
 
@@ -241,7 +245,7 @@ try {
     // Exercise the fallback, including focus containment and Escape cancellation.
     await page.goto(new URL('screenshot.html?fallbackDialog=1', base).href);
     await page.waitForFunction(() => window.__screenshotQA.ready.length === 1);
-    await page.locator('[data-tool="text"]').click(); await page.locator('#image-canvas').click({ position: { x: 5, y: 5 } });
+    await page.locator('.editor-toolbar button[data-tool="text"]').click(); await page.locator('#image-canvas').click({ position: { x: 5, y: 5 } });
     await page.locator('#annotation-text').fill('兼容旧版系统 WebView');
     await page.keyboard.press('Shift+Tab'); assert.equal(await page.evaluate(() => document.activeElement.id), 'apply-text');
     await page.locator('#cancel-text').click(); assert.equal(await page.locator('#text-dialog').isVisible(), false);
@@ -281,17 +285,28 @@ try {
     };
     const beforeOverlay = await page.evaluate(() => ({ copies: window.__screenshotQA.copies.length, saves: window.__screenshotQA.saves.length }));
     let overlayId = await overlayFresh();
-    assert.equal(await page.locator('[data-tool="select"]').getAttribute('aria-pressed'), 'true', 'capture starts without an annotation tool');
+    assert.equal(await page.evaluate(() => window.__screenshotQA.calls.filter(call => call.command === 'focus_screenshot_overlay').length), 0, 'capture ready never requests activation');
+    await page.evaluate(() => { window.__screenshotQA.holdFocus = true; });
+    const beforeFocus = await page.evaluate(() => window.__screenshotQA.calls.length);
+    await page.locator('.editor-toolbar button[data-tool="rectangle"]').click();
+    const initialOverlay = await pixels();
+    await drag('rectangle', [5, 5], [25, 20]);
+    assert.notDeepEqual(await pixels(), initialOverlay, 'pending focus never delays pointer drawing');
+    assert.equal(await page.evaluate(start => window.__screenshotQA.calls.slice(start).filter(call => call.command === 'focus_screenshot_overlay').length, beforeFocus), 1, 'tool and canvas clicks share one pending focus');
+    await page.evaluate(() => { window.__screenshotQA.holdFocus = false; window.__screenshotQA.releaseFocus(); });
+    await page.locator('#undo-edit').click();
+    await page.locator('.editor-toolbar button[data-tool="select"]').click();
+    assert.equal(await page.locator('.editor-toolbar button[data-tool="select"]').getAttribute('aria-pressed'), 'true', 'capture starts without an annotation tool');
     await drag('crop', [10, 8], [42, 32]);
     assert.deepEqual(await page.locator('#image-canvas').boundingBox().then(({ x, y, width, height }) => [x, y, width, height]), [44, 116, 64, 48], 'cropped bitmap retains original screen-local origin and scale');
     await page.locator('#undo-edit').click();
-    await page.locator('[data-tool="select"]').click();
+    await page.locator('.editor-toolbar button[data-tool="select"]').click();
     await page.locator('#image-canvas').focus(); await page.keyboard.press('Control+Shift+s');
     await page.waitForFunction(() => document.querySelector('#editor-status').textContent === '原地截图使用设置中的保存目录；请在设置修改目录');
     assert.equal(await page.evaluate(() => window.__screenshotQA.saves.length), beforeOverlay.saves, 'in-place Save As cannot open a separate native sheet');
     const overlayPixels = await pixels();
     assert.equal(await page.locator('.editor-header').isVisible(), false);
-    assert.equal(await page.locator('[data-tool="select"]').getAttribute('aria-pressed'), 'true');
+    assert.equal(await page.locator('.editor-toolbar button[data-tool="select"]').getAttribute('aria-pressed'), 'true');
     assert.deepEqual(await page.locator('#image-canvas').boundingBox().then(({ x, y, width, height }) => [x, y, width, height]), [24, 100, 192, 128]);
     await page.locator('#image-canvas').click({ position: { x: 30, y: 30 } });
     assert.deepEqual(await pixels(), overlayPixels, 'default selection tool never annotates');
@@ -319,13 +334,13 @@ try {
     });
     assert.deepEqual(exported, editedOverlay.data, 'completion exports only flattened edited pixels');
     overlayId = await overlayFresh();
-    await page.locator('[data-tool="text"]').click(); await page.locator('#image-canvas').click({ position: { x: 8, y: 8 } });
+    await page.locator('.editor-toolbar button[data-tool="text"]').click(); await page.locator('#image-canvas').click({ position: { x: 8, y: 8 } });
     await page.locator('#annotation-text').fill('中文');
     await page.locator('#annotation-text').dispatchEvent('compositionstart');
     await page.evaluate(id => { const q = window.__screenshotQA; q.emit('screenshot-overlay-key', { sessionId: id, key: 'Enter' }); q.emit('screenshot-overlay-key', { sessionId: id, key: 'Escape' }); }, overlayId);
     assert.equal(await page.locator('#text-dialog').isVisible(), true);
     assert.equal(await page.evaluate(id => window.__screenshotQA.closed.includes(id), overlayId), false);
-    assert.equal(await page.evaluate(() => window.__screenshotQA.calls.at(-1).command), 'focus_screenshot_overlay');
+    assert.equal(await page.evaluate(id => window.__screenshotQA.calls.filter(call => call.command === 'focus_screenshot_overlay' && call.sessionId === id).length, overlayId), 1, 'text awaits the session focus without duplicate IPC');
     await page.locator('#annotation-text').dispatchEvent('compositionend');
     await page.keyboard.press('Enter'); assert.equal(await page.locator('#text-dialog').isVisible(), true, 'textarea Enter is a newline, not completion');
     await page.locator('#cancel-text').click();
@@ -362,6 +377,21 @@ try {
     overlayId = await overlayFresh();
     await page.evaluate(id => window.__screenshotQA.emit('screenshot-overlay-key', { sessionId: id, key: 'Enter' }), overlayId);
     await page.waitForFunction(id => window.__screenshotQA.closed.includes(id), overlayId);
+    overlayId = await overlayFresh();
+    await page.evaluate(() => { window.__screenshotQA.focusError = true; });
+    const focusPixels = await pixels();
+    await page.locator('.editor-toolbar button[data-tool="rectangle"]').click();
+    await page.waitForFunction(() => document.querySelector('#editor-status').textContent.includes('QA focus failed'));
+    assert.deepEqual(await pixels(), focusPixels);
+    await page.evaluate(() => { window.__screenshotQA.focusError = false; });
+    await page.locator('.editor-toolbar button[data-tool="select"]').click();
+    assert.equal(await page.evaluate(id => window.__screenshotQA.calls.filter(call => call.command === 'focus_screenshot_overlay' && call.sessionId === id).length, overlayId), 2, 'failed explicit focus can retry');
+    await page.locator('#overlay-cancel').click(); await page.waitForFunction(id => window.__screenshotQA.closed.includes(id), overlayId);
+    for (const action of ['#overlay-copy', '#overlay-cancel', '#overlay-save']) {
+      overlayId = await overlayFresh(); await page.locator(action).click();
+      await page.waitForFunction(id => window.__screenshotQA.closed.includes(id), overlayId);
+      assert.equal(await page.evaluate(id => window.__screenshotQA.calls.filter(call => call.command === 'focus_screenshot_overlay' && call.sessionId === id).length, overlayId), 0, `${action} must not activate before completion`);
+    }
     // Monitor-local edges/corners, tiny selections and compact wrapping. DPR
     // coverage comes from this suite's outer 1x/2x loop; no pixel screenshots.
     const placementCases = [
@@ -374,7 +404,7 @@ try {
     for (const fixture of placementCases) {
       const [width, height] = fixture.viewport; await page.setViewportSize({ width, height });
       overlayId = await overlayFresh({ ...fixture.roi, viewportWidth: width, viewportHeight: height, ...(fixture.monitor ? { toolbarBounds: fixture.monitor } : {}) });
-      await page.locator('[data-tool="text"]').click(); // reveal the variable-size options
+      await page.locator('.editor-toolbar button[data-tool="text"]').click(); // reveal the variable-size options
       await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
       const layout = await page.evaluate(() => {
         const rect = element => { const r = element.getBoundingClientRect(); return { x: r.x, y: r.y, right: r.right, bottom: r.bottom }; };
