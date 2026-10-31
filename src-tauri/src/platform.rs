@@ -998,6 +998,15 @@ fn bounded_capture_health(value: &Value) -> Value {
         "magnifierStaleFrames",
         "magnifierFrameAgeMillisecondsMax",
         "magnifierSampleThreadStopped",
+        "magnifierOriginTickModuloMilliseconds",
+        "magnifierPointerRevision",
+        "magnifierPointerObservedMilliseconds",
+        "magnifierCurrentSampleMatched",
+        "magnifierCurrentSampleSequence",
+        "magnifierCurrentRequestedMilliseconds",
+        "magnifierCurrentCaptureStartMilliseconds",
+        "magnifierCurrentCaptureEndMilliseconds",
+        "magnifierCurrentPaintReturnedMilliseconds",
     ] {
         if let Some(number) = value
             .get(field)
@@ -2268,6 +2277,42 @@ mod tests {
                 json!({})
             );
         }
+    }
+    #[test]
+    fn magnifier_provenance_is_bounded_numeric_metadata_without_pointer_content() {
+        let fields = [
+            "magnifierOriginTickModuloMilliseconds",
+            "magnifierPointerRevision",
+            "magnifierPointerObservedMilliseconds",
+            "magnifierCurrentSampleMatched",
+            "magnifierCurrentSampleSequence",
+            "magnifierCurrentRequestedMilliseconds",
+            "magnifierCurrentCaptureStartMilliseconds",
+            "magnifierCurrentCaptureEndMilliseconds",
+            "magnifierCurrentPaintReturnedMilliseconds",
+        ];
+        for boundary in [0, 10_000_000] {
+            let values: serde_json::Map<String, Value> = fields
+                .iter()
+                .map(|field| ((*field).to_owned(), json!(boundary)))
+                .collect();
+            let input = Value::Object(values);
+            assert_eq!(super::bounded_capture_health(&input), input);
+        }
+        for invalid in [json!(-1), json!(10_000_001), json!(true), json!("private")] {
+            let values: serde_json::Map<String, Value> = fields
+                .iter()
+                .map(|field| ((*field).to_owned(), invalid.clone()))
+                .collect();
+            assert_eq!(
+                super::bounded_capture_health(&Value::Object(values)),
+                json!({})
+            );
+        }
+        assert_eq!(
+            super::bounded_capture_health(&json!({"magnifierPointerXY": [12, 34]})),
+            json!({})
+        );
     }
     #[test]
     fn capture_topology_health_accepts_signed_coordinates_but_never_content() {

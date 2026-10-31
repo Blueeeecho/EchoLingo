@@ -29,6 +29,7 @@ using System.Web.Script.Serialization;
 using System.Windows.Forms;
 public static class EchoLingoNativeCaptureSmoke {
     delegate bool EnumWindow(IntPtr window,IntPtr parameter);
+    [DllImport("kernel32.dll")] static extern ulong GetTickCount64();
     [StructLayout(LayoutKind.Sequential)] struct RECT { public int left,top,right,bottom; }
     [StructLayout(LayoutKind.Sequential)] struct GUI { public uint size,flags; public IntPtr active,focus,capture,menuOwner,moveSize,caret; public RECT caretRect; }
     [StructLayout(LayoutKind.Sequential)] struct INPUT { public uint type; public Union data; }
@@ -204,6 +205,7 @@ public static class EchoLingoNativeCaptureSmoke {
         readonly List<Dictionary<string,object>> finalSnapshots=new List<Dictionary<string,object>>();
         long finalDispatch=-1;
         volatile bool stopping;bool failed,stopped,finalMatched;long maximumRefresh;int samples;
+        long maximumScreenRead,maximumPixelCopy,maximumClassification;
         public MotionPixelObserver(Sources source,Stopwatch clock) {
             this.clock=clock;
             Rectangle first=new Rectangle(source.First.X+42,source.First.Y-26,156,174);
@@ -226,10 +228,13 @@ public static class EchoLingoNativeCaptureSmoke {
                     while(!stopping&&clock.ElapsedMilliseconds<956) {
                         long captureStarted=clock.ElapsedMilliseconds;
                         using(Graphics graphics=Graphics.FromImage(bitmap))graphics.CopyFromScreen(roi.Location,Point.Empty,roi.Size,CopyPixelOperation.SourceCopy);
+                        long screenReadEnded=clock.ElapsedMilliseconds;
+                        maximumScreenRead=Math.Max(maximumScreenRead,screenReadEnded-captureStarted);
                         BitmapData data=bitmap.LockBits(new Rectangle(Point.Empty,roi.Size),ImageLockMode.ReadOnly,PixelFormat.Format32bppArgb);
                         try {for(int y=0;y<roi.Height;y++)Marshal.Copy(IntPtr.Add(data.Scan0,y*data.Stride),bytes,y*roi.Width*4,roi.Width*4);}
                         finally {bitmap.UnlockBits(data);}
                         long elapsed=clock.ElapsedMilliseconds;bool eligible=elapsed<956;if(eligible)samples++;
+                        maximumPixelCopy=Math.Max(maximumPixelCopy,elapsed-screenReadEnded);
                         int detected=0,probeKind=0;bool finalGeometry=false;
                         // Identify the actual magnifier in the SAME immutable
                         // screenshot, not a stale GetWindowRect at moving coordinates.
@@ -253,8 +258,11 @@ public static class EchoLingoNativeCaptureSmoke {
                             }
                             if(eligible&&elapsed>=756&&atFinal&&cyan)finalMatched=true;
                         }
+                        long classified=clock.ElapsedMilliseconds;
+                        maximumClassification=Math.Max(maximumClassification,classified-elapsed);
                         if(elapsed>=700&&finalSnapshots.Count<6)finalSnapshots.Add(new Dictionary<string,object> {
                             {"captureStartMilliseconds",captureStarted},{"captureEndMilliseconds",elapsed},
+                            {"screenReadEndMilliseconds",screenReadEnded},{"classificationEndMilliseconds",classified},
                             {"eligibleBeforeDeadline",eligible},{"detectedFrames",detected},
                             {"finalGeometry",finalGeometry},{"probeColorKind",probeKind}
                         });
@@ -270,7 +278,9 @@ public static class EchoLingoNativeCaptureSmoke {
                 {"finalTargetPixelMatched",finalMatched},{"pixelObservations",samples},
                 {"observerStopped",stopped},{"samplePixelsStored",false},
                 {"finalPointerDispatchMilliseconds",Interlocked.Read(ref finalDispatch)},
-                {"finalSnapshotEvidence",finalSnapshots}
+                {"finalSnapshotEvidence",finalSnapshots},
+                {"maximumScreenReadMilliseconds",maximumScreenRead},{"maximumPixelCopyMilliseconds",maximumPixelCopy},
+                {"maximumClassificationMilliseconds",maximumClassification}
             };
             Need(!failed&&stopped&&colors.Count>=3&&maximumRefresh<=200&&finalMatched,
                 "Moving magnifier pixels froze, lagged, or did not match the generated final target.");
@@ -345,6 +355,7 @@ public static class EchoLingoNativeCaptureSmoke {
         GCHandle callbackRoot=GCHandle.Alloc(callback);
         IntPtr observer=SetWinEventHook(0x8002,0x800b,IntPtr.Zero,callback,(uint)helper,0,0);
         if(observer==IntPtr.Zero) { callbackRoot.Free();Need(false,"Cannot observe generated helper visibility events."); }
+        long phaseTickModulo=(long)(GetTickCount64()%10000000);
         clock.Start();int issued=-1;long settled=-1;MotionPixelObserver pixels=null;
         try {
             pixels=new MotionPixelObserver(source,clock);
@@ -386,6 +397,7 @@ public static class EchoLingoNativeCaptureSmoke {
             long observedDuration=clock.ElapsedMilliseconds;
             report[phase+"MagnifierContinuity"]=new Dictionary<string,object> {
                 {"durationMilliseconds",observedDuration},{"visibilitySamples",samples},
+                {"phaseClockOriginTickModuloMilliseconds",phaseTickModulo},{"crossProcessClockTypicalResolutionMilliseconds",16},{"crossProcessClockIsNotAcceptanceEvidence",true},
                 {"invisibleSamples",invisible},{"hideEvents",hides},{"showEvents",shows},
                 {"locationEvents",locations},{"eventObserverPositiveControl",locations>0},
                 {"generatedMoves",moves},{"distinctMotionPositions",positions.Count},

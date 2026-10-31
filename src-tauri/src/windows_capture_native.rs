@@ -577,6 +577,7 @@ struct SampleFrame {
     pixels: Vec<u8>,
     // clear, GetDC, BitBlt, ReleaseDC, pixel flush/read, complete sample.
     milliseconds: [u64; 6],
+    captured_ms: [u64; 2],
 }
 struct ScreenSampler {
     request: Option<std::sync::mpsc::SyncSender<CaptureSampleTicket>>,
@@ -585,7 +586,7 @@ struct ScreenSampler {
     join: Option<std::thread::JoinHandle<()>>,
 }
 impl ScreenSampler {
-    fn start() -> Result<Self> {
+    fn start(origin: Instant) -> Result<Self> {
         let (request, requests) = std::sync::mpsc::sync_channel::<CaptureSampleTicket>(1);
         let (replies, reply) = std::sync::mpsc::sync_channel(1);
         let stopping = Arc::new(AtomicBool::new(false));
@@ -616,6 +617,7 @@ impl ScreenSampler {
                         let started = Instant::now();
                         raw.clear(w::rgb(22, 26, 34));
                         let clear = started.elapsed().as_millis().min(10_000_000) as u64;
+                        let capture_started = origin.elapsed().as_millis().min(10_000_000) as u64;
                         let times = raw.copy_screen_timed(
                             ticket.sample.copy_offset,
                             ticket.sample.grabbed,
@@ -624,12 +626,14 @@ impl ScreenSampler {
                         let started = Instant::now();
                         let pixels = raw.pixels()?;
                         let flush = started.elapsed().as_millis().min(10_000_000) as u64;
+                        let capture_finished = origin.elapsed().as_millis().min(10_000_000) as u64;
                         if worker_stopping.load(Ordering::SeqCst) {
                             break;
                         }
                         let frame = SampleFrame {
                             ticket,
                             pixels,
+                            captured_ms: [capture_started, capture_finished],
                             milliseconds: [
                                 clear,
                                 times[0],
@@ -1177,6 +1181,9 @@ struct Picker {
     loupe_sample: Surface,
     sampler: ScreenSampler,
     sample_policy: CaptureSamplePolicy,
+    sample_pointer: Option<Point>,
+    sample_displayed: Option<(CaptureSampleTicket, [u64; 2])>,
+    sample_pointer_matched: bool,
     own: HashSet<isize>,
     owner_process: u32,
     purpose: CapturePurpose,
@@ -1203,6 +1210,7 @@ struct Picker {
 impl Picker {
     fn new(request: &Request) -> Result<Self> {
         let started = Instant::now();
+        let origin_tick = unsafe { w::GetTickCount64() } % 10_000_000;
         if request.host_thread == 0 || request.host_token <= 0 {
             return Err(error("CAPTURE_ARGUMENT"));
         }
@@ -1276,7 +1284,7 @@ impl Picker {
         own.insert(loupe.hwnd as isize);
         let loupe_sample =
             Surface::new(CaptureMagnifierSample::SIDE, CaptureMagnifierSample::SIDE)?;
-        let sampler = ScreenSampler::start()?;
+        let sampler = ScreenSampler::start(started)?;
         *canvas.lock().map_err(|_| error("CAPTURE_BITMAP"))? = Some(Surface::preview(156, 174)?);
         let mut input = CaptureInputPolicy::default();
         input.resync_released_buttons(down(1), down(2));
@@ -1324,9 +1332,18 @@ impl Picker {
             "magnifierStaleFrames",
             "magnifierFrameAgeMillisecondsMax",
             "magnifierSampleThreadStopped",
+            "magnifierPointerRevision",
+            "magnifierPointerObservedMilliseconds",
+            "magnifierCurrentSampleMatched",
+            "magnifierCurrentSampleSequence",
+            "magnifierCurrentRequestedMilliseconds",
+            "magnifierCurrentCaptureStartMilliseconds",
+            "magnifierCurrentCaptureEndMilliseconds",
+            "magnifierCurrentPaintReturnedMilliseconds",
         ] {
             health.insert(name, 0);
         }
+        health.insert("magnifierOriginTickModuloMilliseconds", origin_tick);
         health.insert("inputBackend", 3);
         health.insert("desktopMatched", 1);
         health.insert("knownPointer", 1);
@@ -1343,6 +1360,9 @@ impl Picker {
             loupe_sample,
             sampler,
             sample_policy: CaptureSamplePolicy::default(),
+            sample_pointer: None,
+            sample_displayed: None,
+            sample_pointer_matched: false,
             own,
             owner_process: request.owner_process,
             purpose: request.purpose,
@@ -1697,6 +1717,28 @@ impl Picker {
         Ok(())
     }
     fn render_loupe(&mut self, p: Point) -> Result<bool> {
+        // Coordinate-free provenance for the latest observed pointer only.
+        // UpdateWindow/WM_PAINT return is application paint completion only,
+        // not compositor scanout or proof of what an observer later captured.
+        if self.sample_pointer != Some(p) {
+            self.sample_pointer = Some(p);
+            self.sample_pointer_matched = false;
+            self.increment("magnifierPointerRevision");
+            self.health.insert(
+                "magnifierPointerObservedMilliseconds",
+                self.started.elapsed().as_millis().min(10_000_000) as u64,
+            );
+            for field in [
+                "magnifierCurrentSampleMatched",
+                "magnifierCurrentSampleSequence",
+                "magnifierCurrentRequestedMilliseconds",
+                "magnifierCurrentCaptureStartMilliseconds",
+                "magnifierCurrentCaptureEndMilliseconds",
+                "magnifierCurrentPaintReturnedMilliseconds",
+            ] {
+                self.health.insert(field, 0);
+            }
+        }
         if let Some(frame) = self.sampler.poll()? {
             self.increment("magnifierSampleCompleted");
             for ((total, max), elapsed) in [
@@ -1733,6 +1775,7 @@ impl Picker {
             let now = self.started.elapsed().as_millis() as i64;
             if self.sample_policy.complete(frame.ticket, now) {
                 self.loupe_sample.write_pixels(&frame.pixels)?;
+                self.sample_displayed = Some((frame.ticket, frame.captured_ms));
             }
         }
         let sample = CaptureMagnifierSample::new(p, self.selection.desktop);
@@ -1871,6 +1914,29 @@ impl Picker {
             "magnifierPresentMillisecondsMax",
             present_started,
         );
+        if fresh && !self.sample_pointer_matched {
+            if let Some((ticket, captured_ms)) = self.sample_displayed {
+                if ticket.sample == sample {
+                    self.sample_pointer_matched = true;
+                    for (field, value) in [
+                        ("magnifierCurrentSampleMatched", 1),
+                        ("magnifierCurrentSampleSequence", ticket.sequence),
+                        (
+                            "magnifierCurrentRequestedMilliseconds",
+                            ticket.requested_ms as u64,
+                        ),
+                        ("magnifierCurrentCaptureStartMilliseconds", captured_ms[0]),
+                        ("magnifierCurrentCaptureEndMilliseconds", captured_ms[1]),
+                        (
+                            "magnifierCurrentPaintReturnedMilliseconds",
+                            self.started.elapsed().as_millis() as u64,
+                        ),
+                    ] {
+                        self.health.insert(field, value.min(10_000_000));
+                    }
+                }
+            }
+        }
         // The screen read starts only after the loupe is outside its immutable
         // in-flight sample. Later UI moves preserve that exclusion until reply.
         if let Some(request) = request {
@@ -2251,7 +2317,7 @@ pub fn self_test() -> Result<()> {
     {
         return Err(error("CAPTURE_SELF_TEST"));
     }
-    let mut sampler = ScreenSampler::start()?;
+    let mut sampler = ScreenSampler::start(Instant::now())?;
     sampler.stop();
     let stopped = Instant::now();
     loop {

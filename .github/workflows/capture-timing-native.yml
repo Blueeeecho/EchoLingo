@@ -1,0 +1,111 @@
+name: Focused native capture timing diagnostic
+on:
+  push:
+    branches: [diagnostics/024-capture-timing-native]
+permissions:
+  contents: read
+jobs:
+  windows-rust-capture-candidate:
+    name: Isolated Rust capture candidate (native Windows runtime)
+    runs-on: windows-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - name: Verify the reviewed native diagnostic source inputs
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PYCODE'
+          import hashlib, json, os, pathlib, subprocess
+          def git(*args):
+              return subprocess.check_output(['git', *args])
+          head = git('rev-parse', 'HEAD').decode().strip()
+          assert head == os.environ['GITHUB_SHA']
+          assert os.environ['GITHUB_REPOSITORY'] == 'Blueeeecho/EchoLingo'
+          assert os.environ['GITHUB_REF'] == 'refs/heads/diagnostics/024-capture-timing-native'
+          pins = json.loads(pathlib.Path('tests/fixtures/capture-timing-source-pins.json').read_text())
+          for name, expected in pins['files'].items():
+              actual = hashlib.sha256(git('show', 'HEAD:' + name)).hexdigest()
+              assert actual == expected, 'Reviewed source hash mismatch: ' + name
+          subprocess.run(['git', 'diff', '--exit-code', '--'], check=True)
+          evidence = pathlib.Path(os.environ['RUNNER_TEMP']) / 'capture-timing-source-evidence'
+          evidence.mkdir()
+          report = {'diagnosticOnly': True, 'releaseAcceptance': False, 'head': head,
+                    'tree': git('rev-parse', 'HEAD^{tree}').decode().strip(), 'sourcePins': pins}
+          (evidence / 'source.json').write_text(json.dumps(report, indent=2) + '\n')
+          print(json.dumps(report))
+          PYCODE
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Link the actual isolated child without Tauri or offline engine
+        id: native_candidate_build
+        shell: pwsh
+        run: |
+          cargo build --manifest-path src-tauri/native-capture/Cargo.toml --release --locked --target-dir "$env:RUNNER_TEMP/native-capture-candidate"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Verify fail-closed arguments and actual memory pixels
+        shell: pwsh
+        run: ./tests/windows-rust-capture-binary-smoke.ps1 -ExecutablePath "$env:RUNNER_TEMP/native-capture-candidate/release/echolingo-native-capture.exe"
+      - name: Exercise real native selector with the production input host
+        shell: pwsh
+        run: |
+          rustc --edition=2021 tests/windows-native-capture-harness.rs -O -o "$env:RUNNER_TEMP/native-capture-harness.exe"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          powershell -NoLogo -NoProfile -NonInteractive -STA -ExecutionPolicy Bypass -File tests/windows-native-capture-smoke.ps1 -NativeCapturePath "$env:RUNNER_TEMP/native-capture-candidate/release/echolingo-native-capture.exe" -HarnessPath "$env:RUNNER_TEMP/native-capture-harness.exe" -IsolatedTestSession
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Verify isolated F1 window selection with exact production input
+        if: ${{ !cancelled() && steps.native_candidate_build.outcome == 'success' }}
+        shell: pwsh
+        run: |
+          rustc --edition=2021 tests/windows-native-capture-harness.rs -O -o "$env:RUNNER_TEMP/screenshot-window-harness.exe"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $global:LASTEXITCODE = 1
+          $output = @(& powershell -NoLogo -NoProfile -NonInteractive -STA -ExecutionPolicy Bypass -File tests/windows-screenshot-window-smoke.ps1 -NativeCapturePath "$env:RUNNER_TEMP/native-capture-candidate/release/echolingo-native-capture.exe" -HarnessPath "$env:RUNNER_TEMP/screenshot-window-harness.exe" -IsolatedTestSession 2>&1)
+          $fixtureExit = $LASTEXITCODE
+          $output | Out-File "$env:RUNNER_TEMP/isolated-screenshot-window.log" -Encoding utf8
+          $output | Write-Output
+          python scripts/verify-screenshot-window-report.py "$env:RUNNER_TEMP/isolated-screenshot-window.log"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          if ($fixtureExit -ne 0) { exit $fixtureExit }
+      - name: Preserve isolated F1 selector evidence including failures
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: isolated-screenshot-window-evidence
+          path: ${{ runner.temp }}/isolated-screenshot-window.log
+          if-no-files-found: warn
+      - name: Verify same-integrity topmost and modal capture pages
+        shell: pwsh
+        run: powershell -NoLogo -NoProfile -NonInteractive -STA -ExecutionPolicy Bypass -File tests/windows-capture-upper-window-smoke.ps1 -NativeCapturePath "$env:RUNNER_TEMP/native-capture-candidate/release/echolingo-native-capture.exe" -HarnessPath "$env:RUNNER_TEMP/native-capture-harness.exe" -IsolatedTestSession
+      - name: Compare shipping launcher and native child on this same runner
+        shell: pwsh
+        run: |
+          $dir = "$env:RUNNER_TEMP/native-capture-candidate"
+          powershell -NoLogo -NoProfile -NonInteractive -STA -ExecutionPolicy Bypass -File scripts/build-windows-native-helper.ps1 -HelperPath src-tauri/native/windows.ps1 -OutputPath "$dir/echolingo-windows-native.dll"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          rustc --edition=2021 tests/windows-launcher-generate.rs -O -o "$dir/generate-launcher.exe"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & "$dir/generate-launcher.exe" "$dir/echolingo-windows-launcher.ps1"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          rustc --edition=2021 tests/windows-delegated-capture-harness.rs -O -o "$dir/legacy-harness.exe"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          ./tests/windows-native-capture-ab.ps1 -NativeCapturePath "$dir/release/echolingo-native-capture.exe" -NativeHarnessPath "$env:RUNNER_TEMP/native-capture-harness.exe" -LegacyHarnessPath "$dir/legacy-harness.exe" -NativeAssemblyPath "$dir/echolingo-windows-native.dll" -HelperPath "$dir/echolingo-windows-launcher.ps1" -OutputDirectory "$env:RUNNER_TEMP/native-capture-paired-evidence" -IsolatedTestSession
+      - name: Preserve same-runner capture evidence including failures
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: native-capture-paired-evidence
+          path: ${{ runner.temp }}/native-capture-paired-evidence
+          if-no-files-found: warn
+      - name: Preserve exact source provenance
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: capture-timing-source-evidence
+          path: ${{ runner.temp }}/capture-timing-source-evidence
+          if-no-files-found: error
+      - name: Keep diagnostic scope explicit
+        if: always()
+        shell: bash
+        run: echo 'This isolated native timing diagnostic is not full application, installer, or release acceptance. All copied native gates remain strict; no failed cases are retried.' >> "$GITHUB_STEP_SUMMARY"

@@ -249,6 +249,7 @@ unsafe extern "system" {
 #[link(name = "kernel32")]
 unsafe extern "system" {
     pub fn GetModuleHandleW(name: *const u16) -> H;
+    pub fn GetTickCount64() -> u64;
     #[link_name = "GetCurrentThreadId"]
     pub fn CurrentThreadId() -> u32;
     pub fn OpenEventW(access: u32, inherit: i32, name: *const u16) -> H;
