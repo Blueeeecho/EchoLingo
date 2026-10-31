@@ -97,6 +97,10 @@ def verify(report):
             raise ValueError('Request cancellation must not be labeled as an AppKit input event')
         if type(case.get('visiblePanelsAfter')) is not int or case['visiblePanelsAfter'] != 0:
             raise ValueError('Native selector cleanup is incomplete')
+        if (case.get('exactSelectorRetirementVerified') is not True
+                or type(case.get('selectorRetirementObservations')) is not int
+                or case['selectorRetirementObservations'] <= 0):
+            raise ValueError('Exact current-case selector IDs must retire from WindowServer before post-case evidence')
         if any(field in case for field in ('imageBase64', 'text', 'pixels')):
             raise ValueError('Probe must not retain captured pixels or text')
         if case['mode'] in ('escape-cancel', 'request-cancel'):

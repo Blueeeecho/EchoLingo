@@ -26,6 +26,7 @@ def passed():
         report[flag] = True
     for mode in module.MODES:
         case = dict(mode=mode, ok=True, hoverOutlineVerified=True, exactOwnedSourceRevalidated=True,
+                    exactSelectorRetirementVerified=True, selectorRetirementObservations=1,
                     ownAppKitEventDispatched=mode != 'request-cancel', nativeCancellationEndpointDispatched=mode == 'request-cancel', visiblePanelsAfter=0)
         if 'cancel' in mode:
             case['nativeCancelled'] = True
@@ -142,6 +143,24 @@ class MacScreenshotProbeContract(unittest.TestCase):
     def test_cancel_does_not_retain_image(self):
         report = passed(); report['cases'][2]['imageWidth'] = 1
         with self.assertRaises(ValueError): module.verify(report)
+
+    def test_exact_selector_retirement_is_required(self):
+        for field, value in [('exactSelectorRetirementVerified', False), ('selectorRetirementObservations', 0),
+                             ('selectorRetirementObservations', True)]:
+            report = passed(); report['cases'][2][field] = value
+            with self.assertRaises(ValueError): module.verify(report)
+        root = Path(__file__).resolve().parents[1]
+        swift = (root/'tests/macos-screenshot-native-fixture.swift').read_text()
+        retirement = swift.split('func awaitSelectorRetirement(', 1)[1].split('func acceptCaseResponse(', 1)[0]
+        self.assertIn('activeSelectorFrames.first', retirement)
+        self.assertIn('Double(ownPID)', retirement)
+        self.assertIn('== expected', retirement)
+        self.assertIn('Date() < deadline', retirement)
+        self.assertLess(retirement.index('Date() <= deadline'), retirement.index('captureCurrentWindows()'))
+        self.assertLess(retirement.index('Date() <= deadline'), retirement.index('acceptCaseResponse('))
+        self.assertIn('unknown own window remains', retirement)
+        self.assertNotIn('send(', retirement)
+        self.assertIn('caseStarted.addingTimeInterval(6)', swift)
 
     def test_provenance_cannot_be_missing_malformed_or_wrong_source_set(self):
         for field, value in [('fixtureBinarySha256', None), ('fixtureBinarySha256', 'not-a-hash'),

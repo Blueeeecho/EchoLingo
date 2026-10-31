@@ -99,6 +99,13 @@ are exempt from that metadata guard. It does not run the no-exclusion pixel
 oracle through its own blue outline/loupe. Final native PNG pixel checks are
 unchanged, and phase2 must independently show the newly generated red pixels.
 The production hit-policy negative vectors run before any native capture probe.
+After native completion, AppKit must still report no visible selectors. The
+fixture then observes only the current case's recorded selector IDs/PID/frames
+until WindowServer removes them, for at most one second within the existing
+case budget. It never accepts a remaining record, retries input, or exempts an
+unknown/moved/reused own window. This handles asynchronous publication of panel
+closure before the unchanged live-source guard and post-case pixel proof.
+Failures include bounded own-window numeric inventories and the exact check phase.
 
 Five ordered cases call the production `capture-screenshot` endpoint:
 

@@ -129,6 +129,8 @@ private final class ScreenshotProbe {
     var sourceScale: CGFloat = 1
     var sourcePhase = 1
     var preCasePixelProof: String?
+    var activeSelectorFrames: [Int: CGRect] = [:]
+    var selectorRetirementObservations = 0
     var operation: String?
     var activeCase: String?
     var caseStarted = Date()
@@ -658,12 +660,42 @@ private final class ScreenshotProbe {
             if captureWindowNumber(record[kCGWindowOwnerPID as String]) == Double(ownPID) {
                 guard let number = captureWindowNumber(record[kCGWindowNumber as String]),
                       selectorIDs.contains(where: { Double($0) == number }) else {
+                    recordOwnWindowInventory(records)
                     throw NativeError("FIXTURE: unexpected own window overlaps the case source")
                 }
                 continue // only exact own selector panels; no foreign exemption
             }
             let sharing = captureWindowNumber(record[kCGWindowSharingState as String])
             try fixtureNeed(sharing == 1 || sharing == 2, "live case has a protected or unknown-sharing overlay")
+        }
+    }
+
+    func recordOwnWindowInventory(_ records: [[String: Any]]) {
+        let ownPID = ProcessInfo.processInfo.processIdentifier
+        report["ownWindowInventoryPID"] = ownPID
+        let primary = CGDisplayBounds(CGMainDisplayID()).height
+        report["ownAppKitWindowInventory"] = NSApplication.shared.windows.prefix(64).map { window -> [String: Any] in
+            ["windowID": window.windowNumber, "selectorClass": window is CaptureSelectionPanel,
+             "visible": window.isVisible, "key": window.isKeyWindow,
+             "frame": [window.frame.minX, window.frame.minY, window.frame.width, window.frame.height]]
+        }
+        report["ownOnscreenWindowInventory"] = records.filter {
+            captureWindowNumber($0[kCGWindowOwnerPID as String]) == Double(ownPID)
+        }.prefix(64).map { record -> [String: Any] in
+            var value: [String: Any] = [:]
+            for (label, key) in [("windowID", kCGWindowNumber), ("layer", kCGWindowLayer),
+                                 ("alpha", kCGWindowAlpha), ("sharing", kCGWindowSharingState)] {
+                if let number = captureWindowNumber(record[key as String]) { value[label] = number }
+            }
+            if let dictionary = record[kCGWindowBounds as String] as? [String: Any],
+               let rect = CGRect(dictionaryRepresentation: dictionary as CFDictionary),
+               [rect.minX, rect.minY, rect.width, rect.height].allSatisfy({ $0.isFinite }) {
+                value["frame"] = [rect.minX, primary - rect.maxY, rect.width, rect.height]
+            }
+            return value
+        }
+        report["activeCaseSelectorInventory"] = activeSelectorFrames.sorted { $0.key < $1.key }.map { id, frame -> [String: Any] in
+            ["windowID": id, "frame": [frame.minX, frame.minY, frame.width, frame.height]]
         }
     }
 
@@ -687,6 +719,8 @@ private final class ScreenshotProbe {
     func beginNativeCase() {
         guard !finished, index < modes.count else { if !finished { finish("passed") }; return }
         let mode = modes[index]
+        activeSelectorFrames = [:]; selectorRetirementObservations = 0
+        report["activeCaseMode"] = mode; report["activeCaseStage"] = "waiting-for-native-selector"
         let registered = nativeResponse(mode: "--begin-native-capture")
         guard registered["ok"] as? Bool == true, let id = registered["operationId"] as? String else {
             finish("failed", reason: "native-operation-registration"); return
@@ -718,7 +752,14 @@ private final class ScreenshotProbe {
               let hovered = view.hoveredWindow,
               hovered.offsetBy(dx: panel.frame.minX, dy: panel.frame.minY) == target.frame else { return }
         do {
+            report["activeCaseStage"] = "pre-gesture-source-check"
+            activeSelectorFrames = [:]
+            for window in NSApplication.shared.windows where window is CaptureSelectionPanel && window.isVisible && window.windowNumber > 0 {
+                try fixtureNeed(activeSelectorFrames[window.windowNumber] == nil, "current selector identity is duplicated")
+                activeSelectorFrames[window.windowNumber] = window.frame
+            }
             try verifyCaseSource(); caseDriven = true
+            report["activeCaseStage"] = "dispatching-owned-gesture"
             if mode == "request-cancel" {
                 guard let operation = operation else { throw NativeError("FIXTURE: missing own token") }
                 let cancelled = nativeResponse(mode: "--cancel-native-capture", input: Data(operation.utf8))
@@ -742,12 +783,71 @@ private final class ScreenshotProbe {
         guard !finished, activeCase == mode, operation == id else { return }
         timer?.invalidate(); timer = nil
         _ = nativeResponse(mode: "--end-native-capture", input: Data(id.utf8)); operation = nil
+        report["activeCaseStage"] = "observing-exact-selector-retirement"
+        // AppKit visibility changes before WindowServer necessarily publishes
+        // the removal. Observe only this case's exact known selector IDs, never
+        // blanket-exempt own windows or retry the gesture. Stay in its budget.
+        awaitSelectorRetirement(mode, response: response,
+                                deadline: min(Date().addingTimeInterval(1), caseStarted.addingTimeInterval(6)))
+    }
+
+    func awaitSelectorRetirement(_ mode: String, response: [String: Any], deadline: Date) {
+        guard !finished, activeCase == mode, operation == nil else { return }
+        do {
+            try fixtureNeed(Date() <= deadline, "exact selector retirement exceeded its case deadline")
+            try fixtureNeed(caseDriven && !activeSelectorFrames.isEmpty, "native response lacks exact dispatched selector identity")
+            try fixtureNeed(!NSApplication.shared.windows.contains(where: { $0 is CaptureSelectionPanel && $0.isVisible }),
+                            "native selector left visible panels")
+            guard let records = captureCurrentWindows() else { throw NativeError("FIXTURE: selector retirement metadata unavailable") }
+            selectorRetirementObservations += 1
+            let ownPID = ProcessInfo.processInfo.processIdentifier
+            let primary = CGDisplayBounds(CGMainDisplayID()).height
+            var remaining = false
+            for record in records {
+                guard let number = captureWindowNumber(record[kCGWindowNumber as String]) else { continue }
+                guard let expected = activeSelectorFrames.first(where: { Double($0.key) == number })?.value else {
+                    if captureWindowNumber(record[kCGWindowOwnerPID as String]) == Double(ownPID), let target = target {
+                        guard let dictionary = record[kCGWindowBounds as String] as? [String: Any],
+                              let quartz = CGRect(dictionaryRepresentation: dictionary as CFDictionary),
+                              CGRect(x: quartz.minX, y: primary - quartz.maxY, width: quartz.width, height: quartz.height)
+                                .intersection(target.frame).isEmpty else {
+                            recordOwnWindowInventory(records)
+                            throw NativeError("FIXTURE: unknown own window remains during selector retirement")
+                        }
+                    }
+                    continue
+                }
+                guard captureWindowNumber(record[kCGWindowOwnerPID as String]) == Double(ownPID),
+                      let dictionary = record[kCGWindowBounds as String] as? [String: Any],
+                      let quartz = CGRect(dictionaryRepresentation: dictionary as CFDictionary),
+                      CGRect(x: quartz.minX, y: primary - quartz.maxY, width: quartz.width, height: quartz.height) == expected else {
+                    recordOwnWindowInventory(records)
+                    throw NativeError("FIXTURE: retiring selector identity/frame changed")
+                }
+                remaining = true
+            }
+            if remaining {
+                recordOwnWindowInventory(records)
+                guard Date() < deadline else { throw NativeError("FIXTURE: exact selector on-screen retirement timed out") }
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.025) {
+                    self.awaitSelectorRetirement(mode, response: response, deadline: deadline)
+                }
+            } else {
+                report["activeCaseStage"] = "post-response-source-check"
+                acceptCaseResponse(mode, response: response)
+            }
+        } catch { finish("failed", reason: String(describing: error)) }
+    }
+
+    func acceptCaseResponse(_ mode: String, response: [String: Any]) {
+        guard !finished, activeCase == mode else { return }
         do {
             try fixtureNeed(caseDriven, "native screenshot completed before own gesture was dispatched")
             try fixtureNeed(!NSApplication.shared.windows.contains(where: { $0 is CaptureSelectionPanel && $0.isVisible }), "native selector left visible panels")
             try fixtureNeed(response["text"] == nil, "F1 unexpectedly invoked OCR")
             try verifyCaseSource()
             var record: [String: Any] = ["mode": mode, "ok": true, "hoverOutlineVerified": true, "visiblePanelsAfter": 0,
+                                          "exactSelectorRetirementVerified": true, "selectorRetirementObservations": selectorRetirementObservations,
                                           "exactOwnedSourceRevalidated": true, "ownAppKitEventDispatched": mode != "request-cancel",
                                           "nativeCancellationEndpointDispatched": mode == "request-cancel"]
             if mode == "escape-cancel" || mode == "request-cancel" {
