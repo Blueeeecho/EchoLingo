@@ -390,5 +390,5 @@ pub fn focus_text(window: &tauri::WebviewWindow) -> Result<(), String> {
     let webview: &tauri::Webview = window.as_ref();
     webview
         .set_focus()
-        .map_err(|_| "SCREENSHOT_INPUT: 无法进入截图文字输入")
+        .map_err(|_| "SCREENSHOT_INPUT: 无法进入截图文字输入".to_owned())
 }
