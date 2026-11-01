@@ -62,3 +62,9 @@ body[data-inplace=true] .status-line { z-index:4; }
 .inline-text-editor small { display:block; font-size:10px; color:var(--secondary); padding:3px; }
 #object-selection { fill:none; stroke:#7862d8; stroke-width:1.5; stroke-dasharray:4 3; vector-effect:non-scaling-stroke; }
 #image-canvas[data-tool=select] { cursor:default; }
+
+/* Group painting separately from privacy edits and completion controls. */
+.tool-group button[data-tool=pen], .tool-group button[data-tool=mosaic] { margin-left:5px; border-left-color:var(--border); border-radius:0 7px 7px 0; }
+#image-canvas[data-tool=eraser] { cursor:cell; }
+#image-canvas[data-tool=pen], #image-canvas[data-tool=highlight] { cursor:crosshair; }
+#restart-selection { color:var(--accent); }

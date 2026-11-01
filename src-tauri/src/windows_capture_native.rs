@@ -58,6 +58,9 @@ enum Role {
     Mailbox,
     Plane(usize),
     Edge(usize),
+    Action(usize),
+    Hint,
+    Handle,
     Loupe,
 }
 #[derive(Clone, Copy)]
@@ -71,6 +74,7 @@ enum Event {
     Mouse(u32, Point),
     Wire(u32, usize, isize),
     Escape(bool),
+    ConfirmCopy,
     Cancel(u32),
 }
 struct Inbox {
@@ -164,7 +168,7 @@ unsafe extern "system" fn window_proc(hwnd: w::H, msg: u32, wp: usize, lp: isize
             node.inbox.push(Event::Wire(msg, wp, lp));
             return Some(0);
         }
-        if let Role::Plane(_) = node.role {
+        if matches!(node.role, Role::Plane(_) | Role::Action(_) | Role::Handle | Role::Hint) {
             if matches!(msg, 0x201 | 0x202 | 0x204 | 0x205) {
                 let mut p = w::Point {
                     x: (lp as u16 as i16) as i32,
@@ -185,12 +189,38 @@ unsafe extern "system" fn window_proc(hwnd: w::H, msg: u32, wp: usize, lp: isize
             let mut paint: w::Paint = std::mem::zeroed();
             let dc = w::BeginPaint(hwnd, &mut paint);
             if !dc.is_null() {
-                if matches!(node.role, Role::Edge(_)) {
+                if matches!(node.role, Role::Edge(_) | Role::Handle | Role::Action(_) | Role::Hint) {
                     let brush = w::CreateSolidBrush(w::rgb(45, 145, 255));
                     let mut bounds = w::Rect::default();
                     w::GetClientRect(hwnd, &mut bounds);
                     w::FillRect(dc, &bounds, brush);
                     w::DeleteObject(brush);
+                    if matches!(node.role, Role::Action(_) | Role::Hint) {
+                        let background = w::CreateSolidBrush(w::rgb(30, 38, 50));
+                        w::FillRect(dc, &bounds, background);
+                        w::DeleteObject(background);
+                        w::SetTextColor(dc, w::rgb(245, 248, 255));
+                        w::SetBkMode(dc, 1);
+                        let face = w::wide("Segoe UI");
+                        let font_height = if node.role == Role::Hint {
+                            (12 * w::GetDpiForWindow(hwnd).clamp(96, 768) / 96) as i32
+                        } else { (bounds.bottom - bounds.top) / 2 };
+                        let font = w::CreateFontW(-font_height, 0, 0, 0,
+                            400, 0, 0, 0, 1, 0, 0, 5, 0, face.as_ptr());
+                        if font.is_null() {
+                            node.inbox.failed.store(true, Ordering::SeqCst);
+                        } else {
+                            let previous = w::SelectObject(dc, font);
+                            let text = w::wide(match node.role {
+                                Role::Action(index) => SCREENSHOT_LABELS[index],
+                                _ => "拖动边角调整范围，内部拖动可移动；选择工具后固定范围",
+                            });
+                            let flags = if node.role == Role::Hint { 1 | 0x10 } else { 1 | 4 | 0x20 };
+                            w::DrawTextW(dc, text.as_ptr(), -1, &mut bounds, flags);
+                            w::SelectObject(dc, previous);
+                            w::DeleteObject(font);
+                        }
+                    }
                 } else if node.role == Role::Loupe {
                     if let Ok(canvas) = node.canvas.lock() {
                         if let Some(canvas) = canvas.as_ref() {
@@ -276,14 +306,16 @@ impl Window {
         });
         let ex = match role {
             Role::Plane(_) => PLANE_EX,
-            Role::Edge(_) => EDGE_EX,
+            Role::Edge(_) | Role::Action(_) | Role::Handle | Role::Hint => EDGE_EX,
             Role::Loupe => LOUPE_EX,
             _ => 0x08000080,
         };
-        let title = w::wide(if role == Role::Loupe {
-            "EchoLingoCaptureMagnifier"
-        } else {
-            ""
+        let title = w::wide(&match role {
+            Role::Loupe => "EchoLingoCaptureMagnifier".to_owned(),
+            Role::Action(index) => format!("EchoLingoCaptureAction:{}", SCREENSHOT_ACTIONS[index]),
+            Role::Handle => "EchoLingoCaptureResizeHandle".to_owned(),
+            Role::Hint => "EchoLingoCaptureAdjustmentHint".to_owned(),
+            _ => String::new(),
         });
         let parent = if role == Role::Mailbox {
             -3isize as _
@@ -309,7 +341,7 @@ impl Window {
         if hwnd.is_null() {
             return Err(error("CAPTURE_WINDOW"));
         }
-        if matches!(role, Role::Edge(_)) {
+        if matches!(role, Role::Edge(_) | Role::Action(_) | Role::Handle | Role::Hint) {
             if unsafe { w::SetLayeredWindowAttributes(hwnd, w::rgb(255, 0, 255), 255, 1) } == 0 {
                 if unsafe { w::DestroyWindow(hwnd) } == 0 {
                     std::mem::forget(node);
@@ -821,6 +853,7 @@ struct EscapeState {
     inbox: Arc<Inbox>,
     initial: AtomicBool,
     ownership: EscOwnership,
+    confirm: CaptureConfirmKey,
     downs: AtomicU32,
     ups: AtomicU32,
 }
@@ -828,6 +861,19 @@ thread_local! {static ESCAPE:std::cell::RefCell<Option<Arc<EscapeState>>>=const{
 unsafe extern "system" fn escape_hook(code: i32, wp: usize, lp: isize) -> isize {
     if code == 0 && lp != 0 {
         let k = &*(lp as *const w::Keyboard);
+        if k.key == 0x0d && k.flags & 2 == 0 {
+            let key_down = matches!(wp, 0x100 | 0x104);
+            let key_up = matches!(wp, 0x101 | 0x105);
+            let consume = ESCAPE.with(|slot| {
+                let slot = slot.borrow();
+                let Some(state) = slot.as_ref() else { return false; };
+                let (consume, confirm) = state.confirm.event(key_down, key_up,
+                    !down(0x10) && !down(0x11) && !down(0x12));
+                if confirm { state.inbox.push(Event::ConfirmCopy); }
+                consume
+            });
+            if consume { return 1; }
+        }
         if k.key == 0x1b && k.flags & 2 == 0 {
             let down = matches!(wp, 0x100 | 0x104);
             let up = matches!(wp, 0x101 | 0x105);
@@ -879,6 +925,7 @@ impl EscapeListener {
             inbox,
             initial: AtomicBool::new(down(0x1b)),
             ownership: EscOwnership::default(),
+            confirm: CaptureConfirmKey::new(down(0x0d)),
             downs: AtomicU32::new(0),
             ups: AtomicU32::new(0),
         });
@@ -899,7 +946,8 @@ impl EscapeListener {
                 let _ = initial.send((w::CurrentThreadId(), !hook.is_null()));
                 if !hook.is_null() {
                     while !thread_stopping.load(Ordering::SeqCst)
-                        && !hook_state.ownership.may_exit()
+                        && !(hook_state.ownership.may_exit()
+                            && hook_state.confirm.ownership.may_exit())
                     {
                         pump();
                         wait_messages(16);
@@ -933,10 +981,12 @@ impl EscapeListener {
             return true;
         }
         self.state.ownership.request_close();
-        while self.state.ownership.owned() && Instant::now() < self.deadline {
+        self.state.confirm.set_enabled(false);
+        self.state.confirm.ownership.request_close();
+        while (self.state.ownership.owned() || self.state.confirm.ownership.owned()) && Instant::now() < self.deadline {
             std::thread::sleep(Duration::from_millis(5));
         }
-        let released = !self.state.ownership.owned();
+        let released = !self.state.ownership.owned() && !self.state.confirm.ownership.owned();
         if !released {
             self.stopping.store(true, Ordering::SeqCst);
         }
@@ -1172,6 +1222,8 @@ struct Picker {
     _mailbox: Window,
     planes: Vec<Window>,
     edges: Vec<Window>,
+    actions: Vec<Window>,
+    handles: Vec<Window>,
     loupe: Window,
     // Fixed UI upload bitmap; the sampling thread owns a separate source DIB.
     loupe_sample: Surface,
@@ -1266,6 +1318,23 @@ impl Picker {
                 edges.push(edge);
             }
         }
+        let mut actions = Vec::new();
+        let mut handles = Vec::new();
+        if request.purpose == CapturePurpose::Screenshot {
+            for index in 0..=SCREENSHOT_ACTIONS.len() {
+                let role = if index == SCREENSHOT_ACTIONS.len() { Role::Hint } else { Role::Action(index) };
+                let window = Window::new(&class, role, Rect::new(0, 0, 1, 1),
+                    inbox.clone(), canvas.clone())?;
+                own.insert(window.hwnd as isize);
+                actions.push(window);
+            }
+            for _ in 0..8 {
+                let window = Window::new(&class, Role::Handle, Rect::new(0, 0, 1, 1),
+                    inbox.clone(), canvas.clone())?;
+                own.insert(window.hwnd as isize);
+                handles.push(window);
+            }
+        }
         let loupe = Window::new(
             &class,
             Role::Loupe,
@@ -1348,6 +1417,8 @@ impl Picker {
             purpose: request.purpose,
             topology,
             selection,
+            actions,
+            handles,
             input,
             host,
             escape,
@@ -1446,7 +1517,7 @@ impl Picker {
             match event {
                 Event::Display => self.invalidate(2, 0, 0),
                 Event::Dpi { role, hwnd, value } => {
-                    if matches!(role, Role::Probe | Role::Mailbox | Role::Loupe) {
+                    if matches!(role, Role::Probe | Role::Mailbox | Role::Loupe | Role::Handle | Role::Action(_) | Role::Hint) {
                         continue;
                     }
                     let index = match role {
@@ -1499,6 +1570,7 @@ impl Picker {
                     );
                     self.selection.cancel();
                 }
+                Event::ConfirmCopy => self.selection.confirm_copy(),
                 Event::Escape(is_down) => {
                     self.increment(if is_down {
                         "hookEscapeDowns"
@@ -1666,13 +1738,47 @@ impl Picker {
             }
             self.last_raise = elapsed;
         }
+        if self.selection.adjusting {
+            let display = self.topology.displays().iter()
+                .filter(|d| self.selection.selected.intersect(d.bounds).valid())
+                .max_by_key(|d| {
+                let r = self.selection.selected.intersect(d.bounds);
+                i64::from(r.width) * i64::from(r.height)
+            }).or_else(|| self.topology.displays().iter().find(|d| d.bounds.contains(p)))
+                .ok_or_else(|| error("CAPTURE_GEOMETRY"))?;
+            let area = screenshot_toolbar_bounds(display)?;
+            let bounds = screenshot_actions_layout(self.selection.selected,
+                Rect::new(area[0], area[1], area[2], area[3]), display.dpi);
+            if bounds.len() != SCREENSHOT_ACTIONS.len() {
+                return Err(error("CAPTURE_TOOLBAR_GEOMETRY"));
+            }
+            let dpi = display.dpi;
+            self.selection.set_action_bounds(bounds, dpi);
+            let hint = screenshot_hint_bounds(self.selection.action_bounds(), dpi);
+            for (window, bounds) in self.handles.iter().zip(self.selection.handles())
+                .chain(self.actions.iter().zip(self.selection.action_bounds().iter().copied().chain(std::iter::once(hint)))) {
+                let changed = !window.visible() || window.bounds()? != bounds;
+                if changed || raise {
+                    set_bounds(window.hwnd, TOPMOST, bounds, POS | 0x40)?;
+                }
+                if changed {
+                    unsafe {
+                        w::InvalidateRect(window.hwnd, null(), 0);
+                        w::UpdateWindow(window.hwnd);
+                    }
+                }
+            }
+        }
         if self.first {
             self.health
                 .entry("firstBordersVisibleMilliseconds")
                 .or_insert(self.started.elapsed().as_millis() as u64);
         }
         let magnifier_started = Instant::now();
-        let complete = self.render_loupe(p)?;
+        let complete = if self.selection.adjusting {
+            self.loupe.hide();
+            true
+        } else { self.render_loupe(p)? };
         self.record_render_duration(
             "magnifierRenderMillisecondsTotal",
             "magnifierRenderMillisecondsMax",
@@ -1897,6 +2003,8 @@ impl Picker {
                 self.input.resync_released_buttons(down(1), down(2));
             }
             self.selection.expire(elapsed);
+            self.escape.state.confirm.set_enabled(
+                self.selection.adjusting && !self.selection.finished);
             let p = pointer()?;
             if !self.selection.finished {
                 self.selection.move_to(p);
@@ -1950,7 +2058,7 @@ impl Picker {
                     self.sample_policy.close();
                     self.sampler.stop();
                     self.loupe.hide();
-                    for edge in &self.edges {
+                    for edge in self.edges.iter().chain(&self.actions).chain(&self.handles) {
                         edge.hide();
                     }
                 }
@@ -1969,11 +2077,14 @@ impl Picker {
                     input_desktop()?;
                 }
                 let hovered = if !self.selection.dragging && self.selection.highlighted >= 0 {
-                    if self.hover.begin_query(elapsed) {
+                    if !self.selection.adjusting && self.hover.begin_query(elapsed) {
                         self.hover.set_frame(
                             hover_target(p, &self.own, self.owner_process)
                                 .map_or(Rect::default(), |target| target.frame),
                         );
+                    }
+                    if self.selection.adjusting {
+                        self.hover.clear();
                     }
                     self.hover.current(p, elapsed, true)
                 } else {
@@ -2023,7 +2134,7 @@ impl Picker {
         for plane in &self.planes {
             plane.hide();
         }
-        for edge in &self.edges {
+        for edge in self.edges.iter().chain(&self.actions).chain(&self.handles) {
             edge.hide();
         }
         let stop = Instant::now();
@@ -2086,7 +2197,7 @@ impl Picker {
                 }
             }
         }
-        for edge in &mut self.edges {
+        for edge in self.edges.iter_mut().chain(&mut self.actions).chain(&mut self.handles) {
             if !edge.destroy() {
                 self.failure = Some(error("CAPTURE_OVERLAY_CLEANUP"));
             }
@@ -2173,6 +2284,7 @@ pub fn run(request: Request) -> CapturedResult {
                 result: Err(e),
                 health: BTreeMap::new(),
                 capture_geometry: None,
+                initial_action: None,
                 capture_screens: Vec::new(),
             }
         }
@@ -2281,8 +2393,10 @@ pub fn run(request: Request) -> CapturedResult {
     } else {
         None
     };
+    let initial_action = result.as_ref().ok().and(picker.selection.initial_action);
     CapturedResult {
         result,
+        initial_action,
         health: picker.health.clone(),
         capture_geometry,
         capture_screens,
@@ -2290,6 +2404,7 @@ pub fn run(request: Request) -> CapturedResult {
 }
 pub struct CapturedResult {
     pub result: Result<Vec<u8>>,
+    pub initial_action: Option<&'static str>,
     pub health: BTreeMap<&'static str, u64>,
     /// Physical desktop pixels: selected rect followed by containing display union.
     pub capture_geometry: Option<[i32; 8]>,

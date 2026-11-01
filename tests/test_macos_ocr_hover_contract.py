@@ -13,8 +13,8 @@ class MacOSOCRHoverContract(unittest.TestCase):
         cls.session = cls.source.split('final class CaptureSelectionSession {', 1)[1].split('func selectNativeCaptureRegion(', 1)[0]
 
     def test_both_modes_use_the_same_bounded_actual_hit_lookup(self):
-        self.assertIn('var canQueryWindowHint: Bool { outcome == nil && anchor == nil }', self.state)
-        query = self.session.split('if state.canQueryWindowHint {', 1)[1].split('state.receive(event)', 1)[0]
+        self.assertIn('var canQueryWindowHint: Bool { outcome == nil && anchor == nil && !adjusting }', self.state)
+        query = self.session.split('if state.canQueryWindowHint || startsNewSelection {', 1)[1].split('state.receive(event)', 1)[0]
         self.assertIn('now.timeIntervalSince(lastWindowQuery) >= 0.08', query)
         self.assertIn('state.candidate = captureCurrentWindows().flatMap {', query)
         self.assertIn('captureHoverWindow($0, at: pointer', query)
@@ -27,7 +27,7 @@ class MacOSOCRHoverContract(unittest.TestCase):
 
     def test_hint_does_not_enable_ocr_window_clicks(self):
         hint = self.state.split('var windowHint:', 1)[1].split('mutating func receive(', 1)[0]
-        self.assertIn('guard outcome == nil else { return nil }', hint)
+        self.assertIn('guard outcome == nil && !adjusting else { return nil }', hint)
         self.assertIn('if anchor == nil { return candidate }', hint)
         self.assertIn('purpose == .screenshot && !dragExceeded ? pressedWindow : nil', hint)
         self.assertIn('pressedWindow = purpose == .screenshot ? candidate.flatMap', self.state)
@@ -46,7 +46,7 @@ class MacOSOCRHoverContract(unittest.TestCase):
         selection = self.source.split('func captureSelectionSelfTest() throws {', 1)[1].split('func captureOverlayBehaviorSelfTest()', 1)[0]
         self.assertIn('try captureWindowHintSelfTest()', selection)
         fixture = self.source.split('func captureWindowHintSelfTest() throws {', 1)[1].split('func captureScreenshotSelfTest()', 1)[0]
-        for case in ['[CapturePurpose.region, .screenshot]', 'state.outcome == nil', '.windowSelected(target)',
+        for case in ['[CapturePurpose.region, .screenshot]', 'state.outcome == nil', 'state.adjusting && state.selectedWindow == target', 'state.receive(.action(.copy))',
                      'drag.windowHint == nil', 'cancelled.windowHint == nil',
                      'unavailable.outcome == .selected(rectangle)', 'width: 3, height: 3']:
             self.assertIn(case, fixture)

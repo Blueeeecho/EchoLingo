@@ -250,7 +250,10 @@ public static partial class EchoLingoApplicationSmoke {
                 if (!IsWindow(window)) return true;
                 RECT rectangle; if (!GetWindowRect(window, out rectangle) || !IsWindow(window)) return true;
                 int width = rectangle.right - rectangle.left, height = rectangle.bottom - rectangle.top;
-                Assert(width > 0 && height > 0 && Math.Min(width, height) <= 2, "Actual OCR still created a full-screen overlay surface instead of thin edges.");
+                string role=NativeAdjustmentRole(window);
+                if(role==null)Assert(width > 0 && height > 0 && Math.Min(width, height) <= 2, "Actual OCR still created a full-screen overlay surface instead of thin edges.");
+                else Assert(width>0&&height>0&&width<=(role=="hint"?3808:(role=="handle"?64:512))&&height<=(role=="hint"?864:(role=="handle"?64:240)),"Native adjustment decoration exceeded its bounded role dimensions.");
+                // Every visible role is still returned: cleanup must count actions and handles too.
                 result.Add(new AppEdge { Handle = window, ProcessId = owner, ParentProcessId = parent,
                     Bounds = Rectangle.FromLTRB(rectangle.left, rectangle.top, rectangle.right, rectangle.bottom) });
             }
@@ -396,11 +399,25 @@ public static partial class EchoLingoApplicationSmoke {
         }
         return IntPtr.Zero;
     }
+    static string NativeAdjustmentRole(IntPtr window) {
+        StringBuilder name=new StringBuilder(128),title=new StringBuilder(128);GetClassName(window,name,name.Capacity);
+        uint owner;GetWindowThreadProcessId(window,out owner);if(name.ToString()!="EchoLingoNativeCapture-"+owner)return null;
+        GetWindowText(window,title,title.Capacity);string value=title.ToString();
+        if(value=="EchoLingoCaptureResizeHandle")return "handle";
+        if(value=="EchoLingoCaptureAdjustmentHint")return "hint";
+        foreach(string action in new string[]{"select","rectangle","arrow","text","number","pen","highlight","mosaic","solid","crop","copy","save","pin","cancel"})
+            if(value=="EchoLingoCaptureAction:"+action)return action;
+        Assert(value.Length==0||value=="EchoLingoCaptureMagnifier","Unknown titled native capture role; refusing to classify it as a border.");
+        return null;
+    }
     static int AllocatedThinCount(uint helper) {
         int count=0;
         EnumWindows(delegate(IntPtr window,IntPtr unused) {
             uint owner; GetWindowThreadProcessId(window,out owner); long style=GetWindowLongPtr(window,-20).ToInt64();
-            if (owner==helper && !IsInputPlane(window,owner) && (style&(0x08000000L|0x00080000L|0x20L))==(0x08000000L|0x00080000L|0x20L)) count++;
+            if (owner==helper && !IsInputPlane(window,owner) && (style&(0x08000000L|0x00080000L|0x20L))==(0x08000000L|0x00080000L|0x20L)) {
+                // Exclude only exact native adjustment roles, never unknown owned windows.
+                if(NativeAdjustmentRole(window)==null)count++;
+            }
             return true;
         },IntPtr.Zero); return count;
     }

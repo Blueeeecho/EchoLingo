@@ -245,6 +245,9 @@ unsafe extern "system" {
     pub fn SetTextColor(dc: H, color: u32) -> u32;
     pub fn SetBkMode(dc: H, mode: i32) -> i32;
     pub fn GetStockObject(index: i32) -> H;
+    pub fn CreateFontW(height: i32, width: i32, escapement: i32, orientation: i32,
+        weight: i32, italic: u32, underline: u32, strikeout: u32, charset: u32,
+        out_precision: u32, clip_precision: u32, quality: u32, pitch: u32, face: *const u16) -> H;
 }
 #[link(name = "kernel32")]
 unsafe extern "system" {

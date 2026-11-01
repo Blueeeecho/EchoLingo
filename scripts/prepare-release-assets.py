@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Prepare 0.2.7 public assets from the exact successful CI run, without rebuilding."""
+"""Prepare 0.2.8 public assets from the exact successful CI run, without rebuilding."""
 
 import argparse
 import hashlib
@@ -15,7 +15,7 @@ from verify_screenshot_editor_report import verify_report as verify_screenshot_e
 
 
 ROOT = Path(__file__).resolve().parent.parent
-VERSION = "0.2.7"
+VERSION = "0.2.8"
 
 # Share the strict, bounded inspection schema with candidate verification;
 # release preparation adds installed acceptance rather than substituting it.
@@ -38,7 +38,7 @@ def check_version(root=ROOT):
     versions.append(capture["package"]["version"])
     versions.extend(item["version"] for item in capture_lock["package"] if item["name"] == "echolingo-native-capture")
     if len(versions) != 8 or any(version != VERSION for version in versions):
-        raise ValueError("All package, Tauri and Cargo versions must be exactly 0.2.7")
+        raise ValueError("All package, Tauri and Cargo versions must be exactly 0.2.8")
 
 
 def one_file(directory, pattern):
@@ -294,7 +294,7 @@ def main():
     args = parser.parse_args()
     check_version()
     if args.check_version:
-        print("All release versions match 0.2.7.")
+        print("All release versions match 0.2.8.")
         return
     if not all((args.artifacts, args.output, args.commit, args.run_url)):
         parser.error("--artifacts, --output, --commit and --run-url are required")

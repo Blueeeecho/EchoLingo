@@ -19,7 +19,7 @@ class LanguagePatchContract(unittest.TestCase):
         self.assertEqual(MODULE.BASE, '4b8c5f5ac67e07cc4005812963b2c02acdd14d5d')
         self.assertEqual(len(MODULE.PINS), 3)
     def test_retained_language_test_command_does_not_select_old_release_scope(self):
-        for version in ['0.2.6', '0.2.7', '0.2.4-beta.1', None]:
+        for version in ['0.2.6', '0.2.7', '0.2.8', '0.2.4-beta.1', None]:
             with self.subTest(version=version), patch.object(MODULE, 'verify') as verify:
                 self.assertEqual(MODULE.select_mode({'version': version, 'scripts': {'test:language-routing': MODULE.COMMAND}}), 'full')
                 verify.assert_not_called()
@@ -51,7 +51,7 @@ class LanguagePatchContract(unittest.TestCase):
     def test_direct_verification_rejects_other_versions_and_commands_without_git(self):
         with tempfile.TemporaryDirectory() as directory, patch.object(MODULE, 'ROOT', Path(directory)), \
                 patch.object(MODULE.subprocess, 'check_output', side_effect=AssertionError('No historical Git access')) as git:
-            for version, command in [('0.2.6', MODULE.COMMAND), ('0.2.7', MODULE.COMMAND), ('0.2.4', 'different command')]:
+            for version, command in [('0.2.6', MODULE.COMMAND), ('0.2.7', MODULE.COMMAND), ('0.2.8', MODULE.COMMAND), ('0.2.4', 'different command')]:
                 with self.subTest(version=version, command=command):
                     (Path(directory)/'package.json').write_text(json.dumps({
                         'version': version, 'scripts': {'test:language-routing': command}}), encoding='utf-8')

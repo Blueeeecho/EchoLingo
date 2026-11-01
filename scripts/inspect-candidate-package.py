@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Statically inspect a fresh 0.2.7 installer; never run, install or re-sign it.
+"""Statically inspect a fresh 0.2.8 installer; never run, install or re-sign it.
 
 The two --*-passed flags are explicit workflow attestations, not substitutes
 for running a locked build and focused tests first. --output-dir must be new.
@@ -27,11 +27,12 @@ import threading
 import tempfile
 import tomllib
 
-VERSION = "0.2.7"
+VERSION = "0.2.8"
 ROOT = Path(__file__).resolve().parents[1]
 MAX_MEMBERS = 20000
 MAX_LISTING = 16 * 1024 * 1024
 MAX_EXECUTABLE = 512 * 1024 * 1024
+OWN_LICENSE_SHA256 = "20ce870fd3c179bf06c2d28e32264a30e2a7b34e5d317d7aafe2ee0176849e71"
 RUN_URL = re.compile(r"https://github\.com/[A-Za-z0-9_-]+/[A-Za-z0-9_.-]+/actions/runs/[1-9][0-9]*")
 
 
@@ -65,12 +66,17 @@ def command_failure(result):
     return f"{label} failed (exit {result.returncode}){detail}"
 
 
-def checked_command(command, *, env=None, check=True, maximum_bytes=MAX_LISTING):
+def checked_command(command, *, env=None, check=True, maximum_bytes=MAX_LISTING, input_bytes=None):
     # Bound stdout while reading (not after capture_output has allocated it).
     # stderr is a private temporary stream, never a candidate-content log.
     args = [str(item) for item in command]
-    with tempfile.TemporaryFile() as errors:
-        process = subprocess.Popen(args, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=errors, env=env)
+    require(input_bytes is None or (type(input_bytes) is bytes and len(input_bytes) <= 16), "Inspection stdin exceeds limit")
+    with tempfile.TemporaryFile() as errors, tempfile.TemporaryFile() as input_stream:
+        if input_bytes is not None:
+            input_stream.write(input_bytes)
+            input_stream.seek(0)
+        process = subprocess.Popen(args, stdin=subprocess.DEVNULL if input_bytes is None else input_stream,
+                                   stdout=subprocess.PIPE, stderr=errors, env=env)
         timer = threading.Timer(180, process.kill)
         timer.start()
         try:
@@ -127,7 +133,7 @@ def source_identity(root=ROOT):
     versions = [json.loads((root / "package.json").read_text(encoding="utf-8"))["version"],
                 json.loads((root / "src-tauri/tauri.conf.json").read_text(encoding="utf-8"))["version"],
                 tomllib.loads((root / "src-tauri/Cargo.toml").read_text(encoding="utf-8"))["package"]["version"]]
-    require(versions == [VERSION] * 3, "Only the exact 0.2.7 candidate may be inspected")
+    require(versions == [VERSION] * 3, "Only the exact 0.2.8 candidate may be inspected")
     return commit, tree
 
 
@@ -247,10 +253,10 @@ def verify_windows_version(value):
     require(isinstance(value, dict) and set(value) == {"fileVersion", "productVersion", "fileParts", "productParts"},
             "Invalid Windows version metadata")
     for key in ("fileVersion", "productVersion"):
-        require(value[key] in (VERSION, VERSION + ".0"), "Windows file/product version is not 0.2.7")
+        require(value[key] in (VERSION, VERSION + ".0"), "Windows file/product version is not 0.2.8")
     for key in ("fileParts", "productParts"):
         require(isinstance(value[key], list) and all(type(n) is int for n in value[key])
-                and value[key] == [int(part) for part in VERSION.split(".")] + [0], "Windows numeric file/product version is not 0.2.7")
+                and value[key] == [int(part) for part in VERSION.split(".")] + [0], "Windows numeric file/product version is not 0.2.8")
 
 
 def inspect_windows(installer, output, expected_application_size):
@@ -318,10 +324,44 @@ def validate_attach_result(data, mountpoint):
     return device
 
 
+def own_dmg_license_input(installer, root=ROOT):
+    """Confirm only the byte-exact reviewed project LICENSE, never an unknown SLA.
+
+    create-dmg embeds the original license bytes as a TEXT resource in the UDIF
+    plist. Read that bounded metadata without mounting, modifying or executing it.
+    """
+    license_path = regular_file(Path(root) / "LICENSE")
+    require(0 < license_path.stat().st_size <= 64 * 1024, "Project license exceeds limit")
+    expected = license_path.read_bytes()
+    require(hashlib.sha256(expected).hexdigest() == OWN_LICENSE_SHA256, "Project license requires explicit review")
+    path = regular_file(installer)
+    length = path.stat().st_size
+    require(length >= 512, "Truncated UDIF trailer")
+    with path.open("rb") as stream:
+        stream.seek(-512, 2)
+        trailer = stream.read(512)
+        require(trailer[:4] == b"koly", "Missing UDIF trailer")
+        offset, size = struct.unpack_from(">QQ", trailer, 216)
+        require(0 < size <= MAX_LISTING and 0 <= offset < length - 512
+                and offset + size <= length - 512, "Invalid UDIF license metadata bounds")
+        stream.seek(offset)
+        metadata = plistlib.loads(stream.read(size))
+    resources = metadata.get("resource-fork") if isinstance(metadata, dict) else None
+    require(isinstance(resources, dict), "Missing DMG license resources")
+    texts = resources.get("TEXT")
+    require(isinstance(texts, list) and len(texts) == 1 and isinstance(texts[0], dict)
+            and texts[0].get("ID") == "5000" and not resources.get("RTF "), "Unknown or ambiguous DMG license")
+    actual = texts[0].get("Data")
+    require(type(actual) is bytes and actual == expected
+            and hashlib.sha256(actual).hexdigest() == OWN_LICENSE_SHA256, "DMG license differs from reviewed project LICENSE")
+    return b"Y\n"
+
+
 @contextmanager
 def readonly_dmg(installer, mountpoint):
     hdiutil = tool("hdiutil")
     checked_command([hdiutil, "verify", installer])
+    license_input = own_dmg_license_input(installer)
     mountpoint.mkdir()
     detach_target = str(mountpoint)
     primary_error = None
@@ -329,7 +369,7 @@ def readonly_dmg(installer, mountpoint):
     # of only the freshly owned mountpoint/device, never a pre-existing volume.
     try:
         result = checked_command([hdiutil, "attach", "-readonly", "-nobrowse", "-noautoopen", "-plist",
-                                  "-mountpoint", mountpoint, installer], check=False)
+                                  "-mountpoint", mountpoint, installer], check=False, input_bytes=license_input)
         # A failed attach can still report an allocated but unmounted device.
         # Retain that exact operation's device before checking mount/exit state.
         if result.stdout:
@@ -385,6 +425,18 @@ def inspect_macos(installer, output):
     return target
 
 
+def expected_nsis_application_sha256(built_application):
+    # Same complete-file identity rule as installed acceptance: Tauri changes
+    # exactly this full marker when bundling NSIS, not arbitrary UNK substrings.
+    path = regular_file(built_application)
+    require(0 < path.stat().st_size <= MAX_EXECUTABLE, "Fresh application size exceeds limit")
+    data = path.read_bytes()
+    marker, replacement = b"__TAURI_BUNDLE_TYPE_VAR_UNK", b"__TAURI_BUNDLE_TYPE_VAR_NSS"
+    require(data.count(marker) == 1, "Exactly one staged Tauri bundle marker is required")
+    offset = data.index(marker)
+    return hashlib.sha256(data[:offset] + replacement + data[offset + len(marker):]).hexdigest()
+
+
 def inspect(platform, installer, built_application, output, run_url, *, locked_build_passed=False,
             focused_tests_passed=False, root=ROOT):
     require(locked_build_passed is True and focused_tests_passed is True, "Locked build and focused-test attestations are required")
@@ -410,7 +462,8 @@ def inspect(platform, installer, built_application, output, run_url, *, locked_b
     output = output.resolve(strict=True)
     application = inspect_windows(installer, output, built_application.stat().st_size) if platform == "Windows" else inspect_macos(installer, output)
     extracted_hash = sha256(regular_file(application))
-    require(extracted_hash == built_hash, "Installer application does not match freshly built application")
+    expected_hash = expected_nsis_application_sha256(built_application) if platform == "Windows" else built_hash
+    require(extracted_hash == expected_hash, "Installer application does not match freshly built application")
     require(sha256(installer) == installer_hash and sha256(built_application) == built_hash, "Build inputs changed during inspection")
     require(source_identity(root) == (commit, tree), "Source identity changed during inspection")
     report = {"schemaVersion": 1, "platform": platform, "version": VERSION,

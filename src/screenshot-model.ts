@@ -2,7 +2,13 @@
 export interface Size { width: number; height: number }
 export interface Point { x: number; y: number }
 export interface Rect extends Point, Size {}
+export interface StrokeErasure { points: readonly Point[]; width: number }
+export const MAX_STROKE_POINTS = 2048;
+export const MAX_DOCUMENT_PATH_POINTS = 32768;
+export type StrokeOperation = ({ kind: 'pen' } | { kind: 'highlight' }) & { points: readonly Point[]; color: string; width: number; erasures?: readonly StrokeErasure[] };
 export type EditOperation =
+  | StrokeOperation
+  | { kind: 'ellipse'; rect: Rect; color: string; width: number }
   | { kind: 'rectangle'; rect: Rect; color: string; width: number; solid: boolean }
   | { kind: 'arrow'; start: Point; end: Point; color: string; width: number }
   | { kind: 'text'; point: Point; text: string; color: string; size: number; maxWidth: number; background?: string }
@@ -22,6 +28,11 @@ export const MAX_REPLAY_PIXELS = 256_000_000;
 function operationCost(operation: EditOperation, size: Size): number {
   if (operation.kind === 'mosaic') return operation.rect.width * operation.rect.height * 4;
   if (operation.kind === 'crop') return operation.rect.width * operation.rect.height * 2;
+  if (operation.kind === 'pen' || operation.kind === 'highlight') {
+    const b = operationBounds(operation);
+    return b.width * b.height * 4 + operation.points.length * operation.width * 4 + (operation.erasures ?? []).reduce((sum, e) => sum + e.points.length * e.width * 4, 0);
+  }
+  if (operation.kind === 'ellipse') return (operation.rect.width + operation.rect.height) * operation.width * 4;
   if (operation.kind === 'rectangle') return operation.solid ? operation.rect.width * operation.rect.height
     : Math.min(operation.rect.width * operation.rect.height, (operation.rect.width + operation.rect.height) * operation.width * 2);
   if (operation.kind === 'number') return operation.size ** 2;
@@ -60,6 +71,13 @@ function validPoint(point: Point, size: Size): boolean {
   return finite(point.x) && finite(point.y) && point.x >= 0 && point.y >= 0 && point.x <= size.width && point.y <= size.height;
 }
 export function validateOperation(operation: EditOperation, size: Size): void {
+  if (operation.kind === 'pen' || operation.kind === 'highlight') {
+    if (!Array.isArray(operation.points) || operation.points.length < 1 || operation.points.length > MAX_STROKE_POINTS || operation.points.some(p => !validPoint(p, size))) throw new Error('笔迹点数或坐标无效。');
+    const erasures = operation.erasures ?? [];
+    if (erasures.length > 64 || erasures.reduce((n, e) => n + e.points.length, operation.points.length) > 16384
+      || erasures.some(e => !Number.isFinite(e.width) || e.width < 1 || e.width > 128 || !e.points.length || e.points.length > MAX_STROKE_POINTS || e.points.some(p => !finite(p.x) || !finite(p.y) || Math.abs(p.x) > MAX_EDGE * 2 || Math.abs(p.y) > MAX_EDGE * 2))) throw new Error('笔迹擦除次数或坐标超出安全限制。');
+  }
+
   if ('rect' in operation && !validRect(operation.rect, size)) throw new Error('请在图片内选择有效区域。');
   if ('color' in operation && !/^#[0-9a-f]{6}$/i.test(operation.color)) throw new Error('颜色无效。');
   if ('width' in operation && (!finite(operation.width) || operation.width < 1 || operation.width > 64)) throw new Error('线宽无效。');
@@ -77,6 +95,10 @@ function immutableOperation(operation: EditOperation): EditOperation {
   if ('rect' in copy) copy.rect = { ...copy.rect };
   if ('point' in copy) copy.point = { ...copy.point };
   if ('start' in copy) { copy.start = { ...copy.start }; copy.end = { ...copy.end }; }
+  if (copy.kind === 'pen' || copy.kind === 'highlight') {
+    copy.points = Object.freeze(copy.points.map(p => Object.freeze({ ...p })));
+    if (copy.erasures) copy.erasures = Object.freeze(copy.erasures.map(e => Object.freeze({ width: e.width, points: Object.freeze(e.points.map(p => Object.freeze({ ...p }))) })));
+  }
   for (const value of Object.values(copy)) if (value && typeof value === 'object') Object.freeze(value);
   return Object.freeze(copy);
 }
@@ -104,6 +126,8 @@ export class ScreenshotDocument {
     return this.operations.slice(index + 1).reduce((offset, op) => op.kind === 'crop' ? { x: offset.x + op.rect.x, y: offset.y + op.rect.y } : offset, { x: 0, y: 0 });
   }
   private commit(operations: readonly EditOperation[]): void {
+    const pathPoints = operations.reduce((n, op) => n + ((op.kind === 'pen' || op.kind === 'highlight') ? op.points.length + (op.erasures ?? []).reduce((m, e) => m + e.points.length, 0) : 0), 0);
+    if (pathPoints > MAX_DOCUMENT_PATH_POINTS) throw new Error('整张图的笔迹复杂度达到安全上限，请撤销部分笔迹后继续。');
     if (operations.length > MAX_OPERATIONS) throw new Error('已达到 500 步编辑上限。请保存图片，再打开已保存的图片继续编辑。');
     let size: Size = this.original;
     for (const operation of operations) { validateOperation(operation, size); if (operation.kind === 'crop') size = operation.rect; }
@@ -123,6 +147,20 @@ export class ScreenshotDocument {
     if (!previous || previous.kind === 'crop') throw new Error('不能删除裁剪或不存在的标注。');
     this.commit(this.operations.filter((_, i) => i !== index));
   }
+  eraseStrokes(points: readonly Point[], width: number): boolean {
+    if (!points.length || points.length > MAX_STROKE_POINTS || !finite(width) || width < 1 || width > 128 || points.some(p => !validPoint(p, this.size))) throw new Error('橡皮擦路径无效。');
+    const comparisons = this.operations.reduce((n, op) => n + ((op.kind === 'pen' || op.kind === 'highlight') ? op.points.length * points.length : 0), 0);
+    if (comparisons > 2_000_000) throw new Error('笔迹较复杂，请缩短本次擦除路径。');
+    let changed = false;
+    const operations = this.operations.map((op, index) => {
+      if (op.kind !== 'pen' && op.kind !== 'highlight') return op;
+      const offset = this.operationOffset(index), path = points.map(p => ({ x: p.x + offset.x, y: p.y + offset.y }));
+      if (!strokePathsIntersect(op.points, path, (width + op.width) / 2)) return op;
+      changed = true;
+      return immutableOperation({ ...op, erasures: [...(op.erasures ?? []), { points: path, width }] });
+    });
+    if (changed) this.commit(operations); return changed;
+  }
   undo(): boolean { if (!this.canUndo) return false; this.cursor--; return true; }
   redo(): boolean { if (!this.canRedo) return false; this.cursor++; return true; }
 }
@@ -132,6 +170,11 @@ export type TextMeasure = (text: string) => number;
  * Pass a measure function using screenshotTextFont(op.size) for exact text bounds. */
 export function operationBounds(operation: EditOperation, measure?: TextMeasure): Rect {
   if ('rect' in operation) return { ...operation.rect };
+  if (operation.kind === 'pen' || operation.kind === 'highlight') {
+    const xs = operation.points.map(p => p.x), ys = operation.points.map(p => p.y), half = operation.width / 2 + 1;
+    const x = Math.min(...xs) - half, y = Math.min(...ys) - half;
+    return { x, y, width: Math.max(...xs) - x + half, height: Math.max(...ys) - y + half };
+  }
   if (operation.kind === 'text') {
     const textMeasure = measure ?? ((text: string) => [...text].length * operation.size);
     const lines = wrapText(operation.text, operation.maxWidth, textMeasure);
@@ -148,14 +191,35 @@ export function translateOperation(operation: EditOperation, delta: Point, size:
   if (!finite(delta.x) || !finite(delta.y)) throw new Error('移动位置无效。');
   if (operation.kind === 'crop') throw new Error('裁剪不能作为标注移动。');
   let anchors: Point[];
-  if ('rect' in operation) anchors = [{ x: operation.rect.x, y: operation.rect.y }, { x: operation.rect.x + operation.rect.width, y: operation.rect.y + operation.rect.height }];
+  if (operation.kind === 'pen' || operation.kind === 'highlight') anchors = [...operation.points];
+  else if ('rect' in operation) anchors = [{ x: operation.rect.x, y: operation.rect.y }, { x: operation.rect.x + operation.rect.width, y: operation.rect.y + operation.rect.height }];
   else if ('start' in operation) anchors = [operation.start, operation.end];
   else anchors = [operation.point];
   let dx = clamp(delta.x, -Math.min(...anchors.map(p => p.x)), size.width - Math.max(...anchors.map(p => p.x)));
   let dy = clamp(delta.y, -Math.min(...anchors.map(p => p.y)), size.height - Math.max(...anchors.map(p => p.y)));
+  if (operation.kind === 'pen' || operation.kind === 'highlight') {
+    const translate = (p: Point) => ({ x: p.x + dx, y: p.y + dy });
+    return { ...operation, points: operation.points.map(translate), erasures: operation.erasures?.map(e => ({ width: e.width, points: e.points.map(translate) })) };
+  }
   if ('rect' in operation) { dx = Math.round(dx); dy = Math.round(dy); return { ...operation, rect: { ...operation.rect, x: operation.rect.x + dx, y: operation.rect.y + dy } }; }
   if ('start' in operation) return { ...operation, start: { x: operation.start.x + dx, y: operation.start.y + dy }, end: { x: operation.end.x + dx, y: operation.end.y + dy } };
   return { ...operation, point: { x: operation.point.x + dx, y: operation.point.y + dy } };
+}
+function pointSegmentDistance(p: Point, a: Point, b: Point): number {
+  const dx = b.x - a.x, dy = b.y - a.y, t = clamp(((p.x - a.x) * dx + (p.y - a.y) * dy) / (dx * dx + dy * dy || 1), 0, 1);
+  return Math.hypot(p.x - a.x - t * dx, p.y - a.y - t * dy);
+}
+export function strokePathsIntersect(a: readonly Point[], b: readonly Point[], radius: number): boolean {
+  const segments = (p: readonly Point[]) => p.length === 1 ? [[p[0], p[0]]] : p.slice(1).map((q, i) => [p[i], q]);
+  const cross = (p: Point, q: Point, r: Point) => (q.x - p.x) * (r.y - p.y) - (q.y - p.y) * (r.x - p.x);
+  const left = segments(a), right = segments(b);
+  for (const [p, q] of left) for (const [r, t] of right) {
+    if (Math.max(p.x, q.x) + radius < Math.min(r.x, t.x) || Math.max(r.x, t.x) + radius < Math.min(p.x, q.x)
+      || Math.max(p.y, q.y) + radius < Math.min(r.y, t.y) || Math.max(r.y, t.y) + radius < Math.min(p.y, q.y)) continue;
+    if (cross(p, q, r) * cross(p, q, t) < 0 && cross(r, t, p) * cross(r, t, q) < 0) return true;
+    if (Math.min(pointSegmentDistance(p, r, t), pointSegmentDistance(q, r, t), pointSegmentDistance(r, p, q), pointSegmentDistance(t, p, q)) <= radius) return true;
+  }
+  return false;
 }
 export function screenshotTextFont(size: number): string {
   return `${size}px -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif`;

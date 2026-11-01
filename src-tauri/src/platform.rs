@@ -137,9 +137,28 @@ impl ScreenshotGeometry {
         Ok(())
     }
 }
+/// Native F1 selector actions only. File-open sessions never carry an action.
+#[derive(Clone, Copy, Debug, serde::Deserialize, serde::Serialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum ScreenshotInitialAction {
+    Select,
+    Rectangle,
+    Arrow,
+    Text,
+    Number,
+    Pen,
+    Highlight,
+    Mosaic,
+    Solid,
+    Crop,
+    Copy,
+    Save,
+    Pin,
+}
+
 pub fn capture_screenshot_with_geometry_cancelable(
     cancel: NativeCancel,
-) -> Result<(String, ScreenshotGeometry), String> {
+) -> Result<(String, ScreenshotGeometry, ScreenshotInitialAction), String> {
     let response = run_cancelable("capture-screenshot", cancel)?;
     let mut geometry: ScreenshotGeometry = serde_json::from_value(
         response
@@ -159,7 +178,14 @@ pub fn capture_screenshot_with_geometry_cancelable(
         return Err("SCREENSHOT_GEOMETRY: 截图显示器已不可用".into());
     }
     geometry.validate()?;
-    Ok((image_response(response)?, geometry))
+    let action = serde_json::from_value(
+        response
+            .get("initialAction")
+            .cloned()
+            .ok_or("SCREENSHOT_ACTION: 原生截图未返回所选操作")?,
+    )
+    .map_err(|_| "SCREENSHOT_ACTION: 原生截图操作无效")?;
+    Ok((image_response(response)?, geometry, action))
 }
 /// F1 screenshot only: hover/click a visible window or drag a rectangle.
 /// OCR and translation continue to use the existing drag-only capture mode.
@@ -2860,5 +2886,31 @@ mod tests {
             diagnostic["diagnostics"]["permissions"]["processId"],
             std::process::id()
         );
+    }
+}
+
+#[cfg(test)]
+mod screenshot_initial_action_tests {
+    use super::ScreenshotInitialAction;
+    #[test]
+    fn only_native_screenshot_actions_are_accepted() {
+        for action in [
+            "select", "rectangle", "arrow", "text", "number", "pen", "highlight", "mosaic", "solid",
+            "crop", "copy", "save", "pin",
+        ] {
+            let parsed: ScreenshotInitialAction =
+                serde_json::from_value(serde_json::json!(action)).unwrap();
+            assert_eq!(serde_json::to_value(parsed).unwrap(), serde_json::json!(action));
+        }
+        for value in [
+            serde_json::Value::Null,
+            serde_json::json!("cancel"),
+            serde_json::json!("saveAs"),
+            serde_json::json!("COPY"),
+            serde_json::json!(true),
+            serde_json::json!({"copy": true}),
+        ] {
+            assert!(serde_json::from_value::<ScreenshotInitialAction>(value).is_err());
+        }
     }
 }

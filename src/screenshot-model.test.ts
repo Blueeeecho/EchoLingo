@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { ScreenshotDocument, translateOperation, operationBounds, imagePoint, selectionRect, validateSize, validateOperation, mosaicPixels, wrapText, MAX_UNDO, MAX_OPERATIONS, type EditOperation } from './screenshot-model';
+import { ScreenshotDocument, translateOperation, operationBounds, imagePoint, selectionRect, validateSize, validateOperation, mosaicPixels, wrapText, MAX_UNDO, MAX_OPERATIONS, type EditOperation, strokePathsIntersect, MAX_STROKE_POINTS } from './screenshot-model';
 const rectangle = (): EditOperation => ({ kind: 'rectangle', rect: { x: 1, y: 1, width: 6, height: 4 }, color: '#123456', width: 2, solid: true });
 describe('isolated screenshot image-pixel model', () => {
   it('maps actual display bounds into pixels independent of zoom/DPR and clips outside drags', () => {
@@ -135,5 +135,49 @@ describe('editable annotation history', () => {
     expect(() => model.update(1, { kind: 'mosaic', rect: { x: 0, y: 0, width: 8000, height: 4000 }, blockSize: 16 })).toThrow('安全上限');
     expect(model.stateId).toBe(state); expect(model.operations[1]).toEqual(smallMosaic);
     expect(() => model.append({ ...badge(), number: 0 } as EditOperation)).toThrow('序号');
+  });
+});
+
+
+describe('freehand annotations and privacy-safe local eraser', () => {
+  const pen = (): EditOperation => ({ kind: 'pen', points: [{ x: 10, y: 20 }, { x: 100, y: 20 }], color: '#aa1122', width: 4 });
+  it('erases only intersecting freehand marks in one undo step and preserves masks', () => {
+    const model = new ScreenshotDocument({ width: 160, height: 120 });
+    model.append(pen()); model.append({ ...pen(), kind: 'highlight' } as EditOperation); model.append(rectangle());
+    const before = model.operations, state = model.stateId;
+    expect(model.eraseStrokes([{ x: 50, y: 10 }, { x: 50, y: 30 }], 10)).toBe(true);
+    expect(model.operations[0]).toHaveProperty('erasures'); expect(model.operations[1]).toHaveProperty('erasures'); expect(model.operations[2]).toBe(before[2]);
+    model.undo(); expect(model.stateId).toBe(state); expect(model.operations).toBe(before);
+    model.redo(); expect(model.operations[0]).toHaveProperty('erasures');
+    const changed = model.stateId; expect(model.eraseStrokes([{ x: 150, y: 100 }], 10)).toBe(false); expect(model.stateId).toBe(changed);
+  });
+  it('maps eraser through crop, keeps erasures attached on move, and freezes nested input', () => {
+    const model = new ScreenshotDocument({ width: 160, height: 120 }); const operation = pen(); model.append(operation);
+    model.append({ kind: 'crop', rect: { x: 20, y: 10, width: 100, height: 60 } });
+    const path = [{ x: 30, y: 10 }]; model.eraseStrokes(path, 12); path[0].x = 99;
+    const op = model.operations[0]; expect(op).toMatchObject({ erasures: [{ points: [{ x: 50, y: 20 }], width: 12 }] });
+    const moved = translateOperation(op, { x: 5, y: 10 }, model.operationSize(0));
+    expect(moved).toMatchObject({ points: [{ x: 15, y: 30 }, { x: 105, y: 30 }], erasures: [{ points: [{ x: 55, y: 30 }] }] });
+    expect(Object.isFrozen((op as Extract<EditOperation, { kind: 'pen' }>).points[0])).toBe(true);
+  });
+  it('recognizes crossing and single-point paths and rejects unbounded stroke input', () => {
+    expect(strokePathsIntersect([{ x: 0, y: 0 }, { x: 10, y: 10 }], [{ x: 0, y: 10 }, { x: 10, y: 0 }], 1)).toBe(true);
+    expect(strokePathsIntersect([{ x: 1, y: 1 }], [{ x: 10, y: 10 }], 1)).toBe(false);
+    expect(() => validateOperation({ ...pen(), points: Array(MAX_STROKE_POINTS + 1).fill({ x: 1, y: 1 }) } as EditOperation, { width: 160, height: 120 })).toThrow();
+    expect(() => validateOperation({ ...pen(), points: [{ x: NaN, y: 1 }] } as EditOperation, { width: 160, height: 120 })).toThrow();
+  });
+  it('bounds total document ink complexity before accepting more histories', () => {
+    const model = new ScreenshotDocument({ width: 160, height: 120 });
+    const points = Array.from({ length: MAX_STROKE_POINTS }, (_, i) => ({ x: i % 100, y: 20 }));
+    for (let i = 0; i < 16; i++) model.append({ kind: 'pen', points, color: '#111111', width: 2 });
+    const state = model.stateId;
+    expect(() => model.append({ kind: 'pen', points: [{ x: 1, y: 1 }], color: '#111111', width: 2 })).toThrow('复杂度');
+    expect(model.stateId).toBe(state);
+  });
+  it('treats ellipse as a movable editable shape', () => {
+    const model = new ScreenshotDocument({ width: 160, height: 120 });
+    model.append({ kind: 'ellipse', rect: { x: 10, y: 20, width: 80, height: 40 }, color: '#aa1122', width: 4 });
+    model.update(0, translateOperation(model.operations[0], { x: 5, y: 5 }, model.size));
+    expect(model.operations[0]).toMatchObject({ rect: { x: 15, y: 25 } }); model.undo(); expect(model.operations[0]).toMatchObject({ rect: { x: 10, y: 20 } });
   });
 });

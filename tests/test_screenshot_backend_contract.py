@@ -82,7 +82,7 @@ class ScreenshotBackendContract(unittest.TestCase):
         self.assertCode('native_tasks.enter_effect()', source)
         self.assertCode('screenshots.operations.acquire().await', source)
         self.assertCode('.set_parent(&window)', source)
-        close = source.split('pub async fn close_screenshot_editor(', 1)[1].split('#[derive(Serialize)]', 1)[0]
+        close = source.split('pub async fn close_screenshot_editor(', 1)[1].split('pub async fn restart_screenshot_capture(', 1)[0]
         self.assertCode('dialog(&app, move ||', close)
         self.assertCode('state.screenshots.dialog_active.load(Ordering::SeqCst)', close)
         self.assertNotIn('operations.try_acquire', close)
