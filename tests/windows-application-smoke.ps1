@@ -716,7 +716,7 @@ public static partial class EchoLingoApplicationSmoke {
             }catch{editor.Failed=1;}finally{Interlocked.Exchange(ref editor.Complete,1);}});
             reader.IsBackground=true;reader.SetApartmentState(ApartmentState.MTA);reader.Start();
             Assert(primaryStart!=null&&(File.GetAttributes(roaming)&FileAttributes.ReparsePoint)==0&&File.ReadAllText(Path.Combine(roaming,MarkerName))==token,"Failure diagnostic directory is not owned.");
-            bool captureFailure=report.ContainsKey("inputPlaneStyleFailure");
+            bool captureFailure=report.ContainsKey("inputPlaneStyleFailure")||report.ContainsKey("screenshotPinPreparation");
             snapshot["diagnosticKind"]=captureFailure?"capture":"selection";
             string file=Path.Combine(roaming,captureFailure?"capture-diagnostics.json":"selection-diagnostics.json");
             ProcessStartInfo start=new ProcessStartInfo(executable,captureFailure?"--capture-diagnostics":"--selection-diagnostics");start.UseShellExecute=false;start.CreateNoWindow=true;

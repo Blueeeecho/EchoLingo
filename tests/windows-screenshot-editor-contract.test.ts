@@ -74,6 +74,20 @@ describe('actual Windows screenshot fixture source wiring (not native acceptance
     const stable = new Function('generation', 'before', 'after', `return ${expression};`) as (generation: number, before: number, after: number) => boolean;
     for (const [before, after, expected] of [[10, 10, false], [10, 15, false], [15, 15, true], [15, 16, false], [0, 0, false]] as const) expect(stable(10, before, after)).toBe(expected);
   });
+  it('retains strict post-cancel pin readiness and reports bounded preparation failure evidence', () => {
+    expect(fixture).toContain('report["screenshotPinCaptureAttempt"]=result');
+    expect(fixture).toContain('report["screenshotPinPreparation"]=preparation');
+    expect(fixture).toContain('return editor!=IntPtr.Zero&&IsWindowVisible(editor)&&canvas&&overlays==0');
+    expect(fixture).toContain('},25,"Pin fixture F1 did not prepare');
+    expect(wrapper).toContain('report.ContainsKey("inputPlaneStyleFailure")||report.ContainsKey("screenshotPinPreparation")');
+    const observation = fixture.slice(fixture.indexOf('static void ScreenshotPreparationObservation'), fixture.indexOf('static Dictionary<string,object> ScreenshotPinCase'));
+    for (const field of ['editorFound', 'editorVisible', 'helperExited', 'editorPhysicalBounds', 'mainVisible', 'knownActionErrorCode', 'nativeViewportGateFailed']) expect(observation).toContain(field);
+    expect(observation).toContain('own.Current.ProcessId==app.Id');
+    expect(observation).toContain('AutomationElement.AutomationIdProperty,"toast"');
+    expect(observation).toContain('observation["knownActionErrorCode"]=code');
+    expect(observation).not.toMatch(/observation\[[^\]]+\]=message\s*;/);
+    for (const forbidden of ['Send(', 'SetForegroundWindow(', 'CopyFromScreen(', 'ValuePattern']) expect(observation).not.toContain(forbidden);
+  });
   it('exercises actual pin HWND lifecycle and bounded generated pixels without mocked IPC', () => {
     for (const value of ['ScreenshotPinCase(', 'ScreenshotPins(app.Id)', 'ScreenshotPinTopmost(pin)', 'ScreenshotPinToggle(app,pin,true)', 'ScreenshotPinToggle(app,pin,false)', 'SetWindowPos(pin,IntPtr.Zero', '!IsWindow(pin)&&ScreenshotPins(app.Id).Count==0', 'ScreenshotPinPixels(app,pin,selected)', 'new Bitmap(3,3)', 'ScreenshotOwnedClipboard.SeedUnchanged()', 'inplace-pin-native-lifecycle']) expect(fixture).toContain(value);
     expect(wrapper).toContain('[switch]$ScreenshotPinTests');

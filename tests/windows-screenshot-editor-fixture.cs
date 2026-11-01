@@ -372,13 +372,44 @@ public static partial class EchoLingoApplicationSmoke {
                 Color wanted=expected[sampleIndex];for(int y=0;y<3;y++)for(int x=0;x<3;x++){Color color=sample.GetPixel(x,y);Assert(Math.Abs(color.R-wanted.R)<=3&&Math.Abs(color.G-wanted.G)<=3&&Math.Abs(color.B-wanted.B)<=3,"Pinned raster lost its opaque annotation or untouched generated source pixels.");} }
         }
     }
-    static Dictionary<string,object> ScreenshotPinCase(Form form,Panel image,Process app,Point first,Point last,Size selected,uint previous,string output) {
+    // Observe only the owned app's fixed error/status control. Never export its
+    // source text, arbitrary UI strings, screenshot bytes or another app's UI.
+    static void ScreenshotPreparationObservation(Process app,IntPtr source,IntPtr editor,uint helper,Dictionary<string,object> observation) {
+        observation["editorFound"]=editor!=IntPtr.Zero;
+        observation["editorVisible"]=editor!=IntPtr.Zero&&IsWindowVisible(editor);
+        observation["helperExited"]=ProcessExited(helper);
+        observation["foregroundIsApp"]=ForegroundPid()==app.Id;observation["foregroundIsGeneratedSource"]=GetForegroundWindow()==source;
+        RECT frame;if(editor!=IntPtr.Zero&&GetWindowRect(editor,out frame))observation["editorPhysicalBounds"]=new int[]{frame.left,frame.top,frame.right-frame.left,frame.bottom-frame.top};
+        IntPtr main=MainWindow(app.Id);observation["mainVisible"]=main!=IntPtr.Zero&&IsWindowVisible(main);
+        if(main==IntPtr.Zero||!IsWindowVisible(main))return;
+        try {
+            AutomationElement own=AutomationElement.FromHandle(main);
+            Assert(own.Current.ProcessId==app.Id,"Screenshot observation root is not owned.");
+            AutomationElement toast=own.FindFirst(TreeScope.Descendants,new PropertyCondition(AutomationElement.AutomationIdProperty,"toast"));
+            observation["toastControlFound"]=toast!=null;if(toast==null)return;
+            string message=toast.Current.Name??"";
+            if(message.Length==0){AutomationElement text=toast.FindFirst(TreeScope.Children,new PropertyCondition(AutomationElement.ControlTypeProperty,ControlType.Text));if(text!=null)message=text.Current.Name??"";}
+            observation["toastNonempty"]=message.Length>0;
+            foreach(string code in new string[]{"SCREENSHOT_BUSY","SCREENSHOT_CAPTURE","SCREENSHOT_DECODE","SCREENSHOT_ENCODE","SCREENSHOT_FORMAT","SCREENSHOT_GEOMETRY","SCREENSHOT_INPUT","SCREENSHOT_SIZE","SCREENSHOT_TIME","SCREENSHOT_WINDOW","WINDOW_HANDLE","WINDOW_SHOW","NATIVE_PROTOCOL","CAPTURE","CAPTURE_DISPLAY_CHANGED","CAPTURE_INPUT_HOST","CAPTURE_OVERLAY","CANCELLED"})
+                if(message.StartsWith(code+":",StringComparison.Ordinal))observation["knownActionErrorCode"]=code;
+            // Distinguish the production native viewport gate from other geometry
+            // failures using fixed source literals, not free-form diagnostics.
+            if(message=="SCREENSHOT_GEOMETRY: \u539f\u5730\u622a\u56fe\u7a97\u53e3\u4f4d\u7f6e\u6216 DPI \u5df2\u53d8\u5316\uff0c\u8bf7\u91cd\u65b0\u622a\u56fe")observation["nativeViewportGateFailed"]=true;
+        } catch(Exception error){observation["statusObservationErrorType"]=error.GetType().Name;}
+    }
+    static Dictionary<string,object> ScreenshotPinCase(Form form,Panel image,Process app,Point first,Point last,Size selected,uint previous,string output,Dictionary<string,object> report) {
         Assert(ScreenshotPins(app.Id).Count==0,"Pin fixture must start without another app-owned reference window.");
         int files=Directory.GetFiles(output).Length;Assert(ScreenshotOwnedClipboard.SeedUnchanged(),"Pin case requires its unchanged owned clipboard sentinel.");
-        Dictionary<string,object> result=ScreenshotPicker(form,image,app,first,previous);IntPtr pin=IntPtr.Zero,editor=IntPtr.Zero;bool finished=false;
+        Dictionary<string,object> result=ScreenshotPicker(form,image,app,first,previous);report["screenshotPinCaptureAttempt"]=result;
+        Dictionary<string,object> preparation=new Dictionary<string,object>();report["screenshotPinPreparation"]=preparation;IntPtr pin=IntPtr.Zero,editor=IntPtr.Zero;bool finished=false;
         try {
             MoveGenerated(form,first);INPUT down=new INPUT();down.data.mouse.flags=2;Send(new INPUT[]{down});Thread.Sleep(80);MoveGenerated(form,last);Thread.Sleep(80);INPUT up=new INPUT();up.data.mouse.flags=4;Send(new INPUT[]{up});
-            WaitFor(delegate{editor=ScreenshotWindow(app.Id);return editor!=IntPtr.Zero&&IsWindowVisible(editor)&&Element(editor,ScreenshotCanvasName)!=null&&AppOverlays(app.Id)==0;},25,"Pin fixture F1 did not prepare the production in-place editor.",app);
+            WaitFor(delegate{
+                editor=ScreenshotWindow(app.Id);ScreenshotPreparationObservation(app,form.Handle,editor,Convert.ToUInt32(result["helperProcessId"]),preparation);
+                bool canvas=editor!=IntPtr.Zero&&IsWindowVisible(editor)&&Element(editor,ScreenshotCanvasName)!=null;int overlays=AppOverlays(app.Id);
+                preparation["canvasAccessible"]=canvas;preparation["remainingNativeOverlays"]=overlays;
+                return editor!=IntPtr.Zero&&IsWindowVisible(editor)&&canvas&&overlays==0;
+            },25,"Pin fixture F1 did not prepare the production in-place editor.",app);
             ScreenshotDrag(app,editor,"\u5b9e\u5fc3\u906e\u6321",selected,new Point(10,10),new Point(80,70));
             WaitFor(delegate{AutomationElement undo=ScreenshotButton(editor,"\u64a4\u9500");return undo!=null&&undo.Current.IsEnabled;},10,"Pin fixture annotation did not commit.",app);
             OnUi(form,delegate{form.Activate();SetForegroundWindow(form.Handle);});RequireForeground(form);
@@ -433,7 +464,7 @@ public static partial class EchoLingoApplicationSmoke {
         Assert(ScreenshotOwnedClipboard.SeedUnchanged(),"Cancelled F1 mutated the clipboard.");
         Assert(Directory.GetFiles(output).Length==0,"Cancelled F1 saved a file.");cancelled["ok"]=true;cancelled["case"]="escape-cancel";cases.Add(cancelled);
 
-        Dictionary<string,object> pinned=ScreenshotPinCase(form,image,app,first,last,selected,cancelledPid,output);
+        Dictionary<string,object> pinned=ScreenshotPinCase(form,image,app,first,last,selected,cancelledPid,output,report);
         report["screenshotPinRequiredCases"]=1;report["screenshotPinPassedCases"]=1;report["screenshotPinCases"]=new object[]{pinned};
         report["screenshotPinOnly"]=ScreenshotPinOnly;
         if(ScreenshotPinOnly) {
