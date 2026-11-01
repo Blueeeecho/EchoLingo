@@ -47,7 +47,7 @@ struct SessionState {
 }
 pub struct Controller {
     state: Mutex<SessionState>,
-    operations: tokio::sync::Semaphore,
+    pub(crate) operations: tokio::sync::Semaphore,
     dialog_active: AtomicBool,
 }
 impl Default for Controller {
@@ -66,6 +66,19 @@ impl Controller {
             image: None,
         };
         Ok(())
+    }
+    pub(crate) fn pin_source_geometry(
+        &self,
+        id: u64,
+    ) -> Result<Option<super::platform::ScreenshotGeometry>, String> {
+        self.with_image(id, |image| Ok(image.public.capture_geometry.clone()))
+    }
+    pub(crate) fn with_pin_source<T>(
+        &self,
+        id: u64,
+        operation: impl FnOnce() -> Result<T, String>,
+    ) -> Result<T, String> {
+        self.with_image(id, |_| operation())
     }
     fn cancel_pending(&self) {
         if let Ok(mut state) = self.state.lock() {
@@ -264,7 +277,7 @@ fn encode(image: &RgbaImage) -> Result<Vec<u8>, String> {
         .map_err(|_| "SCREENSHOT_ENCODE: 无法生成小于 32 MiB 的 PNG 图片")?;
     Ok(output.0)
 }
-fn from_base64(value: &str, png_only: bool) -> Result<RgbaImage, String> {
+pub(crate) fn from_base64(value: &str, png_only: bool) -> Result<RgbaImage, String> {
     if value.len() > MAX_ENCODED_BYTES.div_ceil(3) * 4 {
         return Err("SCREENSHOT_SIZE: 图片必须小于 32 MiB".into());
     }
@@ -290,6 +303,27 @@ fn make_session(
         overlay: None,
         capture_geometry: None,
     })
+}
+// Fixed synthetic pixels only; this helper and its caller are absent in release.
+#[cfg(all(target_os = "macos", debug_assertions))]
+pub(crate) fn install_native_pin_smoke(controller: &Controller, id: u64) -> Result<String, String> {
+    let image = RgbaImage::from_fn(128, 96, |x, _| {
+        if x < 64 {
+            image::Rgba([228, 93, 104, 255])
+        } else {
+            image::Rgba([23, 101, 199, 255])
+        }
+    });
+    let session = make_session(
+        id,
+        &encode(&image)?,
+        0,
+        Some("generated-pin-fixture".into()),
+    )?;
+    let png = session.png_base64.clone();
+    controller.begin(id)?;
+    controller.install_and_publish(session, "generated.png".into(), |_| Ok(()))?;
+    Ok(png)
 }
 fn capture_file_name(captured_at: u64) -> Result<String, String> {
     let timestamp = i64::try_from(captured_at).map_err(|_| "SCREENSHOT_TIME: 无效截图时间")?;
@@ -425,7 +459,7 @@ pub fn reset_screenshot_directory(app: tauri::AppHandle) -> Result<Directory, St
 
 // Dialog creation stays on AppKit's UI thread on macOS. A later intent is
 // checked after the modal result; cancelling a dialog never saves or publishes.
-async fn dialog<T: Send + 'static>(
+pub(crate) async fn dialog<T: Send + 'static>(
     app: &tauri::AppHandle,
     operation: impl FnOnce() -> T + Send + 'static,
 ) -> Result<T, String> {

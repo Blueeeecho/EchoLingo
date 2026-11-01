@@ -7,6 +7,8 @@ mod language_detection;
 mod macos_startup;
 mod model;
 mod mouse_shortcuts;
+#[cfg(all(target_os = "macos", debug_assertions))]
+mod native_pin_smoke;
 mod native_tasks;
 mod ocr;
 mod ocr_native;
@@ -16,6 +18,7 @@ mod platform;
 mod popup_health;
 mod screenshot;
 mod screenshot_overlay;
+mod screenshot_pins;
 mod service_links;
 mod shortcut_bindings;
 mod shortcut_control;
@@ -31,6 +34,8 @@ mod translation_requests;
 mod translation_selection;
 mod update_notice;
 mod window_layout;
+#[cfg(target_os = "windows")]
+mod windows_atomic_file;
 #[cfg(target_os = "windows")]
 mod windows_capture_input;
 #[cfg(target_os = "windows")]
@@ -63,6 +68,7 @@ struct AppState {
     pinned: AtomicBool,
     native_tasks: native_tasks::Controller,
     screenshots: screenshot::Controller,
+    screenshot_pins: screenshot_pins::Controller,
     shortcut_gate: Mutex<shortcut_control::ShortcutGate>,
     shortcut_routes: shortcut_control::ShortcutRoutes,
     shortcut_updating: AtomicBool,
@@ -376,41 +382,50 @@ fn locked<T>(m: &Mutex<T>) -> Result<std::sync::MutexGuard<'_, T>, String> {
         .map_err(|_| "内部状态锁异常，请重新启动应用".into())
 }
 fn write_json(path: &Path, value: &impl Serialize) -> Result<(), String> {
-    let tmp = path.with_extension("json.tmp");
     let bytes = serde_json::to_vec_pretty(value).map_err(|_| "无法序列化设置")?;
-    let mut file = fs::OpenOptions::new()
-        .write(true)
-        .create(true)
-        .truncate(true)
-        .open(&tmp)
-        .map_err(|_| "无法写入本地数据目录")?;
+    // A shared truncate-open .json.tmp can corrupt overlapping writes and
+    // follows a pre-existing symlink. Each invocation exclusively creates its
+    // own same-directory file, with private permissions from the first open.
+    let mut nonce = [0_u8; 16];
+    getrandom::fill(&mut nonce).map_err(|_| "无法创建本地临时文件")?;
+    let suffix: String = nonce.iter().map(|byte| format!("{byte:02x}")).collect();
+    let mut name = path.file_name().ok_or("无效本地数据路径")?.to_os_string();
+    name.push(format!(".{suffix}.tmp"));
+    let tmp = path.with_file_name(name);
+    let mut options = fs::OpenOptions::new();
+    options.write(true).create_new(true);
     #[cfg(unix)]
     {
-        use std::os::unix::fs::PermissionsExt;
-        file.set_permissions(fs::Permissions::from_mode(0o600))
-            .map_err(|_| "无法设置数据文件权限")?;
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
     }
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        // GENERIC_WRITE | DELETE: rename the exact exclusively-created handle.
+        options.access_mode(0x40000000 | 0x00010000);
+    }
+    let file = options.open(&tmp).map_err(|_| "无法写入本地数据目录")?;
+    struct TemporaryFile(PathBuf);
+    impl Drop for TemporaryFile {
+        fn drop(&mut self) {
+            let _ = fs::remove_file(&self.0);
+        }
+    }
+    // Declared before the file binding below so Windows closes the handle
+    // before cleanup on an early write/sync error.
+    let _temporary = TemporaryFile(tmp.clone());
+    let mut file = file;
     use std::io::Write;
     file.write_all(&bytes).map_err(|_| "无法写入本地数据")?;
     file.sync_all().map_err(|_| "无法同步本地数据")?;
-    drop(file);
     #[cfg(target_os = "windows")]
     {
-        use std::os::windows::ffi::OsStrExt;
-        #[link(name = "kernel32")]
-        unsafe extern "system" {
-            fn MoveFileExW(existing: *const u16, new: *const u16, flags: u32) -> i32;
-        }
-        let from: Vec<u16> = tmp.as_os_str().encode_wide().chain(Some(0)).collect();
-        let to: Vec<u16> = path.as_os_str().encode_wide().chain(Some(0)).collect();
-        // Atomic same-volume replace; never remove the old settings/history first.
-        if unsafe { MoveFileExW(from.as_ptr(), to.as_ptr(), 0x1 | 0x8) } == 0 {
-            return Err("无法原子替换本地数据；原文件保留".into());
-        }
-        Ok(())
+        windows_atomic_file::replace(&file, path)
     }
     #[cfg(not(target_os = "windows"))]
     {
+        drop(file);
         fs::rename(tmp, path).map_err(|_| "无法保存本地数据".to_string())
     }
 }
@@ -3499,7 +3514,16 @@ fn management_menu(app: &tauri::AppHandle) -> tauri::Result<()> {
     Ok(())
 }
 
+fn app_context() -> tauri::Context<tauri::Wry> {
+    // Emit platform resources (including _EMBED_INFO_PLIST) exactly once.
+    tauri::generate_context!()
+}
+
 fn main() {
+    #[cfg(all(target_os = "macos", debug_assertions))]
+    if std::env::args().nth(1).as_deref() == Some("--native-pin-smoke") {
+        std::process::exit(native_pin_smoke::run(app_context()));
+    }
     if let Some(code) = shortcut_probe::run_if_requested(&std::env::args().collect::<Vec<_>>()) {
         std::process::exit(code);
     }
@@ -3560,6 +3584,7 @@ fn main() {
                 pinned: AtomicBool::new(false),
                 native_tasks: native_tasks::Controller::default(),
                 screenshots: screenshot::Controller::default(),
+                screenshot_pins: screenshot_pins::Controller::default(),
                 shortcut_gate: Mutex::new(shortcut_control::ShortcutGate::default()),
                 shortcut_routes: shortcut_control::ShortcutRoutes::default(),
                 shortcut_updating: AtomicBool::new(false),
@@ -3657,6 +3682,14 @@ fn main() {
                 api.prevent_close();
                 let _ = window.emit("screenshot-close-requested", ());
             }
+            tauri::WindowEvent::CloseRequested { .. }
+                if screenshot_pins::is_pin(window.label()) =>
+            {
+                // Reference windows close independently; never hide/cancel the translator.
+            }
+            tauri::WindowEvent::Destroyed if screenshot_pins::is_pin(window.label()) => {
+                screenshot_pins::destroyed(window.app_handle(), window.label());
+            }
             tauri::WindowEvent::CloseRequested { api, .. } => {
                 api.prevent_close();
                 cancel_shortcut_recording(window.app_handle());
@@ -3704,6 +3737,11 @@ fn main() {
             screenshot::open_screenshot_image,
             screenshot::save_screenshot_image,
             screenshot::copy_screenshot_image,
+            screenshot_pins::pin_screenshot_image,
+            screenshot_pins::get_pinned_screenshot,
+            screenshot_pins::pinned_screenshot_ready,
+            screenshot_pins::set_screenshot_pinned,
+            screenshot_pins::close_pinned_screenshot,
             screenshot::close_screenshot_editor,
             screenshot::get_screenshot_directory,
             screenshot::choose_screenshot_directory,
@@ -3723,7 +3761,7 @@ fn main() {
             get_update_status,
             check_for_updates
         ])
-        .build(tauri::generate_context!())
+        .build(app_context())
         .expect("EchoLingo could not start");
     // App still owns the runtime here, so this seeds Tao's initial launch role
     // before applicationDidFinishLaunching rather than changing it during setup.
@@ -4516,6 +4554,7 @@ mod tests {
             pinned: AtomicBool::new(false),
             native_tasks: native_tasks::Controller::default(),
             screenshots: screenshot::Controller::default(),
+            screenshot_pins: screenshot_pins::Controller::default(),
             shortcut_gate: Mutex::new(shortcut_control::ShortcutGate::default()),
             shortcut_routes: shortcut_control::ShortcutRoutes::default(),
             shortcut_updating: AtomicBool::new(false),
@@ -5300,7 +5339,9 @@ mod tests {
         let settings_before = fs::read(&settings_path).unwrap();
         let history_before = fs::read(&history_path).unwrap();
         // A directory reliably blocks the history replacement on both platforms.
-        fs::create_dir(history_path.with_extension("json.tmp")).unwrap();
+        let preserved_history = directory.join("preserved-history.json");
+        fs::rename(&history_path, &preserved_history).unwrap();
+        fs::create_dir(&history_path).unwrap();
         let mut changed = current.clone();
         changed.max_history = 1;
         assert!(
@@ -5309,7 +5350,7 @@ mod tests {
         assert_eq!(current.max_history, 20);
         assert_eq!(history.len(), 3);
         assert_eq!(fs::read(&settings_path).unwrap(), settings_before);
-        assert_eq!(fs::read(&history_path).unwrap(), history_before);
+        assert_eq!(fs::read(&preserved_history).unwrap(), history_before);
         fs::remove_dir_all(directory).unwrap();
     }
     #[test]

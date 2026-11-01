@@ -1,4 +1,6 @@
 import importlib.util
+import json
+import tempfile
 from pathlib import Path
 import unittest
 from unittest.mock import patch
@@ -10,17 +12,52 @@ spec.loader.exec_module(MODULE)
 
 class LanguagePatchContract(unittest.TestCase):
     def test_exact_reviewed_source_and_no_existing_dependency_upgrade(self):
-        self.assertEqual(MODULE.verify()['runId'], 41178655504)
+        # The current release must never qualify for historical language-only reuse.
+        with patch.object(MODULE.subprocess, 'check_output', side_effect=AssertionError('Ineligible release must not query Git')) as git:
+            with self.assertRaisesRegex(ValueError, 'only authorized for the exact 0.2.4'): MODULE.verify()
+            git.assert_not_called()
+        self.assertEqual(MODULE.BASE, '4b8c5f5ac67e07cc4005812963b2c02acdd14d5d')
         self.assertEqual(len(MODULE.PINS), 3)
+    def test_retained_language_test_command_does_not_select_old_release_scope(self):
+        for version in ['0.2.6', '0.2.7', '0.2.4-beta.1', None]:
+            with self.subTest(version=version), patch.object(MODULE, 'verify') as verify:
+                self.assertEqual(MODULE.select_mode({'version': version, 'scripts': {'test:language-routing': MODULE.COMMAND}}), 'full')
+                verify.assert_not_called()
+        package = {'version': '0.2.4', 'scripts': {'test:language-routing': MODULE.COMMAND}}
+        with patch.object(MODULE, 'verify') as verify:
+            self.assertEqual(MODULE.select_mode(package), MODULE.MODE)
+            verify.assert_called_once_with()
+        with patch.object(MODULE, 'verify', side_effect=ValueError('changed historical source')):
+            with self.assertRaises(ValueError): MODULE.select_mode(package)
+        package['scripts']['test:language-routing'] = 'different command'
+        with patch.object(MODULE, 'verify') as verify:
+            self.assertEqual(MODULE.select_mode(package), 'full')
+            verify.assert_not_called()
+
     def test_unapproved_source_or_wrong_pin_fails_closed(self):
-        original = MODULE.git
-        def injected(*args):
-            if args[:2] == ('diff','--name-only'): return 'src-tauri/src/screenshot.rs'
-            return original(*args)
-        with patch.object(MODULE,'git',side_effect=injected):
-            with self.assertRaises(ValueError): MODULE.verify()
-        with patch.dict(MODULE.PINS, {'src-tauri/src/bilingual_input.rs':'0'*64}):
-            with self.assertRaises(ValueError): MODULE.verify()
+        # Exercise the actual path/pin guards with an eligible generated package,
+        # independently of the current release version or checkout history depth.
+        with tempfile.TemporaryDirectory() as directory, patch.object(MODULE, 'ROOT', Path(directory)):
+            (Path(directory)/'package.json').write_text(json.dumps({
+                'version': '0.2.4', 'scripts': {'test:language-routing': MODULE.COMMAND}}), encoding='utf-8')
+            with patch.object(MODULE, 'git', side_effect=[MODULE.TREE, 'src-tauri/src/screenshot.rs']) as git:
+                with self.assertRaisesRegex(ValueError, 'unapproved file'): MODULE.verify()
+                self.assertEqual(git.call_count, 2)
+            with patch.object(MODULE, 'git', side_effect=[MODULE.TREE, '']), \
+                    patch.object(MODULE.subprocess, 'check_output', return_value=b'unapproved canonical source') as canonical:
+                with self.assertRaisesRegex(ValueError, 'Exact reviewed language input changed'): MODULE.verify()
+                canonical.assert_called_once()
+
+    def test_direct_verification_rejects_other_versions_and_commands_without_git(self):
+        with tempfile.TemporaryDirectory() as directory, patch.object(MODULE, 'ROOT', Path(directory)), \
+                patch.object(MODULE.subprocess, 'check_output', side_effect=AssertionError('No historical Git access')) as git:
+            for version, command in [('0.2.6', MODULE.COMMAND), ('0.2.7', MODULE.COMMAND), ('0.2.4', 'different command')]:
+                with self.subTest(version=version, command=command):
+                    (Path(directory)/'package.json').write_text(json.dumps({
+                        'version': version, 'scripts': {'test:language-routing': command}}), encoding='utf-8')
+                    with self.assertRaisesRegex(ValueError, 'only authorized for the exact 0.2.4'): MODULE.verify()
+            git.assert_not_called()
+
     def test_fixed_mode_does_not_make_gui_claims(self):
         source = (ROOT/'.github/workflows/language-patch-checks.yml').read_text()
         self.assertIn('npm run test:language-routing',source)
@@ -35,7 +72,8 @@ class LanguagePatchContract(unittest.TestCase):
     def test_normal_release_path_and_no_overwrite_are_retained(self):
         source = (ROOT/'.github/workflows/release.yml').read_text()
         self.assertIn('uses: ./.github/workflows/release-checks.yml',source)
-        self.assertIn("needs.language-patch.result == 'success'",source)
+        self.assertNotIn("needs.language-patch.result",source)
+        self.assertIn("needs.verify.result == 'success'",source)
         self.assertIn('Only the exact main release commit',source)
         self.assertIn('Release already exists; no files were overwritten.',source)
         self.assertIn('release remains a draft.',source)

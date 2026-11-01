@@ -30,6 +30,23 @@ class ScreenshotBackendContract(unittest.TestCase):
         self.assertEqual(capability['permissions'], ['core:default'])
         self.assertIn('screenshot-editor', capability['windows'])
 
+    def test_windows_pin_toggle_preserves_native_visibility_and_focus(self):
+        source = (ROOT / 'src-tauri/src/screenshot_pins.rs').read_text()
+        toggle = source.split('pub async fn set_screenshot_pinned(', 1)[1].split('pub async fn close_pinned_screenshot(', 1)[0]
+        self.assertCode('#[cfg(target_os = "windows")] { super::platform::set_topmost_without_activation(&window, pinned) }', toggle)
+        self.assertCode('#[cfg(not(target_os = "windows"))] { window.set_always_on_top(pinned)', toggle)
+        self.assertNotIn('.show()', toggle)
+        self.assertNotIn('.set_focus()', toggle)
+        platform = (ROOT / 'src-tauri/src/platform.rs').read_text()
+        native = platform.split('pub fn set_topmost_without_activation(', 1)[1].split('#[cfg', 1)[0]
+        self.assertIn('if topmost { -1isize } else { -2isize }', native)
+        self.assertCode('0x01 | 0x02 | 0x10,', native)  # NOMOVE, NOSIZE, NOACTIVATE
+        self.assertNotIn('ShowWindow(', native)
+        self.assertNotIn('SetForegroundWindow(', native)
+        ready = source.split('pub async fn pinned_screenshot_ready(', 1)[1].split('pub async fn set_screenshot_pinned(', 1)[0]
+        self.assertNotIn('.show()', ready)  # Late Tao show does not retain focused(false).
+        self.assertIn('show_without_activation', ready)
+
     def test_saves_are_atomic_new_png_pixels_only_and_os_desktop_is_resolved(self):
         source = (ROOT / 'src-tauri/src/screenshot.rs').read_text()
         self.assertCode('app.path().desktop_dir()', source)

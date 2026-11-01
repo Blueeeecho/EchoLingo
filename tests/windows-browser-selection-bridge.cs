@@ -6,6 +6,7 @@ using System.Collections;
 using System.Diagnostics;
 using System.IO;
 using System.Runtime.InteropServices;
+using ComTypes = System.Runtime.InteropServices.ComTypes;
 using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
@@ -38,6 +39,7 @@ public static class WindowsBrowserSelectionBridge {
     [DllImport("user32.dll",SetLastError=true)] static extern uint SendInput(uint count,INPUT[] input,int size);
     [DllImport("shell32.dll")] static extern int SHGetKnownFolderPath(ref Guid id,uint flags,IntPtr token,out IntPtr path);
     [DllImport("ole32.dll")] static extern void CoTaskMemFree(IntPtr memory);
+    [DllImport("ole32.dll")] static extern void ReleaseStgMedium(ref ComTypes.STGMEDIUM medium);
     [DllImport("kernel32.dll",CharSet=CharSet.Unicode,SetLastError=true)] static extern bool CreateDirectory(string path,IntPtr security);
     [StructLayout(LayoutKind.Sequential)] struct KEY {public ushort key,scan;public uint flags,time;public UIntPtr extra;}
     [StructLayout(LayoutKind.Sequential)] struct MOUSE {public int x,y;public uint data,flags,time;public UIntPtr extra;}
@@ -47,6 +49,9 @@ public static class WindowsBrowserSelectionBridge {
     [DllImport("user32.dll")] static extern IntPtr GetClipboardOwner();
     [DllImport("user32.dll")] static extern bool OpenClipboard(IntPtr window);
     [DllImport("user32.dll")] static extern bool CloseClipboard();
+    [DllImport("user32.dll")] static extern bool EmptyClipboard();
+    [DllImport("user32.dll",SetLastError=true)] static extern int CountClipboardFormats();
+    [DllImport("kernel32.dll",EntryPoint="SetLastError")] static extern void CleanupSetLastError(uint error);
     [DllImport("user32.dll",CharSet=CharSet.Unicode)] static extern uint RegisterClipboardFormat(string name);
     [DllImport("user32.dll")] static extern IntPtr GetClipboardData(uint format);
     [DllImport("kernel32.dll")] static extern UIntPtr GlobalSize(IntPtr memory);
@@ -59,6 +64,7 @@ public static class WindowsBrowserSelectionBridge {
     static string Helper,Assembly,Browser;
     static uint ownedClipboard;
     static bool seeded;
+    static DataObject ownedSeed;
     static string Stage="setup";static Dictionary<string,object> LastMetadata;
     static AppSession HostedApplication;
     static string ShortcutGesture="instant";
@@ -189,7 +195,7 @@ public static class WindowsBrowserSelectionBridge {
         finally{result["sequenceWhileLocked"]=GetClipboardSequenceNumber();CloseClipboard();result["sequenceAfterUnlock"]=GetClipboardSequenceNumber();}
     }
     static DataObject Seed(){
-        DataObject data=new DataObject();data.SetData(DataFormats.UnicodeText,false,"Generated browser clipboard original 24680");data.SetData(DataFormats.Html,false,"<p>Generated browser rich original 24680</p>");data.SetData(DataFormats.Rtf,false,"{\\rtf1 Generated browser rich original 24680}");if(!NoClipboardProbe)data.SetData(ProbeFormat,false,new MemoryStream(Encoding.ASCII.GetBytes(ProbeNonce)));Clipboard.SetDataObject(data,true,0,0);ownedClipboard=GetClipboardSequenceNumber();seeded=true;
+        DataObject data=new DataObject();data.SetData(DataFormats.UnicodeText,false,"Generated browser clipboard original 24680");data.SetData(DataFormats.Html,false,"<p>Generated browser rich original 24680</p>");data.SetData(DataFormats.Rtf,false,"{\\rtf1 Generated browser rich original 24680}");if(!NoClipboardProbe)data.SetData(ProbeFormat,false,new MemoryStream(Encoding.ASCII.GetBytes(ProbeNonce)));Clipboard.SetDataObject(data,true,0,0);ownedClipboard=GetClipboardSequenceNumber();ownedSeed=data;seeded=true;
         if(LastMetadata!=null)LastMetadata["clipboardProbeEnabled"]=!NoClipboardProbe;
         if(NoClipboardProbe)return data; // no raw acquisition before the original OLE verdict
         var seedObservation=ObserveSyntheticFormats(data);
@@ -224,8 +230,54 @@ public static class WindowsBrowserSelectionBridge {
             // Supplement only: never turn the original OLE failure into a pass.
             // GetClipboardData may trigger delayed rendering: this later raw
             // read is not proof of the representation at the original OLE read.
-            if(!matches&&!NoClipboardProbe)observation["rawFormatsAfterOleFailure"]=ObserveSyntheticFormats(expected);
+            if(!matches&&!NoClipboardProbe){
+                observation["rawFormatsAfterOleFailure"]=ObserveSyntheticFormats(expected);
+                observation["sameObjectComAfterOleFailure"]=ObserveFailedOleCom(actual,expected,observation);
+            }
         }return matches;
+    }
+    // Supplemental later representation only, never a retry of the acceptance
+    // check. DataObject's explicit ComTypes interface forwards to its existing
+    // OLE object. Do not reacquire, reflect into the wrapper, or release its RCW.
+    static Dictionary<string,object> ObserveFailedOleCom(IDataObject actual,DataObject expected,Dictionary<string,object> observation){
+        var result=new Dictionary<string,object>{{"requested",0},{"sameAcquiredObject",1},{"originalVerdictChanged",0},{"laterRepresentationOnly",1},{"mediumReleased",0}};
+        ComTypes.STGMEDIUM medium=new ComTypes.STGMEDIUM();bool received=false;
+        try{
+            uint generation=GetClipboardSequenceNumber();
+            // The preceding raw observation checked the random nonce and all
+            // fixed seed payloads under one native lock, already released.
+            bool guarded=!NoClipboardProbe&&FailedOleCleanupGeneration(observation,generation);
+            result["ownedGenerationGuardPassed"]=guarded?1:0;if(!guarded)return result;
+            var com=actual as ComTypes.IDataObject;
+            result["sameObjectComInterfaceAvailable"]=com!=null?1:0;if(com==null)return result;
+            if(GetClipboardSequenceNumber()!=generation){result["generationChangedBeforeRequest"]=1;return result;}
+            var format=new ComTypes.FORMATETC {cfFormat=13,dwAspect=ComTypes.DVASPECT.DVASPECT_CONTENT,lindex=-1,ptd=IntPtr.Zero,tymed=ComTypes.TYMED.TYMED_HGLOBAL};
+            result["requested"]=1;
+            // NEVER hold OpenClipboard across this COM call (delayed rendering).
+            com.GetData(ref format,out medium);received=true;result["hresult"]=0;
+            result["tymed"]=(int)medium.tymed;
+            bool same=GetClipboardSequenceNumber()==generation;result["generationUnchangedAfterRequest"]=same?1:0;
+            if(!same||medium.tymed!=ComTypes.TYMED.TYMED_HGLOBAL||medium.unionmember==IntPtr.Zero)return result;
+            ulong size=GlobalSize(medium.unionmember).ToUInt64();result["allocationBytes"]=size;
+            if(size==0||size>65536){result["allocationBoundRejected"]=1;return result;}
+            IntPtr pointer=GlobalLock(medium.unionmember);result["globalLockSucceeded"]=pointer!=IntPtr.Zero?1:0;
+            if(pointer==IntPtr.Zero)return result;
+            try{
+                if(GetClipboardSequenceNumber()!=generation){result["generationChangedBeforePayloadRead"]=1;return result;}
+                byte[] bytes=new byte[(int)size];Marshal.Copy(pointer,bytes,0,bytes.Length);
+                result["terminatedBytes"]=TerminatedBytes(bytes,true);
+                byte[] wanted=Encoding.Unicode.GetBytes((string)expected.GetData(DataFormats.UnicodeText,false)+"\0");
+                result["fixedSeedExactEqual"]=ExactPayload(bytes,wanted,true)?1:0;
+                result["generationUnchangedAfterPayloadRead"]=GetClipboardSequenceNumber()==generation?1:0;
+            }finally{GlobalUnlock(medium.unionmember);}
+        }catch(COMException error){result["hresult"]=error.ErrorCode;result["comException"]=1;}
+        catch{result["observationError"]=1;}
+        finally{
+            // Ownership transfers on successful GetData, including early-return
+            // rejection of an unexpected medium/size/generation.
+            if(received){try{ReleaseStgMedium(ref medium);result["mediumReleased"]=1;}catch{result["releaseError"]=1;}}
+        }
+        return result;
     }
     static Dictionary<string,object> QueryDiagnostics(Dictionary<string,object> reply){
         Dictionary<string,object> numeric=new Dictionary<string,object>();object raw;
@@ -289,9 +341,79 @@ public static class WindowsBrowserSelectionBridge {
             return metadata;
         }
     }
+    // Called only under the native clipboard lock. Never inspect a newer
+    // generation, and recheck after potentially delayed representation reads.
+    static bool ReclaimOwnedClipboard(Func<bool> same,Func<bool> content,Func<bool> clear){
+        return same()&&content()&&same()&&clear();
+    }
+    static void ClipboardCleanupPolicySelfTest(){
+        int reads=0,clears=0,checks=0;
+        Need(!ReclaimOwnedClipboard(delegate{return false;},delegate{reads++;return true;},delegate{clears++;return true;})&&reads==0&&clears==0,"CLEANUP_FOREIGN_GENERATION_PRESERVED");
+        Need(!ReclaimOwnedClipboard(delegate{return true;},delegate{return false;},delegate{clears++;return true;})&&clears==0,"CLEANUP_CHANGED_CONTENT_PRESERVED");
+        Need(!ReclaimOwnedClipboard(delegate{return ++checks==1;},delegate{return true;},delegate{clears++;return true;})&&clears==0,"CLEANUP_CHANGED_DURING_READ_PRESERVED");
+        Need(ReclaimOwnedClipboard(delegate{return true;},delegate{return true;},delegate{clears++;return true;})&&clears==1,"CLEANUP_OWNED_GENERATION_CLEARED");
+        Need(!ReclaimOwnedClipboard(delegate{return true;},delegate{return true;},delegate{return false;}),"CLEANUP_FAILURE_REPORTED");
+    }
+    static bool OwnedPayloadsLocked(){
+        if(ownedSeed==null)return false;
+        if(!NoClipboardProbe){
+            long allocation;int error;byte[] actual=LockedBytes(RegisterClipboardFormat(ProbeFormat),256,out allocation,out error),expected=Encoding.ASCII.GetBytes(ProbeNonce);
+            if(actual==null||actual.Length<expected.Length)return false;
+            for(int i=0;i<expected.Length;i++)if(actual[i]!=expected[i])return false;
+        }
+        var values=new Dictionary<string,object>{{"unicodeExactEqual",0},{"rtfExactEqual",0},{"htmlExactEqual",0}};
+        ObserveLockedFormat(values,"unicode",13,(string)ownedSeed.GetData(DataFormats.UnicodeText,false),Encoding.Unicode,true);
+        ObserveLockedFormat(values,"rtf",RegisterClipboardFormat(DataFormats.Rtf),(string)ownedSeed.GetData(DataFormats.Rtf,false),Encoding.ASCII,false);
+        ObserveLockedFormat(values,"html",RegisterClipboardFormat(DataFormats.Html),(string)ownedSeed.GetData(DataFormats.Html,false),Encoding.UTF8,false);
+        return Convert.ToInt32(values["unicodeExactEqual"])==1&&Convert.ToInt32(values["rtfExactEqual"])==1&&Convert.ToInt32(values["htmlExactEqual"])==1;
+    }
+    // Cleanup provenance only: this never changes the original consumer OLE
+    // verdict. Use the observation already taken after failure, never rebase to
+    // whatever happens to be on the clipboard later during close.
+    static bool FailedOleCleanupGeneration(Dictionary<string,object> observation,uint current){
+        object value;
+        if(current==0||!observation.TryGetValue("originalVerdict",out value)||!(value is bool)||((bool)value))return false;
+        foreach(string key in new string[]{"sequenceBeforeRead","sequenceAfterRead"})
+            if(!observation.TryGetValue(key,out value)||Convert.ToUInt32(value)!=current)return false;
+        if(!observation.TryGetValue("rawFormatsAfterOleFailure",out value))return false;
+        var raw=value as Dictionary<string,object>;if(raw==null)return false;
+        foreach(string key in new string[]{"lockAcquired","nonceVerified","unicodeExactEqual","rtfExactEqual","htmlExactEqual"})
+            if(!raw.TryGetValue(key,out value)||Convert.ToInt32(value)!=1)return false;
+        foreach(string key in new string[]{"clipboardWritten","error","unicodeError","rtfError","htmlError"})
+            if(!raw.TryGetValue(key,out value)||Convert.ToInt32(value)!=0)return false;
+        foreach(string key in new string[]{"sequenceBeforeLock","sequenceWhileLocked","sequenceAfterUnlock"})
+            if(!raw.TryGetValue(key,out value)||Convert.ToUInt32(value)!=current)return false;
+        return true;
+    }
+    static void FailedOleCleanupPolicySelfTest(){
+        var raw=new Dictionary<string,object>();
+        foreach(string key in new string[]{"lockAcquired","nonceVerified","unicodeExactEqual","rtfExactEqual","htmlExactEqual"})raw[key]=1;
+        foreach(string key in new string[]{"clipboardWritten","error","unicodeError","rtfError","htmlError"})raw[key]=0;
+        foreach(string key in new string[]{"sequenceBeforeLock","sequenceWhileLocked","sequenceAfterUnlock"})raw[key]=42u;
+        var observation=new Dictionary<string,object>{{"originalVerdict",false},{"sequenceBeforeRead",42u},{"sequenceAfterRead",42u},{"rawFormatsAfterOleFailure",raw}};
+        Need(FailedOleCleanupGeneration(observation,42),"FAILED_OLE_OWNED_NATIVE_GENERATION_ACCEPTED");
+        Need(!(bool)observation["originalVerdict"],"FAILED_OLE_VERDICT_PRESERVED");
+        Need(!FailedOleCleanupGeneration(observation,43),"FAILED_OLE_NEW_GENERATION_REJECTED");
+        foreach(string key in new List<string>(raw.Keys)){
+            object original=raw[key];raw.Remove(key);
+            Need(!FailedOleCleanupGeneration(observation,42),"FAILED_OLE_INCOMPLETE_EVIDENCE_REJECTED");
+            raw[key]=Convert.ToUInt32(original)+1u;
+            Need(!FailedOleCleanupGeneration(observation,42),"FAILED_OLE_CHANGED_EVIDENCE_REJECTED");raw[key]=original;
+        }
+        observation.Remove("rawFormatsAfterOleFailure");
+        Need(!FailedOleCleanupGeneration(observation,42),"FAILED_OLE_NO_PROBE_REJECTED");
+    }
     static bool ClearOwnedClipboard(){
-        if(!seeded)return true;bool owned=GetClipboardSequenceNumber()==ownedClipboard;seeded=false;
-        if(!owned)return false;Clipboard.Clear();return true;
+        if(!seeded)return true;seeded=false; // one cleanup attempt, including failure
+        if(!OpenClipboard(IntPtr.Zero))return false;
+        try{
+            // Framework Clipboard.Clear publishes an empty OLE DataObject;
+            // that is not proof of zero native formats for the next F1 fixture.
+            return ReclaimOwnedClipboard(delegate{return GetClipboardSequenceNumber()==ownedClipboard;},OwnedPayloadsLocked,delegate{
+                if(!EmptyClipboard())return false;
+                CleanupSetLastError(0);return CountClipboardFormats()==0&&Marshal.GetLastWin32Error()==0;
+            });
+        }finally{CloseClipboard();ownedSeed=null;}
     }
     static Dictionary<string,object> GuardMouseStart(Dictionary<string,object> command){
         IntPtr root=BrowserMain(Convert.ToInt32(command["browserPid"]));Need(GetForegroundWindow()==root,"MOUSE_SOURCE_BROWSER_NOT_FOREGROUND");
@@ -480,6 +602,12 @@ public static class WindowsBrowserSelectionBridge {
             Application.DoEvents();Thread.Sleep(10);
         }
         metadata["hotkeyToExactSourceAndHistoryMilliseconds"]=clock.Elapsed.TotalMilliseconds;metadata["shortcutKeysReleasedAfterAction"]=(GetAsyncKeyState(0x12)&0x8000)==0&&(GetAsyncKeyState(0x44)&0x8000)==0;Stage="app-clipboard-and-foreground-check";var clipboardObservation=new Dictionary<string,object>();metadata["richClipboardRestored"]=Restored(seed,clipboardObservation);metadata["clipboardRestorationObservation"]=clipboardObservation;if(Convert.ToBoolean(metadata["richClipboardRestored"]))ownedClipboard=GetClipboardSequenceNumber();
+        else{
+            uint observed=GetClipboardSequenceNumber();
+            bool verified=!NoClipboardProbe&&FailedOleCleanupGeneration(clipboardObservation,observed);
+            metadata["failedOleNativeCleanupOwnershipVerified"]=verified;
+            if(verified)ownedClipboard=observed;
+        }
         metadata["sourceForegroundPreserved"]=GetForegroundWindow()==main;metadata["browserBoundRootPreserved"]=BrowserMain(Convert.ToInt32(command["browserPid"]))==main;metadata["safeToContinue"]=Convert.ToBoolean(metadata["richClipboardRestored"])&&Convert.ToBoolean(metadata["sourceForegroundPreserved"]);
         metadata["ok"]=exact&&foregroundAlways&&Convert.ToBoolean(metadata["richClipboardRestored"])&&Convert.ToBoolean(metadata["sourceForegroundPreserved"])&&Convert.ToBoolean(metadata["browserBoundRootPreserved"])&&Convert.ToBoolean(metadata["shortcutKeysReleasedAfterAction"]);metadata["safeToContinue"]=metadata["ok"];metadata["acquisitionExpectationPassed"]=metadata["ok"];metadata["failureClassification"]=Convert.ToBoolean(metadata["ok"])?null:"actual-app-hotkey-acquisition";if(!Convert.ToBoolean(metadata["ok"])){
             metadata["error"]=!Convert.ToBoolean(metadata["richClipboardRestored"])?"ACTUAL_APP_ORIGINAL_RICH_CLIPBOARD_MISMATCH":"ACTUAL_APP_EXACT_SOURCE_NEW_HISTORY_OR_FOREGROUND_FAILED";
@@ -489,7 +617,7 @@ public static class WindowsBrowserSelectionBridge {
     }
     public static void Run(string helper,string assembly,string browser,string application,string mockUrl,string provider,string hash,long bytes,bool diagnostics,string shortcutGesture,bool noClipboardProbe){
         NoClipboardProbe=noClipboardProbe;Need(!noClipboardProbe||(!String.IsNullOrEmpty(application)&&!diagnostics),"NO_PROBE_REQUIRES_ORDINARY_ACTUAL_APPLICATION");
-        RawPayloadSelfTest();
+        RawPayloadSelfTest();ClipboardCleanupPolicySelfTest();FailedOleCleanupPolicySelfTest();
         Need(shortcutGesture=="instant"||shortcutGesture=="paced","SHORTCUT_GESTURE_INVALID");Need(shortcutGesture=="instant"||!String.IsNullOrEmpty(application),"PACED_GESTURE_REQUIRES_APPLICATION");ShortcutGesture=shortcutGesture;
         Helper=String.IsNullOrEmpty(helper)?null:Path.GetFullPath(helper);Assembly=String.IsNullOrEmpty(assembly)?null:Path.GetFullPath(assembly);Browser=Path.GetFullPath(browser);Need(Helper==null||!Helper.Contains("\"")&&!Assembly.Contains("\""),"INVALID_FIXTURE_PATH");
         IDataObject existing=Clipboard.GetDataObject();Need(existing==null||existing.GetFormats(false).Length==0,"FRESH_EMPTY_CLIPBOARD_REQUIRED");

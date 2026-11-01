@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
-"""Prepare 0.2.4 public assets from the exact successful CI run, without rebuilding."""
+"""Prepare 0.2.7 public assets from the exact successful CI run, without rebuilding."""
 
 import argparse
 import hashlib
+import importlib.util
 import json
 from pathlib import Path
 import re
@@ -14,24 +15,30 @@ from verify_screenshot_editor_report import verify_report as verify_screenshot_e
 
 
 ROOT = Path(__file__).resolve().parent.parent
-VERSION = "0.2.4"
+VERSION = "0.2.7"
+
+# Share the strict, bounded inspection schema with candidate verification;
+# release preparation adds installed acceptance rather than substituting it.
+_SPEC = importlib.util.spec_from_file_location("release_package_verifier", ROOT / "scripts/verify-candidate-package.py")
+package_verifier = importlib.util.module_from_spec(_SPEC)
+_SPEC.loader.exec_module(package_verifier)
 
 
 def check_version(root=ROOT):
-    package = json.loads((root / "package.json").read_text())
-    lock = json.loads((root / "package-lock.json").read_text())
-    tauri = json.loads((root / "src-tauri/tauri.conf.json").read_text())
-    cargo = tomllib.loads((root / "src-tauri/Cargo.toml").read_text())
-    cargo_lock = tomllib.loads((root / "src-tauri/Cargo.lock").read_text())
+    package = json.loads((root / "package.json").read_text(encoding="utf-8"))
+    lock = json.loads((root / "package-lock.json").read_text(encoding="utf-8"))
+    tauri = json.loads((root / "src-tauri/tauri.conf.json").read_text(encoding="utf-8"))
+    cargo = tomllib.loads((root / "src-tauri/Cargo.toml").read_text(encoding="utf-8"))
+    cargo_lock = tomllib.loads((root / "src-tauri/Cargo.lock").read_text(encoding="utf-8"))
     versions = [package["version"], lock["version"], lock["packages"][""]["version"],
                 tauri["version"], cargo["package"]["version"]]
     versions.extend(item["version"] for item in cargo_lock["package"] if item["name"] == "echolingo")
-    capture = tomllib.loads((root / "src-tauri/native-capture/Cargo.toml").read_text())
-    capture_lock = tomllib.loads((root / "src-tauri/native-capture/Cargo.lock").read_text())
+    capture = tomllib.loads((root / "src-tauri/native-capture/Cargo.toml").read_text(encoding="utf-8"))
+    capture_lock = tomllib.loads((root / "src-tauri/native-capture/Cargo.lock").read_text(encoding="utf-8"))
     versions.append(capture["package"]["version"])
     versions.extend(item["version"] for item in capture_lock["package"] if item["name"] == "echolingo-native-capture")
     if len(versions) != 8 or any(version != VERSION for version in versions):
-        raise ValueError("All package, Tauri and Cargo versions must be exactly 0.2.4")
+        raise ValueError("All package, Tauri and Cargo versions must be exactly 0.2.7")
 
 
 def one_file(directory, pattern):
@@ -78,6 +85,20 @@ def _prepare_full(artifacts, output, commit, run_url):
         raise ValueError("Real-model acceptance must not use a translation mock")
     if report.get("installerSha256") != sha256(windows) or report.get("installerBytes") != windows.stat().st_size:
         raise ValueError("Windows installer differs from the actual accepted bytes")
+    package_inspections = {}
+    if tuple(map(int, VERSION.split("."))) >= (0, 2, 7):
+        provenance = package_verifier.source_provenance(ROOT)
+        if provenance["commit"] != commit:
+            raise ValueError("Publication commit differs from the exact checked-out source")
+        for platform, installer, executable in [("Windows", windows, "echolingo.exe"), ("macOS", macos, "echolingo")]:
+            directory = artifacts / f"EchoLingo-package-inspection-{platform}"
+            checks = package_verifier.read_json(one_file(directory, "checks.json"))
+            application = package_verifier.identity(one_file(directory, executable))
+            package_verifier.check_attestations(checks, platform, provenance, run_url,
+                                               package_verifier.identity(installer), application)
+            if platform == "Windows" and report.get("applicationSha256") != application["sha256"]:
+                raise ValueError("Installed Windows application differs from the inspected package")
+            package_inspections[platform] = checks
     with zipfile.ZipFile(source) as archive:
         if archive.testzip() is not None:
             raise ValueError("Corresponding source ZIP is corrupt")
@@ -103,6 +124,9 @@ def _prepare_full(artifacts, output, commit, run_url):
                 "rebuiltAfterValidation": False, "windowsInstalledAcceptanceVerified": True, "files": files}
     if requires_screenshot_editor:
         manifest["windowsInstalledScreenshotEditorVerified"] = True
+    if package_inspections:
+        manifest["packageInspections"] = package_inspections
+        manifest["validationMode"] = "full-fresh-build-v1"
     (output / "RELEASE-MANIFEST.json").write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
     checksums = [f"{sha256(path)}  {path.name}\n" for path in sorted(output.iterdir())]
     (output / "SHA256SUMS.txt").write_text("".join(checksums), encoding="utf-8")
@@ -270,7 +294,7 @@ def main():
     args = parser.parse_args()
     check_version()
     if args.check_version:
-        print("All release versions match 0.2.4.")
+        print("All release versions match 0.2.7.")
         return
     if not all((args.artifacts, args.output, args.commit, args.run_url)):
         parser.error("--artifacts, --output, --commit and --run-url are required")

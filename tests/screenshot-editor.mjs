@@ -31,7 +31,7 @@ try {
         ctx.putImageData(pixels, 0, 0);
         return { id: ++nextId, width, height, pngBase64: canvas.toDataURL('image/png').split(',')[1], capturedAt: 1793419200000 };
       };
-      const q = window.__screenshotQA = { image, calls: [], saves: [], copies: [], closed: [], ready: [], session: image(), nextOpen: null, saveCancel: false,
+      const q = window.__screenshotQA = { image, calls: [], saves: [], copies: [], pins: [], closed: [], ready: [], session: image(), nextOpen: null, saveCancel: false,
         holdOpen: false, holdSave: false, releaseOpen: () => {}, releaseSave: () => {}, holdExport: false, releaseExport: () => {}, exportWaits: 0,
         emit: (event, payload) => listeners.get(event)?.({ event, id: 1, payload }),
         publish(width = 96, height = 64) { this.session = image(width, height); this.emit('screenshot-session', structuredClone(this.session)); return this.session.id; },
@@ -74,6 +74,11 @@ try {
             if (q.saveError) throw new Error('QA save failed');
             q.saves.push(structuredClone(args)); if (q.holdSave) await new Promise(resolve => { q.releaseSave = resolve; });
             return q.saveCancel ? null : { path: '/fixture/Desktop/EchoLingo-2026-10-31-120000.png', fileName: 'EchoLingo-2026-10-31-120000.png' };
+          }
+          if (command === 'pin_screenshot_image') {
+            if (q.pinError) throw new Error('QA pin failed');
+            q.pins.push(structuredClone(args));
+            if (q.holdPin) await new Promise(resolve => { q.releasePin = resolve; }); return;
           }
           if (command === 'copy_screenshot_image') { if (q.copyError) throw new Error('QA copy failed'); q.copies.push(structuredClone(args)); return; }
           if (command === 'close_screenshot_editor') { if (q.closeError) throw new Error('QA close failed'); q.closed.push(args.sessionId); q.emit('screenshot-session-cleared', { id: args.sessionId }); return; }
@@ -119,18 +124,108 @@ try {
     await page.locator('#annotation-text').fill('中文标注\n<script>alert(1)</script>');
     await page.locator('#annotation-text').dispatchEvent('compositionstart');
     await page.locator('#annotation-text').dispatchEvent('keydown', { key: 'Enter', code: 'Enter', ctrlKey: true, isComposing: true, keyCode: 229 });
-    assert.equal(await page.locator('#text-dialog').evaluate(d => d.open), true);
-    await page.locator('#text-dialog').dispatchEvent('cancel');
-    assert.equal(await page.locator('#text-dialog').evaluate(d => d.open), true, 'IME Escape must not discard the text dialog');
+    assert.equal(await page.locator('#text-dialog').evaluate(d => !d.hidden), true);
+    await page.locator('#annotation-text').dispatchEvent('keydown', { key: 'Escape', isComposing: true, keyCode: 229 });
+    assert.equal(await page.locator('#text-dialog').evaluate(d => !d.hidden), true, 'IME Escape must not discard the text dialog');
     await page.locator('#annotation-text').dispatchEvent('keydown', { key: 'Escape', isComposing: true, keyCode: 229 });
     await page.locator('#annotation-text').dispatchEvent('compositionend');
-    await page.locator('#text-dialog').dispatchEvent('cancel');
-    assert.equal(await page.locator('#text-dialog').evaluate(d => d.open), true, 'compositionend before the Escape default must retain text');
-    await page.locator('#apply-text').click(); assert.equal(await page.locator('#text-dialog').evaluate(d => d.open), false);
+    await page.locator('#annotation-text').dispatchEvent('keydown', { key: 'Escape' });
+    assert.equal(await page.locator('#text-dialog').evaluate(d => !d.hidden), true, 'compositionend before the Escape default must retain text');
+    await page.locator('#apply-text').click(); assert.equal(await page.locator('#text-dialog').evaluate(d => !d.hidden), false);
     assert.equal(await page.locator('#undo-edit').isEnabled(), true);
     await page.locator('.editor-toolbar button[data-tool="text"]').click(); await page.locator('#image-canvas').click({ position: { x: 5, y: 5 } });
     await page.locator('#annotation-text').fill('字'.repeat(2000)); assert.equal(await page.locator('#annotation-text').inputValue().then(x => x.length), 2000);
     await page.locator('#cancel-text').click();
+
+    // Delete while a drag is held must cancel the draft movement before index
+    // removal; otherwise pointerup could overwrite the following annotation.
+    await fresh(320, 240);
+    await drag('rectangle', [20, 20], [70, 50]);
+    const firstRectangle = await pixels();
+    await drag('rectangle', [150, 100], [200, 140]);
+    const bothRectangles = await pixels();
+    await page.locator('[data-tool="select"]').click();
+    const movingBounds = await page.locator('#image-canvas').boundingBox();
+    const moveXY = (x, y) => [movingBounds.x + x * movingBounds.width / 320, movingBounds.y + y * movingBounds.height / 240];
+    await page.mouse.move(...moveXY(25, 25)); await page.mouse.down(); await page.mouse.move(...moveXY(35, 35));
+    await page.keyboard.press('Delete'); const deletionRaster = await pixels();
+    await page.mouse.move(...moveXY(45, 45)); await page.mouse.up();
+    assert.deepEqual(await pixels(), deletionRaster, 'late drag events cannot mutate the next object after deletion');
+    await page.locator('#undo-edit').click(); assert.deepEqual(await pixels(), bothRectangles, 'one undo restores only the deleted object');
+    await page.locator('#undo-edit').click(); assert.deepEqual(await pixels(), firstRectangle);
+
+    // New annotation interactions use a nonmodal inline editor and one shared
+    // history. Coordinates are source pixels at both DPRs, not CSS pixel guesses.
+    await fresh(320, 240);
+    const clickImage = async (x, y, count = 1) => {
+      const b = await page.locator('#image-canvas').boundingBox();
+      const [w, h] = await page.locator('#image-canvas').evaluate(c => [c.width, c.height]);
+      await page.mouse.click(b.x + x * b.width / w, b.y + y * b.height / h, { clickCount: count });
+    };
+    await page.locator('[data-tool="text"]').click();
+    await page.locator('#edit-font-size').selectOption('16');
+    await page.locator('#note-style').selectOption('#fff3b0');
+    await clickImage(20, 20); await page.locator('#annotation-text').fill('说明 A');
+    assert.equal(await page.locator('.screenshot-modal-backdrop').count(), 0);
+    await page.keyboard.press('Control+Enter');
+    const notePixels = await pixels();
+    await drag('select', [25, 25], [75, 65]);
+    const movedNote = await pixels(); assert.notDeepEqual(movedNote, notePixels, 'move changes the existing note');
+    await page.locator('#undo-edit').click(); assert.deepEqual(await pixels(), notePixels, 'move is one undo step');
+    await page.locator('#redo-edit').click(); assert.deepEqual(await pixels(), movedNote);
+    await clickImage(75, 65, 2);
+    assert.equal(await page.locator('#annotation-text').inputValue(), '说明 A');
+    await page.locator('#annotation-text').fill('说明 B'); await page.keyboard.press('Control+Enter');
+    const editedNote = await pixels(); assert.notDeepEqual(editedNote, movedNote);
+    await page.locator('#undo-edit').click(); assert.deepEqual(await pixels(), movedNote, 'text edit replaces instead of painting a second layer');
+    await page.locator('#redo-edit').click(); assert.deepEqual(await pixels(), editedNote);
+    await page.locator('[data-tool="select"]').click(); await clickImage(75, 65);
+    await page.keyboard.press('Delete'); assert.notDeepEqual(await pixels(), editedNote);
+    await page.locator('#undo-edit').click(); assert.deepEqual(await pixels(), editedNote, 'delete is reversible');
+
+    await page.locator('[data-tool="number"]').click();
+    await page.locator('#edit-font-size').selectOption('32');
+    await clickImage(45, 150); const oneStep = await pixels();
+    await clickImage(95, 150); const twoSteps = await pixels();
+    await page.locator('#undo-edit').click(); assert.deepEqual(await pixels(), oneStep);
+    await page.locator('#redo-edit').click(); assert.deepEqual(await pixels(), twoSteps);
+    await page.locator('#step-style').selectOption('numbered-arrow');
+    await drag('number', [170, 100], [250, 170]);
+    const stepArrow = await pixels();
+    await drag('select', [170, 100], [190, 115]);
+    const movedArrow = await pixels(); assert.notDeepEqual(movedArrow, stepArrow);
+    await page.locator('#undo-edit').click(); assert.deepEqual(await pixels(), stepArrow, 'badge and arrow move atomically');
+    await page.locator('#undo-edit').click(); assert.deepEqual(await pixels(), twoSteps, 'badge and arrow creation is one undo step');
+    await page.locator('#redo-edit').click();
+    await drag('crop', [10, 10], [300, 220]);
+    const afterCrop = await pixels(); assert.deepEqual([afterCrop.width, afterCrop.height], [290, 210]);
+    await drag('select', [160, 90], [170, 95]);
+    assert.notDeepEqual(await pixels(), afterCrop, 'annotations remain selectable in crop-adjusted coordinates');
+    await page.locator('#undo-edit').click(); assert.deepEqual(await pixels(), afterCrop);
+    await page.locator('#edit-color').fill('#112233'); await drag('solid', [0, 0], [25, 25]);
+    const finalAnnotations = await pixels();
+    for (const [button, collection] of [['#copy-image', 'copies'], ['#save-image', 'saves'], ['#pin-image', 'pins']]) {
+      const before = await page.evaluate(collection => window.__screenshotQA[collection].length, collection);
+      await page.locator(button).click();
+      await page.waitForFunction(([collection, before]) => window.__screenshotQA[collection].length > before, [collection, before]);
+      const raster = await page.evaluate(async collection => {
+        const image = new Image(); image.src = 'data:image/png;base64,' + window.__screenshotQA[collection].at(-1).pngBase64; await image.decode();
+        const c = document.createElement('canvas'); c.width = image.width; c.height = image.height; const ctx = c.getContext('2d'); ctx.drawImage(image, 0, 0);
+        return { width: c.width, height: c.height, data: [...ctx.getImageData(0, 0, c.width, c.height).data] };
+      }, collection);
+      assert.deepEqual(raster, finalAnnotations, collection + ' contains the same flattened annotations/crop/mask');
+    }
+
+    // A pending draft on an otherwise saved image is still unsaved work.
+    await page.locator('[data-tool="text"]').click(); await clickImage(100, 30);
+    await page.locator('#annotation-text').fill('尚未提交的备注');
+    assert.equal(await page.locator('#save-indicator').textContent(), '未保存');
+    await page.locator('#close-editor').click();
+    assert.equal(await page.locator('#discard-dialog').isVisible(), true);
+    await page.locator('#discard-cancel').click();
+    assert.equal(await page.locator('#annotation-text').inputValue(), '尚未提交的备注');
+    await page.locator('#cancel-text').click();
+    assert.equal(await page.locator('#save-indicator').textContent(), '已保存');
 
     // Mosaic modifies actual pixels; solid masks replace RGB and alpha fully.
     await fresh(); await drag('mosaic', [8, 8], [24, 24]);
@@ -143,13 +238,15 @@ try {
 
     // Crop after zoom uses image coordinates, reduces actual PNG dimensions and
     // exposes no crop-excluded pixels. DPR changes display density, not output.
-    await fresh(); await page.locator('#zoom-in').click();
+    const cropSessionId = await fresh(); await page.locator('#zoom-in').click();
     await drag('crop', [10, 8], [42, 32]);
     const crop = await pixels(); assert.deepEqual([crop.width, crop.height], [32, 24]);
     assert.deepEqual(at(crop, 0, 0), at(original, 10, 8));
     await page.locator('#undo-edit').click(); assert.deepEqual(await pixels(), original);
     await page.locator('#redo-edit').click();
-    await page.locator('#copy-image').click(); await page.waitForFunction(() => window.__screenshotQA.copies.length === 1);
+    const copiesBeforeCrop = await page.evaluate(() => window.__screenshotQA.copies.length);
+    await page.locator('#copy-image').click();
+    await page.waitForFunction(([count, id]) => window.__screenshotQA.copies.length === count + 1 && window.__screenshotQA.copies.at(-1).sessionId === id, [copiesBeforeCrop, cropSessionId]);
     const copiedSize = await page.evaluate(async () => {
       const image = new Image(); image.src = 'data:image/png;base64,' + window.__screenshotQA.copies.at(-1).pngBase64; await image.decode(); return [image.naturalWidth, image.naturalHeight];
     }); assert.deepEqual(copiedSize, [32, 24]);
@@ -192,6 +289,7 @@ try {
       await page.waitForFunction(() => document.querySelector('#editor-status').dataset.error === 'true');
       assert.equal(await page.locator('#save-image').isDisabled(), true);
       assert.equal(await page.locator('#copy-image').isDisabled(), true);
+      assert.equal(await page.locator('#pin-image').isDisabled(), true);
       assert.equal(await page.locator('#canvas-frame').isHidden(), true);
       await page.keyboard.press('Control+s'); await page.keyboard.press('Control+c');
       assert.deepEqual(await page.evaluate(() => [window.__screenshotQA.saves.length, window.__screenshotQA.copies.length]), before);
@@ -221,6 +319,7 @@ try {
     await page.locator('#close-editor').click(); await page.locator('#discard-confirm').click();
     await page.waitForFunction(() => window.__screenshotQA.closed.length === 1);
     assert.equal(await page.locator('#copy-image').isDisabled(), true);
+      assert.equal(await page.locator('#pin-image').isDisabled(), true);
 
     // Closing during pre-IPC canvas export cancels the export instead of locking
     // the OS Close button behind encoding or unrelated clipboard/disk latency.
@@ -247,7 +346,7 @@ try {
     await page.waitForFunction(() => window.__screenshotQA.ready.length === 1);
     await page.locator('.editor-toolbar button[data-tool="text"]').click(); await page.locator('#image-canvas').click({ position: { x: 5, y: 5 } });
     await page.locator('#annotation-text').fill('兼容旧版系统 WebView');
-    await page.keyboard.press('Shift+Tab'); assert.equal(await page.evaluate(() => document.activeElement.id), 'apply-text');
+    assert.equal(await page.locator('.screenshot-modal-backdrop').count(), 0, 'inline annotation does not create a modal backdrop');
     await page.locator('#cancel-text').click(); assert.equal(await page.locator('#text-dialog').isVisible(), false);
     await page.locator('#close-editor').click(); await page.keyboard.press('Escape');
     assert.equal(await page.evaluate(() => window.__screenshotQA.closed.length), 0);
@@ -387,7 +486,45 @@ try {
     await page.locator('.editor-toolbar button[data-tool="select"]').click();
     assert.equal(await page.evaluate(id => window.__screenshotQA.calls.filter(call => call.command === 'focus_screenshot_overlay' && call.sessionId === id).length, overlayId), 2, 'failed explicit focus can retry');
     await page.locator('#overlay-cancel').click(); await page.waitForFunction(id => window.__screenshotQA.closed.includes(id), overlayId);
-    for (const action of ['#overlay-copy', '#overlay-cancel', '#overlay-save']) {
+    // Pin exports only the rendered/redacted bitmap, never copies/saves, and
+    // must not dismiss until the independent window has acknowledged readiness.
+    overlayId = await overlayFresh();
+    await page.locator('#edit-color').fill('#112233');
+    await drag('solid', [0, 0], [32, 24]);
+    const pinPixels = await pixels();
+    const beforePin = await page.evaluate(() => [window.__screenshotQA.copies.length, window.__screenshotQA.saves.length]);
+    await page.evaluate(() => { window.__screenshotQA.pinError = true; });
+    await page.locator('#overlay-pin').click();
+    await page.getByText(/QA pin failed/).waitFor();
+    assert.deepEqual(await pixels(), pinPixels, 'failed pin preserves edits');
+    assert.equal(await page.evaluate(id => window.__screenshotQA.closed.includes(id), overlayId), false);
+    await page.evaluate(() => { window.__screenshotQA.pinError = false; window.__screenshotQA.holdPin = true; });
+    const pinsBefore = await page.evaluate(() => window.__screenshotQA.pins.length);
+    await page.locator('#overlay-pin').click();
+    await page.waitForFunction(n => window.__screenshotQA.pins.length === n + 1, pinsBefore);
+    assert.equal(await page.locator('#overlay-pin').isDisabled(), true);
+    assert.equal(await page.evaluate(id => window.__screenshotQA.closed.includes(id), overlayId), false, 'pending ready keeps editor');
+    const exportedPin = await page.evaluate(async () => {
+      const img = new Image(); img.src = 'data:image/png;base64,' + window.__screenshotQA.pins.at(-1).pngBase64; await img.decode();
+      const canvas = document.createElement('canvas'); canvas.width = img.naturalWidth; canvas.height = img.naturalHeight;
+      const ctx = canvas.getContext('2d'); ctx.drawImage(img, 0, 0);
+      return { width: canvas.width, height: canvas.height, data: [...ctx.getImageData(0, 0, canvas.width, canvas.height).data] };
+    });
+    assert.deepEqual(exportedPin, pinPixels);
+    await page.evaluate(() => { window.__screenshotQA.holdPin = false; window.__screenshotQA.releasePin(); });
+    await page.waitForFunction(id => window.__screenshotQA.closed.includes(id), overlayId);
+    assert.deepEqual(await page.evaluate(() => [window.__screenshotQA.copies.length, window.__screenshotQA.saves.length]), beforePin);
+    // A superseded pin completion may never dismiss the new capture.
+    overlayId = await overlayFresh();
+    await page.evaluate(() => { window.__screenshotQA.holdPin = true; });
+    await page.locator('#overlay-pin').click();
+    await page.waitForFunction(id => window.__screenshotQA.pins.at(-1)?.sessionId === id, overlayId);
+    const newerPinId = await overlayFresh();
+    await page.evaluate(() => { window.__screenshotQA.holdPin = false; window.__screenshotQA.releasePin(); });
+    await page.waitForTimeout(40);
+    assert.equal(await page.evaluate(id => window.__screenshotQA.closed.includes(id), newerPinId), false);
+    await page.locator('#overlay-cancel').click();
+    for (const action of ['#overlay-copy', '#overlay-cancel', '#overlay-save', '#overlay-pin']) {
       overlayId = await overlayFresh(); await page.locator(action).click();
       await page.waitForFunction(id => window.__screenshotQA.closed.includes(id), overlayId);
       assert.equal(await page.evaluate(id => window.__screenshotQA.calls.filter(call => call.command === 'focus_screenshot_overlay' && call.sessionId === id).length, overlayId), 0, `${action} must not activate before completion`);
@@ -409,7 +546,7 @@ try {
       const layout = await page.evaluate(() => {
         const rect = element => { const r = element.getBoundingClientRect(); return { x: r.x, y: r.y, right: r.right, bottom: r.bottom }; };
         return { boxes: ['.editor-toolbar', '#overlay-info', '#editor-status'].map(selector => rect(document.querySelector(selector))),
-          actions: ['#overlay-copy', '#overlay-cancel', '#overlay-save'].map(selector => {
+          actions: ['#overlay-copy', '#overlay-cancel', '#overlay-save', '#overlay-pin'].map(selector => {
             const button = document.querySelector(selector), r = button.getBoundingClientRect(), hit = document.elementFromPoint(r.x + r.width / 2, r.y + r.height / 2);
             return { selector, ...rect(button), clickable: !button.disabled && (hit === button || button.contains(hit)) };
           }) };

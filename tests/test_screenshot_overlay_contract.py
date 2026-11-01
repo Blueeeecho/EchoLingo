@@ -42,6 +42,21 @@ class ScreenshotOverlayContract(unittest.TestCase):
         self.assertIn('output["captureGeometry"]', reply)
         self.assertIn('output["imageBase64"]', reply)
         self.assertNotIn('copy_screenshot', reply)
+    def test_windows_capture_removes_shadow_insets_without_relaxing_geometry(self):
+        source = read('src-tauri/src/windows_screenshot_overlay.rs')
+        prepare = source.split('pub fn prepare(', 1)[1].split('pub fn show(', 1)[0]
+        hide = source.split('pub fn hide(', 1)[1].split('pub fn focus_text(', 1)[0]
+        # Tao 0.37.2 reserves client insets for undecorated shadows. A matching
+        # outer frame alone is insufficient; retain exact client/DPI checks.
+        self.assertLess(prepare.index('.set_shadow(false)'), prepare.index('w::SetWindowPos('))
+        self.assertLess(prepare.index('w::SetWindowPos('), prepare.index('verify_viewport('))
+        self.assertIn('configuration.shadow', hide)
+        self.assertIn('.set_shadow(shadow)', hide)
+        verify = source.split('fn verify_viewport(', 1)[1].split('struct HookState', 1)[0]
+        self.assertIn('client.right - client.left != frame[2]', verify)
+        self.assertIn('client.bottom - client.top != frame[3]', verify)
+        self.assertIn('GetDpiForWindow(native) } != dpi', verify)
+        self.assertIn('] != frame', verify)
     def test_windows_initial_show_and_text_focus_are_separate(self):
         source = read('src-tauri/src/windows_screenshot_overlay.rs')
         show = source.split('pub fn show(', 1)[1].split('pub fn hide(', 1)[0]

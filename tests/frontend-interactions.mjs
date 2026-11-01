@@ -276,6 +276,28 @@ try {
       localStorage.removeItem('echolingo.free-setup');
     }
   });
+  // A queued preference must capture the user's choice before an earlier save
+  // re-renders the settings controls. Only fake IPC and generated settings.
+  await page.goto(process.env.ECHOLINGO_TEST_URL ?? 'http://127.0.0.1:1420/');
+  await page.waitForFunction(() => document.querySelector('#theme-select')?.value === 'light');
+  await page.evaluate(() => {
+    window.__qa.holdSave = true;
+    const select = document.querySelector('#theme-select');
+    select.value = 'dark'; select.dispatchEvent(new Event('change', { bubbles: true }));
+  });
+  await page.waitForFunction(() => window.__qa.saveCalls === 1);
+  await page.evaluate(() => {
+    const select = document.querySelector('#theme-select');
+    select.value = 'system'; select.dispatchEvent(new Event('change', { bubbles: true }));
+    window.__qa.holdSave = false; window.__qa.releaseSave();
+  });
+  await page.waitForFunction(() => window.__qa.saveCalls === 2);
+  await page.waitForTimeout(50);
+  assert.deepEqual(await page.evaluate(() => window.__qa.settingsWrites.map(settings => settings.theme)), ['dark', 'system']);
+  assert.equal(await page.locator('#theme-select').inputValue(), 'system');
+  assert.equal(await page.evaluate(() => window.__qa.settings.theme), 'system');
+  console.log('PASS: queued theme changes retain the latest user choice after older saves render. Mock IPC only.');
+
   const sourceFixtureUrl = (mode) => {
     const url = new URL(process.env.ECHOLINGO_TEST_URL ?? 'http://127.0.0.1:1420/');
     url.searchParams.set('sourceDeliveryFixture', mode); return url.href;
@@ -2172,7 +2194,11 @@ try {
   assert.equal(await page.evaluate(() => window.__qa.translationRequests.at(-1).text), 'QA latest reopened ticket wins');
   assert.equal(await page.locator('.result-text').isVisible(), true);
   assert.match(await page.locator('.result-text').evaluate((element) => getComputedStyle(element).fontFamily), /^"?Times New Roman"?,/);
-  assert.doesNotMatch(await page.locator('#source-text').evaluate((element) => getComputedStyle(element).fontFamily), /Times New Roman/);
+  // Both reading panels deliberately share the platform reading stack; only
+  // controls keep UI typography (the same contract is checked on Windows below).
+  assert.equal(await page.locator('#source-text').evaluate((element) => getComputedStyle(element).fontFamily),
+    await page.locator('.result-text').evaluate((element) => getComputedStyle(element).fontFamily));
+  assert.doesNotMatch(await page.locator('.result-actions button').first().evaluate((element) => getComputedStyle(element).fontFamily), /Times New Roman/);
 
   // Fitting content is asynchronous. An older capture must not show its popup
   // after the user has already hidden it and reopened a newer input window.

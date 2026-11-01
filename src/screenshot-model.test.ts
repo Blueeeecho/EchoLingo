@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { ScreenshotDocument, imagePoint, selectionRect, validateSize, validateOperation, mosaicPixels, wrapText, MAX_UNDO, MAX_OPERATIONS, type EditOperation } from './screenshot-model';
+import { ScreenshotDocument, translateOperation, operationBounds, imagePoint, selectionRect, validateSize, validateOperation, mosaicPixels, wrapText, MAX_UNDO, MAX_OPERATIONS, type EditOperation } from './screenshot-model';
 const rectangle = (): EditOperation => ({ kind: 'rectangle', rect: { x: 1, y: 1, width: 6, height: 4 }, color: '#123456', width: 2, solid: true });
 describe('isolated screenshot image-pixel model', () => {
   it('maps actual display bounds into pixels independent of zoom/DPR and clips outside drags', () => {
@@ -70,5 +70,70 @@ describe('isolated screenshot image-pixel model', () => {
     expect(wrapText('中文标注\r\nA😀BC\n', 2, measure)).toEqual(['中文', '标注', 'A😀', 'BC', '']);
     expect(wrapText('abcdef', .5, measure)).toEqual(['a','b','c','d','e','f']);
     expect(wrapText('字'.repeat(2000), 20, measure)).toHaveLength(100);
+  });
+});
+
+describe('editable annotation history', () => {
+  const badge = (number = 1): EditOperation => ({ kind: 'number', point: { x: 30, y: 30 }, number, size: 24, color: '#dd3344' });
+  it('updates, moves and deletes an atomic numbered arrow in one undo step without changing z-order', () => {
+    const model = new ScreenshotDocument({ width: 100, height: 100 });
+    const arrow: EditOperation = { kind: 'numbered-arrow', start: { x: 10, y: 20 }, end: { x: 60, y: 70 }, number: 1, size: 24, color: '#dd3344', width: 4 };
+    model.append(arrow); model.append(rectangle()); const before = model.stateId;
+    model.update(0, translateOperation(arrow, { x: 20, y: 10 }, model.operationSize(0)));
+    expect(model.operations[0]).toMatchObject({ start: { x: 30, y: 30 }, end: { x: 80, y: 80 }, number: 1 });
+    expect(model.operations[1]).toEqual(rectangle());
+    model.undo(); expect(model.stateId).toBe(before); expect(model.operations[0]).toEqual(arrow);
+    model.redo(); const moved = model.operations[0];
+    model.remove(0); expect(model.operations).toEqual([rectangle()]); expect(model.nextNumber).toBe(1);
+    model.undo(); expect(model.operations[0]).toBe(moved); expect(model.nextNumber).toBe(2);
+    model.redo(); model.append(badge()); expect(model.canRedo).toBe(false);
+  });
+  it('keeps notes immutable and restores edited text/background with undo/redo', () => {
+    const model = new ScreenshotDocument({ width: 100, height: 80 });
+    const text: EditOperation = { kind: 'text', point: { x: 10, y: 10 }, text: '备注', size: 16, maxWidth: 80, color: '#112233', background: '#fff3aa' };
+    model.append(text); model.update(0, { ...text, text: '修正后的备注' });
+    expect(model.operations[0]).toMatchObject({ text: '修正后的备注', background: '#fff3aa' });
+    model.undo(); expect(model.operations[0]).toEqual(text); model.redo();
+    expect(Object.isFrozen(model.operations)).toBe(true); expect(Object.isFrozen(model.operations[0])).toBe(true);
+    expect(() => model.update(0, { ...text, background: 'transparent' })).toThrow('底色');
+  });
+  it('maps pre-crop and post-crop annotations to their correct coordinate stage', () => {
+    const model = new ScreenshotDocument({ width: 100, height: 100 }); model.append(badge(1));
+    model.append({ kind: 'crop', rect: { x: 10, y: 20, width: 70, height: 70 } }); model.append(badge(2));
+    model.append({ kind: 'crop', rect: { x: 5, y: 6, width: 50, height: 50 } });
+    expect(model.operationSize(0)).toEqual({ width: 100, height: 100 });
+    expect(model.operationSize(2)).toEqual({ width: 70, height: 70 });
+    expect(model.operationOffset(0)).toEqual({ x: 15, y: 26 });
+    expect(model.operationOffset(2)).toEqual({ x: 5, y: 6 });
+    expect(model.nextNumber).toBe(3); model.remove(0); expect(model.nextNumber).toBe(3);
+    model.undo(); expect(model.operationOffset(0)).toEqual({ x: 15, y: 26 });
+    expect(() => model.update(1, badge())).toThrow('裁剪'); expect(() => model.remove(1)).toThrow('裁剪');
+    expect(model.size).toEqual({ width: 50, height: 50 });
+    model.undo(); expect(model.size).toEqual({ width: 70, height: 70 });
+  });
+  it('derives numbering from current history including crop-hidden numbers, with no mutable counter', () => {
+    const model = new ScreenshotDocument({ width: 100, height: 100 });
+    model.append(badge(model.nextNumber)); model.append(badge(model.nextNumber)); expect(model.nextNumber).toBe(3);
+    model.undo(); expect(model.nextNumber).toBe(2); model.redo(); expect(model.nextNumber).toBe(3);
+    model.append({ kind: 'crop', rect: { x: 80, y: 80, width: 20, height: 20 } }); expect(model.nextNumber).toBe(3);
+    model.remove(1); expect(model.nextNumber).toBe(2); model.undo(); expect(model.nextNumber).toBe(3);
+  });
+  it('clamps a common movement delta and preserves shape size', () => {
+    const arrow: EditOperation = { kind: 'numbered-arrow', start: { x: 10, y: 10 }, end: { x: 40, y: 50 }, number: 1, size: 24, color: '#123456', width: 4 };
+    expect(translateOperation(arrow, { x: 200, y: -200 }, { width: 100, height: 80 })).toMatchObject({ start: { x: 70, y: 0 }, end: { x: 100, y: 40 } });
+    const moved = translateOperation(rectangle(), { x: -20, y: 200 }, { width: 10, height: 10 });
+    expect(moved).toMatchObject({ rect: { x: 0, y: 6, width: 6, height: 4 } });
+    expect(() => translateOperation(arrow, { x: NaN, y: 0 }, { width: 100, height: 80 })).toThrow();
+    expect(operationBounds(badge())).toEqual({ x: 18, y: 18, width: 24, height: 24 });
+    expect(operationBounds({ kind: 'text', point: { x: 10, y: 10 }, text: 'ABCD', size: 10, maxWidth: 15, color: '#000000' }, t => t.length * 5)).toEqual({ x: 10, y: 10, width: 15, height: 27 });
+  });
+  it('keeps invalid edits out of history and enforces replay limits on replacements', () => {
+    const model = new ScreenshotDocument({ width: 8000, height: 4000 });
+    model.append({ kind: 'mosaic', rect: { x: 0, y: 0, width: 8000, height: 4000 }, blockSize: 16 });
+    const smallMosaic: EditOperation = { kind: 'mosaic', rect: { x: 0, y: 0, width: 10, height: 10 }, blockSize: 16 };
+    model.append(smallMosaic); const state = model.stateId;
+    expect(() => model.update(1, { kind: 'mosaic', rect: { x: 0, y: 0, width: 8000, height: 4000 }, blockSize: 16 })).toThrow('安全上限');
+    expect(model.stateId).toBe(state); expect(model.operations[1]).toEqual(smallMosaic);
+    expect(() => model.append({ ...badge(), number: 0 } as EditOperation)).toThrow('序号');
   });
 });

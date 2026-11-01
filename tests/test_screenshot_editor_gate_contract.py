@@ -1,6 +1,7 @@
 """Native F1 editor results must remain independent of mock browser coverage."""
 from pathlib import Path
 import unittest
+from workflow_contract_helpers import executable_job
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -44,7 +45,7 @@ class ScreenshotEditorGateContract(unittest.TestCase):
             self.assertNotIn('continue-on-error', final)
             self.assertNotIn('|| true', job)
             self.assertIn('This is not physical F1 or packaged editor acceptance.', job)
-        self.assertEqual(jobs[0], jobs[1])
+        self.assertEqual(executable_job(jobs[0]), executable_job(jobs[1]))
 
     def test_installed_executable_is_retested_without_replacing_real_offline_flows(self):
         source = (ROOT / 'scripts/windows-offline-translation-test.ps1').read_text()

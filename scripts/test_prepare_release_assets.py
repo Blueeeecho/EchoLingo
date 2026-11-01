@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 import tempfile
 import unittest
+from unittest.mock import patch
 import zipfile
 
 from test_verify_screenshot_editor_report import complete as screenshot_report
@@ -21,8 +22,8 @@ class ReleaseAssetsTests(unittest.TestCase):
         self.root = Path(self.temp.name)
         self.artifacts = self.root / "artifacts"
         self.output = self.root / "public"
-        self.windows = self.artifacts / "EchoLingo-Windows/nsis/EchoLingo_0.2.4_x64-setup.exe"
-        self.macos = self.artifacts / "EchoLingo-macOS/dmg/EchoLingo_0.2.4_aarch64.dmg"
+        self.windows = self.artifacts / f"EchoLingo-Windows/nsis/EchoLingo_{RELEASE.VERSION}_x64-setup.exe"
+        self.macos = self.artifacts / f"EchoLingo-macOS/dmg/EchoLingo_{RELEASE.VERSION}_aarch64.dmg"
         self.report_path = self.artifacts / "EchoLingo-Windows-offline-evidence/temp/echolingo-offline-validation.json"
         for path, data in [(self.windows, b"accepted Windows installer"), (self.macos, b"tested Mac installer")]:
             path.parent.mkdir(parents=True)
@@ -39,11 +40,95 @@ class ReleaseAssetsTests(unittest.TestCase):
             archive.writestr("main.cpp", data)
             archive.writestr("SOURCE-MANIFEST.json", json.dumps(inventory))
 
+        if RELEASE.VERSION == "0.2.7":
+            provenance = {"commit": "a" * 40, "tree": "b" * 40, "trackedWorktreeClean": True}
+            mock = patch.object(RELEASE.package_verifier, "source_provenance", return_value=provenance)
+            mock.start(); self.addCleanup(mock.stop)
+            self.inspections = {}
+            for platform, installer, executable in [("Windows", self.windows, "echolingo.exe"), ("macOS", self.macos, "echolingo")]:
+                folder = self.artifacts / f"EchoLingo-package-inspection-{platform}"
+                folder.mkdir()
+                application = folder / executable
+                application.write_bytes(f"generated {platform} app".encode())
+                digest = RELEASE.sha256(application)
+                checks = {"schemaVersion": 1, "platform": platform, "version": RELEASE.VERSION,
+                          "commit": provenance["commit"], "tree": provenance["tree"],
+                          "runUrl": "https://github.com/Blueeeecho/EchoLingo/actions/runs/123",
+                          "checks": {name: True for name in RELEASE.package_verifier.CHECK_NAMES},
+                          "applicationMetadata": {"version": RELEASE.VERSION, "architecture": "x64" if platform == "Windows" else "arm64"},
+                          "installerSha256": RELEASE.sha256(installer), "applicationSha256": digest,
+                          "extractedApplicationSha256": digest}
+                self.inspections[platform] = folder / "checks.json"
+                self.inspections[platform].write_text(json.dumps(checks))
+                if platform == "Windows":
+                    self.report["applicationSha256"] = digest
+                    self.report["installedScreenshotEditor"]["applicationSha256"] = digest
+            self.write_report()
+
     def write_report(self):
         self.report_path.write_text(json.dumps(self.report), encoding="utf-8-sig")
 
     def prepare(self):
         return RELEASE.prepare(self.artifacts, self.output, "a" * 40, "https://github.com/Blueeeecho/EchoLingo/actions/runs/123")
+
+    def test_fresh_release_requires_every_package_inspection_identity_and_gate(self):
+        for platform, path in self.inspections.items():
+            original = json.loads(path.read_text())
+            for field, value in [('version', '0.2.6'), ('commit', 'c' * 40), ('tree', 'c' * 40),
+                                 ('runUrl', 'https://github.com/Blueeeecho/EchoLingo/actions/runs/999'),
+                                 ('platform', 'wrong'), ('installerSha256', 'c' * 64),
+                                 ('applicationSha256', 'c' * 64), ('extractedApplicationSha256', 'c' * 64),
+                                 ('applicationMetadata', {}), ('schemaVersion', True)]:
+                with self.subTest(platform=platform, field=field):
+                    path.write_text(json.dumps({**original, field: value}))
+                    with self.assertRaises(ValueError): self.prepare()
+                    self.assertFalse(self.output.exists())
+            for gate in original['checks']:
+                with self.subTest(platform=platform, gate=gate):
+                    path.write_text(json.dumps({**original, 'checks': {**original['checks'], gate: False}}))
+                    with self.assertRaises(ValueError): self.prepare()
+            path.write_text(json.dumps(original))
+
+    def test_rejects_mismatched_checkout_or_installed_application(self):
+        with patch.object(RELEASE.package_verifier, 'source_provenance', return_value={'commit': 'c' * 40, 'tree': 'b' * 40}):
+            with self.assertRaisesRegex(ValueError, 'checked-out source'): self.prepare()
+        self.report['applicationSha256'] = 'c' * 64
+        self.report['installedScreenshotEditor']['applicationSha256'] = 'c' * 64
+        self.write_report()
+        with self.assertRaisesRegex(ValueError, 'inspected package'): self.prepare()
+
+    def test_missing_package_inspection_is_not_installed_acceptance(self):
+        self.inspections['macOS'].unlink()
+        with self.assertRaisesRegex(ValueError, 'checks.json'): self.prepare()
+
+    def test_new_release_cannot_use_historical_language_patch_mode(self):
+        with self.assertRaisesRegex(ValueError, 'only authorized for 0.2.4'):
+            RELEASE.prepare(self.artifacts, self.output, 'a' * 40,
+                            'https://github.com/Blueeeecho/EchoLingo/actions/runs/123', language_patch=True)
+
+    def test_release_inspects_app_and_dmg_and_preserves_failed_package_evidence(self):
+        root = Path(__file__).resolve().parents[1]
+        source = (root / '.github/workflows/release-checks.yml').read_text()
+        self.assertIn("'nsis' || 'app,dmg'", source)
+        self.assertIn('python3 scripts/verify-native-pin-release-absence.py src-tauri/target/release/bundle/macos/EchoLingo.app/Contents/MacOS/echolingo', source)
+        self.assertIn('release-native-pin-absence.json', source)
+        self.assertIn('npm run tauri -- build --debug --no-bundle -- --locked', source)
+        self.assertIn('bash tests/macos-pin-native-smoke.sh', source)
+        self.assertIn('release-native-pin-smoke', source)
+        inspection = source.split('      - name: Inspect exact fresh installer', 1)[1].split('      - name: Identify the actual embedded', 1)[0]
+        self.assertIn('bundle/macos/EchoLingo.app/Contents/MacOS/echolingo', inspection)
+        self.assertIn('scripts/inspect-candidate-package.py', inspection)
+        self.assertIn('set -euo pipefail', inspection)
+        self.assertNotIn('continue-on-error:', inspection)
+        self.assertIn('if: always()', inspection)
+        self.assertIn('release-package-inspection/checks.json', inspection)
+        self.assertIn('release-package-inspection/7z-listing.txt', inspection)
+        self.assertIn('EchoLingo.app.tar.gz', inspection)
+        self.assertIn('src-tauri/target/release/bundle/dmg/*.dmg', source)
+        workflow = (root / '.github/workflows/release.yml').read_text()
+        self.assertNotIn('language-patch-checks.yml', workflow)
+        self.assertNotIn('--language-patch', workflow)
+        self.assertIn('pattern: EchoLingo-package-inspection-*', workflow)
 
     def test_installed_screenshot_evidence_is_required_and_bound_to_installed_bytes(self):
         for field in ("installedScreenshotEditorVerified", "installedScreenshotEditor"):
@@ -79,8 +164,26 @@ class ReleaseAssetsTests(unittest.TestCase):
         self.assertEqual(expected.count(marker), 1)
         expected = expected.replace(marker, priority + marker)
         release = (root / ".github/workflows/release-checks.yml").read_text()
-        self.assertEqual(release.split("jobs:\n", 1)[1].strip(), expected.strip())
+        # Only release-specific strengthening may differ: fresh app+DMG,
+        # package inspection/evidence, native-capture formatting and version.
+        normalized = release.split("jobs:\n", 1)[1]
+        start = normalized.index('      - name: Build same-source isolated Mac debug pin host')
+        end = normalized.index('      - name: Identify the actual embedded', start)
+        normalized = normalized[:start] + normalized[end:]
+        normalized = normalized.replace('        id: package_build\n', '').replace("'app,dmg'", "'dmg'")
+        normalized = normalized.replace('        run: |\n          cargo fmt --manifest-path src-tauri/Cargo.toml --check\n          cargo fmt --manifest-path src-tauri/native-capture/Cargo.toml --check', '        run: cargo fmt --manifest-path src-tauri/Cargo.toml --check')
+        self.assertEqual(normalized.strip(), expected.strip())
         self.assertNotIn("actions: read", release)
+
+    def test_upper_window_acceptance_selects_exact_current_installer_in_both_workflows(self):
+        root = Path(__file__).resolve().parents[1]
+        for name in ('ci.yml', 'release-checks.yml'):
+            source = (root / '.github/workflows' / name).read_text()
+            step = source.split('        id: windows_capture_upper_windows', 1)[1].split('      - name:', 1)[0]
+            self.assertIn(f"-Filter 'EchoLingo_{RELEASE.VERSION}_x64-setup.exe'", step)
+            self.assertIn("if ($installers.Count -ne 1) { throw", step)
+            self.assertIn('-InstallerPath $installers[0].FullName -IsolatedTestSession', step)
+            self.assertNotIn("-Filter '*", step)
 
     def test_publication_is_main_or_version_tag_only_and_keeps_prerelease_gate(self):
         root = Path(__file__).resolve().parents[1]
@@ -89,7 +192,7 @@ class ReleaseAssetsTests(unittest.TestCase):
         self.assertIn(f"tags: ['{RELEASE.VERSION}']", workflow)
         self.assertIn(f"refs/tags/{RELEASE.VERSION}", workflow)
         self.assertIn("branches: [main]", workflow)
-        self.assertIn("needs: [release-inputs, verify, language-patch]", workflow)
+        self.assertIn("needs: [release-inputs, verify]", workflow)
         self.assertIn("draft: true, prerelease: true", workflow)
         self.assertIn("main.object.sha !== context.sha", workflow)
         self.assertIn("already exists; inspect it instead of overwriting", workflow)
@@ -127,7 +230,7 @@ class ReleaseAssetsTests(unittest.TestCase):
             for name in files[-2:]:
                 path = copy / name
                 original = path.read_text()
-                path.write_text(original.replace('version = "0.2.4"', 'version = "0.2.3"'))
+                path.write_text(original.replace('version = "0.2.7"', 'version = "0.2.3"'))
                 with self.subTest(name=name), self.assertRaises(ValueError):
                     RELEASE.check_version(copy)
                 path.write_text(original)
@@ -143,7 +246,7 @@ class ReleaseAssetsTests(unittest.TestCase):
         publisher = (root / "scripts/publish-macos-first-release.cjs").read_text()
         self.assertIn("tag: '0.2.1'", publisher)
         self.assertIn("Release exists; no overwrite", publisher)
-        self.assertEqual(RELEASE.VERSION, "0.2.4")
+        self.assertEqual(RELEASE.VERSION, "0.2.7")
 
     def test_refuses_previous_version_installer_filename(self):
         self.windows.rename(self.windows.with_name("EchoLingo_0.2.3_x64-setup.exe"))
@@ -155,7 +258,7 @@ class ReleaseAssetsTests(unittest.TestCase):
         self.assertFalse(manifest["rebuiltAfterValidation"])
         self.assertEqual(len(manifest["files"]), 3)
         self.assertEqual(len(list(self.output.iterdir())), 5)
-        self.assertEqual((self.output / "EchoLingo_0.2.4_windows_x64-setup.exe").read_bytes(), self.windows.read_bytes())
+        self.assertEqual((self.output / "EchoLingo_0.2.7_windows_x64-setup.exe").read_bytes(), self.windows.read_bytes())
         self.assertNotIn(str(self.root), (self.output / "RELEASE-MANIFEST.json").read_text())
         for line in (self.output / "SHA256SUMS.txt").read_text().splitlines():
             digest, name = line.split("  ", 1)

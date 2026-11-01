@@ -1,6 +1,7 @@
 """Focused immutable-artifact diagnostics never replace full acceptance."""
 from pathlib import Path
 import unittest
+from workflow_contract_helpers import executable_job
 
 ROOT = Path(__file__).resolve().parents[1]
 SOURCE = (ROOT / '.github/workflows/f1-fixture-reuse.yml').read_text()
@@ -20,7 +21,7 @@ class F1FixtureReuseWorkflowContract(unittest.TestCase):
         ci = (ROOT / '.github/workflows/ci.yml').read_text()
         expected = ci.split('  macos-screenshot-native-probe:\n', 1)[1].split('  desktop:\n', 1)[0].strip()
         actual = SOURCE.split('  macos-screenshot-native-probe:\n', 1)[1].strip()
-        self.assertEqual(actual, expected)
+        self.assertEqual(executable_job(actual), executable_job(expected))
 
     def test_all_production_changes_fail_and_pins_are_not_inputs(self):
         self.assertIn("git diff --name-only $base HEAD", SOURCE)

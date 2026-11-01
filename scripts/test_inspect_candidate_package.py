@@ -135,9 +135,9 @@ class CandidateInspectionTests(unittest.TestCase):
                     MODULE.verify_pe(path)
 
     def test_windows_versions_require_both_numeric_and_display_match(self):
-        valid = {"fileVersion": "0.2.6.0", "productVersion": "0.2.6", "fileParts": [0, 2, 6, 0], "productParts": [0, 2, 6, 0]}
+        valid = {"fileVersion": "0.2.7.0", "productVersion": "0.2.7", "fileParts": [0, 2, 7, 0], "productParts": [0, 2, 7, 0]}
         MODULE.verify_windows_version(valid)
-        for key, value in (("fileVersion", "0.2.5"), ("fileVersion", "0.2.6.1"), ("productVersion", "0.2.6-preview"),
+        for key, value in (("fileVersion", "0.2.5"), ("fileVersion", "0.2.7.1"), ("productVersion", "0.2.7-preview"),
                            ("fileParts", [0, 2, 6, 1]), ("productParts", [0, 2, 5, 0]), ("fileParts", [False, 2, 6, 0])):
             with self.subTest(key=key, value=value), self.assertRaises(MODULE.InspectionError):
                 MODULE.verify_windows_version({**valid, key: value})
@@ -288,7 +288,7 @@ class CandidateInspectionTests(unittest.TestCase):
     def test_report_only_after_matching_static_application_and_stable_source(self):
         with tempfile.TemporaryDirectory() as folder:
             root = Path(folder)
-            installer = root / "EchoLingo_0.2.6_x64-setup.exe"
+            installer = root / "EchoLingo_0.2.7_x64-setup.exe"
             built = root / "echolingo.exe"
             installer.write_bytes(b"generated installer container")
             built.write_bytes(pe())
@@ -301,8 +301,8 @@ class CandidateInspectionTests(unittest.TestCase):
             with mock.patch.object(MODULE.sys, "platform", "win32"), mock.patch.object(MODULE, "source_identity", return_value=identity), mock.patch.object(MODULE, "inspect_windows", side_effect=extract):
                 report = MODULE.inspect("Windows", installer, built, root / "inspection", "https://github.com/a/b/actions/runs/1",
                                         locked_build_passed=True, focused_tests_passed=True)
-                self.assertEqual(report["version"], "0.2.6")
-                self.assertEqual(report["applicationMetadata"], {"version": "0.2.6", "architecture": "x64"})
+                self.assertEqual(report["version"], "0.2.7")
+                self.assertEqual(report["applicationMetadata"], {"version": "0.2.7", "architecture": "x64"})
                 self.assertEqual(report["applicationSha256"], report["extractedApplicationSha256"])
                 self.assertTrue(all(value is True for value in report["checks"].values()))
                 self.assertEqual(json.loads((root / "inspection/checks.json").read_text()), report)
@@ -323,9 +323,9 @@ class CandidateInspectionTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as folder:
             root = Path(folder)
             (root / "src-tauri").mkdir()
-            (root / "package.json").write_text('{"version":"0.2.6"}')
-            (root / "src-tauri/tauri.conf.json").write_text('{"version":"0.2.6"}')
-            (root / "src-tauri/Cargo.toml").write_text('[package]\nversion="0.2.6"\n')
+            (root / "package.json").write_text('{"version":"0.2.7"}')
+            (root / "src-tauri/tauri.conf.json").write_text('{"version":"0.2.7"}')
+            (root / "src-tauri/Cargo.toml").write_text('[package]\nversion="0.2.7"\n')
             def git(*args):
                 subprocess.run(["git", "-C", str(root), *args], check=True, capture_output=True)
             git("init", "-q")
@@ -349,9 +349,9 @@ class CandidateInspectionTests(unittest.TestCase):
             root = Path(folder)
             (root / "src-tauri").mkdir()
             manifests = {
-                "package.json": '{"version":"0.2.6","description":"描述"}',
-                "src-tauri/tauri.conf.json": '{"version":"0.2.6","productName":"描述"}',
-                "src-tauri/Cargo.toml": '[package]\nversion="0.2.6"\ndescription="描述"\n',
+                "package.json": '{"version":"0.2.7","description":"描述"}',
+                "src-tauri/tauri.conf.json": '{"version":"0.2.7","productName":"描述"}',
+                "src-tauri/Cargo.toml": '[package]\nversion="0.2.7"\ndescription="描述"\n',
             }
             for name, content in manifests.items():
                 (root / name).write_text(content, encoding="utf-8")

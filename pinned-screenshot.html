@@ -1,0 +1,9 @@
+<!doctype html>
+<html lang="zh-CN">
+<head><meta charset="UTF-8"/><meta name="viewport" content="width=device-width, initial-scale=1.0"/><title>贴图 · EchoLingo</title></head>
+<body>
+  <header><span id="image-info">贴图</span><div class="actions"><button id="toggle-pin" aria-label="取消置顶" aria-pressed="true" title="取消置顶（图片仍会保留）" disabled><svg class="pin-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="m8 3 8 0-1 6 4 4v2H5v-2l4-4Zm4 12v7"/></svg><span id="pin-label">已置顶</span></button><button id="close-pin" aria-label="关闭贴图" title="关闭贴图，不保存文件">×</button></div></header>
+  <main><img id="pinned-image" alt="已固定的截图（包含编辑后的标注）" draggable="false" hidden/></main>
+  <p id="pin-status" role="status">正在准备贴图…</p>
+  <script type="module" src="/src/pinned-screenshot.ts"></script>
+</body></html>

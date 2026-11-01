@@ -493,6 +493,17 @@ pub fn ensure_popup_behavior(window: &tauri::WebviewWindow) -> Result<(), String
 
 #[cfg(target_os = "windows")]
 pub fn ensure_popup_behavior(window: &tauri::WebviewWindow) -> Result<(), String> {
+    set_topmost_without_activation(window, true)
+}
+
+/// Raw-passively-shown windows intentionally bypass Tao's visibility cache.
+/// Changing toolkit style flags on them can hide the actual visible HWND.
+/// Change only native z-order, without showing, hiding, moving or focusing it.
+#[cfg(target_os = "windows")]
+pub fn set_topmost_without_activation(
+    window: &tauri::WebviewWindow,
+    topmost: bool,
+) -> Result<(), String> {
     use std::ffi::c_void;
     #[link(name = "user32")]
     unsafe extern "system" {
@@ -513,13 +524,13 @@ pub fn ensure_popup_behavior(window: &tauri::WebviewWindow) -> Result<(), String
     if native.is_null() {
         return Err("WINDOW_HANDLE: Native Windows window is unavailable.".into());
     }
-    // SAFETY: Tauri owns the HWND. TOPMOST changes stacking only; NOMOVE,
+    // SAFETY: Tauri owns the HWND. TOPMOST/NOTOPMOST changes stacking only; NOMOVE,
     // NOSIZE and NOACTIVATE preserve geometry and the foreground application.
     // In particular, SHOWWINDOW is absent so hidden windows remain hidden.
     if unsafe {
         SetWindowPos(
             native,
-            -1isize as *mut c_void,
+            (if topmost { -1isize } else { -2isize }) as *mut c_void,
             0,
             0,
             0,
