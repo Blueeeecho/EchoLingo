@@ -748,7 +748,8 @@ try {
       q.publishSelection = () => {
         const next = q.image(400, 240);
         q.session = { kind: 'selection', id: next.id, revision: 0, width: 400, height: 240,
-          overlay: { x: 120, y: 150, width: 200, height: 120, viewportWidth: innerWidth, viewportHeight: innerHeight } };
+          overlay: { x: 120, y: 150, width: 200, height: 120, viewportWidth: innerWidth, viewportHeight: innerHeight,
+            toolbarBounds: { x: 0, y: 0, width: innerWidth, height: innerHeight } } };
         q.emit('screenshot-session', structuredClone(q.session));
       };
       q.publishSelection(); window.__sameToolbar = document.querySelector('.editor-toolbar');

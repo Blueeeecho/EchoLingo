@@ -19,6 +19,27 @@ describe('persistent screenshot selection', () => {
     const b = { x:-1920,y:-180,width:4480,height:1620 };
     expect(adjustSelection({x:-100,y:0,width:120.5,height:90.25},'move',-200,10,b)).toEqual({x:-300,y:10,width:120.5,height:90.25});
   });
+  it('accepts the full native overlay DTO without treating metadata as coordinates', () => {
+    const native = { x:192, y:346, width:640, height:110, viewportWidth:1024, viewportHeight:768,
+      toolbarBounds: { x:0, y:0, width:1024, height:768 } };
+    expect(adjustSelection(native, 'move', 12, 8, {x:0,y:0,width:1024,height:768})).toEqual({x:204,y:354,width:640,height:110});
+    expect(adjustSelection(native, 'se', 12, 8, {x:0,y:0,width:1024,height:768})).toEqual({x:192,y:346,width:652,height:118});
+    expect(adjustSelection(native, 'nw', -12, -8, {x:0,y:0,width:1024,height:768})).toEqual({x:180,y:338,width:652,height:118});
+    expect(Object.keys(adjustSelection(native, 'move', 0, 0, bounds)).sort()).toEqual(['height','width','x','y']);
+  });
+  it('rejects malformed actual geometry even when legitimate metadata is present', () => {
+    const native = {...rect, toolbarBounds: bounds};
+    for (const key of ['x','y','width','height']) for (const bad of [NaN, Infinity, -Infinity]) {
+      expect(()=>adjustSelection({...native,[key]:bad}, 'move', 0, 0, bounds)).toThrow();
+      expect(()=>adjustSelection(native, 'move', 0, 0, {...bounds,[key]:bad})).toThrow();
+    }
+    for (const bad of [-10,0]) {
+      expect(()=>adjustSelection({...native,width:bad}, 'move', 0, 0, bounds)).toThrow();
+      expect(()=>adjustSelection({...native,height:bad}, 'move', 0, 0, bounds)).toThrow();
+      expect(()=>adjustSelection(native, 'move', 0, 0, {...bounds,width:bad})).toThrow();
+      expect(()=>adjustSelection(native, 'move', 0, 0, {...bounds,height:bad})).toThrow();
+    }
+  });
   it('rejects nonfinite geometry', () => { expect(()=>adjustSelection(rect,'move',NaN,0,bounds)).toThrow(); });
 });
 
