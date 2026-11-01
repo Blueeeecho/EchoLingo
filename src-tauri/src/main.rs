@@ -2417,33 +2417,9 @@ fn visible_action_error(action: &str, error: &str) -> Option<String> {
         return None;
     }
     if action == "selection" {
-        // An unverifiable source is not an explicit user cancellation. Keep
-        // the identity guard closed, but explain the failure in a blank editor
-        // when this request is still current. Never expose native identities.
-        if error.starts_with("SOURCE_CHANGED:") {
-            return Some(
-                "无法确认原取词窗口，已停止取词。请在原窗口重新选词，或手动复制后翻译剪贴板。"
-                    .into(),
-            );
-        }
-        // A shortcut with no obtainable selection is also the user's manual
-        // input shortcut. Permission setup belongs in Settings, not a toast on
-        // an otherwise empty popup. Preserve a warning only if the clipboard
-        // could not be restored after our copy fallback changed it, or a sent
-        // copy received no response (which does not establish an empty selection).
-        return if error.starts_with("COPY_NO_UPDATE:")
-            || error.starts_with("SELECTION_UNAVAILABLE:")
-        {
-            Some(error.to_owned())
-        } else if error.starts_with("CLIPBOARD_RESTORE_FAILED") {
-            Some("原剪贴板恢复失败，当前剪贴板可能仍是刚才复制的选中文字。".into())
-        } else if error.starts_with("CLIPBOARD_RESTORE_SKIPPED") {
-            Some(
-                "复制未能安全完成，暂未恢复原剪贴板，已保留当前内容。请重试或使用截图识别。".into(),
-            )
-        } else {
-            None
-        };
+        // Alt+D is also manual input, even when native selection fails.
+        // Keep native diagnostics and safety guards, not an interrupting toast.
+        return None;
     }
     Some(
         error
@@ -2454,17 +2430,22 @@ fn visible_action_error(action: &str, error: &str) -> Option<String> {
     )
 }
 fn clipboard_restoration_notice(error: &str) -> Option<String> {
-    if error.starts_with("CLIPBOARD_RESTORE_FAILED:")
-        || error.starts_with("CLIPBOARD_RESTORE_SKIPPED:")
-    {
-        visible_action_error("selection", error)
+    // Keep restoration classification independent from selection UI policy:
+    // cancellation must not discard a real restore failure diagnostic.
+    if error.starts_with("CLIPBOARD_RESTORE_FAILED:") {
+        Some("原剪贴板恢复失败，当前剪贴板可能仍是刚才复制的选中文字。".into())
+    } else if error.starts_with("CLIPBOARD_RESTORE_SKIPPED:") {
+        Some(
+            "复制未能安全完成，暂未恢复原剪贴板，已保留当前内容。请重试或使用截图识别。".into(),
+        )
     } else {
         None
     }
 }
 fn finish_native_text<T>(result: Result<T, String>, cancelled: bool) -> Result<T, String> {
-    // Restoration is a global safety notice even when a newer task owns the
-    // popup. Never convert that warning into an old source presentation.
+    // Preserve restoration failure classification for native diagnostics even
+    // after cancellation. Presentation policy separately keeps Alt+D quiet;
+    // a stale result must never replace a newer source.
     if cancelled
         && !result
             .as_ref()
@@ -2497,16 +2478,6 @@ fn action_failure_presentation(
     let mut source = empty_input_payload(presentation_epoch);
     if action == "selection" {
         source["focusInput"] = serde_json::json!(true);
-    }
-    #[cfg(target_os = "macos")]
-    if action == "selection" && error.starts_with("PERMISSION:") {
-        // Keep the permission reminder and editable source in one epoch-bound
-        // event. The Settings link is explicit; a hotkey never requests access.
-        source["permissionRequired"] = serde_json::json!("accessibility");
-        return Some(ActionFailurePresentation {
-            source,
-            error: None,
-        });
     }
     if matches!(action, "capture" | "ocr" | "silentOcr" | "screenshot")
         && error.starts_with("PERMISSION:")
@@ -2780,11 +2751,14 @@ fn start_action(app: tauri::AppHandle, action: String) {
             );
         }
         if let Err(error) = &result {
-            if let Some(message) = clipboard_restoration_notice(error) {
-                // No source, epoch, activation or visibility mutation: an old
-                // copy's failed restore must remain visible during a new task.
-                let _ = app.emit("action-error", message);
-                return;
+            if action != "selection" {
+                if let Some(message) = clipboard_restoration_notice(error) {
+                    // Non-selection clipboard safety notices remain visible.
+                    // Alt+D instead falls through to the current blank editor;
+                    // stale selection failures cannot reopen or clear new input.
+                    let _ = app.emit("action-error", message);
+                    return;
+                }
             }
         }
         if !native_request_is_current(&app, &request, presentation, keep_popup) {
@@ -4762,12 +4736,12 @@ mod tests {
         assert!(hint.error.unwrap().contains("拖选"));
     }
     #[test]
-    fn copy_without_clipboard_update_remains_actionable_through_selection_presentation() {
+    fn copy_without_clipboard_update_opens_quiet_manual_input() {
         let error = "COPY_NO_UPDATE: The target did not update the clipboard";
-        assert_eq!(visible_action_error("selection", error), Some(error.into()));
+        assert_eq!(visible_action_error("selection", error), None);
         let failure = action_failure_presentation("selection", error, 44).unwrap();
         assert_eq!(failure.source, empty_selection_payload(44));
-        assert_eq!(failure.error.as_deref(), Some(error));
+        assert_eq!(failure.error, None);
         assert_eq!(
             finish_native_text::<String>(Err(error.into()), false),
             Err(error.into())
@@ -4778,22 +4752,20 @@ mod tests {
         );
     }
     #[test]
-    fn unverifiable_selection_retains_manual_copy_guidance_without_permission_claim() {
+    fn unverifiable_selection_opens_quiet_manual_input_without_permission_claim() {
         let error = "SELECTION_UNAVAILABLE: Native provider did not expose selection evidence";
         let failure = action_failure_presentation("selection", error, 45).unwrap();
         assert_eq!(failure.source, empty_selection_payload(45));
-        assert_eq!(failure.error.as_deref(), Some(error));
+        assert_eq!(failure.error, None);
         assert!(failure.source.get("permissionRequired").is_none());
     }
     #[test]
-    fn source_identity_failure_is_actionable_but_superseded_selection_stays_quiet() {
+    fn source_identity_failure_opens_manual_input_but_superseded_selection_stays_quiet() {
         let error = "SOURCE_CHANGED: Generated private source identity";
         let failure = action_failure_presentation("selection", error, 46).unwrap();
         assert_eq!(failure.source, empty_selection_payload(46));
         assert!(failure.source.get("permissionRequired").is_none());
-        let message = failure.error.unwrap();
-        assert!(message.contains("重新选词"));
-        assert!(!message.contains("Generated") && !message.contains("private"));
+        assert_eq!(failure.error, None);
         let cancelled = finish_native_text::<String>(Err(error.into()), true).unwrap_err();
         assert_eq!(cancelled, translation_requests::CANCELLED);
         assert!(action_failure_presentation("selection", &cancelled, 46).is_none());
@@ -4836,12 +4808,12 @@ mod tests {
             "selection",
             "CLIPBOARD_RESTORE_FAILED: Original formats unavailable"
         )
-        .is_some());
+        .is_none());
         assert!(visible_action_error(
             "selection",
             "CLIPBOARD_RESTORE_SKIPPED: Copy completion is uncertain"
         )
-        .is_some());
+        .is_none());
     }
     #[test]
     fn empty_ocr_is_blank_quiet_and_does_not_focus_or_translate() {
@@ -4906,10 +4878,7 @@ mod tests {
         let unavailable =
             action_failure_presentation("selection", "PERMISSION: Accessibility is not granted", 7)
                 .unwrap();
-        let mut expected = empty_selection_payload(7);
-        if cfg!(target_os = "macos") {
-            expected["permissionRequired"] = serde_json::json!("accessibility");
-        }
+        let expected = empty_selection_payload(7);
         assert_eq!(unavailable.source, expected);
         assert_eq!(unavailable.error, None);
 
@@ -4920,7 +4889,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(restoration.source, empty_selection_payload(8));
-        assert!(restoration.error.unwrap().contains("剪贴板恢复失败"));
+        assert_eq!(restoration.error, None);
         let skipped = action_failure_presentation(
             "selection",
             "CLIPBOARD_RESTORE_SKIPPED: Copy completion is uncertain",
@@ -4928,7 +4897,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(skipped.source, empty_selection_payload(8));
-        assert!(skipped.error.unwrap().contains("暂未恢复原剪贴板"));
+        assert_eq!(skipped.error, None);
         for (action, error) in [
             ("capture", "OCR 服务返回 HTTP 403，请检查服务凭据或额度"),
             ("silentOcr", "NATIVE_START: Helper unavailable"),
@@ -4941,17 +4910,14 @@ mod tests {
         }
     }
     #[test]
-    fn selection_accessibility_guidance_is_mac_only_and_atomic() {
+    fn selection_permission_failure_is_quiet_manual_input_on_every_platform() {
         let failure = action_failure_presentation(
             "selection",
             "PERMISSION: Accessibility is not granted",
             42,
         )
         .unwrap();
-        let mut expected = empty_selection_payload(42);
-        if cfg!(target_os = "macos") {
-            expected["permissionRequired"] = serde_json::json!("accessibility");
-        }
+        let expected = empty_selection_payload(42);
         assert_eq!(failure.source, expected);
         assert_eq!(failure.error, None);
         assert_eq!(failure.source["focusInput"], true);

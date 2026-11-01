@@ -82,8 +82,7 @@ class MacSelectionRecoveryContract(unittest.TestCase):
         self.assertIn('["launchIdentity", "pid", "windowID"]', fixture)
 
     def test_source_failure_feedback_does_not_remove_supersession_guard(self):
-        self.assertIn('if error.starts_with("SOURCE_CHANGED:")', MAIN)
-        self.assertIn("fn source_identity_failure_is_actionable_but_superseded_selection_stays_quiet()", MAIN)
+        self.assertIn("fn source_identity_failure_opens_manual_input_but_superseded_selection_stays_quiet()", MAIN)
         self.assertIn("finish_native_text(text, worker_request.cancelled() || source_changed)", MAIN)
         action = section(MAIN, "fn start_action(", "async fn hide_native_capture_window(")
         self.assertLess(action.index("if !native_request_is_current(&app, &request, presentation, keep_popup)"),
