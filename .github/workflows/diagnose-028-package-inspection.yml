@@ -1,0 +1,59 @@
+name: Read-only retained 0.2.8 Mac attachment diagnosis
+on:
+  push:
+    branches: [diag/028-package-inspection]
+    paths: [.github/workflows/diagnose-028-package-inspection.yml, scripts/diagnose-028-dmg-attachment.py]
+permissions:
+  contents: read
+  actions: read
+jobs:
+  same-bytes:
+    if: github.repository == 'Blueeeecho/EchoLingo' && github.ref == 'refs/heads/diag/028-package-inspection'
+    runs-on: macos-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Fetch only the pinned generated release artifacts
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('node:fs');
+            const path = require('node:path');
+            const crypto = require('node:crypto');
+            const { owner, repo } = context.repo;
+            const runId = 41281391324;
+            const source = '8ade30e0ed9c5d18c37768cd93ceb72ccfe4603c';
+            const { data: run } = await github.rest.actions.getWorkflowRun({ owner, repo, run_id: runId });
+            if (run.head_sha !== source || run.head_branch !== 'main' || run.path !== '.github/workflows/release.yml') throw new Error('Original run mismatch');
+            const entries = [
+              [13074130151, 'EchoLingo-macOS', 5378384, 'ae7df8549e32cfb7b51d12713b4edeb8917abbd590e4352612168a52ff5573a7', 'dmg.zip'],
+              [13073169414, 'EchoLingo-macOS-app-diagnostic', 4327455, '5410896a3a6694e2e81d3175f1b0ba1a7639f84189bc7aad3547fa4b1ed89144', 'app.zip'],
+            ];
+            const directory = path.join(process.env.RUNNER_TEMP, 'original-package-inputs');
+            fs.mkdirSync(directory);
+            for (const [id, name, size, hash, file] of entries) {
+              const { data: artifact } = await github.rest.actions.getArtifact({ owner, repo, artifact_id: id });
+              if (artifact.expired || artifact.name !== name || artifact.size_in_bytes !== size || artifact.workflow_run.id !== runId || artifact.workflow_run.head_sha !== source || artifact.digest !== `sha256:${hash}`) throw new Error('Original artifact mismatch');
+              const { data } = await github.rest.actions.downloadArtifact({ owner, repo, artifact_id: id, archive_format: 'zip' });
+              const bytes = Buffer.from(data);
+              if (bytes.length !== size || crypto.createHash('sha256').update(bytes).digest('hex') !== hash) throw new Error('Original bytes mismatch');
+              fs.writeFileSync(path.join(directory, file), bytes, { flag: 'wx' });
+            }
+      - name: Capture original bounded attach response without changing strict parsing
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 scripts/diagnose-028-dmg-attachment.py --inputs "$RUNNER_TEMP/original-package-inputs" --output "$RUNNER_TEMP/attachment-diagnostic"
+      - name: Preserve diagnostic response even when original strict parsing fails
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: EchoLingo-0.2.8-retained-attachment-diagnostic
+          if-no-files-found: error
+          path: |
+            ${{ runner.temp }}/attachment-diagnostic/*.stdout
+            ${{ runner.temp }}/attachment-diagnostic/*.stderr
+            ${{ runner.temp }}/attachment-diagnostic/diagnostic.json
