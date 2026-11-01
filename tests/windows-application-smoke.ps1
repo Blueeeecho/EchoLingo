@@ -3,7 +3,7 @@
 # It creates generated source content, a loopback mock and empty owned app dirs.
 # CustomShortcutsTests exercises loaded custom bindings, not Settings UI saving.
 [CmdletBinding()]
-param([string]$ApplicationPath = '', [switch]$OfflineTranslation, [switch]$InstalledPackage, [switch]$LatestIntentTests, [switch]$CustomShortcutsTests, [switch]$RustCapture, [string]$NativeCapturePath = '', [switch]$SourceTopmostModal, [switch]$DefaultCapture, [switch]$ScreenshotEditorTests)
+param([string]$ApplicationPath = '', [switch]$OfflineTranslation, [switch]$InstalledPackage, [switch]$LatestIntentTests, [switch]$CustomShortcutsTests, [switch]$RustCapture, [string]$NativeCapturePath = '', [switch]$SourceTopmostModal, [switch]$DefaultCapture, [switch]$ScreenshotEditorTests, [switch]$ScreenshotPinTests)
 $ErrorActionPreference = 'Stop'
 [Console]::OutputEncoding = [Text.UTF8Encoding]::new($false)
 try {
@@ -18,7 +18,8 @@ try {
     if ([string]::IsNullOrWhiteSpace($ApplicationPath)) {
         $ApplicationPath = Join-Path $PSScriptRoot '..\src-tauri\target\release\echolingo.exe'
     }
-    if ($ScreenshotEditorTests -and ($OfflineTranslation -or $LatestIntentTests -or $CustomShortcutsTests -or -not $DefaultCapture)) { throw 'SCREENSHOT_EDITOR_SCOPE: Use the dedicated generated F1 workflow with -DefaultCapture and exact native helper.' }
+    if ($ScreenshotEditorTests -and $ScreenshotPinTests) { throw 'SCREENSHOT_MODE: Full editor and focused pin-only modes are mutually exclusive.' }
+    if (($ScreenshotEditorTests -or $ScreenshotPinTests) -and ($OfflineTranslation -or $LatestIntentTests -or $CustomShortcutsTests -or -not $DefaultCapture)) { throw 'SCREENSHOT_EDITOR_SCOPE: Use the dedicated generated F1 workflow with -DefaultCapture and exact native helper.' }
     if ($LatestIntentTests -and $OfflineTranslation) { throw 'LATEST_INTENT_MOCK_ONLY: Existing three offline-model flows are unchanged.' }
     if ($CustomShortcutsTests -and ($OfflineTranslation -or $LatestIntentTests)) { throw 'CUSTOM_SHORTCUTS_MOCK_ONLY: Run the three loaded-custom-bindings workflows separately from offline/latest-intent modes.' }
     $ApplicationPath = (Resolve-Path -LiteralPath $ApplicationPath).Path
@@ -925,8 +926,10 @@ public static partial class EchoLingoApplicationSmoke {
         using (Process command = Process.Start(stop)) { command.StandardOutput.ReadToEnd(); command.StandardError.ReadToEnd(); Assert(command.WaitForExit(10000), "Own process-tree cleanup timed out."); }
         Assert(app.WaitForExit(5000), "Own application did not exit during cleanup.");
     }
-    public static Dictionary<string, object> Run(string executable, bool offline, bool installed, bool latest, bool customBindings, bool rustCapture, string nativeCapturePath, bool sourceTopmostModal, bool defaultCapture, bool screenshotEditor) {
+    public static Dictionary<string, object> Run(string executable, bool offline, bool installed, bool latest, bool customBindings, bool rustCapture, string nativeCapturePath, bool sourceTopmostModal, bool defaultCapture, bool screenshotEditor, bool screenshotPinOnly) {
         Assert(!screenshotEditor||(!offline&&!latest&&!customBindings&&defaultCapture&&!sourceTopmostModal),"Screenshot workflow must be isolated from OCR/translation modes.");
+        Assert(!screenshotPinOnly||screenshotEditor,"Pin-only requires the generated screenshot scope.");
+        ScreenshotPinOnly=screenshotPinOnly;
         SourceTopmostModal=sourceTopmostModal;SourceModalOwner=IntPtr.Zero;SourceModalChecks=0;
         Assert(!sourceTopmostModal||(rustCapture&&latest),"Modal run must explicitly select native capture.");
         RustCapture=rustCapture;VerifiedNativeChildren.Clear();NativeCaptureHash=rustCapture?NativeHash(nativeCapturePath):null;
@@ -1181,7 +1184,7 @@ public static partial class EchoLingoApplicationSmoke {
         [Web.Script.Serialization.JavaScriptSerializer].Assembly.Location, [Management.ManagementObject].Assembly.Location, [Windows.Automation.AutomationElement].Assembly.Location,
         [Windows.Automation.ControlType].Assembly.Location, [Windows.DependencyObject].Assembly.Location) | Select-Object -Unique
     Add-Type -TypeDefinition $source -ReferencedAssemblies $references
-    $result = [EchoLingoApplicationSmoke]::Run($ApplicationPath, [bool]$OfflineTranslation, [bool]$InstalledPackage, [bool]$LatestIntentTests, [bool]$CustomShortcutsTests, [bool]$RustCapture, $NativeCapturePath, [bool]$SourceTopmostModal, [bool]$DefaultCapture, [bool]$ScreenshotEditorTests)
+    $result = [EchoLingoApplicationSmoke]::Run($ApplicationPath, [bool]$OfflineTranslation, [bool]$InstalledPackage, [bool]$LatestIntentTests, [bool]$CustomShortcutsTests, [bool]$RustCapture, $NativeCapturePath, [bool]$SourceTopmostModal, [bool]$DefaultCapture, [bool]($ScreenshotEditorTests -or $ScreenshotPinTests), [bool]$ScreenshotPinTests)
     $result['powerShellVersion'] = $PSVersionTable.PSVersion.ToString()
     $result['applicationSha256'] = (Get-FileHash -Algorithm SHA256 -LiteralPath $ApplicationPath).Hash.ToLowerInvariant()
     [Console]::Out.WriteLine(($result | ConvertTo-Json -Depth 12 -Compress))

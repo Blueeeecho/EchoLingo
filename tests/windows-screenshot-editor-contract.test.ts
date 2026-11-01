@@ -16,7 +16,7 @@ describe('actual Windows screenshot fixture source wiring (not native acceptance
       expect(fixture + wrapper).toContain(required);
     }
     expect(fixture).not.toContain('__TAURI_INTERNALS__');
-    for (const name of ['escape-cancel', 'drag-redact-crop-copy-save-twice', 'click-window-close-cancel-confirm']) expect(fixture).toContain(`"${name}"`);
+    for (const name of ['escape-cancel', 'inplace-drag-copy-recapture-save-twice', 'click-window-copy-then-cancel']) expect(fixture).toContain(`"${name}"`);
   });
   it('bounds exported data and asserts no overwrite, hidden PNG payload, OCR, provider traffic or history', () => {
     for (const required of ['bytes.Length<=32*1024*1024', 'position==bytes.Length', 'kind!="eXIf"', 'kind!="iTXt"', 'File.ReadAllBytes(firstPath)', 'CaptureNumber(after,"ocrInvocationCount")==0', 'server.Connections==0&&server.Count==0&&server.Error==null', 'Deserialize<object[]>(File.ReadAllText(history)).Length==0', 'desktopDirectoryWritten', 'no global packet capture', 'screenshotLocalOpenRequiredCases', 'sourceBytesUnchanged', 'FileMode.CreateNew', 'screenshotEditorSurvivedOwnedFocusLoss']) expect(fixture).toContain(required);
@@ -49,7 +49,7 @@ describe('actual Windows screenshot fixture source wiring (not native acceptance
     expect(fixture).toContain('finally{CloseClipboard();}');
   });
   it('claims only its immediate native seed publication after close and reports bounded phase evidence', () => {
-    for (const required of ['seed-publication-close', 'sequenceBeforeSet', 'sequenceAfterSet', 'sequenceBeforeClose', 'sequenceAfterClose', 'sequenceOnReopen', 'sequenceAfterRead', 'seedAttempt', 'copyAttempt', 'copyPhase', 'leaseFormat', 'Observations.Count<48', 'ownerIsGeneratedSource', 'formatsMatch', 'contentMatches', 'observed!=0&&observed==after&&own&&formats&&content', 'Never rebase a later changed generation', 'SeedUnchanged()', 'next!=1&&next!=7&&next!=13&&next!=16']) expect(fixture).toContain(required);
+    for (const required of ['seed-publication-close', 'sequenceBeforeSet', 'sequenceAfterSet', 'sequenceBeforeClose', 'sequenceAfterClose', 'sequenceOnReopen', 'sequenceAfterRead', 'seedAttempt', 'copyAttempt', 'copyPhase', 'leaseFormat', 'Observations.Count<96', 'ownerIsGeneratedSource', 'formatsMatch', 'contentMatches', 'observed!=0&&observed==after&&own&&formats&&content', 'Never rebase a later changed generation', 'SeedUnchanged()', 'next!=1&&next!=7&&next!=13&&next!=16']) expect(fixture).toContain(required);
     expect(fixture).not.toContain('Clipboard.GetText()');
     expect(fixture).toContain('bool same=lockedRead&&digest!=null');
     expect(fixture).toContain('RecordState("seed-verified-close")');
@@ -74,11 +74,21 @@ describe('actual Windows screenshot fixture source wiring (not native acceptance
     const stable = new Function('generation', 'before', 'after', `return ${expression};`) as (generation: number, before: number, after: number) => boolean;
     for (const [before, after, expected] of [[10, 10, false], [10, 15, false], [15, 15, true], [15, 16, false], [0, 0, false]] as const) expect(stable(10, before, after)).toBe(expected);
   });
+  it('exercises actual pin HWND lifecycle and bounded generated pixels without mocked IPC', () => {
+    for (const value of ['ScreenshotPinCase(', 'ScreenshotPins(app.Id)', 'ScreenshotPinTopmost(pin)', 'ScreenshotPinToggle(app,pin,true)', 'ScreenshotPinToggle(app,pin,false)', 'SetWindowPos(pin,IntPtr.Zero', '!IsWindow(pin)&&ScreenshotPins(app.Id).Count==0', 'ScreenshotPinPixels(app,pin,selected)', 'new Bitmap(3,3)', 'ScreenshotOwnedClipboard.SeedUnchanged()', 'inplace-pin-native-lifecycle']) expect(fixture).toContain(value);
+    expect(wrapper).toContain('[switch]$ScreenshotPinTests');
+    expect(fixture).toContain('if(ScreenshotPinOnly)');
+    expect(fixture).not.toContain('__TAURI_INTERNALS__');
+  });
+  it('maps F1 exports to dismiss/re-capture while retaining standalone cancellation and collision oracles', () => {
+    for (const value of ['if(closes)WaitFor', 'for(int save=0;save<2;save++)', 'recapturedSaveSessions', 'inplaceCopyAndSavesDismissed', 'savedCaptureReopenedThroughSettings', 'standaloneCollisionNumberingVerified', 'ScreenshotContinueOpen(app,dialogOwner)', 'inplaceCancelPreservedClipboard']) expect(fixture).toContain(value);
+    expect(fixture).not.toContain('ScreenshotInvoke(app,editor,"100%")');
+  });
   it('observes a failed owned native Open selector without logging names, values or changing input', () => {
     const describe = fixture.slice(fixture.indexOf('static Dictionary<string,object> ScreenshotOpenControlMetadata('), fixture.indexOf('static Dictionary<string,object> ScreenshotOpenGenerated('));
     for (const required of ['titleMatchesExpected', 'ownerIsEditor', 'foregroundMatches', 'numericAutomationId', 'nativeControlId', 'ControlType.Edit', 'ControlType.ComboBox', 'depth<4', 'i<32', 'ScreenshotNativeOpenObservations.Count>=2']) expect(describe).toContain(required);
     for (const forbidden of ['.Current.Name', '.Current.Value', '.SetValue(', '.Invoke()', 'Send(', '.SetFocus(']) expect(describe).not.toContain(forbidden);
-    expect(fixture).toContain('catch{ScreenshotDescribeOpenDialog(app,editor,modal,format);throw;}');
+    expect(fixture).toContain('catch{ScreenshotDescribeOpenDialog(app,dialogOwner,modal,format);throw;}');
     expect(fixture).toContain('AutomationElement.AutomationIdProperty,"1148"');
   });
   it('waits for an owned initialized native Cancel target before one Escape and preserves its phases', () => {
@@ -92,7 +102,7 @@ describe('actual Windows screenshot fixture source wiring (not native acceptance
   });
   it('selects only the observed native filename1148 Edit/ComboBox/ComboBoxEx32 chain', () => {
     const selector = fixture.slice(fixture.indexOf('static bool ScreenshotOwnOpenDialog('), fixture.indexOf('static bool ScreenshotPixelsEqual('));
-    for (const required of ['node.Current.AutomationId!="1148"', 'GetDlgCtrlID(window)==1148', 'GetAncestor(window,2)==modal', 'ControlType.Edit,"Edit"', 'ControlType.ComboBox,"ComboBox"', 'ControlType.Pane,"ComboBoxEx32"', 'Automation.Compare(parent,root)', 'ScreenshotOwnOpenDialog(app,editor,modal)', 'Assert(edits.Count<=1', 'edit.Current.HasKeyboardFocus']) expect(selector).toContain(required);
+    for (const required of ['node.Current.AutomationId!="1148"', 'GetDlgCtrlID(window)==1148', 'GetAncestor(window,2)==modal', 'ControlType.Edit,"Edit"', 'ControlType.ComboBox,"ComboBox"', 'ControlType.Pane,"ComboBoxEx32"', 'Automation.Compare(parent,root)', 'ScreenshotOwnOpenDialog(app,dialogOwner,modal)', 'Assert(edits.Count<=1', 'edit.Current.HasKeyboardFocus']) expect(selector).toContain(required);
     expect(selector).not.toContain('AutomationIdProperty,"1001"');
     expect(selector.match(/\.SetValue\(path\)/g)).toHaveLength(1);
     expect(selector.match(/Send\(new INPUT/g)).toHaveLength(1);

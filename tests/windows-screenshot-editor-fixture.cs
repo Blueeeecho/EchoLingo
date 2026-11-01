@@ -44,7 +44,7 @@ public static partial class EchoLingoApplicationSmoke {
     sealed class ScreenshotClipboardLease {
         readonly IntPtr source;uint generation,format;string digest;IntPtr owner;bool initialized;int seedAttempt,copyAttempt,readOnlyObservationRetries;string copyPhase="cancel-baseline";
         public readonly List<Dictionary<string,object>> Observations=new List<Dictionary<string,object>>();
-        void Record(Dictionary<string,object> row){Assert(Observations.Count<48,"Screenshot clipboard diagnostic bound exceeded.");row["seedAttempt"]=seedAttempt;row["copyAttempt"]=copyAttempt;row["copyPhase"]=copyPhase;row["leaseFormat"]=format;row["readOnlyObservationRetries"]=readOnlyObservationRetries;Observations.Add(row);}
+        void Record(Dictionary<string,object> row){Assert(Observations.Count<96,"Screenshot clipboard diagnostic bound exceeded.");row["seedAttempt"]=seedAttempt;row["copyAttempt"]=copyAttempt;row["copyPhase"]=copyPhase;row["leaseFormat"]=format;row["readOnlyObservationRetries"]=readOnlyObservationRetries;Observations.Add(row);}
         public void BeginCopy(string phase){copyAttempt++;copyPhase=phase;readOnlyObservationRetries=0;}
         public bool StableImageRead(uint before,uint after){bool stable=before!=0&&before!=generation&&before==after;if(!stable)readOnlyObservationRetries++;return stable;}
         void RecordState(string phase,bool lockedRead=false){uint sequence=GetClipboardSequenceNumber();IntPtr currentOwner=GetClipboardOwner();bool same=lockedRead&&digest!=null&&generation!=0&&sequence==generation&&currentOwner==owner;
@@ -117,6 +117,7 @@ public static partial class EchoLingoApplicationSmoke {
             finally{CloseClipboard();}
         }
     }
+    static bool ScreenshotPinOnly;
     const string ScreenshotCanvasName="\u56fe\u7247\u9884\u89c8\uff1b\u4f7f\u7528\u5de5\u5177\u680f\u6dfb\u52a0\u6807\u6ce8";
     static IntPtr ScreenshotWindow(int process) {
         List<IntPtr> candidates=new List<IntPtr>();
@@ -158,6 +159,16 @@ public static partial class EchoLingoApplicationSmoke {
         try{Thread.Sleep(60);ScreenshotMove(app,editor,b);Thread.Sleep(60);}
         finally{if(ForegroundPid()==app.Id){INPUT up=new INPUT();up.data.mouse.flags=4;Send(new INPUT[]{up});}}
     }
+    static void ScreenshotContinueOpen(Process app,IntPtr owner) {
+        bool confirmed=false;
+        WaitFor(delegate{
+            IntPtr foreground=GetForegroundWindow();StringBuilder name=new StringBuilder(128);GetClassName(foreground,name,name.Capacity);
+            if(ForegroundPid()==app.Id&&foreground!=owner&&name.ToString()=="#32770")return true;
+            AutomationElement button=ScreenshotButton(owner,"\u7ee7\u7eed\u6253\u5f00");
+            if(!confirmed&&button!=null&&button.Current.IsEnabled&&!button.Current.IsOffscreen){confirmed=true;ScreenshotInvoke(app,owner,"\u7ee7\u7eed\u6253\u5f00");}
+            return false;
+        },10,"Open did not reach its owned native dialog after optional unsaved-image confirmation.",app);
+    }
     static Dictionary<string,object> ScreenshotCancelState(Process app,IntPtr editor,IntPtr modal,string caption) {
         Dictionary<string,object> state=new Dictionary<string,object>{{"ready",false},{"dialogVisible",true},{"editorVisible",false},{"editorEnabled",false},{"savePresent",false},{"saveEnabled",false},{"editorDomInspected",false}};
         try{uint pid,editorPid;uint thread=GetWindowThreadProcessId(modal,out pid);GetWindowThreadProcessId(editor,out editorPid);
@@ -181,7 +192,7 @@ public static partial class EchoLingoApplicationSmoke {
         string phase=buttonName=="\u53e6\u5b58\u4e3a"?"save-as":"open";
         string caption=phase=="save-as"?"\u53e6\u5b58 PNG\uff08\u540c\u540d\u6587\u4ef6\u5c06\u81ea\u52a8\u7f16\u53f7\uff0c\u4e0d\u8986\u76d6\uff09":"\u6253\u5f00\u672c\u5730 PNG / JPEG \u56fe\u7247";
         Assert(ScreenshotNativeCancelObservations.Count<2,"Native cancellation diagnostic bound exceeded.");Dictionary<string,object> observation=new Dictionary<string,object>{{"phase",phase},{"escapePresses",0}};ScreenshotNativeCancelObservations.Add(observation);
-        ScreenshotInvoke(app,editor,buttonName);IntPtr modal=IntPtr.Zero;
+        ScreenshotInvoke(app,editor,buttonName);if(phase=="open")ScreenshotContinueOpen(app,editor);IntPtr modal=IntPtr.Zero;
         try{WaitFor(delegate{modal=GetForegroundWindow();Dictionary<string,object> state=ScreenshotCancelState(app,editor,modal,caption);observation["beforeEscape"]=state;return Convert.ToBoolean(state["ready"]);},10,"Native "+phase+" dialog did not become an initialized, focused cancellation target; no key sent.",app);
             Assert(ForegroundPid()==app.Id&&GetForegroundWindow()==modal&&GetWindow(modal,4)==editor&&IsWindowEnabled(modal)&&!IsWindowEnabled(editor),"Native dialog lost ownership before cancellation; no key sent.");
             Send(new INPUT[]{Key(0x1B,false),Key(0x1B,true)});observation["escapePresses"]=1;
@@ -237,28 +248,38 @@ public static partial class EchoLingoApplicationSmoke {
         AutomationElement host=TreeWalker.RawViewWalker.GetParent(combo);if(!ScreenshotFilenameNode(host,ControlType.Pane,"ComboBoxEx32",process,modal))return false;
         AutomationElement parent=TreeWalker.RawViewWalker.GetParent(host);return parent!=null&&Automation.Compare(parent,root);
     }
-    static Dictionary<string,object> ScreenshotOpenGenerated(Process app,IntPtr editor,string path,string format,Bitmap expected,string output) {
+    static Dictionary<string,object> ScreenshotOpenGenerated(Process app,IntPtr editor,string path,string format,Bitmap expected,string output,ProcessStartInfo settingsStart=null,bool saveOpened=true) {
         Assert(File.Exists(path)&&(File.GetAttributes(path)&FileAttributes.ReparsePoint)==0,"Generated image input is missing or redirected.");
         byte[] original=File.ReadAllBytes(path);Assert(original.Length>0&&original.Length<65536,"Generated image input exceeds its fixture bound.");
-        ScreenshotInvoke(app,editor,"\u6253\u5f00\u56fe\u7247");IntPtr modal=IntPtr.Zero;
+        IntPtr dialogOwner=editor;
+        if(settingsStart!=null) {
+            using(Process secondary=Process.Start(settingsStart))Assert(secondary.WaitForExit(5000)&&secondary.ExitCode==0,"Explicit settings launch did not exit via the existing single-instance route.");
+            dialogOwner=MainWindow(app.Id);Assert(dialogOwner!=IntPtr.Zero,"Actual settings window missing.");
+            AutomationElement open=null;WaitFor(delegate{return (open=ScreenshotButton(dialogOwner,"\u6253\u5f00\u672c\u5730 PNG / JPEG"))!=null;},10,"Actual screenshot settings Open action missing.",app);
+            object scroll;if(open.TryGetCurrentPattern(ScrollItemPattern.Pattern,out scroll))((ScrollItemPattern)scroll).ScrollIntoView();
+            ScreenshotInvoke(app,dialogOwner,"\u6253\u5f00\u672c\u5730 PNG / JPEG");
+        } else ScreenshotInvoke(app,editor,"\u6253\u5f00\u56fe\u7247");
+        ScreenshotContinueOpen(app,dialogOwner);IntPtr modal=IntPtr.Zero;
         WaitFor(delegate{modal=GetForegroundWindow();StringBuilder name=new StringBuilder(128);GetClassName(modal,name,name.Capacity);return modal!=editor&&ForegroundPid()==app.Id&&name.ToString()=="#32770";},10,"Generated file Open did not show an owned native dialog.",app);
         AutomationElement edit=null;
-        try{WaitFor(delegate{if(!ScreenshotOwnOpenDialog(app,editor,modal))return false;AutomationElement root=AutomationElement.FromHandle(modal);AutomationElementCollection edits=root.FindAll(TreeScope.Descendants,new AndCondition(new PropertyCondition(AutomationElement.ControlTypeProperty,ControlType.Edit),new PropertyCondition(AutomationElement.AutomationIdProperty,"1148")));
+        try{WaitFor(delegate{if(!ScreenshotOwnOpenDialog(app,dialogOwner,modal))return false;AutomationElement root=AutomationElement.FromHandle(modal);AutomationElementCollection edits=root.FindAll(TreeScope.Descendants,new AndCondition(new PropertyCondition(AutomationElement.ControlTypeProperty,ControlType.Edit),new PropertyCondition(AutomationElement.AutomationIdProperty,"1148")));
             Assert(edits.Count<=1,"Native Open file-name Edit is ambiguous; no blind input was sent.");if(edits.Count==0)return false;edit=edits[0];return ScreenshotFilenameChain(edit,root,app.Id,modal);},10,"Native Open needs the observed unique Edit/ComboBox/ComboBoxEx32 1148 chain; no blind input was sent.",app);}
-        catch{ScreenshotDescribeOpenDialog(app,editor,modal,format);throw;}
+        catch{ScreenshotDescribeOpenDialog(app,dialogOwner,modal,format);throw;}
         Assert(edit.Current.ProcessId==app.Id,"Native file-name Edit belongs to another process.");object raw;Assert(edit.TryGetCurrentPattern(ValuePattern.Pattern,out raw)&&!((ValuePattern)raw).Current.IsReadOnly,"Native file-name Edit is not writable.");
-        Assert(ScreenshotOwnOpenDialog(app,editor,modal)&&ScreenshotFilenameChain(edit,AutomationElement.FromHandle(modal),app.Id,modal),"Native Open target identity changed before writing the generated path.");
+        Assert(ScreenshotOwnOpenDialog(app,dialogOwner,modal)&&ScreenshotFilenameChain(edit,AutomationElement.FromHandle(modal),app.Id,modal),"Native Open target identity changed before writing the generated path.");
         ((ValuePattern)raw).SetValue(path);edit.SetFocus();
-        Assert(ScreenshotOwnOpenDialog(app,editor,modal)&&edit.Current.HasKeyboardFocus,"Native Open lost focus before submitting the generated path; no key sent.");Send(new INPUT[]{Key(0x0D,false),Key(0x0D,true)});
+        Assert(ScreenshotOwnOpenDialog(app,dialogOwner,modal)&&edit.Current.HasKeyboardFocus,"Native Open lost focus before submitting the generated path; no key sent.");Send(new INPUT[]{Key(0x0D,false),Key(0x0D,true)});
         WaitFor(delegate{AutomationElement copy=ScreenshotButton(editor,"\u590d\u5236");return !IsWindowVisible(modal)&&IsWindowVisible(editor)&&copy!=null&&copy.Current.IsEnabled&&Element(editor,expected.Width+" \u00d7 "+expected.Height+" px")!=null;},15,"Successful native Open did not install the generated local image session.",app);
         using(Bitmap copied=ScreenshotClipboard(app,editor,expected.Size,delegate(Bitmap actual){return ScreenshotPixelsEqual(actual,expected);},"local-"+format)) {
             for(int y=0;y<expected.Height;y++)for(int x=0;x<expected.Width;x++)Assert(copied.GetPixel(x,y).ToArgb()==expected.GetPixel(x,y).ToArgb(),"Native local image Open changed generated decoded pixels.");
+            if(saveOpened) {
             HashSet<string> existing=new HashSet<string>(Directory.GetFiles(output,"*.png"),StringComparer.OrdinalIgnoreCase);
             ScreenshotInvoke(app,editor,"\u4fdd\u5b58");WaitFor(delegate{return Directory.GetFiles(output,"*.png").Length==existing.Count+1&&ScreenshotButton(editor,"\u4fdd\u5b58").Current.IsEnabled;},15,"Opened local image did not save as a new PNG.",app);
             string saved=Array.Find(Directory.GetFiles(output,"*.png"),delegate(string value){return !existing.Contains(value);});Assert(saved!=null,"New opened-image PNG missing.");ScreenshotPng(saved,copied);
+            }
         }
         Assert(Convert.ToBase64String(original)==Convert.ToBase64String(File.ReadAllBytes(path)),"Opening/editing/saving overwrote the original local input.");
-        return new Dictionary<string,object>{{"format",format},{"nativeDialogSubmitted",true},{"copiedPixelSize",new int[]{expected.Width,expected.Height}},{"savedFlattenedPngPixelsMatched",true},{"sourceBytesUnchanged",true},{"ok",true}};
+        return new Dictionary<string,object>{{"format",format},{"nativeDialogSubmitted",true},{"copiedPixelSize",new int[]{expected.Width,expected.Height}},{"savedFlattenedPngPixelsMatched",saveOpened},{"sourceBytesUnchanged",true},{"ok",true}};
     }
     static bool ScreenshotPixelsEqual(Bitmap actual,Bitmap expected) {
         if(actual.Size!=expected.Size)return false;for(int y=0;y<actual.Height;y++)for(int x=0;x<actual.Width;x++)if(actual.GetPixel(x,y).ToArgb()!=expected.GetPixel(x,y).ToArgb())return false;return true;
@@ -271,7 +292,7 @@ public static partial class EchoLingoApplicationSmoke {
         }return true;
     }
     static Bitmap ScreenshotClipboard(Process app,IntPtr editor,Size expected,Func<Bitmap,bool> generatedPixelsMatch,string copyPhase) {
-        ScreenshotOwnedClipboard.BeginCopy(copyPhase);ScreenshotOwnedClipboard.Seed();ScreenshotInvoke(app,editor,"\u590d\u5236");
+        ScreenshotOwnedClipboard.BeginCopy(copyPhase);ScreenshotOwnedClipboard.Seed();AutomationElement inplace=ScreenshotButton(editor,"\u590d\u5236\u622a\u56fe\u5e76\u5b8c\u6210");bool closes=inplace!=null&&!inplace.Current.IsOffscreen;ScreenshotInvoke(app,editor,closes?"\u590d\u5236\u622a\u56fe\u5e76\u5b8c\u6210":"\u590d\u5236");
         Bitmap result=null;bool accepted=false;
         try{WaitFor(delegate{
             uint generation=GetClipboardSequenceNumber();
@@ -283,7 +304,7 @@ public static partial class EchoLingoApplicationSmoke {
                 Assert(result.Size==expected,"Clipboard pixels have wrong dimensions after real crop.");
                 if(!ScreenshotOwnedClipboard.ObserveImage(generation,delegate{return generatedPixelsMatch(result);})){result.Dispose();result=null;return false;}return true; }
             catch(System.Runtime.InteropServices.ExternalException){if(result!=null){result.Dispose();result=null;}return false;}
-        },10,"Actual editor Copy did not publish an image to the system clipboard.",app);accepted=true;return result;}
+        },10,"Actual editor Copy did not publish an image to the system clipboard.",app);if(closes)WaitFor(delegate{return !IsWindowVisible(editor);},10,"In-place copy did not dismiss capture after clipboard commit.",app);accepted=true;return result;}
         finally{if(!accepted&&result!=null)result.Dispose();}
     }
     static void ScreenshotPng(string path,Bitmap expected) {
@@ -312,6 +333,76 @@ public static partial class EchoLingoApplicationSmoke {
         Send(new INPUT[]{Key(0x70,false),Key(0x70,true)}); // Exactly one real unmodified F1.
         WaitFor(delegate{return AppOcrReady(form,app.Id,form.Handle,frame,pointer,display,ready,oldHelper,clock);},25,"Actual F1 did not produce verified native hover edges over the generated window.",app);
         ready["shortcut"]="F1";ready["hotkeyPresses"]=1;ready["expectedWindowDimensions"]=new int[]{frame.Width,frame.Height};return ready;
+    }
+    [DllImport("user32.dll",SetLastError=true)] static extern bool SetWindowPos(IntPtr window,IntPtr after,int x,int y,int width,int height,uint flags);
+    const string PinnedImageName="\u5df2\u56fa\u5b9a\u7684\u622a\u56fe\uff08\u5305\u542b\u7f16\u8f91\u540e\u7684\u6807\u6ce8\uff09";
+    static List<IntPtr> ScreenshotPins(int process) {
+        List<IntPtr> result=new List<IntPtr>();
+        EnumWindows(delegate(IntPtr window,IntPtr unused){
+            uint owner;GetWindowThreadProcessId(window,out owner);StringBuilder title=new StringBuilder(128),name=new StringBuilder(128);
+            GetWindowText(window,title,title.Capacity);GetClassName(window,name,name.Capacity);
+            if(owner==process&&GetAncestor(window,2)==window&&name.ToString()=="Tauri Window"&&title.ToString()=="\u8d34\u56fe \u00b7 EchoLingo")result.Add(window);
+            return true;
+        },IntPtr.Zero);return result;
+    }
+    static bool ScreenshotPinTopmost(IntPtr pin){return (GetWindowLongPtr(pin,-20).ToInt64()&8)!=0;}
+    static Rectangle ScreenshotPinBounds(IntPtr pin){RECT r=new RECT();Assert(IsWindow(pin)&&GetWindowRect(pin,out r),"Generated pin HWND disappeared before measurement.");return Rectangle.FromLTRB(r.left,r.top,r.right,r.bottom);}
+    static void ScreenshotPinToggle(Process app,IntPtr pin,bool before) {
+        string name=before?"\u53d6\u6d88\u7f6e\u9876":"\u7f6e\u9876\u8d34\u56fe";AutomationElement button=null;object pattern=null;
+        WaitFor(delegate{button=ScreenshotButton(pin,name);return button!=null&&button.Current.IsEnabled&&!button.Current.IsOffscreen;},10,"Pin toggle not ready in actual WebView.",app);
+        Assert(button.TryGetCurrentPattern(TogglePattern.Pattern,out pattern),"Pin toggle has no typed UIA TogglePattern.");
+        TogglePattern toggle=(TogglePattern)pattern;Assert(toggle.Current.ToggleState==(before?ToggleState.On:ToggleState.Off),"Pin toggle initial accessibility state disagrees with native topmost state.");toggle.Toggle();
+        WaitFor(delegate{return IsWindowVisible(pin)&&ScreenshotPinTopmost(pin)!=before&&ScreenshotButton(pin,before?"\u7f6e\u9876\u8d34\u56fe":"\u53d6\u6d88\u7f6e\u9876")!=null;},10,"Pin UI toggle did not change native WS_EX_TOPMOST.",app);
+    }
+    static void ScreenshotPinPixels(Process app,IntPtr pin,Size pixels) {
+        AutomationElement image=null;WaitFor(delegate{return (image=Element(pin,PinnedImageName))!=null&&!image.Current.IsOffscreen;},10,"Decoded pinned image is missing from actual WebView accessibility.",app);
+        System.Windows.Rect box=image.Current.BoundingRectangle;Assert(box.Width>0&&box.Height>0&&ScreenshotPinTopmost(pin)&&IsWindowVisible(pin),"Generated pinned image is not visible/topmost.");
+        double scale=Math.Min(box.Width/pixels.Width,box.Height/pixels.Height),left=box.X+(box.Width-pixels.Width*scale)/2,top=box.Y+(box.Height-pixels.Height*scale)/2;
+        Point[] samples=new Point[]{new Point(40,40),new Point(150,80),new Point(500,80)};
+        Color[] expected=new Color[]{Color.FromArgb(228,93,104),Color.FromArgb(23,101,199),Color.FromArgb(210,60,90)};
+        Assert(DwmFlush()==0,"Generated pin did not settle before bounded pixel observation.");
+        for(int sampleIndex=0;sampleIndex<samples.Length;sampleIndex++) {
+            Point point=new Point((int)Math.Round(left+samples[sampleIndex].X*scale),(int)Math.Round(top+samples[sampleIndex].Y*scale));Rectangle roi=new Rectangle(point.X-1,point.Y-1,3,3);
+            Assert(ScreenshotPinBounds(pin).Contains(roi)&&Screen.FromHandle(pin).WorkingArea.Contains(roi),"Generated pin pixel ROI is outside its owned visible window.");
+            for(int y=roi.Top;y<roi.Bottom;y++)for(int x=roi.Left;x<roi.Right;x++) {
+                IntPtr visible=GetAncestor(WindowFromPoint(new Point(x,y)),2);uint owner;GetWindowThreadProcessId(visible,out owner);
+                Assert(visible==pin&&owner==app.Id,"Generated pin ROI is occluded; no foreign screen pixels read.");
+            }
+            using(Bitmap sample=new Bitmap(3,3)) { using(Graphics graphics=Graphics.FromImage(sample))graphics.CopyFromScreen(roi.Location,Point.Empty,roi.Size,CopyPixelOperation.SourceCopy);
+                Color wanted=expected[sampleIndex];for(int y=0;y<3;y++)for(int x=0;x<3;x++){Color color=sample.GetPixel(x,y);Assert(Math.Abs(color.R-wanted.R)<=3&&Math.Abs(color.G-wanted.G)<=3&&Math.Abs(color.B-wanted.B)<=3,"Pinned raster lost its opaque annotation or untouched generated source pixels.");} }
+        }
+    }
+    static Dictionary<string,object> ScreenshotPinCase(Form form,Panel image,Process app,Point first,Point last,Size selected,uint previous,string output) {
+        Assert(ScreenshotPins(app.Id).Count==0,"Pin fixture must start without another app-owned reference window.");
+        int files=Directory.GetFiles(output).Length;Assert(ScreenshotOwnedClipboard.SeedUnchanged(),"Pin case requires its unchanged owned clipboard sentinel.");
+        Dictionary<string,object> result=ScreenshotPicker(form,image,app,first,previous);IntPtr pin=IntPtr.Zero,editor=IntPtr.Zero;bool finished=false;
+        try {
+            MoveGenerated(form,first);INPUT down=new INPUT();down.data.mouse.flags=2;Send(new INPUT[]{down});Thread.Sleep(80);MoveGenerated(form,last);Thread.Sleep(80);INPUT up=new INPUT();up.data.mouse.flags=4;Send(new INPUT[]{up});
+            WaitFor(delegate{editor=ScreenshotWindow(app.Id);return editor!=IntPtr.Zero&&IsWindowVisible(editor)&&Element(editor,ScreenshotCanvasName)!=null&&AppOverlays(app.Id)==0;},25,"Pin fixture F1 did not prepare the production in-place editor.",app);
+            ScreenshotDrag(app,editor,"\u5b9e\u5fc3\u906e\u6321",selected,new Point(10,10),new Point(80,70));
+            WaitFor(delegate{AutomationElement undo=ScreenshotButton(editor,"\u64a4\u9500");return undo!=null&&undo.Current.IsEnabled;},10,"Pin fixture annotation did not commit.",app);
+            OnUi(form,delegate{form.Activate();SetForegroundWindow(form.Handle);});RequireForeground(form);
+            ScreenshotInvoke(app,editor,"\u56fa\u5b9a\u622a\u56fe\u5230\u684c\u9762");
+            WaitFor(delegate{List<IntPtr> pins=ScreenshotPins(app.Id);Assert(pins.Count<=1,"One pin action created multiple reference windows.");if(pins.Count==1)pin=pins[0];return pin!=IntPtr.Zero&&pin!=editor&&IsWindowVisible(pin)&&Element(pin,PinnedImageName)!=null&&ScreenshotButton(pin,"\u53d6\u6d88\u7f6e\u9876")!=null&&ScreenshotButton(pin,"\u53d6\u6d88\u7f6e\u9876").Current.IsEnabled&&!IsWindowVisible(editor);},20,"Pin handoff did not show decoded reference and dismiss capture.",app);
+            RequireForeground(form);Assert(ScreenshotPinTopmost(pin),"New reference window is not native topmost.");
+            Rectangle work=Screen.FromPoint(first).WorkingArea,initial=ScreenshotPinBounds(pin);Assert(work.Contains(initial),"Pinned outer frame is not clamped to capture monitor work area.");
+            ScreenshotPinPixels(app,pin,selected);result["editedRasterVisible"]=true;result["passiveShowPreservedSourceForeground"]=true;result["decodedReferenceVisibleAndCaptureDismissed"]=true;result["nativeTopmostInitially"]=true;result["initialOuterFrameWithinSourceWorkArea"]=true;
+            ScreenshotPinToggle(app,pin,true);result["nativeUnpinVerified"]=true;ScreenshotPinToggle(app,pin,false);result["nativeRepinVerified"]=true;
+            // Native Move/Size exercises actual HWND geometry without a global
+            // mouse marathon or accidental drag into a foreign application.
+            int width=Math.Min(work.Width-32,initial.Width+80),height=Math.Min(work.Height-32,initial.Height+60);
+            int x=Math.Min(work.Right-width-8,Math.Max(work.Left+8,initial.X+24)),y=Math.Min(work.Bottom-height-8,Math.Max(work.Top+8,initial.Y+24));
+            Assert(width>200&&height>120&&(x!=initial.X||y!=initial.Y)&&(width!=initial.Width||height!=initial.Height),"Generated monitor cannot support the bounded pin move/resize case.");
+            Assert(SetWindowPos(pin,IntPtr.Zero,x,y,width,height,0x0004|0x0010),"Native pin move/resize failed.");
+            WaitFor(delegate{Rectangle bounds=ScreenshotPinBounds(pin);return Math.Abs(bounds.X-x)<=2&&Math.Abs(bounds.Y-y)<=2&&Math.Abs(bounds.Width-width)<=2&&Math.Abs(bounds.Height-height)<=2;},10,"Actual pin HWND did not adopt requested move/resize.",app);
+            Assert(work.Contains(ScreenshotPinBounds(pin))&&ScreenshotPinTopmost(pin),"Native resized pin escaped work area or lost topmost.");ScreenshotPinPixels(app,pin,selected);result["nativeMoveResizeVerified"]=true;result["editedRasterRetainedAfterResize"]=true;
+            ScreenshotInvoke(app,pin,"\u5173\u95ed\u8d34\u56fe");WaitFor(delegate{return !IsWindow(pin)&&ScreenshotPins(app.Id).Count==0;},10,"Closing reference hid it instead of destroying its native HWND.",app);result["nativeWindowDestroyed"]=true;
+            Assert(ScreenshotOwnedClipboard.SeedUnchanged(),"Pin lifecycle changed the clipboard.");Assert(Directory.GetFiles(output).Length==files,"Pin lifecycle wrote a file.");result["clipboardUnchanged"]=true;result["exportDirectoryUnchanged"]=true;result["case"]="inplace-pin-native-lifecycle";result["ok"]=true;finished=true;return result;
+        } finally {
+            // Existing outer fixture owns/stops the exact app tree on failure;
+            // never close another process's window or read its screen pixels.
+            if(!finished)result["failedPinWindowStillPresent"]=pin!=IntPtr.Zero&&IsWindow(pin);
+        }
     }
     static void ScreenshotEditorWorkflow(Form form,Panel image,Process app,MockServer server,string history,string output,ProcessStartInfo start,string executable,string roaming,string token,List<string> passed,Dictionary<string,object> report,Func<int> sourceEvents) {
         IntPtr source=IntPtr.Zero;OnUi(form,delegate{source=form.Handle;});ScreenshotOwnedClipboard=new ScreenshotClipboardLease(source);bool completed=false;
@@ -342,28 +433,72 @@ public static partial class EchoLingoApplicationSmoke {
         Assert(ScreenshotOwnedClipboard.SeedUnchanged(),"Cancelled F1 mutated the clipboard.");
         Assert(Directory.GetFiles(output).Length==0,"Cancelled F1 saved a file.");cancelled["ok"]=true;cancelled["case"]="escape-cancel";cases.Add(cancelled);
 
-        Dictionary<string,object> dragged=ScreenshotPicker(form,image,app,first,cancelledPid);uint dragPid=Convert.ToUInt32(dragged["helperProcessId"]);
+        Dictionary<string,object> pinned=ScreenshotPinCase(form,image,app,first,last,selected,cancelledPid,output);
+        report["screenshotPinRequiredCases"]=1;report["screenshotPinPassedCases"]=1;report["screenshotPinCases"]=new object[]{pinned};
+        report["screenshotPinOnly"]=ScreenshotPinOnly;
+        if(ScreenshotPinOnly) {
+            Dictionary<string,object> pinAfter=CompletedCaptureSnapshot(app,start,executable,roaming,token,0,report);RequireCaptureReleased(pinAfter);
+            Assert(CaptureNumber(pinAfter,"ocrInvocationCount")==0&&server.Connections==0&&server.Count==0&&server.Error==null,"Pin-only path invoked OCR/provider traffic.");
+            Assert(!File.Exists(history)||new JavaScriptSerializer().Deserialize<object[]>(File.ReadAllText(history)).Length==0,"Pin-only path wrote translation history.");
+            Assert(sourceEvents()==0,"Pin-only capture leaked input into source controls.");
+            report["screenshotOcrInvocationCount"]=CaptureNumber(pinAfter,"ocrInvocationCount");report["screenshotHttpConnections"]=server.Connections;report["screenshotTranslationHistoryCount"]=0;
+            report["screenshotNetworkEvidenceScope"]="configured-loopback-provider-trap; no global packet capture";report["screenshotNativeCompletion"]=pinAfter;
+            report["verifiedNativeCaptureGenerations"]=VerifiedNativeChildren.Count;report["screenshotFinalExportCount"]=Directory.GetFiles(output).Length;
+            passed.Add("Actual generated F1 -> annotated production pin -> decoded visible native HWND -> topmost toggle/move/resize -> destroyed; no clipboard/file/provider/history effects");return;
+        }
+        Dictionary<string,object> dragged=ScreenshotPicker(form,image,app,first,Convert.ToUInt32(pinned["helperProcessId"]));uint dragPid=Convert.ToUInt32(dragged["helperProcessId"]);
         MoveGenerated(form,first);INPUT down=new INPUT();down.data.mouse.flags=2;Send(new INPUT[]{down});Thread.Sleep(80);MoveGenerated(form,last);Thread.Sleep(80);INPUT up=new INPUT();up.data.mouse.flags=4;Send(new INPUT[]{up});
         WaitFor(delegate{editor=ScreenshotWindow(app.Id);return editor!=IntPtr.Zero&&IsWindowVisible(editor)&&Element(editor,ScreenshotCanvasName)!=null&&AppOverlays(app.Id)==0;},25,"Real F1 drag did not show the actual image editor.",app);
         Assert(Directory.GetFiles(output).Length==0,"Opening an image auto-saved before explicit Save.");
-        ScreenshotInvoke(app,editor,"100%");ScreenshotDrag(app,editor,"\u5b9e\u5fc3\u906e\u6321",selected,new Point(10,10),new Point(80,70));
+        ScreenshotDrag(app,editor,"\u5b9e\u5fc3\u906e\u6321",selected,new Point(10,10),new Point(80,70));
         WaitFor(delegate{AutomationElement undo=ScreenshotButton(editor,"\u64a4\u9500");return undo!=null&&undo.Current.IsEnabled;},10,"Actual solid redaction did not commit an undoable edit.",app);
         ScreenshotDrag(app,editor,"\u88c1\u526a",selected,new Point(8,8),new Point(selected.Width-8,selected.Height-8));
         Size cropped=new Size(selected.Width-16,selected.Height-16);
-        WaitFor(delegate{return Element(editor,cropped.Width+" \u00d7 "+cropped.Height+" px")!=null;},10,"Actual pixel crop dimensions did not render before export.",app);
+        WaitFor(delegate{return Element(editor,cropped.Width+" \u00d7 "+cropped.Height)!=null;},10,"Actual pixel crop dimensions did not render before export.",app);
         using(Bitmap copied=ScreenshotClipboard(app,editor,cropped,ScreenshotCroppedPixels,"cropped-edits")) {
             Assert(copied.GetPixel(12,12).ToArgb()==Color.FromArgb(228,93,104).ToArgb(),"Real editor solid mask did not replace generated source pixels.");
             Assert(copied.GetPixel(100,70).ToArgb()==Color.FromArgb(23,101,199).ToArgb(),"Generated blue source pixels were not retained outside redaction.");
             Assert(copied.GetPixel(cropped.Width-20,cropped.Height-20).ToArgb()==Color.FromArgb(210,60,90).ToArgb(),"Generated second source color was not retained after crop.");
-            ScreenshotInvoke(app,editor,"\u4fdd\u5b58");WaitFor(delegate{return Directory.GetFiles(output,"*.png").Length==1&&ScreenshotButton(editor,"\u4fdd\u5b58").Current.IsEnabled;},15,"Explicit actual Save did not create a PNG in the selected owned folder.",app);
-            string firstPath=Directory.GetFiles(output,"*.png")[0];Assert(Path.GetFileName(firstPath).StartsWith("Screenshot_",StringComparison.Ordinal),"Default filename was not generated by the screenshot backend.");ScreenshotPng(firstPath,copied);byte[] firstBytes=File.ReadAllBytes(firstPath);
-            ScreenshotInvoke(app,editor,"\u4fdd\u5b58");WaitFor(delegate{return Directory.GetFiles(output,"*.png").Length==2&&ScreenshotButton(editor,"\u4fdd\u5b58").Current.IsEnabled;},15,"Second explicit Save overwrote rather than collision-numbering.",app);
+            string firstPath=null;byte[] firstBytes=null;
+            List<Dictionary<string,object>> saveSessions=new List<Dictionary<string,object>>();
+            for(int save=0;save<2;save++) {
+                Dictionary<string,object> fresh=ScreenshotPicker(form,image,app,first,dragPid);dragPid=Convert.ToUInt32(fresh["helperProcessId"]);saveSessions.Add(fresh);
+                MoveGenerated(form,first);Send(new INPUT[]{down});Thread.Sleep(80);MoveGenerated(form,last);Thread.Sleep(80);Send(new INPUT[]{up});
+                WaitFor(delegate{return IsWindowVisible(editor)&&Element(editor,ScreenshotCanvasName)!=null&&AppOverlays(app.Id)==0;},25,"Fresh F1 save session did not prepare in-place editor.",app);
+                ScreenshotDrag(app,editor,"\u5b9e\u5fc3\u906e\u6321",selected,new Point(10,10),new Point(80,70));
+                ScreenshotDrag(app,editor,"\u88c1\u526a",selected,new Point(8,8),new Point(selected.Width-8,selected.Height-8));
+                WaitFor(delegate{AutomationElement button=ScreenshotButton(editor,"\u4e0b\u8f7d\u622a\u56fe");return button!=null&&button.Current.IsEnabled&&Element(editor,cropped.Width+" \u00d7 "+cropped.Height)!=null;},10,"Fresh cropped save pixels were not ready.",app);
+                ScreenshotInvoke(app,editor,"\u4e0b\u8f7d\u622a\u56fe");int expected=save+1;
+                WaitFor(delegate{return Directory.GetFiles(output,"*.png").Length==expected&&!IsWindowVisible(editor);},15,"In-place save did not create one PNG then dismiss capture.",app);
+                if(save==0){firstPath=Directory.GetFiles(output,"*.png")[0];Assert(Path.GetFileName(firstPath).StartsWith("Screenshot_",StringComparison.Ordinal),"Default filename was not generated by screenshot backend.");ScreenshotPng(firstPath,copied);firstBytes=File.ReadAllBytes(firstPath);}
+            }
+            dragged["hotkeyPresses"]=3;dragged["recapturedSaveSessions"]=saveSessions;dragged["inplaceCopyAndSavesDismissed"]=true;
             string[] files=Directory.GetFiles(output,"*.png");foreach(string file in files)ScreenshotPng(file,copied);
             Assert(Convert.ToBase64String(firstBytes)==Convert.ToBase64String(File.ReadAllBytes(firstPath)),"First export changed after saving again.");
             dragged["savedPngCount"]=files.Length;dragged["exportNames"]=Array.ConvertAll(files,delegate(string path){return Path.GetFileName(path);});dragged["copiedPixelSize"]=new int[]{copied.Width,copied.Height};dragged["allExportPixelsMatchSystemClipboard"]=true;dragged["noOverwrite"]=true;dragged["noHiddenPngMetadataOrTrailingData"]=true;
         }
+        string reopenedPath=Directory.GetFiles(output,"*.png")[0];
+        using(Bitmap reopened=new Bitmap(reopenedPath))ScreenshotOpenGenerated(app,editor,reopenedPath,"saved-capture",reopened,output,start,false);
+        dragged["savedCaptureReopenedThroughSettings"]=true;
+        byte[] reopenedBytes=File.ReadAllBytes(reopenedPath);HashSet<string> beforeCollision=new HashSet<string>(Directory.GetFiles(output,"*.png"),StringComparer.OrdinalIgnoreCase);
+        string firstCollisionPath=null,firstCollisionBase=null;int firstCollisionSuffix=0;byte[] firstCollisionBytes=null;
+        using(Bitmap reopened=new Bitmap(reopenedPath)) {
+            for(int collision=0;collision<2;collision++) {
+                HashSet<string> prior=new HashSet<string>(Directory.GetFiles(output,"*.png"),StringComparer.OrdinalIgnoreCase);
+                ScreenshotInvoke(app,editor,"\u4fdd\u5b58");int count=beforeCollision.Count+collision+1;
+                WaitFor(delegate{return Directory.GetFiles(output,"*.png").Length==count&&ScreenshotButton(editor,"\u4fdd\u5b58").Current.IsEnabled;},15,"Repeated standalone Save did not collision-number its output.",app);
+                string saved=Array.Find(Directory.GetFiles(output,"*.png"),delegate(string value){return !prior.Contains(value);});Assert(saved!=null,"Repeated Save output missing.");ScreenshotPng(saved,reopened);
+                System.Text.RegularExpressions.Match numbered=System.Text.RegularExpressions.Regex.Match(Path.GetFileNameWithoutExtension(saved),"^(Screenshot_[0-9]{4}-[0-9]{2}-[0-9]{2}_[0-9]{2}-[0-9]{2}-[0-9]{2})(?:_([0-9]+))?$");
+                Assert(numbered.Success,"Repeated Save filename did not have its generated timestamp/optional collision suffix.");int suffix=numbered.Groups[2].Success?Int32.Parse(numbered.Groups[2].Value):0;
+                if(collision==0){firstCollisionPath=saved;firstCollisionBase=numbered.Groups[1].Value;firstCollisionSuffix=suffix;firstCollisionBytes=File.ReadAllBytes(saved);}
+                else Assert(numbered.Groups[1].Value==firstCollisionBase&&suffix>firstCollisionSuffix&&Convert.ToBase64String(firstCollisionBytes)==Convert.ToBase64String(File.ReadAllBytes(firstCollisionPath)),"Second same-session Save did not number its collision without overwriting first output.");
+            }
+        }
+        Assert(Convert.ToBase64String(reopenedBytes)==Convert.ToBase64String(File.ReadAllBytes(reopenedPath)),"Repeated standalone Save overwrote its original local image.");
+        dragged["standaloneCollisionSaveCount"]=2;dragged["standaloneCollisionNumberingVerified"]=true;
+        IntPtr management=MainWindow(app.Id);ScreenshotInvoke(app,management,"\u9690\u85cf\u7ba1\u7406\u7a97\u53e3");WaitFor(delegate{return !IsWindowVisible(management);},10,"Settings window did not hide after generated local image Open.",app);
         ScreenshotCancelFileDialog(app,editor,"\u53e6\u5b58\u4e3a");ScreenshotCancelFileDialog(app,editor,"\u6253\u5f00\u56fe\u7247");
-        Assert(Directory.GetFiles(output,"*.png").Length==2,"Cancelled native file dialog wrote an unexpected export.");
+        Assert(Directory.GetFiles(output,"*.png").Length==4,"Cancelled native file dialog wrote an unexpected export.");
         using(Bitmap retained=ScreenshotClipboard(app,editor,cropped,ScreenshotCroppedPixels,"after-native-cancel"))Assert(retained.GetPixel(12,12).ToArgb()==Color.FromArgb(228,93,104).ToArgb(),"Cancelled Open discarded edited image pixels.");
         dragged["nativeSaveAsCancelPreservedImage"]=true;dragged["nativeOpenCancelPreservedImage"]=true;
         string inputs=Path.Combine(Path.GetDirectoryName(output),"GeneratedImageInputs");Assert(!Directory.Exists(inputs),"Generated image input directory already exists.");Directory.CreateDirectory(inputs);
@@ -380,14 +515,17 @@ public static partial class EchoLingoApplicationSmoke {
         OnUi(form,delegate{form.Activate();SetForegroundWindow(form.Handle);});RequireForeground(form);Thread.Sleep(250);Assert(IsWindowVisible(editor),"Independent editor auto-hid after focus moved to the owned source window.");
         report["screenshotEditorSurvivedOwnedFocusLoss"]=true;SetForegroundWindow(editor);
         ScreenshotInvoke(app,editor,"\u5173\u95ed\u622a\u56fe\u7f16\u8f91\u5668");WaitFor(delegate{return !IsWindowVisible(editor);},10,"Saved editor did not close.",app);
-        dragged["case"]="drag-redact-crop-copy-save-twice";dragged["ok"]=true;cases.Add(dragged);
+        dragged["case"]="inplace-drag-copy-recapture-save-twice";dragged["ok"]=true;cases.Add(dragged);
         Dictionary<string,object> clicked=ScreenshotPicker(form,image,app,first,dragPid,true);RequireForeground(form);Send(new INPUT[]{down,up});
         WaitFor(delegate{return IsWindowVisible(editor)&&Element(editor,ScreenshotCanvasName)!=null&&AppOverlays(app.Id)==0;},25,"Click-visible-window F1 did not open editor.",app);
         int[] windowSize=(int[])clicked["expectedWindowDimensions"];
         using(Bitmap copy=ScreenshotClipboard(app,editor,new Size(windowSize[0],windowSize[1]),delegate(Bitmap actual){return ScreenshotExpectedWindow!=null&&ScreenshotPixelsEqual(actual,ScreenshotExpectedWindow);},"clicked-window")) { clicked["visibleWindowPixelSize"]=new int[]{copy.Width,copy.Height}; }
-        ScreenshotInvoke(app,editor,"\u5173\u95ed\u622a\u56fe\u7f16\u8f91\u5668");ScreenshotInvoke(app,editor,"\u7ee7\u7eed\u7f16\u8f91");Assert(IsWindowVisible(editor),"Cancel in unsaved close discarded the editor.");
-        ScreenshotInvoke(app,editor,"\u5173\u95ed\u622a\u56fe\u7f16\u8f91\u5668");ScreenshotInvoke(app,editor,"\u4e22\u5f03\u5e76\u5173\u95ed");WaitFor(delegate{return !IsWindowVisible(editor);},10,"Explicit discard did not close unsaved editor.",app);
-        Assert(Directory.GetFiles(output,"*.png").Length==4,"Closing an unsaved screenshot auto-saved or lost an earlier explicit export.");report["screenshotFinalExportCount"]=4;clicked["case"]="click-window-close-cancel-confirm";clicked["ok"]=true;cases.Add(clicked);
+        Dictionary<string,object> cancelClick=ScreenshotPicker(form,image,app,first,Convert.ToUInt32(clicked["helperProcessId"]));RequireForeground(form);Send(new INPUT[]{down,up});
+        WaitFor(delegate{return IsWindowVisible(editor)&&Element(editor,ScreenshotCanvasName)!=null&&AppOverlays(app.Id)==0;},25,"Second real F1 did not prepare cancel-only window capture.",app);
+        ScreenshotOwnedClipboard.Seed();ScreenshotInvoke(app,editor,"\u53d6\u6d88\u622a\u56fe");
+        WaitFor(delegate{return !IsWindowVisible(editor);},10,"In-place X did not cancel capture.",app);Assert(ScreenshotOwnedClipboard.SeedUnchanged(),"In-place X changed clipboard.");
+        clicked["hotkeyPresses"]=2;clicked["cancelSession"]=cancelClick;clicked["inplaceCopyDismissed"]=true;clicked["inplaceCancelPreservedClipboard"]=true;
+        Assert(Directory.GetFiles(output,"*.png").Length==6,"Closing an unsaved screenshot auto-saved or lost an earlier explicit export.");report["screenshotFinalExportCount"]=6;clicked["case"]="click-window-copy-then-cancel";clicked["ok"]=true;cases.Add(clicked);
         Dictionary<string,object> after=CompletedCaptureSnapshot(app,start,executable,roaming,token,0,report);RequireCaptureReleased(after);
         Assert(CaptureNumber(after,"ocrInvocationCount")==0,"F1 image editing invoked OCR.");
         Assert(server.Connections==0&&server.Count==0&&server.Error==null,"F1 image editing performed an HTTP/provider request.");
@@ -395,7 +533,7 @@ public static partial class EchoLingoApplicationSmoke {
         Assert(sourceEvents()==0,"Native F1 click/drag leaked mouse input to generated source controls.");
         report["screenshotOcrInvocationCount"]=CaptureNumber(after,"ocrInvocationCount");report["screenshotHttpConnections"]=server.Connections;report["screenshotNetworkEvidenceScope"]="configured-loopback-provider-trap; no global packet capture";report["screenshotTranslationHistoryCount"]=0;
         report["screenshotRequiredCases"]=3;report["screenshotPassedCases"]=cases.Count;report["verifiedNativeCaptureGenerations"]=VerifiedNativeChildren.Count;report["screenshotNativeCompletion"]=after;
-        Assert(cases.Count==3&&VerifiedNativeChildren.Count>=3,"Screenshot fixture missed a required real native generation.");
-        passed.Add("Actual F1 cancel, native hover/drag and window-click -> dedicated real WebView editor -> opaque pixels/crop -> system image clipboard -> collision-safe PNG files in owned temp folder; zero OCR/configured-provider HTTP/history (loopback trap, not global packet capture)");
+        Assert(cases.Count==3&&VerifiedNativeChildren.Count>=7,"Screenshot fixture missed a required real native generation.");
+        passed.Add("Actual F1 cancel, annotated pin, in-place copy/save dismissal with two fresh save captures, then actual settings local Open and native dialog cancellation; window-click copy plus new capture cancellation; zero OCR/configured-provider HTTP/history (loopback trap, not global packet capture)");
     }
 }
