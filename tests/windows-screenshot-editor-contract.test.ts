@@ -203,7 +203,7 @@ describe('actual Windows screenshot fixture source wiring (not native acceptance
   });
   it('observes only owned pointer surfaces and capture state around the unchanged gesture', () => {
     const observer = fixture.slice(fixture.indexOf('static Dictionary<string,object> ScreenshotPointerObservation('), fixture.indexOf('static void ScreenshotWebDrag('));
-    for (const value of ['pid==app.Id&&root==editor', 'if(owned)', 'if(ownElement)', 'GetGUIThreadInfo(thread,ref info)', 'captureOwnedEditor', 'hitRootIsEditor', 'hitPidIsApp', 'uiaIsCanvas', 'element.Current.Name==ScreenshotCanvasName', 'canvasRect']) expect(observer).toContain(value);
+    for (const value of ['rootPid==app.Id', 'IsChild(editor,hit)', 'ScreenshotOwnedProcess(app,pid,known,inspectElement)', 'if(owned)', 'if(ownElement)', 'childCapture', 'rootCapture', 'hitRootIsEditor', 'hitPidIsApp', 'uiaIsCanvas', 'Automation.Compare(element,canvas)', 'canvasRect']) expect(observer).toContain(value);
     expect(observer.indexOf('if(owned)')).toBeLessThan(observer.indexOf('GetClassName('));
     expect(observer.indexOf('if(owned)')).toBeLessThan(observer.indexOf('AutomationElement.FromPoint('));
     for (const forbidden of ['Send(', 'SetForegroundWindow(', 'Thread.Sleep', 'result["name"]', 'result["text"]']) expect(observer).not.toContain(forbidden);
@@ -211,6 +211,17 @@ describe('actual Windows screenshot fixture source wiring (not native acceptance
     for (const phase of ['beforeDown', 'afterDown', 'afterMoveBeforeUp']) expect(drag).toContain('observation["'+phase+'"]');
     expect(drag.match(/Send\(new INPUT\[\]\{down\}\)/g)).toHaveLength(1);
     expect(drag.match(/Send\(new INPUT\[\]\{up\}\)/g)).toHaveLength(1);
+  });
+  it('requires every native ownership boundary before cross-process WebView metadata', () => {
+    const scope = fixture.slice(fixture.indexOf('static bool ScreenshotObservationScope('), fixture.indexOf('static bool ScreenshotOwnedProcess('));
+    const expression = scope.match(/return ([^;]+);/)![1];
+    const allowed = new Function('rootMatches','rootPidMatches','childRelationship','processDescendant','return '+expression);
+    expect(allowed(true,true,true,true)).toBe(true);
+    for (let missing=0;missing<4;missing++) {const values=[true,true,true,true];values[missing]=false;expect(allowed(...values)).toBe(false);}
+    const ownership = fixture.slice(fixture.indexOf('static bool ScreenshotOwnedProcess('), fixture.indexOf('static void ScreenshotWebDrag('));
+    for (const value of ['depth<4', 'if(!discover)return false', 'known.TryGetValue(requested,out expected)', 'ParentPid(current)', 'process.StartTime.ToUniversalTime()>childStarted', 'depth<16', 'uiaRootReached', 'ownProcess&&rootReached']) expect(ownership).toContain(value);
+    expect(ownership).not.toContain('.Current.Name');
+    expect(ownership).not.toContain('ProcessName');
   });
   it('maps F1 exports to dismiss/re-capture while retaining standalone cancellation and collision oracles', () => {
     for (const value of ['if(closes)WaitFor', 'for(int save=0;save<2;save++)', 'recapturedSaveSessions', 'inplaceCopyAndSavesDismissed', 'savedCaptureReopenedThroughSettings', 'standaloneCollisionNumberingVerified', 'ScreenshotContinueOpen(app,dialogOwner)', 'inplaceCancelPreservedClipboard']) expect(fixture).toContain(value);

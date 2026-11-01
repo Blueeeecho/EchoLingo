@@ -24,6 +24,7 @@ public static partial class EchoLingoApplicationSmoke {
     static List<Dictionary<string,object>> ScreenshotNativeOpenObservations,ScreenshotNativeCancelObservations;
     [StructLayout(LayoutKind.Sequential)] struct ScreenshotGuiThreadInfo {public uint size,flags;public IntPtr active,focus,capture,menuOwner,moveSize,caret;public RECT caretRect;}
     [DllImport("user32.dll")] static extern bool GetGUIThreadInfo(uint thread,ref ScreenshotGuiThreadInfo info);
+    [DllImport("user32.dll")] static extern bool IsChild(IntPtr parent,IntPtr child);
     [DllImport("user32.dll")] static extern int GetDlgCtrlID(IntPtr window);
     [DllImport("dwmapi.dll")] static extern int DwmFlush();
     // The native adapter holds OpenClipboard for the entire policy call.
@@ -469,23 +470,57 @@ public static partial class EchoLingoApplicationSmoke {
                 if(message.StartsWith(code+":",StringComparison.Ordinal))observation["knownUpdateErrorCode"]=code;
         }catch(Exception){observation["failureStateUnavailable"]=true;}
     }
-    static Dictionary<string,object> ScreenshotPointerObservation(Process app,IntPtr editor,Point point,bool inspectElement) {
+    static bool ScreenshotObservationScope(bool rootMatches,bool rootPidMatches,bool childRelationship,bool processDescendant) {
+        return rootMatches&&rootPidMatches&&childRelationship&&processDescendant;
+    }
+    static bool ScreenshotOwnedProcess(Process app,uint pid,Dictionary<int,DateTime> known,bool discover) {
+        // Reuse the fixture's existing parent query. Names alone do not prove ownership.
+        try {
+            if(app.HasExited)return false;
+            if(pid==app.Id)return true;
+            int requested=checked((int)pid);DateTime expected;
+            if(known.TryGetValue(requested,out expected)){using(Process cached=Process.GetProcessById(requested))return !cached.HasExited&&cached.StartTime.ToUniversalTime()==expected;}
+            if(!discover)return false;
+            Dictionary<int,DateTime> path=new Dictionary<int,DateTime>();HashSet<int> visited=new HashSet<int>();int current=requested;DateTime childStarted=DateTime.MaxValue;
+            for(int depth=0;depth<4;depth++) {
+                if(current<=0||!visited.Add(current))return false;
+                using(Process process=Process.GetProcessById(current)) {
+                    if(process.HasExited||process.StartTime.ToUniversalTime()>childStarted)return false;
+                    childStarted=process.StartTime.ToUniversalTime();
+                    if(current==app.Id){if(app.HasExited||childStarted!=app.StartTime.ToUniversalTime())return false;foreach(KeyValuePair<int,DateTime> entry in path)known[entry.Key]=entry.Value;return true;}
+                    path[current]=childStarted;
+                    current=ParentPid(current);
+                }
+            }
+        }catch(Exception){}
+        return false;
+    }
+    static void ScreenshotCaptureObservation(Process app,IntPtr editor,uint thread,string prefix,Dictionary<string,object> result,Dictionary<int,DateTime> known,bool discover) {
+        ScreenshotGuiThreadInfo info=new ScreenshotGuiThreadInfo();info.size=(uint)Marshal.SizeOf(typeof(ScreenshotGuiThreadInfo));bool queried=thread!=0&&GetGUIThreadInfo(thread,ref info);
+        result[prefix+"QuerySucceeded"]=queried;
+        if(queried){uint pid=0;if(info.capture!=IntPtr.Zero)GetWindowThreadProcessId(info.capture,out pid);
+            result[prefix+"Null"]=info.capture==IntPtr.Zero;
+            result[prefix+"OwnedEditor"]=info.capture!=IntPtr.Zero&&GetAncestor(info.capture,2)==editor&&(info.capture==editor||IsChild(editor,info.capture))&&ScreenshotOwnedProcess(app,pid,known,discover);
+        }
+    }
+    static Dictionary<string,object> ScreenshotPointerObservation(Process app,IntPtr editor,Point point,bool inspectElement,Dictionary<int,DateTime> known) {
         Dictionary<string,object> result=new Dictionary<string,object>();
         try {
-            IntPtr hit=WindowFromPoint(point),root=hit==IntPtr.Zero?IntPtr.Zero:GetAncestor(hit,2);uint pid=0;uint thread=hit==IntPtr.Zero?0:GetWindowThreadProcessId(hit,out pid);
-            bool owned=pid==app.Id&&root==editor;result["hitOwnedEditor"]=owned;result["hitRootIsEditor"]=root==editor;result["hitPidIsApp"]=pid==app.Id;result["hitNull"]=hit==IntPtr.Zero;
-            result["hitForeign"]=hit!=IntPtr.Zero&&!owned;
+            IntPtr hit=WindowFromPoint(point),root=hit==IntPtr.Zero?IntPtr.Zero:GetAncestor(hit,2);uint pid=0,rootPid=0;uint thread=hit==IntPtr.Zero?0:GetWindowThreadProcessId(hit,out pid),rootThread=root==IntPtr.Zero?0:GetWindowThreadProcessId(root,out rootPid);
+            bool descendant=root==editor&&rootPid==app.Id&&(hit==editor||IsChild(editor,hit))&&ScreenshotOwnedProcess(app,pid,known,inspectElement);
+            bool owned=ScreenshotObservationScope(root==editor,rootPid==app.Id,hit==editor||IsChild(editor,hit),descendant);
+            result["hitOwnedEditor"]=owned;result["hitRootIsEditor"]=root==editor;result["hitPidIsApp"]=pid==app.Id;result["hitNull"]=hit==IntPtr.Zero;result["hitVerifiedDescendant"]=descendant;
+            result["hitForeign"]=hit!=IntPtr.Zero&&root!=editor;
             if(owned) {
                 result["hitIsRoot"]=hit==root;result["ownedHitHandle"]=hit.ToInt64();result["ownedRootHandle"]=root.ToInt64();
                 StringBuilder name=new StringBuilder(128);GetClassName(hit,name,name.Capacity);string value=name.ToString();
                 result["ownedHitClass"]=value=="Tauri Window"||value=="Chrome_WidgetWin_0"||value=="Chrome_WidgetWin_1"||value=="Chrome_RenderWidgetHostHWND"||value=="Intermediate D3D Window"?value:"other-owned-class";
-                ScreenshotGuiThreadInfo info=new ScreenshotGuiThreadInfo();info.size=(uint)Marshal.SizeOf(typeof(ScreenshotGuiThreadInfo));bool queried=thread!=0&&GetGUIThreadInfo(thread,ref info);
-                result["captureQuerySucceeded"]=queried;
-                if(queried){uint capturePid=0;if(info.capture!=IntPtr.Zero)GetWindowThreadProcessId(info.capture,out capturePid);result["captureNull"]=info.capture==IntPtr.Zero;result["captureOwnedEditor"]=info.capture!=IntPtr.Zero&&capturePid==app.Id&&GetAncestor(info.capture,2)==editor;result["captureIsHit"]=info.capture!=IntPtr.Zero&&info.capture==hit;}
+                ScreenshotCaptureObservation(app,editor,thread,"childCapture",result,known,inspectElement);ScreenshotCaptureObservation(app,editor,rootThread,"rootCapture",result,known,inspectElement);
                 if(inspectElement) {
-                    AutomationElement element=AutomationElement.FromPoint(new System.Windows.Point(point.X,point.Y));bool ownElement=element!=null&&element.Current.ProcessId==app.Id;
-                    result["uiaOwned"]=ownElement;
-                    if(ownElement){result["uiaControlTypeId"]=element.Current.ControlType.Id;result["uiaIsCanvas"]=element.Current.Name==ScreenshotCanvasName;result["uiaCanvasAutomationId"]=element.Current.AutomationId=="image-canvas";}
+                    AutomationElement element=AutomationElement.FromPoint(new System.Windows.Point(point.X,point.Y));bool ownProcess=element!=null&&ScreenshotOwnedProcess(app,(uint)element.Current.ProcessId,known,true),rootReached=false;
+                    if(ownProcess){AutomationElement cursor=element,editorRoot=AutomationElement.FromHandle(editor);for(int depth=0;cursor!=null&&depth<16;depth++){if(Automation.Compare(cursor,editorRoot)){rootReached=true;break;}cursor=TreeWalker.RawViewWalker.GetParent(cursor);}}
+                    bool ownElement=ownProcess&&rootReached;result["uiaProcessOwned"]=ownProcess;result["uiaRootReached"]=rootReached;result["uiaOwned"]=ownElement;
+                    if(ownElement){AutomationElement canvas=Element(editor,ScreenshotCanvasName);result["uiaControlTypeId"]=element.Current.ControlType.Id;result["uiaIsCanvas"]=canvas!=null&&Automation.Compare(element,canvas);result["uiaCanvasAutomationId"]=element.Current.AutomationId=="image-canvas";}
                 }
             }
             result["canvasRect"]=ScreenshotRectObservation(ScreenshotWebSelection(editor,result));
@@ -496,9 +531,10 @@ public static partial class EchoLingoApplicationSmoke {
         Assert(observations.Count<18,"Adjustment diagnostic inventory exceeded the exact move/eight-handle pairs.");
         IntPtr editor=ScreenshotRetainedEditor(app,helper);
         Dictionary<string,object> observation=new Dictionary<string,object>{{"phase",phase},{"before",ScreenshotRectObservation(ScreenshotWebSelection(editor))},{"expected",ScreenshotRectObservation(expected)},{"pointerStart",new int[]{first.X,first.Y}},{"pointerEnd",new int[]{last.X,last.Y}},{"completed",false}};observations.Add(observation);
-        ScreenshotWebPoint(form,app,editor,first);observation["beforeDown"]=ScreenshotPointerObservation(app,editor,first,true);
+        Dictionary<int,DateTime> knownProcesses=new Dictionary<int,DateTime>();
+        ScreenshotWebPoint(form,app,editor,first);observation["beforeDown"]=ScreenshotPointerObservation(app,editor,first,true,knownProcesses);
         INPUT down=new INPUT();down.data.mouse.flags=2;INPUT up=new INPUT();up.data.mouse.flags=4;Send(new INPUT[]{down});
-        try{Thread.Sleep(60);observation["afterDown"]=ScreenshotPointerObservation(app,editor,first,false);ScreenshotWebPoint(form,app,editor,last);Thread.Sleep(60);observation["afterMoveBeforeUp"]=ScreenshotPointerObservation(app,editor,last,false);}finally{Send(new INPUT[]{up});}
+        try{Thread.Sleep(60);observation["afterDown"]=ScreenshotPointerObservation(app,editor,first,false,knownProcesses);ScreenshotWebPoint(form,app,editor,last);Thread.Sleep(60);observation["afterMoveBeforeUp"]=ScreenshotPointerObservation(app,editor,last,false,knownProcesses);}finally{Send(new INPUT[]{up});}
         try {
             WaitFor(delegate{
                 bool same=ScreenshotRetainedEditor(app,helper)==editor,visible=IsWindowVisible(editor);observation["sameEditor"]=same;observation["editorVisible"]=visible;
