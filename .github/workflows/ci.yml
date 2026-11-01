@@ -136,6 +136,7 @@ jobs:
           cargo test --manifest-path src-tauri/Cargo.toml --locked screenshot_pins::tests -- --nocapture 2>&1 | tee "$RUNNER_TEMP/screenshot-pin/pins.log"
           grep -q 'test result: ok. 8 passed; 0 failed' "$RUNNER_TEMP/screenshot-pin/pins.log"
           cargo test --manifest-path src-tauri/Cargo.toml --locked screenshot_overlay -- --nocapture 2>&1 | tee "$RUNNER_TEMP/screenshot-pin/overlay.log"
+          cargo test --manifest-path src-tauri/Cargo.toml --locked 2>&1 | tee "$RUNNER_TEMP/screenshot-pin/all-rust.log"
           cargo build --manifest-path src-tauri/Cargo.toml --locked 2>&1 | tee "$RUNNER_TEMP/screenshot-pin/build.log"
       - name: Check committed Rust formatting
         run: cargo fmt --manifest-path src-tauri/Cargo.toml --check
@@ -183,7 +184,9 @@ jobs:
           server=$!
           trap 'kill "$server" 2>/dev/null || true' EXIT
           curl --fail --retry 20 --retry-connrefused --retry-delay 1 -s http://127.0.0.1:1420/ > /dev/null
+          node tests/frontend-interactions.mjs
           node tests/screenshot-editor.mjs
+          node tests/screenshot-rendering.mjs
           node tests/pinned-screenshot.mjs
       - name: Preserve synthetic screenshots and startup errors
         if: always()
