@@ -390,6 +390,15 @@ async function endSelectionDrag(event: PointerEvent, cancelled = false): Promise
   if (!selectionDrag || selectionDrag.pointerId !== event.pointerId || !session?.overlay || !selectionSession) return;
   const g = selectionDrag; selectionDrag = null;
   if (frame.hasPointerCapture(event.pointerId)) frame.releasePointerCapture(event.pointerId);
+  // The release is an authoritative terminal sample. Native WebViews may
+  // coalesce/delay all intermediate pointermoves while a passive host captures
+  // the mouse; never infer "no movement" only from the last preview frame.
+  if (!cancelled) {
+    const overlay = session.overlay;
+    session.overlay = { ...overlay, ...adjustSelection(g.rect, g.handle,
+      event.clientX - g.start.x, event.clientY - g.start.y,
+      { x: 0, y: 0, width: overlay.viewportWidth, height: overlay.viewportHeight }) };
+  }
   const token = generation, previous = selectionSession, rect = session.overlay;
   if (cancelled || ['x','y','width','height'].every(k => rect[k as keyof OverlayRect] === g.rect[k as keyof OverlayRect])) {
     session.overlay = { ...session.overlay, ...g.rect }; canvas.hidden = false; if (model) applyZoom(); else placeSelectionFrame(); controls(); return;

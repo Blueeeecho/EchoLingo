@@ -772,6 +772,54 @@ try {
     await page.mouse.move(box.x + 40, box.y + 40); await page.mouse.down(); await page.mouse.move(box.x + 20, box.y + 60); await page.mouse.up();
     await page.waitForFunction(() => window.__screenshotQA.session.revision === 2 && !document.querySelector('[data-tool="pen"]').disabled);
     assert.equal(await page.evaluate(() => window.__screenshotQA.session.overlay.x), 100);
+    // Native passive WebViews can deliver a terminal up without any intervening
+    // DOM move. Commit its endpoint, not the stale last preview coordinates.
+    const terminalBefore = await page.evaluate(() => structuredClone(window.__screenshotQA.session));
+    box = await page.locator('#canvas-frame').boundingBox();
+    await page.mouse.move(box.x + 40, box.y + 40); await page.mouse.down();
+    await page.locator('#canvas-frame').dispatchEvent('pointerup', { pointerId: 991, isPrimary: false, button: 0,
+      clientX: box.x + 99, clientY: box.y + 99 });
+    assert.equal(await page.evaluate(() => window.__screenshotQA.session.revision), terminalBefore.revision, 'foreign release cannot commit or retire the active drag');
+    await page.locator('#canvas-frame').dispatchEvent('pointerup', { pointerId: 1, isPrimary: true, button: 0,
+      clientX: box.x + 52, clientY: box.y + 48 });
+    await page.mouse.up();
+    await page.waitForFunction(revision => window.__screenshotQA.session.revision === revision + 1, terminalBefore.revision);
+    assert.deepEqual(await page.evaluate(() => ({ x: window.__screenshotQA.session.overlay.x, y: window.__screenshotQA.session.overlay.y })),
+      { x: terminalBefore.overlay.x + 12, y: terminalBefore.overlay.y + 8 }, 'up endpoint commits even without a move event');
+    await page.waitForFunction(() => !document.querySelector('[data-tool="pen"]').disabled);
+    const terminalAfter = await page.evaluate(() => structuredClone(window.__screenshotQA.session));
+    await page.locator('#canvas-frame').dispatchEvent('pointermove', { pointerId: 1, isPrimary: true, buttons: 0,
+      clientX: box.x + 150, clientY: box.y + 100 });
+    assert.deepEqual(await page.evaluate(() => window.__screenshotQA.session), terminalAfter, 'delayed move after release cannot reapply or extend the retired drag');
+    box = await page.locator('#canvas-frame').boundingBox();
+    await page.mouse.move(box.x + 40, box.y + 40); await page.mouse.down();
+    await page.locator('#canvas-frame').dispatchEvent('pointercancel', { pointerId: 1, isPrimary: true,
+      clientX: box.x + 90, clientY: box.y + 90 });
+    await page.mouse.up();
+    assert.deepEqual(await page.evaluate(() => window.__screenshotQA.session), terminalAfter, 'cancel never commits its endpoint');
+    assert.deepEqual(await page.locator('#canvas-frame').boundingBox(), box, 'cancel preserves exact original selection geometry');
+    const east = await page.locator('[data-resize="e"]').boundingBox();
+    await page.mouse.move(east.x + east.width / 2, east.y + east.height / 2); await page.mouse.down();
+    await page.locator('#canvas-frame').dispatchEvent('pointerup', { pointerId: 1, isPrimary: true, button: 0,
+      clientX: east.x + east.width / 2 + 12, clientY: east.y + east.height / 2 });
+    await page.mouse.up();
+    await page.waitForFunction(r => window.__screenshotQA.session.revision === r + 1, terminalAfter.revision);
+    assert.equal(await page.evaluate(() => window.__screenshotQA.session.overlay.width), terminalAfter.overlay.width + 12, 'resize also folds in release without intermediate move');
+    await page.waitForFunction(() => !document.querySelector('[data-tool="select"]').disabled);
+    const preClamp = await page.evaluate(() => structuredClone(window.__screenshotQA.session));
+    box = await page.locator('#canvas-frame').boundingBox();
+    await page.mouse.move(box.x + 40, box.y + 40); await page.mouse.down();
+    await page.locator('#canvas-frame').dispatchEvent('pointerup', { pointerId: 1, isPrimary: true, button: 0, clientX: -9999, clientY: -9999 });
+    await page.mouse.up();
+    await page.waitForFunction(r => window.__screenshotQA.session.revision === r + 1, preClamp.revision);
+    assert.deepEqual(await page.evaluate(() => ({x:window.__screenshotQA.session.overlay.x,y:window.__screenshotQA.session.overlay.y})), {x:0,y:0}, 'release outside clamps to viewport, not an invalid capture rect');
+    await page.waitForFunction(() => !document.querySelector('[data-tool="select"]').disabled);
+    await page.mouse.move(40, 40); await page.mouse.down();
+    await page.locator('#canvas-frame').dispatchEvent('pointerup', { pointerId: 1, isPrimary: true, button: 0,
+      clientX: 40 + preClamp.overlay.x, clientY: 40 + preClamp.overlay.y });
+    await page.mouse.up();
+    await page.waitForFunction(r => window.__screenshotQA.session.revision === r + 2 && !document.querySelector('[data-tool="pen"]').disabled, preClamp.revision);
+
     await page.locator('[data-tool="pen"]').click();
     await page.evaluate(() => { window.__screenshotQA.holdSelectionCapture = true; });
     box = await page.locator('#canvas-frame').boundingBox();

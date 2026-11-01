@@ -2811,6 +2811,7 @@ try {
     await page.locator('#source-text').press('Enter');
     await page.locator('.result-setup').waitFor({ state: 'visible' });
     assert.match(await page.locator('.result-error').textContent(), new RegExp(`本次语言组合：${language}`));
+    assert.doesNotMatch(await page.locator('.result-error').textContent(), /语言识别不正确|手动选择源语言|未安装/);
     const preferences = await page.evaluate(() => ({ source: window.__qa.settings.sourceLanguage, target: window.__qa.settings.targetLanguage, writes: window.__qa.saveCalls }));
     await page.evaluate(() => { window.__staleSetupButton = document.querySelector('.result-setup'); });
     await page.locator('#source-text').fill('New input retires the previous setup action');
