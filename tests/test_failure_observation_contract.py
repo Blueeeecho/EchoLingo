@@ -26,6 +26,17 @@ class FailureObservationContract(unittest.TestCase):
         self.assertIn('while(budget.ElapsedMilliseconds<2000)', body)
         self.assertIn('captureFailure?"--capture-diagnostics":"--selection-diagnostics"', body)
 
+    def test_startup_census_is_failure_only_bounded_and_content_free(self):
+        body = APP.split('static Dictionary<string,object> StartupFailureWindows(', 1)[1].split('static AutomationElement Element(', 1)[0]
+        for required in ('budget.ElapsedMilliseconds>=2000', 'owner!=app.Id', 'total>=64', '"Tauri Window"', '"tray_icon_app"', '"global_hotkey_app"', '"other"', 'GetAncestor(window,2)==window'):
+            self.assertIn(required, body)
+        for forbidden in ('GetWindowText', 'ShowWindow', 'SetForegroundWindow', 'Thread.Sleep', 'SendInput', 'Process.Start', 'AutomationElement', 'counts[key]=name'):
+            self.assertNotIn(forbidden, body)
+        self.assertIn('String.Equals(report["failedStage"] as string,"native-startup-milestone",StringComparison.Ordinal)', APP)
+        self.assertIn('snapshot["startupWindowsFinalObservationCompleted"]=false', APP)
+        self.assertIn('!(bool)finalWindows["budgetExpired"]&&!(bool)finalWindows["limitReached"]&&budget.ElapsedMilliseconds<2000', APP)
+        self.assertIn('Convert.ToInt32(readiness["trayWindowCount"])==1; },20,"Actual app did not reach its unique main and after-shortcut tray milestone."', APP)
+
     def test_wpf_observes_failure_without_selection_repair_or_retry(self):
         self.assertIn('if(editor.Selection.Text!=texts[index])ObserveMouseSelectionFailure(index,first,last,row);Need(editor.Selection.Text==texts[index],"WPF_MOUSE_SELECTION_NOT_EXACT_NO_PROGRAMMATIC_REPAIR")', WPF)
         body = WPF.split('void ObserveMouseSelectionFailure(', 1)[1].split('void SelectWithMouse(', 1)[0]
