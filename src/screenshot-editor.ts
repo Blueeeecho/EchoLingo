@@ -61,18 +61,18 @@ function applyZoom(): void {
     placeOverlayTools(); return;
   }
   frame.style.left = ''; frame.style.top = '';
-  if (fit) zoom = Math.min(1, Math.max(0.01, Math.min((workspace.clientWidth - 56) / width, (workspace.clientHeight - 56) / height)));
+  if (fit) zoom = Math.min(1, Math.max(0.01, Math.min((workspace.clientWidth - 56) / width, (workspace.clientHeight - 180) / height)));
   frame.style.width = `${width * zoom}px`; frame.style.height = `${height * zoom}px`;
   $('#zoom-level').textContent = `${Math.round(zoom * 100)}%`;
   $('#gesture-preview').setAttribute('viewBox', `0 0 ${width} ${height}`);
+  placeOverlayTools();
 }
 let placementFrame = 0;
 function placeOverlayTools(): void {
-  if (!inplace() || placementFrame) return;
+  if (placementFrame) return;
   placementFrame = requestAnimationFrame(() => { placementFrame = 0; layoutOverlayTools(); });
 }
 function layoutOverlayTools(): void {
-  if (!inplace()) return;
   const monitor = overlayToolBounds(innerWidth, innerHeight, session?.overlay?.toolbarBounds);
   const margin = Math.min(8, monitor.width / 8, monitor.height / 8);
   const bounds = { x: monitor.x + margin, y: monitor.y + margin, width: monitor.width - margin * 2, height: monitor.height - margin * 2 };
@@ -213,13 +213,13 @@ async function confirmDiscard(action: 'open' | 'close' | 'restart'): Promise<boo
 async function acceptSession(value: ScreenshotSession | null): Promise<void> {
   if (value && (!Number.isSafeInteger(value.id) || value.id <= latestId)) return;
   if (value) latestId = value.id;
-  const replaced = dirty(), token = ++generation;
+  const token = ++generation;
   if (decoding) { decoding.src = ''; decoding = null; } // Cancel superseded image decode work.
   clearGesture(); moveGesture = null; selectedIndex = null; cancelText(); resolveDiscard(false); textFocusPending = false; overlayFocus = null; busy = false; nativeDialog = false; loading = !!value;
   session = null; original = null; model = null; savedState = null; rendered = null;
   canvas.width = canvas.height = 1; frame.hidden = true; $('#empty-state').hidden = !!value; controls();
   if (!value) { setPresentation(); status('截图已取消。使用截图快捷键重新截图，或打开本地图片。'); return; }
-  const { pngBase64, ...metadata } = value; session = metadata; setPresentation(value.overlay); chooseTool(value.overlay ? 'select' : 'rectangle');
+  const { pngBase64, ...metadata } = value; session = metadata; setPresentation(value.overlay); chooseTool('select');
   status('正在准备图片…');
   try {
     validateSize(value); validateOverlay(value.overlay);
@@ -231,7 +231,7 @@ async function acceptSession(value: ScreenshotSession | null): Promise<void> {
     if (image.naturalWidth !== value.width || image.naturalHeight !== value.height) throw new Error('图片尺寸不一致，无法安全打开。');
     original = image; model = new ScreenshotDocument(value); fit = true;
     frame.hidden = false; $('#empty-state').hidden = true; loading = false; const drawn = render();
-    if (drawn) status(value.overlay ? '' : replaced ? '已打开新图片；上一张未保存的编辑已丢弃。图片仅在点击保存后写入文件。' : '仅在本机编辑，不识别文字、不上传图片。保存为合并后的 PNG；复制为合并后的图片。');
+    if (drawn) status('');
     // A backend claim survives WebView reloads; event/snapshot metadata alone
     // must never trigger a second save/copy/pin of the same capture intent.
     const initialIntent = drawn && value.overlay && value.initialAction !== undefined;

@@ -26,12 +26,29 @@ describe('actual Windows screenshot fixture source wiring (not native acceptance
     expect(template).toBeDefined(); expect(labels).not.toBeNull();
     const actualLabel = `624${JSON.parse(`"${labels![1]}"`)}94`;
     expect(actualLabel).toBe(template!.replace('${model.size.width}', '624').replace('${model.size.height}', '94'));
-    expect(matcher).toContain('return Element(editor,');
+    expect(matcher).toContain('AutomationElement dimensions=Element(editor,');
+    expect(matcher).toContain('dimensions!=null&&!dimensions.Current.IsOffscreen');
     expect(matcher).not.toMatch(/Contains\(|StartsWith\(/);
     expect(fixture.match(/ScreenshotInplaceDimensionsMatch\(editor,cropped\)/g)).toHaveLength(2);
     expect(fixture).toContain('new Size(selected.Width-16,selected.Height-16)');
     expect(fixture).toContain('},10,"Actual pixel crop dimensions did not render before export.",app)');
     expect(fixture).toContain('},10,"Fresh cropped save pixels were not ready.",app)');
+  });
+  it('uses exact visible compact file actions and dimensions without changing export semantics', () => {
+    const html = readFileSync(new URL('../screenshot.html', import.meta.url), 'utf8');
+    const decoded = fixture.replace(/\\u([0-9a-fA-F]{4})/g, (_, hex: string) => String.fromCharCode(parseInt(hex, 16)));
+    for (const [id, label] of [['copy-image', '复制图片'], ['save-image', '保存图片']]) {
+      expect(html).toMatch(new RegExp(`id="${id}"[^>]*aria-label="${label}"`));
+      expect(decoded).toContain(`ScreenshotButton(editor,"${label}")`);
+    }
+    expect(decoded).not.toContain('ScreenshotInvoke(app,editor,"复制")');
+    expect(decoded).not.toContain('ScreenshotInvoke(app,editor,"保存")');
+    expect(decoded).not.toContain('ScreenshotButton(editor,"复制")');
+    expect(decoded).not.toContain('ScreenshotButton(editor,"保存")');
+    expect(decoded).toContain('closes?"复制截图并完成":"复制图片"');
+    expect(fixture).toContain('copy.Current.IsEnabled&&!copy.Current.IsOffscreen&&ScreenshotInplaceDimensionsMatch(editor,expected.Size)');
+    expect(fixture).not.toContain('expected.Height+" px"');
+    for (const oracle of ['Repeated standalone Save overwrote its original local image.', 'Native local image Open changed generated decoded pixels.', 'Second same-session Save did not number its collision without overwriting first output.']) expect(fixture).toContain(oracle);
   });
   it('bounds exported data and asserts no overwrite, hidden PNG payload, OCR, provider traffic or history', () => {
     for (const required of ['bytes.Length<=32*1024*1024', 'position==bytes.Length', 'kind!="eXIf"', 'kind!="iTXt"', 'File.ReadAllBytes(firstPath)', 'CaptureNumber(after,"ocrInvocationCount")==0', 'server.Connections==0&&server.Count==0&&server.Error==null', 'Deserialize<object[]>(File.ReadAllText(history)).Length==0', 'desktopDirectoryWritten', 'no global packet capture', 'screenshotLocalOpenRequiredCases', 'sourceBytesUnchanged', 'FileMode.CreateNew', 'screenshotEditorSurvivedOwnedFocusLoss']) expect(fixture).toContain(required);

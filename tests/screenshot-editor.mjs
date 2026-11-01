@@ -112,6 +112,17 @@ try {
       const xy = p => [bounds.x + p[0] * bounds.width / size[0], bounds.y + p[1] * bounds.height / size[1]];
       await page.mouse.move(...xy(start)); await page.mouse.down(); await page.mouse.move(...xy(end), { steps: 3 }); await page.mouse.up();
     };
+    // Opened files share the capture-style toolbar, without pretending to be a
+    // native capture: keep file commands and their existing save/close lifecycle.
+    assert.equal(await page.locator('body').getAttribute('data-compact-editor'), 'true');
+    assert.equal(await page.locator('body').getAttribute('data-inplace'), 'false');
+    assert.equal(await page.locator('.editor-header').isVisible(), false);
+    assert.equal(await page.locator('.editor-footer').isVisible(), false);
+    for (const id of ['open-image', 'pin-image', 'copy-image', 'save-image', 'save-as-image', 'close-editor', 'zoom-fit']) {
+      assert.equal(await page.locator(`.editor-toolbar #${id}`).isVisible(), true, `${id} remains in the one shared toolbar`);
+    }
+    assert.equal(await page.locator('#overlay-copy').isVisible(), false, 'file session does not gain capture completion semantics');
+    assert.equal(await page.locator('#restart-selection').isVisible(), false);
     const original = await pixels();
     assert.deepEqual([original.width, original.height], [96, 64]);
     assert.deepEqual(original.data.slice(0, 4), [0, 0, 0, 0], 'source transparency is retained');
