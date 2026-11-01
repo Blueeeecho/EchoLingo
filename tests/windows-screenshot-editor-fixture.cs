@@ -469,12 +469,36 @@ public static partial class EchoLingoApplicationSmoke {
                 if(message.StartsWith(code+":",StringComparison.Ordinal))observation["knownUpdateErrorCode"]=code;
         }catch(Exception){observation["failureStateUnavailable"]=true;}
     }
+    static Dictionary<string,object> ScreenshotPointerObservation(Process app,IntPtr editor,Point point,bool inspectElement) {
+        Dictionary<string,object> result=new Dictionary<string,object>();
+        try {
+            IntPtr hit=WindowFromPoint(point),root=hit==IntPtr.Zero?IntPtr.Zero:GetAncestor(hit,2);uint pid=0;uint thread=hit==IntPtr.Zero?0:GetWindowThreadProcessId(hit,out pid);
+            bool owned=pid==app.Id&&root==editor;result["hitOwnedEditor"]=owned;result["hitRootIsEditor"]=root==editor;result["hitPidIsApp"]=pid==app.Id;result["hitNull"]=hit==IntPtr.Zero;
+            result["hitForeign"]=hit!=IntPtr.Zero&&!owned;
+            if(owned) {
+                result["hitIsRoot"]=hit==root;result["ownedHitHandle"]=hit.ToInt64();result["ownedRootHandle"]=root.ToInt64();
+                StringBuilder name=new StringBuilder(128);GetClassName(hit,name,name.Capacity);string value=name.ToString();
+                result["ownedHitClass"]=value=="Tauri Window"||value=="Chrome_WidgetWin_0"||value=="Chrome_WidgetWin_1"||value=="Chrome_RenderWidgetHostHWND"||value=="Intermediate D3D Window"?value:"other-owned-class";
+                ScreenshotGuiThreadInfo info=new ScreenshotGuiThreadInfo();info.size=(uint)Marshal.SizeOf(typeof(ScreenshotGuiThreadInfo));bool queried=thread!=0&&GetGUIThreadInfo(thread,ref info);
+                result["captureQuerySucceeded"]=queried;
+                if(queried){uint capturePid=0;if(info.capture!=IntPtr.Zero)GetWindowThreadProcessId(info.capture,out capturePid);result["captureNull"]=info.capture==IntPtr.Zero;result["captureOwnedEditor"]=info.capture!=IntPtr.Zero&&capturePid==app.Id&&GetAncestor(info.capture,2)==editor;result["captureIsHit"]=info.capture!=IntPtr.Zero&&info.capture==hit;}
+                if(inspectElement) {
+                    AutomationElement element=AutomationElement.FromPoint(new System.Windows.Point(point.X,point.Y));bool ownElement=element!=null&&element.Current.ProcessId==app.Id;
+                    result["uiaOwned"]=ownElement;
+                    if(ownElement){result["uiaControlTypeId"]=element.Current.ControlType.Id;result["uiaIsCanvas"]=element.Current.Name==ScreenshotCanvasName;result["uiaCanvasAutomationId"]=element.Current.AutomationId=="image-canvas";}
+                }
+            }
+            result["canvasRect"]=ScreenshotRectObservation(ScreenshotWebSelection(editor,result));
+        }catch(Exception){result["observationUnavailable"]=true;}
+        return result;
+    }
     static void ScreenshotWebDrag(Form form,Process app,uint helper,Point first,Point last,Rectangle expected,string phase,List<Dictionary<string,object>> observations) {
         Assert(observations.Count<18,"Adjustment diagnostic inventory exceeded the exact move/eight-handle pairs.");
         IntPtr editor=ScreenshotRetainedEditor(app,helper);
         Dictionary<string,object> observation=new Dictionary<string,object>{{"phase",phase},{"before",ScreenshotRectObservation(ScreenshotWebSelection(editor))},{"expected",ScreenshotRectObservation(expected)},{"pointerStart",new int[]{first.X,first.Y}},{"pointerEnd",new int[]{last.X,last.Y}},{"completed",false}};observations.Add(observation);
-        ScreenshotWebPoint(form,app,editor,first);INPUT down=new INPUT();down.data.mouse.flags=2;INPUT up=new INPUT();up.data.mouse.flags=4;Send(new INPUT[]{down});
-        try{Thread.Sleep(60);ScreenshotWebPoint(form,app,editor,last);Thread.Sleep(60);}finally{Send(new INPUT[]{up});}
+        ScreenshotWebPoint(form,app,editor,first);observation["beforeDown"]=ScreenshotPointerObservation(app,editor,first,true);
+        INPUT down=new INPUT();down.data.mouse.flags=2;INPUT up=new INPUT();up.data.mouse.flags=4;Send(new INPUT[]{down});
+        try{Thread.Sleep(60);observation["afterDown"]=ScreenshotPointerObservation(app,editor,first,false);ScreenshotWebPoint(form,app,editor,last);Thread.Sleep(60);observation["afterMoveBeforeUp"]=ScreenshotPointerObservation(app,editor,last,false);}finally{Send(new INPUT[]{up});}
         try {
             WaitFor(delegate{
                 bool same=ScreenshotRetainedEditor(app,helper)==editor,visible=IsWindowVisible(editor);observation["sameEditor"]=same;observation["editorVisible"]=visible;

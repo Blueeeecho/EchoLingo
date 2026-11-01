@@ -201,6 +201,17 @@ describe('actual Windows screenshot fixture source wiring (not native acceptance
     expect(failure).not.toMatch(/observation\[[^\]]+\]=message\s*;/);
     for (const forbidden of ['Send(', 'SetForegroundWindow(', '.Invoke()', '.Toggle()', 'Thread.Sleep']) expect(failure).not.toContain(forbidden);
   });
+  it('observes only owned pointer surfaces and capture state around the unchanged gesture', () => {
+    const observer = fixture.slice(fixture.indexOf('static Dictionary<string,object> ScreenshotPointerObservation('), fixture.indexOf('static void ScreenshotWebDrag('));
+    for (const value of ['pid==app.Id&&root==editor', 'if(owned)', 'if(ownElement)', 'GetGUIThreadInfo(thread,ref info)', 'captureOwnedEditor', 'hitRootIsEditor', 'hitPidIsApp', 'uiaIsCanvas', 'element.Current.Name==ScreenshotCanvasName', 'canvasRect']) expect(observer).toContain(value);
+    expect(observer.indexOf('if(owned)')).toBeLessThan(observer.indexOf('GetClassName('));
+    expect(observer.indexOf('if(owned)')).toBeLessThan(observer.indexOf('AutomationElement.FromPoint('));
+    for (const forbidden of ['Send(', 'SetForegroundWindow(', 'Thread.Sleep', 'result["name"]', 'result["text"]']) expect(observer).not.toContain(forbidden);
+    const drag = fixture.slice(fixture.indexOf('static void ScreenshotWebDrag('), fixture.indexOf('static void ScreenshotWebMoveResize('));
+    for (const phase of ['beforeDown', 'afterDown', 'afterMoveBeforeUp']) expect(drag).toContain('observation["'+phase+'"]');
+    expect(drag.match(/Send\(new INPUT\[\]\{down\}\)/g)).toHaveLength(1);
+    expect(drag.match(/Send\(new INPUT\[\]\{up\}\)/g)).toHaveLength(1);
+  });
   it('maps F1 exports to dismiss/re-capture while retaining standalone cancellation and collision oracles', () => {
     for (const value of ['if(closes)WaitFor', 'for(int save=0;save<2;save++)', 'recapturedSaveSessions', 'inplaceCopyAndSavesDismissed', 'savedCaptureReopenedThroughSettings', 'standaloneCollisionNumberingVerified', 'ScreenshotContinueOpen(app,dialogOwner)', 'inplaceCancelPreservedClipboard']) expect(fixture).toContain(value);
     expect(fixture).not.toContain('ScreenshotInvoke(app,editor,"100%")');
