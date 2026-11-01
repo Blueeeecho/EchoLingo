@@ -112,6 +112,25 @@ try {
       const xy = p => [bounds.x + p[0] * bounds.width / size[0], bounds.y + p[1] * bounds.height / size[1]];
       await page.mouse.move(...xy(start)); await page.mouse.down(); await page.mouse.move(...xy(end), { steps: 3 }); await page.mouse.up();
     };
+    // Opened files share the capture-style toolbar, without pretending to be a
+    // native capture: keep file commands and their existing save/close lifecycle.
+    assert.equal(await page.locator('body').getAttribute('data-compact-editor'), 'true');
+    assert.equal(await page.locator('body').getAttribute('data-inplace'), 'false');
+    assert.equal(await page.locator('.editor-header').isVisible(), false);
+    assert.equal(await page.locator('.editor-footer').isVisible(), false);
+    for (const id of ['open-image', 'pin-image', 'copy-image', 'save-image', 'save-as-image', 'close-editor']) {
+      assert.equal(await page.locator(`.editor-toolbar #${id}`).isVisible(), true, `${id} remains in the one shared toolbar`);
+    }
+    assert.equal(await page.locator('#overlay-copy').isVisible(), false, 'file session does not gain capture completion semantics');
+    assert.equal(await page.locator('#restart-selection').isVisible(), false);
+    assert.equal(await page.locator('.tool-options').isVisible(), false, 'selection has no irrelevant style controls');
+    assert.equal(await page.locator('#zoom-fit').isVisible(), false, 'zoom controls are secondary, not always expanded');
+    await page.locator('#zoom-menu summary').click();
+    assert.equal(await page.locator('#zoom-fit').isVisible(), true);
+    await page.keyboard.press('Escape');
+    assert.equal(await page.locator('#zoom-menu').getAttribute('open'), null);
+    assert.equal(await page.locator('#discard-dialog').isVisible(), false, 'Escape closes zoom options, not the image');
+    assert.equal(await page.locator('.editor-toolbar button[data-tool] svg.toolbar-icon').count(), 11, 'all primary tools use the same SVG icon family');
     const original = await pixels();
     assert.deepEqual([original.width, original.height], [96, 64]);
     assert.deepEqual(original.data.slice(0, 4), [0, 0, 0, 0], 'source transparency is retained');
@@ -133,6 +152,7 @@ try {
     // may prematurely commit an active IME candidate. Text is plain, not HTML.
     await fresh(); await page.locator('.editor-toolbar button[data-tool="text"]').click();
     await page.locator('#image-canvas').click({ position: { x: 5, y: 5 } });
+    assert.equal(await page.locator('#annotation-text').evaluate(input => document.activeElement === input && !input.closest('[hidden]')), true, 'the canvas click retains direct-input focus after native pointer defaults');
     await page.locator('#annotation-text').fill('中文标注\n<script>alert(1)</script>');
     await page.locator('#annotation-text').dispatchEvent('compositionstart');
     await page.locator('#annotation-text').dispatchEvent('keydown', { key: 'Enter', code: 'Enter', ctrlKey: true, isComposing: true, keyCode: 229 });
@@ -143,11 +163,39 @@ try {
     await page.locator('#annotation-text').dispatchEvent('compositionend');
     await page.locator('#annotation-text').dispatchEvent('keydown', { key: 'Escape' });
     assert.equal(await page.locator('#text-dialog').evaluate(d => !d.hidden), true, 'compositionend before the Escape default must retain text');
-    await page.locator('#apply-text').click(); assert.equal(await page.locator('#text-dialog').evaluate(d => !d.hidden), false);
+    await page.locator('#annotation-text').press('Control+Enter'); assert.equal(await page.locator('#text-dialog').evaluate(d => !d.hidden), false);
     assert.equal(await page.locator('#undo-edit').isEnabled(), true);
     await page.locator('.editor-toolbar button[data-tool="text"]').click(); await page.locator('#image-canvas').click({ position: { x: 5, y: 5 } });
     await page.locator('#annotation-text').fill('字'.repeat(2000)); assert.equal(await page.locator('#annotation-text').inputValue().then(x => x.length), 2000);
-    await page.locator('#cancel-text').click();
+    await page.locator('#annotation-text').press('Escape');
+
+    // Direct text lives at its image coordinate, without a separate form panel.
+    await fresh(320, 240); const beforeDirectText = await pixels();
+    await page.locator('[data-tool=text]').click();
+    const directCanvas = await page.locator('#image-canvas').boundingBox();
+    await page.locator('#image-canvas').click({ position: { x: 30, y: 40 } });
+    const directInput = await page.locator('#annotation-text').boundingBox();
+    assert.ok(Math.abs(directInput.x - directCanvas.x - 30) < 1 && Math.abs(directInput.y - directCanvas.y - 40) < 1, 'typing starts exactly at the clicked image point');
+    assert.equal(await page.locator('#text-dialog button, #text-dialog small, #text-count').count(), 0, 'no popup-form actions, counter, or persistent instructions');
+    assert.equal(await page.locator('#annotation-text').evaluate(input => getComputedStyle(input).backgroundColor), 'rgba(0, 0, 0, 0)');
+    await page.locator('#annotation-text').fill('Direct typing');
+    await page.locator('#annotation-text').press('Enter');
+    await page.locator('#annotation-text').pressSequentially('Second line');
+    assert.equal(await page.locator('#annotation-text').inputValue(), 'Direct typing\nSecond line');
+    assert.deepEqual(await page.locator('#annotation-text').evaluate(input => ({ top: input.scrollTop, fits: input.scrollHeight <= input.clientHeight })), { top: 0, fits: true }, 'both direct-input lines are visible without a scrollbar shrinking the typing area');
+    assert.equal(await page.locator('#annotation-text').evaluate(input => input.clientHeight <= Math.ceil(parseFloat(getComputedStyle(input).lineHeight) * 2) + 2), true, 'two short explicit lines do not acquire a spurious third line from a too-narrow auto width');
+    const copiesDuringIME = await page.evaluate(() => window.__screenshotQA.copies.length);
+    await page.locator('#annotation-text').dispatchEvent('compositionstart');
+    await page.locator('#copy-image').click();
+    assert.equal(await page.evaluate(() => window.__screenshotQA.copies.length), copiesDuringIME, 'outside copy cannot commit an active IME candidate');
+    assert.equal(await page.locator('#annotation-text').isVisible(), true);
+    await page.locator('#annotation-text').dispatchEvent('compositionend');
+    await mkdir('test-results', { recursive: true });
+    await page.screenshot({ path: `test-results/screenshot-editor-direct-text-dpr${deviceScaleFactor}.png` });
+    await page.mouse.click(10, 10);
+    assert.equal(await page.locator('#annotation-text').isVisible(), false, 'outside click naturally commits without an extra confirmation');
+    assert.notDeepEqual(await pixels(), beforeDirectText);
+    await page.locator('#undo-edit').click(); assert.deepEqual(await pixels(), beforeDirectText);
 
     // Delete while a drag is held must cancel the draft movement before index
     // removal; otherwise pointerup could overwrite the following annotation.
@@ -169,7 +217,7 @@ try {
     // Freehand/highlight and ellipse use source pixels; one eraser gesture
     // changes only ink. Existing masks remain opaque in the final raster.
     await fresh(320, 240); const unmarked = await pixels();
-    await page.locator('#edit-color').fill('#dd2233');
+    await page.locator('[data-tool=pen]').click(); await page.locator('#edit-color').fill('#dd2233');
     await drag('pen', [10, 40], [280, 40]); const painted = await pixels(); assert.notDeepEqual(painted, unmarked);
     await page.locator('#undo-edit').click(); assert.deepEqual(await pixels(), unmarked);
     await page.locator('#redo-edit').click(); assert.deepEqual(await pixels(), painted);
@@ -189,7 +237,7 @@ try {
     await page.locator('[data-tool="rectangle"]').click(); await page.locator('#shape-style').selectOption('ellipse');
     await drag('rectangle', [50, 130], [150, 190]);
     await page.locator('#shape-style').selectOption('rectangle');
-    await page.locator('#edit-color').fill('#112233'); await drag('solid', [30, 20], [60, 100]);
+    await page.locator('[data-tool=solid]').click(); await page.locator('#edit-color').fill('#112233'); await drag('solid', [30, 20], [60, 100]);
     const inkAndMask = await pixels();
     await drag('eraser', [100, 20], [100, 100]); const erasedInk = await pixels(); assert.notDeepEqual(erasedInk, inkAndMask);
     await page.locator('#undo-edit').click(); assert.deepEqual(await pixels(), inkAndMask);
@@ -246,7 +294,7 @@ try {
     await drag('select', [160, 90], [170, 95]);
     assert.notDeepEqual(await pixels(), afterCrop, 'annotations remain selectable in crop-adjusted coordinates');
     await page.locator('#undo-edit').click(); assert.deepEqual(await pixels(), afterCrop);
-    await page.locator('#edit-color').fill('#112233'); await drag('solid', [0, 0], [25, 25]);
+    await page.locator('[data-tool=solid]').click(); await page.locator('#edit-color').fill('#112233'); await drag('solid', [0, 0], [25, 25]);
     const finalAnnotations = await pixels();
     for (const [button, collection] of [['#copy-image', 'copies'], ['#save-image', 'saves'], ['#pin-image', 'pins']]) {
       const before = await page.evaluate(collection => window.__screenshotQA[collection].length, collection);
@@ -260,15 +308,22 @@ try {
       assert.deepEqual(raster, finalAnnotations, collection + ' contains the same flattened annotations/crop/mask');
     }
 
-    // A pending draft on an otherwise saved image is still unsaved work.
+    // Clicking outside text commits it; cancelling Close retains that unsaved annotation.
     await page.locator('[data-tool="text"]').click(); await clickImage(100, 30);
     await page.locator('#annotation-text').fill('尚未提交的备注');
     assert.equal(await page.locator('#save-indicator').textContent(), '未保存');
-    await page.locator('#close-editor').click();
+    const closeBeforeCommit = await page.locator('#close-editor').boundingBox();
+    await page.mouse.move(closeBeforeCommit.x + closeBeforeCommit.width / 2, closeBeforeCommit.y + closeBeforeCommit.height / 2);
+    await page.mouse.down();
+    assert.deepEqual(await page.locator('#close-editor').boundingBox(), closeBeforeCommit, 'outside text commit cannot move the intended action before pointerup');
+    await page.mouse.up();
     assert.equal(await page.locator('#discard-dialog').isVisible(), true);
     await page.locator('#discard-cancel').click();
-    assert.equal(await page.locator('#annotation-text').inputValue(), '尚未提交的备注');
-    await page.locator('#cancel-text').click();
+    assert.equal(await page.locator('#annotation-text').isVisible(), false);
+    assert.notDeepEqual(await pixels(), finalAnnotations, 'cancelling Close retains the text committed by its outside click');
+    assert.equal(await page.locator('#save-indicator').textContent(), '未保存');
+    await page.locator('#undo-edit').click();
+    assert.deepEqual(await pixels(), finalAnnotations, 'one undo returns to the exact previously saved raster');
     assert.equal(await page.locator('#save-indicator').textContent(), '已保存');
 
     // Mosaic modifies actual pixels; solid masks replace RGB and alpha fully.
@@ -277,12 +332,12 @@ try {
     assert.deepEqual(at(mosaicked, 8, 8), at(mosaicked, 23, 23));
     assert.notDeepEqual(at(mosaicked, 8, 8), at(original, 8, 8));
     assert.deepEqual(at(mosaicked, 24, 24), at(original, 24, 24));
-    await page.locator('#edit-color').fill('#112233'); await drag('solid', [0, 0], [8, 8]);
+    await page.locator('[data-tool=solid]').click(); await page.locator('#edit-color').fill('#112233'); await drag('solid', [0, 0], [8, 8]);
     const masked = await pixels(); assert.deepEqual(at(masked, 1, 1), [17, 34, 51, 255]);
 
     // Crop after zoom uses image coordinates, reduces actual PNG dimensions and
     // exposes no crop-excluded pixels. DPR changes display density, not output.
-    const cropSessionId = await fresh(); await page.locator('#zoom-in').click();
+    const cropSessionId = await fresh(); await page.locator('#zoom-menu summary').click(); await page.locator('#zoom-in').click();
     await drag('crop', [10, 8], [42, 32]);
     const crop = await pixels(); assert.deepEqual([crop.width, crop.height], [32, 24]);
     assert.deepEqual(at(crop, 0, 0), at(original, 10, 8));
@@ -391,7 +446,7 @@ try {
     await page.locator('.editor-toolbar button[data-tool="text"]').click(); await page.locator('#image-canvas').click({ position: { x: 5, y: 5 } });
     await page.locator('#annotation-text').fill('兼容旧版系统 WebView');
     assert.equal(await page.locator('.screenshot-modal-backdrop').count(), 0, 'inline annotation does not create a modal backdrop');
-    await page.locator('#cancel-text').click(); assert.equal(await page.locator('#text-dialog').isVisible(), false);
+    await page.locator('#annotation-text').press('Escape'); assert.equal(await page.locator('#text-dialog').isVisible(), false);
     await page.locator('#close-editor').click(); await page.keyboard.press('Escape');
     assert.equal(await page.evaluate(() => window.__screenshotQA.closed.length), 0);
     await page.locator('#close-editor').click(); await page.locator('#discard-confirm').click();
@@ -490,7 +545,7 @@ try {
     assert.equal(await page.evaluate(id => window.__screenshotQA.calls.filter(call => call.command === 'focus_screenshot_overlay' && call.sessionId === id).length, overlayId), 1, 'text awaits the session focus without duplicate IPC');
     await page.locator('#annotation-text').dispatchEvent('compositionend');
     await page.keyboard.press('Enter'); assert.equal(await page.locator('#text-dialog').isVisible(), true, 'textarea Enter is a newline, not completion');
-    await page.locator('#cancel-text').click();
+    await page.locator('#annotation-text').press('Escape');
     await page.evaluate(() => { window.__screenshotQA.saveError = true; });
     await page.locator('#overlay-save').click();
     await page.waitForFunction(() => document.querySelector('#editor-status').textContent.includes('QA save failed'));
@@ -537,7 +592,7 @@ try {
     // Pin exports only the rendered/redacted bitmap, never copies/saves, and
     // must not dismiss until the independent window has acknowledged readiness.
     overlayId = await overlayFresh();
-    await page.locator('#edit-color').fill('#112233');
+    await page.locator('[data-tool=solid]').click(); await page.locator('#edit-color').fill('#112233');
     await drag('solid', [0, 0], [32, 24]);
     const pinPixels = await pixels();
     const beforePin = await page.evaluate(() => [window.__screenshotQA.copies.length, window.__screenshotQA.saves.length]);

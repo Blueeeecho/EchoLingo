@@ -573,6 +573,21 @@ public static partial class EchoLingoApplicationSmoke {
         },IntPtr.Zero);
         return new Dictionary<string,object>{{"trayWindowCount",trays},{"globalHotkeyWindowCount",hotkeys},{"nativeMilestoneIsNotFrontendReadiness",true},{"fixedFrontendWarmupMilliseconds",0}};
     }
+    // Failure-only bounded census. Unknown classes are counted, never retained.
+    // NativeStartup remains the independent acceptance predicate.
+    static Dictionary<string,object> StartupFailureWindows(Process app,Stopwatch budget) {
+        Dictionary<string,object> counts=new Dictionary<string,object>{{"ownedWindowCount",0},{"limitReached",false},{"budgetExpired",false}};
+        foreach(string role in new string[]{"tauri","tray","hotkey","other"})foreach(string kind in new string[]{"Root","NonRoot","Visible"})counts[role+kind]=0;
+        EnumWindows(delegate(IntPtr window,IntPtr unused) {
+            if(budget.ElapsedMilliseconds>=2000){counts["budgetExpired"]=true;return false;}
+            uint owner;GetWindowThreadProcessId(window,out owner);if(owner!=app.Id)return true;
+            int total=(int)counts["ownedWindowCount"];if(total>=64){counts["limitReached"]=true;return false;}counts["ownedWindowCount"]=total+1;
+            StringBuilder name=new StringBuilder(128);GetClassName(window,name,name.Capacity);
+            string role=name.ToString()=="Tauri Window"?"tauri":name.ToString()=="tray_icon_app"?"tray":name.ToString()=="global_hotkey_app"?"hotkey":"other";
+            string key=role+(GetAncestor(window,2)==window?"Root":"NonRoot");counts[key]=(int)counts[key]+1;
+            if(IsWindowVisible(window)){key=role+"Visible";counts[key]=(int)counts[key]+1;}return true;
+        },IntPtr.Zero);return counts;
+    }
     static AutomationElement Element(IntPtr window,string name) {
         return AutomationElement.FromHandle(window).FindFirst(TreeScope.Descendants,new PropertyCondition(AutomationElement.NameProperty,name));
     }
@@ -770,6 +785,7 @@ public static partial class EchoLingoApplicationSmoke {
         string expectedKind=CoreFailureKind(report),expectedGeneratedSource=GeneratedSourceForKind(expectedKind);
         try {
             Assert(app!=null&&!app.HasExited,"Failure observation requires the owned primary.");
+            if(report.ContainsKey("failedStage")&&String.Equals(report["failedStage"] as string,"native-startup-milestone",StringComparison.Ordinal))snapshot["startupWindowsAtFailure"]=StartupFailureWindows(app,budget);
             IntPtr main=MainWindow(app.Id);snapshot["ownMainFound"]=main!=IntPtr.Zero?1:0;snapshot["ownMainVisible"]=main!=IntPtr.Zero&&IsWindowVisible(main)?1:0;
             snapshot["foregroundIsSource"]=GetForegroundWindow()==source.Handle?1:0;snapshot["foregroundIsApp"]=ForegroundPid()==app.Id?1:0;
             snapshot["mockEnabled"]=server!=null?1:0;snapshot["mockRequestCount"]=server==null?0:server.Count;snapshot["mockErrorPresent"]=server!=null&&server.Error!=null?1:0;
@@ -807,6 +823,7 @@ public static partial class EchoLingoApplicationSmoke {
         }catch{snapshot["observationFailed"]=1;}
         finally {
             if(secondary!=null){try{if(!secondary.HasExited){secondary.Kill();snapshot["ownDiagnosticProcessStopped"]=1;}}catch{snapshot["ownDiagnosticProcessCleanupFailed"]=1;}secondary.Dispose();}
+            if(snapshot.ContainsKey("startupWindowsAtFailure")){snapshot["startupWindowsFinalObservationCompleted"]=false;if(budget.ElapsedMilliseconds<2000){Dictionary<string,object> finalWindows=StartupFailureWindows(app,budget);snapshot["startupWindowsAfterExport"]=finalWindows;snapshot["startupWindowsFinalObservationCompleted"]=!(bool)finalWindows["budgetExpired"]&&!(bool)finalWindows["limitReached"]&&budget.ElapsedMilliseconds<2000;}}
             if(reader!=null&&reader.IsAlive&&budget.ElapsedMilliseconds<2000)reader.Join((int)Math.Max(0,2000-budget.ElapsedMilliseconds));
             snapshot["sourceObservationCompleted"]=Interlocked.CompareExchange(ref editor.Complete,0,0)!=0?1:0;
             if(Interlocked.CompareExchange(ref editor.Complete,0,0)!=0){snapshot["sourceAvailable"]=editor.Available;snapshot["sourceVisible"]=editor.Visible;snapshot["sourceNonempty"]=editor.Nonempty;snapshot["sourceObservationFailed"]=editor.Failed;snapshot["sourceGeneratedCompared"]=editor.GeneratedSourceCompared;snapshot["sourceExactGenerated"]=editor.ExactGeneratedSource;snapshot["sourceTrimmedExactGenerated"]=editor.TrimmedExactGeneratedSource;}

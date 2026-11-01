@@ -34,6 +34,7 @@ checks = report.get("diagnostics", {})
 for required in (
     "screenshotWindowPolicyFixturePassed",
     "screenshotCancellationFixturePassed",
+    "ocrCancellationTimingFixturePassed",
     "mixedSelectionRecoveryFixturePassed",
     "chatMultiSelectionFixturePassed",
     "selectionFocusRecoveryFixturePassed",

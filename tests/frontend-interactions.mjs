@@ -337,9 +337,8 @@ try {
   assert.equal(await page.locator('#source-text').inputValue(), 'Recovered explicit source');
   assert.equal(await page.evaluate(() => window.__qa.popupStages.some(stage => stage.phase === 'presentationComplete')), true);
 
-  // Real delivery IDs and delayed IPC reproduce the original error-toast race.
-  // Both compatibility hints must be displayed after clearToast/layout/show,
-  // never before, and old payloads/errors cannot overwrite a newer success.
+  // Even legacy selection-error payloads are quiet manual input. Real delivery
+  // IDs and delayed IPC must preserve focus and reject stale source/errors.
   for (const prefix of ['COPY_NO_UPDATE', 'SELECTION_UNAVAILABLE']) {
     await page.goto(process.env.ECHOLINGO_TEST_URL ?? 'http://127.0.0.1:1420/');
     await page.waitForFunction(() => document.querySelector('#footer-status')?.textContent === '准备就绪');
@@ -361,8 +360,10 @@ try {
     assert.equal(await page.locator('#toast').isHidden(), true);
     await page.evaluate(() => { window.__qa.holdFit = false; window.__qa.releaseFit(); });
     await page.waitForFunction(() => window.__qa.sourceAcks.includes(101));
-    assert.equal(await page.locator('#toast').isVisible(), true);
-    assert.match(await page.locator('#toast').textContent(), /复制|选区/);
+    assert.equal(await page.locator('#toast').isHidden(), true);
+    assert.equal(await page.locator('#source-text').inputValue(), '');
+    await page.waitForFunction(() => document.activeElement === document.querySelector('#source-text'));
+    assert.equal(await page.locator('#permission-guidance').isHidden(), true);
     assert.equal(await page.evaluate(() => window.__qa.translationRequests.length), 0);
     await page.evaluate((prefix) => {
       const fixture = window.__qa;
@@ -1827,22 +1828,13 @@ try {
     assert.equal(await page.locator('#toast').isHidden(), true);
   }
   assert.equal(await page.evaluate(() => window.__qa.translationRequests.length), emptyRequestCount);
-  // A sent copy that receives no clipboard update is NOT a confirmed empty
-  // selection. Exercise the actual native event listener and visible toast.
-  await page.evaluate(() => window.__qa.emit('action-error', 'COPY_NO_UPDATE: generated timeout detail'));
-  await page.locator('#toast').getByText('目标应用没有及时更新剪贴板', { exact: false }).waitFor();
-  assert.match(await page.locator('#toast').textContent(), /Ctrl\+C/);
-  assert.doesNotMatch(await page.locator('#toast').textContent(), /generated timeout detail|未选中|管理员/);
-  assert.equal(await page.evaluate(() => window.__qa.translationRequests.length), emptyRequestCount);
-  await page.evaluate(() => window.__qa.emit('source-text', { text: '', mode: 'input' }));
-  assert.equal(await page.locator('#toast').isHidden(), true);
-  await page.evaluate(() => window.__qa.emit('action-error', 'SELECTION_UNAVAILABLE: generated native detail'));
-  await page.locator('#toast').getByText('当前应用未提供可验证的选区', { exact: false }).waitFor();
-  assert.match(await page.locator('#toast').textContent(), /先按 ⌘C.*翻译剪贴板/);
-  assert.doesNotMatch(await page.locator('#toast').textContent(), /generated native detail|权限/);
-  assert.equal(await page.evaluate(() => window.__qa.translationRequests.length), emptyRequestCount);
-  await page.evaluate(() => window.__qa.emit('source-text', { text: '', mode: 'input' }));
-  assert.equal(await page.locator('#toast').isHidden(), true);
+  // Selection failure is also manual-input intent, not a toast or permission
+  // interruption. Legacy standalone events must not revive the old warning.
+  for (const error of ['COPY_NO_UPDATE: generated timeout detail', 'SELECTION_UNAVAILABLE: generated native detail']) {
+    await page.evaluate((message) => window.__qa.emit('action-error', message), error);
+    assert.equal(await page.locator('#toast').isHidden(), true);
+    assert.equal(await page.evaluate(() => window.__qa.translationRequests.length), emptyRequestCount);
+  }
   // Real permission/provider failures remain visible. An unscoped raw NO_TEXT
   // error is not trusted as an OCR-empty event: the backend must instead send
   // its guarded blank source payload, exercised in the cross-platform suite below.

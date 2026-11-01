@@ -34,11 +34,11 @@ class MacScreenshotOverlayContract(unittest.TestCase):
         self.assertNotIn("keyCode", host)
 
     def test_screenshot_metadata_uses_the_same_plan_as_the_frozen_image(self):
-        self.assertIn("let image = try captureNativePlannedImage(plan, purpose: purpose, operation: operation)", NATIVE)
+        self.assertIn("let image = try captureNativePlannedImage(plan, purpose: purpose, operation: operation, trace: trace)", NATIVE)
         self.assertIn("return (image, plan)", NATIVE)
         self.assertIn('"captureGeometry": try captureEditorGeometry(captured.plan, primaryHeight: captured.plan.primaryHeight)', ENTRY)
         self.assertIn('return try captureScreenshotResponse(cancellation: operation)', ENTRY)
-        self.assertIn('case "--capture-image": return ["ok": true, "imageBase64": try captureImage()]', ENTRY)
+        self.assertIn('case "--capture-image": return ["ok": true, "imageBase64": try captureImage(cancellation: captureInputOperation(input))]', ENTRY)
         capture = ENTRY.split("func captureScreenshotResponse(", 1)[1].split("func screenCapturePermissionFields", 1)[0]
         self.assertNotIn("NSPasteboard", capture)
         self.assertNotIn("write(to", capture)

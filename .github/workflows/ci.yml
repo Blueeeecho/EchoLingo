@@ -55,7 +55,7 @@ jobs:
         run: rustfmt --edition 2021 --check src-tauri/src/bilingual_input.rs
   screenshot-pin-native:
     needs: validation-mode
-    if: needs.validation-mode.outputs.mode == 'screenshot-pins' || (github.event_name == 'pull_request' && (github.head_ref == 'feat/screenshot-pins' || github.head_ref == 'feat/screenshot-028') && github.base_ref == 'main')
+    if: needs.validation-mode.outputs.mode == 'screenshot-pins' || (github.event_name == 'pull_request' && (github.head_ref == 'feat/screenshot-pins' || github.head_ref == 'feat/screenshot-028' || github.head_ref == 'fix/028-unified-editor') && github.base_ref == 'main')
     name: Screenshot pin native (${{ matrix.os }})
     permissions:
       contents: read
@@ -550,6 +550,10 @@ jobs:
       - run: npm test
       - run: npm audit --audit-level=high
       - run: npm run build
+      - name: Windows clipboard text readiness and synthesized-format compatibility
+        if: runner.os == 'Windows'
+        shell: powershell
+        run: powershell.exe -NoProfile -STA -ExecutionPolicy Bypass -File tests/windows-clipboard-readiness-smoke.ps1 -IsolatedTestSession
       - name: Windows clipboard presence-marker preservation and unknown-format rejection
         if: runner.os == 'Windows'
         shell: pwsh
@@ -1131,6 +1135,8 @@ jobs:
       - name: Preview installer safety and rollback fixtures
         run: python -m unittest discover -s scripts -p 'test_*.py' -v
       - run: npm ci
+      - name: Install CJK and symbol fonts for faithful generated UI evidence
+        run: sudo apt-get update && sudo apt-get install -y fonts-noto-cjk fonts-symbola
       - name: Reuse the runner browser, download Chromium only if absent
         timeout-minutes: 10
         run: |
@@ -1158,7 +1164,9 @@ jobs:
         with:
           name: EchoLingo-service-management-ui
           if-no-files-found: warn
-          path: test-results/service-manager-*.png
+          path: |
+            test-results/service-manager-*.png
+            test-results/screenshot-editor-*.png
 
   windows-popup-diagnostics:
     name: Targeted popup diagnostics (verified immutable candidate)

@@ -66,7 +66,7 @@ final class SelectionTrace {
         "foregroundSource", "foregroundPID", "bundleIdentifier", "foregroundMismatch", "root",
         "focusStatus", "focusPIDStatus", "focusOwner", "expectedPID", "ownerMatches", "valueTypeValid",
         "role", "roleStatus", "subrole", "subroleStatus", "selectedTextStatus", "selectedTextEmpty",
-        "rangeStatus", "rangeState", "rangeLength", "rangeTextStatus", "pluralStatus", "pluralState", "rangeCount", "positiveRangeCount",
+        "rangeStatus", "rangeState", "rangeLength", "rangeTextStatus", "pluralStatus", "pluralState", "pluralCapabilityStatus", "pluralCapabilityState", "pluralCapabilityDeclared", "rangeCount", "positiveRangeCount",
         "decision", "documentContainer", "opaqueDocument", "copyIssued", "probeNodes", "probeRoot", "copyStrategy", "windowMatches",
         "requestSourceAnchored", "requestSourceMatches", "requestSourceReason", "secureInputEnabled", "accessibilityGranted", "clipboardChanged",
         "windowTicketSource", "windowTicketReason", "windowRecordsCount",
@@ -618,6 +618,23 @@ func requireUnprotectedSelection(_ subrole: String?) throws {
 
 struct SelectionContainerEmpty: Error {}
 
+// AX failure is not evidence that an attribute is unsupported. Only the public
+// capability list may suppress this optional query, before it is issued, for
+// a validated noneditable container in bounded recovery. This never authorizes copy.
+func optionalPluralCapabilityRequired(role: String?, bounded: Bool, textStatus: AXError,
+                                     selectedRange: CFRange?) -> Bool {
+    selectionRecoveryContainer(role) && bounded &&
+        textStatus == .noValue && selectedRange?.length == 0
+}
+
+func selectionPluralCapabilityQuery(status: AXError, value: CFTypeRef?) -> SelectionQuery<Bool> {
+    guard status == .success, let names = value as? [String], !names.isEmpty,
+          names.count <= 128, Set(names).count == names.count,
+          names.contains(kAXRoleAttribute as String),
+          names.contains(kAXSelectedTextRangeAttribute as String) else { return .invalid }
+    return .value(names.contains(kAXSelectedTextRangesAttribute as String))
+}
+
 func accessibilitySelection(element: AXUIElement?, bundleIdentifier: String? = nil,
                             trace: SelectionTrace? = nil, phase: String = "ax-selection", deadline: TimeInterval? = nil,
                             recoverContainerEmpty: Bool = false,
@@ -686,8 +703,22 @@ func accessibilitySelection(element: AXUIElement?, bundleIdentifier: String? = n
     // Some document implementations publish only the plural range API. Use
     // public ranges rather than reading the document's AXValue or contents.
     var pluralUnavailable = true
-    if shouldQueryPluralSelectionRanges(selectedRange, role: classification.role, opaqueDocument: opaqueDocument,
-                                       boundedContainerProbe: deadline != nil) {
+    var queryPlural = shouldQueryPluralSelectionRanges(selectedRange, role: classification.role, opaqueDocument: opaqueDocument,
+                                                       boundedContainerProbe: deadline != nil)
+    if queryPlural && optionalPluralCapabilityRequired(role: classification.role, bounded: deadline != nil,
+                                                       textStatus: textStatus, selectedRange: selectedRange) {
+        var names: CFArray?
+        try requireSelectionQueryBudget(deadline)
+        let status = AXUIElementCopyAttributeNames(element, &names)
+        let capability = selectionPluralCapabilityQuery(status: status, value: names)
+        trace?.record(phase, ["pluralCapabilityStatus": status.rawValue,
+            "pluralCapabilityState": capability.state,
+            "pluralCapabilityDeclared": capability.value as Any? ?? NSNull()])
+        // Parse failures stay hard failures even if this read exhausted the budget.
+        try requireUsableSelectionQuery(capability)
+        queryPlural = capability.value != false
+    }
+    if queryPlural {
         var values: CFTypeRef?
         try requireSelectionQueryBudget(deadline)
         let status = AXUIElementCopyAttributeValue(element, kAXSelectedTextRangesAttribute as CFString, &values)
@@ -2775,6 +2806,51 @@ func selectionMetadataPolicySelfTest() throws {
           selectionTextQuery(status: .success, value: "selected fixture" as CFString).value == "selected fixture" else {
         throw NativeError("SELF_TEST: Native selection metadata parsing lost valid values or accepted invalid text.")
     }
+    let declaredNames = [kAXRoleAttribute as String, kAXSelectedTextRangeAttribute as String,
+                         kAXSelectedTextRangesAttribute as String] as NSArray
+    let absentNames = [kAXRoleAttribute as String, kAXSelectedTextRangeAttribute as String] as NSArray
+    guard selectionPluralCapabilityQuery(status: .success, value: declaredNames).value == true,
+          selectionPluralCapabilityQuery(status: .success, value: absentNames).value == false,
+          optionalPluralCapabilityRequired(role: "AXGroup",
+              bounded: true, textStatus: .noValue, selectedRange: parsedZero.range) else {
+        throw NativeError("SELF_TEST: Exact optional plural capability policy lost declared or absent metadata.")
+    }
+    for status in [AXError.failure, .cannotComplete, .apiDisabled, .invalidUIElement, .illegalArgument,
+                   .attributeUnsupported, .noValue, .notImplemented] {
+        guard try rejected(selectionPluralCapabilityQuery(status: status, value: absentNames)) else {
+            throw NativeError("SELF_TEST: Failed capability discovery suppressed a selection query.")
+        }
+    }
+    for value in [nil, "not an array" as CFString, [] as NSArray, [1] as NSArray,
+                  (0..<129).map { "attribute-\($0)" } as NSArray,
+                  [kAXRoleAttribute] as NSArray, [kAXRoleAttribute, kAXRoleAttribute] as NSArray] as [CFTypeRef?] {
+        guard try rejected(selectionPluralCapabilityQuery(status: .success, value: value)) else {
+            throw NativeError("SELF_TEST: Malformed capability discovery suppressed a selection query.")
+        }
+    }
+    guard !optionalPluralCapabilityRequired(role: "AXGroup",
+        bounded: true, textStatus: .noValue, selectedRange: nil) else {
+        throw NativeError("SELF_TEST: Unknown range authorized optional capability compatibility.")
+    }
+    for role in ["AXGroup", "AXWindow", "AXSplitGroup", "AXScrollArea", "AXLayoutArea", "AXDocument", "AXWebArea"] {
+        guard optionalPluralCapabilityRequired(role: role, bounded: true,
+            textStatus: .noValue, selectedRange: parsedZero.range) else {
+            throw NativeError("SELF_TEST: A validated container lost capability-based optional query handling.")
+        }
+    }
+    for (role, bounded, status, range) in [
+        ("AXTextArea", true, AXError.noValue, parsedZero.range),
+        ("AXTextField", true, .noValue, parsedZero.range),
+        ("AXButton", true, .noValue, parsedZero.range),
+        ("AXGroup", false, .noValue, parsedZero.range),
+        ("AXGroup", true, .success, parsedZero.range),
+        ("AXGroup", true, .noValue, parsedPositive.range)
+    ] {
+        guard !optionalPluralCapabilityRequired(role: role,
+            bounded: bounded, textStatus: status, selectedRange: range) else {
+            throw NativeError("SELF_TEST: Optional capability handling escaped its bounded container guard.")
+        }
+    }
     let opaque = opaqueSelectionContainer("AXSplitGroup", bundleIdentifier: "com.kingsoft.wpsoffice.mac")
     let unavailableText = selectionTextQuery(status: .noValue, value: nil)
     try requireUsableSelectionQuery(unavailableText)
@@ -3139,8 +3215,11 @@ func pngSizeGuardSelfTest() throws {
     }
 }
 
-func recognize(_ handler: VNImageRequestHandler) throws -> String {
+func recognize(_ handler: VNImageRequestHandler, cancellation: CaptureScreenshotOperation? = nil) throws -> String {
+    if cancellation?.isCancelled == true { throw NativeError("CANCELLED: 文字识别请求已取消。") }
     let request = VNRecognizeTextRequest()
+    let cancellationHandler = cancellation?.installCancellationHandler { request.cancel() }
+    defer { if let cancellationHandler { cancellation?.removeCancellationHandler(cancellationHandler) } }
     // Vision cancellation is cooperative; unlike the former subprocess, the
     // in-process bridge cannot forcibly kill OCR without killing the app.
     let deadline = DispatchSource.makeTimerSource(queue: .global(qos: .utility))
@@ -3154,8 +3233,14 @@ func recognize(_ handler: VNImageRequestHandler) throws -> String {
     let preferred = ["zh-Hans", "zh-Hant", "en-US", "ja-JP", "ko-KR"]
     request.recognitionLanguages = preferred.filter { supported.contains($0) }
     if #available(macOS 13.0, *) { request.automaticallyDetectsLanguage = true }
+    if cancellation?.isCancelled == true { throw NativeError("CANCELLED: 文字识别请求已取消。") }
     do { try handler.perform([request]) }
-    catch is CancellationError { throw NativeError("OCR_TIMEOUT: 文字识别超时，请缩小区域后重试。") }
+    catch {
+        if cancellation?.isCancelled == true { throw NativeError("CANCELLED: 文字识别请求已取消。") }
+        if error is CancellationError { throw NativeError("OCR_TIMEOUT: 文字识别超时，请缩小区域后重试。") }
+        throw error
+    }
+    if cancellation?.isCancelled == true { throw NativeError("CANCELLED: 文字识别请求已取消。") }
     let observations = request.results ?? []
     // Axis-normalized edge skew avoids treating normalized x/y units as an
     // undistorted pixel angle. Tall, vertical, or noticeably tilted boxes disable
@@ -3180,7 +3265,7 @@ func recognize(_ handler: VNImageRequestHandler) throws -> String {
     return text
 }
 
-func withCapturedRegion<T>(purpose: CapturePurpose = .region, cancellation: CaptureScreenshotOperation? = nil,
+func withCapturedRegion<T>(purpose: CapturePurpose = .region, cancellation: CaptureScreenshotOperation? = nil, trace: NativeCaptureTrace? = nil,
                            _ operation: (CGImage) throws -> T) throws -> T {
     // Hotkeys only inspect permission. Requests must come from the explicit
     // Settings action; never reopen a system prompt on each capture attempt.
@@ -3191,15 +3276,39 @@ func withCapturedRegion<T>(purpose: CapturePurpose = .region, cancellation: Capt
     // process identity. Images stay in memory and are released after OCR/API
     // encoding; neither a helper process nor a temporary screenshot is created.
     if cancellation?.isCancelled == true { throw NativeError("CANCELLED: 截图请求已取消。") }
-    let image = try captureNativeRegionImage(purpose: purpose, operation: cancellation)
+    trace?.record(.permissionVerified)
+    let image = try captureNativeRegionImage(purpose: purpose, operation: cancellation, trace: trace)
     if cancellation?.isCancelled == true { throw NativeError("CANCELLED: 截图请求已取消。") }
     return try operation(image)
 }
 
-func captureOCR() throws -> String {
-    return try withCapturedRegion { image in
-        try recognize(VNImageRequestHandler(cgImage: image, options: [:]))
+func captureOCR(cancellation: CaptureScreenshotOperation? = nil) throws -> String {
+    let trace = NativeCaptureTrace(mode: .localOCR)
+    cancellation?.attachTrace(trace)
+    do {
+        let text = try withCapturedRegion(cancellation: cancellation, trace: trace) { image in
+            trace.record(.ocrStarted)
+            let result = try recognize(VNImageRequestHandler(cgImage: image, options: [:]), cancellation: cancellation)
+            trace.record(.ocrCompleted)
+            return result
+        }
+        if cancellation?.isCancelled == true { throw NativeError("CANCELLED: 文字识别请求已取消。") }
+        trace.record(.completed)
+        return text
+    } catch { trace.failure(error); throw error }
+}
+
+func captureInputOperation(_ input: Data) throws -> CaptureScreenshotOperation? {
+    // Standalone native fixtures may call without a token. Production OCR and
+    // cloud-image capture pass the same registered token as F1.
+    if input.isEmpty { return nil }
+    guard input.count <= 64, let id = String(data: input, encoding: .utf8), UUID(uuidString: id) != nil else {
+        throw NativeError("CAPTURE_ARGUMENT: Invalid capture operation.")
     }
+    guard let operation = CaptureScreenshotOperations.shared.lookup(id) else {
+        throw NativeError("CANCELLED: Capture operation has ended.")
+    }
+    return operation
 }
 
 let maximumPNGBytes = 8 * 1024 * 1024
@@ -3213,15 +3322,23 @@ func encodePNG(_ data: Data) throws -> String {
 }
 
 func captureImage(purpose: CapturePurpose = .region, cancellation: CaptureScreenshotOperation? = nil) throws -> String {
-    return try withCapturedRegion(purpose: purpose, cancellation: cancellation) { image in
-        let png = NSMutableData()
-        guard let destination = CGImageDestinationCreateWithData(png, "public.png" as CFString, 1, nil) else {
-            throw NativeError("CAPTURE: 无法创建截图图像。")
+    let trace = NativeCaptureTrace(mode: .cloudImage)
+    cancellation?.attachTrace(trace)
+    do {
+        let encoded = try withCapturedRegion(purpose: purpose, cancellation: cancellation, trace: trace) { image in
+            let png = NSMutableData()
+            guard let destination = CGImageDestinationCreateWithData(png, "public.png" as CFString, 1, nil) else {
+                throw NativeError("CAPTURE: 无法创建截图图像。")
+            }
+            CGImageDestinationAddImage(destination, image, nil)
+            guard CGImageDestinationFinalize(destination) else { throw NativeError("CAPTURE: 无法编码截图图像。") }
+            return try encodePNG(png as Data)
         }
-        CGImageDestinationAddImage(destination, image, nil)
-        guard CGImageDestinationFinalize(destination) else { throw NativeError("CAPTURE: 无法编码截图图像。") }
-        return try encodePNG(png as Data)
-    }
+        if cancellation?.isCancelled == true { throw NativeError("CANCELLED: 截图请求已取消。") }
+        trace.record(.imageEncoded)
+        trace.record(.completed)
+        return encoded
+    } catch { trace.failure(error); throw error }
 }
 
 // Unlike captureImage (OCR/cloud transport), F1 keeps exact logical placement
@@ -4406,6 +4523,7 @@ func diagnostics() -> [String: Any] {
             "ocrLanguages": languages, "ocrEngine": "Apple Vision",
             "selection": "Accessibility selected text, then Cmd+C with clipboard restoration",
             "lastSelectionCapture": SelectionTrace.lastSnapshot(),
+            "lastOcrCapture": NativeCaptureTrace.snapshot(),
             "lastSystemTranslation": SystemTranslationTrace.snapshot(),
             "systemTranslationObservations": SystemTranslationTrace.observationsSnapshot(),
             "screens": displayDiagnostics()]
@@ -4475,7 +4593,8 @@ func selfTest(input: Data = Data()) throws -> [String: Any] {
             "ocrFixtureElapsedMs": recognitionMilliseconds,
             "ocrFixtureTimingScope": "Generated 1100x160 image; Vision recognize only; excludes capture, image drawing and application startup",
             "pngBase64RoundtripPassed": true, "paragraphGeometryFixturePassed": true,
-            "selectionPolicyFixturePassed": true, "captureSelectionFixturePassed": true, "captureSelectionDeadlineFixturePassed": true, "screenshotWindowPolicyFixturePassed": true, "screenshotCancellationFixturePassed": true, "systemTranslationPolicyFixturePassed": true, "selectionForegroundFixturePassed": true,
+            "selectionPolicyFixturePassed": true, "captureSelectionFixturePassed": true, "captureSelectionDeadlineFixturePassed": true, "screenshotWindowPolicyFixturePassed": true, "screenshotCancellationFixturePassed": true,
+            "ocrCancellationTimingFixturePassed": true, "systemTranslationPolicyFixturePassed": true, "selectionForegroundFixturePassed": true,
             "opaqueOfficeSelectionPolicyFixturePassed": true, "wpsSplitGroupPolicyFixturePassed": true,
             "selectionMetadataPolicyFixturePassed": true,
             "selectionClassificationPolicyFixturePassed": true,
@@ -4544,7 +4663,8 @@ func nativeResponse(mode: String, input: Data = Data()) -> [String: Any] {
                     "wpsInteractiveSelectionTested": false, "codexInteractiveSelectionTested": false, "wechatInteractiveSelectionTested": false]]
         case "--capture-selection-self-test":
             try captureSelectionSelfTest()
-            return ["ok": true, "diagnostics": ["captureSelectionFixturePassed": true, "captureSelectionDeadlineFixturePassed": true, "screenshotWindowPolicyFixturePassed": true, "screenshotCancellationFixturePassed": true, "screenCaptured": false, "permissionRequested": false]]
+            return ["ok": true, "diagnostics": ["captureSelectionFixturePassed": true, "captureSelectionDeadlineFixturePassed": true, "screenshotWindowPolicyFixturePassed": true, "screenshotCancellationFixturePassed": true,
+            "ocrCancellationTimingFixturePassed": true, "screenCaptured": false, "permissionRequested": false]]
         case "--capture-selector-preview":
             // Explicit development-only UI preview. It never checks/requests
             // TCC, enumerates shareable content, captures pixels or invokes OCR.
@@ -4554,8 +4674,8 @@ func nativeResponse(mode: String, input: Data = Data()) -> [String: Any] {
                     "diagnostics": ["screenCaptured": false, "permissionRequested": false,
                      "ocrInvoked": false, "translationInvoked": false,
                      "displayCount": plan.displays.count, "scale": plan.scale]]
-        case "--capture-ocr": return ["ok": true, "text": try captureOCR()]
-        case "--capture-image": return ["ok": true, "imageBase64": try captureImage()]
+        case "--capture-ocr": return ["ok": true, "text": try captureOCR(cancellation: captureInputOperation(input))]
+        case "--capture-image": return ["ok": true, "imageBase64": try captureImage(cancellation: captureInputOperation(input))]
         case "--begin-native-capture":
             return ["ok": true, "operationId": try CaptureScreenshotOperations.shared.begin()]
         case "--cancel-native-capture", "--end-native-capture", "--capture-screenshot":

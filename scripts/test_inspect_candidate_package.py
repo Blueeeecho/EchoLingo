@@ -1,4 +1,4 @@
-"""Generated static fixtures only: no installers, native apps or permission APIs."""
+"""Static/generated fixtures and a sanitized own-license response; no native execution."""
 import importlib.util
 import hashlib
 import io
@@ -180,6 +180,49 @@ class CandidateInspectionTests(unittest.TestCase):
                          [{"dev-entry": "not-device", "mount-point": str(mount)}], []):
             with self.subTest(entities=entities), self.assertRaises(MODULE.InspectionError):
                 MODULE.validate_attach_result(plistlib.dumps({"system-entities": entities}), mount)
+
+    def test_actual_own_license_response_keeps_strict_device_and_mount_checks(self):
+        data = (Path(__file__).parent / 'fixtures/028-own-license-attach.stdout').read_bytes()
+        self.assertEqual(MODULE.validate_attach_result(data, Path('/owned/mount')), '/dev/disk7')
+        with self.assertRaises(MODULE.InspectionError):
+            MODULE.validate_attach_result(data, Path('/another/mount'))
+        for altered in (data.replace(b'/dev/disk7s1', b'/dev/disk8s1'),
+                        data.replace(b'/dev/disk7</string>', b'/dev/disk8</string>')):
+            with self.assertRaises(MODULE.InspectionError):
+                MODULE.validate_attach_result(altered, Path('/owned/mount'))
+
+    def test_reviewed_prefix_does_not_hide_nonzero_attach_or_skip_detach(self):
+        fixture = (Path(__file__).parent / 'fixtures/028-own-license-attach.stdout').read_bytes()
+        for code in (0, 1):
+            with tempfile.TemporaryDirectory() as folder:
+                mount = Path(folder) / 'mount'
+                data = fixture.replace(b'/owned/mount', str(mount).encode())
+                calls = []
+                def execute(command, **kwargs):
+                    calls.append(command)
+                    if command[1] == 'attach':
+                        self.assertEqual(kwargs['input_bytes'], b'Y\n')
+                        return subprocess.CompletedProcess(command, code, data, b'fixture attach error' if code else b'')
+                    return subprocess.CompletedProcess(command, 0, b'', b'')
+                with mock.patch.object(MODULE, 'tool', return_value='hdiutil'), mock.patch.object(MODULE, 'own_dmg_license_input', return_value=b'Y\n'), mock.patch.object(MODULE, 'checked_command', side_effect=execute):
+                    if code:
+                        with self.assertRaisesRegex(MODULE.InspectionError, 'attach failed.*exit 1'):
+                            with MODULE.readonly_dmg(Path(folder) / 'own.dmg', mount):
+                                self.fail('nonzero attach must never yield')
+                    else:
+                        with MODULE.readonly_dmg(Path(folder) / 'own.dmg', mount):
+                            pass
+                self.assertEqual([call[1] for call in calls], ['verify', 'attach', 'detach'])
+                self.assertEqual(calls[-1][2], '/dev/disk7')
+
+    def test_unknown_license_output_or_extra_xml_is_never_discarded(self):
+        data = (Path(__file__).parent / 'fixtures/028-own-license-attach.stdout').read_bytes()
+        prefix, xml = data[:2007], data[2007:]
+        for altered in (b'unknown license\n' + xml, b'error\n' + data,
+                        prefix[:-1] + b'!' + xml, prefix + b'error\n' + xml,
+                        data + xml, prefix + xml + b'error', prefix + prefix + xml):
+            with self.subTest(size=len(altered)), self.assertRaises((ValueError, plistlib.InvalidFileException)):
+                MODULE.validate_attach_result(altered, Path('/owned/mount'))
 
     def test_detach_finally_on_inspection_error_and_attach_failure(self):
         for failed_attach in (False, True):

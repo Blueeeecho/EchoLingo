@@ -332,11 +332,87 @@ struct CaptureSelectorState {
     }
 }
 
+enum NativeCaptureTraceMode: String { case localOCR, cloudImage }
+enum NativeCaptureTracePhase: String {
+    case started, permissionVerified, selectorQueued, selectorShown, selectionCompleted
+    case captureStarted, shareableContentReady, pixelsRequested, pixelsReady, captureCompleted
+    case ocrStarted, ocrCompleted, imageEncoded, cancelRequested, completed, cancelled, failed
+}
+
+// Fixed metadata only. These timings never include pixels, OCR/selected text,
+// coordinates, window/app identity, arbitrary error descriptions or file paths.
+final class NativeCaptureTrace: @unchecked Sendable {
+    private static let lock = NSLock()
+    private static var sequence: UInt64 = 0
+    private static var latest: [String: Any] = [:]
+    private static var events: [[String: Any]] = []
+    private static var terminal = false
+    private let id: UInt64
+    private let started = ProcessInfo.processInfo.systemUptime
+    init(mode: NativeCaptureTraceMode) {
+        Self.lock.lock(); defer { Self.lock.unlock() }
+        Self.sequence &+= 1; id = Self.sequence
+        Self.events = []; Self.terminal = false
+        Self.latest = ["attemptId": id, "mode": mode.rawValue, "phase": "started",
+                       "startedAtUnixMs": Int64(Date().timeIntervalSince1970 * 1000), "elapsedMs": 0]
+    }
+    func record(_ phase: NativeCaptureTracePhase) {
+        Self.lock.lock(); defer { Self.lock.unlock() }
+        recordLocked(phase)
+    }
+    private func recordLocked(_ phase: NativeCaptureTracePhase) {
+        guard Self.latest["attemptId"] as? UInt64 == id, !Self.terminal else { return }
+        let elapsed = (ProcessInfo.processInfo.systemUptime - started) * 1000
+        if Self.events.count == 24 { Self.events.removeFirst() }
+        Self.events.append(["phase": phase.rawValue, "elapsedMs": elapsed])
+        Self.latest["phase"] = phase.rawValue; Self.latest["elapsedMs"] = elapsed
+        Self.terminal = phase == .completed || phase == .cancelled || phase == .failed
+    }
+    func failure(_ error: Error) {
+        let category = (error as? NativeError)?.message.split(separator: ":", maxSplits: 1).first.map(String.init) ?? "OTHER"
+        Self.lock.lock(); defer { Self.lock.unlock() }
+        guard Self.latest["attemptId"] as? UInt64 == id, !Self.terminal else { return }
+        recordLocked(category == "CANCELLED" ? .cancelled : .failed)
+        Self.latest["errorCategory"] = ["CANCELLED", "CAPTURE", "CAPTURE_BUSY", "CAPTURE_TOO_LARGE", "PERMISSION", "OCR_TIMEOUT", "NO_TEXT"].contains(category) ? category : "OTHER"
+    }
+    static func snapshot() -> [String: Any] {
+        lock.lock(); defer { lock.unlock() }
+        var result = latest; result["events"] = events; return result
+    }
+}
+
 final class CaptureScreenshotOperation {
     private let lock = NSLock()
     private var cancelled = false
+    private var cancellationHandler: (() -> Void)?
+    private var cancellationHandlerID: UUID?
+    private var trace: NativeCaptureTrace?
+    func attachTrace(_ value: NativeCaptureTrace) {
+        lock.lock(); trace = value; let wasCancelled = cancelled; lock.unlock()
+        if wasCancelled { value.record(.cancelRequested) }
+    }
     var isCancelled: Bool { lock.lock(); defer { lock.unlock() }; return cancelled }
-    func cancel() { lock.lock(); cancelled = true; lock.unlock() }
+    func cancel() {
+        lock.lock(); cancelled = true
+        let handler = cancellationHandler, observation = trace
+        lock.unlock()
+        observation?.record(.cancelRequested)
+        handler?()
+    }
+    // Vision cancellation is cooperative. Register after creating this request
+    // and call outside the lock, including cancellation that arrived earlier.
+    func installCancellationHandler(_ handler: @escaping () -> Void) -> UUID {
+        let id = UUID()
+        lock.lock(); cancellationHandlerID = id; cancellationHandler = handler
+        let alreadyCancelled = cancelled
+        lock.unlock()
+        if alreadyCancelled { handler() }
+        return id
+    }
+    func removeCancellationHandler(_ id: UUID) {
+        lock.lock(); defer { lock.unlock() }
+        if cancellationHandlerID == id { cancellationHandlerID = nil; cancellationHandler = nil }
+    }
 }
 
 final class CaptureScreenshotOperations {
@@ -990,7 +1066,7 @@ final class CaptureSelectionSession {
     }
 }
 
-func selectNativeCaptureRegion(purpose: CapturePurpose = .region, operation: CaptureScreenshotOperation? = nil) throws -> CaptureRegionPlan {
+func selectNativeCaptureRegion(purpose: CapturePurpose = .region, operation: CaptureScreenshotOperation? = nil, trace: NativeCaptureTrace? = nil) throws -> CaptureRegionPlan {
     guard !Thread.isMainThread else { throw NativeError("CAPTURE: 截图需要由应用后台任务启动。") }
     let waiter = CaptureResultWaiter<CaptureRegionPlan>()
     let lifetime = CaptureSelectionLifetime(deadline: Date().addingTimeInterval(120))
@@ -1010,7 +1086,7 @@ func selectNativeCaptureRegion(purpose: CapturePurpose = .region, operation: Cap
         }
         let selection = CaptureSelectionSession(displays: screens, waiter: waiter, lifetime: lifetime, purpose: purpose, operation: operation)
         activeCaptureSelection = selection
-        do { try selection.show() }
+        do { try selection.show(); trace?.record(.selectorShown) }
         catch { selection.finish(.failure(error)) }
     }
     do { return try waiter.wait(until: lifetime.deadline, cancelled: operation.map { operation in { operation.isCancelled } }) }
@@ -1036,7 +1112,7 @@ private func captureFailure(_ error: Error?) -> NativeError {
 }
 
 @available(macOS 14.0, *)
-func captureScreenKitImage(_ plan: CaptureRegionPlan, operation: CaptureScreenshotOperation? = nil) throws -> CGImage {
+func captureScreenKitImage(_ plan: CaptureRegionPlan, operation: CaptureScreenshotOperation? = nil, trace: NativeCaptureTrace? = nil) throws -> CGImage {
     try captureValidateWindow(plan.window)
     let deadline = Date().addingTimeInterval(15)
     let contentWaiter = CaptureResultWaiter<SCShareableContent>()
@@ -1045,6 +1121,7 @@ func captureScreenKitImage(_ plan: CaptureRegionPlan, operation: CaptureScreensh
         else { contentWaiter.finish(.failure(captureFailure(error))) }
     }
     let content = try contentWaiter.wait(until: deadline, cancelled: operation.map { operation in { operation.isCancelled } })
+    trace?.record(.shareableContentReady)
     let ownWindows = content.windows.filter { $0.owningApplication?.processID == ProcessInfo.processInfo.processIdentifier }
     guard let context = CGContext(data: nil, width: plan.pixelWidth, height: plan.pixelHeight,
                                   bitsPerComponent: 8, bytesPerRow: plan.pixelWidth * 4,
@@ -1071,11 +1148,13 @@ func captureScreenKitImage(_ plan: CaptureRegionPlan, operation: CaptureScreensh
         configuration.showsCursor = false
         configuration.scalesToFit = true
         let imageWaiter = CaptureResultWaiter<CGImage>()
+        trace?.record(.pixelsRequested)
         SCScreenshotManager.captureImage(contentFilter: filter, configuration: configuration) { image, error in
             if let image = image { imageWaiter.finish(.success(image)) }
             else { imageWaiter.finish(.failure(captureFailure(error))) }
         }
         let image = try imageWaiter.wait(until: deadline, cancelled: operation.map { operation in { operation.isCancelled } })
+        trace?.record(.pixelsReady)
         let destination = CGRect(x: (part.minX - plan.region.minX) * plan.scale,
                                  y: (part.minY - plan.region.minY) * plan.scale,
                                  width: part.width * plan.scale, height: part.height * plan.scale)
@@ -1127,20 +1206,24 @@ func captureLegacyWindowArray(_ ids: [CGWindowID]) throws -> CFArray {
 // A screenshot returns its exact capture plan with its pixels. Re-reading the
 // pointer or screens after capture would race a display change and misplace the
 // in-place editor. OCR retains the original image-only entry point below.
-func captureNativeRegionResult(purpose: CapturePurpose = .region, operation: CaptureScreenshotOperation? = nil) throws -> (image: CGImage, plan: CaptureRegionPlan) {
-    let plan = try selectNativeCaptureRegion(purpose: purpose, operation: operation)
-    let image = try captureNativePlannedImage(plan, purpose: purpose, operation: operation)
+func captureNativeRegionResult(purpose: CapturePurpose = .region, operation: CaptureScreenshotOperation? = nil, trace: NativeCaptureTrace? = nil) throws -> (image: CGImage, plan: CaptureRegionPlan) {
+    trace?.record(.selectorQueued)
+    let plan = try selectNativeCaptureRegion(purpose: purpose, operation: operation, trace: trace)
+    trace?.record(.selectionCompleted)
+    trace?.record(.captureStarted)
+    let image = try captureNativePlannedImage(plan, purpose: purpose, operation: operation, trace: trace)
+    trace?.record(.captureCompleted)
     return (image, plan)
 }
 
-func captureNativeRegionImage(purpose: CapturePurpose = .region, operation: CaptureScreenshotOperation? = nil) throws -> CGImage {
-    try captureNativeRegionResult(purpose: purpose, operation: operation).image
+func captureNativeRegionImage(purpose: CapturePurpose = .region, operation: CaptureScreenshotOperation? = nil, trace: NativeCaptureTrace? = nil) throws -> CGImage {
+    try captureNativeRegionResult(purpose: purpose, operation: operation, trace: trace).image
 }
 
-func captureNativePlannedImage(_ plan: CaptureRegionPlan, purpose: CapturePurpose, operation: CaptureScreenshotOperation? = nil) throws -> CGImage {
+func captureNativePlannedImage(_ plan: CaptureRegionPlan, purpose: CapturePurpose, operation: CaptureScreenshotOperation? = nil, trace: NativeCaptureTrace? = nil) throws -> CGImage {
     if operation?.isCancelled == true { throw NativeError("CANCELLED: 截图请求已取消。") }
     try captureValidateWindow(plan.window)
-    if #available(macOS 14.0, *) { return try captureScreenKitImage(plan, operation: operation) }
+    if #available(macOS 14.0, *) { return try captureScreenKitImage(plan, operation: operation, trace: trace) }
     // Legacy path is restricted to macOS 12/13; new macOS releases use the
     // public ScreenCaptureKit screenshot API without a child TCC identity.
     let primaryHeight = CGDisplayBounds(CGMainDisplayID()).height
@@ -1267,6 +1350,7 @@ func captureSelectionSelfTest() throws {
     cancelled.receive(.cancel)
     cancelled.receive(.leftUp(CGPoint(x: 200, y: 200)))
     try expect(cancelled.outcome == .cancelled)
+    try captureOCRCancellationSelfTest()
     try captureScreenshotSelfTest()
     try captureWindowHintSelfTest()
     try captureLegacyExclusionSelfTest()
@@ -1553,4 +1637,75 @@ func captureScreenshotSelfTest() throws {
     old.cancel(); try expect(old.isCancelled && !current.isCancelled)
     operations.end(first); try expect(operations.lookup(first) == nil && !current.isCancelled)
     operations.end(second); try expect(current.isCancelled && operations.lookup(second) == nil)
+}
+
+
+// No screen, permissions, Vision engine, clipboard or source text is used.
+func captureOCRCancellationSelfTest() throws {
+    func expect(_ value: Bool) throws {
+        if !value { throw NativeError("SELF_TEST: OCR cancellation/metadata fixture failed.") }
+    }
+    let operation = CaptureScreenshotOperation()
+    let independent = CaptureScreenshotOperation()
+    var invocations = 0
+    let old = operation.installCancellationHandler { invocations += 100 }
+    let current = operation.installCancellationHandler { invocations += 1 }
+    operation.removeCancellationHandler(old) // stale cleanup cannot detach current OCR
+    operation.cancel()
+    try expect(invocations == 1 && operation.isCancelled && !independent.isCancelled)
+    operation.removeCancellationHandler(current)
+    operation.cancel()
+    try expect(invocations == 1)
+    let alreadyCancelled = operation.installCancellationHandler { invocations += 1 }
+    try expect(invocations == 2)
+    operation.removeCancellationHandler(alreadyCancelled)
+
+    // Exercise the real waiter from a worker (the app's native calls are not
+    // allowed on main). Cancellation must abandon it before a late callback.
+    let done = DispatchSemaphore(value: 0)
+    let result = CaptureCancellationFixtureResult()
+    let waiter = CaptureResultWaiter<Int>()
+    let waitingOperation = CaptureScreenshotOperation()
+    DispatchQueue.global(qos: .userInitiated).async {
+        do {
+            _ = try waiter.wait(until: Date().addingTimeInterval(5), cancelled: { waitingOperation.isCancelled })
+            result.set(false)
+        } catch {
+            waiter.finish(.success(42))
+            do {
+                _ = try waiter.wait(until: Date().addingTimeInterval(0.01))
+                result.set(false)
+            } catch {
+                result.set((error as? NativeError)?.message.hasPrefix("CANCELLED:") == true)
+            }
+        }
+        done.signal()
+    }
+    waitingOperation.cancel()
+    try expect(done.wait(timeout: .now() + 2) == .success && result.get())
+
+    let first = NativeCaptureTrace(mode: .localOCR)
+    first.record(.selectorShown)
+    let latest = NativeCaptureTrace(mode: .cloudImage)
+    first.failure(NativeError("CAPTURE: synthetic private detail"))
+    try expect(NativeCaptureTrace.snapshot()["phase"] as? String == "started")
+    for _ in 0..<30 { latest.record(.pixelsRequested) }
+    try expect((NativeCaptureTrace.snapshot()["events"] as? [[String: Any]])?.count == 24)
+    latest.failure(NativeError("UNRECOGNIZED: synthetic private detail"))
+    latest.record(.completed)
+    try expect(NativeCaptureTrace.snapshot()["phase"] as? String == "failed")
+    try expect(NativeCaptureTrace.snapshot()["errorCategory"] as? String == "OTHER")
+    let complete = NativeCaptureTrace(mode: .localOCR)
+    complete.record(.completed)
+    complete.failure(NativeError("CAPTURE: synthetic private detail"))
+    try expect(NativeCaptureTrace.snapshot()["errorCategory"] == nil)
+    let json = try JSONSerialization.data(withJSONObject: NativeCaptureTrace.snapshot())
+    try expect(!String(decoding: json, as: UTF8.self).contains("synthetic private detail"))
+}
+
+private final class CaptureCancellationFixtureResult: @unchecked Sendable {
+    private let lock = NSLock()
+    private var passed = false
+    func set(_ value: Bool) { lock.lock(); passed = value; lock.unlock() }
+    func get() -> Bool { lock.lock(); defer { lock.unlock() }; return passed }
 }

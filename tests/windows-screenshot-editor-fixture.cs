@@ -130,7 +130,7 @@ public static partial class EchoLingoApplicationSmoke {
     }
     static bool ScreenshotInplaceDimensionsMatch(IntPtr editor,Size pixels) {
         // Match the exact image dimensions, without an extra phase caption.
-        return Element(editor,pixels.Width+" \u00d7 "+pixels.Height)!=null;
+        AutomationElement dimensions=Element(editor,pixels.Width+" \u00d7 "+pixels.Height);return dimensions!=null&&!dimensions.Current.IsOffscreen;
     }
     static AutomationElement ScreenshotButton(IntPtr window,string name) {
         AutomationElementCollection matches=AutomationElement.FromHandle(window).FindAll(TreeScope.Descendants,new AndCondition(new PropertyCondition(AutomationElement.NameProperty,name),new PropertyCondition(AutomationElement.ControlTypeProperty,ControlType.Button)));
@@ -184,7 +184,7 @@ public static partial class EchoLingoApplicationSmoke {
             state["foregroundIsDialog"]=foreground;state["foregroundIsEditor"]=GetForegroundWindow()==editor;state["editorVisible"]=IsWindowVisible(editor);state["editorEnabled"]=IsWindowEnabled(editor);state["editorProcessMatches"]=editorPid==app.Id;
             ScreenshotGuiThreadInfo info=new ScreenshotGuiThreadInfo();info.size=(uint)Marshal.SizeOf(typeof(ScreenshotGuiThreadInfo));bool queried=own&&thread!=0&&GetGUIThreadInfo(thread,ref info);bool focus=queried&&info.focus!=IntPtr.Zero&&GetAncestor(info.focus,2)==modal;
             state["focusQuerySucceeded"]=queried;state["focusWithinModal"]=focus;state["guiFlags"]=queried?info.flags:0;
-            if(editorPid==app.Id&&IsWindowVisible(editor)&&IsWindowEnabled(editor)){AutomationElement save=ScreenshotButton(editor,"\u4fdd\u5b58");state["editorDomInspected"]=true;state["savePresent"]=save!=null;if(save!=null){state["saveEnabled"]=save.Current.IsEnabled;state["saveOffscreen"]=save.Current.IsOffscreen;}}
+            if(editorPid==app.Id&&IsWindowVisible(editor)&&IsWindowEnabled(editor)){AutomationElement save=ScreenshotButton(editor,"\u4fdd\u5b58\u56fe\u7247");state["editorDomInspected"]=true;state["savePresent"]=save!=null;if(save!=null){state["saveEnabled"]=save.Current.IsEnabled;state["saveOffscreen"]=save.Current.IsOffscreen;}}
             if(!own||!dialog||!expected||!parent||!foreground||!IsWindowVisible(modal)||!IsWindowEnabled(modal)||IsWindowEnabled(editor)||!focus)return state;
             // IDCANCEL is the native dialog cancellation action. Read its typed
             // accessibility readiness; do not invoke it or change keyboard focus.
@@ -275,12 +275,12 @@ public static partial class EchoLingoApplicationSmoke {
         Assert(ScreenshotOwnOpenDialog(app,dialogOwner,modal)&&ScreenshotFilenameChain(edit,AutomationElement.FromHandle(modal),app.Id,modal),"Native Open target identity changed before writing the generated path.");
         ((ValuePattern)raw).SetValue(path);edit.SetFocus();
         Assert(ScreenshotOwnOpenDialog(app,dialogOwner,modal)&&edit.Current.HasKeyboardFocus,"Native Open lost focus before submitting the generated path; no key sent.");Send(new INPUT[]{Key(0x0D,false),Key(0x0D,true)});
-        WaitFor(delegate{AutomationElement copy=ScreenshotButton(editor,"\u590d\u5236");return !IsWindowVisible(modal)&&IsWindowVisible(editor)&&copy!=null&&copy.Current.IsEnabled&&Element(editor,expected.Width+" \u00d7 "+expected.Height+" px")!=null;},15,"Successful native Open did not install the generated local image session.",app);
+        WaitFor(delegate{AutomationElement copy=ScreenshotButton(editor,"\u590d\u5236\u56fe\u7247");return !IsWindowVisible(modal)&&IsWindowVisible(editor)&&copy!=null&&copy.Current.IsEnabled&&!copy.Current.IsOffscreen&&ScreenshotInplaceDimensionsMatch(editor,expected.Size);},15,"Successful native Open did not install the generated local image session.",app);
         using(Bitmap copied=ScreenshotClipboard(app,editor,expected.Size,delegate(Bitmap actual){return ScreenshotPixelsEqual(actual,expected);},"local-"+format)) {
             for(int y=0;y<expected.Height;y++)for(int x=0;x<expected.Width;x++)Assert(copied.GetPixel(x,y).ToArgb()==expected.GetPixel(x,y).ToArgb(),"Native local image Open changed generated decoded pixels.");
             if(saveOpened) {
             HashSet<string> existing=new HashSet<string>(Directory.GetFiles(output,"*.png"),StringComparer.OrdinalIgnoreCase);
-            ScreenshotInvoke(app,editor,"\u4fdd\u5b58");WaitFor(delegate{return Directory.GetFiles(output,"*.png").Length==existing.Count+1&&ScreenshotButton(editor,"\u4fdd\u5b58").Current.IsEnabled;},15,"Opened local image did not save as a new PNG.",app);
+            ScreenshotInvoke(app,editor,"\u4fdd\u5b58\u56fe\u7247");WaitFor(delegate{return Directory.GetFiles(output,"*.png").Length==existing.Count+1&&ScreenshotButton(editor,"\u4fdd\u5b58\u56fe\u7247").Current.IsEnabled;},15,"Opened local image did not save as a new PNG.",app);
             string saved=Array.Find(Directory.GetFiles(output,"*.png"),delegate(string value){return !existing.Contains(value);});Assert(saved!=null,"New opened-image PNG missing.");ScreenshotPng(saved,copied);
             }
         }
@@ -298,7 +298,7 @@ public static partial class EchoLingoApplicationSmoke {
         }return true;
     }
     static Bitmap ScreenshotClipboard(Process app,IntPtr editor,Size expected,Func<Bitmap,bool> generatedPixelsMatch,string copyPhase) {
-        ScreenshotOwnedClipboard.BeginCopy(copyPhase);ScreenshotOwnedClipboard.Seed();AutomationElement inplace=ScreenshotButton(editor,"\u590d\u5236\u622a\u56fe\u5e76\u5b8c\u6210");bool closes=inplace!=null&&!inplace.Current.IsOffscreen;ScreenshotInvoke(app,editor,closes?"\u590d\u5236\u622a\u56fe\u5e76\u5b8c\u6210":"\u590d\u5236");
+        ScreenshotOwnedClipboard.BeginCopy(copyPhase);ScreenshotOwnedClipboard.Seed();AutomationElement inplace=ScreenshotButton(editor,"\u590d\u5236\u622a\u56fe\u5e76\u5b8c\u6210");bool closes=inplace!=null&&!inplace.Current.IsOffscreen;ScreenshotInvoke(app,editor,closes?"\u590d\u5236\u622a\u56fe\u5e76\u5b8c\u6210":"\u590d\u5236\u56fe\u7247");
         Bitmap result=null;bool accepted=false;
         try{WaitFor(delegate{
             uint generation=GetClipboardSequenceNumber();
@@ -635,8 +635,8 @@ public static partial class EchoLingoApplicationSmoke {
         using(Bitmap reopened=new Bitmap(reopenedPath)) {
             for(int collision=0;collision<2;collision++) {
                 HashSet<string> prior=new HashSet<string>(Directory.GetFiles(output,"*.png"),StringComparer.OrdinalIgnoreCase);
-                ScreenshotInvoke(app,editor,"\u4fdd\u5b58");int count=beforeCollision.Count+collision+1;
-                WaitFor(delegate{return Directory.GetFiles(output,"*.png").Length==count&&ScreenshotButton(editor,"\u4fdd\u5b58").Current.IsEnabled;},15,"Repeated standalone Save did not collision-number its output.",app);
+                ScreenshotInvoke(app,editor,"\u4fdd\u5b58\u56fe\u7247");int count=beforeCollision.Count+collision+1;
+                WaitFor(delegate{return Directory.GetFiles(output,"*.png").Length==count&&ScreenshotButton(editor,"\u4fdd\u5b58\u56fe\u7247").Current.IsEnabled;},15,"Repeated standalone Save did not collision-number its output.",app);
                 string saved=Array.Find(Directory.GetFiles(output,"*.png"),delegate(string value){return !prior.Contains(value);});Assert(saved!=null,"Repeated Save output missing.");ScreenshotPng(saved,reopened);
                 System.Text.RegularExpressions.Match numbered=System.Text.RegularExpressions.Regex.Match(Path.GetFileNameWithoutExtension(saved),"^(Screenshot_[0-9]{4}-[0-9]{2}-[0-9]{2}_[0-9]{2}-[0-9]{2}-[0-9]{2})(?:_([0-9]+))?$");
                 Assert(numbered.Success,"Repeated Save filename did not have its generated timestamp/optional collision suffix.");int suffix=numbered.Groups[2].Success?Int32.Parse(numbered.Groups[2].Value):0;

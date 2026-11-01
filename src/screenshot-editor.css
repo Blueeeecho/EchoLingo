@@ -17,39 +17,39 @@ dialog[data-dialog-fallback][open] { display:block; position:fixed; inset:50% au
    editable; the transparent exterior never becomes part of an export. */
 .inplace-only { display:none; }
 :root[data-inplace=true] { background:transparent; }
-body[data-inplace=true] { min-width:0; display:block; background:#10131a55; }
-body[data-inplace=true] .editor-header,
-body[data-inplace=true] .editor-note,
-body[data-inplace=true] .editor-footer { display:none; }
-body[data-inplace=true] #editor-workspace { position:fixed; inset:0; padding:0; overflow:hidden; display:block; }
-body[data-inplace=true] #canvas-frame { position:absolute; margin:0; outline:2px solid #43b6e7; box-shadow:0 0 0 1px #fff8; }
-body[data-inplace=true] #image-canvas[data-tool=select] { cursor:default; }
-body[data-inplace=true] .editor-toolbar { position:fixed; z-index:5; width:max-content; max-width:calc(100vw - 16px); max-height:calc(100vh - 16px); overflow:auto; padding:7px; gap:6px; border:1px solid var(--border); border-radius:10px; box-shadow:0 5px 24px #0003; }
-body[data-inplace=true] .tool-group { flex-wrap:wrap; }
-body[data-inplace=true] .tool-group span { display:none; }
-body[data-inplace=true] .tool-group button { min-width:32px; }
-body[data-inplace=true] .tool-options { gap:6px; }
-body[data-inplace=true] .history-actions { margin-left:0; }
-body[data-inplace=true] .history-actions button { font-size:0; }
-body[data-inplace=true] #undo-edit::before { content:'↶'; font-size:20px; }
-body[data-inplace=true] #redo-edit::before { content:'↷'; font-size:20px; }
-body[data-inplace=true] .inplace-only { display:block; }
-body[data-inplace=true] .inplace-actions { display:flex; gap:3px; border-left:1px solid var(--border); padding-left:5px; }
-body[data-inplace=true] .inplace-actions button { font-size:23px; line-height:1; min-width:34px; }
+body[data-compact-editor=true] { min-width:0; display:block; background:#10131a55; }
+body[data-compact-editor=true] .editor-header,
+body[data-compact-editor=true] .editor-note,
+body[data-compact-editor=true] .editor-footer { display:none; }
+body[data-compact-editor=true] #editor-workspace { position:fixed; inset:0; padding:0; overflow:hidden; display:block; }
+body[data-compact-editor=true] #canvas-frame { position:absolute; margin:0; outline:2px solid #43b6e7; box-shadow:0 0 0 1px #fff8; }
+body[data-compact-editor=true] #image-canvas[data-tool=select] { cursor:default; }
+body[data-compact-editor=true] .editor-toolbar { position:fixed; z-index:5; width:max-content; max-width:calc(100vw - 16px); max-height:calc(100vh - 16px); overflow:auto; padding:7px; gap:6px; border:1px solid var(--border); border-radius:10px; box-shadow:0 5px 24px #0003; }
+body[data-compact-editor=true] .tool-group { flex-wrap:wrap; }
+body[data-compact-editor=true] .tool-group span { display:none; }
+body[data-compact-editor=true] .tool-group button { min-width:32px; }
+body[data-compact-editor=true] .tool-options { gap:6px; }
+body[data-compact-editor=true] .history-actions { margin-left:0; }
+body[data-compact-editor=true] .history-actions button { font-size:0; }
+body[data-compact-editor=true] #undo-edit::before { content:'↶'; font-size:20px; }
+body[data-compact-editor=true] #redo-edit::before { content:'↷'; font-size:20px; }
+body[data-compact-editor=true] .inplace-only { display:block; }
+body[data-compact-editor=true] .inplace-actions { display:flex; gap:3px; border-left:1px solid var(--border); padding-left:5px; }
+body[data-compact-editor=true] .inplace-actions button { font-size:23px; line-height:1; min-width:34px; }
 #overlay-copy { color:#218b67; } #overlay-cancel { color:#c65360; }
-body[data-inplace=true] #overlay-info { position:fixed; z-index:4; background:var(--surface); padding:5px 9px; border-radius:6px; box-shadow:0 2px 8px #0002; font-variant-numeric:tabular-nums; pointer-events:none; }
-body[data-inplace=true] .status-line { position:fixed; z-index:6; left:8px; bottom:8px; max-width:min(650px,calc(100vw - 16px)); border:1px solid var(--border); border-radius:7px; padding:6px 10px; box-shadow:0 2px 10px #0002; pointer-events:none; }
-body[data-inplace=true] #empty-state { display:none; }
+body[data-compact-editor=true] #overlay-info { position:fixed; z-index:4; background:var(--surface); padding:5px 9px; border-radius:6px; box-shadow:0 2px 8px #0002; font-variant-numeric:tabular-nums; pointer-events:none; }
+body[data-compact-editor=true] .status-line { position:fixed; z-index:6; left:8px; bottom:8px; max-width:min(650px,calc(100vw - 16px)); border:1px solid var(--border); border-radius:7px; padding:6px 10px; box-shadow:0 2px 10px #0002; pointer-events:none; }
+body[data-compact-editor=true] #empty-state { display:none; }
 /* A narrow selected monitor must wrap groups, not overflow into another display.
    Completion actions stay pinned within the toolbar if vertical space is tight. */
-body[data-inplace=true] .tool-group,
-body[data-inplace=true] .tool-options { min-width:0; max-width:100%; flex-wrap:wrap; }
-body[data-inplace=true] .tool-options label { max-width:100%; }
-body[data-inplace=true] .inplace-actions { position:sticky; bottom:0; background:var(--surface); flex-shrink:0; margin-left:auto; }
-body[data-inplace=true] #overlay-info { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
-body[data-inplace=true] .editor-toolbar[data-compact=true] .inplace-actions { order:-1; width:100%; justify-content:flex-end; flex-wrap:wrap; position:sticky; top:0; bottom:auto; z-index:1; border-left:0; padding-left:0; }
+body[data-compact-editor=true] .tool-group,
+body[data-compact-editor=true] .tool-options { min-width:0; max-width:100%; flex-wrap:wrap; }
+body[data-compact-editor=true] .tool-options label { max-width:100%; }
+body[data-compact-editor=true] .inplace-actions { position:sticky; bottom:0; background:var(--surface); flex-shrink:0; margin-left:auto; }
+body[data-compact-editor=true] #overlay-info { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+body[data-compact-editor=true] .editor-toolbar[data-compact=true] .inplace-actions { order:-1; width:100%; justify-content:flex-end; flex-wrap:wrap; position:sticky; top:0; bottom:auto; z-index:1; border-left:0; padding-left:0; }
 /* Messages may overlap a huge selection but never paint over action controls. */
-body[data-inplace=true] .status-line { z-index:4; }
+body[data-compact-editor=true] .status-line { z-index:4; }
 
 .pin-icon { width:18px; height:18px; fill:none; stroke:currentColor; stroke-width:1.8; stroke-linecap:round; stroke-linejoin:round; vertical-align:middle; }
 #overlay-pin, #pin-image { color:var(--accent); }
@@ -68,3 +68,65 @@ body[data-inplace=true] .status-line { z-index:4; }
 #image-canvas[data-tool=eraser] { cursor:cell; }
 #image-canvas[data-tool=pen], #image-canvas[data-tool=highlight] { cursor:crosshair; }
 #restart-selection { color:var(--accent); }
+
+/* Both capture and opened files use the same compact canvas/toolbar surface.
+   Capture geometry remains driven only by the real native overlay metadata. */
+body[data-compact-editor=true] .editor-header,
+body[data-compact-editor=true] .editor-note,
+body[data-compact-editor=true] .editor-footer { display:none; }
+body[data-inplace=true] .file-only { display:none; }
+body:not([data-inplace=true]) .inplace-only { display:none; }
+body[data-compact-editor=true]:not([data-inplace=true]) { background:var(--bg); }
+body[data-compact-editor=true]:not([data-inplace=true]) #editor-workspace { display:flex; padding:70px 28px 110px; overflow:auto; }
+body[data-compact-editor=true]:not([data-inplace=true]) #canvas-frame { position:relative; margin:auto; outline:1px solid var(--border); }
+body[data-compact-editor=true]:not([data-inplace=true]) #empty-state { display:block; }
+body[data-compact-editor=true] .file-actions { gap:3px; border-left:1px solid var(--border); padding-left:5px; margin-left:auto; }
+body[data-compact-editor=true] .file-actions button { min-width:32px; font-size:20px; }
+body[data-compact-editor=true] .zoom-controls { flex-wrap:wrap; }
+body[data-compact-editor=true] #close-editor { color:#c65360; }
+body[data-compact-editor=true] #copy-image { color:#218b67; }
+
+/* One hand-drawn linear SVG family: stable glyphs on every system font stack. */
+.toolbar-icon { width:18px; height:18px; display:block; fill:none; stroke:currentColor; stroke-width:1.7; stroke-linecap:round; stroke-linejoin:round; }
+body[data-compact-editor=true] .editor-toolbar { padding:6px; gap:6px; border-radius:12px; box-shadow:0 4px 18px #161b2b20,0 1px 3px #161b2b12; align-items:center; }
+body[data-compact-editor=true] .editor-toolbar button,
+.zoom-menu summary { display:flex; align-items:center; justify-content:center; width:32px; height:32px; min-height:32px; padding:6px; border-radius:7px; font-size:12px; flex-shrink:0; }
+body[data-compact-editor=true] .tool-group { gap:2px; }
+body[data-compact-editor=true] .tool-group button[data-tool=pen],
+body[data-compact-editor=true] .tool-group button[data-tool=mosaic] { margin-left:6px; border-left-color:transparent; border-radius:7px; }
+body[data-compact-editor=true] .history-actions { gap:2px; padding-left:6px; border-left:1px solid var(--border); }
+body[data-compact-editor=true] #undo-edit::before,
+body[data-compact-editor=true] #redo-edit::before { content:none; }
+body[data-compact-editor=true] .file-actions,
+body[data-compact-editor=true] .inplace-actions { gap:2px; padding-left:6px; margin-left:0; flex-wrap:nowrap; }
+body[data-compact-editor=true] #copy-image { order:6; }
+body[data-compact-editor=true] #close-editor { order:5; }
+body[data-compact-editor=true] #copy-image,
+body[data-compact-editor=true] #overlay-copy { background:#218b6714; }
+body[data-compact-editor=true] .tool-options { order:10; flex-basis:100%; width:auto; padding:6px 4px 0; border-top:1px solid var(--border); gap:12px; }
+body[data-compact-editor=true] .tool-options label { font-size:11px; }
+.zoom-menu { position:relative; flex-shrink:0; }
+.zoom-menu summary { list-style:none; cursor:pointer; color:var(--secondary); }
+.zoom-menu summary::-webkit-details-marker { display:none; }
+.zoom-menu summary:hover, .zoom-menu[open] summary { background:var(--soft); color:var(--accent); }
+.zoom-menu[open] { display:flex; }
+body[data-compact-editor=true] .zoom-controls { gap:2px; padding:4px; }
+body[data-compact-editor=true] #zoom-fit,
+body[data-compact-editor=true] #zoom-actual { width:auto; padding:6px 8px; }
+
+/* Filled two-tone faces and a restrained lower edge give small icons weight
+   without changing hit targets, geometry, accessible labels, or actions. */
+.toolbar-icon { stroke-width:2.1; }
+.toolbar-icon .icon-depth { opacity:.22; stroke-width:2.6; }
+.toolbar-icon .icon-face { stroke-width:2.1; }
+[data-tool=select] .icon-face path { fill:currentColor; fill-opacity:.65; }
+#overlay-copy .icon-face, #copy-image .icon-face { stroke-width:3; }
+#overlay-cancel .icon-face, #close-editor .icon-face { stroke-width:2.7; }
+@media(prefers-color-scheme:dark) { .toolbar-icon .icon-depth { opacity:.32; } }
+
+/* Direct canvas text entry: the input itself, not a floating form panel. */
+.inline-text-editor { padding:0; border:0; border-radius:0; background:transparent; box-shadow:none; outline:1px dashed var(--accent); overflow:hidden; max-width:none; }
+.inline-text-editor textarea { display:block; width:100%; height:100%; min-height:0; max-height:none; padding:0; margin:0; border:0; border-radius:0; resize:none; background:transparent; overflow:auto; white-space:pre-wrap; overflow-wrap:anywhere; word-break:break-all; }
+.inline-text-editor textarea:focus-visible { outline:none; }
+
+.inline-text-editor textarea { overflow:hidden; }

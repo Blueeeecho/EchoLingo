@@ -36,7 +36,7 @@ function status(message: string, error = false): void { $('#editor-status').text
 function readableError(error: unknown): string { return error instanceof Error ? error.message : String(error); }
 function controls(): void {
   for (const button of document.querySelectorAll<HTMLButtonElement>('[data-image-action]')) button.disabled = !model || busy || loading;
-  for (const button of document.querySelectorAll<HTMLButtonElement>('[data-export-action]')) button.disabled ||= !exportReady();
+  for (const button of document.querySelectorAll<HTMLButtonElement>('[data-export-action]')) button.disabled ||= !exportReady() && !(textOpen() && !contextLost);
   $<HTMLButtonElement>('#undo-edit').disabled ||= !model?.canUndo;
   $<HTMLButtonElement>('#redo-edit').disabled ||= !model?.canRedo;
   $<HTMLButtonElement>('#open-image').disabled = busy || loading;
@@ -61,18 +61,18 @@ function applyZoom(): void {
     placeOverlayTools(); return;
   }
   frame.style.left = ''; frame.style.top = '';
-  if (fit) zoom = Math.min(1, Math.max(0.01, Math.min((workspace.clientWidth - 56) / width, (workspace.clientHeight - 56) / height)));
+  if (fit) zoom = Math.min(1, Math.max(0.01, Math.min((workspace.clientWidth - 56) / width, (workspace.clientHeight - 180) / height)));
   frame.style.width = `${width * zoom}px`; frame.style.height = `${height * zoom}px`;
   $('#zoom-level').textContent = `${Math.round(zoom * 100)}%`;
   $('#gesture-preview').setAttribute('viewBox', `0 0 ${width} ${height}`);
+  placeOverlayTools();
 }
 let placementFrame = 0;
 function placeOverlayTools(): void {
-  if (!inplace() || placementFrame) return;
+  if (placementFrame) return;
   placementFrame = requestAnimationFrame(() => { placementFrame = 0; layoutOverlayTools(); });
 }
 function layoutOverlayTools(): void {
-  if (!inplace()) return;
   const monitor = overlayToolBounds(innerWidth, innerHeight, session?.overlay?.toolbarBounds);
   const margin = Math.min(8, monitor.width / 8, monitor.height / 8);
   const bounds = { x: monitor.x + margin, y: monitor.y + margin, width: monitor.width - margin * 2, height: monitor.height - margin * 2 };
@@ -111,8 +111,9 @@ function render(): boolean {
   rendered = null; controls();
   if (!model || !original || contextLost) { if (contextLost) frame.hidden = true; return false; }
   try {
-    renderScreenshot(canvas, original, model.original, model.operations);
-    rendered = { generation, stateId: model.stateId }; frame.hidden = false;
+    const editing = textOpen() && editingIndex !== null;
+    renderScreenshot(canvas, original, model.original, editing ? model.operations.filter((_, index) => index !== editingIndex) : model.operations);
+    rendered = editing ? null : { generation, stateId: model.stateId }; frame.hidden = false;
     applyZoom(); selectionOutline(); controls(); return true;
   } catch (error) {
     frame.hidden = true; canvas.width = canvas.height = 1; controls();
@@ -126,7 +127,7 @@ function clearGesture(restorePreview = true): void {
   gesture = null; $('#gesture-rect').setAttribute('visibility', 'hidden'); $('#gesture-line').setAttribute('visibility', 'hidden');
   if (restore && model && original) render();
 }
-function cancelText(): void { textDialog.hidden = true; textInput.value = ''; textPoint = null; editingIndex = null; composing = false; imeEscape = false; controls(); }
+function cancelText(): void { const restore = textOpen() && editingIndex !== null; textDialog.hidden = true; textInput.value = ''; textPoint = null; editingIndex = null; composing = false; imeEscape = false; if (restore) render(); controls(); }
 function annotationBounds(op: EditOperation): OverlayRect {
   if (op.kind !== 'text') return operationBounds(op);
   const ctx = canvas.getContext('2d')!; ctx.save(); ctx.font = screenshotTextFont(op.size);
@@ -160,18 +161,30 @@ function hitAnnotation(p: Point): number | null {
 function placeTextEditor(): void {
   if (!textOpen() || !textPoint || !model) return;
   const r = canvas.getBoundingClientRect(), offset = editingIndex === null ? { x: 0, y: 0 } : model.operationOffset(editingIndex);
-  const monitor = overlayToolBounds(innerWidth, innerHeight, session?.overlay?.toolbarBounds);
-  textDialog.style.maxWidth = `${Math.max(1, monitor.width - 16)}px`;
-  textDialog.style.maxHeight = `${Math.max(1, monitor.height - 16)}px`;
-  const displaySize = Number($<HTMLSelectElement>('#edit-font-size').value) * r.width / model.size.width;
-  textInput.style.font = screenshotTextFont(Math.max(8, displaySize));
+  const scale = r.width / model.size.width, scaleY = r.height / model.size.height, size = Number($<HTMLSelectElement>('#edit-font-size').value);
+  const sourceSize = editingIndex === null ? model.size : model.operationSize(editingIndex);
+  const maxWidth = Math.max(1, sourceSize.width - textPoint.x);
+  textDialog.style.left = `${r.x + (textPoint.x - offset.x) * scale}px`;
+  textDialog.style.top = `${r.y + (textPoint.y - offset.y) * scaleY}px`;
+  textInput.style.font = screenshotTextFont(size * scale);
+  textInput.style.lineHeight = '1.35';
   textInput.style.color = $<HTMLInputElement>('#edit-color').value;
-  textInput.style.backgroundColor = $<HTMLSelectElement>('#note-style').value || 'var(--surface)';
-  const box = clampOverlayBox(r.x + (textPoint.x - offset.x) * r.width / model.size.width,
-    r.y + (textPoint.y - offset.y) * r.height / model.size.height, textDialog.offsetWidth, textDialog.offsetHeight,
-    { x: monitor.x + 8, y: monitor.y + 8, width: Math.max(1, monitor.width - 16), height: Math.max(1, monitor.height - 16) });
-  textDialog.style.left = `${box.x}px`; textDialog.style.top = `${box.y}px`;
+  textInput.style.backgroundColor = $<HTMLSelectElement>('#note-style').value || 'transparent';
+  // Use this control's real glyph metrics, not a different canvas font context.
+  textInput.style.whiteSpace = 'pre'; textInput.style.width = '1px';
+  const naturalWidth = Math.max(size * scale * 2, textInput.scrollWidth + 2);
+  textDialog.style.width = `${Math.max(1, Math.min(maxWidth * scale, Math.ceil(naturalWidth)))}px`;
+  textInput.style.width = '100%'; textInput.style.whiteSpace = 'pre-wrap';
+  // Measure the actual textarea line boxes after font/width settle. Fractional
+  // CSS heights otherwise create a scrollbar that narrows and rewraps the text.
+  textInput.style.height = '0px';
+  const contentHeight = textInput.scrollHeight + 1;
+  const availableHeight = Math.max(1, (sourceSize.height - textPoint.y) * scaleY);
+  textDialog.style.height = `${Math.min(availableHeight, contentHeight)}px`;
+  textInput.style.height = '100%';
+  if (contentHeight <= availableHeight) textInput.scrollTop = 0;
 }
+
 function beginText(p: Point, index: number | null = null): void {
   if (!model) return;
   const op = index === null ? null : model.operations[index];
@@ -183,8 +196,7 @@ function beginText(p: Point, index: number | null = null): void {
     $<HTMLSelectElement>('#edit-font-size').value = String(op.size);
     $<HTMLSelectElement>('#note-style').value = op.background ?? '';
   }
-  $('#text-count').textContent = `${textInput.value.length} / 2000`;
-  textDialog.hidden = false; placeTextEditor(); controls(); textInput.focus();
+  textDialog.hidden = false; if (editingIndex !== null) render(); placeTextEditor(); controls(); textInput.focus();
 }
 function commitText(): boolean {
   if (!textOpen()) return true;
@@ -213,13 +225,13 @@ async function confirmDiscard(action: 'open' | 'close' | 'restart'): Promise<boo
 async function acceptSession(value: ScreenshotSession | null): Promise<void> {
   if (value && (!Number.isSafeInteger(value.id) || value.id <= latestId)) return;
   if (value) latestId = value.id;
-  const replaced = dirty(), token = ++generation;
+  const token = ++generation;
   if (decoding) { decoding.src = ''; decoding = null; } // Cancel superseded image decode work.
   clearGesture(); moveGesture = null; selectedIndex = null; cancelText(); resolveDiscard(false); textFocusPending = false; overlayFocus = null; busy = false; nativeDialog = false; loading = !!value;
   session = null; original = null; model = null; savedState = null; rendered = null;
   canvas.width = canvas.height = 1; frame.hidden = true; $('#empty-state').hidden = !!value; controls();
   if (!value) { setPresentation(); status('截图已取消。使用截图快捷键重新截图，或打开本地图片。'); return; }
-  const { pngBase64, ...metadata } = value; session = metadata; setPresentation(value.overlay); chooseTool(value.overlay ? 'select' : 'rectangle');
+  const { pngBase64, ...metadata } = value; session = metadata; setPresentation(value.overlay); chooseTool('select');
   status('正在准备图片…');
   try {
     validateSize(value); validateOverlay(value.overlay);
@@ -231,7 +243,7 @@ async function acceptSession(value: ScreenshotSession | null): Promise<void> {
     if (image.naturalWidth !== value.width || image.naturalHeight !== value.height) throw new Error('图片尺寸不一致，无法安全打开。');
     original = image; model = new ScreenshotDocument(value); fit = true;
     frame.hidden = false; $('#empty-state').hidden = true; loading = false; const drawn = render();
-    if (drawn) status(value.overlay ? '' : replaced ? '已打开新图片；上一张未保存的编辑已丢弃。图片仅在点击保存后写入文件。' : '仅在本机编辑，不识别文字、不上传图片。保存为合并后的 PNG；复制为合并后的图片。');
+    if (drawn) status('');
     // A backend claim survives WebView reloads; event/snapshot metadata alone
     // must never trigger a second save/copy/pin of the same capture intent.
     const initialIntent = drawn && value.overlay && value.initialAction !== undefined;
@@ -261,7 +273,10 @@ async function acceptSession(value: ScreenshotSession | null): Promise<void> {
 function chooseTool(next: Tool): void {
   if (textOpen() && !commitText()) return;
   cancelPointer(); tool = next;
+  $<HTMLDetailsElement>('#zoom-menu').open = false;
   for (const button of document.querySelectorAll<HTMLButtonElement>('.editor-toolbar button[data-tool]')) button.setAttribute('aria-pressed', String(button.dataset.tool === tool));
+  $('.tool-options').hidden = next === 'select' || next === 'crop';
+  $('#color-label').hidden = ['select', 'crop', 'eraser', 'mosaic'].includes(next);
   $('#text-size-label').hidden = next !== 'text' && next !== 'number';
   $('#note-style-label').hidden = next !== 'text'; $('#step-style-label').hidden = next !== 'number';
   $('#line-width-label').hidden = !['rectangle', 'arrow', 'number', 'pen', 'highlight'].includes(next);
@@ -297,6 +312,9 @@ $('.editor-toolbar').addEventListener('pointerdown', focusFromEditorPointer, tru
 canvas.addEventListener('pointerdown', focusFromEditorPointer, true);
 canvas.addEventListener('pointerdown', async event => {
   if (event.button !== 0 || busy || loading || !model ) return;
+  // Text owns focus from this pointer gesture. The browser's later default
+  // mousedown focus on the canvas would otherwise immediately blur/commit it.
+  if (tool === 'text') event.preventDefault();
   const start = point(event); canvas.focus({ preventScroll: true });
   if (textOpen() && !commitText()) return;
   if (tool === 'select') {
@@ -410,14 +428,12 @@ $('#delete-edit').addEventListener('click', () => {
 });
 for (const button of document.querySelectorAll<HTMLButtonElement>('.editor-toolbar button[data-tool]')) button.addEventListener('click', () => chooseTool(button.dataset.tool as Tool));
 textInput.addEventListener('compositionstart', () => { composing = true; }); textInput.addEventListener('compositionend', () => { composing = false; });
-textInput.addEventListener('input', () => { $('#text-count').textContent = `${textInput.value.length} / 2000`; controls(); placeTextEditor(); });
-$('#text-form').addEventListener('submit', event => { event.preventDefault(); if (commitText()) canvas.focus(); });
+textInput.addEventListener('input', () => { controls(); placeTextEditor(); });
 textInput.addEventListener('keydown', event => {
   if (event.isComposing || event.keyCode === 229 || composing) { if (event.key === 'Escape') imeEscape = true; return; }
   if (event.key === 'Escape') { event.preventDefault(); event.stopPropagation(); if (imeEscape) { imeEscape = false; return; } cancelText(); canvas.focus(); }
   if ((event.metaKey || event.ctrlKey) && event.key === 'Enter') { event.preventDefault(); event.stopPropagation(); if (commitText()) canvas.focus(); }
 });
-$('#cancel-text').addEventListener('click', () => { if (!composing) { cancelText(); canvas.focus(); } });
 $('#discard-cancel').addEventListener('click', () => resolveDiscard(false)); $('#discard-confirm').addEventListener('click', () => resolveDiscard(true));
 discardDialog.addEventListener('cancel', event => { event.preventDefault(); resolveDiscard(false); });
 $('#undo-edit').addEventListener('click', () => { if (!busy && commitText() && model?.undo()) { selectedIndex = null; cancelPointer(); if (render()) status('已撤销。'); } });
@@ -527,6 +543,7 @@ document.addEventListener('keydown', event => {
   if (event.target instanceof HTMLInputElement || event.target instanceof HTMLTextAreaElement || event.target instanceof HTMLSelectElement) return;
   const mod = event.ctrlKey || event.metaKey, key = event.key.toLowerCase();
   if (event.key === 'Enter' && inplace() && !mod && !event.altKey && !event.shiftKey) { event.preventDefault(); if (!event.repeat) void exportImage('copy'); return; }
+  if (event.key === 'Escape' && $<HTMLDetailsElement>('#zoom-menu').open) { event.preventDefault(); $<HTMLDetailsElement>('#zoom-menu').open = false; $<HTMLElement>('#zoom-menu summary').focus(); return; }
   if (event.key === 'Escape') { event.preventDefault(); if (gesture || moveGesture) cancelPointer(); else if (selectedIndex !== null) { selectedIndex = null; selectionOutline(); } else void closeEditor(); return; }
   if ((event.key === 'Delete' || event.key === 'Backspace') && selectedIndex !== null && !busy) { event.preventDefault(); $('#delete-edit').click(); return; }
   if (mod && ['z', 'y', 's', 'c', 'o'].includes(key)) {
@@ -558,3 +575,38 @@ if (desktop) {
     if (snapshot) await acceptSession(snapshot);
   })().catch(error => status(`截图窗口初始化失败：${readableError(error)}`, true));
 }
+
+$('#zoom-menu').addEventListener('toggle', placeOverlayTools);
+document.addEventListener('pointerdown', event => { const menu = $<HTMLDetailsElement>('#zoom-menu'); if (menu.open && event.target instanceof Node && !menu.contains(event.target)) menu.open = false; });
+
+// Commit outside pointer interactions only once their click target is fixed.
+// Committing on pointerdown can move the toolbar before pointerup and lose the
+// intended Save/Close click. Keyboard-only focus changes still commit on blur.
+let outsideTextPointer = false;
+let outsideTextPoint: Point | null = null;
+document.addEventListener('pointerdown', event => {
+  outsideTextPointer = false; outsideTextPoint = null;
+  if (!textOpen() || !(event.target instanceof Node) || textDialog.contains(event.target)) return;
+  if (composing) { event.preventDefault(); event.stopImmediatePropagation(); textInput.focus(); return; }
+  if (event.target instanceof Element && event.target.closest('.tool-options')) return;
+  outsideTextPointer = true; outsideTextPoint = textPoint;
+}, true);
+document.addEventListener('click', event => {
+  const sameEdit = outsideTextPointer && outsideTextPoint === textPoint;
+  outsideTextPointer = false; outsideTextPoint = null;
+  if (!textOpen() || !(event.target instanceof Node) || textDialog.contains(event.target)) return;
+  if (composing) { event.preventDefault(); event.stopImmediatePropagation(); return; }
+  if (!sameEdit) return; // The initiating canvas click must not commit the edit it just opened.
+  if (event.target instanceof Element && event.target.closest('.tool-options')) return;
+  if (!commitText()) { event.preventDefault(); event.stopImmediatePropagation(); }
+}, true);
+textInput.addEventListener('blur', () => {
+  queueMicrotask(() => {
+    if (!textOpen() || composing || outsideTextPointer || document.activeElement === textInput || document.activeElement?.closest('.tool-options')) return;
+    commitText();
+  });
+});
+document.addEventListener('pointercancel', () => {
+  outsideTextPointer = false; outsideTextPoint = null;
+  if (textOpen() && !composing && document.activeElement !== textInput) commitText();
+});

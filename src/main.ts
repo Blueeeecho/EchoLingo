@@ -1519,12 +1519,9 @@ function receiveActionError(payload: string | PresentedActionError): void {
   handleActionError(payload.message);
 }
 function handleActionError(message: string): void {
-  // A copy with no clipboard update is not evidence of an empty selection.
-  // Surface the actionable failure, without suggesting a different cloud service.
-  if (/^(?:COPY_NO_UPDATE|SELECTION_UNAVAILABLE):/i.test(message.trim())) {
-    toast(userFacingError(message), 'error', 8000);
-    return;
-  }
+  // Selection-specific compatibility events from an older queued delivery
+  // must not resurrect a toast over Alt+D's manual-input editor.
+  if (/^(?:COPY_NO_UPDATE|SELECTION_UNAVAILABLE):/i.test(message.trim())) return;
   // Only selection/cancellation compatibility is suppressed here. The backend
   // converts a confirmed empty OCR into an epoch-bound blank source, rather
   // than emitting an unscoped NO_TEXT error that could clear unrelated input.
