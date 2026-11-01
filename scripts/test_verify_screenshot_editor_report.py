@@ -3,7 +3,7 @@ import json
 import hashlib
 import unittest
 from unittest import mock
-from verify_screenshot_editor_report import EXPECTED_CASES, PIN_FIELDS, verify, verify_report, verify_installed_acceptance
+from verify_screenshot_editor_report import EXPECTED_CASES, PIN_CASES, PIN_FIELDS, verify, verify_report, verify_installed_acceptance
 
 
 def complete(installed=False):
@@ -17,11 +17,20 @@ def complete(installed=False):
         translationBackend='not-invoked-local-image-only', applicationSha256='a'*64, expectedNativeCaptureSha256='b'*64,
         screenshotNetworkEvidenceScope='configured-loopback-provider-trap; no global packet capture',
         screenshotOcrInvocationCount=0, screenshotHttpConnections=0, screenshotTranslationHistoryCount=0,
-        screenshotRequiredCases=3, screenshotPassedCases=3, verifiedNativeCaptureGenerations=7)
+        screenshotRequiredCases=3, screenshotPassedCases=3, verifiedNativeCaptureGenerations=8)
     report['screenshotCases'] = [{'case': case, 'ok': True, 'shortcut': 'F1', 'hotkeyPresses': 1} for case in EXPECTED_CASES]
     for case, count in zip(report['screenshotCases'], (1, 3, 2)): case['hotkeyPresses'] = count
-    report.update(screenshotPinOnly=False, screenshotPinRequiredCases=1, screenshotPinPassedCases=1,
-        screenshotPinCases=[dict(case='inplace-pin-native-lifecycle', shortcut='F1', hotkeyPresses=1, ok=True, **{field: True for field in PIN_FIELDS})])
+    report.update(screenshotPinOnly=False, screenshotPinRequiredCases=2, screenshotPinPassedCases=2, screenshotPinCases=[])
+    for annotated, name in zip((False, True), PIN_CASES):
+        source = dict(isGeneratedSource=True, isEditor=False, isPin=False, isMain=False, isApp=False, isZero=False)
+        editor = dict(isGeneratedSource=False, isEditor=True, isPin=False, isMain=False, isApp=True, isZero=False)
+        case = dict(case=name, shortcut='F1', hotkeyPresses=1, ok=True, **{field: True for field in PIN_FIELDS})
+        case.update(annotationApplied=annotated, editedRasterVisible=annotated, passiveShowPreservedSourceForeground=not annotated,
+            pinInputMethod='uia-invoke-from-active-editor' if annotated else 'owned-physical-click', physicalPinClickCount=0 if annotated else 1,
+            nativeNoActivateBeforePhysicalClick=not annotated, physicalPinClickOwnedTargetVerified=not annotated, handoffForegroundSamples=1,
+            foregroundBeforePinInvoke=copy.deepcopy(editor if annotated else source), foregroundAfterPinInvoke=copy.deepcopy(editor if annotated else source),
+            foregroundDuringPinHandoff=copy.deepcopy(source), foregroundAtVisibleHandoff=copy.deepcopy(source))
+        report['screenshotPinCases'].append(case)
     report['screenshotCases'][1].update({field: True for field in ('allExportPixelsMatchSystemClipboard', 'noOverwrite',
         'noHiddenPngMetadataOrTrailingData', 'nativeSaveAsCancelPreservedImage', 'nativeOpenCancelPreservedImage')})
     report['screenshotCases'][1].update(savedPngCount=2, copiedPixelSize=[624, 94], inplaceCopyAndSavesDismissed=True,
@@ -54,23 +63,57 @@ class ScreenshotEditorReport(unittest.TestCase):
             baseline.assert_not_called()
 
     def test_pin_lifecycle_evidence_is_mandatory(self):
-        for field in PIN_FIELDS:
+        for index in (0, 1):
+            for field in PIN_FIELDS:
+                report = complete()
+                del report['screenshotPinCases'][index][field]
+                with self.assertRaises(ValueError): verify_report(report)
+
+    def test_both_distinct_pin_modes_and_foreground_contracts_are_mandatory(self):
+        for mutate in (
+            lambda r: r.update(screenshotPinCases=r['screenshotPinCases'][:1]),
+            lambda r: r['screenshotPinCases'].reverse(),
+            lambda r: r['screenshotPinCases'][0].update(physicalPinClickCount=True),
+            lambda r: r['screenshotPinCases'][0].update(nativeNoActivateBeforePhysicalClick=False),
+            lambda r: r['screenshotPinCases'][0].update(physicalPinClickOwnedTargetVerified=False),
+            lambda r: r['screenshotPinCases'][0].update(pinInputMethod='uia-invoke-from-active-editor'),
+            lambda r: r['screenshotPinCases'][1].update(annotationApplied=False),
+            lambda r: r['screenshotPinCases'][1].update(editedRasterVisible=False),
+            lambda r: r['screenshotPinCases'][1].update(passiveShowPreservedSourceForeground=True),
+            lambda r: r['screenshotPinCases'][1]['foregroundBeforePinInvoke'].update(isEditor=False),
+            lambda r: r['screenshotPinCases'][0]['foregroundAtVisibleHandoff'].update(isGeneratedSource=False),
+            lambda r: r['screenshotPinCases'][0]['foregroundAfterPinInvoke'].update(isGeneratedSource=False, isEditor=True, isApp=True),
+            lambda r: r['screenshotPinCases'][0]['foregroundAfterPinInvoke'].update(isGeneratedSource=False),
+            lambda r: r['screenshotPinCases'][0]['foregroundDuringPinHandoff'].update(isPin=True),
+            lambda r: r['screenshotPinCases'][1]['foregroundDuringPinHandoff'].update(isMain=True),
+            lambda r: r['screenshotPinCases'][1]['foregroundAfterPinInvoke'].update(isMain=True),
+            lambda r: r['screenshotPinCases'][1]['foregroundAtVisibleHandoff'].update(isPin=True),
+            lambda r: r.update(verifiedNativeCaptureGenerations=7),
+            lambda r: r.update(verifiedNativeCaptureGenerations=9),
+        ):
             report = complete()
-            del report['screenshotPinCases'][0][field]
+            mutate(report)
             with self.assertRaises(ValueError): verify_report(report)
 
     def test_pin_only_cannot_substitute_for_complete_editor(self):
         report = complete()
-        report.update(screenshotPinOnly=True, screenshotFinalExportCount=0, verifiedNativeCaptureGenerations=2)
+        report.update(screenshotPinOnly=True, screenshotFinalExportCount=0, verifiedNativeCaptureGenerations=3)
         report['screenshotCases'] = report['screenshotCases'][:1]
         self.assertEqual(verify_report(report, pin_only=True), report)
         with self.assertRaises(ValueError): verify_report(report)
         report['screenshotFinalExportCount'] = 1
         with self.assertRaises(ValueError): verify_report(report, pin_only=True)
 
+    def test_pin_only_requires_exact_three_native_generations(self):
+        for count in (2, 4, True, 3.0):
+            report = complete()
+            report.update(screenshotPinOnly=True, screenshotFinalExportCount=0, verifiedNativeCaptureGenerations=count)
+            report['screenshotCases'] = report['screenshotCases'][:1]
+            with self.assertRaises(ValueError): verify_report(report, pin_only=True)
+
     def test_pin_only_requires_integer_counts_and_complete_native_cleanup(self):
         report = complete()
-        report.update(screenshotPinOnly=True, screenshotFinalExportCount=0, verifiedNativeCaptureGenerations=2)
+        report.update(screenshotPinOnly=True, screenshotFinalExportCount=0, verifiedNativeCaptureGenerations=3)
         report['screenshotCases'] = report['screenshotCases'][:1]
         for field, invalid in (('screenshotFinalExportCount', False), ('verifiedNativeCaptureGenerations', 2.0)):
             changed = copy.deepcopy(report)
@@ -83,7 +126,7 @@ class ScreenshotEditorReport(unittest.TestCase):
 
     def test_pin_only_requires_its_real_cancel_baseline(self):
         report = complete()
-        report.update(screenshotPinOnly=True, screenshotFinalExportCount=0, verifiedNativeCaptureGenerations=2)
+        report.update(screenshotPinOnly=True, screenshotFinalExportCount=0, verifiedNativeCaptureGenerations=3)
         for cases in ([], report['screenshotCases'], [dict(case='escape-cancel', ok=True, shortcut='F1', hotkeyPresses=True)]):
             report['screenshotCases'] = cases
             with self.assertRaises(ValueError): verify_report(report, pin_only=True)

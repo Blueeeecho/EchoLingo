@@ -80,7 +80,7 @@ describe('actual Windows screenshot fixture source wiring (not native acceptance
     expect(fixture).toContain('return editor!=IntPtr.Zero&&IsWindowVisible(editor)&&canvas&&overlays==0');
     expect(fixture).toContain('},25,"Pin fixture F1 did not prepare');
     expect(wrapper).toContain('report.ContainsKey("inputPlaneStyleFailure")||report.ContainsKey("screenshotPinPreparation")');
-    const observation = fixture.slice(fixture.indexOf('static void ScreenshotPreparationObservation'), fixture.indexOf('static Dictionary<string,object> ScreenshotPinCase'));
+    const observation = fixture.slice(fixture.indexOf('static void ScreenshotPreparationObservation'), fixture.indexOf('static void ScreenshotPassivePinClick'));
     for (const field of ['editorFound', 'editorVisible', 'helperExited', 'editorPhysicalBounds', 'mainVisible', 'knownActionErrorCode', 'nativeViewportGateFailed']) expect(observation).toContain(field);
     expect(observation).toContain('own.Current.ProcessId==app.Id');
     expect(observation).toContain('AutomationElement.AutomationIdProperty,"toast"');
@@ -97,14 +97,30 @@ describe('actual Windows screenshot fixture source wiring (not native acceptance
     expect(pin).toContain('return Convert.ToBoolean(foreground["isGeneratedSource"]);');
     expect(pin).toContain('},20,"Pin handoff did not show decoded reference and dismiss capture.",app)');
     const handoff = pin.slice(pin.indexOf('result["foregroundAfterPinInvoke"]'));
-    expect(handoff).toContain('RequireForeground(form);Assert(ScreenshotPinTopmost(pin)');
+    expect(handoff).toContain('if(!annotated)RequireForeground(form);Assert(ScreenshotPinTopmost(pin)');
     for (const forbidden of ['SetForegroundWindow(', 'form.Activate(', 'AllowSetForegroundWindow(', 'AttachThreadInput(']) expect(handoff).not.toContain(forbidden);
   });
   it('exercises actual pin HWND lifecycle and bounded generated pixels without mocked IPC', () => {
-    for (const value of ['ScreenshotPinCase(', 'ScreenshotPins(app.Id)', 'ScreenshotPinTopmost(pin)', 'ScreenshotPinToggle(app,pin,true)', 'ScreenshotPinToggle(app,pin,false)', 'SetWindowPos(pin,IntPtr.Zero', '!IsWindow(pin)&&ScreenshotPins(app.Id).Count==0', 'ScreenshotPinPixels(app,pin,selected)', 'new Bitmap(3,3)', 'ScreenshotOwnedClipboard.SeedUnchanged()', 'inplace-pin-native-lifecycle']) expect(fixture).toContain(value);
+    for (const value of ['ScreenshotPinCase(', 'ScreenshotPins(app.Id)', 'ScreenshotPinTopmost(pin)', 'ScreenshotPinToggle(app,pin,true)', 'ScreenshotPinToggle(app,pin,false)', 'SetWindowPos(pin,IntPtr.Zero', '!IsWindow(pin)&&ScreenshotPins(app.Id).Count==0', 'ScreenshotPinPixels(app,pin,selected,annotated)', 'new Bitmap(3,3)', 'ScreenshotOwnedClipboard.SeedUnchanged()', 'inplace-pin-passive-physical', 'inplace-pin-annotated-active-editor']) expect(fixture).toContain(value);
     expect(wrapper).toContain('[switch]$ScreenshotPinTests');
     expect(fixture).toContain('if(ScreenshotPinOnly)');
     expect(fixture).not.toContain('__TAURI_INTERNALS__');
+  });
+  it('separates untouched physical pinning from intentionally active annotation without focus restoration', () => {
+    const click = fixture.slice(fixture.indexOf('static void ScreenshotPassivePinClick('), fixture.indexOf('static Dictionary<string,object> ScreenshotPinCase('));
+    for (const required of ['MoveGenerated(form,center);RequireForeground(form)', 'GetAncestor(WindowFromPoint(center),2)', 'target==editor&&process==app.Id', '0x08000000L', 'Send(new INPUT[]{down,up})']) expect(click).toContain(required);
+    for (const forbidden of ['ScreenshotInvoke(', 'SetForegroundWindow(', 'SetFocus(', 'Thread.Sleep(']) expect(click).not.toContain(forbidden);
+    const pin = fixture.slice(fixture.indexOf('static Dictionary<string,object> ScreenshotPinCase('), fixture.indexOf('static void ScreenshotEditorWorkflow('));
+    expect(pin).toContain('IntPtr main=MainWindow(app.Id)');
+    expect(pin).toContain('if(annotated)ScreenshotInvoke(');
+    expect(pin).toContain('else ScreenshotPassivePinClick(');
+    expect(pin).toContain('if(annotated)return true;');
+    expect(pin).toContain('!Convert.ToBoolean(foreground["isPin"])&&!Convert.ToBoolean(foreground["isMain"])');
+    expect(pin).not.toContain('SetForegroundWindow(');
+    expect(pin).not.toContain('form.Activate(');
+    expect(fixture).toContain('report["screenshotPinRequiredCases"]=2;report["screenshotPinPassedCases"]=2');
+    expect(fixture).toContain('new object[]{passive,pinned}');
+    expect(fixture).toContain('annotated?Color.FromArgb(228,93,104):Color.FromArgb(23,101,199)');
   });
   it('maps F1 exports to dismiss/re-capture while retaining standalone cancellation and collision oracles', () => {
     for (const value of ['if(closes)WaitFor', 'for(int save=0;save<2;save++)', 'recapturedSaveSessions', 'inplaceCopyAndSavesDismissed', 'savedCaptureReopenedThroughSettings', 'standaloneCollisionNumberingVerified', 'ScreenshotContinueOpen(app,dialogOwner)', 'inplaceCancelPreservedClipboard']) expect(fixture).toContain(value);

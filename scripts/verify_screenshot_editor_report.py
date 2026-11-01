@@ -9,10 +9,11 @@ import re
 EXPECTED_CASES = ('escape-cancel', 'inplace-drag-copy-recapture-save-twice', 'click-window-copy-then-cancel')
 
 
-PIN_FIELDS = ('editedRasterVisible', 'passiveShowPreservedSourceForeground',
+PIN_CASES = ('inplace-pin-passive-physical', 'inplace-pin-annotated-active-editor')
+PIN_FIELDS = ('rasterVisible', 'initialEditorShowPreservedSourceForeground', 'pinAndMainNotObservedForeground',
               'decodedReferenceVisibleAndCaptureDismissed', 'nativeTopmostInitially',
               'initialOuterFrameWithinSourceWorkArea', 'nativeUnpinVerified', 'nativeRepinVerified',
-              'nativeMoveResizeVerified', 'editedRasterRetainedAfterResize', 'nativeWindowDestroyed',
+              'nativeMoveResizeVerified', 'rasterRetainedAfterResize', 'nativeWindowDestroyed',
               'clipboardUnchanged', 'exportDirectoryUnchanged')
 
 
@@ -22,17 +23,44 @@ NATIVE_COMPLETION = (('nativeCaptureBackend', 1), ('attemptStage', 4), ('helperR
 
 
 def verify_pin(report):
-    if any(type(report.get(field)) is not int or report[field] != 1 for field in ('screenshotPinRequiredCases', 'screenshotPinPassedCases')):
-        raise ValueError('One actual native pin lifecycle case is required')
+    if any(type(report.get(field)) is not int or report[field] != 2 for field in ('screenshotPinRequiredCases', 'screenshotPinPassedCases')):
+        raise ValueError('Both passive and annotated native pin cases are required')
     cases = report.get('screenshotPinCases')
-    if not isinstance(cases, list) or len(cases) != 1 or not isinstance(cases[0], dict):
-        raise ValueError('Exact native pin case inventory is required')
-    case = cases[0]
-    if case.get('case') != 'inplace-pin-native-lifecycle' or case.get('shortcut') != 'F1' or type(case.get('hotkeyPresses')) is not int or case['hotkeyPresses'] != 1 or case.get('ok') is not True:
-        raise ValueError('Native pin must start with one real F1')
-    for field in PIN_FIELDS:
-        if case.get(field) is not True:
-            raise ValueError('Native pin evidence absent: ' + field)
+    if (not isinstance(cases, list) or len(cases) != 2 or any(not isinstance(case, dict) for case in cases)
+            or tuple(case.get('case') for case in cases) != PIN_CASES):
+        raise ValueError('Exact ordered native pin case inventory is required')
+    for annotated, case in zip((False, True), cases):
+        if case.get('shortcut') != 'F1' or type(case.get('hotkeyPresses')) is not int or case['hotkeyPresses'] != 1 or case.get('ok') is not True:
+            raise ValueError('Each native pin must start with one real F1')
+        for field in PIN_FIELDS:
+            if case.get(field) is not True:
+                raise ValueError('Native pin evidence absent: ' + field)
+        if case.get('annotationApplied') is not annotated or case.get('editedRasterVisible') is not annotated:
+            raise ValueError('Annotated and pristine raster evidence must not be conflated')
+        if case.get('passiveShowPreservedSourceForeground') is not (not annotated):
+            raise ValueError('Only passive physical pinning claims source foreground preservation')
+        if case.get('pinInputMethod') != ('uia-invoke-from-active-editor' if annotated else 'owned-physical-click'):
+            raise ValueError('Pin input must represent the tested foreground state')
+        if type(case.get('physicalPinClickCount')) is not int or case['physicalPinClickCount'] != (0 if annotated else 1):
+            raise ValueError('Only the passive case sends exactly one physical pin click')
+        if not annotated:
+            for field in ('nativeNoActivateBeforePhysicalClick', 'physicalPinClickOwnedTargetVerified'):
+                if case.get(field) is not True:
+                    raise ValueError('Passive click ownership evidence absent: ' + field)
+        if type(case.get('handoffForegroundSamples')) is not int or case['handoffForegroundSamples'] < 1:
+            raise ValueError('Native handoff foreground samples are required')
+        for phase in ('foregroundBeforePinInvoke', 'foregroundAfterPinInvoke', 'foregroundDuringPinHandoff', 'foregroundAtVisibleHandoff'):
+            state = case.get(phase)
+            if not isinstance(state, dict) or any(type(state.get(field)) is not bool for field in ('isGeneratedSource', 'isEditor', 'isPin', 'isMain', 'isApp', 'isZero')):
+                raise ValueError('Exact bounded foreground phase evidence is required')
+            if state['isPin'] or state['isMain']:
+                raise ValueError('Pin/main activated during the handoff')
+            if phase == 'foregroundBeforePinInvoke' and state['isEditor' if annotated else 'isGeneratedSource'] is not True:
+                raise ValueError('Pin action began in the wrong foreground state')
+            if not annotated and not (state['isGeneratedSource'] or state['isZero']):
+                raise ValueError('Passive pin observed non-source foreground')
+            if not annotated and phase == 'foregroundAtVisibleHandoff' and not state['isGeneratedSource']:
+                raise ValueError('Passive completed handoff did not preserve source foreground')
 
 
 def verify_report(report, expected_sha=None, installed=False, pin_only=False):
@@ -77,7 +105,7 @@ def verify_report(report, expected_sha=None, installed=False, pin_only=False):
                 or cancelled[0].get('shortcut') != 'F1' or type(cancelled[0].get('hotkeyPresses')) is not int
                 or cancelled[0]['hotkeyPresses'] != 1):
             raise ValueError('Pin-only requires its successful single-F1 cancellation baseline')
-        if type(report.get('screenshotFinalExportCount')) is not int or report['screenshotFinalExportCount'] != 0 or type(report.get('verifiedNativeCaptureGenerations')) is not int or report['verifiedNativeCaptureGenerations'] < 2:
+        if type(report.get('screenshotFinalExportCount')) is not int or report['screenshotFinalExportCount'] != 0 or type(report.get('verifiedNativeCaptureGenerations')) is not int or report['verifiedNativeCaptureGenerations'] != 3:
             raise ValueError('Pin-only path must retain zero exports and verified cancel/pin generations')
         health = report.get('screenshotNativeCompletion', {})
         for field, value in NATIVE_COMPLETION:
@@ -87,8 +115,8 @@ def verify_report(report, expected_sha=None, installed=False, pin_only=False):
     for field in ('screenshotRequiredCases', 'screenshotPassedCases'):
         if type(report.get(field)) is not int or report[field] != 3:
             raise ValueError('All three real F1 editor workflows must pass')
-    if type(report.get('verifiedNativeCaptureGenerations')) is not int or report['verifiedNativeCaptureGenerations'] < 7:
-        raise ValueError('At least seven byte-verified native capture generations are required')
+    if type(report.get('verifiedNativeCaptureGenerations')) is not int or report['verifiedNativeCaptureGenerations'] != 8:
+        raise ValueError('Exactly eight byte-verified native capture generations are required')
     cases = report.get('screenshotCases')
     if (not isinstance(cases, list) or len(cases) != 3
             or any(not isinstance(case, dict) for case in cases)
