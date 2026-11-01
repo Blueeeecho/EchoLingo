@@ -13,7 +13,7 @@ struct CaptureDisplayGeometry: Equatable {
     let scale: CGFloat
 }
 
-enum CapturePurpose: Equatable { case region, screenshot }
+enum CapturePurpose: Equatable { case region, screenshot, screenshotSelection }
 
 enum CaptureScreenshotAction: String, CaseIterable {
     case select, rectangle, arrow, text, number, pen, highlight, mosaic, solid, crop, copy, save, pin, cancel
@@ -267,7 +267,7 @@ struct CaptureSelectorState {
     var windowHint: CaptureWindowTarget? {
         guard outcome == nil && !adjusting else { return nil }
         if anchor == nil { return candidate }
-        return purpose == .screenshot && !dragExceeded ? pressedWindow : nil
+        return purpose != .region && !dragExceeded ? pressedWindow : nil
     }
 
     mutating func receive(_ event: CaptureSelectorEvent) {
@@ -281,7 +281,7 @@ struct CaptureSelectorState {
             else { initialAction = action; outcome = .selected(selection) }
         case .move(let point):
             highlightedDisplay = captureDisplay(at: point, displays: displays)
-            if purpose == .screenshot, let anchor = anchor {
+            if purpose != .region, let anchor = anchor {
                 dragExceeded = dragExceeded || abs(point.x - anchor.x) > 4 || abs(point.y - anchor.y) > 4
                 if dragExceeded { selection = captureRectangle(anchor, point) }
             }
@@ -298,7 +298,7 @@ struct CaptureSelectorState {
             highlightedDisplay = captureDisplay(at: point, displays: displays)
             guard anchor == nil else { return }
             anchor = point
-            pressedWindow = purpose == .screenshot ? candidate.flatMap { $0.frame.contains(point) ? $0 : nil } : nil
+            pressedWindow = purpose != .region ? candidate.flatMap { $0.frame.contains(point) ? $0 : nil } : nil
             dragExceeded = false
             selection = nil
         case .leftDrag(let point):
@@ -313,10 +313,12 @@ struct CaptureSelectorState {
             guard let anchor = anchor else { return }
             let rectangle = captureRectangle(anchor, point)
             dragExceeded = dragExceeded || rectangle.width > 4 || rectangle.height > 4
-            if purpose == .screenshot && !dragExceeded {
+            if purpose != .region && !dragExceeded {
                 if let window = pressedWindow {
                     selection = captureVisibleWindowRectangle(window.frame, displays: displays)
-                    selectedWindow = window; adjusting = true; self.anchor = nil
+                    selectedWindow = window
+                    if purpose == .screenshotSelection { outcome = .windowSelected(window) }
+                    else { adjusting = true; self.anchor = nil }
                 } else { outcome = .cancelled }
             } else if rectangle.width >= 2 && rectangle.height >= 2 {
                 selection = rectangle
@@ -360,20 +362,27 @@ final class NativeCaptureTrace: @unchecked Sendable {
         Self.lock.lock(); defer { Self.lock.unlock() }
         recordLocked(phase)
     }
+    func recordOCR(_ phase: NativeOCRPhase) {
+        Self.lock.lock(); defer { Self.lock.unlock() }
+        recordNameLocked(phase.rawValue)
+    }
     private func recordLocked(_ phase: NativeCaptureTracePhase) {
+        recordNameLocked(phase.rawValue)
+    }
+    private func recordNameLocked(_ phase: String) {
         guard Self.latest["attemptId"] as? UInt64 == id, !Self.terminal else { return }
         let elapsed = (ProcessInfo.processInfo.systemUptime - started) * 1000
-        if Self.events.count == 24 { Self.events.removeFirst() }
-        Self.events.append(["phase": phase.rawValue, "elapsedMs": elapsed])
-        Self.latest["phase"] = phase.rawValue; Self.latest["elapsedMs"] = elapsed
-        Self.terminal = phase == .completed || phase == .cancelled || phase == .failed
+        if Self.events.count == 48 { Self.events.removeFirst() }
+        Self.events.append(["phase": phase, "elapsedMs": elapsed, "mainThread": Thread.isMainThread])
+        Self.latest["phase"] = phase; Self.latest["elapsedMs"] = elapsed
+        Self.terminal = phase == "completed" || phase == "cancelled" || phase == "failed"
     }
     func failure(_ error: Error) {
         let category = (error as? NativeError)?.message.split(separator: ":", maxSplits: 1).first.map(String.init) ?? "OTHER"
         Self.lock.lock(); defer { Self.lock.unlock() }
         guard Self.latest["attemptId"] as? UInt64 == id, !Self.terminal else { return }
         recordLocked(category == "CANCELLED" ? .cancelled : .failed)
-        Self.latest["errorCategory"] = ["CANCELLED", "CAPTURE", "CAPTURE_BUSY", "CAPTURE_TOO_LARGE", "PERMISSION", "OCR_TIMEOUT", "NO_TEXT"].contains(category) ? category : "OTHER"
+        Self.latest["errorCategory"] = ["CANCELLED", "CAPTURE", "CAPTURE_BUSY", "CAPTURE_TOO_LARGE", "PERMISSION", "OCR_BUSY", "OCR_TIMEOUT", "NO_TEXT"].contains(category) ? category : "OTHER"
     }
     static func snapshot() -> [String: Any] {
         lock.lock(); defer { lock.unlock() }
@@ -664,6 +673,37 @@ public func echoLingoShowScreenshotOverlay(_ pointer: UnsafeMutableRawPointer?,
     return 0
 }
 
+@_cdecl("echolingo_resume_screenshot_overlay")
+public func echoLingoResumeScreenshotOverlay(_ pointer: UnsafeMutableRawPointer?,
+    _ x: Double, _ y: Double, _ width: Double, _ height: Double) -> Int32 {
+    guard Thread.isMainThread, let owner = screenshotEditorOwner(pointer),
+          let host = captureScreenshotEditorHosts[ObjectIdentifier(owner)],
+          let frame = screenshotEditorFrame(x, y, width, height), host.panel.frame == frame,
+          host.panel.contentView === host.content, host.content.window === host.panel else { return -1 }
+    host.panel.orderFrontRegardless()
+    NSApp.updateWindows()
+    return host.panel.isVisible && host.panel.isOnActiveSpace && !owner.isVisible ? 0 : -2
+}
+
+// Temporary capture exclusion retains the existing panel and WKWebView.
+// Only explicit text interaction calls this after capture. Initial show retains
+// the established nonactivating key-panel keyboard route; resume never makes key.
+@_cdecl("echolingo_focus_screenshot_overlay")
+public func echoLingoFocusScreenshotOverlay(_ pointer: UnsafeMutableRawPointer?) -> Int32 {
+    guard Thread.isMainThread, let owner = screenshotEditorOwner(pointer),
+          let host = captureScreenshotEditorHosts[ObjectIdentifier(owner)], host.panel.isVisible else { return -1 }
+    host.panel.makeKey()
+    return host.panel.makeFirstResponder(host.webView) ? 0 : -2
+}
+
+@_cdecl("echolingo_suspend_screenshot_overlay")
+public func echoLingoSuspendScreenshotOverlay(_ pointer: UnsafeMutableRawPointer?) -> Int32 {
+    guard Thread.isMainThread, let owner = screenshotEditorOwner(pointer),
+          let host = captureScreenshotEditorHosts[ObjectIdentifier(owner)] else { return -1 }
+    host.panel.orderOut(nil)
+    return host.panel.isVisible ? -2 : 0
+}
+
 @_cdecl("echolingo_hide_screenshot_overlay")
 public func echoLingoHideScreenshotOverlay(_ pointer: UnsafeMutableRawPointer?) -> Int32 {
     guard Thread.isMainThread else { return -1 }
@@ -899,7 +939,7 @@ final class CaptureSelectionSession {
             case .leftMouseDragged: self.receive(.leftDrag(point))
             case .leftMouseUp: self.receive(.leftUp(point))
             case .rightMouseDown:
-                if self.state.purpose == .screenshot { self.receive(.cancel) }
+                if self.state.purpose != .region { self.receive(.cancel) }
             default: break
             }
             return nil
@@ -1295,6 +1335,15 @@ func captureEditorGeometry(_ plan: CaptureRegionPlan, primaryHeight: CGFloat) th
 }
 
 func captureSelectionSelfTest() throws {
+    let deferredDisplay = CaptureDisplayGeometry(id: 99, frame: CGRect(x: -1000, y: 0, width: 1000, height: 800), scale: 2)
+    var deferred = CaptureSelectorState(displays: [deferredDisplay], purpose: .screenshotSelection)
+    deferred.receive(.leftDown(CGPoint(x: -900, y: 100)))
+    deferred.receive(.leftDrag(CGPoint(x: -700, y: 250)))
+    deferred.receive(.leftUp(CGPoint(x: -700, y: 250)))
+    guard deferred.outcome == .selected(CGRect(x: -900, y: 100, width: 200, height: 150)),
+          !deferred.adjusting, deferred.initialAction == nil else {
+        throw NativeError("SELF_TEST: Deferred F1 did not return geometry without a toolbar action.")
+    }
     let primary = CaptureDisplayGeometry(id: 1, frame: CGRect(x: 0, y: 0, width: 1440, height: 900), scale: 2)
     let left = CaptureDisplayGeometry(id: 2, frame: CGRect(x: -1920, y: -180, width: 1920, height: 1080), scale: 1)
     let above = CaptureDisplayGeometry(id: 3, frame: CGRect(x: 0, y: 900, width: 1280, height: 720), scale: 1)
@@ -1689,8 +1738,8 @@ func captureOCRCancellationSelfTest() throws {
     let latest = NativeCaptureTrace(mode: .cloudImage)
     first.failure(NativeError("CAPTURE: synthetic private detail"))
     try expect(NativeCaptureTrace.snapshot()["phase"] as? String == "started")
-    for _ in 0..<30 { latest.record(.pixelsRequested) }
-    try expect((NativeCaptureTrace.snapshot()["events"] as? [[String: Any]])?.count == 24)
+    for _ in 0..<60 { latest.record(.pixelsRequested) }
+    try expect((NativeCaptureTrace.snapshot()["events"] as? [[String: Any]])?.count == 48)
     latest.failure(NativeError("UNRECOGNIZED: synthetic private detail"))
     latest.record(.completed)
     try expect(NativeCaptureTrace.snapshot()["phase"] as? String == "failed")
@@ -1708,4 +1757,123 @@ private final class CaptureCancellationFixtureResult: @unchecked Sendable {
     private var passed = false
     func set(_ value: Bool) { lock.lock(); passed = value; lock.unlock() }
     func get() -> Bool { lock.lock(); defer { lock.unlock() }; return passed }
+}
+
+// Deferred F1 retains metadata only. The Rust session owns this opaque payload;
+// no desktop bitmap is cached and the web view never receives the plan.
+struct DeferredCaptureRect: Codable {
+    let x: Double, y: Double, width: Double, height: Double
+    var frame: CGRect { CGRect(x: x, y: y, width: width, height: height) }
+    init(_ frame: CGRect) { x = frame.minX; y = frame.minY; width = frame.width; height = frame.height }
+}
+struct DeferredCaptureDisplay: Codable {
+    let id: UInt32
+    let frame: DeferredCaptureRect
+    let scale: Double
+    let usable: DeferredCaptureRect
+}
+struct DeferredCaptureWindow: Codable {
+    let id: UInt32
+    let pid: Int32
+    let frame: DeferredCaptureRect
+}
+struct DeferredCapturePlan: Codable {
+    let version: Int
+    let ownerPID: Int32
+    let primaryHeight: Double
+    let displays: [DeferredCaptureDisplay]
+    let window: DeferredCaptureWindow?
+}
+struct DeferredCaptureInput: Codable {
+    let operationId: String
+    let plan: DeferredCapturePlan
+    let rect: DeferredCaptureRect
+}
+func deferredCaptureDisplays() throws -> [DeferredCaptureDisplay] {
+    try onMainThread {
+        try NSScreen.screens.map { screen in
+            guard let id = screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber else {
+                throw NativeError("CAPTURE_GEOMETRY: 无法读取显示器身份。")
+            }
+            return DeferredCaptureDisplay(id: id.uint32Value, frame: DeferredCaptureRect(screen.frame),
+                scale: screen.backingScaleFactor, usable: DeferredCaptureRect(screen.visibleFrame.intersection(screen.frame)))
+        }
+    }
+}
+func validateDeferredCapturePlan(_ plan: DeferredCapturePlan) throws -> [CaptureDisplayGeometry] {
+    guard plan.version == 1, plan.ownerPID == ProcessInfo.processInfo.processIdentifier,
+          plan.primaryHeight == CGDisplayBounds(CGMainDisplayID()).height,
+          !plan.displays.isEmpty, plan.displays.count <= 64 else {
+        throw NativeError("CAPTURE_GEOMETRY: 截图会话或显示器布局已失效。")
+    }
+    let current = try deferredCaptureDisplays()
+    guard current.count == plan.displays.count, Set(plan.displays.map(\.id)).count == plan.displays.count else {
+        throw NativeError("CAPTURE_GEOMETRY: 显示器布局已改变。")
+    }
+    for display in plan.displays {
+        guard let actual = current.first(where: { $0.id == display.id }),
+              actual.frame.frame == display.frame.frame, actual.usable.frame == display.usable.frame,
+              actual.scale == display.scale, display.scale.isFinite, display.scale > 0, display.scale <= 8 else {
+            throw NativeError("CAPTURE_GEOMETRY: 显示器坐标或缩放已改变。")
+        }
+    }
+    if let window = plan.window {
+        try captureValidateWindow(CaptureWindowTarget(id: window.id, pid: window.pid, frame: window.frame.frame))
+    }
+    return plan.displays.map { CaptureDisplayGeometry(id: $0.id, frame: $0.frame.frame, scale: $0.scale) }
+}
+func deferredCaptureGeometry(_ region: CaptureRegionPlan, snapshot: DeferredCapturePlan) throws -> [String: Any] {
+    let all = CaptureRegionPlan(region: region.region, scale: region.scale, pixelWidth: region.pixelWidth,
+        pixelHeight: region.pixelHeight, displays: snapshot.displays.map {
+            CaptureDisplayGeometry(id: $0.id, frame: $0.frame.frame, scale: $0.scale)
+        })
+    return ["captureGeometry": try captureEditorGeometry(all, primaryHeight: snapshot.primaryHeight),
+        "captureScreens": snapshot.displays.map { display in
+            ["x": display.usable.x, "y": snapshot.primaryHeight - display.usable.y - display.usable.height,
+             "width": display.usable.width, "height": display.usable.height]
+        }]
+}
+func selectDeferredScreenshot(cancellation: CaptureScreenshotOperation) throws -> [String: Any] {
+    guard CGPreflightScreenCaptureAccess() else { throw NativeError("PERMISSION: 屏幕录制权限不可用。") }
+    if cancellation.isCancelled { throw NativeError("CANCELLED: 截图请求已取消。") }
+    let displays = try deferredCaptureDisplays()
+    let selected = try selectNativeCaptureRegion(purpose: .screenshotSelection, operation: cancellation)
+    let snapshot = DeferredCapturePlan(version: 1, ownerPID: ProcessInfo.processInfo.processIdentifier,
+        primaryHeight: selected.primaryHeight, displays: displays, window: selected.window.map {
+            DeferredCaptureWindow(id: $0.id, pid: $0.pid, frame: DeferredCaptureRect($0.frame))
+        })
+    _ = try validateDeferredCapturePlan(snapshot)
+    if cancellation.isCancelled { throw NativeError("CANCELLED: 截图请求已取消。") }
+    var result = try deferredCaptureGeometry(selected, snapshot: snapshot)
+    result["selectionPlan"] = try JSONSerialization.jsonObject(with: JSONEncoder().encode(snapshot))
+    result["ok"] = true
+    return result
+}
+func captureDeferredScreenshot(_ input: Data) throws -> [String: Any] {
+    guard input.count <= 65536 else { throw NativeError("CAPTURE_ARGUMENT: 截图参数过大。") }
+    let request = try JSONDecoder().decode(DeferredCaptureInput.self, from: input)
+    guard let cancellation = CaptureScreenshotOperations.shared.lookup(request.operationId),
+          !cancellation.isCancelled else { throw NativeError("CANCELLED: 截图请求已失效。") }
+    guard CGPreflightScreenCaptureAccess() else { throw NativeError("PERMISSION: 屏幕录制权限不可用。") }
+    let displays = try validateDeferredCapturePlan(request.plan)
+    let r = request.rect
+    let rectangle = CGRect(x: r.x, y: request.plan.primaryHeight - r.y - r.height, width: r.width, height: r.height)
+    guard let first = displays.first, displays.dropFirst().reduce(first.frame, { $0.union($1.frame) }).contains(rectangle) else {
+        throw NativeError("CAPTURE_GEOMETRY: 选区超出当前屏幕。")
+    }
+    var plan = try capturePlan(rectangle, displays: displays)
+    plan.window = request.plan.window.map { CaptureWindowTarget(id: $0.id, pid: $0.pid, frame: $0.frame.frame) }
+    let image = try captureNativePlannedImage(plan, purpose: .screenshot, operation: cancellation)
+    _ = try validateDeferredCapturePlan(request.plan)
+    if cancellation.isCancelled { throw NativeError("CANCELLED: 截图请求已取消。") }
+    let data = NSMutableData()
+    guard let destination = CGImageDestinationCreateWithData(data, "public.png" as CFString, 1, nil) else {
+        throw NativeError("CAPTURE: 无法创建截图图像。")
+    }
+    CGImageDestinationAddImage(destination, image, nil)
+    guard CGImageDestinationFinalize(destination) else { throw NativeError("CAPTURE: 无法编码截图图像。") }
+    var result = try deferredCaptureGeometry(plan, snapshot: request.plan)
+    result["imageBase64"] = try encodePNG(data as Data)
+    result["ok"] = true
+    return result
 }

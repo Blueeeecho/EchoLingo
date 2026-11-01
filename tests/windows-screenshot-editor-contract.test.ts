@@ -73,7 +73,7 @@ describe('actual Windows screenshot fixture source wiring (not native acceptance
     }
   });
   it('cleans failed runs only after locked generation and exact generated-content ownership checks', () => {
-    for (const required of ['FRESH_EMPTY_CLIPBOARD_REQUIRED', 'Guid.NewGuid()', 'ScreenshotClipboardPolicyTests()', 'ScreenshotOwnedClipboard.Cleanup()', 'screenshotOwnedClipboardCleared', 'generation-changed-preserved', 'content-changed-preserved', 'GetClipboardSequenceNumber()==generation&&GetClipboardOwner()==owner', 'LockedDigest(format)==digest', 'ScreenshotPixelsEqual(actual,expected)', 'ScreenshotPixelsEqual(actual,ScreenshotExpectedWindow)', 'ScreenshotCroppedPixels', 'DwmFlush()', 'control.Enabled=false']) expect(fixture).toContain(required);
+    for (const required of ['FRESH_EMPTY_CLIPBOARD_REQUIRED', 'Guid.NewGuid()', 'ScreenshotClipboardPolicyTests()', 'ScreenshotOwnedClipboard.Cleanup()', 'screenshotOwnedClipboardCleared', 'generation-changed-preserved', 'content-changed-preserved', 'GetClipboardSequenceNumber()==generation&&GetClipboardOwner()==owner', 'LockedDigest(format)==digest', 'ScreenshotPixelsEqual(actual,expected)', 'ScreenshotWindowPixelsMatch(actual,windowPixels)', 'ScreenshotCroppedPixels', 'DwmFlush()', 'control.Enabled=false']) expect(fixture).toContain(required);
     expect(fixture).not.toContain('Clipboard.Clear()');
     expect(fixture).not.toContain('Clipboard.SetText(');
     expect(fixture).toContain('return ScreenshotReclaim(SameGeneration,SameContent,EmptyClipboard)');
@@ -110,9 +110,9 @@ describe('actual Windows screenshot fixture source wiring (not native acceptance
     expect(fixture).toContain('report["screenshotPinCaptureAttempt"]=result');
     expect(fixture).toContain('report["screenshotPinPreparation"]=preparation');
     expect(fixture).toContain('return editor!=IntPtr.Zero&&IsWindowVisible(editor)&&canvas&&overlays==0');
-    expect(fixture).toContain('},25,"Native solid action did not prepare');
+    expect(fixture).toContain('},25,"Web solid action did not retain');
     expect(wrapper).toContain('report.ContainsKey("inputPlaneStyleFailure")||report.ContainsKey("screenshotPinPreparation")');
-    const observation = fixture.slice(fixture.indexOf('static void ScreenshotPreparationObservation'), fixture.indexOf('static List<IntPtr> ScreenshotNativeRoles'));
+    const observation = fixture.slice(fixture.indexOf('static void ScreenshotPreparationObservation'), fixture.indexOf('static Func<Dictionary<string,object>> ScreenshotCaptureHealth'));
     for (const field of ['editorFound', 'editorVisible', 'helperExited', 'editorPhysicalBounds', 'mainVisible', 'knownActionErrorCode', 'nativeViewportGateFailed']) expect(observation).toContain(field);
     expect(observation).toContain('own.Current.ProcessId==app.Id');
     expect(observation).toContain('AutomationElement.AutomationIdProperty,"toast"');
@@ -148,17 +148,18 @@ describe('actual Windows screenshot fixture source wiring (not native acceptance
     for (const forbidden of ['SetForegroundWindow(', 'SetWindowPos(', '.Current.Name', '.Current.Value']) expect(toggle).not.toContain(forbidden);
   });
   it('separates untouched physical pinning from intentionally active annotation without focus restoration', () => {
-    const click = fixture.slice(fixture.indexOf('static void ScreenshotNativeAction('), fixture.indexOf('static Dictionary<string,object> ScreenshotPinCase('));
-    for (const required of ['ScreenshotNativePoint(form,helper,center)', 'NativeAdjustmentRole(button)==action', '0x08000000L', 'Send(new INPUT[]{down,up})']) expect(click).toContain(required);
-    const owned = fixture.slice(fixture.indexOf('static void ScreenshotNativePoint('), fixture.indexOf('static void ScreenshotNativeDrag('));
-    for (const required of ['MoveGenerated(form,point);RequireForeground(form)', 'GetAncestor(WindowFromPoint(point),2)', 'pid==helper', 'RequireNativeChild(helper,target)']) expect(owned).toContain(required);
+    const click = fixture.slice(fixture.indexOf('static void ScreenshotWebAction('), fixture.indexOf('static void ScreenshotInteractAfterCapture('));
+    for (const required of ['ScreenshotWebPoint(form,app,editor,center)', 'current.Current.BoundingRectangle.Contains(center.X,center.Y)', '0x08000000L', 'Send(new INPUT[]{down,up})']) expect(click).toContain(required);
+    const owned = fixture.slice(fixture.indexOf('static void ScreenshotWebPoint('), fixture.indexOf('static void ScreenshotWebDrag('));
+    for (const required of ['MoveGenerated(form,point);RequireForeground(form)', 'GetAncestor(WindowFromPoint(point),2)', 'pid==app.Id', 'target==editor']) expect(owned).toContain(required);
     for (const forbidden of ['ScreenshotInvoke(', 'SetForegroundWindow(', 'SetFocus(', 'Thread.Sleep(']) expect(click).not.toContain(forbidden);
     const pin = fixture.slice(fixture.indexOf('static Dictionary<string,object> ScreenshotPinCase('), fixture.indexOf('static void ScreenshotEditorWorkflow('));
     expect(pin).toContain('IntPtr main=MainWindow(app.Id)');
     expect(pin).toContain('if(annotated)ScreenshotInvoke(');
-    expect(pin).toContain('else ScreenshotNativeAction(form,app,helper,"pin",result)');
+    expect(pin).toContain('else ScreenshotWebAction(form,app,helper,"pin",result)');
     expect(pin).toContain('if(annotated)return true;');
     expect(pin).toContain('!Convert.ToBoolean(foreground["isPin"])&&!Convert.ToBoolean(foreground["isMain"])');
+    expect(pin).toContain('ScreenshotInteractAfterCapture(app,editor,result)');
     expect(pin).not.toContain('SetForegroundWindow(');
     expect(pin).not.toContain('form.Activate(');
     expect(fixture).toContain('report["screenshotPinRequiredCases"]=2;report["screenshotPinPassedCases"]=2');
@@ -173,18 +174,54 @@ describe('actual Windows screenshot fixture source wiring (not native acceptance
     expect(all).toContain('Every visible role is still returned');
     expect(all).toContain('result.Add(new AppEdge');
   });
-  it('requires native adjusting geometry and paired owned move/resize before explicit tool handoff', () => {
-    for (const required of ['ScreenshotWaitAdjustment(', 'actions==14', 'handles.Count!=8', 'ScreenshotNativeMoveResize(', 'nativeAdjustmentGeometryRestored', 'Native selected tool was not claimed by the editor.', 'nativeInitialToolClaimed', 'ProcessExited(helper)']) expect(fixture).toContain(required);
-    const adjustment = fixture.slice(fixture.indexOf('static void ScreenshotWaitAdjustment('), fixture.indexOf('static void ScreenshotNativeAction('));
+  it('keeps Web adjustment and first-stroke capture on the same owned editor', () => {
+    for (const required of ['ScreenshotWaitAdjustment(', 'ScreenshotWebMoveResize(', 'webAdjustmentGeometryRestored', 'webInitialToolSelected', 'ProcessExited(helper)', 'ScreenshotRetainedEditor(', 'adjustmentDidNotCapturePixels', 'toolSelectionDidNotCapturePixels']) expect(fixture).toContain(required);
+    const adjustment = fixture.slice(fixture.indexOf('static void ScreenshotWaitAdjustment('), fixture.indexOf('static void ScreenshotRecordCaptureCounts('));
     expect(adjustment).not.toContain('CopyFromScreen(');
     expect(adjustment).not.toContain('SetForegroundWindow(');
     expect(adjustment).toContain('finally{Send(new INPUT[]{up});}');
-    const roles = fixture.slice(fixture.indexOf('static List<IntPtr> ScreenshotNativeRoles('), fixture.indexOf('static Rectangle ScreenshotNativeSelection('));
-    expect(roles).toContain('0x08000000L|0x00080000L|0x20L|0x80L|8L');
-    expect(roles).toContain('Screen.FromHandle(window).WorkingArea.Contains(bounds)');
+    expect(adjustment).toContain('target==editor&&pid==app.Id');
     const drag = fixture.slice(fixture.indexOf('static void ScreenshotDrag('), fixture.indexOf('static void ScreenshotContinueOpen('));
-    expect(drag).toContain('},5,"Native selected tool was not claimed by the editor.",app)');
-    expect(fixture.match(/ScreenshotDrag\(app,editor,"\\u5b9e\\u5fc3\\u906e\\u6321",selected,new Point\(10,10\),new Point\(80,70\),true\)/g)).toHaveLength(3);
+    for (const required of ['First stroke captured pixels before its owned release.', 'ScreenshotWindow(app.Id)==editor', 'initialAttempt+1', 'ScreenshotFirstStrokeReleaseChecks++']) expect(drag).toContain(required);
+    expect(drag.indexOf('First stroke captured pixels before')).toBeLessThan(drag.indexOf('finally{'));
+    expect(fixture).toContain('ScreenshotRecordCaptureCounts(report,pinAfter,3,2)');
+    expect(fixture).toContain('ScreenshotRecordCaptureCounts(report,after,8,6)');
+    expect(fixture).not.toContain('verifiedNativeCaptureGenerations');
+  });
+  it('uses one owned toolbar interaction after deferred resume, never forced activation', () => {
+    const interaction = fixture.slice(fixture.indexOf('static void ScreenshotInteractAfterCapture('), fixture.indexOf('static Dictionary<string,object> ScreenshotPinCase('));
+    for (const required of ['ToggleState.On', 'GetAncestor(WindowFromPoint(center),2)', 'target==editor&&pid==app.Id', 'current.Current.BoundingRectangle.Contains(center.X,center.Y)', 'Send(new INPUT[]{down,up})', 'explicitEditorInteractionVerified', 'selected-solid-tool', 'postCaptureInteractionClicks']) expect(interaction).toContain(required);
+    for (const forbidden of ['SetForegroundWindow(', 'SetFocus(', '.Invoke()', '.Toggle()', 'RequireForeground(form)']) expect(interaction).not.toContain(forbidden);
+  });
+  it('records bounded owned adjustment geometry without changing the strict gesture predicate', () => {
+    const drag = fixture.slice(fixture.indexOf('static void ScreenshotWebDrag('), fixture.indexOf('static void ScreenshotWebMoveResize('));
+    for (const value of ['observations.Count<18', '"phase"', '"before"', '"expected"', '"lastObserved"', '"pointerStart"', '"pointerEnd"', 'return actual==expected', '},10,"Web adjustment gesture did not adopt exact expected geometry."', 'ScreenshotAdjustmentFailureState(app,editor,observation);throw;']) expect(drag).toContain(value);
+    const failure = fixture.slice(fixture.indexOf('static void ScreenshotAdjustmentFailureState('), fixture.indexOf('static void ScreenshotWebDrag('));
+    for (const value of ['root.Current.ProcessId==app.Id', 'selectionUpdateError', 'knownUpdateErrorCode', 'selectEnabled', 'selectOffscreen', 'selectOn']) expect(failure).toContain(value);
+    expect(failure).not.toMatch(/observation\[[^\]]+\]=message\s*;/);
+    for (const forbidden of ['Send(', 'SetForegroundWindow(', '.Invoke()', '.Toggle()', 'Thread.Sleep']) expect(failure).not.toContain(forbidden);
+  });
+  it('observes only owned pointer surfaces and capture state around the unchanged gesture', () => {
+    const observer = fixture.slice(fixture.indexOf('static Dictionary<string,object> ScreenshotPointerObservation('), fixture.indexOf('static void ScreenshotWebDrag('));
+    for (const value of ['rootPid==app.Id', 'IsChild(editor,hit)', 'ScreenshotOwnedProcess(app,pid,known,inspectElement)', 'if(owned)', 'if(ownElement)', 'childCapture', 'rootCapture', 'hitRootIsEditor', 'hitPidIsApp', 'uiaIsCanvas', 'Automation.Compare(element,canvas)', 'canvasRect']) expect(observer).toContain(value);
+    expect(observer.indexOf('if(owned)')).toBeLessThan(observer.indexOf('GetClassName('));
+    expect(observer.indexOf('if(owned)')).toBeLessThan(observer.indexOf('AutomationElement.FromPoint('));
+    for (const forbidden of ['Send(', 'SetForegroundWindow(', 'Thread.Sleep', 'result["name"]', 'result["text"]']) expect(observer).not.toContain(forbidden);
+    const drag = fixture.slice(fixture.indexOf('static void ScreenshotWebDrag('), fixture.indexOf('static void ScreenshotWebMoveResize('));
+    for (const phase of ['beforeDown', 'afterDown', 'afterMoveBeforeUp']) expect(drag).toContain('observation["'+phase+'"]');
+    expect(drag.match(/Send\(new INPUT\[\]\{down\}\)/g)).toHaveLength(1);
+    expect(drag.match(/Send\(new INPUT\[\]\{up\}\)/g)).toHaveLength(1);
+  });
+  it('requires every native ownership boundary before cross-process WebView metadata', () => {
+    const scope = fixture.slice(fixture.indexOf('static bool ScreenshotObservationScope('), fixture.indexOf('static bool ScreenshotOwnedProcess('));
+    const expression = scope.match(/return ([^;]+);/)![1];
+    const allowed = new Function('rootMatches','rootPidMatches','childRelationship','processDescendant','return '+expression);
+    expect(allowed(true,true,true,true)).toBe(true);
+    for (let missing=0;missing<4;missing++) {const values=[true,true,true,true];values[missing]=false;expect(allowed(...values)).toBe(false);}
+    const ownership = fixture.slice(fixture.indexOf('static bool ScreenshotOwnedProcess('), fixture.indexOf('static void ScreenshotWebDrag('));
+    for (const value of ['depth<4', 'if(!discover)return false', 'known.TryGetValue(requested,out expected)', 'ParentPid(current)', 'process.StartTime.ToUniversalTime()>childStarted', 'depth<16', 'uiaRootReached', 'ownProcess&&rootReached']) expect(ownership).toContain(value);
+    expect(ownership).not.toContain('.Current.Name');
+    expect(ownership).not.toContain('ProcessName');
   });
   it('maps F1 exports to dismiss/re-capture while retaining standalone cancellation and collision oracles', () => {
     for (const value of ['if(closes)WaitFor', 'for(int save=0;save<2;save++)', 'recapturedSaveSessions', 'inplaceCopyAndSavesDismissed', 'savedCaptureReopenedThroughSettings', 'standaloneCollisionNumberingVerified', 'ScreenshotContinueOpen(app,dialogOwner)', 'inplaceCancelPreservedClipboard']) expect(fixture).toContain(value);
@@ -232,4 +269,34 @@ describe('actual Windows screenshot fixture source wiring (not native acceptance
     expect(fixture).toContain('finally{if(ForegroundPid()==app.Id)');
     expect(fixture).toContain('ForegroundPid()==app.Id&&GetForegroundWindow()==modal');
   });
+});
+
+it('distinguishes deferred pixel completion from input-host completion without weakening either', () => {
+  expect(wrapper).toContain('bool deferredPixels=false');
+  expect(wrapper).toContain('if(deferredPixels)ScreenshotRequireDeferredReleased(health);');
+  expect(wrapper).toContain('else if(RustCapture)Assert(CaptureNumber(health,"nativeCaptureBackend")==1');
+  expect(fixture).toContain('pinAfter=CompletedCaptureSnapshot(app,start,executable,roaming,token,0,report,true);');
+  expect(fixture).toContain('after=CompletedCaptureSnapshot(app,start,executable,roaming,token,0,report);RequireCaptureReleased(after);');
+  const deferred = fixture.split('static void ScreenshotRequireDeferredReleased(')[1].split('static void ScreenshotInteractAfterCapture')[0];
+  for (const key of ['nativeDeferredCapture', 'attemptStage', 'helperResponseReceived', 'resultOk', 'hookRunningAfterStop', 'inputPlaneRemainingAfterCleanup', 'currentHostSessionReserved', 'currentHostOwnedButtons']) expect(deferred).toContain(key);
+});
+
+it('keeps exact whole-window pixel equality while recording bounded mismatch geometry', () => {
+  const compare = fixture.split('static bool ScreenshotWindowPixelsMatch(')[1].split('static void ScreenshotObserveWindowCopy')[0];
+  for (const token of ['actual.GetPixel(x,y).ToArgb()==expected.GetPixel(x,y).ToArgb()', 'clientDifferentPixels', 'nonclientDifferentPixels', 'differenceBounds', 'return count==0']) expect(compare).toContain(token);
+  for (const forbidden of ['CopyFromScreen', '.Save(', 'GetForegroundWindow', 'SHA256', 'expected.GetPixel(minX']) expect(compare).not.toContain(forbidden);
+  expect(fixture).toContain('if(observeCopy!=null)observeCopy("beforeInvoke")');
+  expect(fixture).toContain('if(observeCopy!=null)observeCopy("afterInvoke")');
+  expect(fixture).toContain('ScreenshotWindowPixelsMatch(actual,windowPixels)');
+  expect(fixture).toContain('Clipboard image does not match the generated fixture content; preserved.');
+});
+
+it('copies the final window through one owned passive click without changing pixel oracles', () => {
+  const copy = fixture.split('static void ScreenshotPassiveWindowCopy(')[1].split('static void ScreenshotRecordCaptureCounts')[0];
+  for (const token of ['ScreenshotRetainedEditor(app,helper)==editor', '0x08000000L', 'ScreenshotWebPoint(form,app,editor,point)', 'BoundingRectangle.Contains(point.X,point.Y)', 'Send(new INPUT[]{down,up})', 'copySourceForegroundAfterClick']) expect(copy).toContain(token);
+  expect(copy.match(/Send\(/g)).toHaveLength(1);
+  for (const forbidden of ['SetForegroundWindow', 'ScreenshotInvoke', 'Thread.Sleep', 'CopyFromScreen']) expect(copy).not.toContain(forbidden);
+  expect(fixture).toContain('if(invokeCopy!=null)invokeCopy();else ScreenshotInvoke');
+  expect(fixture).toContain('ScreenshotWindowPixelsMatch(actual,windowPixels)');
+  expect(fixture).toContain('copySourceForegroundAfterCommit');
 });

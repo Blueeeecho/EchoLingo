@@ -887,6 +887,15 @@ try {
   await page.waitForFunction(before => window.__qa.popupDragCommands.slice(before).some(value => value.command === 'move_popup_drag'), pinPopupDragCalls);
   const beginDrag = await page.evaluate(before => window.__qa.popupDragCommands[before], pinPopupDragCalls);
   assert.deepEqual(beginDrag, { command: 'begin_popup_drag', presentationEpoch: dragEpoch, anchorX: dragX, anchorY: dragY, dragId: 1 });
+  // A suppressed WKWebView stream can emit cancel before implicit capture loss.
+  // The original physical mouse remains held; only native press checks may stop it.
+  const movesBeforeLoss = await page.evaluate(() => window.__qa.popupDragCommands.filter(x => x.command === 'move_popup_drag').length);
+  await page.locator('.popup-drag-space').evaluate(element => {
+    for (const type of ['pointercancel', 'lostpointercapture']) element.dispatchEvent(new PointerEvent(type,
+      { pointerId: 1, pointerType: 'mouse', isPrimary: true, buttons: 1, bubbles: true }));
+  });
+  await page.waitForFunction(n => window.__qa.popupDragCommands.filter(x => x.command === 'move_popup_drag').length > n, movesBeforeLoss);
+  assert.equal(await page.evaluate(() => window.__qa.popupDragCommands.filter(x => x.command === 'end_popup_drag').length), 0);
   await page.mouse.up();
   await page.waitForFunction(() => window.__qa.popupDragCommands.at(-1)?.command === 'end_popup_drag');
   const dragCommands = await page.evaluate(before => window.__qa.popupDragCommands.slice(before), pinPopupDragCalls);
@@ -2802,6 +2811,7 @@ try {
     await page.locator('#source-text').press('Enter');
     await page.locator('.result-setup').waitFor({ state: 'visible' });
     assert.match(await page.locator('.result-error').textContent(), new RegExp(`本次语言组合：${language}`));
+    assert.doesNotMatch(await page.locator('.result-error').textContent(), /语言识别不正确|手动选择源语言|未安装/);
     const preferences = await page.evaluate(() => ({ source: window.__qa.settings.sourceLanguage, target: window.__qa.settings.targetLanguage, writes: window.__qa.saveCalls }));
     await page.evaluate(() => { window.__staleSetupButton = document.querySelector('.result-setup'); });
     await page.locator('#source-text').fill('New input retires the previous setup action');

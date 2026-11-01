@@ -55,7 +55,7 @@ jobs:
         run: rustfmt --edition 2021 --check src-tauri/src/bilingual_input.rs
   screenshot-pin-native:
     needs: validation-mode
-    if: needs.validation-mode.outputs.mode == 'screenshot-pins' || (github.event_name == 'pull_request' && (github.head_ref == 'feat/screenshot-pins' || github.head_ref == 'feat/screenshot-028' || github.head_ref == 'fix/028-unified-editor') && github.base_ref == 'main')
+    if: needs.validation-mode.outputs.mode == 'screenshot-pins' || (github.event_name == 'pull_request' && (github.head_ref == 'feat/screenshot-pins' || github.head_ref == 'feat/screenshot-028' || github.head_ref == 'fix/028-unified-editor' || github.head_ref == 'fix/029-persistent-capture-recovery') && github.base_ref == 'main')
     name: Screenshot pin native (${{ matrix.os }})
     permissions:
       contents: read
@@ -127,14 +127,14 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - run: npm ci
       - run: npm run build
-      - name: Compile actual platform app and run all eight pin regressions
+      - name: Compile actual platform app and run all ten pin regressions
         shell: bash
         run: |
           set -euo pipefail
           mkdir -p "$RUNNER_TEMP/screenshot-pin"
           git rev-parse HEAD > "$RUNNER_TEMP/screenshot-pin/source.txt"
           cargo test --manifest-path src-tauri/Cargo.toml --locked screenshot_pins::tests -- --nocapture 2>&1 | tee "$RUNNER_TEMP/screenshot-pin/pins.log"
-          grep -q 'test result: ok. 8 passed; 0 failed' "$RUNNER_TEMP/screenshot-pin/pins.log"
+          grep -q 'test result: ok. 10 passed; 0 failed' "$RUNNER_TEMP/screenshot-pin/pins.log"
           cargo test --manifest-path src-tauri/Cargo.toml --locked screenshot_overlay -- --nocapture 2>&1 | tee "$RUNNER_TEMP/screenshot-pin/overlay.log"
           cargo test --manifest-path src-tauri/Cargo.toml --locked 2>&1 | tee "$RUNNER_TEMP/screenshot-pin/all-rust.log"
           cargo build --manifest-path src-tauri/Cargo.toml --locked 2>&1 | tee "$RUNNER_TEMP/screenshot-pin/build.log"
@@ -600,7 +600,30 @@ jobs:
       - name: Rust formatting
         run: cargo fmt --manifest-path src-tauri/Cargo.toml --check
       - name: Build desktop installer
-        run: npm run tauri build -- --bundles ${{ runner.os == 'Windows' && 'nsis' || 'dmg' }} -- --locked
+        run: npm run tauri build -- --bundles ${{ runner.os == 'Windows' && 'nsis' || 'app,dmg' }} -- --locked
+      - name: Build same-source isolated Mac debug pin host
+        if: runner.os == 'macOS'
+        shell: bash
+        run: npm run tauri -- build --debug --no-bundle -- --locked
+      - name: Verify real Mac pin lifecycle against this exact source
+        if: runner.os == 'macOS'
+        shell: bash
+        run: bash tests/macos-pin-native-smoke.sh "$PWD/src-tauri/target/debug/echolingo" "$PWD/src-tauri/target/release/bundle/macos/EchoLingo.app/Contents/MacOS/echolingo" "$RUNNER_TEMP/ci-native-pin-smoke"
+      - name: Require the packaged release app to omit debug pin smoke entry points
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 scripts/verify-native-pin-release-absence.py src-tauri/target/release/bundle/macos/EchoLingo.app/Contents/MacOS/echolingo | tee "$RUNNER_TEMP/ci-native-pin-absence.json"
+      - name: Preserve actual Mac pin lifecycle evidence
+        if: always() && runner.os == 'macOS'
+        uses: actions/upload-artifact@v4
+        with:
+          name: EchoLingo-macOS-pin-lifecycle
+          path: |
+            ${{ runner.temp }}/ci-native-pin-smoke
+            ${{ runner.temp }}/ci-native-pin-absence.json
+          if-no-files-found: warn
       - name: Identify the actual embedded precompiled Windows helper
         id: windows_native_candidate
         if: runner.os == 'Windows'
@@ -861,7 +884,7 @@ jobs:
         timeout-minutes: 5
         shell: powershell
         run: |
-          $installers = @(Get-ChildItem src-tauri/target/release/bundle/nsis -File -Filter 'EchoLingo_0.2.8_x64-setup.exe')
+          $installers = @(Get-ChildItem src-tauri/target/release/bundle/nsis -File -Filter 'EchoLingo_0.2.9_x64-setup.exe')
           if ($installers.Count -ne 1) { throw 'Expected exactly one own versioned NSIS installer.' }
           rustc --edition=2021 tests/windows-native-capture-harness.rs -O -o "$env:RUNNER_TEMP/echolingo-upper-capture-harness.exe"
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }

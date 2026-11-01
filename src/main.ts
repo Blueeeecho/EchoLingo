@@ -613,8 +613,10 @@ function updateResultView(view: ResultView, result: TranslationResult, done: boo
   view.card.setAttribute('aria-busy', String(!done));
   view.body.className = result.error ? 'result-error' : !done && !result.text ? 'result-loading' : 'result-text';
   const setupPair = needsSystemTranslationSetup(view) ? systemTranslationSetupPair(result.resolvedLanguages) : null;
+  // A session resource failure is not evidence that language detection failed.
+  // Preserve the resolved pair without blaming detection or installation.
   const content = result.error ? userFacingError(result.error) + (setupPair
-    ? ` 本次语言组合：${languageName(setupPair.sourceLanguage)} → ${languageName(setupPair.targetLanguage)}。若原文语言识别不正确，请手动选择源语言后重试。` : '') : result.text;
+    ? ` 本次语言组合：${languageName(setupPair.sourceLanguage)} → ${languageName(setupPair.targetLanguage)}。` : '') : result.text;
   const previous = view.body.textContent ?? '';
   const compact = done && !result.error && !result.preserved;
   const layoutChanged = view.body.dataset.paragraphLayout !== String(compact);

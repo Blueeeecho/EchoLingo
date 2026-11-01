@@ -11,6 +11,7 @@ spec.loader.exec_module(module)
 def passed():
     report = dict(schema='echolingo-macos-screenshot-native-v1', ok=True, status='passed',
                   productionNativeEntryPoint='capture-screenshot', ownAppKitEventsOnly=True,
+                  deferredProductionNativeEntryPoints=['select-screenshot', 'capture-selected-region'],
                   captureGesturesOwnAppKitOnly=True, globalSystemUISetupEventDispatched=False,
                   globalSystemUISetupEscapePairs=0,
                   ownedSourceCleanupConfirmed=True, captureCasesPassed=True,
@@ -28,7 +29,9 @@ def passed():
     for mode in module.MODES:
         case = dict(mode=mode, ok=True, hoverOutlineVerified=True, exactOwnedSourceRevalidated=True,
                     exactSelectorRetirementVerified=True, selectorRetirementObservations=1,
-                    ownAppKitEventDispatched=mode != 'request-cancel', nativeCancellationEndpointDispatched=mode == 'request-cancel', visiblePanelsAfter=0)
+                    ownAppKitEventDispatched=mode != 'request-cancel', nativeCancellationEndpointDispatched=mode in ('request-cancel', 'deferred-cancel-after-selection'), visiblePanelsAfter=0)
+        if mode.startswith('deferred-') and mode != 'deferred-escape-cancel':
+            case.update(deferredGeometryOnlyVerified=True, deferredCaptureDispatched=True)
         if 'cancel' in mode:
             case['nativeCancelled'] = True
         else:
@@ -40,6 +43,18 @@ def passed():
 
 
 class MacScreenshotProbeContract(unittest.TestCase):
+    def test_deferred_native_chain_cannot_be_replaced_by_legacy_evidence(self):
+        for index in (5, 6, 8):
+            for field in ('deferredGeometryOnlyVerified', 'deferredCaptureDispatched'):
+                report = passed(); report['cases'][index][field] = False
+                with self.assertRaises(ValueError): module.verify(report)
+        report = passed(); report['cases'][8]['nativeCancellationEndpointDispatched'] = False
+        with self.assertRaises(ValueError): module.verify(report)
+        report = passed(); report['cases'][8]['imageWidth'] = 1
+        with self.assertRaises(ValueError): module.verify(report)
+        report = passed(); report['deferredProductionNativeEntryPoints'] = ['capture-screenshot']
+        with self.assertRaises(ValueError): module.verify(report)
+
     def test_full_native_evidence_is_passed(self):
         self.assertEqual(module.verify(passed()), 0)
 

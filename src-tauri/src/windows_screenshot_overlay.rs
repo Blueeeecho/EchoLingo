@@ -19,6 +19,7 @@ mod w;
 #[link(name = "user32")]
 unsafe extern "system" {
     fn GetForegroundWindow() -> w::H;
+    fn SetForegroundWindow(hwnd: w::H) -> i32;
     fn GetAncestor(hwnd: w::H, flags: u32) -> w::H;
     fn GetDpiForWindow(hwnd: w::H) -> u32;
     fn GetClientRect(hwnd: w::H, rect: *mut w::Rect) -> i32;
@@ -329,6 +330,30 @@ pub fn show(
     }
     Ok(())
 }
+// Hide only for final pixels. Preserve the exact HWND, host and keyboard router;
+// dismissal still uses hide() and its existing owned-key drain/restore policy.
+pub fn suspend(window: &tauri::WebviewWindow) -> Result<(), String> {
+    verify_retained_host(window)?;
+    crate::platform::hide_webview_window(window)
+}
+pub fn resume(window: &tauri::WebviewWindow) -> Result<(), String> {
+    verify_retained_host(window)?;
+    crate::platform::show_without_activation(window)
+}
+fn verify_retained_host(window: &tauri::WebviewWindow) -> Result<(), String> {
+    let native = window
+        .hwnd()
+        .map_err(|_| "SCREENSHOT_WINDOW: 无法访问截图窗口")?
+        .0;
+    let host = HOST
+        .lock()
+        .map_err(|_| "SCREENSHOT_WINDOW: 截图窗口状态不可用")?;
+    let host = host
+        .as_ref()
+        .filter(|host| host.window == native as isize)
+        .ok_or("SCREENSHOT_WINDOW: 原地截图窗口未准备")?;
+    verify_viewport(native, host.frame, host.dpi)
+}
 pub fn hide(window: &tauri::WebviewWindow) -> Result<(), String> {
     stop_keys();
     crate::platform::hide_webview_window(window)?;
@@ -391,22 +416,56 @@ pub fn hide(window: &tauri::WebviewWindow) -> Result<(), String> {
     *saved_host = None;
     Ok(())
 }
+// A successful API result alone cannot establish keyboard ownership.
+fn explicit_focus_confirmed(request_succeeded: bool, foreground_is_editor: bool) -> bool {
+    request_succeeded && foreground_is_editor
+}
 pub fn focus_text(window: &tauri::WebviewWindow) -> Result<(), String> {
+    // The caller holds the current-session/presentable guard on the UI thread.
+    // Reject a retired, hidden, foreign-process or geometrically stale host.
+    verify_retained_host(window)?;
     let native = window
         .hwnd()
         .map_err(|_| "SCREENSHOT_WINDOW: 无法访问截图窗口")?
         .0;
-    unsafe {
-        let extended = w::GetWindowLongPtrW(native, -20);
-        w::SetWindowLongPtrW(native, -20, extended & !NOACTIVATE);
+    let mut owner = 0;
+    unsafe { w::GetWindowThreadProcessId(native, &mut owner) };
+    if owner != std::process::id() || unsafe { w::IsWindowVisible(native) } == 0 {
+        return Err("SCREENSHOT_INPUT: 当前截图窗口不可交互".into());
     }
-    // This command is called only after explicit editor interaction, never from
-    // screenshot-ready. WebView2 MoveFocus preserves Unicode and IME routing.
-    window
-        .set_focus()
-        .map_err(|_| "SCREENSHOT_INPUT: 无法进入截图文字编辑")?;
+    let extended = unsafe { w::GetWindowLongPtrW(native, -20) };
+    unsafe { w::SetWindowLongPtrW(native, -20, extended & !NOACTIVATE) };
+    // Passive show/resume deliberately bypass Tao's VISIBLE cache. Its
+    // Window::set_focus can silently no-op; force_window_active also has an Alt
+    // SendInput fallback. This explicit user interaction instead makes exactly
+    // one native foreground request, without keys, retries or toolkit show.
+    let requested = unsafe { GetForegroundWindow() == native || SetForegroundWindow(native) != 0 };
+    if !explicit_focus_confirmed(requested, unsafe { GetForegroundWindow() == native }) {
+        unsafe { w::SetWindowLongPtrW(native, -20, extended) };
+        return Err("SCREENSHOT_INPUT: 无法接管截图编辑焦点，请再次点击编辑区".into());
+    }
+    // Focus the owned WebView2 controller only after native ownership is proven.
     let webview: &tauri::Webview = window.as_ref();
-    webview
-        .set_focus()
-        .map_err(|_| "SCREENSHOT_INPUT: 无法进入截图文字输入".to_owned())
+    if webview.set_focus().is_err() {
+        unsafe { w::SetWindowLongPtrW(native, -20, extended) };
+        return Err("SCREENSHOT_INPUT: 无法进入截图文字输入".into());
+    }
+    if unsafe { GetForegroundWindow() } != native {
+        unsafe { w::SetWindowLongPtrW(native, -20, extended) };
+        return Err("SCREENSHOT_INPUT: 截图编辑焦点已变化".into());
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod explicit_focus_tests {
+    use super::explicit_focus_confirmed;
+
+    #[test]
+    fn native_request_and_actual_foreground_are_both_required() {
+        assert!(explicit_focus_confirmed(true, true));
+        assert!(!explicit_focus_confirmed(false, true));
+        assert!(!explicit_focus_confirmed(true, false));
+        assert!(!explicit_focus_confirmed(false, false));
+    }
 }

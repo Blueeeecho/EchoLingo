@@ -1,5 +1,5 @@
 //! Ephemeral, local-only reference windows. No files, clipboard, OCR or network.
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::{
     collections::HashMap,
     sync::{
@@ -116,15 +116,14 @@ fn placement(
         f64::from(image.0) / pixel_scale * units,
         f64::from(image.1) / pixel_scale * units,
     );
-    let toolbar = (42.0 * units).min(max_height / 2.0);
     let fit = (720.0 * units).min(max_width) / original.0;
     let fit = fit
-        .min(((520.0 * units).min(max_height) - toolbar).max(1.0) / original.1)
+        .min((520.0 * units).min(max_height) / original.1)
         .min(1.0);
     let width = (original.0 * fit)
         .max((240.0 * units).min(max_width))
         .min(max_width);
-    let height = (original.1 * fit + toolbar)
+    let height = (original.1 * fit)
         .max((160.0 * units).min(max_height))
         .min(max_height);
     let outer_width = width + decoration.0;
@@ -304,6 +303,7 @@ pub async fn pin_screenshot_image(
     window: tauri::WebviewWindow,
     app: tauri::AppHandle,
     session_id: u64,
+    revision: Option<u64>,
     png_base64: String,
 ) -> Result<(), String> {
     if window.label() != "screenshot-editor" {
@@ -315,6 +315,9 @@ pub async fn pin_screenshot_image(
         .operations
         .try_acquire()
         .map_err(|_| "SCREENSHOT_BUSY: 请先完成当前图片操作")?;
+    state
+        .screenshots
+        .check_image_revision(session_id, revision.unwrap_or(0))?;
     state.screenshots.with_pin_source(session_id, || Ok(()))?;
     let snapshot = tauri::async_runtime::spawn_blocking(move || {
         let pixels = super::screenshot::from_base64(&png_base64, true)?;
@@ -374,7 +377,7 @@ pub async fn pin_screenshot_image(
         .inner_size(240.0, 160.0)
         .visible(false)
         .focused(false)
-        .decorations(true)
+        .decorations(false)
         .resizable(true)
         .always_on_top(true)
         .visible_on_all_workspaces(true)
@@ -481,6 +484,75 @@ pub async fn set_screenshot_pinned(
     })
     .await?
 }
+#[derive(Clone, Copy, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum PinResizeDirection {
+    North,
+    NorthEast,
+    East,
+    SouthEast,
+    South,
+    SouthWest,
+    West,
+    NorthWest,
+}
+impl PinResizeDirection {
+    fn native_name(self) -> &'static str {
+        match self {
+            Self::North => "North",
+            Self::NorthEast => "NorthEast",
+            Self::East => "East",
+            Self::SouthEast => "SouthEast",
+            Self::South => "South",
+            Self::SouthWest => "SouthWest",
+            Self::West => "West",
+            Self::NorthWest => "NorthWest",
+        }
+    }
+}
+fn ready_pin(app: &tauri::AppHandle, window: &tauri::WebviewWindow) -> Result<(), String> {
+    if !is_pin(window.label())
+        || !super::locked(&app.state::<super::AppState>().screenshot_pins.entries)?
+            .get(window.label())
+            .is_some_and(|entry| entry.delivered && entry.ready.is_none() && entry.image.is_none())
+    {
+        return Err(CLOSED.into());
+    }
+    Ok(())
+}
+#[tauri::command]
+pub async fn start_pinned_screenshot_drag(
+    window: tauri::WebviewWindow,
+    app: tauri::AppHandle,
+) -> Result<(), String> {
+    let handle = app.clone();
+    super::screenshot::dialog(&app, move || {
+        ready_pin(&handle, &window)?;
+        window
+            .start_dragging()
+            .map_err(|_| "SCREENSHOT_PIN: 无法拖动贴图窗口".to_owned())
+    })
+    .await?
+}
+#[tauri::command]
+pub async fn resize_pinned_screenshot(
+    window: tauri::WebviewWindow,
+    app: tauri::AppHandle,
+    direction: PinResizeDirection,
+) -> Result<(), String> {
+    let handle = app.clone();
+    super::screenshot::dialog(&app, move || {
+        ready_pin(&handle, &window)?;
+        let direction = serde_json::from_value(serde_json::json!(direction.native_name()))
+            .map_err(|_| "SCREENSHOT_PIN: 贴图调整方向无效".to_owned())?;
+        let webview: &tauri::Webview = window.as_ref();
+        webview
+            .window()
+            .start_resize_dragging(direction)
+            .map_err(|_| "SCREENSHOT_PIN: 无法调整贴图窗口大小".to_owned())
+    })
+    .await?
+}
 #[tauri::command]
 pub async fn close_pinned_screenshot(
     window: tauri::WebviewWindow,
@@ -519,6 +591,39 @@ pub(crate) fn native_smoke_counts(app: &tauri::AppHandle) -> Result<(usize, usiz
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn borderless_pin_has_no_reserved_toolbar_height() {
+        let area = Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 1920.0,
+            height: 1080.0,
+        };
+        let frame = placement(area, None, (640, 480), 1.0, 1.0, (0.0, 0.0)).unwrap();
+        assert_eq!((frame.width, frame.height), (640.0, 480.0));
+    }
+    #[test]
+    fn resize_wire_accepts_only_eight_lowercase_directions() {
+        for (wire, native) in [
+            ("north", "North"),
+            ("northeast", "NorthEast"),
+            ("east", "East"),
+            ("southeast", "SouthEast"),
+            ("south", "South"),
+            ("southwest", "SouthWest"),
+            ("west", "West"),
+            ("northwest", "NorthWest"),
+        ] {
+            let direction: PinResizeDirection =
+                serde_json::from_value(serde_json::json!(wire)).unwrap();
+            assert_eq!(direction.native_name(), native);
+        }
+        for invalid in ["North", "north-east", "", "all"] {
+            assert!(
+                serde_json::from_value::<PinResizeDirection>(serde_json::json!(invalid)).is_err()
+            );
+        }
+    }
     fn entry(pixels: u64, encoded: usize) -> Entry {
         Entry {
             source: 1,

@@ -23,7 +23,9 @@ class ScreenshotWindowContract(unittest.TestCase):
     def test_windows_revalidates_before_and_after_visible_pixel_copy(self):
         native = read('src-tauri/src/windows_capture_native.rs')
         capture = native.split('pub fn run(request: Request)', 1)[1].split('pub struct CapturedResult', 1)[0]
-        self.assertEqual(capture.count('picker.validate_window()?;'), 2)
+        self.assertEqual(capture.count('picker.validate_window()?;'), 3)
+        legacy_pixels = capture.split('if request.selection_only {', 1)[1].split('return Ok(Vec::new());', 1)[1]
+        self.assertEqual(legacy_pixels.count('picker.validate_window()?;'), 2)
         self.assertIn('selected.intersect(display.bounds)', capture)
         self.assertIn('image.copy_screen(', capture)
         self.assertNotIn('PrintWindow', native)

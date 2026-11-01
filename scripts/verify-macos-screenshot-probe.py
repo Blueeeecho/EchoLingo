@@ -5,10 +5,11 @@ import re
 from pathlib import Path
 import sys
 
-MODES = ('window-phase1', 'rectangle-phase1', 'escape-cancel', 'request-cancel', 'window-phase2')
+MODES = ('window-phase1', 'rectangle-phase1', 'escape-cancel', 'request-cancel', 'window-phase2',
+         'deferred-window-phase2', 'deferred-rectangle-phase2', 'deferred-escape-cancel', 'deferred-cancel-after-selection')
 INDEPENDENT = ('privatePasteboardImageRoundtripPassed', 'nativePNGJPEGFileRoundtripPassed',
                'nativeSavePanelCancelPassed', 'nativeSavePanelHiddenBeforeCapture', 'authoritativeHitPolicyFixturePassed')
-SOURCES = {'src-tauri/native/macos.swift', 'src-tauri/native/macos_capture.swift', 'src-tauri/native/macos_window.swift'}
+SOURCES = {'src-tauri/native/macos.swift', 'src-tauri/native/macos_capture.swift', 'src-tauri/native/macos_ocr.swift', 'src-tauri/native/macos_window.swift'}
 
 
 def verify(report):
@@ -20,6 +21,7 @@ def verify(report):
         if report.get(flag) is not False:
             raise ValueError('Native probe scope is missing or overstated: ' + flag)
     if (report.get('productionNativeEntryPoint') != 'capture-screenshot'
+            or report.get('deferredProductionNativeEntryPoints') != ['select-screenshot', 'capture-selected-region']
             or report.get('captureGesturesOwnAppKitOnly') is not True):
         raise ValueError('Missing exact native entry point or scoped AppKit event evidence')
     setup = report.get('globalSystemUISetupEventDispatched')
@@ -93,7 +95,7 @@ def verify(report):
     cases = report.get('cases')
     if (not isinstance(cases, list) or len(cases) != len(MODES) or any(not isinstance(case, dict) for case in cases)
             or tuple(case.get('mode') for case in cases) != MODES):
-        raise ValueError('All five native screenshot cases must execute in order')
+        raise ValueError('All legacy and deferred native screenshot cases must execute in order')
     for case in cases:
         if oracle_used and (case.get('preCaseFullCompositeVerified') is not True
                             or case.get('postCaseFullCompositeVerified') is not True):
@@ -101,8 +103,9 @@ def verify(report):
         for flag in ('ok', 'hoverOutlineVerified', 'exactOwnedSourceRevalidated'):
             if case.get(flag) is not True:
                 raise ValueError('Native screenshot case evidence is incomplete')
-        endpoint_cancel = case['mode'] == 'request-cancel'
-        if (case.get('ownAppKitEventDispatched') is not (not endpoint_cancel)
+        endpoint_cancel = case['mode'] in ('request-cancel', 'deferred-cancel-after-selection')
+        appkit_event = case['mode'] != 'request-cancel'
+        if (case.get('ownAppKitEventDispatched') is not appkit_event
                 or case.get('nativeCancellationEndpointDispatched') is not endpoint_cancel):
             raise ValueError('Request cancellation must not be labeled as an AppKit input event')
         if type(case.get('visiblePanelsAfter')) is not int or case['visiblePanelsAfter'] != 0:
@@ -113,11 +116,16 @@ def verify(report):
             raise ValueError('Exact current-case selector IDs must retire from WindowServer before post-case evidence')
         if any(field in case for field in ('imageBase64', 'text', 'pixels')):
             raise ValueError('Probe must not retain captured pixels or text')
-        if case['mode'] in ('escape-cancel', 'request-cancel'):
+        deferred = case['mode'].startswith('deferred-')
+        if deferred and case['mode'] != 'deferred-escape-cancel':
+            if (case.get('deferredGeometryOnlyVerified') is not True
+                    or case.get('deferredCaptureDispatched') is not True):
+                raise ValueError('Deferred native capture requires metadata-only selection and real pixel entry')
+        if 'cancel' in case['mode']:
             if case.get('nativeCancelled') is not True or 'imageWidth' in case or 'imageHeight' in case:
                 raise ValueError('Native cancellation must return no image')
         else:
-            if (case.get('nativeAdjustmentVerified') is not True or case.get('nativeAction') != 'select'
+            if not deferred and (case.get('nativeAdjustmentVerified') is not True or case.get('nativeAction') != 'select'
                     or type(case.get('nativeActionClickCount')) is not int or case['nativeActionClickCount'] != 1):
                 raise ValueError('Native screenshot requires exact adjustment and one owned action click')
             if case['mode'] == 'rectangle-phase1' and case.get('nativeAdjustmentMoveResizeRestored') is not True:

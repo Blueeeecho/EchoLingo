@@ -332,10 +332,38 @@ public static partial class EchoLingoApplicationSmoke {
             && !ConclusiveDestroyedPlaneRow(true,false,0,0,0,0,0,true),
             "Live, reused, unverified or uncertain plane row was incorrectly omitted.");
     }
+    static bool RejectPreviousPlaneGeneration(bool verifiedNativeChild,uint owner,long observedStart,uint rejectedHelper,long rejectedStart) {
+        return verifiedNativeChild && owner!=0 && rejectedHelper!=0 && owner==rejectedHelper
+            && observedStart>0 && rejectedStart>0 && observedStart==rejectedStart;
+    }
+    static bool ValidInputPlaneStyle(long style,long required) {
+        return (style&required)==required && (style&(0x00080000L|0x20L))==0;
+    }
+    static void VerifyPreviousPlaneGenerationPolicy() {
+        const long required=0x08200088L,layered=0x08280088L;
+        Assert(RejectPreviousPlaneGeneration(true,4056,100,4056,100),"Exact retired generation was not excluded.");
+        Assert(!RejectPreviousPlaneGeneration(false,4056,100,4056,100)
+            && !RejectPreviousPlaneGeneration(true,4056,100,0,100)
+            && !RejectPreviousPlaneGeneration(true,4057,100,4056,100)
+            && !RejectPreviousPlaneGeneration(true,4056,101,4056,100)
+            && !RejectPreviousPlaneGeneration(true,4056,0,4056,100)
+            && !RejectPreviousPlaneGeneration(true,4056,100,4056,0),
+            "Unknown or newer generation was incorrectly excluded.");
+        Assert(RejectPreviousPlaneGeneration(true,4056,100,4056,100)||ValidInputPlaneStyle(layered,required),
+            "Retired plane teardown was applied to current picker acceptance.");
+        Assert(!RejectPreviousPlaneGeneration(true,4057,101,4056,100)&&!ValidInputPlaneStyle(layered,required),
+            "Current generation layered plane was not rejected.");
+        Assert(!RejectPreviousPlaneGeneration(true,4056,101,4056,100)&&!ValidInputPlaneStyle(layered,required),
+            "Reused PID layered plane was not rejected.");
+        Assert(ValidInputPlaneStyle(required,required)&&!ValidInputPlaneStyle(required|0x20L,required),"Plane transparency policy changed.");
+        foreach(long flag in new long[]{0x00200000L,0x08000000L,0x80L,8L})
+            Assert(!ValidInputPlaneStyle(required&~flag,required),"Current visible plane lost a required style.");
+    }
+    static long retiredGenerationRowsExcluded;
     static long hiddenPlaneStyleChecks, hiddenPlaneWithoutTopmostChecks, visiblePlaneStyleChecks;
     static long destroyedRejectedStyleRowsSkipped, destroyedRejectedRectangleRowsSkipped;
     static long destroyedOwnedStyleRowsSkipped, destroyedOwnedRectangleRowsSkipped;
-    static List<AppEdge> AppInputPlanes(int appId, bool visibleOnly, uint edgeHelper=0, uint rejectedHelper=0) {
+    static List<AppEdge> AppInputPlanes(int appId, bool visibleOnly, uint edgeHelper=0, uint rejectedHelper=0, long rejectedStart=0) {
         List<AppEdge> result = new List<AppEdge>();
         Dictionary<uint,int> parents = new Dictionary<uint,int>();
         EnumWindows(delegate(IntPtr window,IntPtr unused) {
@@ -344,6 +372,14 @@ public static partial class EchoLingoApplicationSmoke {
             int parent; if (!parents.TryGetValue(owner,out parent)) { parent=ParentPid((int)owner); parents.Add(owner,parent); }
             if (parent != appId) return true;
             if(!RequireNativeChild(owner,window))return true;
+            // Reject the exact previous helper before treating any of its
+            // teardown windows as candidates for the new picker's invariant.
+            // PID alone is insufficient: a reused PID with a new start time
+            // remains a current candidate and must pass every original check.
+            long observedStart=0;bool verifiedGeneration=RustCapture&&VerifiedNativeChildren.TryGetValue(owner,out observedStart);
+            if(RejectPreviousPlaneGeneration(verifiedGeneration,owner,observedStart,rejectedHelper,rejectedStart)) {
+                retiredGenerationRowsExcluded++;return true;
+            }
             // Production verifies hidden construction before Present() adds
             // HWND_TOPMOST. A new picker can be observed in that valid phase
             // while the previous helper is stopping. Visible planes, including
@@ -351,7 +387,7 @@ public static partial class EchoLingoApplicationSmoke {
             bool visible=IsWindowVisible(window), requireTopmost=visibleOnly||visible;
             long style=GetWindowLongPtr(window,-20).ToInt64(), required=0x00200000L|0x08000000L|0x80L|(requireTopmost?8L:0L);
             if (requireTopmost) visiblePlaneStyleChecks++; else { hiddenPlaneStyleChecks++; if ((style&8)==0) hiddenPlaneWithoutTopmostChecks++; }
-            if ((style&required)!=required || (style&(0x00080000L|0x20L))!=0) {
+            if (!ValidInputPlaneStyle(style,required)) {
                 // The same destroy race occurs during ordinary Escape cleanup,
                 // not only when rejecting a superseded helper. Never return this
                 // row as ready, and keep live/reused/uncertain rows fail-closed.
@@ -438,7 +474,7 @@ public static partial class EchoLingoApplicationSmoke {
         return result;
     }
     static bool AppOcrReady(Form form, int appId, IntPtr expectedSource, Rectangle expectedFrame,
-        Point expectedPointer, Rectangle display, Dictionary<string, object> probe, uint rejectedHelper=0, Stopwatch sinceHotkey=null) {
+        Point expectedPointer, Rectangle display, Dictionary<string, object> probe, uint rejectedHelper=0, Stopwatch sinceHotkey=null, long rejectedStart=0) {
         RequireSourceModal(form.Handle);
         RequireForeground(form);
         Point pointer; bool pointerKnown = GetPhysicalCursorPos(out pointer);
@@ -467,7 +503,7 @@ public static partial class EchoLingoApplicationSmoke {
             windows.Add(new Dictionary<string, object> { { "hwnd", WindowId(edge.Handle) },
                 { "helperProcessId", edge.ProcessId }, { "helperParentProcessId", edge.ParentProcessId }, { "physicalBounds", RectValue(edge.Bounds) } });
         }
-        List<AppEdge> allPlanes=AppInputPlanes(appId,false,helper,rejectedHelper), planes=AppInputPlanes(appId,true,helper,rejectedHelper);
+        List<AppEdge> allPlanes=AppInputPlanes(appId,false,helper,rejectedHelper,rejectedStart), planes=AppInputPlanes(appId,true,helper,rejectedHelper,rejectedStart);
         List<Rectangle> planeBounds=new List<Rectangle>(); foreach (Screen monitor in Screen.AllScreens) planeBounds.Add(monitor.Bounds);
         bool exactPlanes=helper!=0 && allPlanes.Count==planeBounds.Count && planes.Count==planeBounds.Count;
         List<Dictionary<string,object>> planeMetadata=new List<Dictionary<string,object>>();
@@ -643,7 +679,7 @@ public static partial class EchoLingoApplicationSmoke {
             return true;},IntPtr.Zero);
         return count;
     }
-    static readonly HashSet<string> CaptureFields=new HashSet<string>(new string[]{
+    static readonly HashSet<string> CaptureFields=new HashSet<string>(new string[]{"nativeDeferredCapture",
         "ocrInvocationCount","nativeCaptureBackend","attemptId","attemptStage","resultOk","displayChangedError","helperResponseReceived","helperElapsedMilliseconds",
         "nativeHostReady","nativeHostStopped","nativeHostFailed","hookRunningAfterStop","inputPlaneRemainingAfterCleanup",
         "hostSessionReserved","hostOwnedButtons","hostSessionClosing","hostEndRequested","cancellationRequested","displayInvalidationReason","currentHostSessionReserved","currentHostOwnedButtons","currentHostSessionClosing","currentHostEndRequested"});
@@ -690,14 +726,15 @@ public static partial class EchoLingoApplicationSmoke {
     static long CaptureNumber(Dictionary<string,object> health,string name) {
         Assert(health.ContainsKey(name),"Missing capture health field: "+name);return BoundedDiagnosticNumber(health[name],Int64.MaxValue);
     }
-    static Dictionary<string,object> CompletedCaptureSnapshot(Process app,ProcessStartInfo start,string executable,string roaming,string token,long afterAttempt,Dictionary<string,object> report) {
+    static Dictionary<string,object> CompletedCaptureSnapshot(Process app,ProcessStartInfo start,string executable,string roaming,string token,long afterAttempt,Dictionary<string,object> report,bool deferredPixels=false) {
         Dictionary<string,object> health=null;
         int snapshots=0;
         try { WaitFor(delegate {
             health=CaptureSnapshot(app,start,executable,roaming,token);
             snapshots++;
             if(!health.ContainsKey("attemptId")||!health.ContainsKey("attemptStage")||CaptureNumber(health,"attemptId")<=afterAttempt||CaptureNumber(health,"attemptStage")!=4)return false;
-            if(RustCapture)Assert(CaptureNumber(health,"nativeCaptureBackend")==1,"Actual application silently used the legacy screenshot backend.");
+            if(deferredPixels)ScreenshotRequireDeferredReleased(health);
+            else if(RustCapture)Assert(CaptureNumber(health,"nativeCaptureBackend")==1,"Actual application silently used the legacy screenshot backend.");
             // Availability is published by token=0 AFTER owned pairs drain.
             // closing/endRequested are terminal generation evidence, reset only
             // by the NEXT begin(), not outstanding resource counts.
@@ -875,8 +912,10 @@ public static partial class EchoLingoApplicationSmoke {
     static Dictionary<string,object> StartPinnedPicker(Form form,Panel image,Process app,IntPtr main,PinnedVisibilityWatch visibility,uint rejectedPid) {
         Point first=Point.Empty,last=Point.Empty;Rectangle display=Rectangle.Empty;OnUi(form,delegate{first=image.PointToScreen(new Point(2,2));last=image.PointToScreen(new Point(image.Width-2,image.Height-2));display=Screen.FromPoint(first).Bounds;});
         RECT raw;Assert(DwmGetWindowAttribute(form.Handle,9,out raw,Marshal.SizeOf(typeof(RECT)))==0,"Cannot measure generated picker source.");Rectangle frame=Rectangle.FromLTRB(raw.left,raw.top,raw.right,raw.bottom);
+        long rejectedStart=0;
+        if(RustCapture&&rejectedPid!=0)Assert(VerifiedNativeChildren.TryGetValue(rejectedPid,out rejectedStart)&&rejectedStart>0,"Previous helper generation was not verified before restart.");
         MoveGenerated(form,first);Dictionary<string,object> probe=new Dictionary<string,object>();Stopwatch time=Stopwatch.StartNew();Shortcut(form,0x53);
-        WaitFor(delegate{visibility.Check();return AppOcrReady(form,app.Id,form.Handle,frame,first,display,probe,rejectedPid,time)&&Convert.ToUInt32(probe["helperProcessId"])!=rejectedPid;},25,"Pinned latest Alt+S did not create a new exact ready helper.",app);
+        WaitFor(delegate{visibility.Check();return AppOcrReady(form,app.Id,form.Handle,frame,first,display,probe,rejectedPid,time,rejectedStart)&&Convert.ToUInt32(probe["helperProcessId"])!=rejectedPid;},25,"Pinned latest Alt+S did not create a new exact ready helper.",app);
         visibility.Check();probe["hotkeyToReadyMilliseconds"]=time.Elapsed.TotalMilliseconds;probe["rejectedPreviousHelperPid"]=rejectedPid;probe["first"]=new int[]{first.X,first.Y};probe["last"]=new int[]{last.X,last.Y};probe["pinnedMainMetadata"]=MainMetadata(app);return probe;
     }
     static bool ProcessExited(uint pid){try{using(Process process=Process.GetProcessById((int)pid))return process.HasExited;}catch(ArgumentException){return true;}}
@@ -1033,9 +1072,12 @@ public static partial class EchoLingoApplicationSmoke {
         Assert(!customBindings||(!offline&&!latest),"Loaded-custom-bindings workflows require their own mock-only run.");
         Offline = offline; ActualTranslations.Clear(); hiddenPlaneStyleChecks=hiddenPlaneWithoutTopmostChecks=visiblePlaneStyleChecks=0;
         VerifyDestroyedPlaneRowClassifier();
+        VerifyPreviousPlaneGenerationPolicy();
+        retiredGenerationRowsExcluded=0;
         destroyedOwnedStyleRowsSkipped=destroyedOwnedRectangleRowsSkipped=destroyedRejectedStyleRowsSkipped=destroyedRejectedRectangleRowsSkipped=0;
         Dictionary<string, object> report = new Dictionary<string, object>(); List<string> passed = new List<string>();
         report["destroyedPlaneRowClassifierVerified"]=true;
+        report["previousPlaneGenerationPolicyVerified"]=true;
         report["screenshotEditorTestsRequested"] = screenshotEditor;
         if(screenshotEditor){report["startupSettingsWrittenDirectly"]=true;report["settingsUiSaveTested"]=false;report["defaultDesktopLocationTested"]=false;}
         report["ok"] = false; report["passed"] = passed; report["actualApplicationTested"] = false;
@@ -1262,7 +1304,7 @@ public static partial class EchoLingoApplicationSmoke {
             }
         } catch (Exception error) { report["error"] = error.Message; }
         finally {
-            report["inputPlaneStyleChecks"]=new Dictionary<string,object>{{"hidden",hiddenPlaneStyleChecks},{"hiddenWithoutTopmost",hiddenPlaneWithoutTopmostChecks},{"visibleRequiringTopmost",visiblePlaneStyleChecks},{"visiblePlanesStillRequireTopmost",true},{"hiddenPlanesCannotSatisfyReadiness",true},{"destroyedRejectedStyleRowsSkipped",destroyedRejectedStyleRowsSkipped},{"destroyedRejectedRectangleRowsSkipped",destroyedRejectedRectangleRowsSkipped},{"destroyedOwnedStyleRowsSkipped",destroyedOwnedStyleRowsSkipped},{"destroyedOwnedRectangleRowsSkipped",destroyedOwnedRectangleRowsSkipped},{"destroyedRowsCannotSatisfyReadiness",true}};
+            report["inputPlaneStyleChecks"]=new Dictionary<string,object>{{"retiredGenerationRowsExcluded",retiredGenerationRowsExcluded},{"retiredRowsCannotSatisfyReadiness",true},{"hidden",hiddenPlaneStyleChecks},{"hiddenWithoutTopmost",hiddenPlaneWithoutTopmostChecks},{"visibleRequiringTopmost",visiblePlaneStyleChecks},{"visiblePlanesStillRequireTopmost",true},{"hiddenPlanesCannotSatisfyReadiness",true},{"destroyedRejectedStyleRowsSkipped",destroyedRejectedStyleRowsSkipped},{"destroyedRejectedRectangleRowsSkipped",destroyedRejectedRectangleRowsSkipped},{"destroyedOwnedStyleRowsSkipped",destroyedOwnedStyleRowsSkipped},{"destroyedOwnedRectangleRowsSkipped",destroyedOwnedRectangleRowsSkipped},{"destroyedRowsCannotSatisfyReadiness",true}};
             for (int index = owned.Count - 1; index >= 0; index--) {
                 try { CleanDirectory(owned[index], token); }
                 catch (Exception error) { report["ok"] = false; report["directoryCleanupError"] = error.Message; }

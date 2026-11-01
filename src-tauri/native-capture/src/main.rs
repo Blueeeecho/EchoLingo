@@ -23,6 +23,7 @@ fn main() {
             }
             return;
         }
+        let mut deferred_mode = false;
         let parsed = (|| -> Result<capture::Request, String> {
             let mut host = None;
             let mut token = None;
@@ -69,21 +70,61 @@ fn main() {
                 Some("capture-screenshot") if owner.is_some_and(|pid| pid > 0) => {
                     policy::CapturePurpose::Screenshot
                 }
+                Some("select-screenshot" | "capture-selected-region")
+                    if owner.is_some_and(|pid| pid > 0) =>
+                {
+                    policy::CapturePurpose::Screenshot
+                }
                 _ => {
                     return Err(
                         "CAPTURE_ARGUMENT: Unsupported mode or missing screenshot owner".into(),
                     )
                 }
             };
+            deferred_mode = mode.as_deref() == Some("capture-selected-region");
+            if deferred_mode && (host.is_some() || token.is_some()) {
+                return Err(
+                    "CAPTURE_ARGUMENT: Deferred capture does not accept an input host".into(),
+                );
+            }
             Ok(capture::Request {
+                selection_only: mode.as_deref() == Some("select-screenshot"),
                 purpose,
                 owner_process: owner.unwrap_or(0),
-                host_thread: host.ok_or("CAPTURE_ARGUMENT: Missing host")?,
-                host_token: token.ok_or("CAPTURE_ARGUMENT: Missing token")?,
+                host_thread: if deferred_mode {
+                    0
+                } else {
+                    host.ok_or("CAPTURE_ARGUMENT: Missing host")?
+                },
+                host_token: if deferred_mode {
+                    0
+                } else {
+                    token.ok_or("CAPTURE_ARGUMENT: Missing token")?
+                },
                 cancellation: cancel.ok_or("CAPTURE_ARGUMENT: Missing cancellation")?,
             })
         })();
         let reply = match parsed {
+            Ok(request) if deferred_mode => {
+                use std::io::Read;
+                let mut bytes = Vec::new();
+                // One bounded request; never accept an arbitrary file path.
+                match std::io::stdin().take(65_537).read_to_end(&mut bytes) {
+                    Ok(_) => capture::capture_selected_region(
+                        request.owner_process,
+                        &request.cancellation,
+                        &bytes,
+                    ),
+                    Err(_) => capture::CapturedResult {
+                        result: Err("CAPTURE_ARGUMENT: Deferred request could not be read".into()),
+                        health: Default::default(),
+                        capture_geometry: None,
+                        initial_action: None,
+                        capture_screens: Vec::new(),
+                        selection_plan: None,
+                    },
+                }
+            }
             Ok(request) => capture::run(request),
             Err(error) => capture::CapturedResult {
                 result: Err(error),
@@ -91,6 +132,7 @@ fn main() {
                 capture_geometry: None,
                 initial_action: None,
                 capture_screens: Vec::new(),
+                selection_plan: None,
             },
         };
         let ok = reply.result.is_ok();
@@ -106,7 +148,12 @@ fn main() {
             output["captureScreens"] = serde_json::json!(reply.capture_screens.iter().map(|screen|
                 serde_json::json!({"x":screen[0], "y":screen[1], "width":screen[2], "height":screen[3]})).collect::<Vec<_>>());
         }
+        let selection_only = reply.selection_plan.is_some();
+        if let Some(plan) = reply.selection_plan {
+            output["selectionPlan"] = plan;
+        }
         match reply.result {
+            Ok(_) if selection_only => {}
             Ok(bytes) => {
                 output["imageBase64"] =
                     serde_json::json!(base64::engine::general_purpose::STANDARD.encode(bytes))

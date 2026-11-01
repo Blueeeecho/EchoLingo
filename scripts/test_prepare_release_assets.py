@@ -40,7 +40,7 @@ class ReleaseAssetsTests(unittest.TestCase):
             archive.writestr("main.cpp", data)
             archive.writestr("SOURCE-MANIFEST.json", json.dumps(inventory))
 
-        if RELEASE.VERSION == "0.2.8":
+        if RELEASE.VERSION == "0.2.9":
             provenance = {"commit": "a" * 40, "tree": "b" * 40, "trackedWorktreeClean": True}
             mock = patch.object(RELEASE.package_verifier, "source_provenance", return_value=provenance)
             mock.start(); self.addCleanup(mock.stop)
@@ -110,8 +110,12 @@ class ReleaseAssetsTests(unittest.TestCase):
         root = Path(__file__).resolve().parents[1]
         workflow = (root / '.github/workflows/release.yml').read_text()
         self.assertIn('paths: [package.json, scripts/inspect-candidate-package.py, scripts/verify-candidate-package.py, scripts/prepare-release-assets.py, .github/workflows/release.yml, .github/workflows/release-checks.yml]', workflow)
-        self.assertIn("tags: ['0.2.8']", workflow)
+        self.assertIn("tags: ['0.2.9']", workflow)
         checks = (root / '.github/workflows/release-checks.yml').read_text()
+        for path in ('.github/workflows/ci.yml', '.github/workflows/release-checks.yml'):
+            self.assertIn("-Filter 'EchoLingo_0.2.9_x64-setup.exe'", (root / path).read_text())
+        self.assertIn("docs/releases/0.2.9.zh-CN.md", workflow)
+        self.assertTrue((root / 'docs/releases/0.2.9.zh-CN.md').is_file())
         for historical in ('41271318023', '13069451922', 'release-10-diagnostic', '0.2.7'):
             self.assertNotIn(historical, checks)
         self.assertIn('name: Inspect exact fresh installer and packaged application bytes', checks)
@@ -177,10 +181,19 @@ class ReleaseAssetsTests(unittest.TestCase):
         # Only release-specific strengthening may differ: fresh app+DMG,
         # package inspection/evidence, native-capture formatting and version.
         normalized = release.split("jobs:\n", 1)[1]
-        start = normalized.index('      - name: Build same-source isolated Mac debug pin host')
+        # Native pin execution is now common to full CI and release. Compare
+        # every command, normalizing only the evidence directory/title.
+        normalized = normalized.replace('against this release source', 'against this exact source')
+        normalized = normalized.replace('release-native-pin', 'ci-native-pin')
+        start = normalized.index('      - name: Inspect exact fresh installer')
         end = normalized.index('      - name: Identify the actual embedded', start)
         normalized = normalized[:start] + normalized[end:]
-        normalized = normalized.replace('        id: package_build\n', '').replace("'app,dmg'", "'dmg'")
+        # CI uploads pin evidence separately; release includes the same files
+        # in its always-preserved package-inspection artifact above.
+        start = expected.index('      - name: Preserve actual Mac pin lifecycle evidence')
+        end = expected.index('      - name: Identify the actual embedded', start)
+        expected = expected[:start] + expected[end:]
+        normalized = normalized.replace('        id: package_build\n', '')
         normalized = normalized.replace('        run: |\n          cargo fmt --manifest-path src-tauri/Cargo.toml --check\n          cargo fmt --manifest-path src-tauri/native-capture/Cargo.toml --check', '        run: cargo fmt --manifest-path src-tauri/Cargo.toml --check')
         self.assertEqual(normalized.strip(), expected.strip())
         self.assertNotIn("actions: read", release)
@@ -240,7 +253,7 @@ class ReleaseAssetsTests(unittest.TestCase):
             for name in files[-2:]:
                 path = copy / name
                 original = path.read_text()
-                path.write_text(original.replace('version = "0.2.8"', 'version = "0.2.3"'))
+                path.write_text(original.replace('version = "0.2.9"', 'version = "0.2.3"'))
                 with self.subTest(name=name), self.assertRaises(ValueError):
                     RELEASE.check_version(copy)
                 path.write_text(original)
@@ -256,7 +269,7 @@ class ReleaseAssetsTests(unittest.TestCase):
         publisher = (root / "scripts/publish-macos-first-release.cjs").read_text()
         self.assertIn("tag: '0.2.1'", publisher)
         self.assertIn("Release exists; no overwrite", publisher)
-        self.assertEqual(RELEASE.VERSION, "0.2.8")
+        self.assertEqual(RELEASE.VERSION, "0.2.9")
 
     def test_refuses_previous_version_installer_filename(self):
         self.windows.rename(self.windows.with_name("EchoLingo_0.2.3_x64-setup.exe"))
@@ -268,7 +281,7 @@ class ReleaseAssetsTests(unittest.TestCase):
         self.assertFalse(manifest["rebuiltAfterValidation"])
         self.assertEqual(len(manifest["files"]), 3)
         self.assertEqual(len(list(self.output.iterdir())), 5)
-        self.assertEqual((self.output / "EchoLingo_0.2.8_windows_x64-setup.exe").read_bytes(), self.windows.read_bytes())
+        self.assertEqual((self.output / "EchoLingo_0.2.9_windows_x64-setup.exe").read_bytes(), self.windows.read_bytes())
         self.assertNotIn(str(self.root), (self.output / "RELEASE-MANIFEST.json").read_text())
         for line in (self.output / "SHA256SUMS.txt").read_text().splitlines():
             digest, name = line.split("  ", 1)

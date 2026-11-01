@@ -4,6 +4,8 @@
 mod w;
 use crate::policy::*;
 use crate::protocol as wire;
+#[path = "windows_capture_selection.rs"]
+mod deferred;
 use std::{
     collections::{BTreeMap, HashSet, VecDeque},
     ptr::{null, null_mut},
@@ -23,6 +25,7 @@ const SRCCOPY: u32 = 0x00CC0020;
 const CAPTUREBLT: u32 = 0x40000000;
 const MAX_PIXELS: usize = 32_000_000;
 pub struct Request {
+    pub selection_only: bool,
     pub purpose: CapturePurpose,
     pub owner_process: u32,
     pub host_thread: u32,
@@ -1249,6 +1252,7 @@ struct Picker {
     own: HashSet<isize>,
     owner_process: u32,
     purpose: CapturePurpose,
+    selection_only: bool,
     topology: CaptureTopologyPolicy,
     selection: CaptureSelectionState,
     input: CaptureInputPolicy,
@@ -1337,7 +1341,7 @@ impl Picker {
         }
         let mut actions = Vec::new();
         let mut handles = Vec::new();
-        if request.purpose == CapturePurpose::Screenshot {
+        if request.purpose == CapturePurpose::Screenshot && !request.selection_only {
             for index in 0..SCREENSHOT_ACTIONS.len() {
                 let window = Window::new(
                     &class,
@@ -1441,6 +1445,7 @@ impl Picker {
             own,
             owner_process: request.owner_process,
             purpose: request.purpose,
+            selection_only: request.selection_only,
             topology,
             selection,
             actions,
@@ -1535,6 +1540,10 @@ impl Picker {
         // not permission to capture the stale coordinates or a replacement.
         if kind == 0x202 {
             self.validate_window()?;
+            if self.selection_only && self.selection.adjusting {
+                self.selection.adjusting = false;
+                self.selection.finished = true;
+            }
         }
         Ok(())
     }
@@ -2328,6 +2337,147 @@ fn screenshot_toolbar_bounds(display: &CaptureDisplaySnapshot) -> Result<[i32; 4
     }
     Ok([work.x, work.y, work.width, work.height])
 }
+fn selection_plan_value(
+    topology: &CaptureTopologyPolicy,
+    source: Option<CaptureWindowTarget>,
+    owner: u32,
+) -> Result<serde_json::Value> {
+    let displays = topology.displays();
+    if displays.is_empty() || displays.len() > 32 {
+        return Err(error("CAPTURE_DISPLAY_CHANGED"));
+    }
+    let left = displays.iter().map(|d| d.bounds.x).min().unwrap();
+    let top = displays.iter().map(|d| d.bounds.y).min().unwrap();
+    let right = displays.iter().map(|d| d.bounds.right()).max().unwrap();
+    let bottom = displays.iter().map(|d| d.bounds.bottom()).max().unwrap();
+    let viewport = Rect::from_ltrb(left, top, right, bottom);
+    if !viewport.valid() {
+        return Err(error("CAPTURE_GEOMETRY"));
+    }
+    let screens = displays
+        .iter()
+        .map(|d| {
+            let work = screenshot_toolbar_bounds(d)?;
+            Ok(
+                serde_json::json!({"device":d.device,"bounds":deferred::rect_json(d.bounds),
+                "dpi":d.dpi,"work":work}),
+            )
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let source = source.map(|s| {
+        serde_json::json!({"window":s.window,"process":s.process,
+        "thread":s.thread,"frame":deferred::rect_json(s.frame)})
+    });
+    Ok(
+        serde_json::json!({"version":1,"owner":owner,"awareness":topology.awareness,
+        "viewport":deferred::rect_json(viewport),"displays":screens,"source":source}),
+    )
+}
+
+/// Deferred final-region capture: no picker, input host, clipboard or screen cache.
+/// The parent hides its persistent overlay before invoking this operation.
+pub fn capture_selected_region(owner: u32, cancellation: &str, bytes: &[u8]) -> CapturedResult {
+    let mut geometry = None;
+    let mut screens = Vec::new();
+    let result = (|| {
+        let (plan, selected) = deferred::request(bytes, owner)?;
+        let source = deferred::source(&plan["source"])?;
+        unsafe {
+            if w::SetThreadDpiAwarenessContext(-4isize as _).is_null() {
+                w::SetThreadDpiAwarenessContext(-3isize as _);
+            }
+            if w::GetAwarenessFromDpiAwarenessContext(w::GetThreadDpiAwarenessContext()) != 2 {
+                return Err(error("CAPTURE_DPI"));
+            }
+        }
+        let cancel = Cancellation::open(cancellation)?;
+        let class = Class::new()?;
+        let inbox = Arc::new(Inbox::default());
+        let canvas = Arc::new(Mutex::new(None));
+        let own = HashSet::new();
+        let validate = || -> Result<CaptureTopologyPolicy> {
+            if cancel.requested()? {
+                return Err("CANCELLED: Native task was superseded.".into());
+            }
+            input_desktop()?;
+            let current = topology(&class, &inbox, &canvas)?;
+            if selection_plan_value(&current, source, owner)? != plan {
+                return Err(error("CAPTURE_DISPLAY_CHANGED"));
+            }
+            if let Some(expected) = source {
+                let actual = window_target(expected.window as _, None, &own, owner);
+                if !capture_window_is_current(expected, actual) {
+                    return Err(error("CAPTURE_WINDOW_CHANGED"));
+                }
+            }
+            Ok(current)
+        };
+        validate()?;
+        unsafe {
+            if w::DwmFlush() < 0 {
+                return Err(error("CAPTURE_DWM"));
+            }
+        }
+        let current = validate()?;
+        if !current
+            .displays()
+            .iter()
+            .any(|d| selected.intersect(d.bounds).valid())
+        {
+            return Err(error("CAPTURE_GEOMETRY"));
+        }
+        let mut image = Surface::new(selected.width, selected.height)?;
+        image.clear(w::rgb(255, 255, 255));
+        for display in current.displays() {
+            let visible = selected.intersect(display.bounds);
+            if visible.valid() {
+                image.copy_screen(
+                    Point::new(visible.x - selected.x, visible.y - selected.y),
+                    visible,
+                    true,
+                )?;
+            }
+        }
+        validate()?;
+        let png = image.png()?;
+        validate()?;
+        let viewport = deferred::rect(&plan["viewport"])?;
+        geometry = Some([
+            selected.x,
+            selected.y,
+            selected.width,
+            selected.height,
+            viewport.x,
+            viewport.y,
+            viewport.width,
+            viewport.height,
+        ]);
+        screens = current
+            .displays()
+            .iter()
+            .map(screenshot_toolbar_bounds)
+            .collect::<Result<Vec<_>>>()?;
+        Ok(png)
+    })();
+    if result.is_err() {
+        geometry = None;
+        screens.clear();
+    }
+    CapturedResult {
+        result,
+        // This route creates no input host or hook; report its distinct lifecycle.
+        health: BTreeMap::from([
+            ("nativeDeferredCapture", 1),
+            ("hookRunningAfterStop", 0),
+            ("inputPlaneRemainingAfterCleanup", 0),
+        ]),
+        capture_geometry: geometry,
+        capture_screens: screens,
+        initial_action: None,
+        selection_plan: None,
+    }
+}
+
 pub fn run(request: Request) -> CapturedResult {
     let mut picker = match Picker::new(&request) {
         Ok(p) => p,
@@ -2338,11 +2488,13 @@ pub fn run(request: Request) -> CapturedResult {
                 capture_geometry: None,
                 initial_action: None,
                 capture_screens: Vec::new(),
+                selection_plan: None,
             }
         }
     };
     let mut capture_geometry = None;
     let mut capture_screens = Vec::new();
+    let mut selection_plan = None;
     let result = (|| {
         let selected = picker.select()?;
         if request.purpose == CapturePurpose::Screenshot {
@@ -2350,7 +2502,9 @@ pub fn run(request: Request) -> CapturedResult {
                 .topology
                 .displays()
                 .iter()
-                .filter(|display| selected.intersect(display.bounds).valid())
+                .filter(|display| {
+                    request.selection_only || selected.intersect(display.bounds).valid()
+                })
                 .collect();
             capture_screens = visible
                 .iter()
@@ -2390,6 +2544,19 @@ pub fn run(request: Request) -> CapturedResult {
                 width,
                 height,
             ]);
+        }
+        if request.selection_only {
+            picker.validate()?;
+            picker.validate_window()?;
+            if picker.cancel.requested()? {
+                return Err("CANCELLED: Native task was superseded.".into());
+            }
+            selection_plan = Some(selection_plan_value(
+                &picker.topology,
+                picker.selection.selected_window,
+                request.owner_process,
+            )?);
+            return Ok(Vec::new());
         }
         if picker.cancel.requested()? {
             return Err("CANCELLED: Native task was superseded.".into());
@@ -2452,9 +2619,11 @@ pub fn run(request: Request) -> CapturedResult {
         health: picker.health.clone(),
         capture_geometry,
         capture_screens,
+        selection_plan,
     }
 }
 pub struct CapturedResult {
+    pub selection_plan: Option<serde_json::Value>,
     pub result: Result<Vec<u8>>,
     pub initial_action: Option<&'static str>,
     pub health: BTreeMap<&'static str, u64>,
