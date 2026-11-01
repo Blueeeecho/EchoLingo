@@ -24,6 +24,8 @@ const LABEL: &str = "screenshot-editor";
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Session {
+    pub kind: &'static str,
+    pub revision: u64,
     pub id: u64,
     pub png_base64: String,
     pub width: u32,
@@ -38,6 +40,25 @@ pub struct Session {
     #[serde(skip)]
     capture_geometry: Option<super::platform::ScreenshotGeometry>,
 }
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SelectionSession {
+    pub kind: &'static str,
+    pub id: u64,
+    pub revision: u64,
+    pub width: u32,
+    pub height: u32,
+    pub overlay: super::screenshot_overlay::Layout,
+}
+#[derive(Clone, Serialize)]
+#[serde(untagged)]
+pub enum SessionSnapshot { Selection(SelectionSession), Image(Session) }
+struct StoredSelection {
+    public: SelectionSession,
+    native: super::platform::ScreenshotSelection,
+    request: super::native_tasks::Request,
+    capturing: bool,
+}
 struct StoredSession {
     public: Session,
     file_name: String,
@@ -46,6 +67,7 @@ struct StoredSession {
 struct SessionState {
     intent: Option<u64>,
     image: Option<StoredSession>,
+    selection: Option<StoredSelection>,
 }
 pub struct Controller {
     state: Mutex<SessionState>,
@@ -66,6 +88,7 @@ impl Controller {
         *super::locked(&self.state)? = SessionState {
             intent: Some(id),
             image: None,
+            selection: None,
         };
         Ok(())
     }
@@ -81,6 +104,25 @@ impl Controller {
         operation: impl FnOnce() -> Result<T, String>,
     ) -> Result<T, String> {
         self.with_image(id, |_| operation())
+    }
+    fn with_geometry<T>(&self, id: u64, operation: impl FnOnce(Option<&super::platform::ScreenshotGeometry>) -> Result<T, String>) -> Result<T, String> {
+        self.geometry_operation(id, true, operation)
+    }
+    fn with_presentable_geometry<T>(&self, id: u64, operation: impl FnOnce(Option<&super::platform::ScreenshotGeometry>) -> Result<T, String>) -> Result<T, String> {
+        self.geometry_operation(id, false, operation)
+    }
+    fn geometry_operation<T>(&self, id: u64, allow_capturing: bool, operation: impl FnOnce(Option<&super::platform::ScreenshotGeometry>) -> Result<T, String>) -> Result<T, String> {
+        let state = super::locked(&self.state)?;
+        if state.intent != Some(id) { return Err(STALE.into()); }
+        if let Some(selection) = state.selection.as_ref().filter(|selection| selection.public.id == id) {
+            if selection.capturing && !allow_capturing { return Err("SCREENSHOT_BUSY: 正在捕获选区".into()); }
+            return operation(Some(&selection.native.geometry));
+        }
+        let image = state.image.as_ref().filter(|image| image.public.id == id).ok_or(STALE)?;
+        operation(image.public.capture_geometry.as_ref())
+    }
+    pub(crate) fn check_image_revision(&self, id: u64, revision: u64) -> Result<(), String> {
+        self.with_image(id, |image| if image.public.revision == revision { Ok(()) } else { Err(STALE.into()) })
     }
     fn take_initial_action(
         &self,
@@ -101,7 +143,8 @@ impl Controller {
         if let Ok(mut state) = self.state.lock() {
             // An unrelated translator hide/capture may cancel a pending F1 or
             // Open request, but never discard an already committed document.
-            state.intent = state.image.as_ref().map(|image| image.public.id);
+            state.intent = state.image.as_ref().map(|image| image.public.id)
+                .or_else(|| state.selection.as_ref().map(|selection| selection.public.id));
         }
     }
     fn current(&self, id: u64) -> bool {
@@ -127,13 +170,24 @@ impl Controller {
         id: Option<u64>,
         dismiss: impl FnOnce() -> Result<(), String>,
     ) -> Result<(), String> {
+        self.dismiss_revision(id, None, dismiss)
+    }
+    fn dismiss_revision(&self, id: Option<u64>, revision: Option<u64>, dismiss: impl FnOnce() -> Result<(), String>) -> Result<(), String> {
         let mut state = super::locked(&self.state)?;
         if state.intent != id {
             return Err(STALE.into());
         }
+        if let Some(revision) = revision {
+            let current = state.image.as_ref().map(|image| image.public.revision)
+                .or_else(|| state.selection.as_ref().map(|selection| selection.public.revision));
+            if current != Some(revision) { return Err(STALE.into()); }
+        }
         // Preserve the session on native dismissal failure so X can retry. The
         // same lock prevents an older close from hiding a newer capture.
         dismiss()?;
+        if let Some(selection) = state.selection.as_ref() {
+            selection.request.cancellation().store(true, Ordering::SeqCst);
+        }
         *state = SessionState::default();
         Ok(())
     }
@@ -189,7 +243,8 @@ pub fn cancel_pending(app: &tauri::AppHandle) {
 pub fn invalidate(app: &tauri::AppHandle) {
     let state = app.state::<super::AppState>();
     let cleared = if let Ok(mut screenshot) = state.screenshots.state.lock() {
-        let id = screenshot.image.as_ref().map(|image| image.public.id);
+        let id = screenshot.intent;
+        if let Some(selection) = screenshot.selection.as_ref() { selection.request.cancellation().store(true, Ordering::SeqCst); }
         *screenshot = SessionState::default();
         id
     } else {
@@ -207,7 +262,7 @@ pub fn invalidate(app: &tauri::AppHandle) {
                 .screenshots
                 .state
                 .lock()
-                .is_ok_and(|state| state.image.is_none())
+                .is_ok_and(|state| state.image.is_none() && state.selection.is_none())
             {
                 if let Some(window) = handle.get_webview_window(LABEL) {
                     let _ = super::screenshot_overlay::hide(&window);
@@ -311,6 +366,8 @@ fn make_session(
 ) -> Result<Session, String> {
     let pixels = decode(bytes, false)?;
     Ok(Session {
+        kind: "image",
+        revision: 0,
         id,
         png_base64: base64::engine::general_purpose::STANDARD.encode(encode(&pixels)?),
         width: pixels.width(),
@@ -558,12 +615,13 @@ pub async fn choose_screenshot_directory(
 pub fn get_screenshot_session(
     window: tauri::WebviewWindow,
     state: tauri::State<super::AppState>,
-) -> Result<Option<Session>, String> {
+) -> Result<Option<SessionSnapshot>, String> {
     ensure_editor(&window)?;
-    Ok(super::locked(&state.screenshots.state)?
-        .image
-        .as_ref()
-        .map(|image| image.public.clone()))
+    let state = super::locked(&state.screenshots.state)?;
+    Ok(state.image.as_ref().filter(|image| state.intent == Some(image.public.id))
+        .map(|image| SessionSnapshot::Image(image.public.clone()))
+        .or_else(|| state.selection.as_ref().filter(|selection| state.intent == Some(selection.public.id))
+            .map(|selection| SessionSnapshot::Selection(selection.public.clone()))))
 }
 #[tauri::command]
 pub fn consume_screenshot_initial_action(
@@ -585,11 +643,11 @@ pub async fn screenshot_editor_ready(
     let handle = app.clone();
     dialog(&app, move || {
         let state = handle.state::<super::AppState>();
-        state.screenshots.with_image(session_id, |image| {
+        state.screenshots.with_presentable_geometry(session_id, |geometry| {
             let window = handle
                 .get_webview_window(LABEL)
                 .ok_or("SCREENSHOT_WINDOW: 编辑器窗口不存在")?;
-            if let Some(geometry) = image.public.capture_geometry.as_ref() {
+            if let Some(geometry) = geometry {
                 return super::screenshot_overlay::show(&window, geometry, session_id);
             }
             window
@@ -615,8 +673,8 @@ pub async fn focus_screenshot_overlay(
         handle
             .state::<super::AppState>()
             .screenshots
-            .with_image(session_id, |image| {
-                if image.public.capture_geometry.is_none() {
+            .with_presentable_geometry(session_id, |geometry| {
+                if geometry.is_none() {
                     return Err(STALE.into());
                 }
                 super::screenshot_overlay::focus_text(&window)
@@ -629,6 +687,7 @@ pub async fn close_screenshot_editor(
     window: tauri::WebviewWindow,
     app: tauri::AppHandle,
     session_id: Option<u64>,
+    revision: Option<u64>,
 ) -> Result<(), String> {
     ensure_editor(&window)?;
     let handle = app.clone();
@@ -642,7 +701,7 @@ pub async fn close_screenshot_editor(
         }
         state
             .screenshots
-            .dismiss_current(session_id, || super::screenshot_overlay::hide(&window))?;
+            .dismiss_revision(session_id, revision, || super::screenshot_overlay::hide(&window))?;
         // Ordinary committed Save/Copy can finish without retaining the window.
         // Invalidate only this editor, not an unrelated newer OCR task.
         emit_cleared(&handle, session_id);
@@ -692,6 +751,7 @@ pub async fn save_screenshot_image(
     window: tauri::WebviewWindow,
     app: tauri::AppHandle,
     session_id: u64,
+    revision: Option<u64>,
     png_base64: String,
     save_as: bool,
 ) -> Result<Option<SaveResult>, String> {
@@ -702,6 +762,7 @@ pub async fn save_screenshot_image(
         .operations
         .try_acquire()
         .map_err(|_| "SCREENSHOT_BUSY: 请先完成当前图片操作")?;
+    state.screenshots.check_image_revision(session_id, revision.unwrap_or(0))?;
     let name = state.screenshots.with_image(session_id, |image| {
         if save_as && image.public.capture_geometry.is_some() {
             return Err(
@@ -771,6 +832,7 @@ pub async fn copy_screenshot_image(
     window: tauri::WebviewWindow,
     app: tauri::AppHandle,
     session_id: u64,
+    revision: Option<u64>,
     png_base64: String,
 ) -> Result<(), String> {
     ensure_editor(&window)?;
@@ -780,6 +842,7 @@ pub async fn copy_screenshot_image(
         .operations
         .try_acquire()
         .map_err(|_| "SCREENSHOT_BUSY: 请先完成当前图片操作")?;
+    state.screenshots.check_image_revision(session_id, revision.unwrap_or(0))?;
     state.screenshots.with_image(session_id, |_| Ok(()))?;
     let worker_app = app.clone();
     tauri::async_runtime::spawn_blocking(move || {
@@ -922,6 +985,9 @@ pub async fn open_screenshot_image(
             .operations
             .try_acquire()
             .map_err(|_| "SCREENSHOT_BUSY: 请先完成当前图片操作")?;
+        if super::locked(&state.screenshots.state)?.selection.is_some() {
+            return Err("SCREENSHOT_DIALOG: 请先完成或取消原地截图，再打开本地图片".into());
+        }
         if super::locked(&state.screenshots.state)?
             .image
             .as_ref()
@@ -1054,7 +1120,7 @@ pub fn start_capture(app: tauri::AppHandle) {
         if !state.native_tasks.is_current(&request) {
             return;
         }
-        let result: Result<Session, String> = async {
+        let result: Result<super::platform::ScreenshotSelection, String> = async {
             super::hide_native_capture_window(&app, &request, presentation).await?;
             let handle = app.clone();
             let hide_id = request.id();
@@ -1082,34 +1148,16 @@ pub fn start_capture(app: tauri::AppHandle) {
                 if !state.screenshots.current(worker_request.id()) {
                     return Err(STALE.into());
                 }
-                let (encoded, geometry, action) =
-                    super::platform::capture_screenshot_with_geometry_cancelable(
-                        worker_request.cancellation(),
-                    )?;
-                let captured_at = super::now();
-                if worker_request.cancelled() {
-                    return Err(STALE.into());
-                }
-                if encoded.len() > MAX_ENCODED_BYTES.div_ceil(3) * 4 {
-                    return Err("SCREENSHOT_SIZE: 图片过大".into());
-                }
-                let bytes = base64::engine::general_purpose::STANDARD
-                    .decode(encoded)
-                    .map_err(|_| "SCREENSHOT_FORMAT: 无效截图数据")?;
-                let mut session = make_session(worker_request.id(), &bytes, captured_at, None)?;
-                session.capture_geometry = Some(geometry);
-                session.initial_action = Some(action);
-                if worker_request.cancelled() {
-                    return Err(STALE.into());
-                }
-                Ok(session)
+                let selection = super::platform::select_screenshot_cancelable(worker_request.cancellation())?;
+                if worker_request.cancelled() { return Err(STALE.into()); }
+                Ok(selection)
             })
             .await
             .map_err(|_| "SCREENSHOT_CAPTURE: 截图操作被中断".to_owned())?
         }
         .await;
         let outcome = match result {
-            Ok(session) => publish(&app, &request, session).await,
+            Ok(selection) => publish_selection(&app, &request, selection).await,
             Err(error) => Err(error),
         };
         if let Err(error) = outcome {
@@ -1127,9 +1175,211 @@ pub fn start_capture(app: tauri::AppHandle) {
     });
 }
 
+#[derive(Clone, serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct SelectionRect { pub x: f64, pub y: f64, pub width: f64, pub height: f64 }
+fn adjusted_selection(selection: &StoredSelection, rect: SelectionRect) -> Result<(super::platform::ScreenshotGeometry, super::screenshot_overlay::Layout), String> {
+    if [rect.x, rect.y, rect.width, rect.height].iter().any(|v| !v.is_finite()) || rect.width < 2.0 || rect.height < 2.0 {
+        return Err("SCREENSHOT_GEOMETRY: 选区坐标无效".into());
+    }
+    let mut geometry = selection.native.geometry.clone();
+    let scale = geometry.screen_width / selection.public.overlay.viewport_width;
+    geometry.x = geometry.screen_x + (rect.x * scale).round();
+    geometry.y = geometry.screen_y + (rect.y * scale).round();
+    geometry.width = (rect.width * scale).round();
+    geometry.height = (rect.height * scale).round();
+    geometry.validate()?;
+    if geometry.width * geometry.height * geometry.scale * geometry.scale > MAX_PIXELS as f64 {
+        return Err("SCREENSHOT_SIZE: 选区过大".into());
+    }
+    let overlay = super::screenshot_overlay::layout(&geometry, scale)?;
+    Ok((geometry, overlay))
+}
+#[tauri::command]
+pub fn update_screenshot_selection(window: tauri::WebviewWindow, state: tauri::State<super::AppState>,
+    session_id: u64, revision: u64, rect: SelectionRect) -> Result<SelectionSession, String> {
+    ensure_editor(&window)?;
+    let _operation = state.screenshots.operations.try_acquire().map_err(|_| "SCREENSHOT_BUSY: 图片操作尚未完成")?;
+    let mut stored = super::locked(&state.screenshots.state)?;
+    if stored.intent != Some(session_id) { return Err(STALE.into()); }
+    let selection = stored.selection.as_mut().filter(|selection| selection.public.id == session_id
+        && selection.public.revision == revision && !selection.capturing && !selection.request.cancelled()).ok_or(STALE)?;
+    let (geometry, overlay) = adjusted_selection(selection, rect)?;
+    selection.public.revision = revision.checked_add(1).ok_or("SCREENSHOT_SESSION: 选区版本已耗尽")?;
+    selection.public.width = (geometry.width * geometry.scale).ceil() as u32;
+    selection.public.height = (geometry.height * geometry.scale).ceil() as u32;
+    selection.public.overlay = overlay;
+    selection.native.geometry = geometry;
+    let result = selection.public.clone();
+    // This explicit new selection invalidates the old bitmap. No outside area
+    // is reconstructed from the old image or from previously redacted pixels.
+    stored.image = None;
+    Ok(result)
+}
+#[tauri::command]
+pub async fn capture_screenshot_selection(window: tauri::WebviewWindow, app: tauri::AppHandle,
+    session_id: u64, revision: u64) -> Result<Session, String> {
+    ensure_editor(&window)?;
+    let state = app.state::<super::AppState>();
+    let _operation = state.screenshots.operations.try_acquire().map_err(|_| "SCREENSHOT_BUSY: 图片操作尚未完成")?;
+    let (native, request) = {
+        let mut stored = super::locked(&state.screenshots.state)?;
+        if stored.intent != Some(session_id) { return Err(STALE.into()); }
+        if let Some(image) = stored.image.as_ref().filter(|image| image.public.id == session_id && image.public.revision == revision) {
+            return Ok(image.public.clone());
+        }
+        let selection = stored.selection.as_mut().filter(|selection| selection.public.id == session_id
+            && selection.public.revision == revision && !selection.capturing && !selection.request.cancelled()).ok_or(STALE)?;
+        selection.capturing = true;
+        (selection.native.clone(), selection.request.clone())
+    };
+    let handle = app.clone();
+    let result: Result<Session, String> = async {
+        dialog(&app, move || {
+            handle.state::<super::AppState>().screenshots.with_geometry(session_id, |_| super::screenshot_overlay::suspend(&window))
+        }).await??;
+        let worker_app = app.clone();
+        tauri::async_runtime::spawn_blocking(move || {
+            let state = worker_app.state::<super::AppState>();
+            let _physical = state.native_tasks.enter(&request)?;
+            if !state.screenshots.current(session_id) { return Err(STALE.into()); }
+            let (encoded, geometry) = super::platform::capture_selected_region_cancelable(&native, request.cancellation())?;
+            if request.cancelled() || !state.screenshots.current(session_id) { return Err(STALE.into()); }
+            if encoded.len() > MAX_ENCODED_BYTES.div_ceil(3) * 4 { return Err("SCREENSHOT_SIZE: 图片过大".into()); }
+            let bytes = base64::engine::general_purpose::STANDARD.decode(encoded).map_err(|_| "SCREENSHOT_FORMAT: 无效截图数据")?;
+            let mut session = make_session(session_id, &bytes, super::now(), None)?;
+            session.revision = revision;
+            session.capture_geometry = Some(geometry);
+            Ok(session)
+        }).await.map_err(|_| "SCREENSHOT_CAPTURE: 截图操作被中断".to_owned())?
+    }.await;
+    let handle = app.clone();
+    dialog(&app, move || {
+        let state = handle.state::<super::AppState>();
+        let mut stored = super::locked(&state.screenshots.state)?;
+        if stored.intent != Some(session_id) { return Err(STALE.into()); }
+        let selection = stored.selection.as_mut().filter(|selection| selection.public.id == session_id
+            && selection.public.revision == revision).ok_or(STALE)?;
+        selection.capturing = false;
+        let window = handle.get_webview_window(LABEL).ok_or("SCREENSHOT_WINDOW: 编辑器不存在")?;
+        if selection.request.cancelled() { return Err(STALE.into()); }
+        // Same host, passive resume. Never re-prepare/reparent or auto-focus.
+        super::screenshot_overlay::resume(&window, &selection.native.geometry, session_id)?;
+        let mut session = result?;
+        let geometry = session.capture_geometry.as_ref().ok_or(STALE)?;
+        if geometry.screen_x != selection.native.geometry.screen_x || geometry.screen_y != selection.native.geometry.screen_y
+            || geometry.screen_width != selection.native.geometry.screen_width || geometry.screen_height != selection.native.geometry.screen_height {
+            return Err("SCREENSHOT_GEOMETRY: 显示器布局已改变，请重新框选".into());
+        }
+        let scale = geometry.screen_width / selection.public.overlay.viewport_width;
+        session.overlay = Some(super::screenshot_overlay::layout(geometry, scale)?);
+        selection.native.geometry = geometry.clone();
+        selection.public.overlay = session.overlay.clone().ok_or(STALE)?;
+        let file_name = capture_file_name(session.captured_at)?;
+        stored.image = Some(StoredSession { public: session.clone(), file_name });
+        Ok(session)
+    }).await?
+}
+async fn publish_selection(app: &tauri::AppHandle, request: &super::native_tasks::Request,
+    native: super::platform::ScreenshotSelection) -> Result<(), String> {
+    ensure_editor_window(app, request).await?;
+    let handle = app.clone();
+    let request = request.clone();
+    dialog(app, move || {
+        let state = handle.state::<super::AppState>();
+        if !state.native_tasks.is_current(&request) || !state.screenshots.current(request.id()) { return Err(STALE.into()); }
+        let window = handle.get_webview_window(LABEL).ok_or("SCREENSHOT_WINDOW: 编辑器不存在")?;
+        let overlay = super::screenshot_overlay::prepare(&window, &native.geometry)?;
+        let public = SelectionSession { kind: "selection", id: request.id(), revision: 0,
+            width: (native.geometry.width * native.geometry.scale).ceil() as u32,
+            height: (native.geometry.height * native.geometry.scale).ceil() as u32, overlay };
+        state.native_tasks.publish(&request, || {
+            let mut stored = super::locked(&state.screenshots.state)?;
+            if stored.intent != Some(public.id) { return Err(STALE.into()); }
+            stored.selection = Some(StoredSelection { public: public.clone(), native, request: request.clone(), capturing: false });
+            app_emit_selection(&handle, &public)
+        }).unwrap_or_else(|| Err(STALE.into()))
+    }).await?
+}
+fn app_emit_selection(app: &tauri::AppHandle, selection: &SelectionSession) -> Result<(), String> {
+    app.emit_to(LABEL, "screenshot-session", selection).map_err(|_| "SCREENSHOT_WINDOW: 无法传送选区".into())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    fn pending_selection() -> (Controller, super::super::native_tasks::Request) {
+        let tasks = super::super::native_tasks::Controller::default();
+        let request = tasks.begin().unwrap();
+        let controller = Controller::default();
+        controller.begin(request.id()).unwrap();
+        let geometry = super::super::platform::ScreenshotGeometry {
+            x: -900.0, y: 20.0, width: 300.0, height: 200.0,
+            screen_x: -1920.0, screen_y: -100.0, screen_width: 3840.0, screen_height: 1180.0, scale: 1.0,
+            screens: vec![super::super::platform::ScreenshotScreen { x: -1920.0, y: -100.0, width: 1920.0, height: 1080.0 }],
+        };
+        let overlay = super::super::screenshot_overlay::layout(&geometry, 2.0).unwrap();
+        controller.state.lock().unwrap().selection = Some(StoredSelection {
+            public: SelectionSession { kind: "selection", id: request.id(), revision: 0, width: 300, height: 200, overlay },
+            native: super::super::platform::ScreenshotSelection { geometry, plan: serde_json::json!({"synthetic":true}) },
+            request: request.clone(), capturing: false,
+        });
+        (controller, request)
+    }
+    #[test]
+    fn geometry_only_session_never_authorizes_image_exports() {
+        let (controller, request) = pending_selection();
+        assert!(controller.with_image(request.id(), |_| Ok(())).is_err());
+        assert!(controller.with_geometry(request.id(), |g| Ok(g.is_some())).unwrap());
+        assert!(controller.with_geometry(request.id() + 1, |_| Ok(())).is_err());
+    }
+    #[test]
+    fn suspended_capture_blocks_ready_and_focus_under_the_state_lock() {
+        let (controller, request) = pending_selection();
+        controller.state.lock().unwrap().selection.as_mut().unwrap().capturing = true;
+        assert!(controller.with_presentable_geometry::<()>(request.id(), |_| panic!("capture must stay hidden")).is_err());
+        assert!(controller.with_geometry(request.id(), |_| Ok(())).is_ok());
+        controller.state.lock().unwrap().selection.as_mut().unwrap().capturing = false;
+        assert!(controller.with_presentable_geometry(request.id(), |_| Ok(())).is_ok());
+    }
+    #[test]
+    fn stale_export_revision_and_delayed_close_cannot_target_recaptured_image() {
+        let controller = Controller::default();
+        controller.begin(1).unwrap();
+        let mut image = make_session(1, &png(), 1, None).unwrap();
+        image.revision = 2;
+        controller.install(image, "fixture.png".into()).unwrap();
+        assert!(controller.check_image_revision(1, 0).is_err());
+        assert!(controller.check_image_revision(1, 1).is_err());
+        assert!(controller.check_image_revision(1, 2).is_ok());
+        assert!(controller.dismiss_revision(Some(1), Some(1), || panic!("old export must not hide")).is_err());
+        assert!(controller.current(1));
+        controller.dismiss_revision(Some(1), None, || Ok(())).unwrap();
+        assert!(!controller.current(1));
+    }
+    #[test]
+    fn adjustment_uses_retained_viewport_scale_and_negative_origin() {
+        let (controller, _) = pending_selection();
+        let state = controller.state.lock().unwrap();
+        let selection = state.selection.as_ref().unwrap();
+        let (geometry, layout) = adjusted_selection(selection, SelectionRect { x: 10.0, y: 20.0, width: 100.0, height: 80.0 }).unwrap();
+        assert_eq!((geometry.x, geometry.y, geometry.width, geometry.height), (-1900.0, -60.0, 200.0, 160.0));
+        assert_eq!((layout.x, layout.y), (10.0, 20.0));
+        for bad in [f64::NAN, f64::INFINITY, -99999.0] {
+            assert!(adjusted_selection(selection, SelectionRect { x: bad, y: 0.0, width: 100.0, height: 80.0 }).is_err());
+        }
+    }
+    #[test]
+    fn close_pending_capture_cancels_only_its_retained_request() {
+        let (controller, request) = pending_selection();
+        controller.state.lock().unwrap().selection.as_mut().unwrap().capturing = true;
+        assert!(controller.dismiss_current(Some(request.id() + 1), || panic!("stale hide")).is_err());
+        assert!(!request.cancelled());
+        controller.dismiss_current(Some(request.id()), || Ok(())).unwrap();
+        assert!(request.cancelled());
+        assert!(!controller.current(request.id()));
+        assert!(controller.state.lock().unwrap().selection.is_none());
+    }
     fn png() -> Vec<u8> {
         encode(&RgbaImage::from_pixel(3, 2, image::Rgba([12, 34, 56, 255]))).unwrap()
     }

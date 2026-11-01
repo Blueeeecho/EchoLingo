@@ -55,7 +55,23 @@ try {
         invoke: async (command, args = {}) => {
           if (command === 'plugin:event|listen') { listeners.set(args.event, callbacks.get(args.handler)); return 1; }
           if (command === 'plugin:event|unlisten') return;
-          q.calls.push({ command, sessionId: args.sessionId });
+          q.calls.push({ command, sessionId: args.sessionId, revision: args.revision });
+          if (command === 'update_screenshot_selection') {
+            if (args.sessionId !== q.session.id || args.revision !== q.session.revision) throw new Error('stale selection');
+            q.session = { kind: 'selection', id: q.session.id, revision: q.session.revision + 1,
+              width: Math.round(args.rect.width * 2), height: Math.round(args.rect.height * 2), overlay: { ...q.session.overlay, ...args.rect } };
+            return structuredClone(q.session);
+          }
+          if (command === 'capture_screenshot_selection') {
+            if (args.sessionId !== q.session.id || args.revision !== q.session.revision) throw new Error('stale capture');
+            const selected = structuredClone(q.session);
+            if (q.holdSelectionCapture) await new Promise(resolve => { q.releaseSelectionCapture = resolve; });
+            const bitmap = image(selected.width, selected.height);
+            const value = { ...bitmap, kind: 'image', id: selected.id, revision: selected.revision, overlay: selected.overlay };
+            if (q.session?.id === selected.id) q.session = value;
+            return value;
+          }
+
           if (command === 'get_screenshot_session') {
             const snapshot = structuredClone(q.session), mode = new URL(location.href).searchParams.get('startup');
             if (mode === 'cleared') q.emit('screenshot-session-cleared', { id: snapshot.id });
@@ -724,6 +740,94 @@ try {
     await page.reload();
     await page.waitForFunction(() => window.__screenshotQA.calls.some(x => x.command === 'consume_screenshot_initial_action'));
     await page.waitForTimeout(30); assert.equal(await page.evaluate(() => window.__screenshotQA.copies.length), 0, 'backend consumed action is not repeated after WebView reload');
+    // Geometry-only capture uses the exact same toolbar DOM before and after
+    // first paint. Tool choice never captures or removes adjustment handles.
+    await page.evaluate(() => {
+      const q = window.__screenshotQA;
+      q.publishSelection = () => {
+        const next = q.image(400, 240);
+        q.session = { kind: 'selection', id: next.id, revision: 0, width: 400, height: 240,
+          overlay: { x: 120, y: 150, width: 200, height: 120, viewportWidth: innerWidth, viewportHeight: innerHeight } };
+        q.emit('screenshot-session', structuredClone(q.session));
+      };
+      q.publishSelection(); window.__sameToolbar = document.querySelector('.editor-toolbar');
+    });
+    await page.waitForFunction(() => !document.querySelector('#selection-handles').hidden);
+    const geometryCalls = () => page.evaluate(() => window.__screenshotQA.calls.filter(x => x.command === 'capture_screenshot_selection').length);
+    const beforeGeometry = await geometryCalls();
+    await page.locator('[data-tool="pen"]').click();
+    assert.equal(await geometryCalls(), beforeGeometry, 'selecting a tool does not freeze/capture the selection');
+    assert.equal(await page.locator('#selection-handles').isVisible(), true);
+    let handle = await page.locator('[data-resize="se"]').boundingBox();
+    await page.mouse.move(handle.x + handle.width / 2, handle.y + handle.height / 2); await page.mouse.down();
+    await page.mouse.move(handle.x + handle.width / 2 + 60, handle.y + handle.height / 2 + 30);
+    await page.keyboard.press('Enter');
+    assert.equal(await geometryCalls(), beforeGeometry, 'Enter during held selection resize cannot capture backend old bounds');
+    await page.mouse.up();
+    await page.waitForFunction(() => window.__screenshotQA.session.revision === 1 && !document.querySelector('[data-tool="pen"]').disabled);
+    assert.equal(await page.evaluate(() => window.__screenshotQA.session.overlay.width), 260);
+    await page.locator('[data-tool="select"]').click();
+    let box = await page.locator('#canvas-frame').boundingBox();
+    await page.mouse.move(box.x + 40, box.y + 40); await page.mouse.down(); await page.mouse.move(box.x + 20, box.y + 60); await page.mouse.up();
+    await page.waitForFunction(() => window.__screenshotQA.session.revision === 2 && !document.querySelector('[data-tool="pen"]').disabled);
+    assert.equal(await page.evaluate(() => window.__screenshotQA.session.overlay.x), 100);
+    await page.locator('[data-tool="pen"]').click();
+    await page.evaluate(() => { window.__screenshotQA.holdSelectionCapture = true; });
+    box = await page.locator('#canvas-frame').boundingBox();
+    await page.mouse.move(box.x + 25, box.y + 25); await page.mouse.down(); await page.mouse.move(box.x + 80, box.y + 40, { steps: 4 });
+    assert.equal(await geometryCalls(), beforeGeometry, 'held first stroke previews without hiding the native host');
+    assert.notEqual(await page.locator('#pending-ink').getAttribute('points'), '', 'first ink has same-surface vector preview');
+    const heldPreview = await page.locator('#pending-ink').getAttribute('points');
+    await page.evaluate(() => {
+      const canvas = document.querySelector('#image-canvas');
+      for (const type of ['pointerdown','pointercancel','lostpointercapture']) canvas.dispatchEvent(new PointerEvent(type, { pointerId: 991, isPrimary: false, pointerType: 'touch', button: 0, buttons: 1, clientX: 500, clientY: 400, bubbles: true }));
+    });
+    assert.equal(await page.locator('#pending-ink').getAttribute('points'), heldPreview, 'foreign down/cancel cannot replace or cancel held first stroke');
+    await page.mouse.up();
+    await page.waitForFunction(() => !!window.__screenshotQA.releaseSelectionCapture);
+    assert.equal(await geometryCalls(), beforeGeometry + 1);
+    assert.equal(await page.locator('#overlay-cancel').isEnabled(), true, 'capture waiting remains cancellable by the visible x');
+    assert.equal(await page.locator('#edit-width').isDisabled(), true, 'pending stroke style cannot change mid-capture');
+    await page.evaluate(() => {
+      const canvas = document.querySelector('#image-canvas');
+      canvas.dispatchEvent(new PointerEvent('pointermove', { pointerId: 991, clientX: 500, clientY: 400, bubbles: true }));
+      canvas.dispatchEvent(new PointerEvent('pointerup', { pointerId: 991, clientX: 500, clientY: 400, bubbles: true }));
+      window.__screenshotQA.releaseSelectionCapture();
+    });
+    await page.waitForFunction(() => !document.querySelector('#undo-edit').disabled);
+    assert.equal(await page.evaluate(() => window.__sameToolbar === document.querySelector('.editor-toolbar')), true, 'first annotation binds pixels without replacing toolbar');
+    assert.deepEqual(await page.locator('#image-canvas').evaluate(c => [...c.getContext('2d').getImageData(400, 200, 1, 1).data]), [20,40,50,255], 'foreign pointer cannot extend buffered ink');
+    assert.equal(await page.locator('#selection-handles').isVisible(), false, 'annotated pixels use safe crop/reselect rather than silent live recapture');
+    await page.locator('#undo-edit').click();
+    assert.equal(await page.locator('#selection-handles').isVisible(), true, 'undo to no annotations permits full adjustment again');
+    await page.locator('#overlay-cancel').click();
+    // A late capture must not annotate/export/reopen after cancellation.
+    await page.evaluate(() => { window.__screenshotQA.releaseSelectionCapture = null; window.__screenshotQA.publishSelection(); });
+    await page.waitForFunction(() => !document.querySelector('#selection-handles').hidden);
+    await page.locator('[data-tool="rectangle"]').click(); box = await page.locator('#canvas-frame').boundingBox();
+    await page.mouse.move(box.x + 20, box.y + 20); await page.mouse.down(); await page.mouse.move(box.x + 80, box.y + 70); await page.mouse.up();
+    await page.waitForFunction(() => !document.querySelector('#overlay-cancel').disabled && !!window.__screenshotQA.releaseSelectionCapture);
+    const copiesBeforeCancel = await page.evaluate(() => window.__screenshotQA.copies.length);
+    await page.locator('#overlay-cancel').click();
+    await page.evaluate(() => window.__screenshotQA.releaseSelectionCapture());
+    await page.waitForTimeout(40);
+    assert.equal(await page.locator('#canvas-frame').isVisible(), false);
+    assert.equal(await page.evaluate(() => window.__screenshotQA.copies.length), copiesBeforeCancel);
+    // Explicit completion captures once and exports once, even under repeated Enter.
+    await page.evaluate(() => { const q = window.__screenshotQA; q.holdSelectionCapture = true; q.releaseSelectionCapture = null; q.publishSelection(); });
+    await page.waitForFunction(() => !document.querySelector('#selection-handles').hidden);
+    const beforeCopyCapture = await geometryCalls();
+    await page.locator('#overlay-copy').click();
+    await page.waitForFunction(() => !!window.__screenshotQA.releaseSelectionCapture);
+    await page.keyboard.press('Enter'); await page.keyboard.press('Enter');
+    await page.locator('#overlay-copy').dispatchEvent('click');
+    assert.equal(await geometryCalls(), beforeCopyCapture + 1, 'repeated completion during capture shares no second side effect');
+    await page.evaluate(() => { window.__screenshotQA.releaseSelectionCapture(); });
+    await page.waitForFunction(n => window.__screenshotQA.copies.length === n + 1, copiesBeforeCancel);
+    assert.equal(await page.evaluate(() => window.__screenshotQA.copies.at(-1).revision), 0, 'completion carries the exact captured revision');
+    assert.equal(await page.evaluate(() => window.__screenshotQA.calls.filter(c => c.command === 'close_screenshot_editor').at(-1).revision), 0, 'export dismissal is also revision-bound');
+    assert.equal(await geometryCalls(), beforeCopyCapture + 1);
+
     await context.close();
   }
   assert.deepEqual(errors, []); assert.deepEqual(externalRequests, []);

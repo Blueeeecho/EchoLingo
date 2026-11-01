@@ -119,6 +119,7 @@ private final class ScreenshotProbe {
         "ownAppKitEventsOnly": true, "captureGesturesOwnAppKitOnly": true,
         "globalSystemUISetupEventDispatched": false, "globalSystemUISetupEscapePairs": 0,
         "productionNativeEntryPoint": "capture-screenshot",
+        "deferredProductionNativeEntryPoints": ["select-screenshot", "capture-selected-region"],
         "physicalMultiDisplayTested": false, "monitorGapRuntimeTested": false
     ]
     var cases: [[String: Any]] = []
@@ -144,7 +145,8 @@ private final class ScreenshotProbe {
     var oracleOccluder: NSWindow?
     var owner: NSWindow?
     var savePanel: NSSavePanel?
-    let modes = ["window-phase1", "rectangle-phase1", "escape-cancel", "request-cancel", "window-phase2"]
+    let modes = ["window-phase1", "rectangle-phase1", "escape-cancel", "request-cancel", "window-phase2",
+        "deferred-window-phase2", "deferred-rectangle-phase2", "deferred-escape-cancel", "deferred-cancel-after-selection"]
     var index = 0
 
     init(reportURL: URL, directory: URL) { self.reportURL = reportURL; self.directory = directory }
@@ -746,7 +748,7 @@ private final class ScreenshotProbe {
         let mode = modes[index]
         if report["visibilityOraclePassed"] as? Bool == true {
             guard #available(macOS 14.0, *), let target = target,
-                  sourcePhase == (mode == "window-phase2" ? 2 : 1),
+                  sourcePhase == (mode == "window-phase2" || mode.hasPrefix("deferred-") ? 2 : 1),
                   !NSApplication.shared.windows.contains(where: { $0 is CaptureSelectionPanel && $0.isVisible }) else {
                 finish("failed", reason: "case-precondition-phase-or-selector-changed"); return
             }
@@ -771,7 +773,9 @@ private final class ScreenshotProbe {
         timer = Timer(timeInterval: 0.025, repeats: true) { [weak self] _ in self?.driveCase() }
         if let timer = timer { RunLoop.main.add(timer, forMode: .common) }
         DispatchQueue.global(qos: .userInitiated).async {
-            let response = nativeResponse(mode: "--capture-screenshot", input: Data(id.utf8))
+            let response = mode.hasPrefix("deferred-")
+                ? nativeResponse(mode: "--select-screenshot", input: Data(id.utf8))
+                : nativeResponse(mode: "--capture-screenshot", input: Data(id.utf8))
             DispatchQueue.main.async { self.completeCase(mode, id: id, response: response) }
         }
     }
@@ -806,7 +810,7 @@ private final class ScreenshotProbe {
                 guard let operation = operation else { throw NativeError("FIXTURE: missing own token") }
                 let cancelled = nativeResponse(mode: "--cancel-native-capture", input: Data(operation.utf8))
                 try fixtureNeed(cancelled["ok"] as? Bool == true, "request cancellation was rejected")
-            } else if mode == "escape-cancel" {
+            } else if mode.hasSuffix("escape-cancel") {
                 guard let event = NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: [], timestamp: ProcessInfo.processInfo.systemUptime,
                     windowNumber: panel.windowNumber, context: nil, characters: "\u{1b}", charactersIgnoringModifiers: "\u{1b}", isARepeat: false, keyCode: 53) else {
                     throw NativeError("FIXTURE: own Escape event creation failed")
@@ -814,11 +818,16 @@ private final class ScreenshotProbe {
                 NSApplication.shared.sendEvent(event)
             } else {
                 try send(.leftMouseDown, point: point, panel: panel)
-                let end = mode == "rectangle-phase1" ? CGPoint(x: point.x + 120, y: point.y + 80) : CGPoint(x: point.x + 1, y: point.y + 1)
-                if mode == "rectangle-phase1" { try send(.leftMouseDragged, point: end, panel: panel) }
+                let end = mode.contains("rectangle") ? CGPoint(x: point.x + 120, y: point.y + 80) : CGPoint(x: point.x + 1, y: point.y + 1)
+                if mode.contains("rectangle") { try send(.leftMouseDragged, point: end, panel: panel) }
                 try send(.leftMouseUp, point: end, panel: panel)
-                let expected = mode == "rectangle-phase1"
+                let expected = mode.contains("rectangle")
                     ? CGRect(x: point.x, y: point.y, width: 120, height: 80) : target.frame
+                if mode.hasPrefix("deferred-") {
+                    try fixtureNeed(view.handles.isEmpty && view.actionButtons.isEmpty,
+                                    "geometry-only selection unexpectedly created native adjustment controls")
+                    return
+                }
                 func assertAdjustment(_ frame: CGRect) throws {
                     try fixtureNeed(panel.isVisible && view.selection?.offsetBy(dx: panel.frame.minX, dy: panel.frame.minY) == frame,
                                     "released screenshot did not retain exact adjustable region")
@@ -826,7 +835,7 @@ private final class ScreenshotProbe {
                                     "native adjustment handles/actions are incomplete")
                 }
                 try assertAdjustment(expected)
-                if mode == "rectangle-phase1" {
+                if mode.contains("rectangle") {
                     func drag(_ first: CGPoint, _ last: CGPoint, _ frame: CGRect) throws {
                         try send(.leftMouseDown, point: first, panel: panel)
                         try send(.leftMouseDragged, point: last, panel: panel)
@@ -923,11 +932,20 @@ private final class ScreenshotProbe {
             try fixtureNeed(!NSApplication.shared.windows.contains(where: { $0 is CaptureSelectionPanel && $0.isVisible }), "native selector left visible panels")
             try fixtureNeed(response["text"] == nil, "F1 unexpectedly invoked OCR")
             try verifyCaseSource()
+            if mode.hasPrefix("deferred-") && !mode.hasSuffix("escape-cancel")
+                && response["deferredCaptureComplete"] as? Bool != true {
+                try captureDeferredCase(mode, selection: response)
+                return
+            }
             var record: [String: Any] = ["mode": mode, "ok": true, "hoverOutlineVerified": true, "visiblePanelsAfter": 0,
                                           "exactSelectorRetirementVerified": true, "selectorRetirementObservations": selectorRetirementObservations,
                                           "exactOwnedSourceRevalidated": true, "ownAppKitEventDispatched": mode != "request-cancel",
-                                          "nativeCancellationEndpointDispatched": mode == "request-cancel"]
-            if mode == "escape-cancel" || mode == "request-cancel" {
+                                          "nativeCancellationEndpointDispatched": mode == "request-cancel" || mode == "deferred-cancel-after-selection"]
+            if mode.hasPrefix("deferred-") && !mode.hasSuffix("escape-cancel") {
+                record["deferredGeometryOnlyVerified"] = true
+                record["deferredCaptureDispatched"] = true
+            }
+            if mode.contains("cancel") {
                 try fixtureNeed(response["ok"] as? Bool == false && response["imageBase64"] == nil,
                                 "cancelled native screenshot returned pixels")
                 try fixtureNeed((response["error"] as? String)?.hasPrefix("CANCELLED:") == true, "native cancellation had an unrelated error")
@@ -938,19 +956,21 @@ private final class ScreenshotProbe {
                       let image = CGImageSourceCreateImageAtIndex(source, 0, nil), let target = target else {
                     throw NativeError("FIXTURE: real native screenshot did not return a decodable PNG")
                 }
-                try fixtureNeed(adjustmentVerified && response["initialAction"] as? String == "select",
-                                "native screenshot bypassed explicit adjustment action")
-                record["nativeAdjustmentVerified"] = true
-                record["nativeAction"] = "select"
-                record["nativeActionClickCount"] = 1
-                if mode == "rectangle-phase1" {
-                    try fixtureNeed(adjustmentMoveResizeVerified, "native rectangle move/resize was not verified")
-                    record["nativeAdjustmentMoveResizeRestored"] = true
+                if !mode.hasPrefix("deferred-") {
+                    try fixtureNeed(adjustmentVerified && response["initialAction"] as? String == "select",
+                                    "native screenshot bypassed explicit adjustment action")
+                    record["nativeAdjustmentVerified"] = true
+                    record["nativeAction"] = "select"
+                    record["nativeActionClickCount"] = 1
+                    if mode.contains("rectangle") {
+                        try fixtureNeed(adjustmentMoveResizeVerified, "native rectangle move/resize was not verified")
+                        record["nativeAdjustmentMoveResizeRestored"] = true
+                    }
                 }
-                let width = Int((mode == "rectangle-phase1" ? 120 : target.frame.width) * sourceScale)
-                let height = Int((mode == "rectangle-phase1" ? 80 : target.frame.height) * sourceScale)
+                let width = Int((mode.contains("rectangle") ? 120 : target.frame.width) * sourceScale)
+                let height = Int((mode.contains("rectangle") ? 80 : target.frame.height) * sourceScale)
                 try fixtureNeed(image.width == width && image.height == height, "real screenshot dimensions differ from exact source/drag frame")
-                try verifyPixels(image, phase: mode == "window-phase2" ? 2 : 1, fullWindow: mode != "rectangle-phase1")
+                try verifyPixels(image, phase: mode == "window-phase2" || mode.hasPrefix("deferred-") ? 2 : 1, fullWindow: !mode.contains("rectangle"))
                 record["imageWidth"] = width; record["imageHeight"] = height
                 record["generatedVisiblePixelsVerified"] = true; record["ownOverlayPixelsAbsent"] = true
             }
@@ -965,6 +985,48 @@ private final class ScreenshotProbe {
                 }
             } else { recordCompletedCase(record) }
         } catch { finish("failed", reason: String(describing: error)) }
+    }
+
+    // Exercise the production metadata-only entry followed by its real deferred
+    // pixel entry. Keep the original selector retirement and full pixel oracles.
+    func captureDeferredCase(_ mode: String, selection: [String: Any]) throws {
+        guard selection["ok"] as? Bool == true, selection["imageBase64"] == nil,
+              selection["text"] == nil, selection["initialAction"] == nil,
+              let geometry = selection["captureGeometry"] as? [String: Double],
+              let plan = selection["selectionPlan"] as? [String: Any], let target = target else {
+            throw NativeError("FIXTURE: selection entry did not return metadata-only geometry")
+        }
+        let rectangle = mode.contains("rectangle")
+        let expected = rectangle ? CGRect(x: target.frame.minX + 80, y: target.frame.minY + 80,
+                                          width: 120, height: 80) : target.frame
+        let primary = CGDisplayBounds(CGMainDisplayID()).height
+        try fixtureNeed(geometry["x"] == Double(expected.minX)
+                        && geometry["y"] == Double(primary - expected.maxY)
+                        && geometry["width"] == Double(expected.width)
+                        && geometry["height"] == Double(expected.height), "deferred selection geometry changed")
+        let registered = nativeResponse(mode: "--begin-native-capture")
+        guard registered["ok"] as? Bool == true, let id = registered["operationId"] as? String else {
+            throw NativeError("FIXTURE: deferred operation registration failed")
+        }
+        operation = id
+        let rect: [String: Double] = ["x": Double(expected.minX), "y": Double(primary - expected.maxY),
+                                     "width": Double(expected.width), "height": Double(expected.height)]
+        let input = try JSONSerialization.data(withJSONObject: ["operationId": id, "plan": plan, "rect": rect])
+        if mode == "deferred-cancel-after-selection" {
+            let cancelled = nativeResponse(mode: "--cancel-native-capture", input: Data(id.utf8))
+            try fixtureNeed(cancelled["ok"] as? Bool == true, "deferred cancellation was rejected")
+        }
+        report["activeCaseStage"] = "production-deferred-region-capture"
+        DispatchQueue.global(qos: .userInitiated).async {
+            var response = nativeResponse(mode: "--capture-selected-region", input: input)
+            _ = nativeResponse(mode: "--end-native-capture", input: Data(id.utf8))
+            response["deferredCaptureComplete"] = true
+            DispatchQueue.main.async {
+                guard !self.finished, self.activeCase == mode, self.operation == id else { return }
+                self.operation = nil
+                self.acceptCaseResponse(mode, response: response)
+            }
+        }
     }
 
     func recordCompletedCase(_ record: [String: Any]) {

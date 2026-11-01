@@ -16,10 +16,10 @@ class ScreenshotOverlayContract(unittest.TestCase):
         self.assertIn('macos-private-api', cargo['dependencies']['tauri']['features'])
         self.assertIn('.transparent(true)', source)
         ready = source.split('pub async fn screenshot_editor_ready(', 1)[1].split('pub async fn focus_screenshot_overlay(', 1)[0]
-        self.assertLess(ready.index('capture_geometry.as_ref()'), ready.index('.show()'))
+        self.assertLess(ready.index('with_presentable_geometry(session_id'), ready.index('.show()'))
         self.assertIn('return super::screenshot_overlay::show(', ready)
         start = source.split('pub fn start_capture(', 1)[1].split('#[cfg(test)]', 1)[0]
-        self.assertIn('capture_screenshot_with_geometry_cancelable', start)
+        self.assertIn('select_screenshot_cancelable', start)
         self.assertNotIn('set_image(', start)
         self.assertNotIn('save_new_png(', start)
         self.assertIn('super::screenshot_overlay::hide(&window)', start)
@@ -32,7 +32,7 @@ class ScreenshotOverlayContract(unittest.TestCase):
         dismiss = source.split('fn dismiss_current(', 1)[1].split('#[cfg(test)]', 1)[0]
         self.assertLess(dismiss.index('dismiss()?'), dismiss.index('*state = SessionState::default()'))
         close = source.split('pub async fn close_screenshot_editor(', 1)[1].split('pub async fn restart_screenshot_capture(', 1)[0]
-        self.assertLess(close.index('dismiss_current('), close.index('emit_cleared('))
+        self.assertLess(close.index('dismiss_revision('), close.index('emit_cleared('))
     def test_windows_geometry_is_from_selected_pixels_and_process_finishes(self):
         source = read('src-tauri/src/windows_capture_native.rs')
         self.assertRegex(source, r'selected\.x,\s*selected\.y,\s*selected\.width,\s*selected\.height')

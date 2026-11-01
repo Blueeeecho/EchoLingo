@@ -1,14 +1,24 @@
-:root { font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif; color-scheme:light; --surface:#fff; --bg:#f6f7fb; --text:#292b3e; --secondary:#74778b; --border:#e7e7ef; --accent:#7862d8; --soft:#eeebfa; color:var(--text); background:var(--bg); }
-@media(prefers-color-scheme:dark) { :root { color-scheme:dark; --surface:#20212d; --bg:#171821; --text:#e4e4ef; --secondary:#a3a4b7; --border:#30313e; --accent:#aa96f0; --soft:#342d4d; } }
+:root { font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif; color-scheme:light; --surface:#fffffff0; --bg:#fff; --text:#292b3e; --accent:#6861ce; color:var(--text); background:var(--bg); }
+@media(prefers-color-scheme:dark) { :root { color-scheme:dark; --surface:#252632ee; --bg:#171821; --text:#eeeef6; --accent:#b6a4ff; } }
 * { box-sizing:border-box; } [hidden] { display:none!important; }
-body { margin:0; height:100vh; display:flex; flex-direction:column; overflow:hidden; font-size:11px; }
-header { flex:none; min-height:38px; padding:3px 7px 3px 10px; display:flex; align-items:center; justify-content:space-between; gap:6px; background:var(--surface); border-bottom:1px solid var(--border); }
-#image-info { color:var(--secondary); font-variant-numeric:tabular-nums; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
-.actions { display:flex; flex-shrink:0; gap:3px; } button { display:flex; gap:4px; align-items:center; justify-content:center; font:inherit; color:inherit; cursor:pointer; min-height:30px; min-width:30px; padding:5px; border:0; border-radius:6px; background:transparent; }
-button:hover { background:var(--soft); } button:disabled { opacity:.4; cursor:default; } button:focus-visible { outline:2px solid var(--accent); outline-offset:-2px; }
-.pin-icon { width:16px; height:16px; fill:none; stroke:currentColor; stroke-width:1.8; stroke-linecap:round; stroke-linejoin:round; transform:rotate(-35deg); }
-button[aria-pressed=true] { color:var(--accent); } button[aria-pressed=true] .pin-icon { transform:none; fill:currentColor; }
-#close-pin { font-size:21px; } #close-pin:hover { color:#c65360; }
-main { flex:1; min-height:0; min-width:0; display:flex; align-items:center; justify-content:center; overflow:hidden; }
+body { margin:0; height:100vh; overflow:hidden; font-size:11px; }
+main { position:absolute; inset:0; display:flex; align-items:center; justify-content:center; overflow:hidden; cursor:grab; }
+main:active { cursor:grabbing; }
 img { width:100%; height:100%; object-fit:contain; user-select:none; }
-#pin-status { flex:none; margin:0; padding:7px 10px; overflow-wrap:anywhere; color:var(--secondary); max-height:40vh; overflow:auto; }
+.actions { position:fixed; top:7px; right:7px; z-index:3; display:flex; gap:4px; opacity:.25; transition:opacity .12s; }
+body:hover .actions, .actions:focus-within { opacity:1; }
+button { width:28px; height:28px; display:flex; align-items:center; justify-content:center; padding:5px; border:1px solid #80809040; border-radius:6px; background:var(--surface); box-shadow:0 1px 3px #0002; color:var(--text); cursor:pointer; }
+button:hover { color:var(--accent); } button:disabled { opacity:.4; cursor:default; } button:focus-visible { outline:2px solid var(--accent); outline-offset:1px; }
+button svg { width:18px; height:18px; fill:none; stroke:currentColor; stroke-width:2.2; stroke-linecap:round; stroke-linejoin:round; }
+.pin-icon { transform:rotate(-35deg); } button[aria-pressed=true] { color:var(--accent); } button[aria-pressed=true] .pin-icon { transform:none; } button[aria-pressed=true] .pin-icon path:first-child { fill:currentColor; fill-opacity:.55; }
+#close-pin:hover { color:#d65765; }
+#pin-status { position:fixed; bottom:7px; left:7px; right:7px; z-index:4; margin:0; padding:7px; border-radius:5px; background:var(--surface); overflow-wrap:anywhere; max-height:40vh; overflow:auto; }
+#resize-edges { position:fixed; inset:0; pointer-events:none; z-index:5; }
+#resize-edges i { position:absolute; pointer-events:auto; }
+[data-direction=North], [data-direction=South] { left:8px; right:8px; height:5px; cursor:ns-resize; }
+[data-direction=North] { top:0; } [data-direction=South] { bottom:0; }
+[data-direction=East], [data-direction=West] { top:8px; bottom:8px; width:5px; cursor:ew-resize; }
+[data-direction=East] { right:0; } [data-direction=West] { left:0; }
+[data-direction=NorthEast], [data-direction=NorthWest], [data-direction=SouthEast], [data-direction=SouthWest] { width:8px; height:8px; }
+[data-direction=NorthEast] { right:0; top:0; cursor:nesw-resize; } [data-direction=NorthWest] { left:0; top:0; cursor:nwse-resize; }
+[data-direction=SouthEast] { right:0; bottom:0; cursor:nwse-resize; } [data-direction=SouthWest] { left:0; bottom:0; cursor:nesw-resize; }

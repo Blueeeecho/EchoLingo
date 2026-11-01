@@ -21,7 +21,7 @@ pub struct Bounds {
     pub width: f64,
     pub height: f64,
 }
-fn layout(geometry: &ScreenshotGeometry, coordinate_scale: f64) -> Result<Layout, String> {
+pub(crate) fn layout(geometry: &ScreenshotGeometry, coordinate_scale: f64) -> Result<Layout, String> {
     geometry.validate()?;
     if !coordinate_scale.is_finite() || coordinate_scale <= 0.0 || coordinate_scale > 8.0 {
         return Err("SCREENSHOT_GEOMETRY: 无法验证截图显示缩放".into());
@@ -200,15 +200,22 @@ pub fn hide(window: &tauri::WebviewWindow) -> Result<(), String> {
     crate::platform::hide_webview_window(window)
 }
 #[cfg(target_os = "macos")]
-pub fn focus_text(_window: &tauri::WebviewWindow) -> Result<(), String> {
-    Ok(())
+pub fn focus_text(window: &tauri::WebviewWindow) -> Result<(), String> {
+    extern "C" { fn echolingo_focus_screenshot_overlay(window: *mut std::ffi::c_void) -> i32; }
+    let native = window.ns_window().map_err(|_| "SCREENSHOT_WINDOW: 无法访问截图面板")?;
+    if unsafe { echolingo_focus_screenshot_overlay(native) } == 0 { Ok(()) }
+    else { Err("SCREENSHOT_WINDOW: 无法聚焦截图文字输入".into()) }
 }
 
 #[cfg(target_os = "windows")]
 #[path = "windows_screenshot_overlay.rs"]
 mod windows;
 #[cfg(target_os = "windows")]
-pub use windows::{focus_text, hide, prepare, show};
+pub use windows::{focus_text, hide, prepare, show, suspend};
+#[cfg(target_os = "windows")]
+pub fn resume(window: &tauri::WebviewWindow, _geometry: &ScreenshotGeometry, _id: u64) -> Result<(), String> {
+    windows::resume(window)
+}
 
 #[cfg(not(any(target_os = "macos", target_os = "windows")))]
 pub fn prepare(
@@ -320,3 +327,22 @@ mod tests {
         assert!(layout(&value, 1.0).is_err());
     }
 }
+
+#[cfg(target_os = "macos")]
+pub fn suspend(window: &tauri::WebviewWindow) -> Result<(), String> {
+    extern "C" { fn echolingo_suspend_screenshot_overlay(window: *mut std::ffi::c_void) -> i32; }
+    let native = window.ns_window().map_err(|_| "SCREENSHOT_WINDOW: 无法访问截图面板")?;
+    if unsafe { echolingo_suspend_screenshot_overlay(native) } == 0 { Ok(()) }
+    else { Err("SCREENSHOT_WINDOW: 无法暂时隐藏截图面板".into()) }
+}
+#[cfg(target_os = "macos")]
+pub fn resume(window: &tauri::WebviewWindow, geometry: &ScreenshotGeometry, _id: u64) -> Result<(), String> {
+    extern "C" { fn echolingo_resume_screenshot_overlay(window: *mut std::ffi::c_void, x: f64, y: f64, width: f64, height: f64) -> i32; }
+    let native = window.ns_window().map_err(|_| "SCREENSHOT_WINDOW: 无法访问截图面板")?;
+    if unsafe { echolingo_resume_screenshot_overlay(native, geometry.screen_x, geometry.screen_y, geometry.screen_width, geometry.screen_height) } == 0 { Ok(()) }
+    else { Err("SCREENSHOT_WINDOW: 无法恢复截图面板".into()) }
+}
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+pub fn suspend(_window: &tauri::WebviewWindow) -> Result<(), String> { Err("SCREENSHOT_PLATFORM: 不支持的平台".into()) }
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+pub fn resume(_window: &tauri::WebviewWindow, _geometry: &ScreenshotGeometry, _id: u64) -> Result<(), String> { Err("SCREENSHOT_PLATFORM: 不支持的平台".into()) }

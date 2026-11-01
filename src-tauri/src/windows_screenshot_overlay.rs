@@ -329,6 +329,30 @@ pub fn show(
     }
     Ok(())
 }
+// Hide only for final pixels. Preserve the exact HWND, host and keyboard router;
+// dismissal still uses hide() and its existing owned-key drain/restore policy.
+pub fn suspend(window: &tauri::WebviewWindow) -> Result<(), String> {
+    verify_retained_host(window)?;
+    crate::platform::hide_webview_window(window)
+}
+pub fn resume(window: &tauri::WebviewWindow) -> Result<(), String> {
+    verify_retained_host(window)?;
+    crate::platform::show_without_activation(window)
+}
+fn verify_retained_host(window: &tauri::WebviewWindow) -> Result<(), String> {
+    let native = window
+        .hwnd()
+        .map_err(|_| "SCREENSHOT_WINDOW: 无法访问截图窗口")?
+        .0;
+    let host = HOST
+        .lock()
+        .map_err(|_| "SCREENSHOT_WINDOW: 截图窗口状态不可用")?;
+    let host = host
+        .as_ref()
+        .filter(|host| host.window == native as isize)
+        .ok_or("SCREENSHOT_WINDOW: 原地截图窗口未准备")?;
+    verify_viewport(native, host.frame, host.dpi)
+}
 pub fn hide(window: &tauri::WebviewWindow) -> Result<(), String> {
     stop_keys();
     crate::platform::hide_webview_window(window)?;

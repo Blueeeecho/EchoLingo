@@ -643,7 +643,7 @@ public static partial class EchoLingoApplicationSmoke {
             return true;},IntPtr.Zero);
         return count;
     }
-    static readonly HashSet<string> CaptureFields=new HashSet<string>(new string[]{
+    static readonly HashSet<string> CaptureFields=new HashSet<string>(new string[]{"nativeDeferredCapture",
         "ocrInvocationCount","nativeCaptureBackend","attemptId","attemptStage","resultOk","displayChangedError","helperResponseReceived","helperElapsedMilliseconds",
         "nativeHostReady","nativeHostStopped","nativeHostFailed","hookRunningAfterStop","inputPlaneRemainingAfterCleanup",
         "hostSessionReserved","hostOwnedButtons","hostSessionClosing","hostEndRequested","cancellationRequested","displayInvalidationReason","currentHostSessionReserved","currentHostOwnedButtons","currentHostSessionClosing","currentHostEndRequested"});

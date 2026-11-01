@@ -17,7 +17,7 @@ fi
 private="$(mktemp -d "${TMPDIR:-/tmp}/echolingo-screenshot-native.XXXXXX")"
 trap 'rm -rf "$private"' EXIT
 binary="$private/screenshot-fixture"
-if ! swiftc "$repo_root/src-tauri/native/macos.swift" "$repo_root/src-tauri/native/macos_capture.swift" \
+if ! swiftc "$repo_root/src-tauri/native/macos.swift" "$repo_root/src-tauri/native/macos_capture.swift" "$repo_root/src-tauri/native/macos_ocr.swift" \
     "$repo_root/src-tauri/native/macos_window.swift" "$repo_root/tests/macos-screenshot-native-fixture.swift" \
     -D ECHOLINGO_LIBRARY -parse-as-library -O -target "$(uname -m)-apple-macosx12.0" \
     -framework AppKit -framework Vision -framework ApplicationServices -framework CoreText \
@@ -42,7 +42,7 @@ report['nativeProcessExitCode'] = code
 report['fixtureBinarySha256'] = hashlib.sha256(binary.read_bytes()).hexdigest()
 report['productionSourceSha256'] = {
     str(path): hashlib.sha256((root/path).read_bytes()).hexdigest()
-    for path in map(Path, ['src-tauri/native/macos.swift','src-tauri/native/macos_capture.swift','src-tauri/native/macos_window.swift'])
+    for path in map(Path, ['src-tauri/native/macos.swift','src-tauri/native/macos_capture.swift', 'src-tauri/native/macos_ocr.swift','src-tauri/native/macos_window.swift'])
 }
 report_path.write_text(json.dumps(report, sort_keys=True) + '\n')
 PY

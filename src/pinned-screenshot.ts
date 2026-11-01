@@ -19,7 +19,6 @@ toggle.addEventListener('click', async () => {
     toggle.setAttribute('aria-pressed', String(pinned));
     toggle.setAttribute('aria-label', pinned ? '取消置顶' : '置顶贴图');
     toggle.title = pinned ? '取消置顶（图片仍会保留）' : '固定在其他窗口上方';
-    document.querySelector('#pin-label')!.textContent = pinned ? '已置顶' : '置顶';
     status.textContent = ''; status.hidden = true;
   } catch (error) { status.hidden = false; status.textContent = `无法修改置顶状态：${errorText(error)}`; }
   finally { busy = false; toggle.disabled = closing; }
@@ -45,7 +44,6 @@ void (async () => {
     await image.decode();
     if (image.naturalWidth !== value.width || image.naturalHeight !== value.height) throw new Error('贴图尺寸不一致');
     image.hidden = false;
-    document.querySelector('#image-info')!.textContent = `${value.width} × ${value.height}`;
     status.textContent = ''; status.hidden = true;
     // A hidden native WebView can throttle animation frames: decoded pixels
     // and prepared DOM, not a pre-show requestAnimationFrame, gate the handoff.
@@ -57,3 +55,18 @@ void (async () => {
     await invoke('pinned_screenshot_ready', { success: false }).catch(() => {});
   }
 })();
+
+// Only image/background drags move the frameless native window. The two
+// controls and resize edges have independent hit targets and never initiate drag.
+document.querySelector('main')!.addEventListener('pointerdown', event => {
+  if (!(event instanceof PointerEvent) || event.button !== 0 || closing || image.hidden || !isTauri()) return;
+  event.preventDefault();
+  void invoke('start_pinned_screenshot_drag').catch(error => { status.hidden = false; status.textContent = `无法移动贴图：${errorText(error)}`; });
+});
+document.querySelector('#resize-edges')!.addEventListener('pointerdown', event => {
+  if (!(event instanceof PointerEvent) || event.button !== 0 || closing || !isTauri()) return;
+  const direction = (event.target as HTMLElement).dataset.direction;
+  if (!direction) return;
+  event.preventDefault(); event.stopPropagation();
+  void invoke('resize_pinned_screenshot', { direction: direction.toLowerCase() }).catch(error => { status.hidden = false; status.textContent = `无法调整贴图大小：${errorText(error)}`; });
+});

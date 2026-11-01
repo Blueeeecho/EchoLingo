@@ -152,7 +152,7 @@ public static partial class EchoLingoApplicationSmoke {
     static void ScreenshotDrag(Process app,IntPtr editor,string tool,Size pixels,Point first,Point last,bool initialTool=false) {
         if(initialTool){WaitFor(delegate{AutomationElement button=ScreenshotButton(editor,tool);object pattern;
             return button!=null&&button.Current.IsEnabled&&!button.Current.IsOffscreen&&button.TryGetCurrentPattern(TogglePattern.Pattern,out pattern)&&((TogglePattern)pattern).Current.ToggleState==ToggleState.On;
-        },5,"Native selected tool was not claimed by the editor.",app);}else ScreenshotInvoke(app,editor,tool);SetForegroundWindow(editor);
+        },5,"Web selected tool was not ready in the retained editor.",app);}else ScreenshotInvoke(app,editor,tool);SetForegroundWindow(editor);
         AutomationElement canvas=null;WaitFor(delegate{return (canvas=Element(editor,ScreenshotCanvasName))!=null&&!canvas.Current.IsOffscreen;},10,"Actual image canvas missing from UIAutomation.",app);
         System.Windows.Rect bounds=canvas.Current.BoundingRectangle;Assert(bounds.Width>0&&bounds.Height>0,"Actual image canvas has no screen bounds.");
         Assert(first.X<last.X&&first.Y<last.Y,"Fixture annotation rectangle must be ordered.");
@@ -161,9 +161,15 @@ public static partial class EchoLingoApplicationSmoke {
         Assert(bounds.Width>=pixels.Width&&bounds.Height>=pixels.Height,"Fixture requires actual-size or larger image display.");
         Point a=new Point((int)Math.Ceiling(bounds.X+first.X*bounds.Width/pixels.Width),(int)Math.Ceiling(bounds.Y+first.Y*bounds.Height/pixels.Height));
         Point b=new Point((int)Math.Floor(bounds.X+last.X*bounds.Width/pixels.Width),(int)Math.Floor(bounds.Y+last.Y*bounds.Height/pixels.Height));
+        long initialAttempt=initialTool?CaptureNumber(ScreenshotCaptureHealth(),"attemptId"):0;
         ScreenshotMove(app,editor,a);INPUT down=new INPUT();down.data.mouse.flags=2;Send(new INPUT[]{down});
-        try{Thread.Sleep(60);ScreenshotMove(app,editor,b);Thread.Sleep(60);}
+        try{Thread.Sleep(60);ScreenshotMove(app,editor,b);Thread.Sleep(60);
+            if(initialTool)Assert(IsWindowVisible(editor)&&CaptureNumber(ScreenshotCaptureHealth(),"attemptId")==initialAttempt,"First stroke captured pixels before its owned release.");
+        }
         finally{if(ForegroundPid()==app.Id){INPUT up=new INPUT();up.data.mouse.flags=4;Send(new INPUT[]{up});}}
+        if(initialTool){WaitFor(delegate{AutomationElement undo=ScreenshotButton(editor,"\u64a4\u9500");return IsWindowVisible(editor)&&ScreenshotWindow(app.Id)==editor&&undo!=null&&undo.Current.IsEnabled;},10,"First released stroke did not render in the same editor.",app);
+            Assert(CaptureNumber(ScreenshotCaptureHealth(),"attemptId")==initialAttempt+1,"First released stroke must capture pixels exactly once.");ScreenshotFirstStrokeReleaseChecks++;
+        }
     }
     static void ScreenshotContinueOpen(Process app,IntPtr owner) {
         bool confirmed=false;
@@ -416,98 +422,125 @@ public static partial class EchoLingoApplicationSmoke {
         IntPtr foreground=GetForegroundWindow();uint process=0;if(foreground!=IntPtr.Zero)GetWindowThreadProcessId(foreground,out process);
         return new Dictionary<string,object>{{"isGeneratedSource",foreground==source},{"isEditor",editor!=IntPtr.Zero&&foreground==editor},{"isPin",pin!=IntPtr.Zero&&foreground==pin},{"isMain",main!=IntPtr.Zero&&foreground==main},{"isApp",process==app.Id},{"isZero",foreground==IntPtr.Zero}};
     }
-    static List<IntPtr> ScreenshotNativeRoles(uint helper,string role) {
-        List<IntPtr> result=new List<IntPtr>();
-        EnumWindows(delegate(IntPtr window,IntPtr unused){uint pid;GetWindowThreadProcessId(window,out pid);
-            if(pid==helper&&IsWindowVisible(window)&&NativeAdjustmentRole(window)==role&&RequireNativeChild(helper,window)) {
-                long required=0x08000000L|0x00080000L|0x20L|0x80L|8L,style=GetWindowLongPtr(window,-20).ToInt64();
-                Assert((style&required)==required,"Visible native adjustment role lost passive/topmost/tool/layered/transparent styles.");
-                RECT r;Assert(GetWindowRect(window,out r),"Visible native adjustment role has no rectangle.");Rectangle bounds=Rectangle.FromLTRB(r.left,r.top,r.right,r.bottom);
-                Assert(bounds.Width>0&&bounds.Height>0&&bounds.Width<=(role=="handle"?64:512)&&bounds.Height<=(role=="handle"?64:240),"Native adjustment role exceeded its bounded dimensions.");
-                if(role!="handle")Assert(Screen.FromHandle(window).WorkingArea.Contains(bounds),"Native toolbar role escaped its current monitor work area.");
-                result.Add(window);
-            }return true;
-        },IntPtr.Zero);return result;
+    static Func<Dictionary<string,object>> ScreenshotCaptureHealth;
+    static long ScreenshotInitialAttempt;
+    static int ScreenshotFirstStrokeReleaseChecks;
+    static readonly Dictionary<uint,IntPtr> ScreenshotSelectionEditors=new Dictionary<uint,IntPtr>();
+    static Rectangle ScreenshotWebSelection(IntPtr editor) {
+        AutomationElement canvas=Element(editor,ScreenshotCanvasName);if(canvas==null||canvas.Current.IsOffscreen)return Rectangle.Empty;
+        System.Windows.Rect box=canvas.Current.BoundingRectangle;
+        return new Rectangle((int)Math.Round(box.X),(int)Math.Round(box.Y),(int)Math.Round(box.Width),(int)Math.Round(box.Height));
     }
-    static Rectangle ScreenshotNativeSelection(uint helper) {
-        List<IntPtr> handles=ScreenshotNativeRoles(helper,"handle");if(handles.Count!=8)return Rectangle.Empty;
-        int left=Int32.MaxValue,top=Int32.MaxValue,right=Int32.MinValue,bottom=Int32.MinValue;HashSet<Point> centers=new HashSet<Point>();
-        foreach(IntPtr handle in handles){RECT r;Assert(GetWindowRect(handle,out r),"Owned adjustment handle disappeared.");
-            Point center=new Point(r.left+(r.right-r.left)/2,r.top+(r.bottom-r.top)/2);centers.Add(center);
-            left=Math.Min(left,center.X);top=Math.Min(top,center.Y);right=Math.Max(right,center.X);bottom=Math.Max(bottom,center.Y);
-        }
-        Assert(centers.Count==8,"Adjustment did not expose eight distinct handles.");return Rectangle.FromLTRB(left,top,right,bottom);
+    static IntPtr ScreenshotRetainedEditor(Process app,uint helper) {
+        IntPtr expected;Assert(ScreenshotSelectionEditors.TryGetValue(helper,out expected)&&expected!=IntPtr.Zero&&ScreenshotWindow(app.Id)==expected&&IsWindow(expected),"Persistent screenshot editor HWND was replaced.");return expected;
     }
     static void ScreenshotWaitAdjustment(Form form,Process app,uint helper,Rectangle expected,Dictionary<string,object> evidence) {
+        IntPtr editor=IntPtr.Zero;
         WaitFor(delegate{
-            if(ProcessExited(helper))return false;
-            Rectangle actual=ScreenshotNativeSelection(helper);int actions=0;
-            foreach(string action in new string[]{"select","rectangle","arrow","text","number","pen","highlight","mosaic","solid","crop","copy","save","pin","cancel"}) {
-                int count=ScreenshotNativeRoles(helper,action).Count;Assert(count<=1,"Duplicate native screenshot action.");actions+=count;
-            }
-            return actual==expected&&actions==14;
-        },10,"Released F1 did not remain in exact native adjustment geometry with eight handles and all actions.",app);
-        RequireForeground(form);IntPtr editor=ScreenshotWindow(app.Id);Assert(editor==IntPtr.Zero||!IsWindowVisible(editor),"F1 opened editor before choosing a native action.");
-        evidence["nativeAdjustmentVisible"]=true;evidence["nativeAdjustmentHandleCount"]=8;evidence["initialNativeAdjustmentPreservedSourceForeground"]=true;
+            editor=ScreenshotWindow(app.Id);if(editor==IntPtr.Zero||!IsWindowVisible(editor)||!ProcessExited(helper)||AppOverlays(app.Id)!=0)return false;
+            AutomationElement select=ScreenshotButton(editor,"\u9009\u62e9"),undo=ScreenshotButton(editor,"\u64a4\u9500");object pattern;
+            return ScreenshotWebSelection(editor)==expected&&select!=null&&select.Current.IsEnabled&&!select.Current.IsOffscreen&&select.TryGetCurrentPattern(TogglePattern.Pattern,out pattern)&&((TogglePattern)pattern).Current.ToggleState==ToggleState.On&&undo!=null&&!undo.Current.IsEnabled;
+        },10,"Released F1 did not hand off exact geometry to the persistent Web editor.",app);
+        RequireForeground(form);Assert((GetWindowLongPtr(editor,-20).ToInt64()&0x08000000L)!=0,"Geometry editor lost passive NOACTIVATE style.");
+        ScreenshotSelectionEditors[helper]=editor;
+        evidence["selectionAttemptId"]=CaptureNumber(ScreenshotCaptureHealth(),"attemptId");evidence["webAdjustmentVisible"]=true;evidence["initialWebAdjustmentPreservedSourceForeground"]=true;evidence["selectionHelperExitedBeforeAdjustment"]=true;
     }
-    static void ScreenshotNativePoint(Form form,uint helper,Point point) {
+    static void ScreenshotWebPoint(Form form,Process app,IntPtr editor,Point point) {
         MoveGenerated(form,point);RequireForeground(form);IntPtr target=GetAncestor(WindowFromPoint(point),2);uint pid;GetWindowThreadProcessId(target,out pid);
-        Assert(pid==helper&&IsWindowVisible(target)&&RequireNativeChild(helper,target),"Native adjustment input would target a foreign window; refused.");
+        Assert(target==editor&&pid==app.Id&&IsWindowVisible(target),"Web adjustment input would target a foreign window; refused.");
     }
-    static void ScreenshotNativeDrag(Form form,Process app,uint helper,Point first,Point last,Rectangle expected) {
-        ScreenshotNativePoint(form,helper,first);INPUT down=new INPUT();down.data.mouse.flags=2;INPUT up=new INPUT();up.data.mouse.flags=4;Send(new INPUT[]{down});
-        try{Thread.Sleep(60);ScreenshotNativePoint(form,helper,last);Thread.Sleep(60);}finally{Send(new INPUT[]{up});}
-        WaitFor(delegate{return ScreenshotNativeSelection(helper)==expected;},10,"Native adjustment gesture did not adopt exact expected geometry.",app);RequireForeground(form);
+    static void ScreenshotWebDrag(Form form,Process app,uint helper,Point first,Point last,Rectangle expected) {
+        IntPtr editor=ScreenshotRetainedEditor(app,helper);ScreenshotWebPoint(form,app,editor,first);INPUT down=new INPUT();down.data.mouse.flags=2;INPUT up=new INPUT();up.data.mouse.flags=4;Send(new INPUT[]{down});
+        try{Thread.Sleep(60);ScreenshotWebPoint(form,app,editor,last);Thread.Sleep(60);}finally{Send(new INPUT[]{up});}
+        WaitFor(delegate{return ScreenshotRetainedEditor(app,helper)==editor&&IsWindowVisible(editor)&&ScreenshotWebSelection(editor)==expected;},10,"Web adjustment gesture did not adopt exact expected geometry.",app);RequireForeground(form);
     }
-    static void ScreenshotNativeMoveResize(Form form,Process app,uint helper,Rectangle original,Dictionary<string,object> evidence) {
+    static void ScreenshotWebMoveResize(Form form,Process app,uint helper,Rectangle original,Dictionary<string,object> evidence) {
+        long before=CaptureNumber(ScreenshotCaptureHealth(),"attemptId");
         Point center=new Point(original.Left+original.Width/2,original.Top+original.Height/2);
         Rectangle moved=new Rectangle(original.X+12,original.Y+8,original.Width,original.Height);
-        ScreenshotNativeDrag(form,app,helper,center,new Point(center.X+12,center.Y+8),moved);
-        ScreenshotNativeDrag(form,app,helper,new Point(center.X+12,center.Y+8),center,original);
-        Rectangle resized=new Rectangle(original.X,original.Y,original.Width+16,original.Height+8);
-        ScreenshotNativeDrag(form,app,helper,new Point(original.Right,original.Bottom),new Point(resized.Right,resized.Bottom),resized);
-        ScreenshotNativeDrag(form,app,helper,new Point(resized.Right,resized.Bottom),new Point(original.Right,original.Bottom),original);
-        evidence["nativeAdjustmentMoveResizeVerified"]=true;evidence["nativeAdjustmentGeometryRestored"]=true;
+        ScreenshotWebDrag(form,app,helper,center,new Point(center.X+12,center.Y+8),moved);
+        ScreenshotWebDrag(form,app,helper,new Point(center.X+12,center.Y+8),center,original);
+        int[,] edges=new int[,]{{0,-1},{1,-1},{1,0},{1,1},{0,1},{-1,1},{-1,0},{-1,-1}};
+        for(int i=0;i<8;i++) {
+            int horizontal=edges[i,0],vertical=edges[i,1],dx=-horizontal*8,dy=-vertical*8;
+            Point handle=new Point(horizontal<0?original.Left:horizontal>0?original.Right:center.X,vertical<0?original.Top:vertical>0?original.Bottom:center.Y);
+            Rectangle resized=Rectangle.FromLTRB(original.Left+(horizontal<0?dx:0),original.Top+(vertical<0?dy:0),original.Right+(horizontal>0?dx:0),original.Bottom+(vertical>0?dy:0));
+            Point next=new Point(handle.X+dx,handle.Y+dy);
+            ScreenshotWebDrag(form,app,helper,handle,next,resized);ScreenshotWebDrag(form,app,helper,next,handle,original);
+        }
+        Assert(CaptureNumber(ScreenshotCaptureHealth(),"attemptId")==before,"Adjusting geometry unexpectedly captured pixels.");
+        evidence["webAdjustmentHandleCount"]=8;evidence["webAdjustmentMoveResizeVerified"]=true;evidence["webAdjustmentGeometryRestored"]=true;evidence["adjustmentDidNotCapturePixels"]=true;
     }
-    static void ScreenshotNativeAction(Form form,Process app,uint helper,string action,Dictionary<string,object> evidence) {
-        List<IntPtr> buttons=ScreenshotNativeRoles(helper,action);Assert(buttons.Count==1,"Native action is missing or duplicated.");IntPtr button=buttons[0];RECT r;Assert(GetWindowRect(button,out r),"Native action has no rectangle.");
-        Point center=new Point(r.left+(r.right-r.left)/2,r.top+(r.bottom-r.top)/2);
-        Assert(r.right-r.left>=4&&r.bottom-r.top>=4&&Screen.FromHandle(button).WorkingArea.Contains(Rectangle.FromLTRB(r.left,r.top,r.right,r.bottom)),"Native action is not safely visible inside display work area.");
-        Assert((GetWindowLongPtr(button,-20).ToInt64()&0x08000000L)!=0&&IsWindowEnabled(button),"Native action lost NOACTIVATE or enabled state.");
-        ScreenshotNativePoint(form,helper,center);RECT latest;
-        Assert(IsWindowVisible(button)&&NativeAdjustmentRole(button)==action&&GetWindowRect(button,out latest)&&Rectangle.FromLTRB(latest.left,latest.top,latest.right,latest.bottom).Contains(center),"Native action moved before click; refused.");
+    static void ScreenshotWebAction(Form form,Process app,uint helper,string action,Dictionary<string,object> evidence) {
+        IntPtr editor=ScreenshotRetainedEditor(app,helper);string name=action=="solid"?"\u5b9e\u5fc3\u906e\u6321":action=="select"?"\u9009\u62e9":action=="pin"?"\u56fa\u5b9a\u622a\u56fe\u5230\u684c\u9762":null;
+        Assert(name!=null,"Unsupported fixture Web action.");long before=CaptureNumber(ScreenshotCaptureHealth(),"attemptId");AutomationElement button=null;
+        WaitFor(delegate{button=ScreenshotButton(editor,name);return button!=null&&button.Current.IsEnabled&&!button.Current.IsOffscreen;},10,"Web screenshot action unavailable.",app);
+        System.Windows.Rect r=button.Current.BoundingRectangle;Point center=new Point((int)(r.X+r.Width/2),(int)(r.Y+r.Height/2));
+        Assert(r.Width>=4&&r.Height>=4&&Screen.FromHandle(editor).WorkingArea.Contains(center),"Web action is outside usable monitor bounds.");
+        Assert((GetWindowLongPtr(editor,-20).ToInt64()&0x08000000L)!=0,"Web action lost NOACTIVATE style.");
+        ScreenshotWebPoint(form,app,editor,center);AutomationElement current=ScreenshotButton(editor,name);
+        Assert(current!=null&&!current.Current.IsOffscreen&&current.Current.IsEnabled&&current.Current.BoundingRectangle.Contains(center.X,center.Y),"Web action moved before paired click; refused.");
         INPUT down=new INPUT();down.data.mouse.flags=2;INPUT up=new INPUT();up.data.mouse.flags=4;Send(new INPUT[]{down,up});
-        evidence["nativeInitialAction"]=action;evidence["nativeActionClickCount"]=1;evidence["nativeActionOwnedTargetVerified"]=true;
-        if(action=="pin"){evidence["physicalPinClickCount"]=1;evidence["nativeNoActivateBeforePhysicalClick"]=true;evidence["physicalPinClickOwnedTargetVerified"]=true;}
+        evidence["webInitialAction"]=action;evidence["webActionClickCount"]=1;evidence["webActionOwnedTargetVerified"]=true;
+        if(action!="pin") {
+            WaitFor(delegate{AutomationElement selected=ScreenshotButton(editor,name);object pattern;return selected!=null&&selected.TryGetCurrentPattern(TogglePattern.Pattern,out pattern)&&((TogglePattern)pattern).Current.ToggleState==ToggleState.On;},5,"Web tool did not become selected.",app);
+            Assert(CaptureNumber(ScreenshotCaptureHealth(),"attemptId")==before,"Choosing a tool unexpectedly captured pixels.");
+            AutomationElement undo=ScreenshotButton(editor,"\u64a4\u9500");Assert(undo!=null&&!undo.Current.IsEnabled,"Choosing a tool created an edit.");evidence["toolSelectionDidNotCapturePixels"]=true;
+        } else {evidence["physicalPinClickCount"]=1;evidence["nativeNoActivateBeforePhysicalClick"]=true;evidence["physicalPinClickOwnedTargetVerified"]=true;}
+    }
+    static void ScreenshotRecordCaptureCounts(Dictionary<string,object> report,Dictionary<string,object> after,int selections,int deferred) {
+        Assert(VerifiedNativeChildren.Count==selections,"F1 picker identity count differs from exact selection cycles.");
+        long attempts=CaptureNumber(after,"attemptId")-ScreenshotInitialAttempt;
+        Assert(ScreenshotFirstStrokeReleaseChecks==(ScreenshotPinOnly?1:4),"Exact first-stroke release checks required.");report["verifiedFirstStrokeReleaseChecks"]=ScreenshotFirstStrokeReleaseChecks;
+        Assert(attempts==selections+deferred,"Unexpected selected-region capture attempt count.");
+        report["verifiedF1SelectionGenerations"]=VerifiedNativeChildren.Count;report["verifiedDeferredPixelCaptures"]=deferred;report["verifiedNativeCaptureAttempts"]=attempts;
+    }
+    static void ScreenshotRequireDeferredReleased(Dictionary<string,object> health) {
+        Assert(CaptureNumber(health,"nativeDeferredCapture")==1&&CaptureNumber(health,"attemptStage")==4&&CaptureNumber(health,"helperResponseReceived")==1&&CaptureNumber(health,"resultOk")==1,"Deferred pixels did not complete successfully.");
+        foreach(string field in new string[]{"hookRunningAfterStop","inputPlaneRemainingAfterCleanup","currentHostSessionReserved","currentHostOwnedButtons"})Assert(CaptureNumber(health,field)==0,"Deferred capture retained native input resources.");
+    }
+    static void ScreenshotInteractAfterCapture(Process app,IntPtr editor,Dictionary<string,object> evidence) {
+        Assert(ScreenshotWindow(app.Id)==editor&&IsWindowVisible(editor),"Post-capture interaction lost its editor.");
+        AutomationElement button=ScreenshotButton(editor,"\u5b9e\u5fc3\u906e\u6321");object pattern;
+        Assert(button!=null&&button.Current.IsEnabled&&!button.Current.IsOffscreen&&button.TryGetCurrentPattern(TogglePattern.Pattern,out pattern)&&((TogglePattern)pattern).Current.ToggleState==ToggleState.On,"Post-capture solid tool must already be selected.");
+        System.Windows.Rect bounds=button.Current.BoundingRectangle;Point center=new Point((int)(bounds.X+bounds.Width/2),(int)(bounds.Y+bounds.Height/2));Rectangle desktop=SystemInformation.VirtualScreen;
+        Assert(desktop.Contains(center),"Post-capture tool is outside desktop.");
+        INPUT move=new INPUT();move.data.mouse.dx=(int)Math.Round((center.X-desktop.Left)*65535.0/(desktop.Width-1));move.data.mouse.dy=(int)Math.Round((center.Y-desktop.Top)*65535.0/(desktop.Height-1));move.data.mouse.flags=0x8000|0x4000|1;Send(new INPUT[]{move});
+        IntPtr target=GetAncestor(WindowFromPoint(center),2);uint pid;GetWindowThreadProcessId(target,out pid);AutomationElement current=ScreenshotButton(editor,"\u5b9e\u5fc3\u906e\u6321");
+        Assert(target==editor&&pid==app.Id&&IsWindowVisible(editor)&&current!=null&&current.Current.IsEnabled&&!current.Current.IsOffscreen&&current.Current.BoundingRectangle.Contains(center.X,center.Y),"Post-capture tool click would target a foreign surface; refused.");
+        INPUT down=new INPUT();down.data.mouse.flags=2;INPUT up=new INPUT();up.data.mouse.flags=4;Send(new INPUT[]{down,up});
+        WaitFor(delegate{return GetForegroundWindow()==editor&&ForegroundPid()==app.Id;},5,"Owned post-capture tool interaction did not activate the editor.",app);
+        evidence["explicitEditorInteractionVerified"]=true;evidence["postCaptureInteractionTarget"]="selected-solid-tool";evidence["postCaptureInteractionClicks"]=1;
     }
     static Dictionary<string,object> ScreenshotPinCase(Form form,Panel image,Process app,Point first,Point last,Size selected,uint previous,string output,Dictionary<string,object> report,bool annotated) {
         Assert(ScreenshotPins(app.Id).Count==0,"Pin fixture must start without another app-owned reference window.");
         IntPtr main=MainWindow(app.Id);Assert(main!=IntPtr.Zero,"Pin test must bind the exact main HWND before any pin exists.");
         int files=Directory.GetFiles(output).Length;Assert(ScreenshotOwnedClipboard.SeedUnchanged(),"Pin case requires its unchanged owned clipboard sentinel.");
-        Dictionary<string,object> result=ScreenshotPicker(form,image,app,first,previous);report["screenshotPinCaptureAttempt"]=result;result["annotationApplied"]=annotated;result["physicalPinClickCount"]=0;result["pinInputMethod"]=annotated?"uia-invoke-from-active-editor":"owned-native-adjustment-click";
+        Dictionary<string,object> result=ScreenshotPicker(form,image,app,first,previous);report["screenshotPinCaptureAttempt"]=result;result["annotationApplied"]=annotated;result["physicalPinClickCount"]=0;result["pinInputMethod"]=annotated?"uia-invoke-from-active-editor":"owned-web-adjustment-click";
         Dictionary<string,object> preparation=new Dictionary<string,object>();report["screenshotPinPreparation"]=preparation;IntPtr pin=IntPtr.Zero,editor=IntPtr.Zero;bool finished=false;
         try {
             MoveGenerated(form,first);INPUT down=new INPUT();down.data.mouse.flags=2;Send(new INPUT[]{down});Thread.Sleep(80);MoveGenerated(form,last);Thread.Sleep(80);INPUT up=new INPUT();up.data.mouse.flags=4;Send(new INPUT[]{up});
             uint helper=Convert.ToUInt32(result["helperProcessId"]);Rectangle selection=Rectangle.FromLTRB(first.X,first.Y,last.X,last.Y);
             ScreenshotWaitAdjustment(form,app,helper,selection,result);
-            ScreenshotNativeMoveResize(form,app,helper,selection,result);
-            Assert(ScreenshotOwnedClipboard.SeedUnchanged()&&Directory.GetFiles(output).Length==files,"Native adjustment produced a clipboard/file side effect.");
+            ScreenshotWebMoveResize(form,app,helper,selection,result);
+            editor=ScreenshotRetainedEditor(app,helper);result["persistentEditorIdentityVerified"]=true;
+            Assert(ScreenshotOwnedClipboard.SeedUnchanged()&&Directory.GetFiles(output).Length==files,"Web adjustment produced a clipboard/file side effect.");
             if(annotated) {
-                ScreenshotNativeAction(form,app,helper,"solid",result);
+                ScreenshotWebAction(form,app,helper,"solid",result);
                 WaitFor(delegate{
                     editor=ScreenshotWindow(app.Id);ScreenshotPreparationObservation(app,form.Handle,editor,helper,preparation);
                     bool canvas=editor!=IntPtr.Zero&&IsWindowVisible(editor)&&Element(editor,ScreenshotCanvasName)!=null;int overlays=AppOverlays(app.Id);
                     preparation["canvasAccessible"]=canvas;preparation["remainingNativeOverlays"]=overlays;
                     return editor!=IntPtr.Zero&&IsWindowVisible(editor)&&canvas&&overlays==0;
-                },25,"Native solid action did not prepare the production in-place editor.",app);
+                },25,"Web solid action did not retain the production in-place editor.",app);
                 RequireForeground(form);result["initialEditorShowPreservedSourceForeground"]=true;
-                ScreenshotDrag(app,editor,"\u5b9e\u5fc3\u906e\u6321",selected,new Point(10,10),new Point(80,70),true);result["nativeInitialToolClaimed"]=true;
+                ScreenshotDrag(app,editor,"\u5b9e\u5fc3\u906e\u6321",selected,new Point(10,10),new Point(80,70),true);result["webInitialToolSelected"]=true;
                 WaitFor(delegate{AutomationElement undo=ScreenshotButton(editor,"\u64a4\u9500");return undo!=null&&undo.Current.IsEnabled;},10,"Pin fixture annotation did not commit.",app);
-                Assert(GetForegroundWindow()==editor&&ForegroundPid()==app.Id,"Annotation must intentionally leave the owned editor active.");
+                Assert(ScreenshotRetainedEditor(app,helper)==editor,"Annotation editor identity changed.");ScreenshotInteractAfterCapture(app,editor,result);
             } else RequireForeground(form);
             result["foregroundBeforePinInvoke"]=ScreenshotPinForeground(app,form.Handle,editor,pin,main);
             if(annotated)ScreenshotInvoke(app,editor,"\u56fa\u5b9a\u622a\u56fe\u5230\u684c\u9762");
-            else ScreenshotNativeAction(form,app,helper,"pin",result);
+            else ScreenshotWebAction(form,app,helper,"pin",result);
             List<IntPtr> created=ScreenshotPins(app.Id);Assert(created.Count<=1,"One pin action created multiple reference windows.");if(created.Count==1)pin=created[0];
             Dictionary<string,object> afterInvoke=ScreenshotPinForeground(app,form.Handle,editor,pin,main);result["foregroundAfterPinInvoke"]=afterInvoke;
             Assert(!Convert.ToBoolean(afterInvoke["isPin"])&&!Convert.ToBoolean(afterInvoke["isMain"]),"Pin invocation activated the pin or main window.");
@@ -516,6 +549,7 @@ public static partial class EchoLingoApplicationSmoke {
             // Retain bounded foreground evidence before outer fixture cleanup.
             // Do not reactivate the source after pinning to manufacture a pass.
             WaitFor(delegate{editor=ScreenshotWindow(app.Id);List<IntPtr> pins=ScreenshotPins(app.Id);Assert(pins.Count<=1,"One pin action created multiple reference windows.");if(pins.Count==1)pin=pins[0];
+                Assert(editor==ScreenshotRetainedEditor(app,helper),"Deferred capture replaced the persistent editor HWND.");
                 bool ready=pin!=IntPtr.Zero&&pin!=editor&&IsWindowVisible(pin)&&Element(pin,PinnedImageName)!=null&&ScreenshotButton(pin,"\u53d6\u6d88\u7f6e\u9876")!=null&&ScreenshotButton(pin,"\u53d6\u6d88\u7f6e\u9876").Current.IsEnabled&&!IsWindowVisible(editor)&&AppOverlays(app.Id)==0&&ProcessExited(helper);
                 Dictionary<string,object> foreground=ScreenshotPinForeground(app,form.Handle,editor,pin,main);result["foregroundDuringPinHandoff"]=foreground;result["handoffForegroundSamples"]=++foregroundSamples;
                 Assert(!Convert.ToBoolean(foreground["isPin"])&&!Convert.ToBoolean(foreground["isMain"]),"Pin creation activated the pin or main window.");
@@ -532,7 +566,7 @@ public static partial class EchoLingoApplicationSmoke {
             Assert(!Convert.ToBoolean(completedForeground["isPin"])&&!Convert.ToBoolean(completedForeground["isMain"]),"Completed handoff activated the pin or main window.");
             if(!annotated)RequireForeground(form);Assert(ScreenshotPinTopmost(pin),"New reference window is not native topmost.");
             Rectangle work=Screen.FromPoint(first).WorkingArea,initial=ScreenshotPinBounds(pin);Assert(work.Contains(initial),"Pinned outer frame is not clamped to capture monitor work area.");
-            ScreenshotPinPixels(app,pin,selected,annotated);result["rasterVisible"]=true;result["editedRasterVisible"]=annotated;result["passiveShowPreservedSourceForeground"]=!annotated;result["pinAndMainNotObservedForeground"]=true;result["decodedReferenceVisibleAndCaptureDismissed"]=true;result["nativeTopmostInitially"]=true;result["initialOuterFrameWithinSourceWorkArea"]=true;
+            ScreenshotPinPixels(app,pin,selected,annotated);result["rasterVisible"]=true;result["editedRasterVisible"]=annotated;result["passiveShowPreservedSourceForeground"]=!annotated;result["pinAndMainNotObservedForeground"]=true;result["decodedReferenceVisibleAndCaptureDismissed"]=true;Assert((GetWindowLongPtr(pin,-16).ToInt64()&0x00C00000L)==0,"Pinned image still has a native title bar.");result["nativeBorderlessVerified"]=true;result["nativeTopmostInitially"]=true;result["initialOuterFrameWithinSourceWorkArea"]=true;
             ScreenshotPinToggle(app,pin,true,result);result["nativeUnpinVerified"]=true;ScreenshotPinToggle(app,pin,false,result);result["nativeRepinVerified"]=true;
             // Native Move/Size exercises actual HWND geometry without a global
             // mouse marathon or accidental drag into a foreign application.
@@ -556,7 +590,7 @@ public static partial class EchoLingoApplicationSmoke {
         ScreenshotNativeOpenObservations=new List<Dictionary<string,object>>();report["screenshotNativeOpenObservations"]=ScreenshotNativeOpenObservations;
         ScreenshotNativeCancelObservations=new List<Dictionary<string,object>>();report["screenshotNativeCancelObservations"]=ScreenshotNativeCancelObservations;
         try{ScreenshotOwnedClipboard.RequireEmpty();ScreenshotEditorWorkflowBody(form,image,app,server,history,output,start,executable,roaming,token,passed,report,sourceEvents);completed=true;}
-        finally{string outcome;try{outcome=ScreenshotOwnedClipboard.Cleanup();}catch(Exception error){outcome="cleanup-error-"+error.GetType().Name;}ScreenshotOwnedClipboard=null;if(ScreenshotExpectedWindow!=null){ScreenshotExpectedWindow.Dispose();ScreenshotExpectedWindow=null;}
+        finally{string outcome;try{outcome=ScreenshotOwnedClipboard.Cleanup();}catch(Exception error){outcome="cleanup-error-"+error.GetType().Name;}ScreenshotOwnedClipboard=null;ScreenshotCaptureHealth=null;ScreenshotSelectionEditors.Clear();if(ScreenshotExpectedWindow!=null){ScreenshotExpectedWindow.Dispose();ScreenshotExpectedWindow=null;}
             report["screenshotClipboardCleanup"]=outcome;report["screenshotOwnedClipboardCleared"]=outcome=="verified-owned-generation-cleared"||outcome=="already-empty";
             if(completed)Assert(Convert.ToBoolean(report["screenshotOwnedClipboardCleared"]),"Owned screenshot clipboard cleanup did not restore the initial empty state: "+outcome);}
     }
@@ -567,7 +601,8 @@ public static partial class EchoLingoApplicationSmoke {
         OnUi(form,delegate{foreach(Control control in form.Controls)if(control is TextBox)control.Enabled=false;form.Refresh();});
         report["uiAutomationSelectorsUsed"]=true;report["translationBackend"]="not-invoked-local-image-only";report["screenshotOutputIsOwnedTemporaryDirectory"]=true;report["desktopDirectoryWritten"]=false;
         List<Dictionary<string,object>> cases=new List<Dictionary<string,object>>();report["screenshotCases"]=cases;
-        Dictionary<string,object> before=CaptureSnapshot(app,start,executable,roaming,token);
+        ScreenshotCaptureHealth=delegate{return CaptureSnapshot(app,start,executable,roaming,token);};
+        ScreenshotFirstStrokeReleaseChecks=0;Dictionary<string,object> before=ScreenshotCaptureHealth();ScreenshotInitialAttempt=before.ContainsKey("attemptId")?CaptureNumber(before,"attemptId"):0;
         Assert(CaptureNumber(before,"ocrInvocationCount")==0,"OCR was invoked before the isolated F1 workflow.");
         Point first=Point.Empty,last=Point.Empty;OnUi(form,delegate{first=image.PointToScreen(new Point(20,20));last=image.PointToScreen(new Point(660,130));});
         Size selected=new Size(last.X-first.X,last.Y-first.Y);Assert(selected==new Size(640,110),"Generated screenshot region dimensions changed.");
@@ -585,19 +620,19 @@ public static partial class EchoLingoApplicationSmoke {
         report["screenshotPinRequiredCases"]=2;report["screenshotPinPassedCases"]=2;report["screenshotPinCases"]=new object[]{passive,pinned};
         report["screenshotPinOnly"]=ScreenshotPinOnly;
         if(ScreenshotPinOnly) {
-            Dictionary<string,object> pinAfter=CompletedCaptureSnapshot(app,start,executable,roaming,token,0,report);RequireCaptureReleased(pinAfter);
+            Dictionary<string,object> pinAfter=CompletedCaptureSnapshot(app,start,executable,roaming,token,0,report);ScreenshotRequireDeferredReleased(pinAfter);
             Assert(CaptureNumber(pinAfter,"ocrInvocationCount")==0&&server.Connections==0&&server.Count==0&&server.Error==null,"Pin-only path invoked OCR/provider traffic.");
             Assert(!File.Exists(history)||new JavaScriptSerializer().Deserialize<object[]>(File.ReadAllText(history)).Length==0,"Pin-only path wrote translation history.");
             Assert(sourceEvents()==0,"Pin-only capture leaked input into source controls.");
             report["screenshotOcrInvocationCount"]=CaptureNumber(pinAfter,"ocrInvocationCount");report["screenshotHttpConnections"]=server.Connections;report["screenshotTranslationHistoryCount"]=0;
             report["screenshotNetworkEvidenceScope"]="configured-loopback-provider-trap; no global packet capture";report["screenshotNativeCompletion"]=pinAfter;
-            report["verifiedNativeCaptureGenerations"]=VerifiedNativeChildren.Count;report["screenshotFinalExportCount"]=Directory.GetFiles(output).Length;
+            ScreenshotRecordCaptureCounts(report,pinAfter,3,2);report["screenshotFinalExportCount"]=Directory.GetFiles(output).Length;
             passed.Add("Actual generated F1 passive physical-click pin and annotated active-editor pin -> decoded native HWNDs -> topmost toggle/move/resize -> destroyed; no clipboard/file/provider/history effects");return;
         }
         Dictionary<string,object> dragged=ScreenshotPicker(form,image,app,first,Convert.ToUInt32(pinned["helperProcessId"]));uint dragPid=Convert.ToUInt32(dragged["helperProcessId"]);
         MoveGenerated(form,first);INPUT down=new INPUT();down.data.mouse.flags=2;Send(new INPUT[]{down});Thread.Sleep(80);MoveGenerated(form,last);Thread.Sleep(80);INPUT up=new INPUT();up.data.mouse.flags=4;Send(new INPUT[]{up});
-        ScreenshotWaitAdjustment(form,app,dragPid,Rectangle.FromLTRB(first.X,first.Y,last.X,last.Y),dragged);ScreenshotNativeAction(form,app,dragPid,"solid",dragged);
-        WaitFor(delegate{editor=ScreenshotWindow(app.Id);return editor!=IntPtr.Zero&&IsWindowVisible(editor)&&Element(editor,ScreenshotCanvasName)!=null&&AppOverlays(app.Id)==0;},25,"Native solid action did not show the actual image editor.",app);
+        ScreenshotWaitAdjustment(form,app,dragPid,Rectangle.FromLTRB(first.X,first.Y,last.X,last.Y),dragged);ScreenshotWebAction(form,app,dragPid,"solid",dragged);
+        WaitFor(delegate{editor=ScreenshotWindow(app.Id);return editor!=IntPtr.Zero&&IsWindowVisible(editor)&&Element(editor,ScreenshotCanvasName)!=null&&AppOverlays(app.Id)==0;},25,"Web solid action did not retain the actual image editor.",app);
         Assert(Directory.GetFiles(output).Length==0,"Opening an image auto-saved before explicit Save.");
         ScreenshotDrag(app,editor,"\u5b9e\u5fc3\u906e\u6321",selected,new Point(10,10),new Point(80,70),true);
         WaitFor(delegate{AutomationElement undo=ScreenshotButton(editor,"\u64a4\u9500");return undo!=null&&undo.Current.IsEnabled;},10,"Actual solid redaction did not commit an undoable edit.",app);
@@ -613,8 +648,8 @@ public static partial class EchoLingoApplicationSmoke {
             for(int save=0;save<2;save++) {
                 Dictionary<string,object> fresh=ScreenshotPicker(form,image,app,first,dragPid);dragPid=Convert.ToUInt32(fresh["helperProcessId"]);saveSessions.Add(fresh);
                 MoveGenerated(form,first);Send(new INPUT[]{down});Thread.Sleep(80);MoveGenerated(form,last);Thread.Sleep(80);Send(new INPUT[]{up});
-                ScreenshotWaitAdjustment(form,app,dragPid,Rectangle.FromLTRB(first.X,first.Y,last.X,last.Y),fresh);ScreenshotNativeAction(form,app,dragPid,"solid",fresh);
-                WaitFor(delegate{return IsWindowVisible(editor)&&Element(editor,ScreenshotCanvasName)!=null&&AppOverlays(app.Id)==0;},25,"Fresh native solid action did not prepare in-place editor.",app);
+                ScreenshotWaitAdjustment(form,app,dragPid,Rectangle.FromLTRB(first.X,first.Y,last.X,last.Y),fresh);ScreenshotWebAction(form,app,dragPid,"solid",fresh);
+                WaitFor(delegate{return IsWindowVisible(editor)&&Element(editor,ScreenshotCanvasName)!=null&&AppOverlays(app.Id)==0;},25,"Fresh Web solid action did not retain in-place editor.",app);
                 ScreenshotDrag(app,editor,"\u5b9e\u5fc3\u906e\u6321",selected,new Point(10,10),new Point(80,70),true);
                 ScreenshotDrag(app,editor,"\u88c1\u526a",selected,new Point(8,8),new Point(selected.Width-8,selected.Height-8));
                 WaitFor(delegate{AutomationElement button=ScreenshotButton(editor,"\u4e0b\u8f7d\u622a\u56fe");return button!=null&&button.Current.IsEnabled&&ScreenshotInplaceDimensionsMatch(editor,cropped);},10,"Fresh cropped save pixels were not ready.",app);
@@ -668,12 +703,12 @@ public static partial class EchoLingoApplicationSmoke {
         dragged["case"]="inplace-drag-copy-recapture-save-twice";dragged["ok"]=true;cases.Add(dragged);
         Dictionary<string,object> clicked=ScreenshotPicker(form,image,app,first,dragPid,true);RequireForeground(form);Send(new INPUT[]{down,up});
         int[] frame=(int[])clicked["expectedWindowBounds"];Rectangle sourceFrame=new Rectangle(frame[0],frame[1],frame[2],frame[3]);
-        ScreenshotWaitAdjustment(form,app,Convert.ToUInt32(clicked["helperProcessId"]),sourceFrame,clicked);ScreenshotNativeAction(form,app,Convert.ToUInt32(clicked["helperProcessId"]),"select",clicked);
+        ScreenshotWaitAdjustment(form,app,Convert.ToUInt32(clicked["helperProcessId"]),sourceFrame,clicked);ScreenshotWebAction(form,app,Convert.ToUInt32(clicked["helperProcessId"]),"select",clicked);
         WaitFor(delegate{return IsWindowVisible(editor)&&Element(editor,ScreenshotCanvasName)!=null&&AppOverlays(app.Id)==0;},25,"Click-visible-window native select did not open editor.",app);
         int[] windowSize=(int[])clicked["expectedWindowDimensions"];
         using(Bitmap copy=ScreenshotClipboard(app,editor,new Size(windowSize[0],windowSize[1]),delegate(Bitmap actual){return ScreenshotExpectedWindow!=null&&ScreenshotPixelsEqual(actual,ScreenshotExpectedWindow);},"clicked-window")) { clicked["visibleWindowPixelSize"]=new int[]{copy.Width,copy.Height}; }
         Dictionary<string,object> cancelClick=ScreenshotPicker(form,image,app,first,Convert.ToUInt32(clicked["helperProcessId"]));RequireForeground(form);Send(new INPUT[]{down,up});
-        ScreenshotWaitAdjustment(form,app,Convert.ToUInt32(cancelClick["helperProcessId"]),sourceFrame,cancelClick);ScreenshotNativeAction(form,app,Convert.ToUInt32(cancelClick["helperProcessId"]),"select",cancelClick);
+        ScreenshotWaitAdjustment(form,app,Convert.ToUInt32(cancelClick["helperProcessId"]),sourceFrame,cancelClick);ScreenshotWebAction(form,app,Convert.ToUInt32(cancelClick["helperProcessId"]),"select",cancelClick);
         WaitFor(delegate{return IsWindowVisible(editor)&&Element(editor,ScreenshotCanvasName)!=null&&AppOverlays(app.Id)==0;},25,"Second native select did not prepare cancel-only window capture.",app);
         ScreenshotOwnedClipboard.Seed();ScreenshotInvoke(app,editor,"\u53d6\u6d88\u622a\u56fe");
         WaitFor(delegate{return !IsWindowVisible(editor);},10,"In-place X did not cancel capture.",app);Assert(ScreenshotOwnedClipboard.SeedUnchanged(),"In-place X changed clipboard.");
@@ -685,7 +720,7 @@ public static partial class EchoLingoApplicationSmoke {
         Assert(!File.Exists(history)||new JavaScriptSerializer().Deserialize<object[]>(File.ReadAllText(history)).Length==0,"F1 image editing wrote translation history.");
         Assert(sourceEvents()==0,"Native F1 click/drag leaked mouse input to generated source controls.");
         report["screenshotOcrInvocationCount"]=CaptureNumber(after,"ocrInvocationCount");report["screenshotHttpConnections"]=server.Connections;report["screenshotNetworkEvidenceScope"]="configured-loopback-provider-trap; no global packet capture";report["screenshotTranslationHistoryCount"]=0;
-        report["screenshotRequiredCases"]=3;report["screenshotPassedCases"]=cases.Count;report["verifiedNativeCaptureGenerations"]=VerifiedNativeChildren.Count;report["screenshotNativeCompletion"]=after;
+        report["screenshotRequiredCases"]=3;report["screenshotPassedCases"]=cases.Count;ScreenshotRecordCaptureCounts(report,after,8,6);report["screenshotNativeCompletion"]=after;
         Assert(cases.Count==3&&VerifiedNativeChildren.Count==8,"Screenshot fixture missed a required real native generation.");
         passed.Add("Actual F1 cancel, annotated pin, in-place copy/save dismissal with two fresh save captures, then actual settings local Open and native dialog cancellation; window-click copy plus new capture cancellation; zero OCR/configured-provider HTTP/history (loopback trap, not global packet capture)");
     }

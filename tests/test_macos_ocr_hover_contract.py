@@ -29,9 +29,9 @@ class MacOSOCRHoverContract(unittest.TestCase):
         hint = self.state.split('var windowHint:', 1)[1].split('mutating func receive(', 1)[0]
         self.assertIn('guard outcome == nil && !adjusting else { return nil }', hint)
         self.assertIn('if anchor == nil { return candidate }', hint)
-        self.assertIn('purpose == .screenshot && !dragExceeded ? pressedWindow : nil', hint)
-        self.assertIn('pressedWindow = purpose == .screenshot ? candidate.flatMap', self.state)
-        self.assertIn('if purpose == .screenshot && !dragExceeded {', self.state)
+        self.assertIn('purpose != .region && !dragExceeded ? pressedWindow : nil', hint)
+        self.assertIn('pressedWindow = purpose != .region ? candidate.flatMap', self.state)
+        self.assertIn('if purpose != .region && !dragExceeded {', self.state)
         self.assertIn('} else if rectangle.width >= 2 && rectangle.height >= 2 {', self.state)
         self.assertIn('let hovered = state.windowHint?.frame.intersection(geometry.frame)', self.session)
 

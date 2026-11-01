@@ -10,8 +10,9 @@ EXPECTED_CASES = ('escape-cancel', 'inplace-drag-copy-recapture-save-twice', 'cl
 
 
 PIN_CASES = ('inplace-pin-passive-physical', 'inplace-pin-annotated-active-editor')
-PIN_FIELDS = ('rasterVisible', 'initialNativeAdjustmentPreservedSourceForeground', 'pinAndMainNotObservedForeground',
-              'nativeAdjustmentVisible', 'nativeAdjustmentMoveResizeVerified', 'nativeAdjustmentGeometryRestored', 'nativeActionOwnedTargetVerified',
+PIN_FIELDS = ('rasterVisible', 'initialWebAdjustmentPreservedSourceForeground', 'pinAndMainNotObservedForeground',
+              'persistentEditorIdentityVerified', 'adjustmentDidNotCapturePixels', 'nativeBorderlessVerified',
+              'webAdjustmentVisible', 'webAdjustmentMoveResizeVerified', 'webAdjustmentGeometryRestored', 'webActionOwnedTargetVerified',
               'decodedReferenceVisibleAndCaptureDismissed', 'nativeTopmostInitially',
               'initialOuterFrameWithinSourceWorkArea', 'nativeUnpinVerified', 'nativeRepinVerified',
               'nativeMoveResizeVerified', 'rasterRetainedAfterResize', 'nativeWindowDestroyed',
@@ -23,14 +24,25 @@ NATIVE_COMPLETION = (('nativeCaptureBackend', 1), ('attemptStage', 4), ('helperR
                      ('inputPlaneRemainingAfterCleanup', 0), ('currentHostSessionReserved', 0), ('currentHostOwnedButtons', 0))
 
 
+def verify_capture_counts(report, selections, deferred):
+    for field, expected in (('verifiedF1SelectionGenerations', selections),
+                            ('verifiedDeferredPixelCaptures', deferred),
+                            ('verifiedNativeCaptureAttempts', selections + deferred),
+                            ('verifiedFirstStrokeReleaseChecks', 1 if selections == 3 else 4)):
+        if type(report.get(field)) is not int or report[field] != expected:
+            raise ValueError('Exact selection/deferred capture counts required: ' + field)
+
+
 def verify_adjustment(case, action):
-    if (not isinstance(case, dict) or case.get('nativeInitialAction') != action
-            or type(case.get('nativeActionClickCount')) is not int or case['nativeActionClickCount'] != 1
-            or type(case.get('nativeAdjustmentHandleCount')) is not int or case['nativeAdjustmentHandleCount'] != 8):
-        raise ValueError('Exact native adjustment action and eight handles are required')
-    for field in ('nativeAdjustmentVisible', 'initialNativeAdjustmentPreservedSourceForeground', 'nativeActionOwnedTargetVerified'):
+    if (not isinstance(case, dict) or case.get('webInitialAction') != action
+            or type(case.get('webActionClickCount')) is not int or case['webActionClickCount'] != 1
+):
+        raise ValueError('Exact Web adjustment action is required')
+    if action != 'pin' and case.get('toolSelectionDidNotCapturePixels') is not True:
+        raise ValueError('Tool choice must not capture pixels')
+    for field in ('webAdjustmentVisible', 'initialWebAdjustmentPreservedSourceForeground', 'webActionOwnedTargetVerified', 'selectionHelperExitedBeforeAdjustment'):
         if case.get(field) is not True:
-            raise ValueError('Native adjustment evidence absent: ' + field)
+            raise ValueError('Web adjustment evidence absent: ' + field)
 
 
 def verify_pin(report):
@@ -46,14 +58,16 @@ def verify_pin(report):
         for field in PIN_FIELDS:
             if case.get(field) is not True:
                 raise ValueError('Native pin evidence absent: ' + field)
+        if type(case.get('webAdjustmentHandleCount')) is not int or case['webAdjustmentHandleCount'] != 8:
+            raise ValueError('All eight Web resize handles must be exercised')
         verify_adjustment(case, 'solid' if annotated else 'pin')
-        if annotated and (case.get('initialEditorShowPreservedSourceForeground') is not True or case.get('nativeInitialToolClaimed') is not True):
-            raise ValueError('Native solid action must be claimed before intentional editor annotation')
+        if annotated and (case.get('initialEditorShowPreservedSourceForeground') is not True or case.get('webInitialToolSelected') is not True or case.get('explicitEditorInteractionVerified') is not True or case.get('postCaptureInteractionTarget') != 'selected-solid-tool' or type(case.get('postCaptureInteractionClicks')) is not int or case.get('postCaptureInteractionClicks') != 1):
+            raise ValueError('Web solid tool must be selected before intentional editor annotation')
         if case.get('annotationApplied') is not annotated or case.get('editedRasterVisible') is not annotated:
             raise ValueError('Annotated and pristine raster evidence must not be conflated')
         if case.get('passiveShowPreservedSourceForeground') is not (not annotated):
             raise ValueError('Only passive physical pinning claims source foreground preservation')
-        if case.get('pinInputMethod') != ('uia-invoke-from-active-editor' if annotated else 'owned-native-adjustment-click'):
+        if case.get('pinInputMethod') != ('uia-invoke-from-active-editor' if annotated else 'owned-web-adjustment-click'):
             raise ValueError('Pin input must represent the tested foreground state')
         if type(case.get('physicalPinClickCount')) is not int or case['physicalPinClickCount'] != (0 if annotated else 1):
             raise ValueError('Only the passive case sends exactly one physical pin click')
@@ -119,18 +133,20 @@ def verify_report(report, expected_sha=None, installed=False, pin_only=False):
                 or cancelled[0].get('shortcut') != 'F1' or type(cancelled[0].get('hotkeyPresses')) is not int
                 or cancelled[0]['hotkeyPresses'] != 1):
             raise ValueError('Pin-only requires its successful single-F1 cancellation baseline')
-        if type(report.get('screenshotFinalExportCount')) is not int or report['screenshotFinalExportCount'] != 0 or type(report.get('verifiedNativeCaptureGenerations')) is not int or report['verifiedNativeCaptureGenerations'] != 3:
+        if type(report.get('screenshotFinalExportCount')) is not int or report['screenshotFinalExportCount'] != 0 or type(report.get('verifiedF1SelectionGenerations')) is not int or report['verifiedF1SelectionGenerations'] != 3:
             raise ValueError('Pin-only path must retain zero exports and verified cancel/pin generations')
+        verify_capture_counts(report, 3, 2)
         health = report.get('screenshotNativeCompletion', {})
-        for field, value in NATIVE_COMPLETION:
+        for field, value in tuple(pair for pair in NATIVE_COMPLETION if pair[0] != 'nativeHostStopped') + (('nativeDeferredCapture', 1), ('resultOk', 1)):
             if type(health.get(field)) is not int or health[field] != value:
                 raise ValueError('Pin native cleanup incomplete: ' + field)
         return report
     for field in ('screenshotRequiredCases', 'screenshotPassedCases'):
         if type(report.get(field)) is not int or report[field] != 3:
             raise ValueError('All three real F1 editor workflows must pass')
-    if type(report.get('verifiedNativeCaptureGenerations')) is not int or report['verifiedNativeCaptureGenerations'] != 8:
-        raise ValueError('Exactly eight byte-verified native capture generations are required')
+    if type(report.get('verifiedF1SelectionGenerations')) is not int or report['verifiedF1SelectionGenerations'] != 8:
+        raise ValueError('Exactly eight byte-verified F1 selection helpers are required')
+    verify_capture_counts(report, 8, 6)
     cases = report.get('screenshotCases')
     if (not isinstance(cases, list) or len(cases) != 3
             or any(not isinstance(case, dict) for case in cases)

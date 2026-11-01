@@ -18,7 +18,13 @@ repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 fixture_dir="$(mktemp -d "${TMPDIR:-/tmp}/echolingo-native-self-test.XXXXXX")"
 trap 'rm -rf "$fixture_dir"' EXIT
 
-swiftc "$repo_root/src-tauri/native/macos.swift" "$repo_root/src-tauri/native/macos_capture.swift" "$repo_root/src-tauri/native/macos_window.swift" -parse-as-library -O \
+# Exercise actual bounded coordinator with blocked work AND blocked cancellation.
+# No Apple engine or private pixels are used by this fixture.
+swiftc "$repo_root/src-tauri/native/macos_ocr.swift" "$repo_root/tests/macos-ocr-domain-fixture.swift" \
+  -parse-as-library -O -target "${native_arch}-apple-macosx12.0" -o "$fixture_dir/ocr-domain-fixture"
+"$fixture_dir/ocr-domain-fixture"
+
+swiftc "$repo_root/src-tauri/native/macos.swift" "$repo_root/src-tauri/native/macos_capture.swift" "$repo_root/src-tauri/native/macos_ocr.swift" "$repo_root/src-tauri/native/macos_window.swift" -parse-as-library -O \
   -target "${native_arch}-apple-macosx12.0" \
   -framework AppKit -framework Vision -framework ApplicationServices -framework CoreText \
   -o "$fixture_dir/echolingo-native-helper"

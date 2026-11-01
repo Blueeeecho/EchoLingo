@@ -4,6 +4,18 @@ use serde::Serialize;
 use std::collections::VecDeque;
 
 const MAX_EVENTS: usize = 48;
+#[derive(Clone, Copy, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum CancellationReason {
+    ScreenshotAction,
+    InputAction,
+    NewNativeAction,
+    SettingsAction,
+    OutsideClick,
+    ExternalFocus,
+    HideRequested,
+    WindowClose,
+}
 #[derive(Default, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PopupHealth {
@@ -19,8 +31,16 @@ struct Event {
     visible: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     resulting_epoch: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    cancel_reason: Option<CancellationReason>,
 }
 impl PopupHealth {
+    pub fn record_cancellation(&mut self, epoch: u64, at: u64, reason: CancellationReason) {
+        self.record(epoch, "presentationCancelled", at, None);
+        if let Some(event) = self.events.back_mut() {
+            event.cancel_reason = Some(reason);
+        }
+    }
     pub fn record(&mut self, epoch: u64, phase: &'static str, at: u64, visible: Option<bool>) {
         self.record_related(epoch, phase, at, visible, None);
     }
@@ -41,6 +61,7 @@ impl PopupHealth {
             recorded_at_unix_ms: at,
             visible,
             resulting_epoch,
+            cancel_reason: None,
         });
     }
 }
@@ -78,6 +99,14 @@ mod tests {
         let event = &serde_json::to_value(health).unwrap()["events"][0];
         assert_eq!(event["presentationEpoch"], 7);
         assert_eq!(event["resultingEpoch"], 8);
+    }
+    #[test]
+    fn cancellation_reason_is_fixed_metadata_linked_to_presentation() {
+        let mut health = PopupHealth::default();
+        health.record_cancellation(63, 100, CancellationReason::SettingsAction);
+        let value = serde_json::to_value(health).unwrap();
+        assert_eq!(value["events"][0]["cancelReason"], "settingsAction");
+        assert_eq!(value["events"][0]["presentationEpoch"], 63);
     }
     #[test]
     fn frontend_cannot_log_arbitrary_text_or_native_success() {

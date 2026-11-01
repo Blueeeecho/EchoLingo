@@ -130,3 +130,20 @@ body[data-compact-editor=true] #zoom-actual { width:auto; padding:6px 8px; }
 .inline-text-editor textarea:focus-visible { outline:none; }
 
 .inline-text-editor textarea { overflow:hidden; }
+
+/* One persistent surface: live selection geometry and captured pixels share the same toolbar. */
+#canvas-frame[data-adjustable="true"] { outline: 1px solid #4997ef; }
+#selection-handles { position: absolute; inset: 0; pointer-events: none; z-index: 3; }
+#selection-handles [data-resize] { position: absolute; width: 10px; height: 10px; border: 1px solid #3184e4; background: #fff; box-sizing: border-box; pointer-events: auto; transform: translate(-50%, -50%); }
+[data-resize="n"] { left: 50%; top: 0; cursor: ns-resize; }
+[data-resize="ne"] { left: 100%; top: 0; cursor: nesw-resize; }
+[data-resize="e"] { left: 100%; top: 50%; cursor: ew-resize; }
+[data-resize="se"] { left: 100%; top: 100%; cursor: nwse-resize; }
+[data-resize="s"] { left: 50%; top: 100%; cursor: ns-resize; }
+[data-resize="sw"] { left: 0; top: 100%; cursor: nesw-resize; }
+[data-resize="w"] { left: 0; top: 50%; cursor: ew-resize; }
+[data-resize="nw"] { left: 0; top: 0; cursor: nwse-resize; }
+
+#canvas-frame[data-live-selection="true"] { background: transparent; box-shadow: none; }
+
+#canvas-frame[data-adjustable="true"] #image-canvas[data-tool="select"] { cursor: move; }

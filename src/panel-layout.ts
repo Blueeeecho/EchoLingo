@@ -205,8 +205,9 @@ export function installPanelLayout(desktop: boolean, getPresentation: () => Tran
   };
   const lostPopupCapture = (event: PointerEvent): void => {
     // A moved WKWebView may lose DOM capture while the same physical press is
-    // still active. Only an established native token can keep tracking safely.
-    if (!popupDrag.retainsNativeGesture(event.pointerId)) cancelPopupDrag(event);
+    // still active. pointercancel precedes implicit lostpointercapture too;
+    // only an established mouse token can keep native press tracking safely.
+    if (!popupDrag.retainsAfterStreamLoss(event.pointerId, event.pointerType)) cancelPopupDrag(event);
   };
   const movePopupDrag = (event: PointerEvent): void => popupDrag.move(event.pointerId, event.screenX, event.screenY, event.buttons);
   const endPopupDrag = (event: PointerEvent): void => {
@@ -259,6 +260,7 @@ export function installPanelLayout(desktop: boolean, getPresentation: () => Tran
     if (!dragTarget || event.target.closest('button, a, input, textarea, select, [role="menu"], [contenteditable="true"]')) return;
     event.preventDefault();
     if (/Mac/.test(navigator.platform)) {
+      if (event.pointerType !== 'mouse') return;
       const presentation = getPresentation();
       if (!currentResizePresentation(presentation.epoch, false, false)) return;
       cancelPopupDrag();
@@ -273,7 +275,7 @@ export function installPanelLayout(desktop: boolean, getPresentation: () => Tran
   document.addEventListener('pointermove', moveWidth);
   document.addEventListener('pointermove', movePopupDrag);
   document.addEventListener('pointerup', endPopupDrag);
-  document.addEventListener('pointercancel', cancelPopupDrag);
+  document.addEventListener('pointercancel', lostPopupCapture);
   document.addEventListener('lostpointercapture', lostPopupCapture);
   document.addEventListener('click', suppressDragClick, true);
   document.addEventListener('visibilitychange', checkDragPresentation);
@@ -301,7 +303,7 @@ export function installPanelLayout(desktop: boolean, getPresentation: () => Tran
     document.removeEventListener('pointermove', moveWidth);
     document.removeEventListener('pointermove', movePopupDrag);
     document.removeEventListener('pointerup', endPopupDrag);
-    document.removeEventListener('pointercancel', cancelPopupDrag);
+    document.removeEventListener('pointercancel', lostPopupCapture);
     document.removeEventListener('lostpointercapture', lostPopupCapture);
     document.removeEventListener('click', suppressDragClick, true);
     document.removeEventListener('visibilitychange', checkDragPresentation);

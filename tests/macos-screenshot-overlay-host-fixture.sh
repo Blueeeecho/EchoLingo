@@ -8,7 +8,7 @@ if [[ "${GITHUB_ACTIONS:-}" != true && "${1:-}" != --isolated-test-session ]]; t
 fi
 private="$(mktemp -d "${TMPDIR:-/tmp}/echolingo-overlay-host.XXXXXX")"
 trap 'rm -rf "$private"' EXIT
-swiftc "$root/src-tauri/native/macos.swift" "$root/src-tauri/native/macos_capture.swift" \
+swiftc "$root/src-tauri/native/macos.swift" "$root/src-tauri/native/macos_capture.swift" "$root/src-tauri/native/macos_ocr.swift" \
   "$root/src-tauri/native/macos_window.swift" "$root/tests/macos-screenshot-overlay-host-fixture.swift" \
   -D ECHOLINGO_LIBRARY -parse-as-library -O -target "$(uname -m)-apple-macosx12.0" \
   -framework AppKit -framework WebKit -framework Vision -framework ApplicationServices -framework CoreText \

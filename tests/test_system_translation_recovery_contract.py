@@ -55,7 +55,8 @@ class SystemTranslationRecoveryContract(unittest.TestCase):
 
     def test_existing_native_job_runs_system_policy_checks(self):
         script = (Path(__file__).resolve().parent / 'macos-native-self-test.sh').read_text()
-        self.assertEqual(script.count('swiftc "$repo_root/'), 1)
+        self.assertEqual(script.count('swiftc "$repo_root/src-tauri/native/macos.swift"'), 1)
+        self.assertEqual(script.count('swiftc "$repo_root/src-tauri/native/macos_ocr.swift"'), 1)
         self.assertIn('--system-translation-self-test', script)
         self.assertIn('systemTranslationTraceRecoveryFixturePassed', script)
         self.assertIn('compiler >= (6, 2) and macos_major >= 26', script)

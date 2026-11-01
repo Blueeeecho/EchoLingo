@@ -1579,11 +1579,24 @@ fn announce_presentation(app: &tauri::AppHandle, presentation: translation_reque
     windows_visibility::disarm();
     let _ = app.emit("translation-presentation", presentation);
 }
-fn cancel_active_translation(app: &tauri::AppHandle) -> Option<translation_requests::Presentation> {
-    screenshot::cancel_pending(app);
-    if let Ok(presentation) = app.state::<AppState>().translation_requests.presentation() {
-        record_popup_health(app, presentation.epoch, "presentationCancelled", None);
+fn record_native_cancellation(app: &tauri::AppHandle, reason: popup_health::CancellationReason) {
+    let state = app.state::<AppState>();
+    if let Ok(presentation) = state.translation_requests.presentation() {
+        if let Ok(mut health) = state.popup_health.lock() {
+            health.record_cancellation(presentation.epoch, now(), reason);
+        }
     }
+}
+// F1's existing caller keeps the same cancellation API and cleanup behavior.
+fn cancel_active_translation(app: &tauri::AppHandle) -> Option<translation_requests::Presentation> {
+    cancel_active_translation_with_reason(app, popup_health::CancellationReason::ScreenshotAction)
+}
+fn cancel_active_translation_with_reason(
+    app: &tauri::AppHandle,
+    reason: popup_health::CancellationReason,
+) -> Option<translation_requests::Presentation> {
+    screenshot::cancel_pending(app);
+    record_native_cancellation(app, reason);
     app.state::<AppState>().native_tasks.cancel();
     let presentation = app
         .state::<AppState>()
@@ -1935,6 +1948,7 @@ fn prepare_input_presentation(
 
 fn show(app: &tauri::AppHandle) -> Result<translation_requests::Presentation, String> {
     screenshot::cancel_pending(app);
+    record_native_cancellation(app, popup_health::CancellationReason::InputAction);
     app.state::<AppState>().native_tasks.cancel();
     let presentation = prepare_input_presentation(&app.state::<AppState>().translation_requests)?;
     announce_presentation(app, presentation);
@@ -1997,7 +2011,9 @@ fn request_shortcut_settings(app: &tauri::AppHandle) {
     request_settings_section(app, true);
 }
 fn request_settings_section(app: &tauri::AppHandle, shortcuts: bool) {
-    let Some(presentation) = cancel_active_translation(app) else {
+    let Some(presentation) =
+        cancel_active_translation_with_reason(app, popup_health::CancellationReason::SettingsAction)
+    else {
         return;
     };
     let state = app.state::<AppState>();
@@ -2523,6 +2539,7 @@ fn start_action(app: tauri::AppHandle, action: String) {
         return;
     }
     let state = app.state::<AppState>();
+    record_native_cancellation(&app, popup_health::CancellationReason::NewNativeAction);
     let request = match state.native_tasks.begin() {
         Ok(request) => request,
         Err(error) => {
@@ -2618,7 +2635,7 @@ fn start_action(app: tauri::AppHandle, action: String) {
             // Only one actual native child owns input/exclusion at a time. A
             // superseded waiter is rejected before launching or reading text.
             record_popup_health(&worker_app, presentation.epoch, "nativeWorkerWaiting", None);
-            let _physical = state.native_tasks.enter(&worker_request)?;
+            let physical = state.native_tasks.enter(&worker_request)?;
             record_popup_health(&worker_app, presentation.epoch, "nativeWorkerEntered", None);
             if !native_request_is_current(&worker_app, &worker_request, presentation, keep_popup) {
                 return Err(translation_requests::CANCELLED.to_owned());
@@ -2730,6 +2747,8 @@ fn start_action(app: tauri::AppHandle, action: String) {
             // A later editor inside the same source window is a different
             // selection intent. Discard it without raising/focusing a blank
             // popup; restoration notices retain their global safety path.
+            drop(physical);
+            record_popup_health(&worker_app, presentation.epoch, "nativeWorkerReleased", None);
             finish_native_text(text, worker_request.cancelled() || source_changed)
                 .map(|text| (text, cloud_ocr))
         })
@@ -3064,7 +3083,10 @@ fn outside_click_watcher(app: tauri::AppHandle) {
                             size.height,
                         ) {
                             record_popup_health(&handle, current.epoch, "hideOutsideClick", None);
-                            cancel_active_translation(&handle);
+                            cancel_active_translation_with_reason(
+                                &handle,
+                                popup_health::CancellationReason::OutsideClick,
+                            );
                             let _ = platform::hide_webview_window(&window);
                         }
                     }
@@ -3146,7 +3168,10 @@ fn outside_click_watcher(app: tauri::AppHandle) {
                                     "hideOutsideClick",
                                     None,
                                 );
-                                cancel_active_translation(&handle);
+                                cancel_active_translation_with_reason(
+                                &handle,
+                                popup_health::CancellationReason::OutsideClick,
+                            );
                                 let _ = platform::hide_webview_window(&window);
                             }
                         });
@@ -3202,7 +3227,7 @@ fn windows_popup_focus_changed(app: &tauri::AppHandle, focused: bool) {
         platform::popup_foreground_is_external(&window),
     ) {
         record_popup_health(app, current.epoch, "hideExternalFocus", None);
-        cancel_active_translation(app);
+        cancel_active_translation_with_reason(app, popup_health::CancellationReason::ExternalFocus);
         let _ = platform::hide_webview_window(&window);
     }
 }
@@ -3286,7 +3311,7 @@ fn hide_window(app: tauri::AppHandle) -> Result<(), String> {
         record_popup_health(&app, current.epoch, "hideRequested", None);
     }
     cancel_shortcut_recording(&app);
-    cancel_active_translation(&app);
+    cancel_active_translation_with_reason(&app, popup_health::CancellationReason::HideRequested);
     let window = app.get_webview_window("main").ok_or("窗口不存在")?;
     platform::hide_webview_window(&window)
 }
@@ -3676,7 +3701,10 @@ fn main() {
             tauri::WindowEvent::CloseRequested { api, .. } => {
                 api.prevent_close();
                 cancel_shortcut_recording(window.app_handle());
-                cancel_active_translation(window.app_handle());
+                cancel_active_translation_with_reason(
+                    window.app_handle(),
+                    popup_health::CancellationReason::WindowClose,
+                );
                 let _ = platform::hide_window(window);
             }
             _ => {}
@@ -3717,6 +3745,8 @@ fn main() {
             screenshot::get_screenshot_session,
             screenshot::consume_screenshot_initial_action,
             screenshot::screenshot_editor_ready,
+            screenshot::update_screenshot_selection,
+            screenshot::capture_screenshot_selection,
             screenshot::focus_screenshot_overlay,
             screenshot::open_screenshot_image,
             screenshot::save_screenshot_image,
@@ -3725,6 +3755,8 @@ fn main() {
             screenshot_pins::get_pinned_screenshot,
             screenshot_pins::pinned_screenshot_ready,
             screenshot_pins::set_screenshot_pinned,
+            screenshot_pins::start_pinned_screenshot_drag,
+            screenshot_pins::resize_pinned_screenshot,
             screenshot_pins::close_pinned_screenshot,
             screenshot::close_screenshot_editor,
             screenshot::restart_screenshot_capture,
@@ -4812,6 +4844,18 @@ mod tests {
             "CLIPBOARD_RESTORE_SKIPPED: Copy completion is uncertain"
         )
         .is_none());
+    }
+    #[test]
+    fn busy_ocr_uses_normal_error_presentation_but_selection_stays_quiet() {
+        let error = "OCR_BUSY: Previous recognition is still ending";
+        let failed = action_failure_presentation("ocr", error, 42).unwrap();
+        assert_eq!(failed.source["text"], "");
+        assert_eq!(failed.error.as_deref(), Some(error));
+        assert_eq!(visible_action_error("selection", error), None);
+        assert!(action_failure_presentation("selection", error, 42)
+            .unwrap()
+            .error
+            .is_none());
     }
     #[test]
     fn empty_ocr_is_blank_quiet_and_does_not_focus_or_translate() {

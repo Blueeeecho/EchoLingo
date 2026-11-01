@@ -134,7 +134,7 @@ jobs:
           mkdir -p "$RUNNER_TEMP/screenshot-pin"
           git rev-parse HEAD > "$RUNNER_TEMP/screenshot-pin/source.txt"
           cargo test --manifest-path src-tauri/Cargo.toml --locked screenshot_pins::tests -- --nocapture 2>&1 | tee "$RUNNER_TEMP/screenshot-pin/pins.log"
-          grep -q 'test result: ok. 8 passed; 0 failed' "$RUNNER_TEMP/screenshot-pin/pins.log"
+          grep -q 'test result: ok. 10 passed; 0 failed' "$RUNNER_TEMP/screenshot-pin/pins.log"
           cargo test --manifest-path src-tauri/Cargo.toml --locked screenshot_overlay -- --nocapture 2>&1 | tee "$RUNNER_TEMP/screenshot-pin/overlay.log"
           cargo test --manifest-path src-tauri/Cargo.toml --locked 2>&1 | tee "$RUNNER_TEMP/screenshot-pin/all-rust.log"
           cargo build --manifest-path src-tauri/Cargo.toml --locked 2>&1 | tee "$RUNNER_TEMP/screenshot-pin/build.log"

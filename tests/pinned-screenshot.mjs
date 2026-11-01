@@ -23,7 +23,7 @@ try {
           if (qa.failToggle) throw new Error('fixture toggle failure');
           return;
         }
-        if (['pinned_screenshot_ready', 'close_pinned_screenshot'].includes(command)) return;
+        if (['pinned_screenshot_ready', 'close_pinned_screenshot', 'start_pinned_screenshot_drag', 'resize_pinned_screenshot'].includes(command)) return;
         throw new Error('Unexpected IPC: ' + command);
       } };
     }, { broken });
@@ -36,7 +36,16 @@ try {
       assert.equal(await page.locator('#toggle-pin').isDisabled(), true);
     } else {
       assert.equal(await page.locator('#pinned-image').isVisible(), true);
-      assert.equal(await page.locator('#image-info').textContent(), '96 × 64');
+      assert.equal(await page.locator('header, #image-info, #pin-label').count(), 0, 'no title/dimensions/pin caption');
+      assert.equal(await page.locator('button').count(), 2, 'only pin and close controls');
+      assert.equal(await page.locator('.actions').textContent(), '', 'icons contain no persistent labels');
+      assert.equal(await page.locator('#pinned-image').evaluate(image => getComputedStyle(image).objectFit), 'contain');
+      await page.mouse.move(100, 90); await page.mouse.down(); await page.mouse.up();
+      assert.equal(await page.evaluate(() => window.__pinQA.calls.filter(c => c.command === 'start_pinned_screenshot_drag').length), 1);
+      for (const direction of ['North','NorthEast','East','SouthEast','South','SouthWest','West','NorthWest']) {
+        await page.locator(`[data-direction=${direction}]`).click();
+        assert.equal(await page.evaluate(() => window.__pinQA.calls.filter(c => c.command === 'resize_pinned_screenshot').at(-1).direction), direction.toLowerCase());
+      }
       await page.locator('#toggle-pin').click();
       await page.waitForFunction(() => document.querySelector('#toggle-pin').getAttribute('aria-pressed') === 'false');
       await page.evaluate(() => { window.__pinQA.failToggle = true; });
@@ -49,7 +58,8 @@ try {
       await page.evaluate(() => { window.__pinQA.holdToggle = false; window.__pinQA.release(); });
       await page.waitForFunction(() => document.querySelector('#toggle-pin').getAttribute('aria-pressed') === 'true');
       const imageBox = await page.locator('#pinned-image').boundingBox();
-      assert.ok(imageBox.width <= 240 && imageBox.height < 160);
+      assert.deepEqual(imageBox, { x: 0, y: 0, width: 240, height: 160 }, 'image area uses full window without header reservation');
+      assert.equal(await page.evaluate(() => window.__pinQA.calls.filter(c => c.command === 'start_pinned_screenshot_drag').length), 1, 'buttons and resize edges never drag');
     }
     await page.locator('#close-pin').click();
     await page.waitForFunction(() => window.__pinQA.calls.some(call => call.command === 'close_pinned_screenshot'));

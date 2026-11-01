@@ -70,7 +70,8 @@ final class SelectionTrace {
         "decision", "documentContainer", "opaqueDocument", "copyIssued", "probeNodes", "probeRoot", "copyStrategy", "windowMatches",
         "requestSourceAnchored", "requestSourceMatches", "requestSourceReason", "secureInputEnabled", "accessibilityGranted", "clipboardChanged",
         "windowTicketSource", "windowTicketReason", "windowRecordsCount",
-        "probeStep", "childrenStatus", "childrenCount", "selectedChildrenStatus", "selectedChildrenCount"
+        "probeStep", "childrenStatus", "childrenCount", "selectedChildrenStatus", "selectedChildrenCount",
+        "optionalPluralRootFailure"
     ]
     private let start = ProcessInfo.processInfo.systemUptime
     private let startedAtUnixMs = Date().timeIntervalSince1970 * 1000
@@ -80,6 +81,7 @@ final class SelectionTrace {
     private var phase = "started"
     private var truncated = false
     private var copyIssued = false
+    private var optionalPluralRootFailure = false
     var hasIssuedCopy: Bool { copyIssued }
     init(publish: Bool = true) {
         self.publish = publish
@@ -92,6 +94,7 @@ final class SelectionTrace {
     func record(_ phase: String, _ fields: [String: Any] = [:]) {
         self.phase = String(phase.prefix(64))
         if fields["copyIssued"] as? Bool == true { copyIssued = true }
+        if fields["optionalPluralRootFailure"] as? Bool == true { optionalPluralRootFailure = true }
         var event: [String: Any] = ["phase": self.phase, "mainThread": Thread.isMainThread,
                                     "elapsedMs": elapsedMilliseconds()]
         for (key, value) in fields where Self.allowedFields.contains(key) {
@@ -120,6 +123,8 @@ final class SelectionTrace {
         return ["schemaVersion": 2, "state": state, "phase": phase,
                 "attempt": attempt, "startedAtUnixMs": startedAtUnixMs,
                 "errorCategory": category as Any? ?? NSNull(), "copyIssued": copyIssued,
+                "optionalPluralRootFailure": optionalPluralRootFailure,
+                "optionalPluralRootFailureStatus": optionalPluralRootFailure ? Int(AXError.failure.rawValue) as Any : NSNull(),
                 "elapsedMs": elapsedMilliseconds(), "events": events, "eventsTruncated": truncated]
     }
     private func store(state: String, errorCategory: String?) {
@@ -617,6 +622,9 @@ func requireUnprotectedSelection(_ subrole: String?) throws {
 }
 
 struct SelectionContainerEmpty: Error {}
+// A real failed optional read, not unsupported/noValue and never permission to
+// Copy. Only the bounded root observer may defer it to seek independent proof.
+struct SelectionOptionalPluralRootFailure: Error {}
 
 // AX failure is not evidence that an attribute is unsupported. Only the public
 // capability list may suppress this optional query, before it is issued, for
@@ -639,7 +647,8 @@ func accessibilitySelection(element: AXUIElement?, bundleIdentifier: String? = n
                             trace: SelectionTrace? = nil, phase: String = "ax-selection", deadline: TimeInterval? = nil,
                             recoverContainerEmpty: Bool = false,
                             requireNonEditableCandidate: Bool = false,
-                            requireTextTarget: Bool = false) throws -> String? {
+                            requireTextTarget: Bool = false,
+                            allowOptionalPluralRootRecovery: Bool = false) throws -> String? {
     guard let element = element else {
         trace?.record(phase, ["decision": "focusUnavailable"])
         return nil
@@ -703,6 +712,7 @@ func accessibilitySelection(element: AXUIElement?, bundleIdentifier: String? = n
     // Some document implementations publish only the plural range API. Use
     // public ranges rather than reading the document's AXValue or contents.
     var pluralUnavailable = true
+    var pluralCapabilityDeclared: Bool?
     var queryPlural = shouldQueryPluralSelectionRanges(selectedRange, role: classification.role, opaqueDocument: opaqueDocument,
                                                        boundedContainerProbe: deadline != nil)
     if queryPlural && optionalPluralCapabilityRequired(role: classification.role, bounded: deadline != nil,
@@ -717,6 +727,7 @@ func accessibilitySelection(element: AXUIElement?, bundleIdentifier: String? = n
         // Parse failures stay hard failures even if this read exhausted the budget.
         try requireUsableSelectionQuery(capability)
         queryPlural = capability.value != false
+        pluralCapabilityDeclared = capability.value
     }
     if queryPlural {
         var values: CFTypeRef?
@@ -725,6 +736,12 @@ func accessibilitySelection(element: AXUIElement?, bundleIdentifier: String? = n
         let query = selectionRangesQuery(status: status, value: values)
         pluralUnavailable = query.state == "unavailable"
         trace?.record(phase, ["pluralStatus": status.rawValue, "pluralState": query.state])
+        if optionalPluralRootReadCanRecover(allowed: allowOptionalPluralRootRecovery,
+            role: classification.role, bounded: deadline != nil, textStatus: textStatus,
+            selectedRange: selectedRange, capabilityDeclared: pluralCapabilityDeclared, pluralStatus: status) {
+            trace?.record(phase, ["decision": "declaredPluralRootReadFailed", "optionalPluralRootFailure": true])
+            throw SelectionOptionalPluralRootFailure()
+        }
         try requireUsableSelectionQuery(query)
         if let values = query.value {
             var texts = [String?]()
@@ -774,6 +791,14 @@ func selectionRecoveryContainer(_ role: String?) -> Bool {
     ["AXWindow", "AXGroup", "AXSplitGroup", "AXScrollArea", "AXLayoutArea", "AXDocument", "AXWebArea"].contains(role ?? "")
 }
 
+func optionalPluralRootReadCanRecover(allowed: Bool, role: String?, bounded: Bool,
+                                     textStatus: AXError, selectedRange: CFRange?,
+                                     capabilityDeclared: Bool?, pluralStatus: AXError) -> Bool {
+    allowed && role == "AXGroup" && bounded && textStatus == .noValue &&
+        selectedRange.map { validSelectionRange($0) && $0.length == 0 } == true &&
+        capabilityDeclared == true && pluralStatus == .failure
+}
+
 func shouldQueryPluralSelectionRanges(_ range: CFRange?, role: String?, opaqueDocument: Bool,
                                      boundedContainerProbe: Bool = false) -> Bool {
     // Preserve the existing ordinary/WPS path. The newly supported generic
@@ -786,6 +811,21 @@ struct SelectionProbeObservation<Node> {
     let children: [Node]
     let protected: Bool
     var resourceLimit: Bool = false
+}
+
+// Ordinary recovery treats a public positive selection as authoritative for
+// that node. The optional-root-failure route instead has to inspect its subtree
+// too: positive parent text cannot hide another selection or an unknown child.
+// Keep this production observer branch injectable in the native fixtures.
+func selectionProbeObserveChildren<Node>(text: String?, requireCompleteSubtree: Bool,
+                                        children: () throws -> SelectionProbeObservation<Node>?) rethrows -> SelectionProbeObservation<Node>? {
+    let positiveText = text.flatMap { $0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? nil : $0 }
+    if let positiveText, !requireCompleteSubtree {
+        return SelectionProbeObservation(text: positiveText, children: [], protected: false)
+    }
+    guard let observation = try children() else { return nil }
+    return SelectionProbeObservation(text: positiveText, children: observation.children,
+        protected: observation.protected, resourceLimit: observation.resourceLimit)
 }
 
 enum SelectionProbeResult: Equatable {
@@ -814,6 +854,7 @@ enum SelectionProbeResult: Equatable {
 func probeUniqueSelection<Node>(root: Node, maximumNodes: Int = 64, maximumDepth: Int = 6,
                                same: (Node, Node) -> Bool, contextIsCurrent: () -> Bool,
                                withinBudget: () -> Bool = { true },
+                               requireCompleteSubtree: () -> Bool = { false },
                                observe: (Node, Int) -> SelectionProbeObservation<Node>?) -> (SelectionProbeResult, Int) {
     guard maximumNodes > 0, maximumDepth >= 0, withinBudget() else { return (.resourceLimit, 0) }
     guard contextIsCurrent() else { return (withinBudget() ? .stale : .resourceLimit, 0) }
@@ -827,12 +868,15 @@ func probeUniqueSelection<Node>(root: Node, maximumNodes: Int = 64, maximumDepth
         visited.append(node)
         // A hard observer failure wins even if its AX call also used the budget.
         guard let value = observe(node, maximumNodes - visited.count) else { return (.incomplete, visited.count) }
-        if value.protected { continue }
+        if value.protected {
+            if requireCompleteSubtree() { return (.incomplete, visited.count) }
+            continue
+        }
         if value.resourceLimit { return (.resourceLimit, visited.count) }
         if let text = value.text, !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             guard selected == nil else { return (.ambiguous, visited.count) }
             selected = text
-            continue
+            if !requireCompleteSubtree() { continue }
         }
         guard value.children.count <= maximumNodes - visited.count,
               depth < maximumDepth || value.children.isEmpty else { return (.resourceLimit, visited.count) }
@@ -1007,6 +1051,21 @@ func selectionRecoveryDisposition(_ result: SelectionProbeResult, contextVerifie
     return selectionProbeAllowsCompatibility(result, knownUnsafeTarget: false) ? .compatibility : .rejected(result.state)
 }
 
+func selectionOptionalPluralRecoveryDisposition(_ result: SelectionProbeResult, contextVerified: Bool,
+                                                blockedTarget: Bool, candidateRole: String?,
+                                                windowAndSelectionVerified: Bool) -> SelectionRecoveryDisposition {
+    guard contextVerified else { return .rejected("probeContextUnverified") }
+    guard !blockedTarget else { return .rejected("protectedOrNonTextTarget") }
+    guard case .text(let text) = result, !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+        return .rejected("optionalPluralNoCompleteSelection")
+    }
+    // A lone message/static-text fragment does not prove a cross-message
+    // selection. Require a document's public selection, not concatenated text.
+    guard readonlySelectionContainer(candidateRole) else { return .rejected("optionalPluralNonDocumentCandidate") }
+    guard windowAndSelectionVerified else { return .rejected("optionalPluralSelectionUnverified") }
+    return .text(text)
+}
+
 func selectionOwningWindow(_ element: AXUIElement, role: String? = nil,
                            applicationPID: pid_t, deadline: TimeInterval) -> SelectionQuery<AXUIElement> {
     guard selectionQueryBudgetAvailable(deadline) else { return .limited }
@@ -1176,6 +1235,7 @@ func recoverySelection(originalFocus: AXUIElement?, source: SelectionApplication
     var hardContextFailure = false
     var knownBlockedTarget = false
     var knownEmptyEditor = false
+    var optionalPluralRootFailure = false
     var selectedCandidate: AXUIElement?
     var selectedCandidateRole: String?
     func contextIsCurrent() -> Bool {
@@ -1232,7 +1292,8 @@ func recoverySelection(originalFocus: AXUIElement?, source: SelectionApplication
     }
     let (result, count) = probeUniqueSelection(root: root, same: { CFEqual($0, $1) },
         contextIsCurrent: contextIsCurrent,
-        withinBudget: { selectionQueryBudgetAvailable(deadline) }) { element, remaining in
+        withinBudget: { selectionQueryBudgetAvailable(deadline) },
+        requireCompleteSubtree: { optionalPluralRootFailure }) { element, remaining in
         // Keep per-node metadata private unless this node fails. This avoids
         // flooding the retained trace or discarding the initial source proof.
         let nodeTrace = SelectionTrace(publish: false)
@@ -1281,59 +1342,92 @@ func recoverySelection(originalFocus: AXUIElement?, source: SelectionApplication
             do { try requireSelectionCopyTarget(role: roleQuery.value, subrole: subroleQuery.value) }
             catch {
                 if selectionTargetBlocksCompatibility(isSourceTarget: sourceTarget, role: roleQuery.value, rejectedControl: true) { knownBlockedTarget = true }
+                if optionalPluralRootFailure && sensitive { return invalid() }
                 return SelectionProbeObservation(text: nil, children: [], protected: true)
             }
             var text: String?
+            var confirmedEmpty = false
             probeStep = "selectionAttributes"
             do { text = try accessibilitySelection(element: element, bundleIdentifier: source.bundleIdentifier,
-                trace: nodeTrace, phase: "selectionAttributes", deadline: deadline) }
+                trace: nodeTrace, phase: "selectionAttributes", deadline: deadline,
+                allowOptionalPluralRootRecovery: originalFocus != nil && CFEqual(element, root) &&
+                    sourceWindowTicket != nil && initialWindow.value != nil) }
+            catch is SelectionOptionalPluralRootFailure {
+                optionalPluralRootFailure = true
+                // Preserve the failed API's status; this is not a successful or
+                // unavailable read. No other node receives this exception.
+                if let events = nodeTrace.snapshot()["events"] as? [[String: Any]] {
+                    for event in events where (event["phase"] as? String) != "started" {
+                        trace.record("selection-probe-ax", event)
+                    }
+                }
+                trace.record("selection-plural-root-recovery", ["decision": "readOnlyDocumentSelection",
+                    "optionalPluralRootFailure": true])
+            }
             catch let error as NativeError where error.message.hasPrefix("NO_SELECTION:") {
+                confirmedEmpty = true
                 if selectionTargetBlocksCompatibility(isSourceTarget: sourceTarget, role: roleQuery.value, emptySelection: true) { knownEmptyEditor = true }
             }
-            if let text, !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            let hasPositiveSelection = text.map { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty } ?? false
+            if hasPositiveSelection {
                 selectedCandidate = element
                 selectedCandidateRole = roleQuery.value
-                return SelectionProbeObservation(text: text, children: [], protected: false)
             }
-            guard selectionRecoveryContainer(roleQuery.value) else {
-                return SelectionProbeObservation(text: nil, children: [], protected: false)
+            return try selectionProbeObserveChildren(text: text, requireCompleteSubtree: optionalPluralRootFailure) {
+                if optionalPluralRootFailure && !CFEqual(element, root) && !confirmedEmpty && !hasPositiveSelection {
+                    // nil requests Copy in the ordinary route. Here it means an
+                    // unresolved branch, so a different message cannot masquerade
+                    // as the entire selection. No partial traversal may succeed.
+                    probeStep = "optionalPluralUnknownSelection"
+                    return invalid()
+                }
+                guard selectionRecoveryContainer(roleQuery.value) else {
+                    if optionalPluralRootFailure && roleQuery.value != "AXStaticText" && !selectionEditableRole(roleQuery.value) {
+                        probeStep = "optionalPluralUnknownLeaf"
+                        return invalid()
+                    }
+                    return SelectionProbeObservation(text: nil, children: [], protected: false)
+                }
+                var childCount: CFIndex = 0
+                try requireSelectionQueryBudget(deadline)
+                probeStep = "childrenCount"
+                let countStatus = AXUIElementGetAttributeValueCount(element, kAXChildrenAttribute as CFString, &childCount)
+                childFields = ["childrenStatus": countStatus.rawValue, "childrenCount": childCount]
+                if unavailableSelectionRange(countStatus) {
+                    if optionalPluralRootFailure { return invalid() }
+                    return SelectionProbeObservation(text: nil, children: [], protected: false)
+                }
+                guard countStatus == .success, childCount >= 0 else { return invalid() }
+                guard childCount <= remaining else { return limited() }
+                guard childCount > 0 else { return SelectionProbeObservation(text: nil, children: [], protected: false) }
+                var values: CFArray?
+                try requireSelectionQueryBudget(deadline)
+                probeStep = "childrenValues"
+                let childrenStatus = AXUIElementCopyAttributeValues(element, kAXChildrenAttribute as CFString, 0, childCount, &values)
+                childFields["childrenStatus"] = childrenStatus.rawValue
+                guard childrenStatus == .success,
+                      let values, CFArrayGetCount(values) == childCount else { return invalid() }
+                var children = [AXUIElement]()
+                probeStep = "childrenType"
+                for index in 0..<childCount {
+                    guard let pointer = CFArrayGetValueAtIndex(values, index) else { return invalid() }
+                    let child = Unmanaged<CFTypeRef>.fromOpaque(pointer).takeUnretainedValue()
+                    guard CFGetTypeID(child) == AXUIElementGetTypeID() else { return invalid() }
+                    children.append(child as! AXUIElement)
+                }
+                return SelectionProbeObservation(text: nil, children: children, protected: false)
             }
-            var childCount: CFIndex = 0
-            try requireSelectionQueryBudget(deadline)
-            probeStep = "childrenCount"
-            let countStatus = AXUIElementGetAttributeValueCount(element, kAXChildrenAttribute as CFString, &childCount)
-            childFields = ["childrenStatus": countStatus.rawValue, "childrenCount": childCount]
-            if unavailableSelectionRange(countStatus) { return SelectionProbeObservation(text: nil, children: [], protected: false) }
-            guard countStatus == .success, childCount >= 0 else { return invalid() }
-            guard childCount <= remaining else { return limited() }
-            guard childCount > 0 else { return SelectionProbeObservation(text: nil, children: [], protected: false) }
-            var values: CFArray?
-            try requireSelectionQueryBudget(deadline)
-            probeStep = "childrenValues"
-            let childrenStatus = AXUIElementCopyAttributeValues(element, kAXChildrenAttribute as CFString, 0, childCount, &values)
-            childFields["childrenStatus"] = childrenStatus.rawValue
-            guard childrenStatus == .success,
-                  let values, CFArrayGetCount(values) == childCount else { return invalid() }
-            var children = [AXUIElement]()
-            probeStep = "childrenType"
-            for index in 0..<childCount {
-                guard let pointer = CFArrayGetValueAtIndex(values, index) else { return invalid() }
-                let child = Unmanaged<CFTypeRef>.fromOpaque(pointer).takeUnretainedValue()
-                guard CFGetTypeID(child) == AXUIElementGetTypeID() else { return invalid() }
-                children.append(child as! AXUIElement)
-            }
-            return SelectionProbeObservation(text: nil, children: children, protected: false)
         } catch is SelectionProbeBudgetExpired { return limited() }
         catch { return invalid() }
     }
     trace.record("selection-probe", ["decision": observedContextChange ? "sourceChanged" : result.state, "probeNodes": count,
         "probeRoot": originalFocus == nil ? "focusedWindow" : "focusContainer"])
     if observedContextChange { throw requestSourceFailure ?? NativeError("CANCELLED: 原取词窗口或焦点已改变，请重新选择。") }
-    if focusBecameAvailable && !hardContextFailure && !knownBlockedTarget && !knownEmptyEditor {
+    if focusBecameAvailable && !hardContextFailure && !knownBlockedTarget && !knownEmptyEditor && !optionalPluralRootFailure {
         throw SelectionFocusBecameAvailable()
     }
     var mixedWindowVerified = false
-    if case .text(let selectedText) = result, knownEmptyEditor, !knownBlockedTarget, !hardContextFailure,
+    if case .text(let selectedText) = result, knownEmptyEditor || optionalPluralRootFailure, !knownBlockedTarget, !hardContextFailure,
        !selectionEditableRole(selectedCandidateRole), let candidate = selectedCandidate, let ticket = sourceWindowTicket {
         guard !IsSecureEventInputEnabled() else { throw unavailableSelectionError(trace: trace, reason: "secureInputActive") }
         let rootWindow = selectionOwningWindow(root, role: rootRole, applicationPID: pid, deadline: deadline)
@@ -1344,6 +1438,15 @@ func recoverySelection(originalFocus: AXUIElement?, source: SelectionApplication
             sourceWindowStable: selectionCopyTicket(source: source, matching: ticket) == ticket, same: { CFEqual($0, $1) })
         // Re-read only the public selection, never AXValue/document content.
         // An old sibling selection cleared while probing must not be returned.
+        if mixedWindowVerified {
+            if optionalPluralRootFailure {
+                // Reclassify the root too: its subrole could become protected
+                // without changing its AX object identity during traversal.
+                mixedWindowVerified = (try? selectionRecoveryRole(root, applicationPID: pid, deadline: deadline)) == rootRole
+                    && (try? selectionRecoveryRole(candidate, applicationPID: pid, deadline: deadline)) == selectedCandidateRole
+                    && readonlySelectionContainer(selectedCandidateRole)
+            }
+        }
         if mixedWindowVerified {
             let currentText = try? accessibilitySelection(element: candidate, bundleIdentifier: source.bundleIdentifier,
                 deadline: deadline, requireNonEditableCandidate: true)
@@ -1365,6 +1468,21 @@ func recoverySelection(originalFocus: AXUIElement?, source: SelectionApplication
             "decision": mixedWindowVerified ? "verifiedPositiveSelection" : "mixedSelectionWindowUnverified"])
     }
     if observedContextChange { throw requestSourceFailure ?? NativeError("CANCELLED: 原取词窗口或焦点已改变，请重新选择。") }
+    if optionalPluralRootFailure {
+        // This separate terminal branch cannot reach compatibility Copy, even
+        // on none/resourceLimit. Full traversal + a stable document selection
+        // is the only success; all existing source/security checks still apply.
+        switch selectionOptionalPluralRecoveryDisposition(result, contextVerified: !hardContextFailure,
+            blockedTarget: knownBlockedTarget, candidateRole: selectedCandidateRole,
+            windowAndSelectionVerified: mixedWindowVerified) {
+        case .text(let text):
+            trace.record("selection-plural-root-completed", ["decision": "verifiedDocumentSelection",
+                "optionalPluralRootFailure": true])
+            return text
+        case .rejected(let reason): throw unavailableSelectionError(trace: trace, reason: reason)
+        case .compatibility: throw unavailableSelectionError(trace: trace, reason: "optionalPluralCopyForbidden")
+        }
+    }
     switch selectionRecoveryDisposition(result, contextVerified: !hardContextFailure, blockedTarget: knownBlockedTarget,
                                         emptyEditor: knownEmptyEditor, mixedWindowVerified: mixedWindowVerified,
                                         candidateEditable: selectionEditableRole(selectedCandidateRole)) {
@@ -2067,6 +2185,7 @@ func selectionPolicySelfTest() throws {
     try selectionQueryPolicySelfTest()
     try selectionCopyPolicySelfTest()
     try selectionRecoverySelfTest()
+    try selectionOptionalPluralRecoverySelfTest()
     try selectionMixedRecoverySelfTest()
     try selectionChatMultiSelectionSelfTest()
     try selectionCompatibilitySelfTest()
@@ -2547,6 +2666,177 @@ func selectionChatMultiSelectionSelfTest() throws {
     let serialized = String(decoding: try JSONSerialization.data(withJSONObject: trace.snapshot()), as: UTF8.self)
     try expect(serialized.contains("childrenValues") && serialized.contains("selectedChildrenCount"))
     try expect(!serialized.contains("private multi-selection sentinel"))
+}
+
+func selectionOptionalPluralRecoverySelfTest() throws {
+    func expect(_ value: Bool) throws {
+        if !value { throw NativeError("SELF_TEST: Optional plural root read-only recovery failed.") }
+    }
+    func eligible(allowed: Bool = true, role: String? = "AXGroup", bounded: Bool = true,
+                  textStatus: AXError = .noValue, range: CFRange? = CFRange(location: 0, length: 0),
+                  declared: Bool? = true, status: AXError = .failure) -> Bool {
+        optionalPluralRootReadCanRecover(allowed: allowed, role: role, bounded: bounded,
+            textStatus: textStatus, selectedRange: range, capabilityDeclared: declared, pluralStatus: status)
+    }
+    // Generated metadata reproduces the proven failing shape, not user text.
+    try expect(eligible())
+    try expect(selectionRangesQuery(status: .failure, value: nil).state == "invalid")
+    try expect(!eligible(allowed: false) && !eligible(bounded: false))
+    for role in ["AXWindow", "AXWebArea", "AXDocument", "AXTextArea", "AXTextField", "AXStaticText", "AXButton"] {
+        try expect(!eligible(role: role))
+    }
+    for status in [AXError.success, .attributeUnsupported, .notImplemented, .cannotComplete, .apiDisabled, .invalidUIElement] {
+        try expect(!eligible(textStatus: status))
+    }
+    for range in [nil, CFRange(location: -1, length: 0), CFRange(location: 0, length: 1)] as [CFRange?] {
+        try expect(!eligible(range: range))
+    }
+    try expect(!eligible(declared: false) && !eligible(declared: nil))
+    for status in [AXError.success, .noValue, .attributeUnsupported, .notImplemented, .cannotComplete,
+                   .apiDisabled, .invalidUIElement, .illegalArgument] {
+        try expect(!eligible(status: status))
+    }
+    typealias Node = SelectionProbeObservation<Int>
+    let whole = "first synthetic message\nsecond synthetic message"
+    let graph = [0: Node(text: nil, children: [1, 2], protected: false),
+                 1: Node(text: whole, children: [], protected: false),
+                 2: Node(text: nil, children: [], protected: false)]
+    func probe(_ nodes: [Int: Node], limit: Int = 64) -> SelectionProbeResult {
+        probeUniqueSelection(root: 0, maximumNodes: limit, same: { $0 == $1 }, contextIsCurrent: { true }) { id, _ in nodes[id] }.0
+    }
+    func disposition(_ result: SelectionProbeResult, role: String? = "AXWebArea", context: Bool = true,
+                     blocked: Bool = false, verified: Bool = true) -> SelectionRecoveryDisposition {
+        selectionOptionalPluralRecoveryDisposition(result, contextVerified: context, blockedTarget: blocked,
+            candidateRole: role, windowAndSelectionVerified: verified)
+    }
+    // The candidate's own public selection contains BOTH messages. We never
+    // construct success by concatenating independent descendants/fragments.
+    try expect(disposition(probe(graph)) == .text(whole))
+    try expect(disposition(probe(graph), role: "AXDocument") == .text(whole))
+    for role in ["AXStaticText", "AXGroup", "AXTextArea", "AXTextField", "AXButton"] {
+        if case .text = disposition(.text("one message fragment"), role: role) {
+            throw NativeError("SELF_TEST: A fragment or editable candidate passed document coverage.")
+        }
+    }
+    var fragments = graph
+    fragments[1] = Node(text: "first fragment", children: [], protected: false)
+    fragments[2] = Node(text: "second fragment", children: [], protected: false)
+    try expect(probe(fragments) == .ambiguous)
+    var unknown = graph; unknown.removeValue(forKey: 2)
+    try expect(probe(unknown) == .incomplete) // Hidden/unknown branch after a positive candidate.
+    for result in [SelectionProbeResult.none, .ambiguous, .incomplete, .stale, .resourceLimit, .text(""), .text(" \n"),
+                   probe(fragments), probe(unknown), probe(graph, limit: 1)] {
+        let rejected = disposition(result)
+        if case .text = rejected { throw NativeError("SELF_TEST: Incomplete optional recovery supplied text.") }
+        try expect(rejected != .compatibility)
+    }
+    try expect(disposition(.text(whole), context: false) == .rejected("probeContextUnverified"))
+    try expect(disposition(.text(whole), blocked: true) == .rejected("protectedOrNonTextTarget"))
+    let sameWindow = selectionMixedWindowMatches(initial: 1, root: 1, candidate: 1, focused: 1,
+        sourceWindowStable: true, same: { (left: Int, right: Int) in left == right })
+    let otherWindow = selectionMixedWindowMatches(initial: 1, root: 1, candidate: 2, focused: 1,
+        sourceWindowStable: true, same: { (left: Int, right: Int) in left == right })
+    try expect(sameWindow && !otherWindow)
+    for verified in [otherWindow, selectionMixedTextStillSelected(whole, current: "first fragment"),
+                     selectionMixedTextStillSelected(whole, current: nil)] {
+        try expect(disposition(.text(whole), verified: verified) == .rejected("optionalPluralSelectionUnverified"))
+    }
+    let trace = SelectionTrace(publish: false)
+    trace.record("selection-plural-root-recovery", ["pluralStatus": AXError.failure.rawValue,
+        "optionalPluralRootFailure": true, "selectedText": "private-selection-sentinel"])
+    for _ in 0..<64 { trace.record("fixture-progress") }
+    let snapshot = trace.snapshot(state: "completed")
+    try expect(snapshot["optionalPluralRootFailure"] as? Bool == true && snapshot["copyIssued"] as? Bool == false)
+    try expect(snapshot["optionalPluralRootFailureStatus"] as? Int == Int(AXError.failure.rawValue))
+    try expect(snapshot["eventsTruncated"] as? Bool == true)
+    let encoded = String(decoding: try JSONSerialization.data(withJSONObject: snapshot), as: UTF8.self)
+    try expect(!encoded.contains("private-selection-sentinel"))
+    try selectionOptionalPluralSubtreeSelfTest()
+}
+
+func selectionOptionalPluralSubtreeSelfTest() throws {
+    func expect(_ value: Bool) throws {
+        if !value { throw NativeError("SELF_TEST: Optional plural subtree coverage failed.") }
+    }
+    struct FixtureNode {
+        let role: String
+        var text: String? = nil
+        var children: [Int]? = []
+        var confirmedEmpty = true
+        var secure = false
+    }
+    typealias Observation = SelectionProbeObservation<Int>
+    func probe(_ nodes: [Int: FixtureNode], recoverRootFailure: Bool = true,
+               maximumNodes: Int = 64, maximumDepth: Int = 6) -> (result: SelectionProbeResult, childrenRead: [Int], observed: [Int]) {
+        var strict = false
+        var childrenRead = [Int]()
+        var observed = [Int]()
+        let result = probeUniqueSelection(root: 0, maximumNodes: maximumNodes, maximumDepth: maximumDepth,
+            same: { $0 == $1 }, contextIsCurrent: { true }, requireCompleteSubtree: { strict }) { id, remaining -> Observation? in
+            observed.append(id)
+            guard let node = nodes[id] else { return nil }
+            if id == 0 && recoverRootFailure {
+                // The actual failing metadata activates strict mode during the
+                // root observation, just as the production typed-error catch.
+                guard optionalPluralRootReadCanRecover(allowed: true, role: node.role, bounded: true,
+                    textStatus: .noValue, selectedRange: CFRange(location: 0, length: 0),
+                    capabilityDeclared: true, pluralStatus: .failure) else { return nil }
+                strict = true
+            }
+            if node.secure { return Observation(text: nil, children: [], protected: true) }
+            // This is the same helper as the production observer, not a
+            // precomputed observation or injected final verification boolean.
+            return selectionProbeObserveChildren(text: node.text, requireCompleteSubtree: strict) {
+                childrenRead.append(id)
+                if strict && id != 0 && !node.confirmedEmpty && node.text == nil { return nil }
+                guard let children = node.children else { return nil }
+                return Observation(text: nil, children: children, protected: false,
+                    resourceLimit: children.count > remaining)
+            }
+        }.0
+        return (result, childrenRead, observed)
+    }
+    let whole = "first synthetic message\nsecond synthetic message"
+    let graph = [0: FixtureNode(role: "AXGroup", children: [1], confirmedEmpty: false),
+                 1: FixtureNode(role: "AXWebArea", text: whole, children: [2]),
+                 2: FixtureNode(role: "AXStaticText")]
+    let complete = probe(graph)
+    try expect(complete.result == .text(whole))
+    try expect(complete.childrenRead == [0, 1, 2] && complete.observed == [0, 1, 2])
+    var nestedPositive = graph
+    nestedPositive[2] = FixtureNode(role: "AXDocument", text: "independent nested selection")
+    let ambiguous = probe(nestedPositive)
+    try expect(ambiguous.result == .ambiguous && ambiguous.childrenRead.contains(1) && ambiguous.observed.contains(2))
+    var nestedUnknown = graph
+    nestedUnknown[2] = FixtureNode(role: "AXDocument", confirmedEmpty: false)
+    let unknown = probe(nestedUnknown)
+    try expect(unknown.result == .incomplete && unknown.childrenRead.contains(1) && unknown.observed.contains(2))
+    var nestedSecure = graph
+    nestedSecure[2] = FixtureNode(role: "AXTextField", secure: true)
+    let secure = probe(nestedSecure)
+    try expect(secure.result == .incomplete && secure.childrenRead.contains(1) && secure.observed.contains(2))
+    var unavailableChildren = graph
+    unavailableChildren[1] = FixtureNode(role: "AXWebArea", text: whole, children: nil)
+    try expect(probe(unavailableChildren).result == .incomplete)
+    try expect(probe(graph, maximumNodes: 2).result == .resourceLimit)
+    try expect(probe(graph, maximumDepth: 1).result == .resourceLimit)
+    for result in [ambiguous.result, unknown.result, secure.result, probe(unavailableChildren).result,
+                   probe(graph, maximumNodes: 2).result, probe(graph, maximumDepth: 1).result] {
+        let disposition = selectionOptionalPluralRecoveryDisposition(result, contextVerified: true,
+            blockedTarget: false, candidateRole: "AXWebArea", windowAndSelectionVerified: true)
+        if case .text = disposition { throw NativeError("SELF_TEST: A partial subtree supplied text.") }
+        try expect(disposition != .compatibility)
+    }
+    // Without the new failure-only mode, preserve the existing positive-node
+    // short circuit in BOTH the production observer helper and the walker.
+    for nodes in [nestedPositive, nestedUnknown, nestedSecure, unavailableChildren] {
+        let ordinary = probe(nodes, recoverRootFailure: false)
+        try expect(ordinary.result == .text(whole) && ordinary.childrenRead == [0] && ordinary.observed == [0, 1])
+    }
+    let ordinaryWalker = probeUniqueSelection(root: 0, same: { $0 == $1 }, contextIsCurrent: { true }) { id, _ in
+        id == 0 ? Observation(text: whole, children: [1], protected: false) : nil
+    }
+    try expect(ordinaryWalker.0 == .text(whole) && ordinaryWalker.1 == 1)
 }
 
 func selectionMixedRecoverySelfTest() throws {
@@ -3215,32 +3505,40 @@ func pngSizeGuardSelfTest() throws {
     }
 }
 
-func recognize(_ handler: VNImageRequestHandler, cancellation: CaptureScreenshotOperation? = nil) throws -> String {
-    if cancellation?.isCancelled == true { throw NativeError("CANCELLED: 文字识别请求已取消。") }
-    let request = VNRecognizeTextRequest()
-    let cancellationHandler = cancellation?.installCancellationHandler { request.cancel() }
-    defer { if let cancellationHandler { cancellation?.removeCancellationHandler(cancellationHandler) } }
-    // Vision cancellation is cooperative; unlike the former subprocess, the
-    // in-process bridge cannot forcibly kill OCR without killing the app.
-    let deadline = DispatchSource.makeTimerSource(queue: .global(qos: .utility))
-    deadline.schedule(deadline: .now() + 30)
-    deadline.setEventHandler { request.cancel() }
-    deadline.resume()
-    defer { deadline.setEventHandler {}; deadline.cancel() }
+func recognize(_ image: CGImage, job: NativeOCRJob) throws -> String {
+    try job.checkStopped()
+    job.observe(.handlerCreationStarted)
+    let handler = VNImageRequestHandler(cgImage: image, options: [:])
+    job.observe(.handlerCreated)
+    try job.checkStopped()
+    job.observe(.requestCreationStarted)
+    let request = VNRecognizeTextRequest { _, _ in job.observe(.visionCompletionDelivered) }
+    job.observe(.requestCreated)
+    job.bindCancellation { request.cancel() }
+    defer { job.clearCancellation() }
+    try job.checkStopped()
     request.recognitionLevel = .accurate
     request.usesLanguageCorrection = true
-    let supported = try request.supportedRecognitionLanguages()
+    job.observe(.languageQueryStarted)
+    let supported: [String] = try {
+        defer { job.observe(.languageQueryReturned) }
+        return try request.supportedRecognitionLanguages()
+    }()
+    NativeOCRCapabilities.shared.record(supported)
+    try job.checkStopped()
     let preferred = ["zh-Hans", "zh-Hant", "en-US", "ja-JP", "ko-KR"]
     request.recognitionLanguages = preferred.filter { supported.contains($0) }
-    if #available(macOS 13.0, *) { request.automaticallyDetectsLanguage = true }
-    if cancellation?.isCancelled == true { throw NativeError("CANCELLED: 文字识别请求已取消。") }
-    do { try handler.perform([request]) }
-    catch {
-        if cancellation?.isCancelled == true { throw NativeError("CANCELLED: 文字识别请求已取消。") }
-        if error is CancellationError { throw NativeError("OCR_TIMEOUT: 文字识别超时，请缩小区域后重试。") }
-        throw error
-    }
-    if cancellation?.isCancelled == true { throw NativeError("CANCELLED: 文字识别请求已取消。") }
+    var automatic = false
+    if #available(macOS 13.0, *) { request.automaticallyDetectsLanguage = true; automatic = true }
+    job.recordConfiguration(revision: request.revision, languages: request.recognitionLanguages, automatic: automatic)
+    job.observe(.recognitionConfigured)
+    try job.checkStopped()
+    job.observe(.performStarted)
+    try {
+        defer { job.observe(.performReturned) }
+        try handler.perform([request])
+    }()
+    try job.checkStopped()
     let observations = request.results ?? []
     // Axis-normalized edge skew avoids treating normalized x/y units as an
     // undistorted pixel angle. Tall, vertical, or noticeably tilted boxes disable
@@ -3259,10 +3557,30 @@ func recognize(_ handler: VNImageRequestHandler, cancellation: CaptureScreenshot
                                                         width: box.width, height: box.height))
     }
     let text = joinOCRLines(lines, allowGeometry: allowGeometry)
+    job.observe(.layoutCompleted)
+    try job.checkStopped()
     guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
         throw NativeError("NO_TEXT: No text was recognized. Select a larger, clearer area and retry.")
     }
     return text
+}
+
+func nativeOCRError(_ error: Error) -> Error {
+    guard let error = error as? NativeOCRWorkError else { return error }
+    switch error {
+    case .busy: return NativeError("OCR_BUSY: 上一次文字识别仍在结束，请稍后重试。取词和截图仍可使用。")
+    case .cancelled: return NativeError("CANCELLED: 文字识别请求已取消。")
+    case .timedOut: return NativeError("OCR_TIMEOUT: 文字识别超时，请稍后重试。")
+    }
+}
+
+// The generated OCR self-test exercises the same bounded domain/recognizer,
+// without capturing a screen, requesting permission, or changing the clipboard.
+func recognizeFixture(_ image: CGImage) throws -> String {
+    let job = try NativeOCRDomain.shared.reserve()
+    defer { job.releaseReservation() }
+    try job.start { job in try autoreleasepool { try recognize(image, job: job) } }
+    do { return try job.wait() } catch { throw nativeOCRError(error) }
 }
 
 func withCapturedRegion<T>(purpose: CapturePurpose = .region, cancellation: CaptureScreenshotOperation? = nil, trace: NativeCaptureTrace? = nil,
@@ -3286,16 +3604,26 @@ func captureOCR(cancellation: CaptureScreenshotOperation? = nil) throws -> Strin
     let trace = NativeCaptureTrace(mode: .localOCR)
     cancellation?.attachTrace(trace)
     do {
+        let job = try NativeOCRDomain.shared.reserve { trace.recordOCR($0) }
+        defer { job.releaseReservation() }
         let text = try withCapturedRegion(cancellation: cancellation, trace: trace) { image in
+            // Capture has its own cancellation/cleanup. Install the OCR handler
+            // only after capture relinquishes input; an earlier cancellation is
+            // replayed by installCancellationHandler before starting the job.
+            let cancellationHandler = cancellation?.installCancellationHandler { job.cancel() }
+            defer { if let cancellationHandler { cancellation?.removeCancellationHandler(cancellationHandler) } }
             trace.record(.ocrStarted)
-            let result = try recognize(VNImageRequestHandler(cgImage: image, options: [:]), cancellation: cancellation)
+            // Selection panels and input monitors are already gone. Only this
+            // immutable in-memory image crosses into the single OCR work slot.
+            try job.start { job in try autoreleasepool { try recognize(image, job: job) } }
+            let result = try job.wait()
             trace.record(.ocrCompleted)
             return result
         }
         if cancellation?.isCancelled == true { throw NativeError("CANCELLED: 文字识别请求已取消。") }
         trace.record(.completed)
         return text
-    } catch { trace.failure(error); throw error }
+    } catch { let failure = nativeOCRError(error); trace.failure(failure); throw failure }
 }
 
 func captureInputOperation(_ input: Data) throws -> CaptureScreenshotOperation? {
@@ -4515,12 +4843,14 @@ func systemTranslationTraceSelfTest() throws {
 }
 
 func diagnostics() -> [String: Any] {
-    let languages = (try? VNRecognizeTextRequest().supportedRecognitionLanguages()) ?? []
+    let capabilities = NativeOCRCapabilities.shared.snapshot()
     return ["platform": "macos", "helper": "swift-appkit-vision", "localOcr": true,
             "nativeExecution": "in-process-static", "permissions": permissionStatus(),
             "accessibilityGranted": AXIsProcessTrusted(),
             "screenCaptureGranted": CGPreflightScreenCaptureAccess(),
-            "ocrLanguages": languages, "ocrEngine": "Apple Vision",
+            "ocrLanguages": capabilities.languages,
+            "ocrLanguagesObservation": capabilities.observed ? "observed" : "notQueried",
+            "ocrWorker": NativeOCRDomain.shared.snapshot(), "ocrEngine": "Apple Vision",
             "selection": "Accessibility selected text, then Cmd+C with clipboard restoration",
             "lastSelectionCapture": SelectionTrace.lastSnapshot(),
             "lastOcrCapture": NativeCaptureTrace.snapshot(),
@@ -4575,7 +4905,7 @@ func selfTest(input: Data = Data()) throws -> [String: Any] {
     CTLineDraw(line, context)
     guard let image = context.makeImage() else { throw NativeError("SELF_TEST: Could not create test bitmap.") }
     let recognitionStart = ProcessInfo.processInfo.systemUptime
-    let text = try recognize(VNImageRequestHandler(cgImage: image, options: [:]))
+    let text = try recognizeFixture(image)
     let recognitionMilliseconds = (ProcessInfo.processInfo.systemUptime - recognitionStart) * 1000
     guard text.lowercased().contains("echolingo"), text.contains("2468") else {
         throw NativeError("SELF_TEST: Local OCR did not recognize the generated fixture.")
@@ -4674,6 +5004,10 @@ func nativeResponse(mode: String, input: Data = Data()) -> [String: Any] {
                     "diagnostics": ["screenCaptured": false, "permissionRequested": false,
                      "ocrInvoked": false, "translationInvoked": false,
                      "displayCount": plan.displays.count, "scale": plan.scale]]
+        case "--select-screenshot":
+            guard let operation = try captureInputOperation(input) else { throw NativeError("CAPTURE_ARGUMENT: 缺少截图会话。") }
+            return try selectDeferredScreenshot(cancellation: operation)
+        case "--capture-selected-region": return try captureDeferredScreenshot(input)
         case "--capture-ocr": return ["ok": true, "text": try captureOCR(cancellation: captureInputOperation(input))]
         case "--capture-image": return ["ok": true, "imageBase64": try captureImage(cancellation: captureInputOperation(input))]
         case "--begin-native-capture":

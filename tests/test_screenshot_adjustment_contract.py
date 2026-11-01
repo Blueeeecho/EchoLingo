@@ -13,7 +13,8 @@ class ScreenshotAdjustmentContract(unittest.TestCase):
         self.assertIn('response.get("initialAction").cloned()', re.sub(r"\s+", "", platform))
         self.assertIn('initial_action: None', screenshot)
         start = screenshot.split('pub fn start_capture(', 1)[1].split('#[cfg(test)]', 1)[0]
-        self.assertIn('session.initial_action = Some(action)', start)
+        self.assertIn('select_screenshot_cancelable', start)
+        self.assertNotIn('session.initial_action = Some(action)', start)
         self.assertIn('worker_request.cancelled()', start)
 
     def test_claim_removes_action_under_current_session_lock(self):

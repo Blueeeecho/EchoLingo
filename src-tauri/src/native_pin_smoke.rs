@@ -96,7 +96,7 @@ async fn exercise(app: tauri::AppHandle) -> Result<(), String> {
             "SMOKE_EXTERNAL_FOREGROUND_REQUIRED",
         )?;
         // Actual production create/session checks and IPC-driven decoded-ready.
-        screenshot_pins::pin_screenshot_image(editor.clone(), app.clone(), id, png).await?;
+        screenshot_pins::pin_screenshot_image(editor.clone(), app.clone(), id, None, png).await?;
         let pin = app
             .webview_windows()
             .into_values()
@@ -111,6 +111,11 @@ async fn exercise(app: tauri::AppHandle) -> Result<(), String> {
         screenshot::dialog(&app, move || {
             let (visible, key, level) = native_state(&inspect)?;
             need(visible && !key && level > 0, "SMOKE_PASSIVE_TOPMOST")?;
+            let native = inspect.ns_window().map_err(|_| "SMOKE_NATIVE_HANDLE")?;
+            need(
+                unsafe { integer(native, b"styleMask\0") & 1 == 0 },
+                "SMOKE_PIN_NOT_BORDERLESS",
+            )?;
             need(foreground_pid() == before, "SMOKE_FOREGROUND_CHANGED")
         })
         .await??;

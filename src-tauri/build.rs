@@ -4,6 +4,7 @@ fn main() {
     tauri_build::build();
     println!("cargo:rerun-if-changed=native/macos.swift");
     println!("cargo:rerun-if-changed=native/macos_capture.swift");
+    println!("cargo:rerun-if-changed=native/macos_ocr.swift");
     println!("cargo:rerun-if-changed=native/macos_window.swift");
     println!("cargo:rerun-if-changed=native/windows.ps1");
     println!("cargo:rerun-if-changed=windows_launcher.rs");
@@ -32,6 +33,7 @@ fn main() {
         .args([
             "native/macos.swift",
             "native/macos_capture.swift",
+            "native/macos_ocr.swift",
             "native/macos_window.swift",
             "-O",
             "-target",
@@ -147,6 +149,7 @@ fn build_windows_rust_capture() {
         "windows_capture_ffi.rs",
         "windows_capture_policy.rs",
         "windows_capture_protocol.rs",
+        "windows_capture_selection.rs",
     ] {
         println!("cargo:rerun-if-changed=src/{source}");
     }

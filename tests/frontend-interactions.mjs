@@ -887,6 +887,15 @@ try {
   await page.waitForFunction(before => window.__qa.popupDragCommands.slice(before).some(value => value.command === 'move_popup_drag'), pinPopupDragCalls);
   const beginDrag = await page.evaluate(before => window.__qa.popupDragCommands[before], pinPopupDragCalls);
   assert.deepEqual(beginDrag, { command: 'begin_popup_drag', presentationEpoch: dragEpoch, anchorX: dragX, anchorY: dragY, dragId: 1 });
+  // A suppressed WKWebView stream can emit cancel before implicit capture loss.
+  // The original physical mouse remains held; only native press checks may stop it.
+  const movesBeforeLoss = await page.evaluate(() => window.__qa.popupDragCommands.filter(x => x.command === 'move_popup_drag').length);
+  await page.locator('.popup-drag-space').evaluate(element => {
+    for (const type of ['pointercancel', 'lostpointercapture']) element.dispatchEvent(new PointerEvent(type,
+      { pointerId: 1, pointerType: 'mouse', isPrimary: true, buttons: 1, bubbles: true }));
+  });
+  await page.waitForFunction(n => window.__qa.popupDragCommands.filter(x => x.command === 'move_popup_drag').length > n, movesBeforeLoss);
+  assert.equal(await page.evaluate(() => window.__qa.popupDragCommands.filter(x => x.command === 'end_popup_drag').length), 0);
   await page.mouse.up();
   await page.waitForFunction(() => window.__qa.popupDragCommands.at(-1)?.command === 'end_popup_drag');
   const dragCommands = await page.evaluate(before => window.__qa.popupDragCommands.slice(before), pinPopupDragCalls);

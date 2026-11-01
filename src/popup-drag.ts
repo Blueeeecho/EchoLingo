@@ -68,6 +68,11 @@ export class PopupDragController {
   retainsNativeGesture(pointerId: number): boolean {
     return this.gesture?.pointerId === pointerId && this.gesture.token !== null && this.check();
   }
+  retainsAfterStreamLoss(pointerId: number, pointerType: string): boolean {
+    // DOM cancellation ends an event stream, not necessarily the physical
+    // mouse press. Never extend this native mouse policy to touch/pen input.
+    return pointerType === 'mouse' && this.retainsNativeGesture(pointerId);
+  }
   release(pointerId: number): boolean {
     if (!this.gesture || this.gesture.pointerId !== pointerId) return false;
     const crossed = this.gesture.crossed;

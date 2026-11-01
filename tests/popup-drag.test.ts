@@ -104,6 +104,39 @@ describe('Mac popup drag uses a real gesture rather than an asynchronous current
     drag.release(2);
   });
 
+  it('pointercancel then lostcapture retains only an established held mouse token', async () => {
+    const { drag, host, frame } = fixture();
+    const streamLost = (pointerId = 1, pointerType = 'mouse') => {
+      if (!drag.retainsAfterStreamLoss(pointerId, pointerType)) drag.release(pointerId);
+    };
+    drag.press(press); drag.move(1, -1100, 250, 1); await tick();
+    streamLost(); streamLost(); // pointercancel -> implicit lostpointercapture
+    await frame(); await frame();
+    expect(host.end).not.toHaveBeenCalled(); expect(host.move).toHaveBeenCalledTimes(3);
+    // Native physical release/new press remains authoritative without DOM up.
+    host.move.mockRejectedValueOnce(new Error('released or different physical press'));
+    await frame(); expect(host.end).toHaveBeenCalledWith(1); expect(drag.check()).toBe(false);
+    streamLost(); await frame(); expect(host.move).toHaveBeenCalledTimes(4);
+  });
+  it.each(['touch', 'pen', ''])('never retains a %s stream as a native mouse drag', async pointerType => {
+    const { drag } = fixture(); drag.press(press); drag.move(1, -1100, 250, 1); await tick();
+    expect(drag.retainsAfterStreamLoss(1, pointerType)).toBe(false); drag.cancel();
+  });
+  it('stream cancellation before native begin resolves still retires the late token', async () => {
+    const { drag, host } = fixture(); const wait = deferred<number>(); host.begin.mockReturnValueOnce(wait.promise);
+    drag.press(press); drag.move(1, -1100, 250, 1);
+    expect(drag.retainsAfterStreamLoss(1, 'mouse')).toBe(false); drag.release(1);
+    wait.resolve(8); await tick(); expect(host.move).not.toHaveBeenCalled(); expect(host.end).toHaveBeenCalledWith(8);
+    expect(drag.retainsAfterStreamLoss(1, 'mouse')).toBe(false);
+  });
+  it.each(['hidden', 'epoch', 'blur'] as const)('stream loss cannot retain after %s', async reason => {
+    const { drag, host, hide, change } = fixture();
+    drag.press(press); drag.move(1, -1100, 250, 1); await tick();
+    if (reason === 'hidden') hide(); else if (reason === 'epoch') change(); else drag.cancel();
+    expect(drag.retainsAfterStreamLoss(1, 'mouse')).toBe(false); await tick();
+    expect(host.end).toHaveBeenCalledWith(1);
+  });
+
   it('an explicit native false result stops sampling rather than spinning', async () => {
     const { drag, host, frame, frames } = fixture();
     drag.press(press); drag.move(1, -1100, 250, 1); await tick();
