@@ -550,6 +550,10 @@ jobs:
       - run: npm test
       - run: npm audit --audit-level=high
       - run: npm run build
+      - name: Windows clipboard text readiness and synthesized-format compatibility
+        if: runner.os == 'Windows'
+        shell: powershell
+        run: powershell.exe -NoProfile -STA -ExecutionPolicy Bypass -File tests/windows-clipboard-readiness-smoke.ps1 -IsolatedTestSession
       - name: Windows clipboard presence-marker preservation and unknown-format rejection
         if: runner.os == 'Windows'
         shell: pwsh

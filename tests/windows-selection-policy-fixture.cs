@@ -333,6 +333,32 @@ public static class WindowsSelectionPolicyFixture {
                     "Split guards retain exactly one validated read, one post-read check and at most one copy");
             }
 
+            int oleReads = 0;
+            Assert(SelectionCopyPolicy.ReadPublishedUnicode(false, delegate {
+                oleReads++; throw new Exception("Absent format must not enter blocking OLE");
+            }) == null && oleReads == 0, "No Unicode readiness means no OLE read or hidden retry");
+            Assert(SelectionCopyPolicy.ReadPublishedUnicode(true, delegate { oleReads++; return "ready Unicode"; }) == "ready Unicode"
+                && oleReads == 1, "A ready Unicode publication is read exactly once");
+            Assert(SelectionCopyPolicy.ReadPublishedUnicode(true, delegate { return null; }) == null,
+                "Readiness is not evidence of a nonempty publication");
+            Error(delegate { SelectionCopyPolicy.ReadPublishedUnicode(true, delegate { throw new InvalidOperationException("CLIPBOARD: provider failed"); }); }, "CLIPBOARD:");
+            int readyStep = 0, readyRestores = 0, readyReads = 0;
+            string readyResult = SelectionCopyPolicy.CompleteCopy(10, 4,
+                delegate { return readyStep == 0 ? 11u : 12u; },
+                delegate { return SelectionCopyPolicy.ReadPublishedUnicode(readyStep > 0, delegate { readyReads++; return "delayed Unicode"; }); },
+                delegate(uint copied) { Assert(copied == 12, "Only the completed generation restores"); readyRestores++; },
+                delegate { return readyStep * 100L; }, delegate { readyStep++; }, null, null, null, null, null);
+            Assert(readyResult == "delayed Unicode" && readyReads == 1 && readyRestores == 1,
+                "Unavailable then ready waits without OLE and restores one completed publication");
+            int neverStep = 0, neverReads = 0, neverRestores = 0;
+            Error(delegate { SelectionCopyPolicy.CompleteCopy(10, 4,
+                delegate { return 11u; },
+                delegate { return SelectionCopyPolicy.ReadPublishedUnicode(false, delegate { neverReads++; return "old text"; }); },
+                delegate(uint copied) { neverRestores++; }, delegate { return neverStep * 600L; },
+                delegate { neverStep++; }, null, null, null, null, null); }, "CLIPBOARD_RESTORE_SKIPPED:");
+            Assert(neverReads == 0 && neverRestores == 0 && neverStep == 2,
+                "Non-text updates retain the original 1200ms limit without reading or restoring old text");
+
             CopyFixture normal = Stable();
             Assert(normal.Run(4) == "synthetic selected text 中文" && normal.Index == 2, "Clear then first coherent source-owned Unicode publication completes without a fixed stability sleep");
             Assert(normal.LastOutcome == 2 && normal.LastElapsed == 10 && normal.ObservationCount == 3, "Successful copy records observed completion without extending the deadline");
