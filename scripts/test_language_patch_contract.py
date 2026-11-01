@@ -10,8 +10,26 @@ spec.loader.exec_module(MODULE)
 
 class LanguagePatchContract(unittest.TestCase):
     def test_exact_reviewed_source_and_no_existing_dependency_upgrade(self):
-        self.assertEqual(MODULE.verify()['runId'], 41178655504)
+        # The current release must never qualify for historical language-only reuse.
+        with self.assertRaises(ValueError): MODULE.verify()
+        self.assertEqual(MODULE.BASE, '4b8c5f5ac67e07cc4005812963b2c02acdd14d5d')
         self.assertEqual(len(MODULE.PINS), 3)
+    def test_retained_language_test_command_does_not_select_old_release_scope(self):
+        for version in ['0.2.6', '0.2.7', '0.2.4-beta.1', None]:
+            with self.subTest(version=version), patch.object(MODULE, 'verify') as verify:
+                self.assertEqual(MODULE.select_mode({'version': version, 'scripts': {'test:language-routing': MODULE.COMMAND}}), 'full')
+                verify.assert_not_called()
+        package = {'version': '0.2.4', 'scripts': {'test:language-routing': MODULE.COMMAND}}
+        with patch.object(MODULE, 'verify') as verify:
+            self.assertEqual(MODULE.select_mode(package), MODULE.MODE)
+            verify.assert_called_once_with()
+        with patch.object(MODULE, 'verify', side_effect=ValueError('changed historical source')):
+            with self.assertRaises(ValueError): MODULE.select_mode(package)
+        package['scripts']['test:language-routing'] = 'different command'
+        with patch.object(MODULE, 'verify') as verify:
+            self.assertEqual(MODULE.select_mode(package), 'full')
+            verify.assert_not_called()
+
     def test_unapproved_source_or_wrong_pin_fails_closed(self):
         original = MODULE.git
         def injected(*args):
@@ -35,7 +53,8 @@ class LanguagePatchContract(unittest.TestCase):
     def test_normal_release_path_and_no_overwrite_are_retained(self):
         source = (ROOT/'.github/workflows/release.yml').read_text()
         self.assertIn('uses: ./.github/workflows/release-checks.yml',source)
-        self.assertIn("needs.language-patch.result == 'success'",source)
+        self.assertNotIn("needs.language-patch.result",source)
+        self.assertIn("needs.verify.result == 'success'",source)
         self.assertIn('Only the exact main release commit',source)
         self.assertIn('Release already exists; no files were overwritten.',source)
         self.assertIn('release remains a draft.',source)

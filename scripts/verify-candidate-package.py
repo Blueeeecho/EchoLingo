@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Hash a 0.2.6 candidate and bind explicit build checks to its exact source.
+"""Hash a 0.2.7 candidate and bind explicit build checks to its exact source.
 
 This is not a release/installed-application acceptance gate. It never executes
 an installer, application or engine, downloads files, changes Git, or republishes
@@ -20,7 +20,7 @@ import sys
 import tomllib
 
 ROOT = Path(__file__).resolve().parents[1]
-VERSION = "0.2.6"
+VERSION = "0.2.7"
 MODE = "candidate-package-provenance-v1"
 STAGER_SHA256 = "da1928dd2c699bc27d7d6ff7d6c66c975fc72018fea14b153a34bc5fdd9f05fa"
 VERSION_PATHS = (
@@ -114,7 +114,7 @@ def check_versions(root):
             raise ValueError("Exactly one own-package lock entry is required: " + name)
         versions.append(entries[0]["version"])
     if len(versions) != 8 or any(version != VERSION for version in versions):
-        raise ValueError("All eight version values in seven manifests must equal 0.2.6")
+        raise ValueError("All eight version values in seven manifests must equal 0.2.7")
     return [{"path": name, "sha256": sha256(root / name)} for name in VERSION_PATHS]
 
 
@@ -157,10 +157,10 @@ def check_pe(path, expected_machine=None):
 
 def check_headers(platform, installer, application):
     if platform == "Windows":
-        if installer.name != "EchoLingo_0.2.6_x64-setup.exe" or application.name.lower() != "echolingo.exe":
+        if installer.name != "EchoLingo_0.2.7_x64-setup.exe" or application.name.lower() != "echolingo.exe":
             raise ValueError("Unexpected Windows candidate filename/version/architecture")
         return {"installer": check_pe(installer), "application": check_pe(application, 0x8664)}
-    if installer.name not in {"EchoLingo_0.2.6_aarch64.dmg", "EchoLingo_0.2.6_arm64.dmg"} or application.name != "echolingo":
+    if installer.name not in {"EchoLingo_0.2.7_aarch64.dmg", "EchoLingo_0.2.7_arm64.dmg"} or application.name != "echolingo":
         raise ValueError("Unexpected macOS candidate filename/version/architecture")
     if installer.stat().st_size <= 512:
         raise ValueError("Truncated UDIF disk image")

@@ -1,7 +1,7 @@
-# 0.2.4 uses the full normal CI jobs plus the existing release priority-input gate.
+# 0.2.7 uses the full normal CI jobs plus the existing release priority-input gate.
 # Keep diagnostic-only token permissions out of this reusable publication gate.
 # Build/test steps mirror ci.yml; no production binaries are rebuilt afterward.
-name: Validate 0.2.4 release installers
+name: Validate 0.2.7 release installers
 on:
   workflow_call:
 permissions:
@@ -173,9 +173,61 @@ jobs:
       - name: Rust tests
         run: cargo test --manifest-path src-tauri/Cargo.toml --locked
       - name: Rust formatting
-        run: cargo fmt --manifest-path src-tauri/Cargo.toml --check
+        run: |
+          cargo fmt --manifest-path src-tauri/Cargo.toml --check
+          cargo fmt --manifest-path src-tauri/native-capture/Cargo.toml --check
       - name: Build desktop installer
-        run: npm run tauri build -- --bundles ${{ runner.os == 'Windows' && 'nsis' || 'dmg' }} -- --locked
+        id: package_build
+        run: npm run tauri build -- --bundles ${{ runner.os == 'Windows' && 'nsis' || 'app,dmg' }} -- --locked
+      - name: Require the packaged release app to omit debug pin smoke entry points
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 scripts/verify-native-pin-release-absence.py src-tauri/target/release/bundle/macos/EchoLingo.app/Contents/MacOS/echolingo | tee "$RUNNER_TEMP/release-native-pin-absence.json"
+      - name: Inspect exact fresh installer and packaged application bytes
+        id: package_inspection
+        shell: bash
+        env:
+          RELEASE_RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          if [ "$RUNNER_OS" = Windows ]; then
+            files=(src-tauri/target/release/bundle/nsis/*.exe)
+            application=src-tauri/target/release/echolingo.exe
+          else
+            files=(src-tauri/target/release/bundle/dmg/*.dmg)
+            application=src-tauri/target/release/bundle/macos/EchoLingo.app/Contents/MacOS/echolingo
+          fi
+          test "${#files[@]}" -eq 1
+          python scripts/inspect-candidate-package.py --platform "$RUNNER_OS" --installer "${files[0]}" --built-application "$application" --output-dir "$RUNNER_TEMP/release-package-inspection" --run-url "$RELEASE_RUN_URL" --locked-build-passed --focused-tests-passed 2>&1 | tee "$RUNNER_TEMP/release-package-inspection.log"
+          git diff --exit-code
+      - name: Preserve package inspection evidence including failures
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: EchoLingo-package-inspection-${{ runner.os }}
+          if-no-files-found: warn
+          path: |
+            ${{ runner.temp }}/release-package-inspection/checks.json
+            ${{ runner.temp }}/release-package-inspection/echolingo.exe
+            ${{ runner.temp }}/release-package-inspection/echolingo
+            ${{ runner.temp }}/release-package-inspection/7z-listing.txt
+            ${{ runner.temp }}/release-package-inspection.log
+            ${{ runner.temp }}/release-native-pin-absence.json
+      - name: Preserve the fresh macOS app bundle even if inspection fails
+        if: always() && runner.os == 'macOS' && steps.package_build.outcome == 'success'
+        shell: bash
+        run: |
+          set -euo pipefail
+          tar -czf "$RUNNER_TEMP/EchoLingo.app.tar.gz" -C src-tauri/target/release/bundle/macos EchoLingo.app
+      - name: Upload macOS app bundle for package diagnosis, not substitute acceptance
+        if: always() && runner.os == 'macOS' && steps.package_build.outcome == 'success'
+        uses: actions/upload-artifact@v4
+        with:
+          name: EchoLingo-macOS-app-diagnostic
+          if-no-files-found: error
+          path: ${{ runner.temp }}/EchoLingo.app.tar.gz
       - name: Identify the actual embedded precompiled Windows helper
         id: windows_native_candidate
         if: runner.os == 'Windows'
@@ -436,7 +488,7 @@ jobs:
         timeout-minutes: 5
         shell: powershell
         run: |
-          $installers = @(Get-ChildItem src-tauri/target/release/bundle/nsis -File -Filter '*0.2.4*x64*setup.exe')
+          $installers = @(Get-ChildItem src-tauri/target/release/bundle/nsis -File -Filter '*0.2.7*x64*setup.exe')
           if ($installers.Count -ne 1) { throw 'Expected exactly one own versioned NSIS installer.' }
           rustc --edition=2021 tests/windows-native-capture-harness.rs -O -o "$env:RUNNER_TEMP/echolingo-upper-capture-harness.exe"
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }

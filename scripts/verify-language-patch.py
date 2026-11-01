@@ -63,6 +63,14 @@ def verify():
         raise ValueError('Existing dependency versions/checksums must be unchanged')
     return {'commit': BASE, 'runId': 41178655504, 'tree': TREE}
 
+def select_mode(package):
+    # Keeping the targeted test command in later releases does not authorize
+    # reuse of the fixed 0.2.4 source/installer baseline.
+    if package.get('version') != '0.2.4' or package.get('scripts', {}).get('test:language-routing') != COMMAND:
+        return 'full'
+    verify()  # Exact historical source/dependency pins still fail closed.
+    return MODE
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--select', action='store_true')
@@ -70,9 +78,8 @@ def main():
     parser.add_argument('--platform', choices=['Windows','macOS'])
     parser.add_argument('--installer', type=Path)
     args = parser.parse_args()
-    selected = json.loads((ROOT/'package.json').read_text()).get('scripts',{}).get('test:language-routing') == COMMAND
-    if args.select and not selected:
-        mode = 'full'
+    if args.select:
+        mode = select_mode(json.loads((ROOT/'package.json').read_text(encoding='utf-8')))
     else:
         baseline = verify()
         mode = MODE

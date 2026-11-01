@@ -10,6 +10,9 @@ import test_prepare_release_assets as full_fixtures
 
 class LanguagePatchAssetsTests(unittest.TestCase):
     def setUp(self):
+        # Historical tests retain the original authorized version and pins.
+        version = patch.object(RELEASE, 'VERSION', '0.2.4')
+        version.start(); self.addCleanup(version.stop)
         fixture = full_fixtures.ReleaseAssetsTests('test_versions_are_consistent')
         fixture.setUp()
         self.addCleanup(fixture.doCleanups)
