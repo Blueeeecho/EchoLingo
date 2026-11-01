@@ -113,6 +113,9 @@ class ReleaseAssetsTests(unittest.TestCase):
         self.assertIn("'nsis' || 'app,dmg'", source)
         self.assertIn('python3 scripts/verify-native-pin-release-absence.py src-tauri/target/release/bundle/macos/EchoLingo.app/Contents/MacOS/echolingo', source)
         self.assertIn('release-native-pin-absence.json', source)
+        self.assertIn('npm run tauri -- build --debug --no-bundle -- --locked', source)
+        self.assertIn('bash tests/macos-pin-native-smoke.sh', source)
+        self.assertIn('release-native-pin-smoke', source)
         inspection = source.split('      - name: Inspect exact fresh installer', 1)[1].split('      - name: Identify the actual embedded', 1)[0]
         self.assertIn('bundle/macos/EchoLingo.app/Contents/MacOS/echolingo', inspection)
         self.assertIn('scripts/inspect-candidate-package.py', inspection)
@@ -165,7 +168,7 @@ class ReleaseAssetsTests(unittest.TestCase):
         # Only release-specific strengthening may differ: fresh app+DMG,
         # package inspection/evidence, native-capture formatting and version.
         normalized = release.split("jobs:\n", 1)[1]
-        start = normalized.index('      - name: Require the packaged release app')
+        start = normalized.index('      - name: Build same-source isolated Mac debug pin host')
         end = normalized.index('      - name: Identify the actual embedded', start)
         normalized = normalized[:start] + normalized[end:]
         normalized = normalized.replace('        id: package_build\n', '').replace("'app,dmg'", "'dmg'")
