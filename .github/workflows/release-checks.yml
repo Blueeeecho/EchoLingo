@@ -179,6 +179,14 @@ jobs:
       - name: Build desktop installer
         id: package_build
         run: npm run tauri build -- --bundles ${{ runner.os == 'Windows' && 'nsis' || 'app,dmg' }} -- --locked
+      - name: Build same-source isolated Mac debug pin host
+        if: runner.os == 'macOS'
+        shell: bash
+        run: npm run tauri -- build --debug --no-bundle -- --locked
+      - name: Verify real Mac pin lifecycle against this release source
+        if: runner.os == 'macOS'
+        shell: bash
+        run: bash tests/macos-pin-native-smoke.sh "$PWD/src-tauri/target/debug/echolingo" "$PWD/src-tauri/target/release/bundle/macos/EchoLingo.app/Contents/MacOS/echolingo" "$RUNNER_TEMP/release-native-pin-smoke"
       - name: Require the packaged release app to omit debug pin smoke entry points
         if: runner.os == 'macOS'
         shell: bash
@@ -215,6 +223,7 @@ jobs:
             ${{ runner.temp }}/release-package-inspection/7z-listing.txt
             ${{ runner.temp }}/release-package-inspection.log
             ${{ runner.temp }}/release-native-pin-absence.json
+            ${{ runner.temp }}/release-native-pin-smoke
       - name: Preserve the fresh macOS app bundle even if inspection fails
         if: always() && runner.os == 'macOS' && steps.package_build.outcome == 'success'
         shell: bash

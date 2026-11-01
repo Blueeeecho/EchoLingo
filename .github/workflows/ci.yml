@@ -138,6 +138,17 @@ jobs:
           cargo test --manifest-path src-tauri/Cargo.toml --locked screenshot_overlay -- --nocapture 2>&1 | tee "$RUNNER_TEMP/screenshot-pin/overlay.log"
           cargo test --manifest-path src-tauri/Cargo.toml --locked 2>&1 | tee "$RUNNER_TEMP/screenshot-pin/all-rust.log"
           cargo build --manifest-path src-tauri/Cargo.toml --locked 2>&1 | tee "$RUNNER_TEMP/screenshot-pin/build.log"
+      - name: Build isolated Mac debug and release binaries from this exact source
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          set -euo pipefail
+          npm run tauri -- build --debug --no-bundle -- --locked
+          npm run tauri -- build --no-bundle -- --locked
+      - name: Real Mac production pin lifecycle and release-entry absence
+        if: runner.os == 'macOS'
+        shell: bash
+        run: bash tests/macos-pin-native-smoke.sh "$PWD/src-tauri/target/debug/echolingo" "$PWD/src-tauri/target/release/echolingo" "$RUNNER_TEMP/screenshot-pin/native-lifecycle"
       - name: Check committed Rust formatting
         run: cargo fmt --manifest-path src-tauri/Cargo.toml --check
       - name: Preserve exact-source compiler and synthetic evidence
