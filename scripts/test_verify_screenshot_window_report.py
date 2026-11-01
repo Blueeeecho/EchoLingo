@@ -34,7 +34,7 @@ def complete():
         case['generatedSourceSetup'].update(firstRootIsBackground=False, lastRootIsBackground=False, observations=3)
         if not rejected:
             case.update(imageWidth=80, imageHeight=60, nativeAdjustmentObserved=True,
-                        nativeAdjustmentHintVisible=True, nativeActionOwnedTargetVerified=True, nativeActionSourceForegroundPreserved=True,
+                        nativeActionOwnedTargetVerified=True, nativeActionSourceForegroundPreserved=True,
                         nativeAdjustmentHandleCount=8, nativeActionClickCount=1, nativeInitialAction='select')
             native['initialAction'] = 'select'
         cases.append(case)
@@ -51,7 +51,7 @@ class ScreenshotWindowReport(unittest.TestCase):
             module.verify(json.dumps(report))
 
     def test_native_adjustment_and_matching_explicit_action_are_mandatory(self):
-        for field, value in (('nativeAdjustmentObserved', False), ('nativeAdjustmentHintVisible', False),
+        for field, value in (('nativeAdjustmentObserved', False),
                              ('nativeActionOwnedTargetVerified', False), ('nativeActionSourceForegroundPreserved', False), ('nativeAdjustmentHandleCount', 7),
                              ('nativeAdjustmentHandleCount', 8.0), ('nativeActionClickCount', True),
                              ('nativeActionClickCount', 2), ('nativeInitialAction', 'copy')):

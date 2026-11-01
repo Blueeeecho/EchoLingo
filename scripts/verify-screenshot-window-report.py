@@ -102,7 +102,7 @@ def verify(text):
             if 'imageWidth' in case or 'imageHeight' in case:
                 raise ValueError('A rejected F1 case must not produce image dimensions')
         else:
-            for field in ('nativeAdjustmentObserved', 'nativeAdjustmentHintVisible', 'nativeActionOwnedTargetVerified', 'nativeActionSourceForegroundPreserved'):
+            for field in ('nativeAdjustmentObserved', 'nativeActionOwnedTargetVerified', 'nativeActionSourceForegroundPreserved'):
                 if case.get(field) is not True:
                     raise ValueError('Successful F1 requires actual native adjusting/action evidence: ' + field)
             if (type(case.get('nativeAdjustmentHandleCount')) is not int or case['nativeAdjustmentHandleCount'] != 8

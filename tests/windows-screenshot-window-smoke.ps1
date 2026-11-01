@@ -41,14 +41,13 @@ try {
         if(Class(window)!="EchoLingoNativeCapture-"+helper)return null;
         StringBuilder title=new StringBuilder(128);GetWindowText(window,title,title.Capacity);string text=title.ToString();
         if(text=="EchoLingoCaptureResizeHandle")return "handle";
-        if(text=="EchoLingoCaptureAdjustmentHint")return "hint";
         foreach(string action in ScreenshotActions)if(text=="EchoLingoCaptureAction:"+action)return action;
         Need(text.Length==0||text=="EchoLingoCaptureMagnifier","Unknown titled screenshot role.");return null;
     }
     static bool ScreenshotInventory(Dictionary<string,int> roles) {
-        if(roles.Count!=16)return false;
+        if(roles.Count!=15)return false;
         foreach(string action in ScreenshotActions)if(!roles.ContainsKey(action)||roles[action]!=1)return false;
-        return roles.ContainsKey("handle")&&roles["handle"]==8&&roles.ContainsKey("hint")&&roles["hint"]==1;
+        return roles.ContainsKey("handle")&&roles["handle"]==8;
     }
     static void ScreenshotChooseSelect(int helper,Sources source,Rectangle expected,Dictionary<string,object> report) {
         Stopwatch time=Stopwatch.StartNew();IntPtr button=IntPtr.Zero;bool ready=false;
@@ -59,7 +58,7 @@ try {
                 string role=ScreenshotRole(window,helper);if(role==null)return true;
                 long required=0x08000000L|0x80000L|0x20L|0x80L|8;
                 Need((GetWindowLongPtr(window,-20).ToInt64()&required)==required,"Screenshot adjustment role lost native passive styles.");
-                Rectangle bounds=Bounds(window);Need(bounds.Width>0&&bounds.Height>0&&bounds.Width<=(role=="hint"?3808:(role=="handle"?64:512))&&bounds.Height<=(role=="hint"?864:(role=="handle"?64:240)),"Screenshot adjustment role has invalid bounds.");
+                Rectangle bounds=Bounds(window);Need(bounds.Width>0&&bounds.Height>0&&bounds.Width<=(role=="handle"?64:512)&&bounds.Height<=(role=="handle"?64:240),"Screenshot adjustment role has invalid bounds.");
                 if(role!="handle")Need(Screen.FromHandle(window).WorkingArea.Contains(bounds),"Screenshot toolbar escaped its monitor work area.");
                 roles[role]=roles.ContainsKey(role)?roles[role]+1:1;
                 if(role=="handle")handles.Add(new Point(bounds.Left+bounds.Width/2,bounds.Top+bounds.Height/2));
@@ -79,7 +78,7 @@ try {
         Need(owner==helper&&Class(target)=="EchoLingoNativeCapture-"+helper&&IsWindowVisible(target),"Native select input would target a foreign window.");
         Send(new INPUT[]{Mouse(2),Mouse(4)});
         Need(GetForegroundWindow()==source.AH,"Native select action activated another window.");report["nativeActionSourceForegroundPreserved"]=true;
-        report["nativeAdjustmentObserved"]=true;report["nativeAdjustmentHandleCount"]=8;report["nativeAdjustmentHintVisible"]=true;
+        report["nativeAdjustmentObserved"]=true;report["nativeAdjustmentHandleCount"]=8;
         report["nativeInitialAction"]="select";report["nativeActionClickCount"]=1;report["nativeActionOwnedTargetVerified"]=true;
     }
     static void ScreenshotPressed(int helper) {

@@ -8,7 +8,7 @@ from verify_screenshot_editor_report import EXPECTED_CASES, PIN_CASES, PIN_FIELD
 
 def adjustment(action):
     return dict(nativeInitialAction=action, nativeActionClickCount=1, nativeAdjustmentHandleCount=8,
-                nativeAdjustmentVisible=True, nativeAdjustmentHintVisible=True, initialNativeAdjustmentPreservedSourceForeground=True,
+                nativeAdjustmentVisible=True, initialNativeAdjustmentPreservedSourceForeground=True,
                 nativeActionOwnedTargetVerified=True)
 
 
@@ -112,7 +112,7 @@ class ScreenshotEditorReport(unittest.TestCase):
             for field, value in (
                 ('nativeInitialAction', 'copy'), ('nativeActionClickCount', True),
                 ('nativeActionClickCount', 2), ('nativeAdjustmentHandleCount', 7),
-                ('nativeAdjustmentHandleCount', 8.0), ('nativeAdjustmentHintVisible', False),
+                ('nativeAdjustmentHandleCount', 8.0),
                 ('nativeAdjustmentVisible', False), ('nativeActionOwnedTargetVerified', False),
                 ('nativeAdjustmentGeometryRestored', False), ('nativeAdjustmentMoveResizeVerified', False)):
                 report = complete()

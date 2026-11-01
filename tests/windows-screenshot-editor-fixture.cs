@@ -129,9 +129,8 @@ public static partial class EchoLingoApplicationSmoke {
         },IntPtr.Zero);return candidates.Count==1?candidates[0]:IntPtr.Zero;
     }
     static bool ScreenshotInplaceDimensionsMatch(IntPtr editor,Size pixels) {
-        // Exact current in-place label; dimensional and exported-pixel oracles
-        // remain unchanged when the phase explanation is appended to the UI.
-        return Element(editor,pixels.Width+" \u00d7 "+pixels.Height+" \u00b7 \u6807\u6ce8\u4e2d\uff0c\u8303\u56f4\u5df2\u56fa\u5b9a")!=null;
+        // Match the exact image dimensions, without an extra phase caption.
+        return Element(editor,pixels.Width+" \u00d7 "+pixels.Height)!=null;
     }
     static AutomationElement ScreenshotButton(IntPtr window,string name) {
         AutomationElementCollection matches=AutomationElement.FromHandle(window).FindAll(TreeScope.Descendants,new AndCondition(new PropertyCondition(AutomationElement.NameProperty,name),new PropertyCondition(AutomationElement.ControlTypeProperty,ControlType.Button)));
@@ -424,7 +423,7 @@ public static partial class EchoLingoApplicationSmoke {
                 long required=0x08000000L|0x00080000L|0x20L|0x80L|8L,style=GetWindowLongPtr(window,-20).ToInt64();
                 Assert((style&required)==required,"Visible native adjustment role lost passive/topmost/tool/layered/transparent styles.");
                 RECT r;Assert(GetWindowRect(window,out r),"Visible native adjustment role has no rectangle.");Rectangle bounds=Rectangle.FromLTRB(r.left,r.top,r.right,r.bottom);
-                Assert(bounds.Width>0&&bounds.Height>0&&bounds.Width<=(role=="hint"?3808:(role=="handle"?64:512))&&bounds.Height<=(role=="hint"?864:(role=="handle"?64:240)),"Native adjustment role exceeded its bounded dimensions.");
+                Assert(bounds.Width>0&&bounds.Height>0&&bounds.Width<=(role=="handle"?64:512)&&bounds.Height<=(role=="handle"?64:240),"Native adjustment role exceeded its bounded dimensions.");
                 if(role!="handle")Assert(Screen.FromHandle(window).WorkingArea.Contains(bounds),"Native toolbar role escaped its current monitor work area.");
                 result.Add(window);
             }return true;
@@ -446,10 +445,10 @@ public static partial class EchoLingoApplicationSmoke {
             foreach(string action in new string[]{"select","rectangle","arrow","text","number","pen","highlight","mosaic","solid","crop","copy","save","pin","cancel"}) {
                 int count=ScreenshotNativeRoles(helper,action).Count;Assert(count<=1,"Duplicate native screenshot action.");actions+=count;
             }
-            return actual==expected&&actions==14&&ScreenshotNativeRoles(helper,"hint").Count==1;
+            return actual==expected&&actions==14;
         },10,"Released F1 did not remain in exact native adjustment geometry with eight handles and all actions.",app);
         RequireForeground(form);IntPtr editor=ScreenshotWindow(app.Id);Assert(editor==IntPtr.Zero||!IsWindowVisible(editor),"F1 opened editor before choosing a native action.");
-        evidence["nativeAdjustmentHintVisible"]=true;evidence["nativeAdjustmentVisible"]=true;evidence["nativeAdjustmentHandleCount"]=8;evidence["initialNativeAdjustmentPreservedSourceForeground"]=true;
+        evidence["nativeAdjustmentVisible"]=true;evidence["nativeAdjustmentHandleCount"]=8;evidence["initialNativeAdjustmentPreservedSourceForeground"]=true;
     }
     static void ScreenshotNativePoint(Form form,uint helper,Point point) {
         MoveGenerated(form,point);RequireForeground(form);IntPtr target=GetAncestor(WindowFromPoint(point),2);uint pid;GetWindowThreadProcessId(target,out pid);

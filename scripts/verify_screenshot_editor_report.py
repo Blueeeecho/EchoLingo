@@ -28,7 +28,7 @@ def verify_adjustment(case, action):
             or type(case.get('nativeActionClickCount')) is not int or case['nativeActionClickCount'] != 1
             or type(case.get('nativeAdjustmentHandleCount')) is not int or case['nativeAdjustmentHandleCount'] != 8):
         raise ValueError('Exact native adjustment action and eight handles are required')
-    for field in ('nativeAdjustmentVisible', 'nativeAdjustmentHintVisible', 'initialNativeAdjustmentPreservedSourceForeground', 'nativeActionOwnedTargetVerified'):
+    for field in ('nativeAdjustmentVisible', 'initialNativeAdjustmentPreservedSourceForeground', 'nativeActionOwnedTargetVerified'):
         if case.get(field) is not True:
             raise ValueError('Native adjustment evidence absent: ' + field)
 

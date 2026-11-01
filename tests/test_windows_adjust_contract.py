@@ -10,6 +10,12 @@ WIRE = (ROOT / 'src-tauri/native-capture/src/main.rs').read_text()
 
 
 class WindowsAdjustmentContract(unittest.TestCase):
+    def test_no_extra_adjustment_hint_window_or_reserved_space(self):
+        self.assertNotIn('Role::Hint', HOST)
+        self.assertNotIn('screenshot_hint_bounds', POLICY)
+        self.assertNotIn('hint_height', POLICY)
+        self.assertIn('for index in 0..SCREENSHOT_ACTIONS.len()', HOST)
+
     def test_exact_action_allowlist_and_cancel_remains_non_image(self):
         block = POLICY.split('pub const SCREENSHOT_ACTIONS:', 1)[1].split('];', 1)[0]
         self.assertEqual(re.findall(r'"([a-z]+)"', block), [
@@ -27,7 +33,7 @@ class WindowsAdjustmentContract(unittest.TestCase):
         compact = re.sub(r'\s+', '', HOST)
         self.assertIn('self.edges.iter().chain(&self.actions).chain(&self.handles)', compact)
         self.assertIn('self.edges.iter_mut().chain(&mutself.actions).chain(&mutself.handles)', compact)
-        self.assertIn('Role::Edge(_) | Role::Action(_) | Role::Handle | Role::Hint => EDGE_EX', HOST)
+        self.assertIn('Role::Edge(_) | Role::Action(_) | Role::Handle => EDGE_EX', HOST)
         self.assertIn('return Some(3);', HOST)  # MA_NOACTIVATE unchanged
 
     def test_final_capture_still_revalidates_display_and_clicked_source(self):

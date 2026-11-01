@@ -822,9 +822,8 @@ private final class ScreenshotProbe {
                 func assertAdjustment(_ frame: CGRect) throws {
                     try fixtureNeed(panel.isVisible && view.selection?.offsetBy(dx: panel.frame.minX, dy: panel.frame.minY) == frame,
                                     "released screenshot did not retain exact adjustable region")
-                    try fixtureNeed(view.handles.count == 8 && view.actionButtons.count == CaptureScreenshotAction.allCases.count
-                                    && captureActionHintFrame(view.actionButtons) != nil,
-                                    "native adjustment handles/actions/hint are incomplete")
+                    try fixtureNeed(view.handles.count == 8 && view.actionButtons.count == CaptureScreenshotAction.allCases.count,
+                                    "native adjustment handles/actions are incomplete")
                 }
                 try assertAdjustment(expected)
                 if mode == "rectangle-phase1" {

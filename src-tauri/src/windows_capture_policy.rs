@@ -142,9 +142,7 @@ pub fn screenshot_actions_layout(selected: Rect, area: Rect, dpi: u32) -> Vec<Re
     let columns = ((area.width - gap) / (width + gap)).clamp(1, 7);
     let rows = (SCREENSHOT_ACTIONS.len() as i32 + columns - 1) / columns;
     let total_width = columns * (width + gap) + gap;
-    let hint_width = total_width - 2 * gap;
-    let hint_height = unit(18) * ((unit(360) + hint_width - 1) / hint_width);
-    let total_height = rows * (height + gap) + gap + hint_height + gap;
+    let total_height = rows * (height + gap) + gap;
     if total_width > area.width || total_height > area.height {
         return Vec::new();
     }
@@ -160,32 +158,12 @@ pub fn screenshot_actions_layout(selected: Rect, area: Rect, dpi: u32) -> Vec<Re
         .map(|i| {
             Rect::new(
                 x + gap + (i as i32 % columns) * (width + gap),
-                y + gap + hint_height + gap + (i as i32 / columns) * (height + gap),
+                y + gap + (i as i32 / columns) * (height + gap),
                 width,
                 height,
             )
         })
         .collect()
-}
-
-/// Noninteractive phase hint shares the same reserved work-area-bounded toolbar.
-pub fn screenshot_hint_bounds(actions: &[Rect], dpi: u32) -> Rect {
-    let Some(first) = actions.first() else {
-        return Rect::default();
-    };
-    let right = actions
-        .iter()
-        .filter(|r| r.y == first.y)
-        .map(|r| r.right())
-        .max()
-        .unwrap_or(first.right());
-    let width = right - first.x;
-    if width <= 0 {
-        return Rect::default();
-    }
-    let unit = |n: i32| (n * dpi.clamp(96, 768) as i32 + 95) / 96;
-    let height = unit(18) * ((unit(360) + width - 1) / width);
-    Rect::new(first.x, first.y - unit(4) - height, width, height)
 }
 
 #[derive(Clone, Debug)]
@@ -201,7 +179,6 @@ pub struct CaptureSelectionState {
     pub adjusting: bool,
     pub initial_action: Option<&'static str>,
     action_bounds: Vec<Rect>,
-    hint_bounds: Rect,
     pressed_action: Option<usize>,
     adjustment: Option<usize>, // 0..8 handles, 8 interior move
     adjustment_start: Rect,
@@ -243,7 +220,6 @@ impl CaptureSelectionState {
             adjusting: false,
             initial_action: None,
             action_bounds: Vec::new(),
-            hint_bounds: Rect::default(),
             pressed_action: None,
             adjustment: None,
             adjustment_start: Rect::default(),
@@ -362,7 +338,7 @@ impl CaptureSelectionState {
         self.origin = self.clamp(p);
         if self.adjusting {
             self.pressed_action = self.action_bounds.iter().position(|r| r.contains(p));
-            self.adjustment = if self.pressed_action.is_some() || self.hint_bounds.contains(p) {
+            self.adjustment = if self.pressed_action.is_some() {
                 None
             } else {
                 self.handles()
@@ -428,7 +404,6 @@ impl CaptureSelectionState {
             && bounds.len() == SCREENSHOT_ACTIONS.len()
             && bounds.iter().all(|r| r.valid())
         {
-            self.hint_bounds = screenshot_hint_bounds(&bounds, dpi);
             self.action_bounds = bounds;
             self.handle_size = ((8 * dpi.clamp(96, 768) + 95) / 96) as i32;
         }
@@ -2268,19 +2243,6 @@ mod screenshot_adjustment_tests {
         }
     }
     #[test]
-    fn hint_pointer_pair_is_noninteractive_even_if_it_overlaps_selection() {
-        let mut s = selected();
-        let bounds = screenshot_actions_layout(s.selected, s.desktop, 96);
-        let hint = screenshot_hint_bounds(&bounds, 96);
-        s.set_action_bounds(bounds, 96);
-        s.selected = s.selected.union(hint).unwrap();
-        let original = s.selected;
-        s.begin(Point::new(hint.x + 3, hint.y + 3));
-        s.end(Point::new(hint.x + 33, hint.y + 23));
-        assert_eq!(s.selected, original);
-        assert!(!s.finished && s.initial_action.is_none());
-    }
-    #[test]
     fn interior_move_clamps_without_resizing_and_keeps_source_ticket() {
         let mut s = selected();
         let target = CaptureWindowTarget {
@@ -2316,7 +2278,6 @@ mod screenshot_adjustment_tests {
             let bounds = screenshot_actions_layout(Rect::new(-10, -30, 10, 30), area, dpi);
             assert_eq!(bounds.len(), 14);
             assert!(bounds.iter().all(|r| area.contains_rect(*r)));
-            assert!(area.contains_rect(screenshot_hint_bounds(&bounds, dpi)));
         }
         assert!(
             screenshot_actions_layout(Rect::new(0, 0, 10, 10), Rect::new(0, 0, 50, 50), 96)
@@ -2324,12 +2285,11 @@ mod screenshot_adjustment_tests {
         );
     }
     #[test]
-    fn wrapped_toolbar_and_hint_fit_small_negative_coordinate_work_area() {
+    fn wrapped_toolbar_fits_small_negative_coordinate_work_area() {
         let area = Rect::new(-220, -360, 220, 360);
         let bounds = screenshot_actions_layout(Rect::new(-100, -200, 80, 80), area, 96);
         assert_eq!(bounds.len(), 14);
         assert!(bounds.iter().all(|r| area.contains_rect(*r)));
-        assert!(area.contains_rect(screenshot_hint_bounds(&bounds, 96)));
         assert!(
             screenshot_actions_layout(Rect::new(0, 0, 10, 10), Rect::new(0, 0, 50, 50), 96)
                 .is_empty()

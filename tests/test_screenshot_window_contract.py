@@ -111,9 +111,8 @@ class ScreenshotWindowContract(unittest.TestCase):
             self.assertEqual(native.count(marker), 1)
             self.assertIn(marker, screenshot)
         self.assertIn('ScreenshotInventory(screenshotRoles)', screenshot)
-        self.assertIn('if(roles.Count!=16)return false', screenshot)
+        self.assertIn('if(roles.Count!=15)return false', screenshot)
         self.assertIn('roles["handle"]==8', screenshot)
-        self.assertIn('roles["hint"]==1', screenshot)
         self.assertIn('if(!rejected)ScreenshotChooseSelect(helper,source,expected,report)', screenshot)
         self.assertLess(screenshot.index('if(!rejected)ScreenshotChooseSelect'), screenshot.index('reply=host.Finish(report,12000)'))
         action = screenshot.split('static void ScreenshotChooseSelect(', 1)[1].split('static void ScreenshotPressed(', 1)[0]

@@ -67,7 +67,7 @@ func captureActionButtons(selection: CGRect, usable: CGRect) -> [(CaptureScreens
     let columns = max(1, min(7, Int((usable.width - 16) / 40)))
     let rows = (actions.count + columns - 1) / columns
     let cellWidth = min(64, (usable.width - 16) / CGFloat(columns))
-    let width = CGFloat(columns) * cellWidth, height = CGFloat(rows) * 30 + 44
+    let width = CGFloat(columns) * cellWidth, height = CGFloat(rows) * 30
     guard height <= usable.height - 16 else { return [] }
     let x = min(max(selection.minX, usable.minX + 8), usable.maxX - width - 8)
     let below = selection.minY - height - 8
@@ -76,14 +76,6 @@ func captureActionButtons(selection: CGRect, usable: CGRect) -> [(CaptureScreens
     return actions.enumerated().map { index, action in
         (action, CGRect(x: x + CGFloat(index % columns) * cellWidth, y: y + CGFloat(rows - 1 - index / columns) * 30, width: cellWidth - 2, height: 28))
     }
-}
-
-// The hint shares the existing transparent selector host and its work-area
-// budget; it is not a separate window or an additional confirmation step.
-func captureActionHintFrame(_ buttons: [(CaptureScreenshotAction, CGRect)]) -> CGRect? {
-    guard let first = buttons.first else { return nil }
-    let bounds = buttons.dropFirst().reduce(first.1) { $0.union($1.1) }
-    return CGRect(x: bounds.minX, y: bounds.maxY + 2, width: bounds.width, height: 42)
 }
 
 struct CaptureWindowTarget: Equatable {
@@ -712,14 +704,6 @@ final class CaptureSelectionView: NSView {
             let size = title.size()
             title.draw(at: CGPoint(x: frame.midX - size.width / 2, y: frame.midY - size.height / 2))
         }
-        if let hint = captureActionHintFrame(actionButtons) {
-            NSColor(calibratedWhite: 0.12, alpha: 0.98).setFill()
-            NSBezierPath(roundedRect: hint, xRadius: 5, yRadius: 5).fill()
-            let paragraph = NSMutableParagraphStyle()
-            paragraph.alignment = .center
-            let title = NSAttributedString(string: "拖边角调整范围\n内部拖动可移动\n选工具后固定范围", attributes: [.font: NSFont.systemFont(ofSize: 10), .foregroundColor: NSColor.white, .paragraphStyle: paragraph])
-            title.draw(in: hint.insetBy(dx: 4, dy: 2))
-        }
         guard let loupe = loupe else { return }
         let plate = NSBezierPath(roundedRect: loupe.frame, xRadius: 6, yRadius: 6)
         NSColor(calibratedWhite: 0.08, alpha: 0.94).setFill()
@@ -771,7 +755,6 @@ final class CaptureSelectionSession {
     fileprivate let lifetime: CaptureSelectionLifetime
     private var completed = false
     private var actionButtons: [(CaptureScreenshotAction, CGRect)] = []
-    private var pressedHint = false
     private var pressedAction: CaptureScreenshotAction?
     private var actionDisplayID: CGDirectDisplayID?
     private var ownsEnter = false
@@ -823,14 +806,6 @@ final class CaptureSelectionSession {
             }
             guard isCaptureWindow else { return event }
             let point = event.window?.convertPoint(toScreen: event.locationInWindow) ?? NSEvent.mouseLocation
-            if event.type == .leftMouseDown, captureActionHintFrame(self.actionButtons)?.contains(point) == true {
-                self.pressedHint = true
-                return nil
-            }
-            if self.pressedHint && [.leftMouseDragged, .leftMouseUp].contains(event.type) {
-                if event.type == .leftMouseUp { self.pressedHint = false }
-                return nil
-            }
             if event.type == .leftMouseDown,
                let action = self.actionButtons.first(where: { $0.1.contains(point) })?.0 {
                 self.pressedAction = action
@@ -1550,11 +1525,10 @@ func captureScreenshotSelfTest() throws {
     }
     let shifted = captureAdjustedRectangle(rect, origin: .zero, point: CGPoint(x: 500, y: 100), handle: 0, desktop: desktop)
     try expect(shifted == rect.offsetBy(dx: 500, dy: 100))
-    for usable in [CGRect(x: -1920, y: -180, width: 1920, height: 1040), CGRect(x: -180, y: -180, width: 180, height: 180)] {
+    for usable in [CGRect(x: -1920, y: -180, width: 1920, height: 1040), CGRect(x: -180, y: -140, width: 180, height: 140)] {
         let buttons = captureActionButtons(selection: CGRect(x: usable.maxX - 2, y: usable.maxY - 2, width: 2, height: 2), usable: usable)
         try expect(buttons.count == CaptureScreenshotAction.allCases.count)
         try expect(buttons.allSatisfy { usable.contains($0.1) })
-        try expect(captureActionHintFrame(buttons).map { usable.contains($0) } == true)
     }
     try expect(captureActionButtons(selection: rect, usable: CGRect(x: 0, y: 0, width: 80, height: 80)).isEmpty)
     var adjusting = CaptureSelectorState(displays: displays, purpose: .screenshot)

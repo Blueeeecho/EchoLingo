@@ -18,13 +18,13 @@ describe('actual Windows screenshot fixture source wiring (not native acceptance
     expect(fixture).not.toContain('__TAURI_INTERNALS__');
     for (const name of ['escape-cancel', 'inplace-drag-copy-recapture-save-twice', 'click-window-copy-then-cancel']) expect(fixture).toContain(`"${name}"`);
   });
-  it('matches exact current in-place crop dimensions including its phase label', () => {
+  it('matches exact current in-place crop dimensions without a phase label', () => {
     const editor = readFileSync(new URL('../src/screenshot-editor.ts', import.meta.url), 'utf8');
     const template = editor.match(/\$\('#overlay-info'\)\.textContent = model \? `([^`]+)`/)?.[1];
     const matcher = fixture.slice(fixture.indexOf('static bool ScreenshotInplaceDimensionsMatch('), fixture.indexOf('static AutomationElement ScreenshotButton('));
-    const labels = matcher.match(/pixels\.Width\+"([^"]*)"\+pixels\.Height\+"([^"]*)"/);
+    const labels = matcher.match(/pixels\.Width\+"([^"]*)"\+pixels\.Height/);
     expect(template).toBeDefined(); expect(labels).not.toBeNull();
-    const actualLabel = `624${JSON.parse(`"${labels![1]}"`)}94${JSON.parse(`"${labels![2]}"`)}`;
+    const actualLabel = `624${JSON.parse(`"${labels![1]}"`)}94`;
     expect(actualLabel).toBe(template!.replace('${model.size.width}', '624').replace('${model.size.height}', '94'));
     expect(matcher).toContain('return Element(editor,');
     expect(matcher).not.toMatch(/Contains\(|StartsWith\(/);
@@ -150,14 +150,14 @@ describe('actual Windows screenshot fixture source wiring (not native acceptance
   });
   it('classifies only exact native adjustment roles while cleanup still counts every visible role', () => {
     const roles = wrapper.slice(wrapper.indexOf('static string NativeAdjustmentRole'), wrapper.indexOf('static int[] RectValue'));
-    for (const required of ['EchoLingoCaptureResizeHandle', 'EchoLingoCaptureAdjustmentHint', 'EchoLingoCaptureAction:', 'Unknown titled native capture role', 'if(NativeAdjustmentRole(window)==null)count++']) expect(roles).toContain(required);
+    for (const required of ['EchoLingoCaptureResizeHandle', 'EchoLingoCaptureAction:', 'Unknown titled native capture role', 'if(NativeAdjustmentRole(window)==null)count++']) expect(roles).toContain(required);
     const all = wrapper.slice(wrapper.indexOf('static List<AppEdge> AppOverlayWindows'), wrapper.indexOf('static bool IsInputPlane'));
     expect(all).toContain('string role=NativeAdjustmentRole(window)');
     expect(all).toContain('Every visible role is still returned');
     expect(all).toContain('result.Add(new AppEdge');
   });
   it('requires native adjusting geometry and paired owned move/resize before explicit tool handoff', () => {
-    for (const required of ['ScreenshotWaitAdjustment(', 'actions==14', 'handles.Count!=8', 'ScreenshotNativeMoveResize(', 'nativeAdjustmentGeometryRestored', 'nativeAdjustmentHintVisible', 'Native selected tool was not claimed by the editor.', 'nativeInitialToolClaimed', 'ProcessExited(helper)']) expect(fixture).toContain(required);
+    for (const required of ['ScreenshotWaitAdjustment(', 'actions==14', 'handles.Count!=8', 'ScreenshotNativeMoveResize(', 'nativeAdjustmentGeometryRestored', 'Native selected tool was not claimed by the editor.', 'nativeInitialToolClaimed', 'ProcessExited(helper)']) expect(fixture).toContain(required);
     const adjustment = fixture.slice(fixture.indexOf('static void ScreenshotWaitAdjustment('), fixture.indexOf('static void ScreenshotNativeAction('));
     expect(adjustment).not.toContain('CopyFromScreen(');
     expect(adjustment).not.toContain('SetForegroundWindow(');

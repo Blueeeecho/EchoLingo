@@ -59,7 +59,6 @@ enum Role {
     Plane(usize),
     Edge(usize),
     Action(usize),
-    Hint,
     Handle,
     Loupe,
 }
@@ -168,10 +167,7 @@ unsafe extern "system" fn window_proc(hwnd: w::H, msg: u32, wp: usize, lp: isize
             node.inbox.push(Event::Wire(msg, wp, lp));
             return Some(0);
         }
-        if matches!(
-            node.role,
-            Role::Plane(_) | Role::Action(_) | Role::Handle | Role::Hint
-        ) {
+        if matches!(node.role, Role::Plane(_) | Role::Action(_) | Role::Handle) {
             if matches!(msg, 0x201 | 0x202 | 0x204 | 0x205) {
                 let mut p = w::Point {
                     x: (lp as u16 as i16) as i32,
@@ -192,27 +188,20 @@ unsafe extern "system" fn window_proc(hwnd: w::H, msg: u32, wp: usize, lp: isize
             let mut paint: w::Paint = std::mem::zeroed();
             let dc = w::BeginPaint(hwnd, &mut paint);
             if !dc.is_null() {
-                if matches!(
-                    node.role,
-                    Role::Edge(_) | Role::Handle | Role::Action(_) | Role::Hint
-                ) {
+                if matches!(node.role, Role::Edge(_) | Role::Handle | Role::Action(_)) {
                     let brush = w::CreateSolidBrush(w::rgb(45, 145, 255));
                     let mut bounds = w::Rect::default();
                     w::GetClientRect(hwnd, &mut bounds);
                     w::FillRect(dc, &bounds, brush);
                     w::DeleteObject(brush);
-                    if matches!(node.role, Role::Action(_) | Role::Hint) {
+                    if let Role::Action(index) = node.role {
                         let background = w::CreateSolidBrush(w::rgb(30, 38, 50));
                         w::FillRect(dc, &bounds, background);
                         w::DeleteObject(background);
                         w::SetTextColor(dc, w::rgb(245, 248, 255));
                         w::SetBkMode(dc, 1);
                         let face = w::wide("Segoe UI");
-                        let font_height = if node.role == Role::Hint {
-                            (12 * w::GetDpiForWindow(hwnd).clamp(96, 768) / 96) as i32
-                        } else {
-                            (bounds.bottom - bounds.top) / 2
-                        };
+                        let font_height = (bounds.bottom - bounds.top) / 2;
                         let font = w::CreateFontW(
                             -font_height,
                             0,
@@ -233,16 +222,8 @@ unsafe extern "system" fn window_proc(hwnd: w::H, msg: u32, wp: usize, lp: isize
                             node.inbox.failed.store(true, Ordering::SeqCst);
                         } else {
                             let previous = w::SelectObject(dc, font);
-                            let text = w::wide(match node.role {
-                                Role::Action(index) => SCREENSHOT_LABELS[index],
-                                _ => "拖动边角调整范围，内部拖动可移动；选择工具后固定范围",
-                            });
-                            let flags = if node.role == Role::Hint {
-                                1 | 0x10
-                            } else {
-                                1 | 4 | 0x20
-                            };
-                            w::DrawTextW(dc, text.as_ptr(), -1, &mut bounds, flags);
+                            let text = w::wide(SCREENSHOT_LABELS[index]);
+                            w::DrawTextW(dc, text.as_ptr(), -1, &mut bounds, 1 | 4 | 0x20);
                             w::SelectObject(dc, previous);
                             w::DeleteObject(font);
                         }
@@ -332,7 +313,7 @@ impl Window {
         });
         let ex = match role {
             Role::Plane(_) => PLANE_EX,
-            Role::Edge(_) | Role::Action(_) | Role::Handle | Role::Hint => EDGE_EX,
+            Role::Edge(_) | Role::Action(_) | Role::Handle => EDGE_EX,
             Role::Loupe => LOUPE_EX,
             _ => 0x08000080,
         };
@@ -340,7 +321,6 @@ impl Window {
             Role::Loupe => "EchoLingoCaptureMagnifier".to_owned(),
             Role::Action(index) => format!("EchoLingoCaptureAction:{}", SCREENSHOT_ACTIONS[index]),
             Role::Handle => "EchoLingoCaptureResizeHandle".to_owned(),
-            Role::Hint => "EchoLingoCaptureAdjustmentHint".to_owned(),
             _ => String::new(),
         });
         let parent = if role == Role::Mailbox {
@@ -367,10 +347,7 @@ impl Window {
         if hwnd.is_null() {
             return Err(error("CAPTURE_WINDOW"));
         }
-        if matches!(
-            role,
-            Role::Edge(_) | Role::Action(_) | Role::Handle | Role::Hint
-        ) {
+        if matches!(role, Role::Edge(_) | Role::Action(_) | Role::Handle) {
             if unsafe { w::SetLayeredWindowAttributes(hwnd, w::rgb(255, 0, 255), 255, 1) } == 0 {
                 if unsafe { w::DestroyWindow(hwnd) } == 0 {
                     std::mem::forget(node);
@@ -1361,15 +1338,10 @@ impl Picker {
         let mut actions = Vec::new();
         let mut handles = Vec::new();
         if request.purpose == CapturePurpose::Screenshot {
-            for index in 0..=SCREENSHOT_ACTIONS.len() {
-                let role = if index == SCREENSHOT_ACTIONS.len() {
-                    Role::Hint
-                } else {
-                    Role::Action(index)
-                };
+            for index in 0..SCREENSHOT_ACTIONS.len() {
                 let window = Window::new(
                     &class,
-                    role,
+                    Role::Action(index),
                     Rect::new(0, 0, 1, 1),
                     inbox.clone(),
                     canvas.clone(),
@@ -1578,7 +1550,6 @@ impl Picker {
                             | Role::Loupe
                             | Role::Handle
                             | Role::Action(_)
-                            | Role::Hint
                     ) {
                         continue;
                     }
@@ -1828,15 +1799,10 @@ impl Picker {
             }
             let dpi = display.dpi;
             self.selection.set_action_bounds(bounds, dpi);
-            let hint = screenshot_hint_bounds(self.selection.action_bounds(), dpi);
             for (window, bounds) in self.handles.iter().zip(self.selection.handles()).chain(
-                self.actions.iter().zip(
-                    self.selection
-                        .action_bounds()
-                        .iter()
-                        .copied()
-                        .chain(std::iter::once(hint)),
-                ),
+                self.actions
+                    .iter()
+                    .zip(self.selection.action_bounds().iter().copied()),
             ) {
                 let changed = !window.visible() || window.bounds()? != bounds;
                 if changed || raise {

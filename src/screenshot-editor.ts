@@ -32,7 +32,7 @@ let gesture: { start: Point; end: Point; pointerId: number; points?: Point[] } |
 let discardResolve: ((value: boolean) => void) | null = null;
 // A non-empty inline draft is unsaved even before it enters operation history.
 const dirty = () => model !== null && (savedState !== model.stateId || (textOpen() && !!textInput.value.trim()));
-function status(message: string, error = false): void { $('#editor-status').textContent = message; $('#editor-status').dataset.error = String(error); placeOverlayTools(); }
+function status(message: string, error = false): void { $('#editor-status').textContent = message; $('#editor-status').hidden = !message; $('#editor-status').dataset.error = String(error); placeOverlayTools(); }
 function readableError(error: unknown): string { return error instanceof Error ? error.message : String(error); }
 function controls(): void {
   for (const button of document.querySelectorAll<HTMLButtonElement>('[data-image-action]')) button.disabled = !model || busy || loading;
@@ -44,7 +44,7 @@ function controls(): void {
   $<HTMLButtonElement>('#overlay-cancel').disabled = busy || nativeDialog;
   $('#save-indicator').textContent = model ? dirty() ? '未保存' : '已保存' : '';
   $('#image-info').textContent = model ? `${model.size.width} × ${model.size.height} px` : loading ? '正在打开图片…' : '没有打开的图片';
-  $('#overlay-info').textContent = model ? `${model.size.width} × ${model.size.height} · 标注中，范围已固定` : '';
+  $('#overlay-info').textContent = model ? `${model.size.width} × ${model.size.height}` : '';
   document.title = `${dirty() ? '• ' : ''}截图 · EchoLingo`;
 }
 function applyZoom(): void {
@@ -231,7 +231,7 @@ async function acceptSession(value: ScreenshotSession | null): Promise<void> {
     if (image.naturalWidth !== value.width || image.naturalHeight !== value.height) throw new Error('图片尺寸不一致，无法安全打开。');
     original = image; model = new ScreenshotDocument(value); fit = true;
     frame.hidden = false; $('#empty-state').hidden = true; loading = false; const drawn = render();
-    if (drawn) status(value.overlay ? '范围已固定，正在标注 · 重新框选可调整范围 · ✓ / Enter 复制完成 · × / Esc 取消 · ↓ 保存' : replaced ? '已打开新图片；上一张未保存的编辑已丢弃。图片仅在点击保存后写入文件。' : '仅在本机编辑，不识别文字、不上传图片。保存为合并后的 PNG；复制为合并后的图片。');
+    if (drawn) status(value.overlay ? '' : replaced ? '已打开新图片；上一张未保存的编辑已丢弃。图片仅在点击保存后写入文件。' : '仅在本机编辑，不识别文字、不上传图片。保存为合并后的 PNG；复制为合并后的图片。');
     // A backend claim survives WebView reloads; event/snapshot metadata alone
     // must never trigger a second save/copy/pin of the same capture intent.
     const initialIntent = drawn && value.overlay && value.initialAction !== undefined;

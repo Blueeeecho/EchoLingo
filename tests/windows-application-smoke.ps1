@@ -252,7 +252,7 @@ public static partial class EchoLingoApplicationSmoke {
                 int width = rectangle.right - rectangle.left, height = rectangle.bottom - rectangle.top;
                 string role=NativeAdjustmentRole(window);
                 if(role==null)Assert(width > 0 && height > 0 && Math.Min(width, height) <= 2, "Actual OCR still created a full-screen overlay surface instead of thin edges.");
-                else Assert(width>0&&height>0&&width<=(role=="hint"?3808:(role=="handle"?64:512))&&height<=(role=="hint"?864:(role=="handle"?64:240)),"Native adjustment decoration exceeded its bounded role dimensions.");
+                else Assert(width>0&&height>0&&width<=(role=="handle"?64:512)&&height<=(role=="handle"?64:240),"Native adjustment decoration exceeded its bounded role dimensions.");
                 // Every visible role is still returned: cleanup must count actions and handles too.
                 result.Add(new AppEdge { Handle = window, ProcessId = owner, ParentProcessId = parent,
                     Bounds = Rectangle.FromLTRB(rectangle.left, rectangle.top, rectangle.right, rectangle.bottom) });
@@ -404,7 +404,6 @@ public static partial class EchoLingoApplicationSmoke {
         uint owner;GetWindowThreadProcessId(window,out owner);if(name.ToString()!="EchoLingoNativeCapture-"+owner)return null;
         GetWindowText(window,title,title.Capacity);string value=title.ToString();
         if(value=="EchoLingoCaptureResizeHandle")return "handle";
-        if(value=="EchoLingoCaptureAdjustmentHint")return "hint";
         foreach(string action in new string[]{"select","rectangle","arrow","text","number","pen","highlight","mosaic","solid","crop","copy","save","pin","cancel"})
             if(value=="EchoLingoCaptureAction:"+action)return action;
         Assert(value.Length==0||value=="EchoLingoCaptureMagnifier","Unknown titled native capture role; refusing to classify it as a border.");

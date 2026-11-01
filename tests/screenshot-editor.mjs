@@ -593,7 +593,7 @@ try {
       await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
       const layout = await page.evaluate(() => {
         const rect = element => { const r = element.getBoundingClientRect(); return { x: r.x, y: r.y, right: r.right, bottom: r.bottom }; };
-        return { boxes: ['.editor-toolbar', '#overlay-info', '#editor-status'].map(selector => rect(document.querySelector(selector))),
+        return { boxes: ['.editor-toolbar', '#overlay-info', '#editor-status'].map(selector => document.querySelector(selector)).filter(element => !element.hidden).map(rect),
           actions: ['#overlay-copy', '#overlay-cancel', '#overlay-save', '#overlay-pin'].map(selector => {
             const button = document.querySelector(selector), r = button.getBoundingClientRect(), hit = document.elementFromPoint(r.x + r.width / 2, r.y + r.height / 2);
             return { selector, ...rect(button), clickable: !button.disabled && (hit === button || button.contains(hit)) };
@@ -639,7 +639,8 @@ try {
     });
     await page.waitForFunction(id => window.__screenshotQA.ready.includes(id), overlayId);
     await page.waitForFunction(() => document.querySelector('[data-tool="pen"]').getAttribute('aria-pressed') === 'true');
-    assert.match(await page.locator('#overlay-info').textContent(), /范围已固定/);
+    assert.equal(await page.locator('#overlay-info').textContent(), '96 × 64');
+    assert.equal(await page.locator('#editor-status').isVisible(), false, 'no permanent annotation-stage hint or empty status bubble');
     await drag('pen', [10, 20], [80, 20]);
     await page.locator('#restart-selection').click(); await page.locator('#discard-cancel').click();
     assert.equal(await page.evaluate(() => window.__screenshotQA.restarted), undefined, 'cancel reselect keeps image');

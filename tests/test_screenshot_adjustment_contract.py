@@ -50,8 +50,10 @@ class ScreenshotAdjustmentContract(unittest.TestCase):
 
     def test_mac_toolbar_geometry_and_native_fixtures_cover_adjustment(self):
         source = (ROOT / 'src-tauri/native/macos_capture.swift').read_text()
-        for value in ['captureActionHintFrame', '选工具后固定范围', 'pressedHint', 'captureAdjustmentHandles', 'captureAdjustedRectangle', 'captureActionButtons', 'height <= usable.height - 16', '.visibleFrame', 'actionDisplayID', 'desktop.contains(adjusted)', 'adjusting.initialAction == .pen', 'buttons.allSatisfy { usable.contains($0.1) }']:
+        for value in ['captureAdjustmentHandles', 'captureAdjustedRectangle', 'captureActionButtons', 'height <= usable.height - 16', '.visibleFrame', 'actionDisplayID', 'desktop.contains(adjusted)', 'adjusting.initialAction == .pen', 'buttons.allSatisfy { usable.contains($0.1) }']:
             self.assertIn(value, source)
+        for removed in ['captureActionHintFrame', 'pressedHint', '选工具后固定范围']:
+            self.assertNotIn(removed, source)
         self.assertNotIn('NSApp.activate', source.split('final class CaptureSelectionSession {', 1)[1].split('func selectNativeCaptureRegion(', 1)[0])
 
 if __name__ == '__main__': unittest.main()
