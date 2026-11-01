@@ -553,9 +553,9 @@ public static partial class EchoLingoApplicationSmoke {
     static Dictionary<string,object> ScreenshotPointerObservation(Process app,IntPtr editor,Point point,bool inspectElement,Dictionary<int,DateTime> known) {
         Dictionary<string,object> result=new Dictionary<string,object>();
         try {
-            Point cursor;bool cursorRead=GetCursorPos(out cursor);result["osCursorRead"]=cursorRead;result["physicalLeftDown"]=(GetAsyncKeyState(1)&0x8000)!=0;
+            Point osCursorPoint;bool cursorRead=GetCursorPos(out osCursorPoint);result["osCursorRead"]=cursorRead;result["physicalLeftDown"]=(GetAsyncKeyState(1)&0x8000)!=0;
             result["expectedPointer"]=new int[]{point.X,point.Y};result["desktopBounds"]=ScreenshotRectObservation(SystemInformation.VirtualScreen);
-            if(cursorRead){IntPtr cursorRoot=GetAncestor(WindowFromPoint(cursor),2);uint cursorPid;GetWindowThreadProcessId(cursorRoot,out cursorPid);bool ownedCursor=cursorRoot==editor&&cursorPid==app.Id;result["osCursorOwnedEditor"]=ownedCursor;result["osCursorMatchesExpected"]=cursor==point;if(ownedCursor)result["osCursor"]=new int[]{cursor.X,cursor.Y};}
+            if(cursorRead){IntPtr cursorRoot=GetAncestor(WindowFromPoint(osCursorPoint),2);uint cursorPid;GetWindowThreadProcessId(cursorRoot,out cursorPid);bool ownedCursor=cursorRoot==editor&&cursorPid==app.Id;result["osCursorOwnedEditor"]=ownedCursor;result["osCursorMatchesExpected"]=osCursorPoint==point;if(ownedCursor)result["osCursor"]=new int[]{osCursorPoint.X,osCursorPoint.Y};}
             IntPtr hit=WindowFromPoint(point),root=hit==IntPtr.Zero?IntPtr.Zero:GetAncestor(hit,2);uint pid=0,rootPid=0;uint thread=hit==IntPtr.Zero?0:GetWindowThreadProcessId(hit,out pid),rootThread=root==IntPtr.Zero?0:GetWindowThreadProcessId(root,out rootPid);
             bool descendant=root==editor&&rootPid==app.Id&&(hit==editor||IsChild(editor,hit))&&ScreenshotOwnedProcess(app,pid,known,inspectElement);
             bool owned=ScreenshotObservationScope(root==editor,rootPid==app.Id,hit==editor||IsChild(editor,hit),descendant);

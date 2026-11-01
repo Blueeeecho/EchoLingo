@@ -1,4 +1,4 @@
-name: Isolated Windows F1 DOM pointer diagnostic
+name: Retained 0.2.9 complete DOM diagnostic after fixture compile repair
 on:
   push:
     branches: [diag/029-f1-geometry]
@@ -6,131 +6,57 @@ permissions:
   contents: read
   actions: read
 jobs:
-  windows-f1-dom:
+  windows-f1-geometry:
+    name: One original F1 fixture against unchanged retained application bytes
     runs-on: windows-latest
-    timeout-minutes: 30
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
-          fetch-depth: 0
           persist-credentials: false
-      - uses: actions/setup-node@v4
-        with:
-          node-version: '24'
-          cache: npm
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: swatinem/rust-cache@v2
-        with:
-          workspaces: src-tauri -> target
-      - name: Verify only unchanged offline resource inputs may be reused
-        shell: bash
-        run: |
-          set -euo pipefail
-          git diff --exit-code 4b8c5f5ac67e07cc4005812963b2c02acdd14d5d HEAD -- \
-            scripts/offline-engine scripts/prepare-offline-models.py scripts/test_prepare_offline_models.py \
-            scripts/prepare-offline-notices.py scripts/package-offline-source.py \
-            scripts/audit-windows-resources.py \
-            resources/offline-translation src-tauri/tauri.windows.conf.json LICENSE LICENSING.md
-          git diff --exit-code da0b5d03060a62ea120d931cc6c9eede5af66a7f HEAD -- scripts/stage-language-patch-resources.py
-      - name: Download pinned offline resources and corresponding source without old app reuse
+      - name: Download exact retained evidence without rebuilding
         uses: actions/github-script@v7
         with:
           script: |
-            const fs = require('node:fs');
-            const path = require('node:path');
-            const pins = [
-              [13034542412, 'windows.zip', 'da42d05739744f5eafa71f9758d6a045b42020403d4228f3007d9bbda92fbb25'],
-              [13034970610, 'evidence.zip', '2520b83f54d3774b75c0cc1c6fc3f3105f0c9fb380800d94ac73001e36295285']
-            ];
-            const directory = path.join(process.env.RUNNER_TEMP, 'candidate-offline-inputs');
-            fs.mkdirSync(directory);
-            const { data: run } = await github.rest.actions.getWorkflowRun({owner:'Blueeeecho',repo:'EchoLingo',run_id:41178655504});
-            if (run.conclusion !== 'success' || run.head_sha !== '4b8c5f5ac67e07cc4005812963b2c02acdd14d5d') throw new Error('Pinned resource run mismatch');
-            for (const [id,name,hash] of pins) {
-              const { data: artifact } = await github.rest.actions.getArtifact({owner:'Blueeeecho',repo:'EchoLingo',artifact_id:id});
-              if (artifact.expired || artifact.workflow_run.id !== 41178655504 || artifact.digest !== `sha256:${hash}`) throw new Error('Pinned resource artifact mismatch');
-              const { data } = await github.rest.actions.downloadArtifact({owner:'Blueeeecho',repo:'EchoLingo',artifact_id:id,archive_format:'zip'});
-              fs.writeFileSync(path.join(directory,name), Buffer.from(data));
-            }
-      - name: Extract only hash-verified offline engine models licenses and source
-        shell: pwsh
-        run: |
-          python scripts/stage-language-patch-resources.py --windows-zip "$env:RUNNER_TEMP/candidate-offline-inputs/windows.zip" --evidence-zip "$env:RUNNER_TEMP/candidate-offline-inputs/evidence.zip" --output-dir "$env:RUNNER_TEMP/candidate-offline-evidence"
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          python scripts/audit-windows-resources.py --staged
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-      - run: npm ci
-      - name: Require the diagnostic node to be absent from the default production UI
+            const fs = require('node:fs'), crypto = require('node:crypto'), path = require('node:path');
+            const owner='Blueeeecho', repo='EchoLingo', runId=41314313059;
+            const source='68aacb5b08028f33fd183e743607e70359b69c23';
+            if (context.repo.owner !== owner || context.repo.repo !== repo) throw Error('Unexpected repository');
+            const {data: run} = await github.rest.actions.getWorkflowRun({owner,repo,run_id:runId});
+            if (run.head_sha !== source || run.repository.id !== 1432139657) throw Error('Original source mismatch');
+            const {data: a} = await github.rest.actions.getArtifact({owner,repo,artifact_id:13086149183});
+            const hash='b04b7948493c38d2f1963c59a40fb377cab74ed0c785fad09b509783fe0858af';
+            if (a.expired || a.name !== 'EchoLingo-029-isolated-DOM-pointer-diagnostic' || a.workflow_run.id !== runId || a.workflow_run.head_sha !== source || a.size_in_bytes !== 18938994 || a.digest !== `sha256:${hash}`) throw Error('Retained evidence identity mismatch');
+            const {data} = await github.rest.actions.downloadArtifact({owner,repo,artifact_id:13086149183,archive_format:'zip'});
+            const bytes=Buffer.from(data);
+            if (bytes.length !== 18938994 || crypto.createHash('sha256').update(bytes).digest('hex') !== hash) throw Error('Evidence bytes mismatch');
+            fs.writeFileSync(path.join(process.env.RUNNER_TEMP,'retained-evidence.zip'),bytes,{flag:'wx'});
+      - name: Extract only exact built executable and its exact embedded capture helper
         shell: bash
         run: |
-          set -euo pipefail
-          unset VITE_SCREENSHOT_POINTER_PROBE
-          npm run build
-          python3 - <<'PYABSENCE'
-          import pathlib
-          files=[p for p in pathlib.Path('dist').rglob('*') if p.is_file()]
-          assert files
-          for p in files:
-              assert b'EL_SCREENSHOT_POINTER_PROBE_' not in p.read_bytes(), str(p)
-              assert b'screenshot-pointer-probe' not in p.read_bytes(), str(p)
-          print('Default production UI contains no pointer diagnostic node or marker.')
-          PYABSENCE
-      - name: Build a new isolated diagnostic application without installer or offline engine compilation
-        shell: bash
-        env:
-          VITE_SCREENSHOT_POINTER_PROBE: '1'
-        run: |
-          set -euo pipefail
-          npm run tauri -- build --no-bundle -- --locked
-          python3 - <<'PYPRESENCE'
-          import pathlib
-          assert any(b'EL_SCREENSHOT_POINTER_PROBE_V2' in p.read_bytes() for p in pathlib.Path('dist').rglob('*') if p.is_file())
-          PYPRESENCE
-      - name: Identify the actual embedded precompiled Windows helper
-        id: windows_native_candidate
-        shell: powershell
-        run: |
-          $dll = Get-ChildItem src-tauri/target/release/build -Recurse -File -Filter echolingo-windows-native.dll | Sort-Object LastWriteTimeUtc -Descending | Select-Object -First 1
-          if ($null -eq $dll) { throw 'The production Windows native DLL was not built.' }
-          $appBytes = [IO.File]::ReadAllBytes((Resolve-Path src-tauri/target/release/echolingo.exe))
-          $dllBytes = [IO.File]::ReadAllBytes($dll.FullName)
-          Add-Type -TypeDefinition @'
-          public static class EchoLingoExactPayload {
-            public static int Find(byte[] binary, byte[] payload) {
-              if (payload.Length == 0) return -1;
-              for (int i = 0; i <= binary.Length - payload.Length; i++) {
-                if (binary[i] != payload[0]) continue;
-                int j = 1; while (j < payload.Length && binary[i+j] == payload[j]) j++;
-                if (j == payload.Length) return i;
-              }
-              return -1;
-            }
-          }
-          '@
-          $payloadOffset = [EchoLingoExactPayload]::Find($appBytes, $dllBytes)
-          if ($payloadOffset -lt 0) { throw 'The selected complete DLL is not embedded byte-for-byte in the actual application.' }
-          $launcher = Join-Path $dll.DirectoryName 'echolingo-windows-launcher.ps1'
-          if (-not (Test-Path -LiteralPath $launcher -PathType Leaf)) { throw 'Generated Windows launcher is missing beside the accepted DLL.' }
-          $launcherBytes = [IO.File]::ReadAllBytes($launcher)
-          $launcherOffset = [EchoLingoExactPayload]::Find($appBytes, $launcherBytes)
-          if ($launcherOffset -lt 0) { throw 'The complete candidate launcher is not embedded byte-for-byte in the actual application.' }
-          [ordered]@{ launcherBytes = $launcherBytes.Length; launcherSha256 = (Get-FileHash $launcher -Algorithm SHA256).Hash.ToLowerInvariant(); completeLauncherEmbedded = $true; exactLauncherOffset = $launcherOffset } | ConvertTo-Json -Compress
-          "path=$($dll.FullName)" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
-          $capture = Join-Path $dll.DirectoryName 'echolingo-native-capture.exe'
-          $captureBytes = [IO.File]::ReadAllBytes($capture)
-          $captureOffset = [EchoLingoExactPayload]::Find($appBytes, $captureBytes)
-          if ($captureOffset -lt 0) { throw 'The complete Rust capture child is not embedded byte-for-byte in the actual application.' }
-          "capturePath=$capture" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
-          [ordered]@{ nativeCaptureBytes = $captureBytes.Length; nativeCaptureSha256 = (Get-FileHash $capture -Algorithm SHA256).Hash.ToLowerInvariant(); completeNativeCaptureEmbedded = $true; exactNativeCaptureOffset = $captureOffset } | ConvertTo-Json -Compress
-          [ordered]@{ dllBytes = $dllBytes.Length; dllSha256 = (Get-FileHash $dll.FullName -Algorithm SHA256).Hash.ToLowerInvariant(); completePayloadEmbedded = $true; exactPayloadOffset = $payloadOffset } | ConvertTo-Json -Compress
-      - name: Record new diagnostic build identity, not retained or release acceptance
-        shell: powershell
-        run: |
-          [ordered]@{ source='${{ github.sha }}'; applicationSha256=(Get-FileHash src-tauri/target/release/echolingo.exe -Algorithm SHA256).Hash.ToLowerInvariant(); applicationBytes=(Get-Item src-tauri/target/release/echolingo.exe).Length; helperSha256=(Get-FileHash '${{ steps.windows_native_candidate.outputs.capturePath }}' -Algorithm SHA256).Hash.ToLowerInvariant(); diagnosticOnly=$true; releaseAcceptance=$false; retainedBytes=$false; rebuilt=$true; pointerProbeCompiled=$true; inputRetries=0; fixtureInvocations=1 } | ConvertTo-Json | Set-Content "$env:RUNNER_TEMP/f1-dom-identity.json"
-      - name: One original full F1 fixture with fixed own-DOM counter observations
+          python3 - <<'PY'
+          import hashlib,json,os,pathlib,stat,zipfile
+          root=pathlib.Path(os.environ['RUNNER_TEMP'])
+          member='EchoLingo/EchoLingo/src-tauri/target/release/echolingo.exe'
+          expected='033f0fac57f17768e05c24969ee17d0ffecab43f7b3dd973bdf9062e2a0fa5ce'
+          helper_sha='6c82ca5299e8f79e46767773344275188da9cf3ae95ec6000ba8965b65e9ca1d'
+          with zipfile.ZipFile(root/'retained-evidence.zip') as archive:
+              entries=[x for x in archive.infolist() if x.filename==member]
+              assert len(entries)==1
+              entry=entries[0]; mode=entry.external_attr>>16
+              assert not entry.is_dir() and not stat.S_ISLNK(mode) and stat.S_IFMT(mode) in (0,stat.S_IFREG) and entry.file_size==8424448
+              with archive.open(entry) as stream: data=stream.read(8424449)
+              assert len(data)==8424448 and hashlib.sha256(data).hexdigest()==expected
+          helper=data[5978101:5978101+472064]
+          assert len(helper)==472064 and helper[:2]==b'MZ' and hashlib.sha256(helper).hexdigest()==helper_sha
+          with (root/'retained-echolingo.exe').open('xb') as f: f.write(data)
+          with (root/'retained-native-capture.exe').open('xb') as f: f.write(helper)
+          (root/'retained-f1-identity.json').write_text(json.dumps({'source':'68aacb5b08028f33fd183e743607e70359b69c23','sourceRun':41314313059,'artifact':13086149183,'fixtureCommit':os.environ['GITHUB_SHA'],'applicationSha256':expected,'applicationBytes':len(data),'helperOffset':5978101,'helperBytes':len(helper),'helperSha256':helper_sha,'diagnosticOnly':True,'releaseAcceptance':False,'rebuilt':False,'retries':0,'fixtureInvocations':1,'pointerProbeCompiled':True,'priorApplicationTested':False,'priorFailure':'fixture-csharp-local-name-conflict'}),encoding='utf-8')
+          PY
+      - name: Run original complete F1 fixture exactly once with complete bounded DOM and native geometry observations
         id: f1
         continue-on-error: true
         timeout-minutes: 10
@@ -138,23 +64,32 @@ jobs:
         run: |
           $ErrorActionPreference = 'Continue'
           $global:LASTEXITCODE = 1
-          $output = @(& powershell.exe -NoProfile -STA -ExecutionPolicy Bypass -File tests/windows-application-smoke.ps1 -ApplicationPath src-tauri/target/release/echolingo.exe -ScreenshotEditorTests -DefaultCapture -NativeCapturePath '${{ steps.windows_native_candidate.outputs.capturePath }}' 2>&1)
+          $output = @(& powershell.exe -NoProfile -STA -ExecutionPolicy Bypass -File tests/windows-application-smoke.ps1 -ApplicationPath "$env:RUNNER_TEMP/retained-echolingo.exe" -ScreenshotEditorTests -DefaultCapture -NativeCapturePath "$env:RUNNER_TEMP/retained-native-capture.exe" 2>&1)
           $fixtureExit = $LASTEXITCODE
-          $output | Out-File "$env:RUNNER_TEMP/f1-dom-observation.log" -Encoding utf8
+          $output | Out-File "$env:RUNNER_TEMP/retained-f1-geometry.log" -Encoding utf8
           $output | Write-Output
           exit $fixtureExit
+      - name: Verify immutable inputs after the single fixture
+        if: always()
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          foreach ($item in @(@('retained-echolingo.exe',8424448,'033f0fac57f17768e05c24969ee17d0ffecab43f7b3dd973bdf9062e2a0fa5ce'),@('retained-native-capture.exe',472064,'6c82ca5299e8f79e46767773344275188da9cf3ae95ec6000ba8965b65e9ca1d'))) {
+            $path = Join-Path $env:RUNNER_TEMP $item[0]
+            if ((Get-Item -LiteralPath $path).Length -ne $item[1] -or (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash.ToLowerInvariant() -ne $item[2]) { throw 'Retained input changed or was unavailable.' }
+          }
+          'unchanged=true; rebuild=false; retry=false; releaseAcceptance=false' | Set-Content "$env:RUNNER_TEMP/retained-f1-after.txt"
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: EchoLingo-029-isolated-DOM-pointer-diagnostic
+          name: EchoLingo-029-retained-complete-DOM-diagnostic
           if-no-files-found: error
           path: |
-            ${{ runner.temp }}/f1-dom-observation.log
-            ${{ runner.temp }}/f1-dom-identity.json
-            src-tauri/target/release/echolingo.exe
-            ${{ runner.temp }}/candidate-offline-evidence
+            ${{ runner.temp }}/retained-f1-geometry.log
+            ${{ runner.temp }}/retained-f1-identity.json
+            ${{ runner.temp }}/retained-f1-after.txt
       - name: Preserve original verdict without replacing final release acceptance
         if: always()
         shell: powershell
         run: |
-          if ('${{ steps.f1.outcome }}' -ne 'success') { throw 'Original F1 fixture failed or incomplete. Diagnostic counters do not replace its acceptance predicate.' }
+          if ('${{ steps.f1.outcome }}' -ne 'success') { throw 'Original complete F1 fixture failed or incomplete; observation does not change the verdict.' }

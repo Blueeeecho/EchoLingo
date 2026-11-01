@@ -229,7 +229,7 @@ describe('actual Windows screenshot fixture source wiring (not native acceptance
     expect(schema.indexOf('if(!ScreenshotProbePayload(data))return')).toBeLessThan(schema.indexOf('result["domProbe"]=data'));
     for (const forbidden of ['Send(', 'SetForegroundWindow(', '.Invoke()', 'Thread.Sleep', 'result["raw"]', 'result["value"]']) expect(schema).not.toContain(forbidden);
     const observe = fixture.slice(fixture.indexOf('static Dictionary<string,object> ScreenshotPointerObservation('), fixture.indexOf('static void ScreenshotWebMoveResize('));
-    for (const value of ['GetCursorPos(out cursor)', '(GetAsyncKeyState(1)&0x8000)!=0', 'cursorRoot==editor&&cursorPid==app.Id', 'if(ownedCursor)result["osCursor"]', 'observation["afterUp"]']) expect(observe).toContain(value);
+    for (const value of ['GetCursorPos(out osCursorPoint)', '(GetAsyncKeyState(1)&0x8000)!=0', 'cursorRoot==editor&&cursorPid==app.Id', 'if(ownedCursor)result["osCursor"]', 'observation["afterUp"]']) expect(observe).toContain(value);
   });
   it('maps F1 exports to dismiss/re-capture while retaining standalone cancellation and collision oracles', () => {
     for (const value of ['if(closes)WaitFor', 'for(int save=0;save<2;save++)', 'recapturedSaveSessions', 'inplaceCopyAndSavesDismissed', 'savedCaptureReopenedThroughSettings', 'standaloneCollisionNumberingVerified', 'ScreenshotContinueOpen(app,dialogOwner)', 'inplaceCancelPreservedClipboard']) expect(fixture).toContain(value);
