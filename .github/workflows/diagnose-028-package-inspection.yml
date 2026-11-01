@@ -42,16 +42,16 @@ jobs:
               if (bytes.length !== size || crypto.createHash('sha256').update(bytes).digest('hex') !== hash) throw new Error('Original bytes mismatch');
               fs.writeFileSync(path.join(directory, file), bytes, { flag: 'wx' });
             }
-      - name: Capture original bounded attach response without changing strict parsing
+      - name: Verify retained attachment with the exact reviewed prefix-parser patch
         shell: bash
         run: |
           set -euo pipefail
           python3 scripts/diagnose-028-dmg-attachment.py --inputs "$RUNNER_TEMP/original-package-inputs" --output "$RUNNER_TEMP/attachment-diagnostic"
-      - name: Preserve diagnostic response even when original strict parsing fails
+      - name: Preserve patched same-byte diagnostic response even on failure
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: EchoLingo-0.2.8-retained-attachment-diagnostic
+          name: EchoLingo-0.2.8-retained-attachment-patched-diagnostic
           if-no-files-found: error
           path: |
             ${{ runner.temp }}/attachment-diagnostic/*.stdout

@@ -17,6 +17,7 @@ import json
 import os
 from pathlib import Path
 import plistlib
+from xml.parsers.expat import ExpatError
 import re
 import shutil
 import stat
@@ -300,7 +301,21 @@ def owned_bundle_file(bundle, relative):
 
 
 def attachment_entities(data):
-    value = plistlib.loads(data)
+    # Actual unchanged 0.2.8 DMG, diagnostic run 41282105467: hdiutil emits
+    # the reviewed own license (MacRoman rendering and wrapped lines) before
+    # its XML even with -plist. Accept only that exact observed 2007-byte
+    # prefix, never search for XML or discard arbitrary command output.
+    # readonly_dmg separately verifies the original DMG/project LICENSE hash
+    # before supplying confirmation; this does not authorize another license.
+    prefix_size = 2007
+    prefix_sha256 = "a773ba44e24e65c363584a20c09f126bbd4bd0a2b9a52e70a6f5e62df8fbba04"
+    if len(data) > prefix_size and hashlib.sha256(data[:prefix_size]).hexdigest() == prefix_sha256:
+        data = data[prefix_size:]
+        require(data.startswith(b'<?xml version="1.0" encoding="UTF-8"?>'), "Expected XML immediately after reviewed license output")
+    try:
+        value = plistlib.loads(data)
+    except (plistlib.InvalidFileException, ExpatError) as error:
+        raise InspectionError("Malformed disk-image attachment plist") from error
     require(isinstance(value, dict) and isinstance(value.get("system-entities"), list), "Malformed disk-image attachment metadata")
     entities = value["system-entities"]
     require(all(isinstance(entity, dict) for entity in entities), "Malformed attachment entity")

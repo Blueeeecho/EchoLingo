@@ -12,6 +12,8 @@ import zipfile
 ROOT = Path(__file__).resolve().parents[1]
 SOURCE = '8ade30e0ed9c5d18c37768cd93ceb72ccfe4603c'
 RUN = 41281391324
+ORIGINAL_INSPECTOR_SHA = 'f98408dbf82a1ab6cf23817669cbeab3e17e8b3d02c719028643e74792925878'
+PATCHED_INSPECTOR_SHA = '16ac78b8ff2d4c3f8cc51ddea14c0f4eb9f665faf3ab081ff063f9da291e3447'
 ARTIFACTS = {
     'dmg.zip': (13074130151, 5378384, 'ae7df8549e32cfb7b51d12713b4edeb8917abbd590e4352612168a52ff5573a7'),
     'app.zip': (13073169414, 4327455, '5410896a3a6694e2e81d3175f1b0ba1a7639f84189bc7aad3547fa4b1ed89144'),
@@ -30,7 +32,8 @@ def main():
     inspector = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(inspector)
     expected = subprocess.check_output(['git', '-C', str(ROOT), 'show', SOURCE + ':scripts/inspect-candidate-package.py'])
-    inspector.require(expected == (ROOT / 'scripts/inspect-candidate-package.py').read_bytes(), 'Diagnostic must use the unchanged original inspector')
+    inspector.require(hashlib.sha256(expected).hexdigest() == ORIGINAL_INSPECTOR_SHA, 'Original inspector identity mismatch')
+    inspector.require(inspector.sha256(ROOT / 'scripts/inspect-candidate-package.py') == PATCHED_INSPECTOR_SHA, 'Diagnostic must use only the exact reviewed prefix-parser patch')
     for filename, (_, size, digest) in ARTIFACTS.items():
         path = inspector.regular_file(args.inputs / filename)
         inspector.require(path.stat().st_size == size and inspector.sha256(path) == digest, 'Pinned artifact bytes mismatch')
@@ -49,7 +52,7 @@ def main():
     observations = []
 
     def capture(command, **kwargs):
-        # The original inspector retains stdin, arguments, deadlines, output bounds,
+        # The reviewed inspector retains stdin, arguments, deadlines, output bounds,
         # strict parsing and its scoped finally-detach. Only copy this tool's result.
         check = kwargs.pop('check', True)
         result = original_command(command, check=False, **kwargs)
@@ -69,7 +72,8 @@ def main():
 
     inspector.checked_command = capture
     report = {'diagnosticOnly': True, 'originalSource': SOURCE, 'originalRun': RUN,
-              'inspectorSha256': hashlib.sha256(expected).hexdigest(), 'artifacts': ARTIFACTS,
+              'originalInspectorSha256': ORIGINAL_INSPECTOR_SHA, 'patchedInspectorSha256': PATCHED_INSPECTOR_SHA,
+              'formalReleaseAcceptance': False, 'artifacts': ARTIFACTS,
               'dmgSha256': DMG_SHA, 'commands': observations, 'strictAttachmentPassed': False}
     failed = False
     try:
