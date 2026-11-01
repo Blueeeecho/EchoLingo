@@ -319,6 +319,42 @@ public static class WindowsBrowserSelectionBridge {
         ObserveLockedFormat(values,"html",RegisterClipboardFormat(DataFormats.Html),(string)ownedSeed.GetData(DataFormats.Html,false),Encoding.UTF8,false);
         return Convert.ToInt32(values["unicodeExactEqual"])==1&&Convert.ToInt32(values["rtfExactEqual"])==1&&Convert.ToInt32(values["htmlExactEqual"])==1;
     }
+    // Cleanup provenance only: this never changes the original consumer OLE
+    // verdict. Use the observation already taken after failure, never rebase to
+    // whatever happens to be on the clipboard later during close.
+    static bool FailedOleCleanupGeneration(Dictionary<string,object> observation,uint current){
+        object value;
+        if(current==0||!observation.TryGetValue("originalVerdict",out value)||!(value is bool)||((bool)value))return false;
+        foreach(string key in new string[]{"sequenceBeforeRead","sequenceAfterRead"})
+            if(!observation.TryGetValue(key,out value)||Convert.ToUInt32(value)!=current)return false;
+        if(!observation.TryGetValue("rawFormatsAfterOleFailure",out value))return false;
+        var raw=value as Dictionary<string,object>;if(raw==null)return false;
+        foreach(string key in new string[]{"lockAcquired","nonceVerified","unicodeExactEqual","rtfExactEqual","htmlExactEqual"})
+            if(!raw.TryGetValue(key,out value)||Convert.ToInt32(value)!=1)return false;
+        foreach(string key in new string[]{"clipboardWritten","error","unicodeError","rtfError","htmlError"})
+            if(!raw.TryGetValue(key,out value)||Convert.ToInt32(value)!=0)return false;
+        foreach(string key in new string[]{"sequenceBeforeLock","sequenceWhileLocked","sequenceAfterUnlock"})
+            if(!raw.TryGetValue(key,out value)||Convert.ToUInt32(value)!=current)return false;
+        return true;
+    }
+    static void FailedOleCleanupPolicySelfTest(){
+        var raw=new Dictionary<string,object>();
+        foreach(string key in new string[]{"lockAcquired","nonceVerified","unicodeExactEqual","rtfExactEqual","htmlExactEqual"})raw[key]=1;
+        foreach(string key in new string[]{"clipboardWritten","error","unicodeError","rtfError","htmlError"})raw[key]=0;
+        foreach(string key in new string[]{"sequenceBeforeLock","sequenceWhileLocked","sequenceAfterUnlock"})raw[key]=42u;
+        var observation=new Dictionary<string,object>{{"originalVerdict",false},{"sequenceBeforeRead",42u},{"sequenceAfterRead",42u},{"rawFormatsAfterOleFailure",raw}};
+        Need(FailedOleCleanupGeneration(observation,42),"FAILED_OLE_OWNED_NATIVE_GENERATION_ACCEPTED");
+        Need(!(bool)observation["originalVerdict"],"FAILED_OLE_VERDICT_PRESERVED");
+        Need(!FailedOleCleanupGeneration(observation,43),"FAILED_OLE_NEW_GENERATION_REJECTED");
+        foreach(string key in new List<string>(raw.Keys)){
+            object original=raw[key];raw.Remove(key);
+            Need(!FailedOleCleanupGeneration(observation,42),"FAILED_OLE_INCOMPLETE_EVIDENCE_REJECTED");
+            raw[key]=Convert.ToUInt32(original)+1u;
+            Need(!FailedOleCleanupGeneration(observation,42),"FAILED_OLE_CHANGED_EVIDENCE_REJECTED");raw[key]=original;
+        }
+        observation.Remove("rawFormatsAfterOleFailure");
+        Need(!FailedOleCleanupGeneration(observation,42),"FAILED_OLE_NO_PROBE_REJECTED");
+    }
     static bool ClearOwnedClipboard(){
         if(!seeded)return true;seeded=false; // one cleanup attempt, including failure
         if(!OpenClipboard(IntPtr.Zero))return false;
@@ -518,6 +554,12 @@ public static class WindowsBrowserSelectionBridge {
             Application.DoEvents();Thread.Sleep(10);
         }
         metadata["hotkeyToExactSourceAndHistoryMilliseconds"]=clock.Elapsed.TotalMilliseconds;metadata["shortcutKeysReleasedAfterAction"]=(GetAsyncKeyState(0x12)&0x8000)==0&&(GetAsyncKeyState(0x44)&0x8000)==0;Stage="app-clipboard-and-foreground-check";var clipboardObservation=new Dictionary<string,object>();metadata["richClipboardRestored"]=Restored(seed,clipboardObservation);metadata["clipboardRestorationObservation"]=clipboardObservation;if(Convert.ToBoolean(metadata["richClipboardRestored"]))ownedClipboard=GetClipboardSequenceNumber();
+        else{
+            uint observed=GetClipboardSequenceNumber();
+            bool verified=!NoClipboardProbe&&FailedOleCleanupGeneration(clipboardObservation,observed);
+            metadata["failedOleNativeCleanupOwnershipVerified"]=verified;
+            if(verified)ownedClipboard=observed;
+        }
         metadata["sourceForegroundPreserved"]=GetForegroundWindow()==main;metadata["browserBoundRootPreserved"]=BrowserMain(Convert.ToInt32(command["browserPid"]))==main;metadata["safeToContinue"]=Convert.ToBoolean(metadata["richClipboardRestored"])&&Convert.ToBoolean(metadata["sourceForegroundPreserved"]);
         metadata["ok"]=exact&&foregroundAlways&&Convert.ToBoolean(metadata["richClipboardRestored"])&&Convert.ToBoolean(metadata["sourceForegroundPreserved"])&&Convert.ToBoolean(metadata["browserBoundRootPreserved"])&&Convert.ToBoolean(metadata["shortcutKeysReleasedAfterAction"]);metadata["safeToContinue"]=metadata["ok"];metadata["acquisitionExpectationPassed"]=metadata["ok"];metadata["failureClassification"]=Convert.ToBoolean(metadata["ok"])?null:"actual-app-hotkey-acquisition";if(!Convert.ToBoolean(metadata["ok"])){
             metadata["error"]=!Convert.ToBoolean(metadata["richClipboardRestored"])?"ACTUAL_APP_ORIGINAL_RICH_CLIPBOARD_MISMATCH":"ACTUAL_APP_EXACT_SOURCE_NEW_HISTORY_OR_FOREGROUND_FAILED";
@@ -527,7 +569,7 @@ public static class WindowsBrowserSelectionBridge {
     }
     public static void Run(string helper,string assembly,string browser,string application,string mockUrl,string provider,string hash,long bytes,bool diagnostics,string shortcutGesture,bool noClipboardProbe){
         NoClipboardProbe=noClipboardProbe;Need(!noClipboardProbe||(!String.IsNullOrEmpty(application)&&!diagnostics),"NO_PROBE_REQUIRES_ORDINARY_ACTUAL_APPLICATION");
-        RawPayloadSelfTest();ClipboardCleanupPolicySelfTest();
+        RawPayloadSelfTest();ClipboardCleanupPolicySelfTest();FailedOleCleanupPolicySelfTest();
         Need(shortcutGesture=="instant"||shortcutGesture=="paced","SHORTCUT_GESTURE_INVALID");Need(shortcutGesture=="instant"||!String.IsNullOrEmpty(application),"PACED_GESTURE_REQUIRES_APPLICATION");ShortcutGesture=shortcutGesture;
         Helper=String.IsNullOrEmpty(helper)?null:Path.GetFullPath(helper);Assembly=String.IsNullOrEmpty(assembly)?null:Path.GetFullPath(assembly);Browser=Path.GetFullPath(browser);Need(Helper==null||!Helper.Contains("\"")&&!Assembly.Contains("\""),"INVALID_FIXTURE_PATH");
         IDataObject existing=Clipboard.GetDataObject();Need(existing==null||existing.GetFormats(false).Length==0,"FRESH_EMPTY_CLIPBOARD_REQUIRED");
