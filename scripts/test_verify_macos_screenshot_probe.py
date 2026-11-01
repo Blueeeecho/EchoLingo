@@ -32,7 +32,9 @@ def passed():
         if 'cancel' in mode:
             case['nativeCancelled'] = True
         else:
-            case.update(imageWidth=512, imageHeight=320, generatedVisiblePixelsVerified=True, ownOverlayPixelsAbsent=True)
+            case.update(imageWidth=512, imageHeight=320, generatedVisiblePixelsVerified=True, ownOverlayPixelsAbsent=True,
+                        nativeAdjustmentVerified=True, nativeAction="select", nativeActionClickCount=1)
+            if mode == "rectangle-phase1": case["nativeAdjustmentMoveResizeRestored"] = True
         report['cases'].append(case)
     return report
 
@@ -134,6 +136,16 @@ class MacScreenshotProbeContract(unittest.TestCase):
         for cases in [passed()['cases'][:-1], passed()['cases'] + [passed()['cases'][0]]]:
             report = passed(); report['cases'] = cases
             with self.assertRaises(ValueError): module.verify(report)
+
+    def test_adjustment_requires_owned_action_and_geometry_evidence(self):
+        for index in (0, 1, 4):
+            for field, value in [('nativeAdjustmentVerified', False), ('nativeAction', 'copy'),
+                                 ('nativeActionClickCount', True), ('nativeActionClickCount', 0),
+                                 ('nativeActionClickCount', 2)]:
+                report = passed(); report['cases'][index][field] = value
+                with self.assertRaises(ValueError): module.verify(report)
+        report = passed(); del report['cases'][1]['nativeAdjustmentMoveResizeRestored']
+        with self.assertRaises(ValueError): module.verify(report)
 
     def test_pixels_or_cleanup_failure_cannot_pass(self):
         for field, value in [('generatedVisiblePixelsVerified', False), ('ownOverlayPixelsAbsent', False),

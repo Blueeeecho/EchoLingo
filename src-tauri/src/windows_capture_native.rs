@@ -168,7 +168,10 @@ unsafe extern "system" fn window_proc(hwnd: w::H, msg: u32, wp: usize, lp: isize
             node.inbox.push(Event::Wire(msg, wp, lp));
             return Some(0);
         }
-        if matches!(node.role, Role::Plane(_) | Role::Action(_) | Role::Handle | Role::Hint) {
+        if matches!(
+            node.role,
+            Role::Plane(_) | Role::Action(_) | Role::Handle | Role::Hint
+        ) {
             if matches!(msg, 0x201 | 0x202 | 0x204 | 0x205) {
                 let mut p = w::Point {
                     x: (lp as u16 as i16) as i32,
@@ -189,7 +192,10 @@ unsafe extern "system" fn window_proc(hwnd: w::H, msg: u32, wp: usize, lp: isize
             let mut paint: w::Paint = std::mem::zeroed();
             let dc = w::BeginPaint(hwnd, &mut paint);
             if !dc.is_null() {
-                if matches!(node.role, Role::Edge(_) | Role::Handle | Role::Action(_) | Role::Hint) {
+                if matches!(
+                    node.role,
+                    Role::Edge(_) | Role::Handle | Role::Action(_) | Role::Hint
+                ) {
                     let brush = w::CreateSolidBrush(w::rgb(45, 145, 255));
                     let mut bounds = w::Rect::default();
                     w::GetClientRect(hwnd, &mut bounds);
@@ -204,9 +210,25 @@ unsafe extern "system" fn window_proc(hwnd: w::H, msg: u32, wp: usize, lp: isize
                         let face = w::wide("Segoe UI");
                         let font_height = if node.role == Role::Hint {
                             (12 * w::GetDpiForWindow(hwnd).clamp(96, 768) / 96) as i32
-                        } else { (bounds.bottom - bounds.top) / 2 };
-                        let font = w::CreateFontW(-font_height, 0, 0, 0,
-                            400, 0, 0, 0, 1, 0, 0, 5, 0, face.as_ptr());
+                        } else {
+                            (bounds.bottom - bounds.top) / 2
+                        };
+                        let font = w::CreateFontW(
+                            -font_height,
+                            0,
+                            0,
+                            0,
+                            400,
+                            0,
+                            0,
+                            0,
+                            1,
+                            0,
+                            0,
+                            5,
+                            0,
+                            face.as_ptr(),
+                        );
                         if font.is_null() {
                             node.inbox.failed.store(true, Ordering::SeqCst);
                         } else {
@@ -215,7 +237,11 @@ unsafe extern "system" fn window_proc(hwnd: w::H, msg: u32, wp: usize, lp: isize
                                 Role::Action(index) => SCREENSHOT_LABELS[index],
                                 _ => "拖动边角调整范围，内部拖动可移动；选择工具后固定范围",
                             });
-                            let flags = if node.role == Role::Hint { 1 | 0x10 } else { 1 | 4 | 0x20 };
+                            let flags = if node.role == Role::Hint {
+                                1 | 0x10
+                            } else {
+                                1 | 4 | 0x20
+                            };
                             w::DrawTextW(dc, text.as_ptr(), -1, &mut bounds, flags);
                             w::SelectObject(dc, previous);
                             w::DeleteObject(font);
@@ -341,7 +367,10 @@ impl Window {
         if hwnd.is_null() {
             return Err(error("CAPTURE_WINDOW"));
         }
-        if matches!(role, Role::Edge(_) | Role::Action(_) | Role::Handle | Role::Hint) {
+        if matches!(
+            role,
+            Role::Edge(_) | Role::Action(_) | Role::Handle | Role::Hint
+        ) {
             if unsafe { w::SetLayeredWindowAttributes(hwnd, w::rgb(255, 0, 255), 255, 1) } == 0 {
                 if unsafe { w::DestroyWindow(hwnd) } == 0 {
                     std::mem::forget(node);
@@ -866,13 +895,22 @@ unsafe extern "system" fn escape_hook(code: i32, wp: usize, lp: isize) -> isize 
             let key_up = matches!(wp, 0x101 | 0x105);
             let consume = ESCAPE.with(|slot| {
                 let slot = slot.borrow();
-                let Some(state) = slot.as_ref() else { return false; };
-                let (consume, confirm) = state.confirm.event(key_down, key_up,
-                    !down(0x10) && !down(0x11) && !down(0x12));
-                if confirm { state.inbox.push(Event::ConfirmCopy); }
+                let Some(state) = slot.as_ref() else {
+                    return false;
+                };
+                let (consume, confirm) = state.confirm.event(
+                    key_down,
+                    key_up,
+                    !down(0x10) && !down(0x11) && !down(0x12),
+                );
+                if confirm {
+                    state.inbox.push(Event::ConfirmCopy);
+                }
                 consume
             });
-            if consume { return 1; }
+            if consume {
+                return 1;
+            }
         }
         if k.key == 0x1b && k.flags & 2 == 0 {
             let down = matches!(wp, 0x100 | 0x104);
@@ -983,7 +1021,9 @@ impl EscapeListener {
         self.state.ownership.request_close();
         self.state.confirm.set_enabled(false);
         self.state.confirm.ownership.request_close();
-        while (self.state.ownership.owned() || self.state.confirm.ownership.owned()) && Instant::now() < self.deadline {
+        while (self.state.ownership.owned() || self.state.confirm.ownership.owned())
+            && Instant::now() < self.deadline
+        {
             std::thread::sleep(Duration::from_millis(5));
         }
         let released = !self.state.ownership.owned() && !self.state.confirm.ownership.owned();
@@ -1322,15 +1362,29 @@ impl Picker {
         let mut handles = Vec::new();
         if request.purpose == CapturePurpose::Screenshot {
             for index in 0..=SCREENSHOT_ACTIONS.len() {
-                let role = if index == SCREENSHOT_ACTIONS.len() { Role::Hint } else { Role::Action(index) };
-                let window = Window::new(&class, role, Rect::new(0, 0, 1, 1),
-                    inbox.clone(), canvas.clone())?;
+                let role = if index == SCREENSHOT_ACTIONS.len() {
+                    Role::Hint
+                } else {
+                    Role::Action(index)
+                };
+                let window = Window::new(
+                    &class,
+                    role,
+                    Rect::new(0, 0, 1, 1),
+                    inbox.clone(),
+                    canvas.clone(),
+                )?;
                 own.insert(window.hwnd as isize);
                 actions.push(window);
             }
             for _ in 0..8 {
-                let window = Window::new(&class, Role::Handle, Rect::new(0, 0, 1, 1),
-                    inbox.clone(), canvas.clone())?;
+                let window = Window::new(
+                    &class,
+                    Role::Handle,
+                    Rect::new(0, 0, 1, 1),
+                    inbox.clone(),
+                    canvas.clone(),
+                )?;
                 own.insert(window.hwnd as isize);
                 handles.push(window);
             }
@@ -1517,7 +1571,15 @@ impl Picker {
             match event {
                 Event::Display => self.invalidate(2, 0, 0),
                 Event::Dpi { role, hwnd, value } => {
-                    if matches!(role, Role::Probe | Role::Mailbox | Role::Loupe | Role::Handle | Role::Action(_) | Role::Hint) {
+                    if matches!(
+                        role,
+                        Role::Probe
+                            | Role::Mailbox
+                            | Role::Loupe
+                            | Role::Handle
+                            | Role::Action(_)
+                            | Role::Hint
+                    ) {
                         continue;
                     }
                     let index = match role {
@@ -1739,24 +1801,43 @@ impl Picker {
             self.last_raise = elapsed;
         }
         if self.selection.adjusting {
-            let display = self.topology.displays().iter()
+            let display = self
+                .topology
+                .displays()
+                .iter()
                 .filter(|d| self.selection.selected.intersect(d.bounds).valid())
                 .max_by_key(|d| {
-                let r = self.selection.selected.intersect(d.bounds);
-                i64::from(r.width) * i64::from(r.height)
-            }).or_else(|| self.topology.displays().iter().find(|d| d.bounds.contains(p)))
+                    let r = self.selection.selected.intersect(d.bounds);
+                    i64::from(r.width) * i64::from(r.height)
+                })
+                .or_else(|| {
+                    self.topology
+                        .displays()
+                        .iter()
+                        .find(|d| d.bounds.contains(p))
+                })
                 .ok_or_else(|| error("CAPTURE_GEOMETRY"))?;
             let area = screenshot_toolbar_bounds(display)?;
-            let bounds = screenshot_actions_layout(self.selection.selected,
-                Rect::new(area[0], area[1], area[2], area[3]), display.dpi);
+            let bounds = screenshot_actions_layout(
+                self.selection.selected,
+                Rect::new(area[0], area[1], area[2], area[3]),
+                display.dpi,
+            );
             if bounds.len() != SCREENSHOT_ACTIONS.len() {
                 return Err(error("CAPTURE_TOOLBAR_GEOMETRY"));
             }
             let dpi = display.dpi;
             self.selection.set_action_bounds(bounds, dpi);
             let hint = screenshot_hint_bounds(self.selection.action_bounds(), dpi);
-            for (window, bounds) in self.handles.iter().zip(self.selection.handles())
-                .chain(self.actions.iter().zip(self.selection.action_bounds().iter().copied().chain(std::iter::once(hint)))) {
+            for (window, bounds) in self.handles.iter().zip(self.selection.handles()).chain(
+                self.actions.iter().zip(
+                    self.selection
+                        .action_bounds()
+                        .iter()
+                        .copied()
+                        .chain(std::iter::once(hint)),
+                ),
+            ) {
                 let changed = !window.visible() || window.bounds()? != bounds;
                 if changed || raise {
                     set_bounds(window.hwnd, TOPMOST, bounds, POS | 0x40)?;
@@ -1778,7 +1859,9 @@ impl Picker {
         let complete = if self.selection.adjusting {
             self.loupe.hide();
             true
-        } else { self.render_loupe(p)? };
+        } else {
+            self.render_loupe(p)?
+        };
         self.record_render_duration(
             "magnifierRenderMillisecondsTotal",
             "magnifierRenderMillisecondsMax",
@@ -2003,8 +2086,10 @@ impl Picker {
                 self.input.resync_released_buttons(down(1), down(2));
             }
             self.selection.expire(elapsed);
-            self.escape.state.confirm.set_enabled(
-                self.selection.adjusting && !self.selection.finished);
+            self.escape
+                .state
+                .confirm
+                .set_enabled(self.selection.adjusting && !self.selection.finished);
             let p = pointer()?;
             if !self.selection.finished {
                 self.selection.move_to(p);
@@ -2197,7 +2282,12 @@ impl Picker {
                 }
             }
         }
-        for edge in self.edges.iter_mut().chain(&mut self.actions).chain(&mut self.handles) {
+        for edge in self
+            .edges
+            .iter_mut()
+            .chain(&mut self.actions)
+            .chain(&mut self.handles)
+        {
             if !edge.destroy() {
                 self.failure = Some(error("CAPTURE_OVERLAY_CLEANUP"));
             }

@@ -33,7 +33,10 @@ def complete():
             'foregroundIsSourceA', 'exactFramesUnchanged', 'firstRootSameProcess', 'lastRootSameProcess')}
         case['generatedSourceSetup'].update(firstRootIsBackground=False, lastRootIsBackground=False, observations=3)
         if not rejected:
-            case.update(imageWidth=80, imageHeight=60)
+            case.update(imageWidth=80, imageHeight=60, nativeAdjustmentObserved=True,
+                        nativeAdjustmentHintVisible=True, nativeActionOwnedTargetVerified=True, nativeActionSourceForegroundPreserved=True,
+                        nativeAdjustmentHandleCount=8, nativeActionClickCount=1, nativeInitialAction='select')
+            native['initialAction'] = 'select'
         cases.append(case)
     return {'ok': True, 'cases': cases, 'screenshotPurpose': True,
             'startedGenerations': 10, 'hostExitedNormally': True, 'hostShutdownError': None,
@@ -46,6 +49,18 @@ class ScreenshotWindowReport(unittest.TestCase):
     def rejects(self, report):
         with self.assertRaises(ValueError):
             module.verify(json.dumps(report))
+
+    def test_native_adjustment_and_matching_explicit_action_are_mandatory(self):
+        for field, value in (('nativeAdjustmentObserved', False), ('nativeAdjustmentHintVisible', False),
+                             ('nativeActionOwnedTargetVerified', False), ('nativeActionSourceForegroundPreserved', False), ('nativeAdjustmentHandleCount', 7),
+                             ('nativeAdjustmentHandleCount', 8.0), ('nativeActionClickCount', True),
+                             ('nativeActionClickCount', 2), ('nativeInitialAction', 'copy')):
+            report = complete()
+            report['cases'][0][field] = value
+            self.rejects(report)
+        report = complete()
+        report['cases'][0]['helperDiagnostics']['initialAction'] = 'pin'
+        self.rejects(report)
 
     def test_complete_and_bom_log_passes(self):
         report = complete()

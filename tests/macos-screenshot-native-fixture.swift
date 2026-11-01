@@ -135,6 +135,8 @@ private final class ScreenshotProbe {
     var activeCase: String?
     var caseStarted = Date()
     var caseDriven = false
+    var adjustmentVerified = false
+    var adjustmentMoveResizeVerified = false
     var timer: Timer?
     var finished = false
     var oracleAttempted = false
@@ -765,6 +767,7 @@ private final class ScreenshotProbe {
             finish("failed", reason: "native-operation-registration"); return
         }
         operation = id; activeCase = mode; caseStarted = Date(); caseDriven = false
+        adjustmentVerified = false; adjustmentMoveResizeVerified = false
         timer = Timer(timeInterval: 0.025, repeats: true) { [weak self] _ in self?.driveCase() }
         if let timer = timer { RunLoop.main.add(timer, forMode: .common) }
         DispatchQueue.global(qos: .userInitiated).async {
@@ -814,6 +817,42 @@ private final class ScreenshotProbe {
                 let end = mode == "rectangle-phase1" ? CGPoint(x: point.x + 120, y: point.y + 80) : CGPoint(x: point.x + 1, y: point.y + 1)
                 if mode == "rectangle-phase1" { try send(.leftMouseDragged, point: end, panel: panel) }
                 try send(.leftMouseUp, point: end, panel: panel)
+                let expected = mode == "rectangle-phase1"
+                    ? CGRect(x: point.x, y: point.y, width: 120, height: 80) : target.frame
+                func assertAdjustment(_ frame: CGRect) throws {
+                    try fixtureNeed(panel.isVisible && view.selection?.offsetBy(dx: panel.frame.minX, dy: panel.frame.minY) == frame,
+                                    "released screenshot did not retain exact adjustable region")
+                    try fixtureNeed(view.handles.count == 8 && view.actionButtons.count == CaptureScreenshotAction.allCases.count
+                                    && captureActionHintFrame(view.actionButtons) != nil,
+                                    "native adjustment handles/actions/hint are incomplete")
+                }
+                try assertAdjustment(expected)
+                if mode == "rectangle-phase1" {
+                    func drag(_ first: CGPoint, _ last: CGPoint, _ frame: CGRect) throws {
+                        try send(.leftMouseDown, point: first, panel: panel)
+                        try send(.leftMouseDragged, point: last, panel: panel)
+                        try send(.leftMouseUp, point: last, panel: panel)
+                        try assertAdjustment(frame)
+                    }
+                    let center = CGPoint(x: expected.midX, y: expected.midY)
+                    let moved = CGPoint(x: center.x + 12, y: center.y + 8)
+                    try drag(center, moved, expected.offsetBy(dx: 12, dy: 8))
+                    try drag(moved, center, expected)
+                    let corner = CGPoint(x: expected.maxX, y: expected.maxY)
+                    let expanded = CGPoint(x: corner.x + 16, y: corner.y + 8)
+                    try drag(corner, expanded, CGRect(x: expected.minX, y: expected.minY, width: 136, height: 88))
+                    try drag(expanded, corner, expected)
+                    adjustmentMoveResizeVerified = true
+                }
+                guard let action = view.actionButtons.first(where: { $0.0 == .select }) else {
+                    throw NativeError("FIXTURE: native select action is missing")
+                }
+                let actionPoint = panel.convertPoint(toScreen: CGPoint(x: action.1.midX, y: action.1.midY))
+                try fixtureNeed(panel.frame.contains(actionPoint), "native action escaped owned selector")
+                adjustmentVerified = true
+                report["activeCaseStage"] = "dispatching-owned-native-action"
+                try send(.leftMouseDown, point: actionPoint, panel: panel)
+                try send(.leftMouseUp, point: actionPoint, panel: panel)
             }
         } catch { finish("failed", reason: String(describing: error)) }
     }
@@ -899,6 +938,15 @@ private final class ScreenshotProbe {
                       let bytes = Data(base64Encoded: encoded), let source = CGImageSourceCreateWithData(bytes as CFData, nil),
                       let image = CGImageSourceCreateImageAtIndex(source, 0, nil), let target = target else {
                     throw NativeError("FIXTURE: real native screenshot did not return a decodable PNG")
+                }
+                try fixtureNeed(adjustmentVerified && response["initialAction"] as? String == "select",
+                                "native screenshot bypassed explicit adjustment action")
+                record["nativeAdjustmentVerified"] = true
+                record["nativeAction"] = "select"
+                record["nativeActionClickCount"] = 1
+                if mode == "rectangle-phase1" {
+                    try fixtureNeed(adjustmentMoveResizeVerified, "native rectangle move/resize was not verified")
+                    record["nativeAdjustmentMoveResizeRestored"] = true
                 }
                 let width = Int((mode == "rectangle-phase1" ? 120 : target.frame.width) * sourceScale)
                 let height = Int((mode == "rectangle-phase1" ? 80 : target.frame.height) * sourceScale)

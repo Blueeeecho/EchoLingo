@@ -2895,12 +2895,26 @@ mod screenshot_initial_action_tests {
     #[test]
     fn only_native_screenshot_actions_are_accepted() {
         for action in [
-            "select", "rectangle", "arrow", "text", "number", "pen", "highlight", "mosaic", "solid",
-            "crop", "copy", "save", "pin",
+            "select",
+            "rectangle",
+            "arrow",
+            "text",
+            "number",
+            "pen",
+            "highlight",
+            "mosaic",
+            "solid",
+            "crop",
+            "copy",
+            "save",
+            "pin",
         ] {
             let parsed: ScreenshotInitialAction =
                 serde_json::from_value(serde_json::json!(action)).unwrap();
-            assert_eq!(serde_json::to_value(parsed).unwrap(), serde_json::json!(action));
+            assert_eq!(
+                serde_json::to_value(parsed).unwrap(),
+                serde_json::json!(action)
+            );
         }
         for value in [
             serde_json::Value::Null,

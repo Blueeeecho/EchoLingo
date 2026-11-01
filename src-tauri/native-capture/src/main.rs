@@ -100,7 +100,9 @@ fn main() {
                 "screenX":g[4], "screenY":g[5], "screenWidth":g[6], "screenHeight":g[7], "scale":1.0});
         }
         if ok {
-            if let Some(action) = reply.initial_action { output["initialAction"] = serde_json::json!(action); }
+            if let Some(action) = reply.initial_action {
+                output["initialAction"] = serde_json::json!(action);
+            }
             output["captureScreens"] = serde_json::json!(reply.capture_screens.iter().map(|screen|
                 serde_json::json!({"x":screen[0], "y":screen[1], "width":screen[2], "height":screen[3]})).collect::<Vec<_>>());
         }

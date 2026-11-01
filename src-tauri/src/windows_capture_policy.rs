@@ -100,12 +100,36 @@ pub struct CaptureWindowTarget {
 
 /// Wire values are shared with the editor; cancel never produces an image.
 pub const SCREENSHOT_ACTIONS: [&str; 14] = [
-    "select", "rectangle", "arrow", "text", "number", "pen", "highlight",
-    "mosaic", "solid", "crop", "copy", "save", "pin", "cancel",
+    "select",
+    "rectangle",
+    "arrow",
+    "text",
+    "number",
+    "pen",
+    "highlight",
+    "mosaic",
+    "solid",
+    "crop",
+    "copy",
+    "save",
+    "pin",
+    "cancel",
 ];
 pub const SCREENSHOT_LABELS: [&str; 14] = [
-    "选择", "矩形", "箭头", "文字", "序号", "画笔", "荧光笔",
-    "马赛克", "遮盖", "裁剪", "✓ 复制", "↓ 保存", "贴图", "× 取消",
+    "选择",
+    "矩形",
+    "箭头",
+    "文字",
+    "序号",
+    "画笔",
+    "荧光笔",
+    "马赛克",
+    "遮盖",
+    "裁剪",
+    "✓ 复制",
+    "↓ 保存",
+    "贴图",
+    "× 取消",
 ];
 
 /// All toolbar geometry is physical and kept inside one real display work area.
@@ -126,21 +150,39 @@ pub fn screenshot_actions_layout(selected: Rect, area: Rect, dpi: u32) -> Vec<Re
     }
     let x = selected.x.clamp(area.x, area.right() - total_width);
     let below = selected.bottom().saturating_add(unit(10));
-    let y = if below.saturating_add(total_height) <= area.bottom() { below }
-        else { selected.y.saturating_sub(total_height + unit(10)) }
-        .clamp(area.y, area.bottom() - total_height);
-    (0..SCREENSHOT_ACTIONS.len()).map(|i| Rect::new(
-        x + gap + (i as i32 % columns) * (width + gap),
-        y + gap + hint_height + gap + (i as i32 / columns) * (height + gap), width, height,
-    )).collect()
+    let y = if below.saturating_add(total_height) <= area.bottom() {
+        below
+    } else {
+        selected.y.saturating_sub(total_height + unit(10))
+    }
+    .clamp(area.y, area.bottom() - total_height);
+    (0..SCREENSHOT_ACTIONS.len())
+        .map(|i| {
+            Rect::new(
+                x + gap + (i as i32 % columns) * (width + gap),
+                y + gap + hint_height + gap + (i as i32 / columns) * (height + gap),
+                width,
+                height,
+            )
+        })
+        .collect()
 }
 
 /// Noninteractive phase hint shares the same reserved work-area-bounded toolbar.
 pub fn screenshot_hint_bounds(actions: &[Rect], dpi: u32) -> Rect {
-    let Some(first) = actions.first() else { return Rect::default(); };
-    let right = actions.iter().filter(|r| r.y == first.y).map(|r| r.right()).max().unwrap_or(first.right());
+    let Some(first) = actions.first() else {
+        return Rect::default();
+    };
+    let right = actions
+        .iter()
+        .filter(|r| r.y == first.y)
+        .map(|r| r.right())
+        .max()
+        .unwrap_or(first.right());
     let width = right - first.x;
-    if width <= 0 { return Rect::default(); }
+    if width <= 0 {
+        return Rect::default();
+    }
     let unit = |n: i32| (n * dpi.clamp(96, 768) as i32 + 95) / 96;
     let height = unit(18) * ((unit(360) + width - 1) / width);
     Rect::new(first.x, first.y - unit(4) - height, width, height)
@@ -254,10 +296,14 @@ impl CaptureSelectionState {
             let dy = i64::from(end.y) - i64::from(self.origin.y);
             if let Some(handle) = self.adjustment {
                 if handle == 8 {
-                    self.selected.x = (i64::from(start.x) + dx)
-                        .clamp(i64::from(self.desktop.x), i64::from(self.desktop.right() - start.width)) as i32;
-                    self.selected.y = (i64::from(start.y) + dy)
-                        .clamp(i64::from(self.desktop.y), i64::from(self.desktop.bottom() - start.height)) as i32;
+                    self.selected.x = (i64::from(start.x) + dx).clamp(
+                        i64::from(self.desktop.x),
+                        i64::from(self.desktop.right() - start.width),
+                    ) as i32;
+                    self.selected.y = (i64::from(start.y) + dy).clamp(
+                        i64::from(self.desktop.y),
+                        i64::from(self.desktop.bottom() - start.height),
+                    ) as i32;
                 } else {
                     let mut left = start.x;
                     let mut top = start.y;
@@ -265,21 +311,26 @@ impl CaptureSelectionState {
                     let mut bottom = start.bottom();
                     if matches!(handle, 0 | 6 | 7) {
                         left = (i64::from(start.x) + dx)
-                            .clamp(i64::from(self.desktop.x), i64::from(right - 3)) as i32;
+                            .clamp(i64::from(self.desktop.x), i64::from(right - 3))
+                            as i32;
                     }
                     if matches!(handle, 2 | 3 | 4) {
                         right = (i64::from(start.right()) + dx)
-                            .clamp(i64::from(left + 3), i64::from(self.desktop.right())) as i32;
+                            .clamp(i64::from(left + 3), i64::from(self.desktop.right()))
+                            as i32;
                     }
                     if matches!(handle, 0 | 1 | 2) {
                         top = (i64::from(start.y) + dy)
-                            .clamp(i64::from(self.desktop.y), i64::from(bottom - 3)) as i32;
+                            .clamp(i64::from(self.desktop.y), i64::from(bottom - 3))
+                            as i32;
                     }
                     if matches!(handle, 4 | 5 | 6) {
                         bottom = (i64::from(start.bottom()) + dy)
-                            .clamp(i64::from(top + 3), i64::from(self.desktop.bottom())) as i32;
+                            .clamp(i64::from(top + 3), i64::from(self.desktop.bottom()))
+                            as i32;
                     }
-                    self.selected = Rect::from_ltrb(left, top, right, bottom).intersect(self.desktop);
+                    self.selected =
+                        Rect::from_ltrb(left, top, right, bottom).intersect(self.desktop);
                 }
             }
             return;
@@ -311,8 +362,12 @@ impl CaptureSelectionState {
         self.origin = self.clamp(p);
         if self.adjusting {
             self.pressed_action = self.action_bounds.iter().position(|r| r.contains(p));
-            self.adjustment = if self.pressed_action.is_some() || self.hint_bounds.contains(p) { None } else {
-                self.handles().iter().position(|r| r.contains(p))
+            self.adjustment = if self.pressed_action.is_some() || self.hint_bounds.contains(p) {
+                None
+            } else {
+                self.handles()
+                    .iter()
+                    .position(|r| r.contains(p))
                     .or_else(|| self.selected.contains(p).then_some(8))
             };
             self.adjustment_start = self.selected;
@@ -335,7 +390,9 @@ impl CaptureSelectionState {
             if let Some(index) = self.pressed_action.take() {
                 if self.action_bounds.get(index).is_some_and(|r| r.contains(p)) {
                     let action = SCREENSHOT_ACTIONS[index];
-                    if action == "cancel" { self.cancel(); } else {
+                    if action == "cancel" {
+                        self.cancel();
+                    } else {
                         self.initial_action = Some(action);
                         self.finished = true;
                     }
@@ -367,8 +424,10 @@ impl CaptureSelectionState {
     }
     pub fn set_action_bounds(&mut self, bounds: Vec<Rect>, dpi: u32) {
         // Do not move a pressed button underneath its release.
-        if !self.dragging && bounds.len() == SCREENSHOT_ACTIONS.len()
-            && bounds.iter().all(|r| r.valid()) {
+        if !self.dragging
+            && bounds.len() == SCREENSHOT_ACTIONS.len()
+            && bounds.iter().all(|r| r.valid())
+        {
             self.hint_bounds = screenshot_hint_bounds(&bounds, dpi);
             self.action_bounds = bounds;
             self.handle_size = ((8 * dpi.clamp(96, 768) + 95) / 96) as i32;
@@ -378,12 +437,30 @@ impl CaptureSelectionState {
         let r = self.selected;
         let x = r.x + r.width / 2;
         let y = r.y + r.height / 2;
-        [(r.x,r.y),(x,r.y),(r.right(),r.y),(r.right(),y),
-         (r.right(),r.bottom()),(x,r.bottom()),(r.x,r.bottom()),(r.x,y)]
-            .into_iter().map(|(x,y)| Rect::new(x.saturating_sub(self.handle_size/2),
-                y.saturating_sub(self.handle_size/2),self.handle_size,self.handle_size)).collect()
+        [
+            (r.x, r.y),
+            (x, r.y),
+            (r.right(), r.y),
+            (r.right(), y),
+            (r.right(), r.bottom()),
+            (x, r.bottom()),
+            (r.x, r.bottom()),
+            (r.x, y),
+        ]
+        .into_iter()
+        .map(|(x, y)| {
+            Rect::new(
+                x.saturating_sub(self.handle_size / 2),
+                y.saturating_sub(self.handle_size / 2),
+                self.handle_size,
+                self.handle_size,
+            )
+        })
+        .collect()
     }
-    pub fn action_bounds(&self) -> &[Rect] { &self.action_bounds }
+    pub fn action_bounds(&self) -> &[Rect] {
+        &self.action_bounds
+    }
     pub fn cancel(&mut self) {
         if !self.finished {
             self.dragging = false;
@@ -2100,14 +2177,16 @@ mod screenshot_window_tests {
     }
 }
 
-
 #[cfg(test)]
 mod screenshot_adjustment_tests {
     use super::*;
     fn selected() -> CaptureSelectionState {
         let mut s = CaptureSelectionState::with_purpose(
-            vec![Rect::new(-500, -200, 1400, 1000)], Point::new(0, 0),
-            CapturePurpose::Screenshot).unwrap();
+            vec![Rect::new(-500, -200, 1400, 1000)],
+            Point::new(0, 0),
+            CapturePurpose::Screenshot,
+        )
+        .unwrap();
         s.begin(Point::new(10, 10));
         s.end(Point::new(210, 110));
         assert!(s.adjusting && !s.finished && !s.cancelled);
@@ -2127,8 +2206,12 @@ mod screenshot_adjustment_tests {
             assert!(!s.finished);
             s.end(p);
             assert!(s.finished);
-            if *action == "cancel" { assert!(s.cancelled && s.initial_action.is_none()); }
-            else { assert!(!s.cancelled); assert_eq!(s.initial_action, Some(*action)); }
+            if *action == "cancel" {
+                assert!(s.cancelled && s.initial_action.is_none());
+            } else {
+                assert!(!s.cancelled);
+                assert_eq!(s.initial_action, Some(*action));
+            }
         }
     }
     #[test]
@@ -2140,7 +2223,8 @@ mod screenshot_adjustment_tests {
         s.end(Point::new(100, 80));
         s.confirm_copy();
         assert!(s.finished && s.initial_action == Some("copy"));
-        let mut region = CaptureSelectionState::new(vec![Rect::new(0,0,500,400)], Point::new(0,0)).unwrap();
+        let mut region =
+            CaptureSelectionState::new(vec![Rect::new(0, 0, 500, 400)], Point::new(0, 0)).unwrap();
         region.confirm_copy();
         assert!(!region.finished && region.initial_action.is_none());
     }
@@ -2178,7 +2262,8 @@ mod screenshot_adjustment_tests {
             let original = s.selected;
             let h = s.handles()[index];
             let p = Point::new(h.x + 1, h.y + 1);
-            s.begin(p); s.end(p);
+            s.begin(p);
+            s.end(p);
             assert_eq!(s.selected, original);
         }
     }
@@ -2198,7 +2283,12 @@ mod screenshot_adjustment_tests {
     #[test]
     fn interior_move_clamps_without_resizing_and_keeps_source_ticket() {
         let mut s = selected();
-        let target = CaptureWindowTarget { window: 1, process: 2, thread: 3, frame: s.selected };
+        let target = CaptureWindowTarget {
+            window: 1,
+            process: 2,
+            thread: 3,
+            frame: s.selected,
+        };
         s.selected_window = Some(target);
         s.begin(Point::new(80, 60));
         s.end(Point::new(-2000, -2000));
@@ -2209,8 +2299,13 @@ mod screenshot_adjustment_tests {
     fn adjustment_cancel_and_timeout_cannot_be_revived() {
         for timeout in [false, true] {
             let mut s = selected();
-            if timeout { s.expire(120_000); } else { s.cancel(); }
-            s.begin(Point::new(50, 50)); s.end(Point::new(100, 100));
+            if timeout {
+                s.expire(120_000);
+            } else {
+                s.cancel();
+            }
+            s.begin(Point::new(50, 50));
+            s.end(Point::new(100, 100));
             assert!(s.finished && s.cancelled && s.initial_action.is_none());
         }
     }
@@ -2223,7 +2318,10 @@ mod screenshot_adjustment_tests {
             assert!(bounds.iter().all(|r| area.contains_rect(*r)));
             assert!(area.contains_rect(screenshot_hint_bounds(&bounds, dpi)));
         }
-        assert!(screenshot_actions_layout(Rect::new(0, 0, 10, 10), Rect::new(0,0,50,50),96).is_empty());
+        assert!(
+            screenshot_actions_layout(Rect::new(0, 0, 10, 10), Rect::new(0, 0, 50, 50), 96)
+                .is_empty()
+        );
     }
     #[test]
     fn wrapped_toolbar_and_hint_fit_small_negative_coordinate_work_area() {
@@ -2232,12 +2330,17 @@ mod screenshot_adjustment_tests {
         assert_eq!(bounds.len(), 14);
         assert!(bounds.iter().all(|r| area.contains_rect(*r)));
         assert!(area.contains_rect(screenshot_hint_bounds(&bounds, 96)));
-        assert!(screenshot_actions_layout(Rect::new(0, 0, 10, 10), Rect::new(0, 0, 50, 50), 96).is_empty());
+        assert!(
+            screenshot_actions_layout(Rect::new(0, 0, 10, 10), Rect::new(0, 0, 50, 50), 96)
+                .is_empty()
+        );
     }
     #[test]
     fn alt_s_region_still_finishes_on_first_release_without_action() {
-        let mut s = CaptureSelectionState::new(vec![Rect::new(0,0,500,400)], Point::new(0,0)).unwrap();
-        s.begin(Point::new(20,20)); s.end(Point::new(200,100));
+        let mut s =
+            CaptureSelectionState::new(vec![Rect::new(0, 0, 500, 400)], Point::new(0, 0)).unwrap();
+        s.begin(Point::new(20, 20));
+        s.end(Point::new(200, 100));
         assert!(s.finished && !s.cancelled && !s.adjusting && s.initial_action.is_none());
     }
 }
@@ -2260,24 +2363,33 @@ impl CaptureConfirmKey {
         }
     }
     pub fn set_enabled(&self, enabled: bool) {
-        self.enabled.store(enabled, std::sync::atomic::Ordering::SeqCst);
+        self.enabled
+            .store(enabled, std::sync::atomic::Ordering::SeqCst);
     }
     pub fn event(&self, down: bool, up: bool, unmodified: bool) -> (bool, bool) {
         use std::sync::atomic::Ordering::SeqCst;
         let enabled = self.enabled.load(SeqCst);
         if !enabled && !self.ownership.owned() {
-            if down { self.initial.store(true, SeqCst); }
-            if up { self.initial.store(false, SeqCst); }
+            if down {
+                self.initial.store(true, SeqCst);
+            }
+            if up {
+                self.initial.store(false, SeqCst);
+            }
             return (false, false);
         }
         if self.initial.load(SeqCst) {
-            if up { self.initial.store(false, SeqCst); }
+            if up {
+                self.initial.store(false, SeqCst);
+            }
             return (false, false);
         }
         if down {
             let repeated = self.ownership.owned();
             if self.ownership.down() {
-                if !repeated { self.eligible.store(unmodified, SeqCst); }
+                if !repeated {
+                    self.eligible.store(unmodified, SeqCst);
+                }
                 return (true, false);
             }
         }

@@ -411,6 +411,10 @@ try {
     await page.emulateMedia({ colorScheme: 'dark' }); await page.setViewportSize({ width: 600, height: 540 });
     await page.screenshot({ path: `test-results/screenshot-editor-dark-narrow-dpr${deviceScaleFactor}.png` });
     assert.equal(await page.locator('body').evaluate(b => b.scrollWidth <= innerWidth), true);
+    assert.deepEqual(await page.locator('.tool-group button').evaluateAll(buttons => buttons.filter(button => {
+      const rect = button.getBoundingClientRect();
+      return rect.left < 0 || rect.right > innerWidth;
+    }).map(button => button.dataset.tool)), [], 'all annotation tools remain within the narrow editor, not merely clipped');
     assert.deepEqual(await page.evaluate(() => Object.keys(localStorage)), [], 'no image data persisted in web storage');
     const commands = await page.evaluate(() => window.__screenshotQA.calls.map(x => x.command));
     assert.equal(commands.some(x => /ocr|translate|history|provider/i.test(x)), false, 'F1 editor never invokes OCR, translation, providers, or history');

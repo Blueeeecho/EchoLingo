@@ -101,6 +101,30 @@ class ScreenshotWindowContract(unittest.TestCase):
         self.assertIn('CAPTURE_WINDOW_CHANGED:', new)
         self.assertNotIn('SetWindowDisplayAffinity', read('src-tauri/src/windows_capture_native.rs'))
 
+    def test_isolated_f1_accounts_exact_native_roles_and_explicit_action_without_changing_region_gate(self):
+        native = read('tests/windows-native-capture-smoke.ps1')
+        screenshot = read('tests/windows-screenshot-window-smoke.ps1')
+        # Every replacement is a single bounded known-source edit, not a relaxed gate.
+        for marker in ('int allocated=0,loupes=0;bool loupeNear=false,pixelsReady=false;',
+                       'long edges=0x08000000L|0x80000L|0x20L;',
+                       'bool exact=thin.Count==8 && allocated==12*Screen.AllScreens.Length;'):
+            self.assertEqual(native.count(marker), 1)
+            self.assertIn(marker, screenshot)
+        self.assertIn('ScreenshotInventory(screenshotRoles)', screenshot)
+        self.assertIn('if(roles.Count!=16)return false', screenshot)
+        self.assertIn('roles["handle"]==8', screenshot)
+        self.assertIn('roles["hint"]==1', screenshot)
+        self.assertIn('if(!rejected)ScreenshotChooseSelect(helper,source,expected,report)', screenshot)
+        self.assertLess(screenshot.index('if(!rejected)ScreenshotChooseSelect'), screenshot.index('reply=host.Finish(report,12000)'))
+        action = screenshot.split('static void ScreenshotChooseSelect(', 1)[1].split('static void ScreenshotPressed(', 1)[0]
+        for required in ('wanted.SetEquals(handles)', 'owner==helper', 'Screen.FromHandle(window).WorkingArea.Contains(bounds)',
+                         '0x08000000L|0x80000L|0x20L|0x80L|8', 'Send(new INPUT[]{Mouse(2),Mouse(4)})'):
+            self.assertIn(required, action)
+        for forbidden in ('SetForegroundWindow', 'CopyFromScreen', 'Clipboard', 'SetWindowPos'):
+            self.assertNotIn(forbidden, action)
+        self.assertNotIn('ScreenshotChooseSelect', native)
+        self.assertIn('if kind == 0x202 {\n            self.validate_window()?;', read('src-tauri/src/windows_capture_native.rs'))
+
     def test_generated_windows_are_ready_before_any_input_or_capture(self):
         existing = read('tests/windows-native-capture-smoke.ps1')
         setup = existing.split('public Sources(Dictionary<string,object> report=null)', 1)[1].split('void Prepare(', 1)[0]
