@@ -33,6 +33,29 @@ class BrowserClipboardCleanupContract(unittest.TestCase):
         self.assertIn('if(verified)ownedClipboard=observed;', SOURCE)
         self.assertIn('metadata["ok"]=exact&&foregroundAlways&&Convert.ToBoolean(metadata["richClipboardRestored"])', SOURCE)
 
+    def test_com_probe_is_failure_only_same_object_and_never_reacquires(self):
+        self.assertIn('if(!matches&&!NoClipboardProbe){', SOURCE)
+        self.assertIn('ObserveFailedOleCom(actual,expected,observation)', SOURCE)
+        probe = SOURCE.split("    static Dictionary<string,object> ObserveFailedOleCom", 1)[1].split("    static Dictionary<string,object> QueryDiagnostics", 1)[0]
+        self.assertIn("actual as ComTypes.IDataObject", probe)
+        self.assertEqual(probe.count("com.GetData(ref format,out medium)"), 1)
+        for forbidden in ("Clipboard.GetDataObject(", "OleGetClipboard(", "OpenClipboard(", "Thread.Sleep(", "ReleaseComObject(", 'observation["originalVerdict"]=', 'metadata["ok"]='):
+            self.assertNotIn(forbidden, probe)
+        self.assertLess(probe.index("FailedOleCleanupGeneration"), probe.index("com.GetData("))
+        self.assertLess(probe.index("generationChangedBeforePayloadRead"), probe.index("Marshal.Copy"))
+        self.assertIn("cfFormat=13", probe)
+        self.assertIn("lindex=-1", probe)
+        self.assertIn("tymed=ComTypes.TYMED.TYMED_HGLOBAL", probe)
+
+    def test_com_probe_bounds_and_releases_owned_medium_on_all_success_paths(self):
+        probe = SOURCE.split("    static Dictionary<string,object> ObserveFailedOleCom", 1)[1].split("    static Dictionary<string,object> QueryDiagnostics", 1)[0]
+        self.assertLess(probe.index("size>65536"), probe.index("Marshal.Copy"))
+        self.assertIn("finally{GlobalUnlock(medium.unionmember);}", probe)
+        self.assertIn("if(received){try{ReleaseStgMedium(ref medium);", probe)
+        self.assertIn('catch(COMException error){result["hresult"]=error.ErrorCode;', probe)
+        self.assertIn('result["fixedSeedExactEqual"]=ExactPayload(bytes,wanted,true)?1:0;', probe)
+        self.assertNotIn('result["payload"]', probe)
+
 
 if __name__ == "__main__":
     unittest.main()

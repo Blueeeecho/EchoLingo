@@ -6,6 +6,7 @@ using System.Collections;
 using System.Diagnostics;
 using System.IO;
 using System.Runtime.InteropServices;
+using ComTypes = System.Runtime.InteropServices.ComTypes;
 using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
@@ -38,6 +39,7 @@ public static class WindowsBrowserSelectionBridge {
     [DllImport("user32.dll",SetLastError=true)] static extern uint SendInput(uint count,INPUT[] input,int size);
     [DllImport("shell32.dll")] static extern int SHGetKnownFolderPath(ref Guid id,uint flags,IntPtr token,out IntPtr path);
     [DllImport("ole32.dll")] static extern void CoTaskMemFree(IntPtr memory);
+    [DllImport("ole32.dll")] static extern void ReleaseStgMedium(ref ComTypes.STGMEDIUM medium);
     [DllImport("kernel32.dll",CharSet=CharSet.Unicode,SetLastError=true)] static extern bool CreateDirectory(string path,IntPtr security);
     [StructLayout(LayoutKind.Sequential)] struct KEY {public ushort key,scan;public uint flags,time;public UIntPtr extra;}
     [StructLayout(LayoutKind.Sequential)] struct MOUSE {public int x,y;public uint data,flags,time;public UIntPtr extra;}
@@ -228,8 +230,54 @@ public static class WindowsBrowserSelectionBridge {
             // Supplement only: never turn the original OLE failure into a pass.
             // GetClipboardData may trigger delayed rendering: this later raw
             // read is not proof of the representation at the original OLE read.
-            if(!matches&&!NoClipboardProbe)observation["rawFormatsAfterOleFailure"]=ObserveSyntheticFormats(expected);
+            if(!matches&&!NoClipboardProbe){
+                observation["rawFormatsAfterOleFailure"]=ObserveSyntheticFormats(expected);
+                observation["sameObjectComAfterOleFailure"]=ObserveFailedOleCom(actual,expected,observation);
+            }
         }return matches;
+    }
+    // Supplemental later representation only, never a retry of the acceptance
+    // check. DataObject's explicit ComTypes interface forwards to its existing
+    // OLE object. Do not reacquire, reflect into the wrapper, or release its RCW.
+    static Dictionary<string,object> ObserveFailedOleCom(IDataObject actual,DataObject expected,Dictionary<string,object> observation){
+        var result=new Dictionary<string,object>{{"requested",0},{"sameAcquiredObject",1},{"originalVerdictChanged",0},{"laterRepresentationOnly",1},{"mediumReleased",0}};
+        ComTypes.STGMEDIUM medium=new ComTypes.STGMEDIUM();bool received=false;
+        try{
+            uint generation=GetClipboardSequenceNumber();
+            // The preceding raw observation checked the random nonce and all
+            // fixed seed payloads under one native lock, already released.
+            bool guarded=!NoClipboardProbe&&FailedOleCleanupGeneration(observation,generation);
+            result["ownedGenerationGuardPassed"]=guarded?1:0;if(!guarded)return result;
+            var com=actual as ComTypes.IDataObject;
+            result["sameObjectComInterfaceAvailable"]=com!=null?1:0;if(com==null)return result;
+            if(GetClipboardSequenceNumber()!=generation){result["generationChangedBeforeRequest"]=1;return result;}
+            var format=new ComTypes.FORMATETC {cfFormat=13,dwAspect=ComTypes.DVASPECT.DVASPECT_CONTENT,lindex=-1,ptd=IntPtr.Zero,tymed=ComTypes.TYMED.TYMED_HGLOBAL};
+            result["requested"]=1;
+            // NEVER hold OpenClipboard across this COM call (delayed rendering).
+            com.GetData(ref format,out medium);received=true;result["hresult"]=0;
+            result["tymed"]=(int)medium.tymed;
+            bool same=GetClipboardSequenceNumber()==generation;result["generationUnchangedAfterRequest"]=same?1:0;
+            if(!same||medium.tymed!=ComTypes.TYMED.TYMED_HGLOBAL||medium.unionmember==IntPtr.Zero)return result;
+            ulong size=GlobalSize(medium.unionmember).ToUInt64();result["allocationBytes"]=size;
+            if(size==0||size>65536){result["allocationBoundRejected"]=1;return result;}
+            IntPtr pointer=GlobalLock(medium.unionmember);result["globalLockSucceeded"]=pointer!=IntPtr.Zero?1:0;
+            if(pointer==IntPtr.Zero)return result;
+            try{
+                if(GetClipboardSequenceNumber()!=generation){result["generationChangedBeforePayloadRead"]=1;return result;}
+                byte[] bytes=new byte[(int)size];Marshal.Copy(pointer,bytes,0,bytes.Length);
+                result["terminatedBytes"]=TerminatedBytes(bytes,true);
+                byte[] wanted=Encoding.Unicode.GetBytes((string)expected.GetData(DataFormats.UnicodeText,false)+"\0");
+                result["fixedSeedExactEqual"]=ExactPayload(bytes,wanted,true)?1:0;
+                result["generationUnchangedAfterPayloadRead"]=GetClipboardSequenceNumber()==generation?1:0;
+            }finally{GlobalUnlock(medium.unionmember);}
+        }catch(COMException error){result["hresult"]=error.ErrorCode;result["comException"]=1;}
+        catch{result["observationError"]=1;}
+        finally{
+            // Ownership transfers on successful GetData, including early-return
+            // rejection of an unexpected medium/size/generation.
+            if(received){try{ReleaseStgMedium(ref medium);result["mediumReleased"]=1;}catch{result["releaseError"]=1;}}
+        }
+        return result;
     }
     static Dictionary<string,object> QueryDiagnostics(Dictionary<string,object> reply){
         Dictionary<string,object> numeric=new Dictionary<string,object>();object raw;
