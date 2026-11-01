@@ -36,6 +36,11 @@ def sha(path):
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 def verify():
+    # Direct verification/build-report calls need the same eligibility boundary
+    # as --select, before accessing history absent from ordinary shallow clones.
+    package = json.loads((ROOT/'package.json').read_text(encoding='utf-8'))
+    if package.get('version') != '0.2.4' or package.get('scripts', {}).get('test:language-routing') != COMMAND:
+        raise ValueError('Historical language patch verification is only authorized for the exact 0.2.4 package')
     if git('rev-parse', BASE+'^{tree}') != TREE:
         raise ValueError('Baseline source tree mismatch')
     changed = set(git('diff', '--name-only', BASE, 'HEAD').splitlines())
@@ -51,7 +56,7 @@ def verify():
             raise ValueError('Exact reviewed language input changed: '+path)
     before = json.loads(git('show', BASE+':package.json'))
     before['scripts']['test:language-routing'] = COMMAND
-    if json.loads((ROOT/'package.json').read_text()) != before:
+    if package != before:
         raise ValueError('Package input differs beyond the targeted test command')
     old = tomllib.loads(git('show', BASE+':src-tauri/Cargo.lock'))['package']
     new = tomllib.loads((ROOT/'src-tauri/Cargo.lock').read_text())['package']
