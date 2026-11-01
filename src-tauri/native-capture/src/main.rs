@@ -83,7 +83,9 @@ fn main() {
             };
             deferred_mode = mode.as_deref() == Some("capture-selected-region");
             if deferred_mode && (host.is_some() || token.is_some()) {
-                return Err("CAPTURE_ARGUMENT: Deferred capture does not accept an input host".into());
+                return Err(
+                    "CAPTURE_ARGUMENT: Deferred capture does not accept an input host".into(),
+                );
             }
             Ok(capture::Request {
                 selection_only: mode.as_deref() == Some("select-screenshot"),

@@ -378,7 +378,8 @@ try {
     await page.locator('#save-image').click(); await page.waitForFunction(() => document.querySelector('#save-indicator').textContent === '已保存');
     const saved = await page.evaluate(() => window.__screenshotQA.saves.at(-1));
     assert.equal(saved.saveAs, false); assert.match(saved.pngBase64, /^iVBORw0KGgo/);
-    assert.deepEqual(Object.keys(saved).sort(), ['pngBase64', 'saveAs', 'sessionId']);
+    assert.deepEqual(Object.keys(saved).sort(), ['pngBase64', 'revision', 'saveAs', 'sessionId']);
+    assert.equal(saved.revision, 0, 'ordinary file export carries the initial revision without exposing source paths');
 
     // Backend-normalized local image delivery may arrive both as an event and
     // the Open return value; install only once, reset history, retain on failure.

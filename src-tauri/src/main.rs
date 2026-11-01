@@ -2011,9 +2011,10 @@ fn request_shortcut_settings(app: &tauri::AppHandle) {
     request_settings_section(app, true);
 }
 fn request_settings_section(app: &tauri::AppHandle, shortcuts: bool) {
-    let Some(presentation) =
-        cancel_active_translation_with_reason(app, popup_health::CancellationReason::SettingsAction)
-    else {
+    let Some(presentation) = cancel_active_translation_with_reason(
+        app,
+        popup_health::CancellationReason::SettingsAction,
+    ) else {
         return;
     };
     let state = app.state::<AppState>();
@@ -2748,7 +2749,12 @@ fn start_action(app: tauri::AppHandle, action: String) {
             // selection intent. Discard it without raising/focusing a blank
             // popup; restoration notices retain their global safety path.
             drop(physical);
-            record_popup_health(&worker_app, presentation.epoch, "nativeWorkerReleased", None);
+            record_popup_health(
+                &worker_app,
+                presentation.epoch,
+                "nativeWorkerReleased",
+                None,
+            );
             finish_native_text(text, worker_request.cancelled() || source_changed)
                 .map(|text| (text, cloud_ocr))
         })
@@ -3169,9 +3175,9 @@ fn outside_click_watcher(app: tauri::AppHandle) {
                                     None,
                                 );
                                 cancel_active_translation_with_reason(
-                                &handle,
-                                popup_health::CancellationReason::OutsideClick,
-                            );
+                                    &handle,
+                                    popup_health::CancellationReason::OutsideClick,
+                                );
                                 let _ = platform::hide_webview_window(&window);
                             }
                         });

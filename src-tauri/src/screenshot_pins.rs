@@ -315,7 +315,9 @@ pub async fn pin_screenshot_image(
         .operations
         .try_acquire()
         .map_err(|_| "SCREENSHOT_BUSY: 请先完成当前图片操作")?;
-    state.screenshots.check_image_revision(session_id, revision.unwrap_or(0))?;
+    state
+        .screenshots
+        .check_image_revision(session_id, revision.unwrap_or(0))?;
     state.screenshots.with_pin_source(session_id, || Ok(()))?;
     let snapshot = tauri::async_runtime::spawn_blocking(move || {
         let pixels = super::screenshot::from_base64(&png_base64, true)?;
@@ -617,7 +619,9 @@ mod tests {
             assert_eq!(direction.native_name(), native);
         }
         for invalid in ["North", "north-east", "", "all"] {
-            assert!(serde_json::from_value::<PinResizeDirection>(serde_json::json!(invalid)).is_err());
+            assert!(
+                serde_json::from_value::<PinResizeDirection>(serde_json::json!(invalid)).is_err()
+            );
         }
     }
     fn entry(pixels: u64, encoded: usize) -> Entry {

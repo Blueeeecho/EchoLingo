@@ -26,7 +26,9 @@ class PersistentOverlayContract(unittest.TestCase):
         for forbidden in ('screenshot_overlay::prepare(', '.set_focus(', 'emit_session(', 'NSApp.activate'):
             self.assertNotIn(forbidden, capture)
         dismiss = source.split('fn dismiss_current(', 1)[1].split('#[cfg(test)]', 1)[0]
-        self.assertIn('selection.request.cancellation().store(true', dismiss)
+        for newline in ('\n', '\r\n'):
+            self.assertIn('selection.request.cancellation().store(true,Ordering::SeqCst);',
+                          ''.join(dismiss.replace('\n', newline).split()))
 
     def test_presentation_export_and_close_guards_are_revision_safe(self):
         source = read('src-tauri/src/screenshot.rs')

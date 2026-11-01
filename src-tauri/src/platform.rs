@@ -162,38 +162,67 @@ pub struct ScreenshotSelection {
     pub plan: Value,
 }
 fn screenshot_response_geometry(response: &Value) -> Result<ScreenshotGeometry, String> {
-    let mut geometry: ScreenshotGeometry = serde_json::from_value(response.get("captureGeometry").cloned()
-        .ok_or("SCREENSHOT_GEOMETRY: 缺少选区坐标")?).map_err(|_| "SCREENSHOT_GEOMETRY: 选区坐标无效")?;
-    geometry.screens = serde_json::from_value(response.get("captureScreens").cloned()
-        .ok_or("SCREENSHOT_GEOMETRY: 缺少显示器边界")?).map_err(|_| "SCREENSHOT_GEOMETRY: 显示器边界无效")?;
-    if geometry.screens.is_empty() { return Err("SCREENSHOT_GEOMETRY: 显示器不可用".into()); }
+    let mut geometry: ScreenshotGeometry = serde_json::from_value(
+        response
+            .get("captureGeometry")
+            .cloned()
+            .ok_or("SCREENSHOT_GEOMETRY: 缺少选区坐标")?,
+    )
+    .map_err(|_| "SCREENSHOT_GEOMETRY: 选区坐标无效")?;
+    geometry.screens = serde_json::from_value(
+        response
+            .get("captureScreens")
+            .cloned()
+            .ok_or("SCREENSHOT_GEOMETRY: 缺少显示器边界")?,
+    )
+    .map_err(|_| "SCREENSHOT_GEOMETRY: 显示器边界无效")?;
+    if geometry.screens.is_empty() {
+        return Err("SCREENSHOT_GEOMETRY: 显示器不可用".into());
+    }
     geometry.validate()?;
     Ok(geometry)
 }
 pub fn select_screenshot_cancelable(cancel: NativeCancel) -> Result<ScreenshotSelection, String> {
     let response = run_cancelable("select-screenshot", cancel)?;
-    let plan = response.get("selectionPlan").filter(|value| value.is_object()).cloned()
+    let plan = response
+        .get("selectionPlan")
+        .filter(|value| value.is_object())
+        .cloned()
         .ok_or("SCREENSHOT_GEOMETRY: 缺少原生选区快照")?;
-    if plan.to_string().len() > 60000 { return Err("SCREENSHOT_GEOMETRY: 选区快照过大".into()); }
-    Ok(ScreenshotSelection { geometry: screenshot_response_geometry(&response)?, plan })
+    if plan.to_string().len() > 60000 {
+        return Err("SCREENSHOT_GEOMETRY: 选区快照过大".into());
+    }
+    Ok(ScreenshotSelection {
+        geometry: screenshot_response_geometry(&response)?,
+        plan,
+    })
 }
-pub fn capture_selected_region_cancelable(selection: &ScreenshotSelection, cancel: NativeCancel)
-    -> Result<(String, ScreenshotGeometry), String> {
+pub fn capture_selected_region_cancelable(
+    selection: &ScreenshotSelection,
+    cancel: NativeCancel,
+) -> Result<(String, ScreenshotGeometry), String> {
     selection.geometry.validate()?;
     let geometry = &selection.geometry;
     #[cfg(target_os = "windows")]
     let rect = json!({"x":geometry.x as i64,"y":geometry.y as i64,
         "width":geometry.width as i64,"height":geometry.height as i64});
     #[cfg(not(target_os = "windows"))]
-    let rect = json!({"x":geometry.x,"y":geometry.y,"width":geometry.width,"height":geometry.height});
+    let rect =
+        json!({"x":geometry.x,"y":geometry.y,"width":geometry.width,"height":geometry.height});
     let input = json!({"plan": selection.plan, "rect": rect}).to_string();
-    if input.len() > 65000 { return Err("SCREENSHOT_GEOMETRY: 选区参数过大".into()); }
+    if input.len() > 65000 {
+        return Err("SCREENSHOT_GEOMETRY: 选区参数过大".into());
+    }
     #[cfg(target_os = "macos")]
-    let response = run_macos_capture_cancelable_input("capture-selected-region", cancel, Some(&input))?;
+    let response =
+        run_macos_capture_cancelable_input("capture-selected-region", cancel, Some(&input))?;
     #[cfg(target_os = "windows")]
     let response = run_windows("capture-selected-region", Some(&input), Some(cancel))?;
     #[cfg(not(any(target_os = "macos", target_os = "windows")))]
-    let response = { let _ = cancel; run("capture-selected-region", Some(&input))? };
+    let response = {
+        let _ = cancel;
+        run("capture-selected-region", Some(&input))?
+    };
     let geometry = screenshot_response_geometry(&response)?;
     Ok((image_response(response)?, geometry))
 }
@@ -252,7 +281,14 @@ fn run_cancelable(mode: &str, cancel: NativeCancel) -> Result<Value, String> {
     #[cfg(not(target_os = "windows"))]
     {
         #[cfg(target_os = "macos")]
-        if matches!(mode, "capture-ocr" | "capture-image" | "capture-screenshot" | "select-screenshot" | "capture-selected-region") {
+        if matches!(
+            mode,
+            "capture-ocr"
+                | "capture-image"
+                | "capture-screenshot"
+                | "select-screenshot"
+                | "capture-selected-region"
+        ) {
             return run_macos_capture_cancelable(mode, cancel);
         }
         let result = run(mode, None);
@@ -269,7 +305,11 @@ fn run_macos_capture_cancelable(mode: &str, cancel: NativeCancel) -> Result<Valu
     run_macos_capture_cancelable_input(mode, cancel, None)
 }
 #[cfg(target_os = "macos")]
-fn run_macos_capture_cancelable_input(mode: &str, cancel: NativeCancel, input: Option<&str>) -> Result<Value, String> {
+fn run_macos_capture_cancelable_input(
+    mode: &str,
+    cancel: NativeCancel,
+    input: Option<&str>,
+) -> Result<Value, String> {
     use std::sync::{
         atomic::{AtomicBool, Ordering},
         Arc,
@@ -310,11 +350,16 @@ fn run_macos_capture_cancelable_input(mode: &str, cancel: NativeCancel, input: O
     let result = if cancelled(Some(&cancel)) {
         Err(NATIVE_CANCELLED.into())
     } else {
-        if let Some(input) = input { (|| {
-            let mut payload: Value = serde_json::from_str(input).map_err(|_| "SCREENSHOT_GEOMETRY: 无效选区请求")?;
-            payload["operationId"] = json!(operation);
-            run(mode, Some(&payload.to_string()))
-        })() } else { run(mode, Some(&operation)) }
+        if let Some(input) = input {
+            (|| {
+                let mut payload: Value =
+                    serde_json::from_str(input).map_err(|_| "SCREENSHOT_GEOMETRY: 无效选区请求")?;
+                payload["operationId"] = json!(operation);
+                run(mode, Some(&payload.to_string()))
+            })()
+        } else {
+            run(mode, Some(&operation))
+        }
     };
     finished.store(true, Ordering::SeqCst);
     let cancellation_result = watcher
@@ -1546,7 +1591,14 @@ fn run_windows_selection(
 
     static CAPTURE_ATTEMPT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let started = Instant::now();
-    let capture = matches!(mode, "capture-ocr" | "capture-image" | "capture-screenshot" | "select-screenshot" | "capture-selected-region");
+    let capture = matches!(
+        mode,
+        "capture-ocr"
+            | "capture-image"
+            | "capture-screenshot"
+            | "select-screenshot"
+            | "capture-selected-region"
+    );
     let capture_attempt =
         capture.then(|| CAPTURE_ATTEMPT.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1);
     let selection = mode == "selected-text";
@@ -1663,7 +1715,10 @@ fn run_windows_selection(
         })
     };
     // An 8 MiB PNG expands to about 10.7 MiB of base64 plus the JSON envelope.
-    let output_limit = if matches!(mode, "capture-image" | "capture-screenshot" | "capture-selected-region") {
+    let output_limit = if matches!(
+        mode,
+        "capture-image" | "capture-screenshot" | "capture-selected-region"
+    ) {
         12
     } else {
         4
@@ -1680,7 +1735,14 @@ fn run_windows_selection(
     };
     // Helpers cancel their own picker after 120 seconds and OCR after 30 seconds.
     // The longer outer limit gives them time to dispose images and temporary files.
-    let limit = if matches!(mode, "capture-ocr" | "capture-image" | "capture-screenshot" | "select-screenshot" | "capture-selected-region") {
+    let limit = if matches!(
+        mode,
+        "capture-ocr"
+            | "capture-image"
+            | "capture-screenshot"
+            | "select-screenshot"
+            | "capture-selected-region"
+    ) {
         180
     } else {
         60
@@ -1989,7 +2051,11 @@ fn rust_capture_command(mode: &str) -> Result<std::process::Command, String> {
 
 #[cfg(target_os = "windows")]
 fn native_command(mode: &str) -> Result<std::process::Command, String> {
-    if matches!(mode, "capture-screenshot" | "select-screenshot" | "capture-selected-region") || (mode == "capture-image" && rust_capture_enabled()) {
+    if matches!(
+        mode,
+        "capture-screenshot" | "select-screenshot" | "capture-selected-region"
+    ) || (mode == "capture-image" && rust_capture_enabled())
+    {
         // Screenshot mode has no legacy fallback: a failed native/security
         // check must never retry through a less restrictive capture backend.
         return rust_capture_command(mode);

@@ -7,7 +7,9 @@ def read(path): return (ROOT / path).read_text()
 class MacOCRCancellationContract(unittest.TestCase):
     def test_all_capture_modes_share_registered_cancel_lifetime(self):
         source = read("src-tauri/src/platform.rs")
-        self.assertIn('matches!(mode, "capture-ocr" | "capture-image" | "capture-screenshot" | "select-screenshot" | "capture-selected-region")', source)
+        required = 'matches!(mode,"capture-ocr"|"capture-image"|"capture-screenshot"|"select-screenshot"|"capture-selected-region")'
+        for newline in ("\n", "\r\n"):
+            self.assertIn(required, "".join(source.replace("\n", newline).split()))
         body = source.split("fn run_macos_capture_cancelable_input", 1)[1].split("\nfn ", 1)[0]
         self.assertIn('run(mode, Some(&operation))', body)
         self.assertIn('"cancel-native-capture"', body)

@@ -127,7 +127,7 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - run: npm ci
       - run: npm run build
-      - name: Compile actual platform app and run all eight pin regressions
+      - name: Compile actual platform app and run all ten pin regressions
         shell: bash
         run: |
           set -euo pipefail
@@ -601,6 +601,29 @@ jobs:
         run: cargo fmt --manifest-path src-tauri/Cargo.toml --check
       - name: Build desktop installer
         run: npm run tauri build -- --bundles ${{ runner.os == 'Windows' && 'nsis' || 'dmg' }} -- --locked
+      - name: Build same-source isolated Mac debug pin host
+        if: runner.os == 'macOS'
+        shell: bash
+        run: npm run tauri -- build --debug --no-bundle -- --locked
+      - name: Verify real Mac pin lifecycle against this exact source
+        if: runner.os == 'macOS'
+        shell: bash
+        run: bash tests/macos-pin-native-smoke.sh "$PWD/src-tauri/target/debug/echolingo" "$PWD/src-tauri/target/release/bundle/macos/EchoLingo.app/Contents/MacOS/echolingo" "$RUNNER_TEMP/ci-native-pin-smoke"
+      - name: Require the packaged release app to omit debug pin smoke entry points
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 scripts/verify-native-pin-release-absence.py src-tauri/target/release/bundle/macos/EchoLingo.app/Contents/MacOS/echolingo | tee "$RUNNER_TEMP/ci-native-pin-absence.json"
+      - name: Preserve actual Mac pin lifecycle evidence
+        if: always() && runner.os == 'macOS'
+        uses: actions/upload-artifact@v4
+        with:
+          name: EchoLingo-macOS-pin-lifecycle
+          path: |
+            ${{ runner.temp }}/ci-native-pin-smoke
+            ${{ runner.temp }}/ci-native-pin-absence.json
+          if-no-files-found: warn
       - name: Identify the actual embedded precompiled Windows helper
         id: windows_native_candidate
         if: runner.os == 'Windows'

@@ -2358,14 +2358,20 @@ fn selection_plan_value(
         .iter()
         .map(|d| {
             let work = screenshot_toolbar_bounds(d)?;
-            Ok(serde_json::json!({"device":d.device,"bounds":deferred::rect_json(d.bounds),
-                "dpi":d.dpi,"work":work}))
+            Ok(
+                serde_json::json!({"device":d.device,"bounds":deferred::rect_json(d.bounds),
+                "dpi":d.dpi,"work":work}),
+            )
         })
         .collect::<Result<Vec<_>>>()?;
-    let source = source.map(|s| serde_json::json!({"window":s.window,"process":s.process,
-        "thread":s.thread,"frame":deferred::rect_json(s.frame)}));
-    Ok(serde_json::json!({"version":1,"owner":owner,"awareness":topology.awareness,
-        "viewport":deferred::rect_json(viewport),"displays":screens,"source":source}))
+    let source = source.map(|s| {
+        serde_json::json!({"window":s.window,"process":s.process,
+        "thread":s.thread,"frame":deferred::rect_json(s.frame)})
+    });
+    Ok(
+        serde_json::json!({"version":1,"owner":owner,"awareness":topology.awareness,
+        "viewport":deferred::rect_json(viewport),"displays":screens,"source":source}),
+    )
 }
 
 /// Deferred final-region capture: no picker, input host, clipboard or screen cache.
@@ -2496,7 +2502,9 @@ pub fn run(request: Request) -> CapturedResult {
                 .topology
                 .displays()
                 .iter()
-                .filter(|display| request.selection_only || selected.intersect(display.bounds).valid())
+                .filter(|display| {
+                    request.selection_only || selected.intersect(display.bounds).valid()
+                })
                 .collect();
             capture_screens = visible
                 .iter()

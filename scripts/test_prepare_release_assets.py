@@ -181,9 +181,18 @@ class ReleaseAssetsTests(unittest.TestCase):
         # Only release-specific strengthening may differ: fresh app+DMG,
         # package inspection/evidence, native-capture formatting and version.
         normalized = release.split("jobs:\n", 1)[1]
-        start = normalized.index('      - name: Build same-source isolated Mac debug pin host')
+        # Native pin execution is now common to full CI and release. Compare
+        # every command, normalizing only the evidence directory/title.
+        normalized = normalized.replace('against this release source', 'against this exact source')
+        normalized = normalized.replace('release-native-pin', 'ci-native-pin')
+        start = normalized.index('      - name: Inspect exact fresh installer')
         end = normalized.index('      - name: Identify the actual embedded', start)
         normalized = normalized[:start] + normalized[end:]
+        # CI uploads pin evidence separately; release includes the same files
+        # in its always-preserved package-inspection artifact above.
+        start = expected.index('      - name: Preserve actual Mac pin lifecycle evidence')
+        end = expected.index('      - name: Identify the actual embedded', start)
+        expected = expected[:start] + expected[end:]
         normalized = normalized.replace('        id: package_build\n', '').replace("'app,dmg'", "'dmg'")
         normalized = normalized.replace('        run: |\n          cargo fmt --manifest-path src-tauri/Cargo.toml --check\n          cargo fmt --manifest-path src-tauri/native-capture/Cargo.toml --check', '        run: cargo fmt --manifest-path src-tauri/Cargo.toml --check')
         self.assertEqual(normalized.strip(), expected.strip())

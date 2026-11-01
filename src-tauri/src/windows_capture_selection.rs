@@ -34,10 +34,7 @@ pub fn source(value: &Value) -> Result<Option<CaptureWindowTarget>, String> {
         u32::try_from(value["process"].as_u64().ok_or_else(invalid)?).map_err(|_| invalid())?;
     let thread =
         u32::try_from(value["thread"].as_u64().ok_or_else(invalid)?).map_err(|_| invalid())?;
-    if window == 0
-        || process == 0
-        || thread == 0
-        || value.as_object().is_none_or(|o| o.len() != 4)
+    if window == 0 || process == 0 || thread == 0 || value.as_object().is_none_or(|o| o.len() != 4)
     {
         return Err(invalid());
     }
@@ -57,7 +54,9 @@ pub fn request(bytes: &[u8], owner: u32) -> Result<(Value, Rect), String> {
     if value.as_object().is_none_or(|o| o.len() != 2)
         || plan["version"] != 1
         || plan["owner"] != owner
-        || plan["displays"].as_array().is_none_or(|v| v.is_empty() || v.len() > 32)
+        || plan["displays"]
+            .as_array()
+            .is_none_or(|v| v.is_empty() || v.len() > 32)
     {
         return Err(invalid());
     }
