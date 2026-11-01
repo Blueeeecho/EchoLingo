@@ -149,6 +149,63 @@ jobs:
         if: runner.os == 'macOS'
         shell: bash
         run: bash tests/macos-pin-native-smoke.sh "$PWD/src-tauri/target/debug/echolingo" "$PWD/src-tauri/target/release/echolingo" "$RUNNER_TEMP/screenshot-pin/native-lifecycle"
+      - name: Build actual Windows application with bundled local UI
+        if: runner.os == 'Windows'
+        shell: bash
+        run: npm run tauri -- build --no-bundle -- --locked
+      - name: Identify the actual embedded precompiled Windows helper
+        id: windows_native_candidate
+        if: runner.os == 'Windows'
+        shell: powershell
+        run: |
+          $dll = Get-ChildItem src-tauri/target/release/build -Recurse -File -Filter echolingo-windows-native.dll | Sort-Object LastWriteTimeUtc -Descending | Select-Object -First 1
+          if ($null -eq $dll) { throw 'The production Windows native DLL was not built.' }
+          $appBytes = [IO.File]::ReadAllBytes((Resolve-Path src-tauri/target/release/echolingo.exe))
+          $dllBytes = [IO.File]::ReadAllBytes($dll.FullName)
+          Add-Type -TypeDefinition @'
+          public static class EchoLingoExactPayload {
+            public static int Find(byte[] binary, byte[] payload) {
+              if (payload.Length == 0) return -1;
+              for (int i = 0; i <= binary.Length - payload.Length; i++) {
+                if (binary[i] != payload[0]) continue;
+                int j = 1; while (j < payload.Length && binary[i+j] == payload[j]) j++;
+                if (j == payload.Length) return i;
+              }
+              return -1;
+            }
+          }
+          '@
+          $payloadOffset = [EchoLingoExactPayload]::Find($appBytes, $dllBytes)
+          if ($payloadOffset -lt 0) { throw 'The selected complete DLL is not embedded byte-for-byte in the actual application.' }
+          $launcher = Join-Path $dll.DirectoryName 'echolingo-windows-launcher.ps1'
+          if (-not (Test-Path -LiteralPath $launcher -PathType Leaf)) { throw 'Generated Windows launcher is missing beside the accepted DLL.' }
+          $launcherBytes = [IO.File]::ReadAllBytes($launcher)
+          $launcherOffset = [EchoLingoExactPayload]::Find($appBytes, $launcherBytes)
+          if ($launcherOffset -lt 0) { throw 'The complete candidate launcher is not embedded byte-for-byte in the actual application.' }
+          [ordered]@{ launcherBytes = $launcherBytes.Length; launcherSha256 = (Get-FileHash $launcher -Algorithm SHA256).Hash.ToLowerInvariant(); completeLauncherEmbedded = $true; exactLauncherOffset = $launcherOffset } | ConvertTo-Json -Compress
+          "path=$($dll.FullName)" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+          $capture = Join-Path $dll.DirectoryName 'echolingo-native-capture.exe'
+          $captureBytes = [IO.File]::ReadAllBytes($capture)
+          $captureOffset = [EchoLingoExactPayload]::Find($appBytes, $captureBytes)
+          if ($captureOffset -lt 0) { throw 'The complete Rust capture child is not embedded byte-for-byte in the actual application.' }
+          "capturePath=$capture" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+          [ordered]@{ nativeCaptureBytes = $captureBytes.Length; nativeCaptureSha256 = (Get-FileHash $capture -Algorithm SHA256).Hash.ToLowerInvariant(); completeNativeCaptureEmbedded = $true; exactNativeCaptureOffset = $captureOffset } | ConvertTo-Json -Compress
+          [ordered]@{ dllBytes = $dllBytes.Length; dllSha256 = (Get-FileHash $dll.FullName -Algorithm SHA256).Hash.ToLowerInvariant(); completePayloadEmbedded = $true; exactPayloadOffset = $payloadOffset } | ConvertTo-Json -Compress
+      - name: Real Windows pin lifecycle with generated source pixels
+        if: runner.os == 'Windows'
+        timeout-minutes: 8
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Continue'
+          $global:LASTEXITCODE = 1
+          $output = @(& powershell.exe -NoProfile -STA -ExecutionPolicy Bypass -File tests/windows-application-smoke.ps1 -ApplicationPath src-tauri/target/release/echolingo.exe -DefaultCapture -NativeCapturePath '${{ steps.windows_native_candidate.outputs.capturePath }}' -ScreenshotPinTests 2>&1)
+          $fixtureExit = $LASTEXITCODE
+          $report = "$env:RUNNER_TEMP/screenshot-pin/native-pin.log"
+          $output | Out-File $report -Encoding utf8
+          $output | Write-Output
+          python scripts/verify_screenshot_editor_report.py $report --application src-tauri/target/release/echolingo.exe --pin-only
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          if ($fixtureExit -ne 0) { exit $fixtureExit }
       - name: Check committed Rust formatting
         run: cargo fmt --manifest-path src-tauri/Cargo.toml --check
       - name: Preserve exact-source compiler and synthetic evidence
