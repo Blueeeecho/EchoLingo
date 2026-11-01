@@ -39,6 +39,18 @@ class NativePinSmokeContract(unittest.TestCase):
         self.assertIn('repeated_fn_callback_keeps_first_result', source)
         self.assertIn('callback_after_timeout_or_receiver_drop_is_harmless', source)
 
+    def test_single_context_macro_and_matching_objc_declarations(self):
+        main = (ROOT / 'src-tauri/src/main.rs').read_text()
+        fixture = (ROOT / 'src-tauri/src/native_pin_smoke.rs').read_text()
+        self.assertEqual(main.count('tauri::generate_context!()'), 1)
+        self.assertNotIn('tauri::generate_context!', fixture)
+        self.assertIn('native_pin_smoke::run(app_context())', main)
+        self.assertIn('.build(app_context())', main)
+        self.assertIn('pub fn run(mut context: tauri::Context<tauri::Wry>)', fixture)
+        self.assertIn('type Selector = *const c_void;', fixture)
+        self.assertIn('fn objc_msgSend(receiver: Object, selector: Selector);', fixture)
+        self.assertNotIn('as unsafe extern "C" fn()', fixture)
+
     def test_runner_checks_release_bytes_and_keeps_failed_evidence(self):
         source = (ROOT / 'tests/macos-pin-native-smoke.sh').read_text()
         for required in ('DEBUG_SMOKE_ENTRY_PRESENT_IN_RELEASE', 'timeout=70',

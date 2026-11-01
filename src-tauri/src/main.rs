@@ -3524,10 +3524,15 @@ fn management_menu(app: &tauri::AppHandle) -> tauri::Result<()> {
     Ok(())
 }
 
+fn app_context() -> tauri::Context<tauri::Wry> {
+    // Emit platform resources (including _EMBED_INFO_PLIST) exactly once.
+    tauri::generate_context!()
+}
+
 fn main() {
     #[cfg(all(target_os = "macos", debug_assertions))]
     if std::env::args().nth(1).as_deref() == Some("--native-pin-smoke") {
-        std::process::exit(native_pin_smoke::run());
+        std::process::exit(native_pin_smoke::run(app_context()));
     }
     if let Some(code) = shortcut_probe::run_if_requested(&std::env::args().collect::<Vec<_>>()) {
         std::process::exit(code);
@@ -3766,7 +3771,7 @@ fn main() {
             get_update_status,
             check_for_updates
         ])
-        .build(tauri::generate_context!())
+        .build(app_context())
         .expect("EchoLingo could not start");
     // App still owns the runtime here, so this seeds Tao's initial launch role
     // before applicationDidFinishLaunching rather than changing it during setup.

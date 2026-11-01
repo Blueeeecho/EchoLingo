@@ -4,26 +4,26 @@ use super::*;
 use std::ffi::{c_char, c_void};
 
 type Object = *mut c_void;
-type Selector = *mut c_void;
+type Selector = *const c_void;
 #[link(name = "objc")]
 unsafe extern "C" {
     fn objc_getClass(name: *const c_char) -> Object;
     fn sel_registerName(name: *const c_char) -> Selector;
-    fn objc_msgSend();
+    fn objc_msgSend(receiver: Object, selector: Selector);
 }
 unsafe fn object(receiver: Object, name: &'static [u8]) -> Object {
     let send: unsafe extern "C" fn(Object, Selector) -> Object =
-        std::mem::transmute(objc_msgSend as unsafe extern "C" fn());
+        std::mem::transmute(objc_msgSend as unsafe extern "C" fn(Object, Selector));
     send(receiver, sel_registerName(name.as_ptr().cast()))
 }
 unsafe fn integer(receiver: Object, name: &'static [u8]) -> isize {
     let send: unsafe extern "C" fn(Object, Selector) -> isize =
-        std::mem::transmute(objc_msgSend as unsafe extern "C" fn());
+        std::mem::transmute(objc_msgSend as unsafe extern "C" fn(Object, Selector));
     send(receiver, sel_registerName(name.as_ptr().cast()))
 }
 unsafe fn boolean(receiver: Object, name: &'static [u8]) -> bool {
     let send: unsafe extern "C" fn(Object, Selector) -> bool =
-        std::mem::transmute(objc_msgSend as unsafe extern "C" fn());
+        std::mem::transmute(objc_msgSend as unsafe extern "C" fn(Object, Selector));
     send(receiver, sel_registerName(name.as_ptr().cast()))
 }
 fn foreground_pid() -> i32 {
@@ -236,7 +236,7 @@ fn state(directory: PathBuf) -> AppState {
         popup_health: Mutex::new(popup_health::PopupHealth::default()),
     }
 }
-pub fn run() -> i32 {
+pub fn run(mut context: tauri::Context<tauri::Wry>) -> i32 {
     if std::env::args().skip(1).collect::<Vec<_>>()
         != ["--native-pin-smoke", "--isolated-test-session"]
     {
@@ -254,7 +254,6 @@ pub fn run() -> i32 {
     let setup_directory = directory.clone();
     let result = Arc::new(Mutex::new(None::<Result<(), String>>));
     let run_result = result.clone();
-    let mut context = tauri::generate_context!();
     context.config_mut().identifier = "io.github.blueeeecho.echolingo.native-pin-smoke".into();
     context.config_mut().app.windows.clear();
     context.config_mut().bundle.active = false;
