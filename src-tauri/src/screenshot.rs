@@ -308,10 +308,18 @@ fn make_session(
 #[cfg(all(target_os = "macos", debug_assertions))]
 pub(crate) fn install_native_pin_smoke(controller: &Controller, id: u64) -> Result<String, String> {
     let image = RgbaImage::from_fn(128, 96, |x, _| {
-        if x < 64 { image::Rgba([228, 93, 104, 255]) }
-        else { image::Rgba([23, 101, 199, 255]) }
+        if x < 64 {
+            image::Rgba([228, 93, 104, 255])
+        } else {
+            image::Rgba([23, 101, 199, 255])
+        }
     });
-    let session = make_session(id, &encode(&image)?, 0, Some("generated-pin-fixture".into()))?;
+    let session = make_session(
+        id,
+        &encode(&image)?,
+        0,
+        Some("generated-pin-fixture".into()),
+    )?;
     let png = session.png_base64.clone();
     controller.begin(id)?;
     controller.install_and_publish(session, "generated.png".into(), |_| Ok(()))?;

@@ -497,7 +497,14 @@ pub async fn close_pinned_screenshot(
 pub(crate) fn native_smoke_counts(app: &tauri::AppHandle) -> Result<(usize, usize), String> {
     let state = app.state::<super::AppState>();
     let entries = super::locked(&state.screenshot_pins.entries)?;
-    Ok((entries.len(), entries.values().filter_map(|e| e.image.as_ref()).map(|i| i.png_base64.len()).sum()))
+    Ok((
+        entries.len(),
+        entries
+            .values()
+            .filter_map(|e| e.image.as_ref())
+            .map(|i| i.png_base64.len())
+            .sum(),
+    ))
 }
 
 #[cfg(test)]
