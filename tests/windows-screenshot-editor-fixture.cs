@@ -426,8 +426,10 @@ public static partial class EchoLingoApplicationSmoke {
     static long ScreenshotInitialAttempt;
     static int ScreenshotFirstStrokeReleaseChecks;
     static readonly Dictionary<uint,IntPtr> ScreenshotSelectionEditors=new Dictionary<uint,IntPtr>();
-    static Rectangle ScreenshotWebSelection(IntPtr editor) {
-        AutomationElement canvas=Element(editor,ScreenshotCanvasName);if(canvas==null||canvas.Current.IsOffscreen)return Rectangle.Empty;
+    static Rectangle ScreenshotWebSelection(IntPtr editor,Dictionary<string,object> observation=null) {
+        AutomationElement canvas=Element(editor,ScreenshotCanvasName);bool offscreen=canvas!=null&&canvas.Current.IsOffscreen;
+        if(observation!=null){observation["canvasPresent"]=canvas!=null;observation["canvasOffscreen"]=offscreen;}
+        if(canvas==null||offscreen)return Rectangle.Empty;
         System.Windows.Rect box=canvas.Current.BoundingRectangle;
         return new Rectangle((int)Math.Round(box.X),(int)Math.Round(box.Y),(int)Math.Round(box.Width),(int)Math.Round(box.Height));
     }
@@ -449,24 +451,53 @@ public static partial class EchoLingoApplicationSmoke {
         MoveGenerated(form,point);RequireForeground(form);IntPtr target=GetAncestor(WindowFromPoint(point),2);uint pid;GetWindowThreadProcessId(target,out pid);
         Assert(target==editor&&pid==app.Id&&IsWindowVisible(target),"Web adjustment input would target a foreign window; refused.");
     }
-    static void ScreenshotWebDrag(Form form,Process app,uint helper,Point first,Point last,Rectangle expected) {
-        IntPtr editor=ScreenshotRetainedEditor(app,helper);ScreenshotWebPoint(form,app,editor,first);INPUT down=new INPUT();down.data.mouse.flags=2;INPUT up=new INPUT();up.data.mouse.flags=4;Send(new INPUT[]{down});
+    static int[] ScreenshotRectObservation(Rectangle rect) {return new int[]{rect.X,rect.Y,rect.Width,rect.Height};}
+    static void ScreenshotAdjustmentFailureState(Process app,IntPtr editor,Dictionary<string,object> observation) {
+        // Read only this owned editor. Export fixed categories, never UI text.
+        try {
+            AutomationElement root=AutomationElement.FromHandle(editor);Assert(root.Current.ProcessId==app.Id,"Adjustment diagnostic root is not owned.");
+            AutomationElement select=ScreenshotButton(editor,"\u9009\u62e9");object pattern;
+            observation["selectPresent"]=select!=null;
+            if(select!=null){observation["selectEnabled"]=select.Current.IsEnabled;observation["selectOffscreen"]=select.Current.IsOffscreen;observation["selectOn"]=select.TryGetCurrentPattern(TogglePattern.Pattern,out pattern)&&((TogglePattern)pattern).Current.ToggleState==ToggleState.On;}
+            AutomationElement status=root.FindFirst(TreeScope.Descendants,new PropertyCondition(AutomationElement.AutomationIdProperty,"editor-status"));
+            observation["statusPresent"]=status!=null;if(status==null)return;
+            string message=status.Current.Name??"";if(message.Length==0){AutomationElement text=status.FindFirst(TreeScope.Children,new PropertyCondition(AutomationElement.ControlTypeProperty,ControlType.Text));if(text!=null)message=text.Current.Name??"";}
+            observation["statusNonempty"]=message.Length!=0;string prefix="\u672a\u8c03\u6574\u9009\u533a\uff1a";
+            observation["selectionUpdateError"]=message.StartsWith(prefix,StringComparison.Ordinal);
+            if(message.StartsWith(prefix,StringComparison.Ordinal))message=message.Substring(prefix.Length);
+            foreach(string code in new string[]{"SCREENSHOT_BUSY","SCREENSHOT_GEOMETRY","SCREENSHOT_SIZE","SCREENSHOT_SESSION","SCREENSHOT_REVISION","SCREENSHOT_WINDOW","CAPTURE_DISPLAY_CHANGED","CANCELLED"})
+                if(message.StartsWith(code+":",StringComparison.Ordinal))observation["knownUpdateErrorCode"]=code;
+        }catch(Exception){observation["failureStateUnavailable"]=true;}
+    }
+    static void ScreenshotWebDrag(Form form,Process app,uint helper,Point first,Point last,Rectangle expected,string phase,List<Dictionary<string,object>> observations) {
+        Assert(observations.Count<18,"Adjustment diagnostic inventory exceeded the exact move/eight-handle pairs.");
+        IntPtr editor=ScreenshotRetainedEditor(app,helper);
+        Dictionary<string,object> observation=new Dictionary<string,object>{{"phase",phase},{"before",ScreenshotRectObservation(ScreenshotWebSelection(editor))},{"expected",ScreenshotRectObservation(expected)},{"pointerStart",new int[]{first.X,first.Y}},{"pointerEnd",new int[]{last.X,last.Y}},{"completed",false}};observations.Add(observation);
+        ScreenshotWebPoint(form,app,editor,first);INPUT down=new INPUT();down.data.mouse.flags=2;INPUT up=new INPUT();up.data.mouse.flags=4;Send(new INPUT[]{down});
         try{Thread.Sleep(60);ScreenshotWebPoint(form,app,editor,last);Thread.Sleep(60);}finally{Send(new INPUT[]{up});}
-        WaitFor(delegate{return ScreenshotRetainedEditor(app,helper)==editor&&IsWindowVisible(editor)&&ScreenshotWebSelection(editor)==expected;},10,"Web adjustment gesture did not adopt exact expected geometry.",app);RequireForeground(form);
+        try {
+            WaitFor(delegate{
+                bool same=ScreenshotRetainedEditor(app,helper)==editor,visible=IsWindowVisible(editor);observation["sameEditor"]=same;observation["editorVisible"]=visible;
+                if(!same||!visible)return false;
+                Rectangle actual=ScreenshotWebSelection(editor,observation);observation["lastObserved"]=ScreenshotRectObservation(actual);return actual==expected;
+            },10,"Web adjustment gesture did not adopt exact expected geometry.",app);RequireForeground(form);observation["completed"]=true;
+        }catch{ScreenshotAdjustmentFailureState(app,editor,observation);throw;}
     }
     static void ScreenshotWebMoveResize(Form form,Process app,uint helper,Rectangle original,Dictionary<string,object> evidence) {
         long before=CaptureNumber(ScreenshotCaptureHealth(),"attemptId");
+        List<Dictionary<string,object>> observations=new List<Dictionary<string,object>>();evidence["webAdjustmentGestures"]=observations;
         Point center=new Point(original.Left+original.Width/2,original.Top+original.Height/2);
         Rectangle moved=new Rectangle(original.X+12,original.Y+8,original.Width,original.Height);
-        ScreenshotWebDrag(form,app,helper,center,new Point(center.X+12,center.Y+8),moved);
-        ScreenshotWebDrag(form,app,helper,new Point(center.X+12,center.Y+8),center,original);
+        ScreenshotWebDrag(form,app,helper,center,new Point(center.X+12,center.Y+8),moved,"move",observations);
+        ScreenshotWebDrag(form,app,helper,new Point(center.X+12,center.Y+8),center,original,"move-restore",observations);
+        string[] handles=new string[]{"n","ne","e","se","s","sw","w","nw"};
         int[,] edges=new int[,]{{0,-1},{1,-1},{1,0},{1,1},{0,1},{-1,1},{-1,0},{-1,-1}};
         for(int i=0;i<8;i++) {
             int horizontal=edges[i,0],vertical=edges[i,1],dx=-horizontal*8,dy=-vertical*8;
             Point handle=new Point(horizontal<0?original.Left:horizontal>0?original.Right:center.X,vertical<0?original.Top:vertical>0?original.Bottom:center.Y);
             Rectangle resized=Rectangle.FromLTRB(original.Left+(horizontal<0?dx:0),original.Top+(vertical<0?dy:0),original.Right+(horizontal>0?dx:0),original.Bottom+(vertical>0?dy:0));
             Point next=new Point(handle.X+dx,handle.Y+dy);
-            ScreenshotWebDrag(form,app,helper,handle,next,resized);ScreenshotWebDrag(form,app,helper,next,handle,original);
+            ScreenshotWebDrag(form,app,helper,handle,next,resized,"resize-"+handles[i],observations);ScreenshotWebDrag(form,app,helper,next,handle,original,"restore-"+handles[i],observations);
         }
         Assert(CaptureNumber(ScreenshotCaptureHealth(),"attemptId")==before,"Adjusting geometry unexpectedly captured pixels.");
         evidence["webAdjustmentHandleCount"]=8;evidence["webAdjustmentMoveResizeVerified"]=true;evidence["webAdjustmentGeometryRestored"]=true;evidence["adjustmentDidNotCapturePixels"]=true;

@@ -193,6 +193,14 @@ describe('actual Windows screenshot fixture source wiring (not native acceptance
     for (const required of ['ToggleState.On', 'GetAncestor(WindowFromPoint(center),2)', 'target==editor&&pid==app.Id', 'current.Current.BoundingRectangle.Contains(center.X,center.Y)', 'Send(new INPUT[]{down,up})', 'explicitEditorInteractionVerified', 'selected-solid-tool', 'postCaptureInteractionClicks']) expect(interaction).toContain(required);
     for (const forbidden of ['SetForegroundWindow(', 'SetFocus(', '.Invoke()', '.Toggle()', 'RequireForeground(form)']) expect(interaction).not.toContain(forbidden);
   });
+  it('records bounded owned adjustment geometry without changing the strict gesture predicate', () => {
+    const drag = fixture.slice(fixture.indexOf('static void ScreenshotWebDrag('), fixture.indexOf('static void ScreenshotWebMoveResize('));
+    for (const value of ['observations.Count<18', '"phase"', '"before"', '"expected"', '"lastObserved"', '"pointerStart"', '"pointerEnd"', 'return actual==expected', '},10,"Web adjustment gesture did not adopt exact expected geometry."', 'ScreenshotAdjustmentFailureState(app,editor,observation);throw;']) expect(drag).toContain(value);
+    const failure = fixture.slice(fixture.indexOf('static void ScreenshotAdjustmentFailureState('), fixture.indexOf('static void ScreenshotWebDrag('));
+    for (const value of ['root.Current.ProcessId==app.Id', 'selectionUpdateError', 'knownUpdateErrorCode', 'selectEnabled', 'selectOffscreen', 'selectOn']) expect(failure).toContain(value);
+    expect(failure).not.toMatch(/observation\[[^\]]+\]=message\s*;/);
+    for (const forbidden of ['Send(', 'SetForegroundWindow(', '.Invoke()', '.Toggle()', 'Thread.Sleep']) expect(failure).not.toContain(forbidden);
+  });
   it('maps F1 exports to dismiss/re-capture while retaining standalone cancellation and collision oracles', () => {
     for (const value of ['if(closes)WaitFor', 'for(int save=0;save<2;save++)', 'recapturedSaveSessions', 'inplaceCopyAndSavesDismissed', 'savedCaptureReopenedThroughSettings', 'standaloneCollisionNumberingVerified', 'ScreenshotContinueOpen(app,dialogOwner)', 'inplaceCancelPreservedClipboard']) expect(fixture).toContain(value);
     expect(fixture).not.toContain('ScreenshotInvoke(app,editor,"100%")');
