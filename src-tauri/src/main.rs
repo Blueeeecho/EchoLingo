@@ -421,9 +421,16 @@ fn write_json(path: &Path, value: &impl Serialize) -> Result<(), String> {
         }
         let from: Vec<u16> = tmp.as_os_str().encode_wide().chain(Some(0)).collect();
         let to: Vec<u16> = path.as_os_str().encode_wide().chain(Some(0)).collect();
+        // Windows destination replacement is not a writer-coordination primitive:
+        // overlapping MoveFileExW calls can fail on each other's open handles.
+        // Serialize only the commit, not serialization, writing or file sync.
+        // No caller lock is acquired while this guard is held.
+        static COMMIT: Mutex<()> = Mutex::new(());
+        let _commit = locked(&COMMIT)?;
         // Atomic same-volume replace; never remove the old settings/history first.
         if unsafe { MoveFileExW(from.as_ptr(), to.as_ptr(), 0x1 | 0x8) } == 0 {
-            return Err("无法原子替换本地数据；原文件保留".into());
+            let code = std::io::Error::last_os_error().raw_os_error().unwrap_or(0);
+            return Err(format!("无法原子替换本地数据；原文件保留 (Windows {code})"));
         }
         Ok(())
     }

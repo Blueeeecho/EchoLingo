@@ -162,6 +162,32 @@ fn windows_locked_target_preserves_original_and_can_be_retried() {
     assert!(!path.with_extension("json.tmp").exists());
 }
 
+// Readers using the normal Rust sharing mode must not prevent replacement,
+// and an already-open reader must retain the complete previous snapshot.
+#[cfg(target_os = "windows")]
+#[test]
+fn windows_shared_reader_retains_old_snapshot_during_atomic_replace() {
+    use std::io::Read;
+    let fixture = StorageFixture::new();
+    let path = fixture.file();
+    let original = serde_json::json!({"text": "old snapshot"});
+    let replacement = serde_json::json!({"text": "new snapshot"});
+    write_json(&path, &original).unwrap();
+    let mut reader = fs::File::open(&path).unwrap();
+    write_json(&path, &replacement).unwrap();
+    let mut old_bytes = Vec::new();
+    reader.read_to_end(&mut old_bytes).unwrap();
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(&old_bytes).unwrap(),
+        original
+    );
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(&fs::read(&path).unwrap()).unwrap(),
+        replacement
+    );
+    assert_eq!(fs::read_dir(&fixture.0).unwrap().count(), 1);
+}
+
 fn entry(id: &str, favorite: bool) -> HistoryEntry {
     HistoryEntry {
         id: id.into(),
