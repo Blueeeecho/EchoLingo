@@ -17,7 +17,7 @@ class ScreenshotWindowContract(unittest.TestCase):
         self.assertIn('Some("capture-image") => policy::CapturePurpose::Region', native)
         self.assertIn('Some("capture-screenshot") if owner.is_some_and', native)
         swift = read('src-tauri/native/macos.swift')
-        self.assertIn('case "--capture-image": return ["ok": true, "imageBase64": try captureImage()]', swift)
+        self.assertIn('case "--capture-image": return ["ok": true, "imageBase64": try captureImage(cancellation: captureInputOperation(input))]', swift)
         self.assertIn('captureScreenshotResponse(cancellation: operation)', swift)
 
     def test_windows_revalidates_before_and_after_visible_pixel_copy(self):
@@ -75,7 +75,7 @@ class ScreenshotWindowContract(unittest.TestCase):
 
     def test_cancel_is_registered_before_watching_and_scoped_to_operation(self):
         platform = read('src-tauri/src/platform.rs')
-        fn = platform.split('fn run_macos_screenshot_cancelable', 1)[1].split('#[derive(Clone, Copy)]', 1)[0]
+        fn = platform.split('fn run_macos_capture_cancelable', 1)[1].split('#[derive(Clone, Copy)]', 1)[0]
         self.assertLess(fn.index('begin-native-capture'), fn.index('let watcher'))
         self.assertIn('cancel-native-capture', fn)
         self.assertIn('end-native-capture', fn)

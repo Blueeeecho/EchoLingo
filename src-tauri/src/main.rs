@@ -2648,7 +2648,9 @@ fn start_action(app: tauri::AppHandle, action: String) {
             let state = worker_app.state::<AppState>();
             // Only one actual native child owns input/exclusion at a time. A
             // superseded waiter is rejected before launching or reading text.
+            record_popup_health(&worker_app, presentation.epoch, "nativeWorkerWaiting", None);
             let _physical = state.native_tasks.enter(&worker_request)?;
+            record_popup_health(&worker_app, presentation.epoch, "nativeWorkerEntered", None);
             if !native_request_is_current(&worker_app, &worker_request, presentation, keep_popup) {
                 return Err(translation_requests::CANCELLED.to_owned());
             }
@@ -2710,6 +2712,7 @@ fn start_action(app: tauri::AppHandle, action: String) {
                 }
             }
             let cancel = worker_request.cancellation();
+            record_popup_health(&worker_app, presentation.epoch, "nativeCallStarted", None);
             let text = match worker_action.as_str() {
                 "selection" => {
                     #[cfg(target_os = "windows")]
@@ -2739,6 +2742,14 @@ fn start_action(app: tauri::AppHandle, action: String) {
                 }
                 _ => Err("未知操作".into()),
             };
+            let native_phase = if worker_request.cancelled() {
+                "nativeCallCancelled"
+            } else if text.is_ok() {
+                "nativeCallCompleted"
+            } else {
+                "nativeCallFailed"
+            };
+            record_popup_health(&worker_app, presentation.epoch, native_phase, None);
             #[cfg(target_os = "windows")]
             if let Some(exclusion) = exclusion {
                 exclusion.restore()?;

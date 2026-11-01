@@ -3,7 +3,7 @@ import { overlayToolBounds, clampOverlayBox, placeOverlayToolbar, type OverlayRe
 import { closeDialog, dialogOpen, showDialog } from './screenshot-dialog';
 import { invoke, isTauri } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
-import { ScreenshotDocument, imagePoint, selectionRect, validateSize, MAX_ENCODED_BYTES, operationBounds, screenshotTextFont, translateOperation, type Point, type EditOperation, MAX_STROKE_POINTS, strokePathsIntersect } from './screenshot-model';
+import { ScreenshotDocument, imagePoint, selectionRect, validateSize, MAX_ENCODED_BYTES, operationBounds, screenshotTextFont, wrapText, translateOperation, type Point, type EditOperation, MAX_STROKE_POINTS, strokePathsIntersect } from './screenshot-model';
 import { flattenedPng, renderScreenshot } from './screenshot-renderer';
 interface ScreenshotOverlay { x: number; y: number; width: number; height: number; viewportWidth: number; viewportHeight: number; toolbarBounds?: OverlayRect }
 interface ScreenshotSession { id: number; pngBase64: string; width: number; height: number; capturedAt: number; sourceName?: string; overlay?: ScreenshotOverlay; initialAction?: InitialAction }
@@ -36,7 +36,7 @@ function status(message: string, error = false): void { $('#editor-status').text
 function readableError(error: unknown): string { return error instanceof Error ? error.message : String(error); }
 function controls(): void {
   for (const button of document.querySelectorAll<HTMLButtonElement>('[data-image-action]')) button.disabled = !model || busy || loading;
-  for (const button of document.querySelectorAll<HTMLButtonElement>('[data-export-action]')) button.disabled ||= !exportReady();
+  for (const button of document.querySelectorAll<HTMLButtonElement>('[data-export-action]')) button.disabled ||= !exportReady() && !(textOpen() && !contextLost);
   $<HTMLButtonElement>('#undo-edit').disabled ||= !model?.canUndo;
   $<HTMLButtonElement>('#redo-edit').disabled ||= !model?.canRedo;
   $<HTMLButtonElement>('#open-image').disabled = busy || loading;
@@ -111,8 +111,9 @@ function render(): boolean {
   rendered = null; controls();
   if (!model || !original || contextLost) { if (contextLost) frame.hidden = true; return false; }
   try {
-    renderScreenshot(canvas, original, model.original, model.operations);
-    rendered = { generation, stateId: model.stateId }; frame.hidden = false;
+    const editing = textOpen() && editingIndex !== null;
+    renderScreenshot(canvas, original, model.original, editing ? model.operations.filter((_, index) => index !== editingIndex) : model.operations);
+    rendered = editing ? null : { generation, stateId: model.stateId }; frame.hidden = false;
     applyZoom(); selectionOutline(); controls(); return true;
   } catch (error) {
     frame.hidden = true; canvas.width = canvas.height = 1; controls();
@@ -126,7 +127,7 @@ function clearGesture(restorePreview = true): void {
   gesture = null; $('#gesture-rect').setAttribute('visibility', 'hidden'); $('#gesture-line').setAttribute('visibility', 'hidden');
   if (restore && model && original) render();
 }
-function cancelText(): void { textDialog.hidden = true; textInput.value = ''; textPoint = null; editingIndex = null; composing = false; imeEscape = false; controls(); }
+function cancelText(): void { const restore = textOpen() && editingIndex !== null; textDialog.hidden = true; textInput.value = ''; textPoint = null; editingIndex = null; composing = false; imeEscape = false; if (restore) render(); controls(); }
 function annotationBounds(op: EditOperation): OverlayRect {
   if (op.kind !== 'text') return operationBounds(op);
   const ctx = canvas.getContext('2d')!; ctx.save(); ctx.font = screenshotTextFont(op.size);
@@ -160,18 +161,23 @@ function hitAnnotation(p: Point): number | null {
 function placeTextEditor(): void {
   if (!textOpen() || !textPoint || !model) return;
   const r = canvas.getBoundingClientRect(), offset = editingIndex === null ? { x: 0, y: 0 } : model.operationOffset(editingIndex);
-  const monitor = overlayToolBounds(innerWidth, innerHeight, session?.overlay?.toolbarBounds);
-  textDialog.style.maxWidth = `${Math.max(1, monitor.width - 16)}px`;
-  textDialog.style.maxHeight = `${Math.max(1, monitor.height - 16)}px`;
-  const displaySize = Number($<HTMLSelectElement>('#edit-font-size').value) * r.width / model.size.width;
-  textInput.style.font = screenshotTextFont(Math.max(8, displaySize));
+  const scale = r.width / model.size.width, scaleY = r.height / model.size.height, size = Number($<HTMLSelectElement>('#edit-font-size').value);
+  const sourceSize = editingIndex === null ? model.size : model.operationSize(editingIndex);
+  const maxWidth = Math.max(1, sourceSize.width - textPoint.x);
+  const measure = document.createElement('canvas').getContext('2d')!;
+  measure.font = screenshotTextFont(size);
+  const lines = wrapText(textInput.value || ' ', maxWidth, text => measure.measureText(text).width);
+  const naturalWidth = Math.max(size * 2, ...lines.map(line => measure.measureText(line).width + 2));
+  textDialog.style.left = `${r.x + (textPoint.x - offset.x) * scale}px`;
+  textDialog.style.top = `${r.y + (textPoint.y - offset.y) * scaleY}px`;
+  textDialog.style.width = `${Math.max(1, Math.min(maxWidth, naturalWidth) * scale)}px`;
+  textDialog.style.height = `${Math.max(1, Math.min(sourceSize.height - textPoint.y, Math.max(1, lines.length) * size * 1.35) * scale)}px`;
+  textInput.style.font = screenshotTextFont(size * scale);
+  textInput.style.lineHeight = '1.35';
   textInput.style.color = $<HTMLInputElement>('#edit-color').value;
-  textInput.style.backgroundColor = $<HTMLSelectElement>('#note-style').value || 'var(--surface)';
-  const box = clampOverlayBox(r.x + (textPoint.x - offset.x) * r.width / model.size.width,
-    r.y + (textPoint.y - offset.y) * r.height / model.size.height, textDialog.offsetWidth, textDialog.offsetHeight,
-    { x: monitor.x + 8, y: monitor.y + 8, width: Math.max(1, monitor.width - 16), height: Math.max(1, monitor.height - 16) });
-  textDialog.style.left = `${box.x}px`; textDialog.style.top = `${box.y}px`;
+  textInput.style.backgroundColor = $<HTMLSelectElement>('#note-style').value || 'transparent';
 }
+
 function beginText(p: Point, index: number | null = null): void {
   if (!model) return;
   const op = index === null ? null : model.operations[index];
@@ -183,8 +189,7 @@ function beginText(p: Point, index: number | null = null): void {
     $<HTMLSelectElement>('#edit-font-size').value = String(op.size);
     $<HTMLSelectElement>('#note-style').value = op.background ?? '';
   }
-  $('#text-count').textContent = `${textInput.value.length} / 2000`;
-  textDialog.hidden = false; placeTextEditor(); controls(); textInput.focus();
+  textDialog.hidden = false; if (editingIndex !== null) render(); placeTextEditor(); controls(); textInput.focus();
 }
 function commitText(): boolean {
   if (!textOpen()) return true;
@@ -413,14 +418,12 @@ $('#delete-edit').addEventListener('click', () => {
 });
 for (const button of document.querySelectorAll<HTMLButtonElement>('.editor-toolbar button[data-tool]')) button.addEventListener('click', () => chooseTool(button.dataset.tool as Tool));
 textInput.addEventListener('compositionstart', () => { composing = true; }); textInput.addEventListener('compositionend', () => { composing = false; });
-textInput.addEventListener('input', () => { $('#text-count').textContent = `${textInput.value.length} / 2000`; controls(); placeTextEditor(); });
-$('#text-form').addEventListener('submit', event => { event.preventDefault(); if (commitText()) canvas.focus(); });
+textInput.addEventListener('input', () => { controls(); placeTextEditor(); });
 textInput.addEventListener('keydown', event => {
   if (event.isComposing || event.keyCode === 229 || composing) { if (event.key === 'Escape') imeEscape = true; return; }
   if (event.key === 'Escape') { event.preventDefault(); event.stopPropagation(); if (imeEscape) { imeEscape = false; return; } cancelText(); canvas.focus(); }
   if ((event.metaKey || event.ctrlKey) && event.key === 'Enter') { event.preventDefault(); event.stopPropagation(); if (commitText()) canvas.focus(); }
 });
-$('#cancel-text').addEventListener('click', () => { if (!composing) { cancelText(); canvas.focus(); } });
 $('#discard-cancel').addEventListener('click', () => resolveDiscard(false)); $('#discard-confirm').addEventListener('click', () => resolveDiscard(true));
 discardDialog.addEventListener('cancel', event => { event.preventDefault(); resolveDiscard(false); });
 $('#undo-edit').addEventListener('click', () => { if (!busy && commitText() && model?.undo()) { selectedIndex = null; cancelPointer(); if (render()) status('已撤销。'); } });
@@ -565,3 +568,21 @@ if (desktop) {
 
 $('#zoom-menu').addEventListener('toggle', placeOverlayTools);
 document.addEventListener('pointerdown', event => { const menu = $<HTMLDetailsElement>('#zoom-menu'); if (menu.open && event.target instanceof Node && !menu.contains(event.target)) menu.open = false; });
+
+// An outside click commits plain text, but never accepts an active IME candidate.
+document.addEventListener('pointerdown', event => {
+  if (!textOpen() || !(event.target instanceof Node) || textDialog.contains(event.target)) return;
+  if (composing) { event.preventDefault(); event.stopImmediatePropagation(); textInput.focus(); return; }
+  // Style controls intentionally keep the same live text edit open.
+  if (event.target instanceof Element && event.target.closest('.tool-options')) return;
+  if (!commitText()) { event.preventDefault(); event.stopImmediatePropagation(); }
+}, true);
+textInput.addEventListener('blur', () => {
+  queueMicrotask(() => {
+    if (!textOpen() || composing || document.activeElement === textInput || document.activeElement?.closest('.tool-options')) return;
+    commitText();
+  });
+});
+document.addEventListener('click', event => {
+  if (textOpen() && composing && event.target instanceof Node && !textDialog.contains(event.target)) { event.preventDefault(); event.stopImmediatePropagation(); }
+}, true);

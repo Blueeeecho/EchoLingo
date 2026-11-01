@@ -210,8 +210,8 @@ fn run_cancelable(mode: &str, cancel: NativeCancel) -> Result<Value, String> {
     #[cfg(not(target_os = "windows"))]
     {
         #[cfg(target_os = "macos")]
-        if mode == "capture-screenshot" {
-            return run_macos_screenshot_cancelable(cancel);
+        if matches!(mode, "capture-ocr" | "capture-image" | "capture-screenshot") {
+            return run_macos_capture_cancelable(mode, cancel);
         }
         let result = run(mode, None);
         if cancelled(Some(&cancel)) {
@@ -223,13 +223,13 @@ fn run_cancelable(mode: &str, cancel: NativeCancel) -> Result<Value, String> {
 }
 
 #[cfg(target_os = "macos")]
-fn run_macos_screenshot_cancelable(cancel: NativeCancel) -> Result<Value, String> {
+fn run_macos_capture_cancelable(mode: &str, cancel: NativeCancel) -> Result<Value, String> {
     use std::sync::{
         atomic::{AtomicBool, Ordering},
         Arc,
     };
     // Register before the watcher can cancel, so cancellation cannot get lost
-    // while AppKit presentation is queued. Tokens isolate repeated F1 requests.
+    // while AppKit presentation is queued. Tokens isolate repeated screenshot and OCR requests.
     let operation = run("begin-native-capture", None)?
         .get("operationId")
         .and_then(Value::as_str)
@@ -264,7 +264,7 @@ fn run_macos_screenshot_cancelable(cancel: NativeCancel) -> Result<Value, String
     let result = if cancelled(Some(&cancel)) {
         Err(NATIVE_CANCELLED.into())
     } else {
-        run("capture-screenshot", Some(&operation))
+        run(mode, Some(&operation))
     };
     finished.store(true, Ordering::SeqCst);
     let cancellation_result = watcher

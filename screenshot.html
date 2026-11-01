@@ -38,7 +38,7 @@
   <aside class="editor-note"><span id="tool-hint">拖动绘制矩形。所有标注均以原始图片像素为准。</span><span>隐私内容建议使用「实心遮挡」，不要只依赖马赛克。</span></aside>
   <footer class="editor-footer"><div><span id="image-info">没有打开的图片</span><span id="save-indicator"></span></div></footer>
   <div class="status-line" id="editor-status" role="status" aria-live="polite">图片只会在点击保存后写入文件；保存为合并后的 PNG。</div>
-  <section id="text-dialog" class="inline-text-editor" aria-label="原位编辑文字" hidden><form id="text-form"><textarea id="annotation-text" maxlength="2000" rows="2" placeholder="在这里写说明…" aria-label="标注文字"></textarea><div class="inline-text-actions"><span id="text-count">0 / 2000</span><button type="button" id="cancel-text" title="取消文字 · Esc">取消</button><button type="submit" id="apply-text" class="primary" title="提交文字 · Ctrl/⌘ Enter">完成文字</button></div><small>Enter 换行 · Ctrl/⌘ Enter 完成</small></form></section>
+  <section id="text-dialog" class="inline-text-editor" aria-label="原位编辑文字" hidden><textarea id="annotation-text" maxlength="2000" rows="1" aria-label="标注文字" spellcheck="false" wrap="soft"></textarea></section>
   <dialog id="discard-dialog" aria-labelledby="discard-title"><h2 id="discard-title">还没有保存这张图片</h2><p id="discard-description">关闭后，本次图片和编辑内容将被丢弃。不会自动保存。</p><div class="dialog-bottom"><button id="discard-cancel">继续编辑</button><button id="discard-confirm" class="danger">丢弃并关闭</button></div></dialog>
   <script type="module" src="/src/screenshot-editor.ts"></script>
 </body></html>
