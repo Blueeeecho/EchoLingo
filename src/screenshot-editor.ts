@@ -261,7 +261,10 @@ async function acceptSession(value: ScreenshotSession | null): Promise<void> {
 function chooseTool(next: Tool): void {
   if (textOpen() && !commitText()) return;
   cancelPointer(); tool = next;
+  $<HTMLDetailsElement>('#zoom-menu').open = false;
   for (const button of document.querySelectorAll<HTMLButtonElement>('.editor-toolbar button[data-tool]')) button.setAttribute('aria-pressed', String(button.dataset.tool === tool));
+  $('.tool-options').hidden = next === 'select' || next === 'crop';
+  $('#color-label').hidden = ['select', 'crop', 'eraser', 'mosaic'].includes(next);
   $('#text-size-label').hidden = next !== 'text' && next !== 'number';
   $('#note-style-label').hidden = next !== 'text'; $('#step-style-label').hidden = next !== 'number';
   $('#line-width-label').hidden = !['rectangle', 'arrow', 'number', 'pen', 'highlight'].includes(next);
@@ -527,6 +530,7 @@ document.addEventListener('keydown', event => {
   if (event.target instanceof HTMLInputElement || event.target instanceof HTMLTextAreaElement || event.target instanceof HTMLSelectElement) return;
   const mod = event.ctrlKey || event.metaKey, key = event.key.toLowerCase();
   if (event.key === 'Enter' && inplace() && !mod && !event.altKey && !event.shiftKey) { event.preventDefault(); if (!event.repeat) void exportImage('copy'); return; }
+  if (event.key === 'Escape' && $<HTMLDetailsElement>('#zoom-menu').open) { event.preventDefault(); $<HTMLDetailsElement>('#zoom-menu').open = false; $<HTMLElement>('#zoom-menu summary').focus(); return; }
   if (event.key === 'Escape') { event.preventDefault(); if (gesture || moveGesture) cancelPointer(); else if (selectedIndex !== null) { selectedIndex = null; selectionOutline(); } else void closeEditor(); return; }
   if ((event.key === 'Delete' || event.key === 'Backspace') && selectedIndex !== null && !busy) { event.preventDefault(); $('#delete-edit').click(); return; }
   if (mod && ['z', 'y', 's', 'c', 'o'].includes(key)) {
@@ -558,3 +562,6 @@ if (desktop) {
     if (snapshot) await acceptSession(snapshot);
   })().catch(error => status(`截图窗口初始化失败：${readableError(error)}`, true));
 }
+
+$('#zoom-menu').addEventListener('toggle', placeOverlayTools);
+document.addEventListener('pointerdown', event => { const menu = $<HTMLDetailsElement>('#zoom-menu'); if (menu.open && event.target instanceof Node && !menu.contains(event.target)) menu.open = false; });

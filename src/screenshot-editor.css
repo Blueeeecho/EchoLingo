@@ -85,3 +85,31 @@ body[data-compact-editor=true] .file-actions button { min-width:32px; font-size:
 body[data-compact-editor=true] .zoom-controls { flex-wrap:wrap; }
 body[data-compact-editor=true] #close-editor { color:#c65360; }
 body[data-compact-editor=true] #copy-image { color:#218b67; }
+
+/* One hand-drawn linear SVG family: stable glyphs on every system font stack. */
+.toolbar-icon { width:18px; height:18px; display:block; fill:none; stroke:currentColor; stroke-width:1.7; stroke-linecap:round; stroke-linejoin:round; }
+body[data-compact-editor=true] .editor-toolbar { padding:6px; gap:6px; border-radius:12px; box-shadow:0 4px 18px #161b2b20,0 1px 3px #161b2b12; align-items:center; }
+body[data-compact-editor=true] .editor-toolbar button,
+.zoom-menu summary { display:flex; align-items:center; justify-content:center; width:32px; height:32px; min-height:32px; padding:6px; border-radius:7px; font-size:12px; flex-shrink:0; }
+body[data-compact-editor=true] .tool-group { gap:2px; }
+body[data-compact-editor=true] .tool-group button[data-tool=pen],
+body[data-compact-editor=true] .tool-group button[data-tool=mosaic] { margin-left:6px; border-left-color:transparent; border-radius:7px; }
+body[data-compact-editor=true] .history-actions { gap:2px; padding-left:6px; border-left:1px solid var(--border); }
+body[data-compact-editor=true] #undo-edit::before,
+body[data-compact-editor=true] #redo-edit::before { content:none; }
+body[data-compact-editor=true] .file-actions,
+body[data-compact-editor=true] .inplace-actions { gap:2px; padding-left:6px; margin-left:0; flex-wrap:nowrap; }
+body[data-compact-editor=true] #copy-image { order:6; }
+body[data-compact-editor=true] #close-editor { order:5; }
+body[data-compact-editor=true] #copy-image,
+body[data-compact-editor=true] #overlay-copy { background:#218b6714; }
+body[data-compact-editor=true] .tool-options { order:10; flex-basis:100%; width:auto; padding:6px 4px 0; border-top:1px solid var(--border); gap:12px; }
+body[data-compact-editor=true] .tool-options label { font-size:11px; }
+.zoom-menu { position:relative; flex-shrink:0; }
+.zoom-menu summary { list-style:none; cursor:pointer; color:var(--secondary); }
+.zoom-menu summary::-webkit-details-marker { display:none; }
+.zoom-menu summary:hover, .zoom-menu[open] summary { background:var(--soft); color:var(--accent); }
+.zoom-menu[open] { display:flex; }
+body[data-compact-editor=true] .zoom-controls { gap:2px; padding:4px; }
+body[data-compact-editor=true] #zoom-fit,
+body[data-compact-editor=true] #zoom-actual { width:auto; padding:6px 8px; }

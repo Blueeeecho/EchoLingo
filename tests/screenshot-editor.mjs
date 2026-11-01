@@ -118,11 +118,19 @@ try {
     assert.equal(await page.locator('body').getAttribute('data-inplace'), 'false');
     assert.equal(await page.locator('.editor-header').isVisible(), false);
     assert.equal(await page.locator('.editor-footer').isVisible(), false);
-    for (const id of ['open-image', 'pin-image', 'copy-image', 'save-image', 'save-as-image', 'close-editor', 'zoom-fit']) {
+    for (const id of ['open-image', 'pin-image', 'copy-image', 'save-image', 'save-as-image', 'close-editor']) {
       assert.equal(await page.locator(`.editor-toolbar #${id}`).isVisible(), true, `${id} remains in the one shared toolbar`);
     }
     assert.equal(await page.locator('#overlay-copy').isVisible(), false, 'file session does not gain capture completion semantics');
     assert.equal(await page.locator('#restart-selection').isVisible(), false);
+    assert.equal(await page.locator('.tool-options').isVisible(), false, 'selection has no irrelevant style controls');
+    assert.equal(await page.locator('#zoom-fit').isVisible(), false, 'zoom controls are secondary, not always expanded');
+    await page.locator('#zoom-menu summary').click();
+    assert.equal(await page.locator('#zoom-fit').isVisible(), true);
+    await page.keyboard.press('Escape');
+    assert.equal(await page.locator('#zoom-menu').getAttribute('open'), null);
+    assert.equal(await page.locator('#discard-dialog').isVisible(), false, 'Escape closes zoom options, not the image');
+    assert.equal(await page.locator('.editor-toolbar button[data-tool] svg.toolbar-icon').count(), 11, 'all primary tools use the same SVG icon family');
     const original = await pixels();
     assert.deepEqual([original.width, original.height], [96, 64]);
     assert.deepEqual(original.data.slice(0, 4), [0, 0, 0, 0], 'source transparency is retained');
@@ -180,7 +188,7 @@ try {
     // Freehand/highlight and ellipse use source pixels; one eraser gesture
     // changes only ink. Existing masks remain opaque in the final raster.
     await fresh(320, 240); const unmarked = await pixels();
-    await page.locator('#edit-color').fill('#dd2233');
+    await page.locator('[data-tool=pen]').click(); await page.locator('#edit-color').fill('#dd2233');
     await drag('pen', [10, 40], [280, 40]); const painted = await pixels(); assert.notDeepEqual(painted, unmarked);
     await page.locator('#undo-edit').click(); assert.deepEqual(await pixels(), unmarked);
     await page.locator('#redo-edit').click(); assert.deepEqual(await pixels(), painted);
@@ -200,7 +208,7 @@ try {
     await page.locator('[data-tool="rectangle"]').click(); await page.locator('#shape-style').selectOption('ellipse');
     await drag('rectangle', [50, 130], [150, 190]);
     await page.locator('#shape-style').selectOption('rectangle');
-    await page.locator('#edit-color').fill('#112233'); await drag('solid', [30, 20], [60, 100]);
+    await page.locator('[data-tool=solid]').click(); await page.locator('#edit-color').fill('#112233'); await drag('solid', [30, 20], [60, 100]);
     const inkAndMask = await pixels();
     await drag('eraser', [100, 20], [100, 100]); const erasedInk = await pixels(); assert.notDeepEqual(erasedInk, inkAndMask);
     await page.locator('#undo-edit').click(); assert.deepEqual(await pixels(), inkAndMask);
@@ -257,7 +265,7 @@ try {
     await drag('select', [160, 90], [170, 95]);
     assert.notDeepEqual(await pixels(), afterCrop, 'annotations remain selectable in crop-adjusted coordinates');
     await page.locator('#undo-edit').click(); assert.deepEqual(await pixels(), afterCrop);
-    await page.locator('#edit-color').fill('#112233'); await drag('solid', [0, 0], [25, 25]);
+    await page.locator('[data-tool=solid]').click(); await page.locator('#edit-color').fill('#112233'); await drag('solid', [0, 0], [25, 25]);
     const finalAnnotations = await pixels();
     for (const [button, collection] of [['#copy-image', 'copies'], ['#save-image', 'saves'], ['#pin-image', 'pins']]) {
       const before = await page.evaluate(collection => window.__screenshotQA[collection].length, collection);
@@ -288,12 +296,12 @@ try {
     assert.deepEqual(at(mosaicked, 8, 8), at(mosaicked, 23, 23));
     assert.notDeepEqual(at(mosaicked, 8, 8), at(original, 8, 8));
     assert.deepEqual(at(mosaicked, 24, 24), at(original, 24, 24));
-    await page.locator('#edit-color').fill('#112233'); await drag('solid', [0, 0], [8, 8]);
+    await page.locator('[data-tool=solid]').click(); await page.locator('#edit-color').fill('#112233'); await drag('solid', [0, 0], [8, 8]);
     const masked = await pixels(); assert.deepEqual(at(masked, 1, 1), [17, 34, 51, 255]);
 
     // Crop after zoom uses image coordinates, reduces actual PNG dimensions and
     // exposes no crop-excluded pixels. DPR changes display density, not output.
-    const cropSessionId = await fresh(); await page.locator('#zoom-in').click();
+    const cropSessionId = await fresh(); await page.locator('#zoom-menu summary').click(); await page.locator('#zoom-in').click();
     await drag('crop', [10, 8], [42, 32]);
     const crop = await pixels(); assert.deepEqual([crop.width, crop.height], [32, 24]);
     assert.deepEqual(at(crop, 0, 0), at(original, 10, 8));
@@ -548,7 +556,7 @@ try {
     // Pin exports only the rendered/redacted bitmap, never copies/saves, and
     // must not dismiss until the independent window has acknowledged readiness.
     overlayId = await overlayFresh();
-    await page.locator('#edit-color').fill('#112233');
+    await page.locator('[data-tool=solid]').click(); await page.locator('#edit-color').fill('#112233');
     await drag('solid', [0, 0], [32, 24]);
     const pinPixels = await pixels();
     const beforePin = await page.evaluate(() => [window.__screenshotQA.copies.length, window.__screenshotQA.saves.length]);
