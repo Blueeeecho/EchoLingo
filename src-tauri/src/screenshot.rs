@@ -304,6 +304,19 @@ fn make_session(
         capture_geometry: None,
     })
 }
+// Fixed synthetic pixels only; this helper and its caller are absent in release.
+#[cfg(all(target_os = "macos", debug_assertions))]
+pub(crate) fn install_native_pin_smoke(controller: &Controller, id: u64) -> Result<String, String> {
+    let image = RgbaImage::from_fn(128, 96, |x, _| {
+        if x < 64 { image::Rgba([228, 93, 104, 255]) }
+        else { image::Rgba([23, 101, 199, 255]) }
+    });
+    let session = make_session(id, &encode(&image)?, 0, Some("generated-pin-fixture".into()))?;
+    let png = session.png_base64.clone();
+    controller.begin(id)?;
+    controller.install_and_publish(session, "generated.png".into(), |_| Ok(()))?;
+    Ok(png)
+}
 fn capture_file_name(captured_at: u64) -> Result<String, String> {
     let timestamp = i64::try_from(captured_at).map_err(|_| "SCREENSHOT_TIME: 无效截图时间")?;
     let instant = chrono::DateTime::from_timestamp_millis(timestamp)

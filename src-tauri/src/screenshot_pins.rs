@@ -493,6 +493,13 @@ pub async fn close_pinned_screenshot(
     .await?
 }
 
+#[cfg(all(target_os = "macos", debug_assertions))]
+pub(crate) fn native_smoke_counts(app: &tauri::AppHandle) -> Result<(usize, usize), String> {
+    let state = app.state::<super::AppState>();
+    let entries = super::locked(&state.screenshot_pins.entries)?;
+    Ok((entries.len(), entries.values().filter_map(|e| e.image.as_ref()).map(|i| i.png_base64.len()).sum()))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

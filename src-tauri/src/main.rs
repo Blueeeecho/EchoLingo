@@ -7,6 +7,8 @@ mod language_detection;
 mod macos_startup;
 mod model;
 mod mouse_shortcuts;
+#[cfg(all(target_os = "macos", debug_assertions))]
+mod native_pin_smoke;
 mod native_tasks;
 mod ocr;
 mod ocr_native;
@@ -3516,6 +3518,10 @@ fn management_menu(app: &tauri::AppHandle) -> tauri::Result<()> {
 }
 
 fn main() {
+    #[cfg(all(target_os = "macos", debug_assertions))]
+    if std::env::args().nth(1).as_deref() == Some("--native-pin-smoke") {
+        std::process::exit(native_pin_smoke::run());
+    }
     if let Some(code) = shortcut_probe::run_if_requested(&std::env::args().collect::<Vec<_>>()) {
         std::process::exit(code);
     }
