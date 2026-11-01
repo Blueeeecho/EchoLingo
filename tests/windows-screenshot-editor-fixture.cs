@@ -397,6 +397,10 @@ public static partial class EchoLingoApplicationSmoke {
             if(message=="SCREENSHOT_GEOMETRY: \u539f\u5730\u622a\u56fe\u7a97\u53e3\u4f4d\u7f6e\u6216 DPI \u5df2\u53d8\u5316\uff0c\u8bf7\u91cd\u65b0\u622a\u56fe")observation["nativeViewportGateFailed"]=true;
         } catch(Exception error){observation["statusObservationErrorType"]=error.GetType().Name;}
     }
+    static Dictionary<string,object> ScreenshotPinForeground(Process app,IntPtr source,IntPtr editor,IntPtr pin) {
+        IntPtr foreground=GetForegroundWindow();uint process=0;if(foreground!=IntPtr.Zero)GetWindowThreadProcessId(foreground,out process);
+        return new Dictionary<string,object>{{"isGeneratedSource",foreground==source},{"isEditor",editor!=IntPtr.Zero&&foreground==editor},{"isPin",pin!=IntPtr.Zero&&foreground==pin},{"isApp",process==app.Id},{"isZero",foreground==IntPtr.Zero}};
+    }
     static Dictionary<string,object> ScreenshotPinCase(Form form,Panel image,Process app,Point first,Point last,Size selected,uint previous,string output,Dictionary<string,object> report) {
         Assert(ScreenshotPins(app.Id).Count==0,"Pin fixture must start without another app-owned reference window.");
         int files=Directory.GetFiles(output).Length;Assert(ScreenshotOwnedClipboard.SeedUnchanged(),"Pin case requires its unchanged owned clipboard sentinel.");
@@ -410,11 +414,26 @@ public static partial class EchoLingoApplicationSmoke {
                 preparation["canvasAccessible"]=canvas;preparation["remainingNativeOverlays"]=overlays;
                 return editor!=IntPtr.Zero&&IsWindowVisible(editor)&&canvas&&overlays==0;
             },25,"Pin fixture F1 did not prepare the production in-place editor.",app);
+            RequireForeground(form);result["initialEditorShowPreservedSourceForeground"]=true;
             ScreenshotDrag(app,editor,"\u5b9e\u5fc3\u906e\u6321",selected,new Point(10,10),new Point(80,70));
             WaitFor(delegate{AutomationElement undo=ScreenshotButton(editor,"\u64a4\u9500");return undo!=null&&undo.Current.IsEnabled;},10,"Pin fixture annotation did not commit.",app);
             OnUi(form,delegate{form.Activate();SetForegroundWindow(form.Handle);});RequireForeground(form);
+            result["foregroundBeforePinInvoke"]=ScreenshotPinForeground(app,form.Handle,editor,pin);
             ScreenshotInvoke(app,editor,"\u56fa\u5b9a\u622a\u56fe\u5230\u684c\u9762");
-            WaitFor(delegate{List<IntPtr> pins=ScreenshotPins(app.Id);Assert(pins.Count<=1,"One pin action created multiple reference windows.");if(pins.Count==1)pin=pins[0];return pin!=IntPtr.Zero&&pin!=editor&&IsWindowVisible(pin)&&Element(pin,PinnedImageName)!=null&&ScreenshotButton(pin,"\u53d6\u6d88\u7f6e\u9876")!=null&&ScreenshotButton(pin,"\u53d6\u6d88\u7f6e\u9876").Current.IsEnabled&&!IsWindowVisible(editor);},20,"Pin handoff did not show decoded reference and dismiss capture.",app);
+            result["foregroundAfterPinInvoke"]=ScreenshotPinForeground(app,form.Handle,editor,pin);
+            // Retain bounded foreground evidence before outer fixture cleanup.
+            // Do not reactivate the source after pinning to manufacture a pass.
+            WaitFor(delegate{List<IntPtr> pins=ScreenshotPins(app.Id);Assert(pins.Count<=1,"One pin action created multiple reference windows.");if(pins.Count==1)pin=pins[0];
+                bool ready=pin!=IntPtr.Zero&&pin!=editor&&IsWindowVisible(pin)&&Element(pin,PinnedImageName)!=null&&ScreenshotButton(pin,"\u53d6\u6d88\u7f6e\u9876")!=null&&ScreenshotButton(pin,"\u53d6\u6d88\u7f6e\u9876").Current.IsEnabled&&!IsWindowVisible(editor);
+                Dictionary<string,object> foreground=ScreenshotPinForeground(app,form.Handle,editor,pin);result["foregroundDuringPinHandoff"]=foreground;
+                if(!ready)return false;
+                // Windows can briefly report NULL while the hidden editor loses
+                // activation. Only that gap may settle within this same budget;
+                // any actual focus theft fails immediately, without refocusing.
+                Assert(Convert.ToBoolean(foreground["isZero"])||Convert.ToBoolean(foreground["isGeneratedSource"]),"Pin handoff changed foreground to a non-source window.");
+                return Convert.ToBoolean(foreground["isGeneratedSource"]);
+            },20,"Pin handoff did not show decoded reference and dismiss capture.",app);
+            result["foregroundAtVisibleHandoff"]=ScreenshotPinForeground(app,form.Handle,editor,pin);
             RequireForeground(form);Assert(ScreenshotPinTopmost(pin),"New reference window is not native topmost.");
             Rectangle work=Screen.FromPoint(first).WorkingArea,initial=ScreenshotPinBounds(pin);Assert(work.Contains(initial),"Pinned outer frame is not clamped to capture monitor work area.");
             ScreenshotPinPixels(app,pin,selected);result["editedRasterVisible"]=true;result["passiveShowPreservedSourceForeground"]=true;result["decodedReferenceVisibleAndCaptureDismissed"]=true;result["nativeTopmostInitially"]=true;result["initialOuterFrameWithinSourceWorkArea"]=true;
@@ -432,7 +451,7 @@ public static partial class EchoLingoApplicationSmoke {
         } finally {
             // Existing outer fixture owns/stops the exact app tree on failure;
             // never close another process's window or read its screen pixels.
-            if(!finished)result["failedPinWindowStillPresent"]=pin!=IntPtr.Zero&&IsWindow(pin);
+            if(!finished){result["failedPinWindowStillPresent"]=pin!=IntPtr.Zero&&IsWindow(pin);result["foregroundAtPinFailure"]=ScreenshotPinForeground(app,form.Handle,editor,pin);}
         }
     }
     static void ScreenshotEditorWorkflow(Form form,Panel image,Process app,MockServer server,string history,string output,ProcessStartInfo start,string executable,string roaming,string token,List<string> passed,Dictionary<string,object> report,Func<int> sourceEvents) {

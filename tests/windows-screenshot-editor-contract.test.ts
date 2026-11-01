@@ -88,6 +88,18 @@ describe('actual Windows screenshot fixture source wiring (not native acceptance
     expect(observation).not.toMatch(/observation\[[^\]]+\]=message\s*;/);
     for (const forbidden of ['Send(', 'SetForegroundWindow(', 'CopyFromScreen(', 'ValuePattern']) expect(observation).not.toContain(forbidden);
   });
+  it('records native handoff foreground before cleanup without refocusing to manufacture a pass', () => {
+    const pin = fixture.slice(fixture.indexOf('static Dictionary<string,object> ScreenshotPinCase('), fixture.indexOf('static void ScreenshotEditorWorkflow('));
+    expect(pin).toContain('RequireForeground(form);result["initialEditorShowPreservedSourceForeground"]=true');
+    for (const field of ['foregroundBeforePinInvoke', 'foregroundAfterPinInvoke', 'foregroundDuringPinHandoff', 'foregroundAtVisibleHandoff', 'foregroundAtPinFailure']) expect(pin).toContain(field);
+    expect(pin).toContain('!IsWindowVisible(editor);');
+    expect(pin).toContain('Assert(Convert.ToBoolean(foreground["isZero"])||Convert.ToBoolean(foreground["isGeneratedSource"]),"Pin handoff changed foreground to a non-source window.")');
+    expect(pin).toContain('return Convert.ToBoolean(foreground["isGeneratedSource"]);');
+    expect(pin).toContain('},20,"Pin handoff did not show decoded reference and dismiss capture.",app)');
+    const handoff = pin.slice(pin.indexOf('result["foregroundAfterPinInvoke"]'));
+    expect(handoff).toContain('RequireForeground(form);Assert(ScreenshotPinTopmost(pin)');
+    for (const forbidden of ['SetForegroundWindow(', 'form.Activate(', 'AllowSetForegroundWindow(', 'AttachThreadInput(']) expect(handoff).not.toContain(forbidden);
+  });
   it('exercises actual pin HWND lifecycle and bounded generated pixels without mocked IPC', () => {
     for (const value of ['ScreenshotPinCase(', 'ScreenshotPins(app.Id)', 'ScreenshotPinTopmost(pin)', 'ScreenshotPinToggle(app,pin,true)', 'ScreenshotPinToggle(app,pin,false)', 'SetWindowPos(pin,IntPtr.Zero', '!IsWindow(pin)&&ScreenshotPins(app.Id).Count==0', 'ScreenshotPinPixels(app,pin,selected)', 'new Bitmap(3,3)', 'ScreenshotOwnedClipboard.SeedUnchanged()', 'inplace-pin-native-lifecycle']) expect(fixture).toContain(value);
     expect(wrapper).toContain('[switch]$ScreenshotPinTests');
