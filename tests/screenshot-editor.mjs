@@ -112,6 +112,35 @@ try {
       const xy = p => [bounds.x + p[0] * bounds.width / size[0], bounds.y + p[1] * bounds.height / size[1]];
       await page.mouse.move(...xy(start)); await page.mouse.down(); await page.mouse.move(...xy(end), { steps: 3 }); await page.mouse.up();
     };
+    // Delivery-only preview: real current editor with generated, non-private pixels.
+    if (process.env.ECHOLINGO_SCREENSHOT_PREVIEW === '1') {
+      await page.emulateMedia({ colorScheme: 'light' });
+      for (const mode of ['window', 'inplace']) {
+        const id = await page.evaluate(mode => {
+          const q = window.__screenshotQA, source = document.createElement('canvas');
+          source.width = 640; source.height = 360;
+          const ctx = source.getContext('2d');
+          ctx.fillStyle = '#f2f5fa'; ctx.fillRect(0, 0, 640, 360);
+          ctx.fillStyle = '#ffffff'; ctx.fillRect(32, 32, 576, 296);
+          ctx.fillStyle = '#7862d8'; ctx.fillRect(56, 60, 6, 38);
+          ctx.font = 'bold 26px sans-serif'; ctx.fillStyle = '#292b3e'; ctx.fillText('EchoLingo 0.2.8', 80, 88);
+          ctx.font = '16px sans-serif'; ctx.fillStyle = '#74778b'; ctx.fillText('Generated screenshot preview — no private content', 56, 132);
+          for (let i = 0; i < 4; i++) { ctx.fillStyle = i % 2 ? '#e9e5f8' : '#edf0f5'; ctx.fillRect(56, 164 + i * 34, 460 - i * 42, 16); }
+          q.session = { ...q.image(640, 360), pngBase64: source.toDataURL('image/png').split(',')[1],
+            ...(mode === 'inplace' ? { overlay: { x: 160, y: 140, width: 640, height: 360, viewportWidth: innerWidth, viewportHeight: innerHeight } } : {}) };
+          q.emit('screenshot-session', structuredClone(q.session)); return q.session.id;
+        }, mode);
+        await page.waitForFunction(id => window.__screenshotQA.ready.includes(id), id);
+        await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+        if (mode === 'inplace') {
+          assert.equal(await page.locator('#overlay-info').textContent(), '640 × 360');
+          assert.equal(await page.locator('#editor-status').isVisible(), false);
+        }
+        await mkdir('test-results', { recursive: true });
+        await page.screenshot({ path: `test-results/screenshot-preview-${mode}-dpr${deviceScaleFactor}.png` });
+      }
+      await context.close(); continue;
+    }
     const original = await pixels();
     assert.deepEqual([original.width, original.height], [96, 64]);
     assert.deepEqual(original.data.slice(0, 4), [0, 0, 0, 0], 'source transparency is retained');
@@ -672,5 +701,6 @@ try {
     await context.close();
   }
   assert.deepEqual(errors, []); assert.deepEqual(externalRequests, []);
-  console.log('PASS: dedicated screenshot editor DPR1/2, all annotation tools, Chinese IME/long text, true crop, pixel mosaic/opaque redaction, undo/redo, flattened copy/save, dialog cancellation, generation races, close/new session, malformed/oversized inputs, no OCR/network/history. Fake IPC only; native acceptance is separate.');
+  if (process.env.ECHOLINGO_SCREENSHOT_PREVIEW === '1') console.log('PASS: current-code synthetic UI preview only; no native selection or full-regression acceptance claimed.');
+  else console.log('PASS: dedicated screenshot editor DPR1/2, all annotation tools, Chinese IME/long text, true crop, pixel mosaic/opaque redaction, undo/redo, flattened copy/save, dialog cancellation, generation races, close/new session, malformed/oversized inputs, no OCR/network/history. Fake IPC only; native acceptance is separate.');
 } finally { await browser.close(); }

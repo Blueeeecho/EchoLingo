@@ -1,0 +1,42 @@
+name: Current screenshot UI preview (synthetic only)
+on:
+  push:
+    branches: [diag/screenshot-028-preview]
+permissions:
+  contents: read
+jobs:
+  preview:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+      - run: npm ci
+      - name: Reuse runner browser
+        run: |
+          task_browser=$(command -v google-chrome || command -v chromium || true)
+          if [ -n "$task_browser" ]; then
+            echo "ECHOLINGO_TEST_CHROMIUM=$task_browser" >> "$GITHUB_ENV"
+          else
+            npx playwright install --with-deps chromium
+          fi
+      - name: Render unchanged product UI with generated source pixels
+        env:
+          ECHOLINGO_SCREENSHOT_PREVIEW: '1'
+        run: |
+          npm run dev > "$RUNNER_TEMP/screenshot-preview-vite.log" 2>&1 &
+          server=$!
+          trap 'kill "$server" 2>/dev/null || true' EXIT
+          curl --fail --retry 20 --retry-connrefused --retry-delay 1 -s http://127.0.0.1:1420/ > /dev/null
+          node tests/screenshot-editor.mjs
+          git rev-parse HEAD > test-results/screenshot-preview-source.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: current-screenshot-ui-preview
+          path: test-results/screenshot-preview-*
+          if-no-files-found: error
