@@ -585,7 +585,7 @@ public static partial class EchoLingoApplicationSmoke {
             {"displayAffinityQuerySucceeded",affinityOk},{"displayAffinity",affinityOk?(object)affinity:null},{"displayAffinityWin32Error",affinityError},
             {"physicalBounds",rectOk?(object)new int[]{r.left,r.top,r.right-r.left,r.bottom-r.top}:null}};
     }
-    sealed class FailedEditorObservation { public int Complete,Available,Visible,Nonempty,Failed; }
+    sealed class FailedEditorObservation { public int Complete,Available,Visible,Nonempty,Failed,GeneratedSourceCompared,ExactGeneratedSource,TrimmedExactGeneratedSource; }
     static HashSet<string> FailureHealthFields() {
         HashSet<string> fields=new HashSet<string>(new string[]{"selectionQueryCount","helperResponseReceived","helperElapsedMilliseconds","helperResultNonempty","cancellationRequested","cancellationSignalled","cancellationSignalFailed","attemptId","attemptPhase","configuredCopyStrategy","actionResultOk","actionResultNonempty"});
         foreach(string suffix in new string[]{"Stage","Depth","IdentityCompared","IdentityEqual","RootWalkReason","ExceptionKind","Milliseconds"})for(int i=1;i<=16;i++)fields.Add("selectionQuery"+i+suffix);
@@ -696,27 +696,77 @@ public static partial class EchoLingoApplicationSmoke {
         Assert(value is int||value is long,"Failure diagnostic must contain integer metadata.");
         long number=Convert.ToInt64(value);Assert(number>=0&&number<=maximum,"Failure diagnostic metadata exceeds its bound.");return number;
     }
+    static string GeneratedSourceForKind(string kind) {
+        return kind=="selection"?Selected:kind=="typed"?Typed:kind=="ocr"?OcrText:kind=="pinned-ocr"?PinnedOcr:kind=="abandoned-ocr"?AbandonedOcr:kind=="pinned-selection-one"?PinnedSelectionOne:kind=="pinned-selection-two"?PinnedSelectionTwo:kind=="switched-selection"?SwitchedSelection:null;
+    }
+    static string CoreFailureKind(Dictionary<string,object> report) {
+        object stage,active,operation;report.TryGetValue("failedStage",out stage);report.TryGetValue("latestIntentActiveKind",out active);report.TryGetValue("latestIntentActiveOperation",out operation);
+        if((string)stage=="first-region-ocr")return "ocr";
+        if((string)stage!="latest-intent-workflows")return null;
+        return (string)active=="pinned-ocr-restart"?"pinned-ocr":(string)active=="ocr-to-selection"?((string)operation=="capture"?"abandoned-ocr":"switched-selection"):active as string;
+    }
+    static bool IsCoreCaptureFailure(Dictionary<string,object> report) {
+        object stage,kind,operation;report.TryGetValue("failedStage",out stage);report.TryGetValue("latestIntentActiveKind",out kind);report.TryGetValue("latestIntentActiveOperation",out operation);
+        return (string)stage=="first-region-ocr"||(string)stage=="display-change-cancellation"
+            ||((string)stage=="latest-intent-workflows"&&((string)kind=="pinned-ocr-restart"||((string)kind=="ocr-to-selection"&&(string)operation=="capture")));
+    }
+    // Failure-only generated-fixture comparisons, before process/directory cleanup.
+    // No raw source/result/provider strings or private paths leave this function.
+    static void ObserveFailedCoreHistory(Dictionary<string,object> report,MockServer server,string history,string roaming,string token,string providerId) {
+        string kind=CoreFailureKind(report),expected=GeneratedSourceForKind(kind);
+        if(expected==null)return;
+        Dictionary<string,object> evidence=new Dictionary<string,object>{{"expectedKind",kind},{"exactSource",false},{"trimmedExactSource",false},{"expectedProviderResult",false},{"expectedResultMatches",false},{"providerErrorPresent",false},{"exactHistoryPredicateMatched",false},{"trimmedHistoryPredicateMatched",false},{"mockResultComparisonApplicable",server!=null},{"parseFailed",false}};
+        report["failedCoreHistoryObservation"]=evidence;
+        if(server!=null){try{report["failedCoreMockObservation"]=server.FailureSnapshot();}catch{evidence["mockObservationFailed"]=true;}}
+        try {
+            Assert((File.GetAttributes(roaming)&FileAttributes.ReparsePoint)==0&&File.ReadAllText(Path.Combine(roaming,MarkerName))==token,"History observation directory is not fixture-owned.");
+            evidence["ownershipVerified"]=true;evidence["fileExists"]=File.Exists(history);if(!File.Exists(history))return;
+            Assert((File.GetAttributes(history)&FileAttributes.ReparsePoint)==0&&new FileInfo(history).Length<=1048576,"Generated history observation exceeds ownership/size bound.");
+            string bounded;
+            using(var reader=new StreamReader(history,Encoding.UTF8,true)){char[] characters=new char[1048577];int length=reader.ReadBlock(characters,0,characters.Length);Assert(length<=1048576,"Generated history read bound exceeded.");bounded=new string(characters,0,length);}
+            object[] entries=new JavaScriptSerializer().Deserialize<object[]>(bounded);
+            Assert(entries!=null&&entries.Length<=16,"Generated history entry bound exceeded.");evidence["entryCount"]=entries.Length;
+            foreach(object raw in entries) {
+                Dictionary<string,object> entry=raw as Dictionary<string,object>;object value;if(entry==null||!entry.TryGetValue("text",out value)||!(value is string))continue;
+                string text=(string)value;StringComparison comparison=(kind=="ocr"||kind=="pinned-ocr"||kind=="abandoned-ocr")?StringComparison.OrdinalIgnoreCase:StringComparison.Ordinal;
+                bool exact=String.Equals(text,expected,comparison),trimmed=String.Equals(text.Trim(),expected,comparison);
+                if(exact)evidence["exactSource"]=true;if(trimmed)evidence["trimmedExactSource"]=true;if(!exact&&!trimmed)continue;
+                if(!entry.TryGetValue("results",out value)||!(value is IEnumerable))continue;int count=0;
+                foreach(object item in (IEnumerable)value) {
+                    Assert(++count<=16,"Generated history result bound exceeded.");Dictionary<string,object> result=item as Dictionary<string,object>;object provider,resultText;
+                    if(result==null||!result.TryGetValue("providerId",out provider)||!String.Equals(provider as string,providerId,StringComparison.Ordinal))continue;
+                    evidence["expectedProviderResult"]=true;if(result.ContainsKey("error"))evidence["providerErrorPresent"]=true;
+                    if(server!=null&&result.TryGetValue("text",out resultText)&&String.Equals(resultText as string,MockServer.Result(kind),StringComparison.Ordinal)){
+                        evidence["expectedResultMatches"]=true;
+                        if(!result.ContainsKey("error")){if(exact)evidence["exactHistoryPredicateMatched"]=true;if(trimmed)evidence["trimmedHistoryPredicateMatched"]=true;}
+                    }
+                }
+            }
+        } catch {evidence["parseFailed"]=true;}
+    }
     // One read-only export after the original action has already failed. This
     // never retries a shortcut, changes focus or extends its acceptance budget.
     static void ObserveFailedWorkflow(Dictionary<string,object> report,Process app,ProcessStartInfo primaryStart,
         string executable,string roaming,string token,Form source,MockServer server) {
         Dictionary<string,object> snapshot=new Dictionary<string,object>{{"takenAfterWorkflowFailure",1},{"budgetMilliseconds",2000},{"captureOrKeyRequests",0},{"primaryLaunchedWithSelectionDiagnostics",0}};
-        report["failureOnlyObservation"]=snapshot;Stopwatch budget=Stopwatch.StartNew();Process secondary=null;
+        report["failureOnlyObservation"]=snapshot;Stopwatch budget=Stopwatch.StartNew();Process secondary=null;Thread reader=null;
         FailedEditorObservation editor=new FailedEditorObservation();
+        string expectedKind=CoreFailureKind(report),expectedGeneratedSource=GeneratedSourceForKind(expectedKind);
         try {
             Assert(app!=null&&!app.HasExited,"Failure observation requires the owned primary.");
             IntPtr main=MainWindow(app.Id);snapshot["ownMainFound"]=main!=IntPtr.Zero?1:0;snapshot["ownMainVisible"]=main!=IntPtr.Zero&&IsWindowVisible(main)?1:0;
             snapshot["foregroundIsSource"]=GetForegroundWindow()==source.Handle?1:0;snapshot["foregroundIsApp"]=ForegroundPid()==app.Id?1:0;
             snapshot["mockEnabled"]=server!=null?1:0;snapshot["mockRequestCount"]=server==null?0:server.Count;snapshot["mockErrorPresent"]=server!=null&&server.Error!=null?1:0;
-            Thread reader=new Thread(delegate(){try {
+            reader=new Thread(delegate(){try {
                 if(main==IntPtr.Zero)return;
                 AutomationElement own=AutomationElement.FromHandle(main);Assert(own!=null&&own.Current.ProcessId==app.Id,"Failure editor root is not owned.");
                 AutomationElement input=own.FindFirst(TreeScope.Descendants,new AndCondition(new PropertyCondition(AutomationElement.ControlTypeProperty,ControlType.Edit),new OrCondition(new PropertyCondition(AutomationElement.AutomationIdProperty,"source-text"),new PropertyCondition(AutomationElement.NameProperty,"\u539f\u6587"))));object raw;
-                if(input!=null){editor.Available=1;editor.Visible=input.Current.IsOffscreen?0:1;if(input.TryGetCurrentPattern(ValuePattern.Pattern,out raw))editor.Nonempty=String.IsNullOrEmpty(((ValuePattern)raw).Current.Value)?0:1;}
+                if(input!=null){editor.Available=1;editor.Visible=input.Current.IsOffscreen?0:1;if(input.TryGetCurrentPattern(ValuePattern.Pattern,out raw)){string value=((ValuePattern)raw).Current.Value;editor.Nonempty=String.IsNullOrEmpty(value)?0:1;
+                    if(expectedGeneratedSource!=null&&value!=null&&value.Length<=20000){StringComparison comparison=(expectedKind=="ocr"||expectedKind=="pinned-ocr"||expectedKind=="abandoned-ocr")?StringComparison.OrdinalIgnoreCase:StringComparison.Ordinal;editor.GeneratedSourceCompared=1;editor.ExactGeneratedSource=String.Equals(value,expectedGeneratedSource,comparison)?1:0;editor.TrimmedExactGeneratedSource=String.Equals(value.Trim(),expectedGeneratedSource,comparison)?1:0;}}}
             }catch{editor.Failed=1;}finally{Interlocked.Exchange(ref editor.Complete,1);}});
             reader.IsBackground=true;reader.SetApartmentState(ApartmentState.MTA);reader.Start();
             Assert(primaryStart!=null&&(File.GetAttributes(roaming)&FileAttributes.ReparsePoint)==0&&File.ReadAllText(Path.Combine(roaming,MarkerName))==token,"Failure diagnostic directory is not owned.");
-            bool captureFailure=report.ContainsKey("inputPlaneStyleFailure")||report.ContainsKey("screenshotPinPreparation");
+            bool captureFailure=report.ContainsKey("inputPlaneStyleFailure")||report.ContainsKey("screenshotPinPreparation")||IsCoreCaptureFailure(report);
             snapshot["diagnosticKind"]=captureFailure?"capture":"selection";
             string file=Path.Combine(roaming,captureFailure?"capture-diagnostics.json":"selection-diagnostics.json");
             ProcessStartInfo start=new ProcessStartInfo(executable,captureFailure?"--capture-diagnostics":"--selection-diagnostics");start.UseShellExecute=false;start.CreateNoWindow=true;
@@ -741,8 +791,9 @@ public static partial class EchoLingoApplicationSmoke {
         }catch{snapshot["observationFailed"]=1;}
         finally {
             if(secondary!=null){try{if(!secondary.HasExited){secondary.Kill();snapshot["ownDiagnosticProcessStopped"]=1;}}catch{snapshot["ownDiagnosticProcessCleanupFailed"]=1;}secondary.Dispose();}
+            if(reader!=null&&reader.IsAlive&&budget.ElapsedMilliseconds<2000)reader.Join((int)Math.Max(0,2000-budget.ElapsedMilliseconds));
             snapshot["sourceObservationCompleted"]=Interlocked.CompareExchange(ref editor.Complete,0,0)!=0?1:0;
-            if(Interlocked.CompareExchange(ref editor.Complete,0,0)!=0){snapshot["sourceAvailable"]=editor.Available;snapshot["sourceVisible"]=editor.Visible;snapshot["sourceNonempty"]=editor.Nonempty;snapshot["sourceObservationFailed"]=editor.Failed;}
+            if(Interlocked.CompareExchange(ref editor.Complete,0,0)!=0){snapshot["sourceAvailable"]=editor.Available;snapshot["sourceVisible"]=editor.Visible;snapshot["sourceNonempty"]=editor.Nonempty;snapshot["sourceObservationFailed"]=editor.Failed;snapshot["sourceGeneratedCompared"]=editor.GeneratedSourceCompared;snapshot["sourceExactGenerated"]=editor.ExactGeneratedSource;snapshot["sourceTrimmedExactGenerated"]=editor.TrimmedExactGeneratedSource;}
             snapshot["elapsedMilliseconds"]=Math.Min(10000000,budget.ElapsedMilliseconds);
         }
     }
@@ -803,13 +854,13 @@ public static partial class EchoLingoApplicationSmoke {
         using(PinnedVisibilityWatch visibility=new PinnedVisibilityWatch(main)){
             try{
                 foreach(string selected in new string[]{PinnedSelectionOne,PinnedSelectionTwo}){
-                    string kind=MockServer.Kind(selected);Dictionary<string,object> test=new Dictionary<string,object>{{"kind",kind},{"ok",false}};cases.Add(test);
+                    string kind=MockServer.Kind(selected);report["latestIntentActiveKind"]=kind;Dictionary<string,object> test=new Dictionary<string,object>{{"kind",kind},{"ok",false}};cases.Add(test);
                     layouts.Add(PlaceGeneratedSource(form,source,image,main,selected));visibility.Check();Stopwatch time=Stopwatch.StartNew();Shortcut(form,0x44);
                     WaitFor(delegate{visibility.Check();if(server.Error!=null)throw new InvalidOperationException(server.Error);return HasHistory(history,selected,kind,providerId)&&SourceMatches(main,selected);},45,"One Alt+D did not replace the pinned source and commit distinct history.",app);
                     test["hotkeyToHistoryMilliseconds"]=time.Elapsed.TotalMilliseconds;RequireForeground(form);test["ok"]=true;
                 }
                 Assert(server.Count==5,"Pinned selections caused duplicate or missing translations.");passed.Add("Pinned actual popup accepted two distinct one-press Alt+D selections and durable histories");
-                layouts.Add(PlaceGeneratedSource(form,source,image,main,null));paint(PinnedOcr);
+                report["latestIntentActiveKind"]="pinned-ocr-restart";report["latestIntentActiveOperation"]="capture";layouts.Add(PlaceGeneratedSource(form,source,image,main,null));paint(PinnedOcr);
                 Dictionary<string,object> first=StartPinnedPicker(form,image,app,main,visibility,0);uint oldPid=Convert.ToUInt32(first["helperProcessId"]);
                 Dictionary<string,object> restarted=new Dictionary<string,object>{{"kind","pinned-ocr-restart"},{"ok",false},{"firstReadiness",first}};cases.Add(restarted);
                 // No Escape and no mouse release: the next Alt+S is a new task.
@@ -819,10 +870,10 @@ public static partial class EchoLingoApplicationSmoke {
                 MoveGenerated(form,a);INPUT down=new INPUT();down.data.mouse.flags=2;Send(new INPUT[]{down});MoveGenerated(form,b);RequireForeground(form);INPUT up=new INPUT();up.data.mouse.flags=4;Stopwatch release=Stopwatch.StartNew();Send(new INPUT[]{up});
                 WaitFor(delegate{visibility.Check();if(server.Error!=null)throw new InvalidOperationException(server.Error);return HasHistory(history,PinnedOcr,"pinned-ocr",providerId)&&SourceMatches(main,PinnedOcr,true);},50,"Repeated pinned Alt+S did not OCR/replace/translate the generated image.",app);
                 restarted["releaseToHistoryMilliseconds"]=release.Elapsed.TotalMilliseconds;visibility.Check();RequireForeground(form);Assert(AppOverlays(app.Id)==0&&sourceEvents()==0,"Pinned OCR left an overlay or delivered input to generated content.");Assert(server.Count==6,"Repeated OCR caused duplicate or stale translations.");restarted["ok"]=true;passed.Add("Pinned Alt+S then Alt+S without Esc created a new helper and completed one fresh OCR/history while visible");
-                layouts.Add(PlaceGeneratedSource(form,source,image,main,SwitchedSelection));paint(AbandonedOcr);
+                layouts.Add(PlaceGeneratedSource(form,source,image,main,SwitchedSelection));report["latestIntentActiveKind"]="ocr-to-selection";report["latestIntentActiveOperation"]="capture";paint(AbandonedOcr);
                 Dictionary<string,object> abandoned=StartPinnedPicker(form,image,app,main,visibility,0);uint abandonedPid=Convert.ToUInt32(abandoned["helperProcessId"]);
                 Dictionary<string,object> switched=new Dictionary<string,object>{{"kind","ocr-to-selection"},{"ok",false},{"cancelledReadiness",abandoned}};cases.Add(switched);
-                Stopwatch switchTime=Stopwatch.StartNew();Shortcut(form,0x44);
+                report["latestIntentActiveOperation"]="selection";Stopwatch switchTime=Stopwatch.StartNew();Shortcut(form,0x44);
                 WaitFor(delegate{visibility.Check();if(server.Error!=null)throw new InvalidOperationException(server.Error);return HasHistory(history,SwitchedSelection,"switched-selection",providerId)&&SourceMatches(main,SwitchedSelection)&&ProcessExited(abandonedPid)&&AppOverlays(app.Id)==0;},45,"Alt+D did not replace/cancel the ready OCR task and commit one new selection.",app);
                 switched["hotkeyToHistoryMilliseconds"]=switchTime.Elapsed.TotalMilliseconds;visibility.Check();RequireForeground(form);Assert(server.Count==7,"OCR-to-selection caused a stale or duplicate translation.");
                 Assert(new JavaScriptSerializer().Deserialize<object[]>(File.ReadAllText(history)).Length==7,"Latest-intent fixture did not commit exactly seven distinct generated histories.");Assert(Element(main,"\u53d6\u6d88\u9489\u4f4f")!=null,"Popup pin state was lost.");switched["ok"]=true;passed.Add("Pinned ready Alt+S -> one Alt+D cancelled the picker with no Esc, fresh source/history and zero remaining overlays");
@@ -834,6 +885,16 @@ public static partial class EchoLingoApplicationSmoke {
         readonly TcpListener listener; readonly Thread thread; readonly object gate = new object();
         readonly JavaScriptSerializer json = new JavaScriptSerializer();
         public readonly List<Dictionary<string, object>> Requests = new List<Dictionary<string, object>>();
+        readonly List<string> responseFlushedKinds=new List<string>();
+        public Dictionary<string,object> FailureSnapshot() {
+            lock(gate) {
+                var accepted=new List<string>();var sourceMatches=new List<Dictionary<string,object>>();var flushed=new List<string>();bool unknown=false;
+                string[] allowed=new string[]{"selection","typed","ocr","pinned-selection-one","pinned-selection-two","pinned-ocr","abandoned-ocr","switched-selection"};
+                for(int i=0;i<Requests.Count&&i<16;i++){string kind=Requests[i]["kind"] as string;if(Array.IndexOf(allowed,kind)<0){unknown=true;continue;}accepted.Add(kind);sourceMatches.Add(new Dictionary<string,object>{{"kind",kind},{"exactExpected",Requests[i]["sourceExactExpected"]},{"trimmedExactExpected",Requests[i]["sourceTrimmedExactExpected"]}});}
+                foreach(string kind in responseFlushedKinds){if(flushed.Count>=16)break;if(Array.IndexOf(allowed,kind)<0){unknown=true;continue;}flushed.Add(kind);}
+                return new Dictionary<string,object>{{"acceptedKinds",accepted},{"acceptedSourceMatches",sourceMatches},{"responseFlushedKinds",flushed},{"boundExceeded",Requests.Count>16||responseFlushedKinds.Count>16},{"unknownKindRejected",unknown},{"responseFlushIsNotClientReceipt",true}};
+            }
+        }
         public volatile string Error; volatile bool stopping;
         public MockServer() {
             listener = new TcpListener(IPAddress.Loopback, 0); listener.Start();
@@ -879,13 +940,14 @@ public static partial class EchoLingoApplicationSmoke {
             byte[] bytes = new byte[length]; int offset = 0;
             while (offset < length) { int read = stream.Read(bytes, offset, length - offset); Assert(read > 0, "Mock body truncated."); offset += read; }
             Dictionary<string, object> body = json.Deserialize<Dictionary<string, object>>(Encoding.UTF8.GetString(bytes));
-            string kind = Kind((string)body["q"]);
+            string kind = Kind((string)body["q"]);string canonical=GeneratedSourceForKind(kind);StringComparison comparison=(kind=="ocr"||kind=="pinned-ocr"||kind=="abandoned-ocr")?StringComparison.OrdinalIgnoreCase:StringComparison.Ordinal;
             Assert((string)body["target"] == "zh", "Automatic English-to-Chinese target did not reach mock.");
             Assert(!body.ContainsKey("api_key") || String.IsNullOrEmpty(body["api_key"] as string), "Fixture must have no API key.");
             byte[] response = Encoding.UTF8.GetBytes(json.Serialize(new Dictionary<string, object> { { "translatedText", Result(kind) } }));
             byte[] responseHead = Encoding.ASCII.GetBytes("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nConnection: close\r\nContent-Length: " + response.Length + "\r\n\r\n");
-            lock (gate) Requests.Add(new Dictionary<string, object> { { "kind", kind }, { "target", body["target"] }, { "emptyCredential", true } });
+            lock (gate) Requests.Add(new Dictionary<string, object> { { "kind", kind }, { "target", body["target"] }, { "emptyCredential", true }, { "sourceExactExpected", String.Equals((string)body["q"],canonical,comparison) }, { "sourceTrimmedExactExpected", String.Equals(((string)body["q"]).Trim(),canonical,comparison) } });
             stream.Write(responseHead, 0, responseHead.Length); stream.Write(response, 0, response.Length); stream.Flush();
+            lock(gate){if(responseFlushedKinds.Count<17)responseFlushedKinds.Add(kind);}
         }
         public void Dispose() { stopping = true; listener.Stop(); thread.Join(2000); }
     }
@@ -1147,7 +1209,7 @@ public static partial class EchoLingoApplicationSmoke {
                                 if(RustCapture){Assert(VerifiedNativeChildren.Count>=(latest?5:1),"Candidate did not exercise all required verified native child generations.");report["verifiedNativeCaptureGenerations"]=VerifiedNativeChildren.Count;}
                                 if(SourceTopmostModal){RequireSourceModal(form.Handle);Assert(SourceModalChecks>0,"Topmost modal precondition was never verified.");report["sourceTopmostModalChecks"]=SourceModalChecks;report["sourceModalOwnerDisabledUntilCompletion"]=true;}
                                 report["actualOfflineTranslations"] = ActualTranslations; report["ok"] = true;
-                            } catch (Exception error) { report["failedStage"]=stage;report["error"] = error.Message;InputPlaneStyleException planeError=error as InputPlaneStyleException;if(planeError!=null)report["inputPlaneStyleFailure"]=planeError.ScalarMetadata;if(app!=null&&!app.HasExited){try{report["ownMainFailureMetadata"]=MainMetadata(app);}catch(Exception diagnostic){report["mainMetadataErrorType"]=diagnostic.GetType().Name;}ObserveFailedWorkflow(report,app,start,executable,roaming,token,form,server);} }
+                            } catch (Exception error) { report["failedStage"]=stage;report["error"] = error.Message;ObserveFailedCoreHistory(report,server,history,roaming,token,providerId);InputPlaneStyleException planeError=error as InputPlaneStyleException;if(planeError!=null)report["inputPlaneStyleFailure"]=planeError.ScalarMetadata;if(app!=null&&!app.HasExited){try{report["ownMainFailureMetadata"]=MainMetadata(app);}catch(Exception diagnostic){report["mainMetadataErrorType"]=diagnostic.GetType().Name;}ObserveFailedWorkflow(report,app,start,executable,roaming,token,form,server);} }
                             finally {
                                 if (customBindings) report["customShortcutPassedWorkflowCount"] = customCases.Count;
                                 if (!(bool)report["ok"]) ReleaseOwnInput(form, app, customBindings);
