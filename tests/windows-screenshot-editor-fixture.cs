@@ -470,6 +470,31 @@ public static partial class EchoLingoApplicationSmoke {
                 if(message.StartsWith(code+":",StringComparison.Ordinal))observation["knownUpdateErrorCode"]=code;
         }catch(Exception){observation["failureStateUnavailable"]=true;}
     }
+    static void ScreenshotDomPointerObservation(Process app,IntPtr editor,Dictionary<string,object> result) {
+        // Diagnostic-only compiler flag creates this exact own-editor node.
+        // Validate the entire bounded schema before retaining any of its values.
+        result["domProbeFound"]=false;result["domProbeValid"]=false;
+        try {
+            uint pid;GetWindowThreadProcessId(editor,out pid);if(pid!=app.Id||ScreenshotWindow(app.Id)!=editor)return;
+            AutomationElement root=AutomationElement.FromHandle(editor);
+            AutomationElement node=root.FindFirst(TreeScope.Descendants,new PropertyCondition(AutomationElement.AutomationIdProperty,"screenshot-pointer-probe"));
+            if(node==null)return;result["domProbeFound"]=true;
+            string value=node.Current.Name??"",prefix="EL_SCREENSHOT_POINTER_PROBE_V1:";
+            if(value.Length>512||!value.StartsWith(prefix,StringComparison.Ordinal))return;
+            Dictionary<string,object> data=new JavaScriptSerializer().DeserializeObject(value.Substring(prefix.Length)) as Dictionary<string,object>;
+            string[] keys=new string[]{"counts","stage","target","downTarget","downPrimary","downButton","state"};
+            if(data==null||data.Count!=keys.Length||Array.Exists(keys,key=>!data.ContainsKey(key)))return;
+            string[] stages=new string[]{"ready","doc-down","doc-move","doc-up","doc-cancel","doc-got","doc-lost","canvas-down","begin-attempt","begin","move-attempt","move","up-attempt","update","updated","update-error","cancel"};
+            string[] targets=new string[]{"none","canvas","frame","handle","toolbar","other"};
+            object[] counts=data["counts"] as object[];if(counts==null||counts.Length!=17||Array.Exists(counts,item=>!(item is int)||(int)item<0||(int)item>255))return;
+            if(!(data["stage"] is string)||Array.IndexOf(stages,(string)data["stage"])<0||!(data["target"] is string)||Array.IndexOf(targets,(string)data["target"])<0||!(data["downTarget"] is string)||Array.IndexOf(targets,(string)data["downTarget"])<0||!(data["downPrimary"] is bool)||!(data["downButton"] is int)||(int)data["downButton"]< -1||(int)data["downButton"]>5)return;
+            Dictionary<string,object> state=data["state"] as Dictionary<string,object>;
+            string[] flags=new string[]{"canAdjust","busy","loading","selection","model","drag","pending","gesture","moving","text","primary","owner"};
+            string[] tools=new string[]{"select","rectangle","arrow","text","mosaic","solid","crop","number","pen","highlight","eraser"};
+            if(state==null||state.Count!=14||Array.Exists(flags,key=>!state.ContainsKey(key)||!(state[key] is bool))||!state.ContainsKey("button")||!state.ContainsKey("tool")||!(state["button"] is int)||(int)state["button"]< -1||(int)state["button"]>5||!(state["tool"] is string)||Array.IndexOf(tools,(string)state["tool"])<0)return;
+            result["domProbeValid"]=true;result["domProbe"]=data;
+        }catch(Exception){result["domProbeUnavailable"]=true;}
+    }
     static bool ScreenshotObservationScope(bool rootMatches,bool rootPidMatches,bool childRelationship,bool processDescendant) {
         return rootMatches&&rootPidMatches&&childRelationship&&processDescendant;
     }
@@ -523,7 +548,7 @@ public static partial class EchoLingoApplicationSmoke {
                     if(ownElement){AutomationElement canvas=Element(editor,ScreenshotCanvasName);result["uiaControlTypeId"]=element.Current.ControlType.Id;result["uiaIsCanvas"]=canvas!=null&&Automation.Compare(element,canvas);result["uiaCanvasAutomationId"]=element.Current.AutomationId=="image-canvas";}
                 }
             }
-            result["canvasRect"]=ScreenshotRectObservation(ScreenshotWebSelection(editor,result));
+            result["canvasRect"]=ScreenshotRectObservation(ScreenshotWebSelection(editor,result));ScreenshotDomPointerObservation(app,editor,result);
         }catch(Exception){result["observationUnavailable"]=true;}
         return result;
     }
@@ -541,7 +566,7 @@ public static partial class EchoLingoApplicationSmoke {
                 if(!same||!visible)return false;
                 Rectangle actual=ScreenshotWebSelection(editor,observation);observation["lastObserved"]=ScreenshotRectObservation(actual);return actual==expected;
             },10,"Web adjustment gesture did not adopt exact expected geometry.",app);RequireForeground(form);observation["completed"]=true;
-        }catch{ScreenshotAdjustmentFailureState(app,editor,observation);throw;}
+        }catch{ScreenshotDomPointerObservation(app,editor,observation);ScreenshotAdjustmentFailureState(app,editor,observation);throw;}
     }
     static void ScreenshotWebMoveResize(Form form,Process app,uint helper,Rectangle original,Dictionary<string,object> evidence) {
         long before=CaptureNumber(ScreenshotCaptureHealth(),"attemptId");

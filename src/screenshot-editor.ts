@@ -1,4 +1,5 @@
 import './screenshot-editor.css';
+import { createScreenshotPointerProbe, type ProbeStage } from './screenshot-pointer-probe';
 import { adjustSelection, selectionCancelDisabled, type SelectionHandle } from './screenshot-selection';
 import { overlayToolBounds, clampOverlayBox, placeOverlayToolbar, type OverlayRect } from './screenshot-overlay-layout';
 import { closeDialog, dialogOpen, showDialog } from './screenshot-dialog';
@@ -42,6 +43,11 @@ let gesture: { start: Point; end: Point; pointerId: number; points?: Point[] } |
 let discardResolve: ((value: boolean) => void) | null = null;
 // A non-empty inline draft is unsaved even before it enters operation history.
 const dirty = () => model !== null && (savedState !== model.stateId || (textOpen() && !!textInput.value.trim()));
+const pointerProbe: (stage: ProbeStage, event?: PointerEvent) => void = import.meta.env.VITE_SCREENSHOT_POINTER_PROBE === '1'
+  ? createScreenshotPointerProbe(event => ({ canAdjust: canAdjustSelection(), busy, loading, selection: !!selectionSession, model: !!model,
+    drag: !!selectionDrag, pending: !!pendingStroke, gesture: !!gesture, moving: !!moveGesture, text: textOpen(), tool, primary: event?.isPrimary ?? false, button: event?.button ?? -1,
+    owner: !!event && event.pointerId === selectionDrag?.pointerId })) : () => {};
+
 function status(message: string, error = false): void { $('#editor-status').textContent = message; $('#editor-status').hidden = !message; $('#editor-status').dataset.error = String(error); placeOverlayTools(); }
 function readableError(error: unknown): string { return error instanceof Error ? error.message : String(error); }
 function annotationStyleKey(): string { return [...document.querySelectorAll<HTMLInputElement | HTMLSelectElement>('.tool-options input, .tool-options select')].map(input => input.value).join('\u0000'); }
@@ -370,23 +376,26 @@ async function ensureSelectionImage(): Promise<boolean> {
   capturePending = task; controls(); return task;
 }
 function beginSelectionDrag(event: PointerEvent, handle: SelectionHandle): void {
+  pointerProbe('begin-attempt', event);
   if (!event.isPrimary || event.button !== 0 || pendingStroke || selectionDrag || busy || loading || !canAdjustSelection() || !session?.overlay) return;
   event.preventDefault(); event.stopPropagation();
   selectionDrag = { pointerId: event.pointerId, start: { x: event.clientX, y: event.clientY }, rect: { ...session.overlay }, handle };
-  frame.setPointerCapture(event.pointerId);
+  frame.setPointerCapture(event.pointerId); pointerProbe('begin', event);
 }
 $('#selection-handles').addEventListener('pointerdown', event => {
   const pointer = event as PointerEvent, handle = (event.target as HTMLElement).dataset.resize as SelectionHandle | undefined;
   if (handle) beginSelectionDrag(pointer, handle);
 });
 frame.addEventListener('pointermove', event => {
+  pointerProbe('move-attempt', event);
   if (!selectionDrag || selectionDrag.pointerId !== event.pointerId || !session?.overlay) return;
   const g = selectionDrag, overlay = session.overlay;
   const rect = adjustSelection(g.rect, g.handle, event.clientX - g.start.x, event.clientY - g.start.y,
     { x: 0, y: 0, width: overlay.viewportWidth, height: overlay.viewportHeight });
-  session.overlay = { ...overlay, ...rect }; frame.dataset.liveSelection = 'true'; canvas.hidden = true; placeSelectionFrame();
+  session.overlay = { ...overlay, ...rect }; frame.dataset.liveSelection = 'true'; canvas.hidden = true; placeSelectionFrame(); pointerProbe('move', event);
 });
 async function endSelectionDrag(event: PointerEvent, cancelled = false): Promise<void> {
+  pointerProbe(cancelled ? 'cancel' : 'up-attempt', event);
   if (!selectionDrag || selectionDrag.pointerId !== event.pointerId || !session?.overlay || !selectionSession) return;
   const g = selectionDrag; selectionDrag = null;
   if (frame.hasPointerCapture(event.pointerId)) frame.releasePointerCapture(event.pointerId);
@@ -394,7 +403,7 @@ async function endSelectionDrag(event: PointerEvent, cancelled = false): Promise
   if (cancelled || ['x','y','width','height'].every(k => rect[k as keyof OverlayRect] === g.rect[k as keyof OverlayRect])) {
     session.overlay = { ...session.overlay, ...g.rect }; canvas.hidden = false; if (model) applyZoom(); else placeSelectionFrame(); controls(); return;
   }
-  selectionUpdating = true; busy = true; controls();
+  selectionUpdating = true; busy = true; controls(); pointerProbe('update', event);
   try {
     const value = await invoke<SelectionSession>('update_screenshot_selection', { sessionId: previous.id, revision: previous.revision,
       rect: { x: rect.x, y: rect.y, width: rect.width, height: rect.height } });
@@ -402,14 +411,16 @@ async function endSelectionDrag(event: PointerEvent, cancelled = false): Promise
     if (value.kind !== 'selection' || value.id !== previous.id || value.revision !== previous.revision + 1) throw new Error('选区更新版本无效');
     validateSize(value); validateOverlay(value.overlay);
     selectionSession = value; session = { ...value }; original = null; model = null; rendered = null; savedState = null;
-    canvas.width = canvas.height = 1; placeSelectionFrame(); status('');
+    canvas.width = canvas.height = 1; placeSelectionFrame(); status(''); pointerProbe('updated', event);
   } catch (error) {
+    pointerProbe('update-error', event);
     if (token === generation && session) { session.overlay = previous.overlay; if (model) applyZoom(); else placeSelectionFrame(); status(`未调整选区：${readableError(error)}`, true); }
   } finally { if (token === generation) { canvas.hidden = false; selectionUpdating = false; busy = false; controls(); } }
 }
 frame.addEventListener('pointerup', event => { void endSelectionDrag(event); });
 frame.addEventListener('pointercancel', event => { void endSelectionDrag(event, true); });
 canvas.addEventListener('pointerdown', event => {
+  pointerProbe('canvas-down', event);
   if (!event.isPrimary || pendingStroke || selectionDrag || gesture || moveGesture) return;
   if (tool === 'select' && canAdjustSelection()) { beginSelectionDrag(event, 'move'); return; }
   if (model) { void beginCanvasPointer(event); return; }

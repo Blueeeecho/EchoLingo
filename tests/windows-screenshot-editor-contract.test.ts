@@ -223,6 +223,12 @@ describe('actual Windows screenshot fixture source wiring (not native acceptance
     expect(ownership).not.toContain('.Current.Name');
     expect(ownership).not.toContain('ProcessName');
   });
+  it('reads only the compile-time fixed diagnostic node through a complete bounded schema', () => {
+    const reader = fixture.slice(fixture.indexOf('static void ScreenshotDomPointerObservation('), fixture.indexOf('static bool ScreenshotObservationScope('));
+    for (const value of ['pid!=app.Id||ScreenshotWindow(app.Id)!=editor', 'screenshot-pointer-probe', 'EL_SCREENSHOT_POINTER_PROBE_V1:', 'value.Length>512', 'data.Count!=keys.Length', 'counts.Length!=17', '(int)item>255', 'state.Count!=14', 'result["domProbe"]=data']) expect(reader).toContain(value);
+    expect(reader.indexOf('state.Count!=14')).toBeLessThan(reader.indexOf('result["domProbe"]=data'));
+    for (const forbidden of ['Send(', 'SetForegroundWindow(', '.Invoke()', 'Thread.Sleep', 'result["raw"]', 'result["value"]']) expect(reader).not.toContain(forbidden);
+  });
   it('maps F1 exports to dismiss/re-capture while retaining standalone cancellation and collision oracles', () => {
     for (const value of ['if(closes)WaitFor', 'for(int save=0;save<2;save++)', 'recapturedSaveSessions', 'inplaceCopyAndSavesDismissed', 'savedCaptureReopenedThroughSettings', 'standaloneCollisionNumberingVerified', 'ScreenshotContinueOpen(app,dialogOwner)', 'inplaceCancelPreservedClipboard']) expect(fixture).toContain(value);
     expect(fixture).not.toContain('ScreenshotInvoke(app,editor,"100%")');
