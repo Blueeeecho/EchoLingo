@@ -2,6 +2,7 @@ import AppKit
 import CoreGraphics
 import Foundation
 import ScreenCaptureKit
+import WebKit
 
 // All capture UI and capture APIs execute inside the statically linked app.
 // Coordinates used by the selector are AppKit global logical points (y up).
@@ -27,6 +28,8 @@ struct CaptureRegionPlan {
     let pixelWidth: Int
     let pixelHeight: Int
     let displays: [CaptureDisplayGeometry]
+    // Freeze the AppKit/global-top-left conversion with the selection plan.
+    let primaryHeight: CGFloat = CGDisplayBounds(CGMainDisplayID()).height
     var window: CaptureWindowTarget? = nil
 }
 
@@ -176,6 +179,15 @@ struct CaptureSelectorState {
     private(set) var selection: CGRect?
     private(set) var outcome: CaptureSelectorOutcome?
 
+    // The window outline is a hint in both modes. Only F1 can retain a
+    // pressed window as a click target; OCR remains a free rectangle drag.
+    var canQueryWindowHint: Bool { outcome == nil && anchor == nil }
+    var windowHint: CaptureWindowTarget? {
+        guard outcome == nil else { return nil }
+        if anchor == nil { return candidate }
+        return purpose == .screenshot && !dragExceeded ? pressedWindow : nil
+    }
+
     mutating func receive(_ event: CaptureSelectorEvent) {
         guard outcome == nil else { return }
         switch event {
@@ -192,7 +204,7 @@ struct CaptureSelectorState {
             highlightedDisplay = captureDisplay(at: point, displays: displays)
             guard anchor == nil else { return }
             anchor = point
-            pressedWindow = candidate.flatMap { $0.frame.contains(point) ? $0 : nil }
+            pressedWindow = purpose == .screenshot ? candidate.flatMap { $0.frame.contains(point) ? $0 : nil } : nil
             dragExceeded = false
             selection = nil
         case .leftDrag(let point):
@@ -323,6 +335,165 @@ final class CaptureSelectionLifetime {
 final class CaptureSelectionPanel: NSPanel {
     override var canBecomeKey: Bool { true }
     override var canBecomeMain: Bool { false }
+}
+
+// The normal Tauri window remains the IPC owner but is never shown for F1.
+// Reparent its existing content view into a real nonactivating NSPanel rather
+// than changing an NSWindow's ObjC class/style after creation. WKWebView keeps
+// its NSTextInputClient/IME implementation; no key monitor swallows text input.
+private final class CaptureScreenshotEditorPanel: NSPanel {
+    override var canBecomeKey: Bool { true }
+    override var canBecomeMain: Bool { false }
+}
+
+private final class CaptureScreenshotEditorHost {
+    weak var owner: NSWindow?
+    let panel: CaptureScreenshotEditorPanel
+    let content: NSView
+    let webView: WKWebView
+    let contentFrame: CGRect
+    let contentMask: NSView.AutoresizingMask
+    var closeObserver: NSObjectProtocol?
+
+    init(owner: NSWindow, content: NSView, webView: WKWebView, frame: CGRect) {
+        self.owner = owner
+        self.content = content
+        self.webView = webView
+        self.contentFrame = content.frame
+        self.contentMask = content.autoresizingMask
+        panel = CaptureScreenshotEditorPanel(contentRect: frame,
+            styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
+        panel.isReleasedWhenClosed = false
+        panel.isOpaque = false
+        panel.backgroundColor = .clear
+        panel.hasShadow = false
+        panel.animationBehavior = .none
+        panel.hidesOnDeactivate = false
+        panel.isFloatingPanel = true
+        // Clicks and makeKey() may focus WKWebView without activating the app.
+        // The web view, not a capture key monitor, owns composition/Enter/Esc.
+        panel.becomesKeyOnlyIfNeeded = false
+        panel.isMovable = false
+        panel.acceptsMouseMovedEvents = true
+        // Unlike the transient selector, this panel accepts text. Keep it
+        // below system IME candidates; screenSaver/statusBar can cover them.
+        // Space membership comes from the nonactivating panel/collection
+        // policy, not from elevating the editor above system input windows.
+        panel.level = .floating
+        panel.collectionBehavior = popupCollectionBehavior([.stationary, .ignoresCycle])
+        panel.sharingType = .none
+        owner.orderOut(nil)
+        owner.contentView = NSView(frame: content.frame)
+        content.autoresizingMask = [.width, .height]
+        panel.contentView = content
+        content.setFrameSize(frame.size)
+        content.layoutSubtreeIfNeeded()
+    }
+
+    func restore() {
+        panel.orderOut(nil)
+        if let closeObserver = closeObserver { NotificationCenter.default.removeObserver(closeObserver) }
+        closeObserver = nil
+        // Retain the content while detaching; restore only to its original
+        // owner. This makes repeated F1 and ordinary Open Image deterministic.
+        panel.contentView = nil
+        content.autoresizingMask = contentMask
+        content.frame = contentFrame
+        if let owner = owner { owner.contentView = content; owner.orderOut(nil) }
+        panel.close()
+    }
+}
+
+// Accessed only on AppKit's main thread. An entry holds one content view and
+// one hidden/visible panel; hide/owner-close remove it and release native state.
+private var captureScreenshotEditorHosts: [ObjectIdentifier: CaptureScreenshotEditorHost] = [:]
+
+private func screenshotEditorWebView(_ root: NSView) -> WKWebView? {
+    if let webView = root as? WKWebView { return webView }
+    for child in root.subviews {
+        if let webView = screenshotEditorWebView(child) { return webView }
+    }
+    return nil
+}
+
+private func screenshotEditorOwner(_ pointer: UnsafeMutableRawPointer?) -> NSWindow? {
+    guard let pointer = pointer else { return nil }
+    return Unmanaged<AnyObject>.fromOpaque(pointer).takeUnretainedValue() as? NSWindow
+}
+
+private func screenshotEditorFrame(_ x: Double, _ y: Double, _ width: Double, _ height: Double) -> CGRect? {
+    guard [x, y, width, height].allSatisfy({ $0.isFinite }),
+          width >= 2, height >= 2, width <= 131072, height <= 131072,
+          abs(x) <= 131072, abs(y) <= 131072 else { return nil }
+    let primaryHeight = CGDisplayBounds(CGMainDisplayID()).height
+    let frame = CGRect(x: x, y: Double(primaryHeight) - y - height, width: width, height: height)
+    let screens = NSScreen.screens.map(\.frame).filter { !$0.intersection(frame).isEmpty }
+    guard let first = screens.first,
+          screens.dropFirst().reduce(first, { $0.union($1) }) == frame else { return nil }
+    // This catches a changed host union between capture and preparation. It
+    // deliberately does not claim to detect a scale/identity-only change
+    // whose logical union stayed identical.
+    return frame
+}
+
+@_cdecl("echolingo_prepare_screenshot_overlay")
+public func echoLingoPrepareScreenshotOverlay(_ pointer: UnsafeMutableRawPointer?,
+    _ x: Double, _ y: Double, _ width: Double, _ height: Double) -> Int32 {
+    guard Thread.isMainThread else { return -1 }
+    guard let owner = screenshotEditorOwner(pointer) else { return -2 }
+    guard let frame = screenshotEditorFrame(x, y, width, height) else { return -3 }
+    let key = ObjectIdentifier(owner)
+    if let host = captureScreenshotEditorHosts[key] {
+        guard host.owner === owner, host.panel.contentView === host.content else { return -4 }
+        host.panel.setFrame(frame, display: false)
+        host.content.setFrameSize(frame.size)
+        host.content.layoutSubtreeIfNeeded()
+        return 0
+    }
+    guard let content = owner.contentView, content.window === owner,
+          let webView = screenshotEditorWebView(content) else { return -4 }
+    let host = CaptureScreenshotEditorHost(owner: owner, content: content, webView: webView, frame: frame)
+    captureScreenshotEditorHosts[key] = host
+    host.closeObserver = NotificationCenter.default.addObserver(
+        forName: NSWindow.willCloseNotification, object: owner, queue: .main) { _ in
+            if let current = captureScreenshotEditorHosts.removeValue(forKey: key) { current.restore() }
+        }
+    guard host.panel.contentView === content, content.window === host.panel else {
+        captureScreenshotEditorHosts.removeValue(forKey: key)?.restore()
+        return -5
+    }
+    return 0
+}
+
+@_cdecl("echolingo_show_screenshot_overlay")
+public func echoLingoShowScreenshotOverlay(_ pointer: UnsafeMutableRawPointer?,
+    _ x: Double, _ y: Double, _ width: Double, _ height: Double) -> Int32 {
+    let prepared = echoLingoPrepareScreenshotOverlay(pointer, x, y, width, height)
+    guard prepared == 0 else { return prepared }
+    guard let owner = screenshotEditorOwner(pointer),
+          let host = captureScreenshotEditorHosts[ObjectIdentifier(owner)] else { return -4 }
+    host.panel.orderFrontRegardless()
+    host.panel.makeKey()
+    // Send keys into WebKit's real NSTextInputClient, not the generic holder
+    // view. Its DOM input/IME composition keeps first refusal on Enter/Escape.
+    guard host.panel.makeFirstResponder(host.webView) else {
+        _ = echoLingoHideScreenshotOverlay(pointer)
+        return -7
+    }
+    NSApp.updateWindows()
+    guard host.panel.isVisible, host.panel.isOnActiveSpace, !owner.isVisible else {
+        _ = echoLingoHideScreenshotOverlay(pointer)
+        return -6
+    }
+    return 0
+}
+
+@_cdecl("echolingo_hide_screenshot_overlay")
+public func echoLingoHideScreenshotOverlay(_ pointer: UnsafeMutableRawPointer?) -> Int32 {
+    guard Thread.isMainThread else { return -1 }
+    guard let owner = screenshotEditorOwner(pointer) else { return -2 }
+    if let host = captureScreenshotEditorHosts.removeValue(forKey: ObjectIdentifier(owner)) { host.restore() }
+    return 0
 }
 
 let captureLoupeSample: CGFloat = 52
@@ -556,7 +727,7 @@ final class CaptureSelectionSession {
             break
         }
         if operation?.isCancelled == true { state.receive(.cancel) }
-        if state.purpose == .screenshot && state.anchor == nil {
+        if state.canQueryWindowHint {
             let now = Date()
             let isPress: Bool
             if case .leftDown = event { isPress = true } else { isPress = false }
@@ -589,8 +760,7 @@ final class CaptureSelectionSession {
         for (geometry, panel, view) in panels {
             let pointerOnDisplay = state.highlightedDisplay == geometry.id
             let highlight = pointerOnDisplay && state.purpose == .region
-            let hoverTarget = state.anchor == nil ? state.candidate : (state.dragExceeded ? nil : state.pressedWindow)
-            let hovered = hoverTarget?.frame.intersection(geometry.frame)
+            let hovered = state.windowHint?.frame.intersection(geometry.frame)
             let localHovered = hovered.flatMap { rectangle -> CGRect? in
                 if rectangle.isEmpty || rectangle.isNull { return nil }
                 return rectangle.offsetBy(dx: -geometry.frame.minX, dy: -geometry.frame.minY)
@@ -609,12 +779,15 @@ final class CaptureSelectionSession {
                 default: return true
                 }
             }()
-            if view.highlighted != highlight || view.selection != local || view.hoveredWindow != localHovered || pointerMoved {
+            let loupeChanged = view.selection != local || pointerMoved
+            if view.highlighted != highlight || view.hoveredWindow != localHovered || loupeChanged {
                 view.highlighted = highlight
                 view.hoveredWindow = localHovered
                 view.selection = local
                 view.loupeAnchor = localPointer
-                if let localPointer = localPointer {
+                // Metadata-only hint changes redraw the outline without
+                // taking another magnifier sample at an unchanged pointer.
+                if loupeChanged, let localPointer = localPointer {
                     let number = panel.windowNumber
                     let windowID: CGWindowID = number > 0 ? CGWindowID(number) : 0
                     if let image = captureLoupeImage(at: pointer, windowID: windowID) {
@@ -624,7 +797,7 @@ final class CaptureSelectionSession {
                         } else { label = "3×" }
                         view.loupe = CaptureLoupe(image: image, frame: captureLoupeFrame(anchor: localPointer, viewSize: view.bounds.size), label: label)
                     } else { view.loupe = nil }
-                } else { view.loupe = nil }
+                } else if localPointer == nil { view.loupe = nil }
                 view.needsDisplay = true
             }
         }
@@ -784,8 +957,20 @@ func captureLegacyWindowArray(_ ids: [CGWindowID]) throws -> CFArray {
     return array
 }
 
-func captureNativeRegionImage(purpose: CapturePurpose = .region, operation: CaptureScreenshotOperation? = nil) throws -> CGImage {
+// A screenshot returns its exact capture plan with its pixels. Re-reading the
+// pointer or screens after capture would race a display change and misplace the
+// in-place editor. OCR retains the original image-only entry point below.
+func captureNativeRegionResult(purpose: CapturePurpose = .region, operation: CaptureScreenshotOperation? = nil) throws -> (image: CGImage, plan: CaptureRegionPlan) {
     let plan = try selectNativeCaptureRegion(purpose: purpose, operation: operation)
+    let image = try captureNativePlannedImage(plan, purpose: purpose, operation: operation)
+    return (image, plan)
+}
+
+func captureNativeRegionImage(purpose: CapturePurpose = .region, operation: CaptureScreenshotOperation? = nil) throws -> CGImage {
+    try captureNativeRegionResult(purpose: purpose, operation: operation).image
+}
+
+func captureNativePlannedImage(_ plan: CaptureRegionPlan, purpose: CapturePurpose, operation: CaptureScreenshotOperation? = nil) throws -> CGImage {
     if operation?.isCancelled == true { throw NativeError("CANCELLED: 截图请求已取消。") }
     try captureValidateWindow(plan.window)
     if #available(macOS 14.0, *) { return try captureScreenKitImage(plan, operation: operation) }
@@ -840,6 +1025,25 @@ func captureNativeRegionImage(purpose: CapturePurpose = .region, operation: Capt
     return image
 }
 
+// Public response coordinates are logical points with a top-left global origin,
+// just like the cross-platform editor contract. The source remains AppKit y-up.
+// Only displays intersecting this explicit selection become the editor host.
+func captureEditorGeometry(_ plan: CaptureRegionPlan, primaryHeight: CGFloat) throws -> [String: Double] {
+    guard let first = plan.displays.first else { throw NativeError("CAPTURE_GEOMETRY: 截图屏幕不可用。") }
+    let screen = plan.displays.dropFirst().reduce(first.frame) { $0.union($1.frame) }
+    let values = [plan.region.minX, plan.region.minY, plan.region.width, plan.region.height,
+                  screen.minX, screen.minY, screen.width, screen.height, primaryHeight, plan.scale]
+    guard values.allSatisfy({ $0.isFinite }), screen.width > 0, screen.height > 0,
+          screen.contains(plan.region), plan.scale > 0 else {
+        throw NativeError("CAPTURE_GEOMETRY: 截图坐标无效，请重新截图。")
+    }
+    return ["x": Double(plan.region.minX), "y": Double(primaryHeight - plan.region.maxY),
+            "width": Double(plan.region.width), "height": Double(plan.region.height),
+            "screenX": Double(screen.minX), "screenY": Double(primaryHeight - screen.maxY),
+            "screenWidth": Double(screen.width), "screenHeight": Double(screen.height),
+            "scale": Double(plan.scale)]
+}
+
 func captureSelectionSelfTest() throws {
     let primary = CaptureDisplayGeometry(id: 1, frame: CGRect(x: 0, y: 0, width: 1440, height: 900), scale: 2)
     let left = CaptureDisplayGeometry(id: 2, frame: CGRect(x: -1920, y: -180, width: 1920, height: 1080), scale: 1)
@@ -855,8 +1059,13 @@ func captureSelectionSelfTest() throws {
     try expect(captureSourceRectangle(CGRect(x: -1800, y: 720, width: 100, height: 80), display: left) == CGRect(x: 120, y: 100, width: 100, height: 80))
     let plan = try capturePlan(CGRect(x: -100, y: 100, width: 300, height: 200), displays: displays)
     try expect(plan.displays.count == 2 && plan.scale == 2 && plan.pixelWidth == 600 && plan.pixelHeight == 400)
+    let editor = try captureEditorGeometry(plan, primaryHeight: 900)
+    try expect(editor["x"] == -100 && editor["y"] == 600 && editor["width"] == 300 && editor["height"] == 200)
+    try expect(editor["screenX"] == -1920 && editor["screenY"] == 0 && editor["screenWidth"] == 3360 && editor["screenHeight"] == 1080 && editor["scale"] == 2)
     let abovePlan = try capturePlan(CGRect(x: 20, y: 920, width: 100, height: 80), displays: displays)
     try expect(abovePlan.pixelWidth == 100 && abovePlan.pixelHeight == 80)
+    let aboveEditor = try captureEditorGeometry(abovePlan, primaryHeight: 900)
+    try expect(aboveEditor["y"] == -100 && aboveEditor["screenY"] == -720 && aboveEditor["scale"] == 1)
     let fractional = try capturePlan(CGRect(x: 10.25, y: 20.25, width: 10.25, height: 20.25), displays: displays)
     try expect(fractional.region == CGRect(x: 10, y: 20, width: 11, height: 21) && fractional.pixelWidth == 22)
     for invalid in [CGRect(x: 0, y: 0, width: 1, height: 100), CGRect(x: CGFloat.infinity, y: 0, width: 10, height: 10),
@@ -892,6 +1101,7 @@ func captureSelectionSelfTest() throws {
     cancelled.receive(.leftUp(CGPoint(x: 200, y: 200)))
     try expect(cancelled.outcome == .cancelled)
     try captureScreenshotSelfTest()
+    try captureWindowHintSelfTest()
     try captureLegacyExclusionSelfTest()
     try captureSelectionDeadlineSelfTest()
     try captureOverlayBehaviorSelfTest()
@@ -982,6 +1192,57 @@ func captureSelectionDeadlineSelfTest() throws {
     var presentationCount = 0
     if delayed.begin(at: deadline.addingTimeInterval(30)) { presentationCount += 1 }
     try expect(presentationCount == 0)
+}
+
+// Pure mode/visual policy: sharing a decorative hint must not enable OCR
+// whole-window clicks or make an unavailable hint a prerequisite for dragging.
+func captureWindowHintSelfTest() throws {
+    func expect(_ value: Bool) throws {
+        if !value { throw NativeError("SELF_TEST: Capture window hint policy fixture failed.") }
+    }
+    let display = CaptureDisplayGeometry(id: 1, frame: CGRect(x: 0, y: 0, width: 1440, height: 900), scale: 2)
+    let target = CaptureWindowTarget(id: 51, pid: 41, frame: CGRect(x: 100, y: 100, width: 500, height: 300))
+    let anchor = CGPoint(x: 200, y: 200), end = CGPoint(x: 400, y: 350)
+    let rectangle = captureRectangle(anchor, end)
+    for purpose in [CapturePurpose.region, .screenshot] {
+        var state = CaptureSelectorState(displays: [display], purpose: purpose)
+        try expect(state.canQueryWindowHint && state.windowHint == nil)
+        state.candidate = target
+        state.receive(.move(anchor))
+        try expect(state.canQueryWindowHint && state.windowHint == target)
+        state.receive(.leftDown(anchor))
+        try expect(!state.canQueryWindowHint)
+        try expect(state.windowHint == (purpose == .screenshot ? target : nil))
+        try expect(state.pressedWindow == (purpose == .screenshot ? target : nil))
+        state.receive(.leftUp(anchor))
+        if purpose == .region {
+            // Repeated OCR clicks stay armed; they never capture the hint.
+            try expect(state.outcome == nil && state.anchor == nil && state.windowHint == target)
+            state.receive(.leftDown(anchor)); state.receive(.leftUp(anchor))
+            try expect(state.outcome == nil && state.canQueryWindowHint)
+        } else {
+            try expect(state.outcome == .windowSelected(target))
+            try expect(!state.canQueryWindowHint && state.windowHint == nil)
+        }
+        var drag = CaptureSelectorState(displays: [display], purpose: purpose, candidate: target)
+        drag.receive(.leftDown(anchor)); drag.receive(.leftDrag(end))
+        try expect(!drag.canQueryWindowHint && drag.windowHint == nil)
+        drag.receive(.leftUp(end))
+        try expect(drag.outcome == .selected(rectangle) && drag.windowHint == nil)
+        var cancelled = CaptureSelectorState(displays: [display], purpose: purpose, candidate: target)
+        cancelled.receive(.cancel); cancelled.receive(.leftDown(anchor))
+        try expect(cancelled.outcome == .cancelled && !cancelled.canQueryWindowHint && cancelled.windowHint == nil)
+        // No stale target after cancel/restart. Missing/protected/unsupported
+        // metadata resolves to nil and cannot block a new rectangle selection.
+        var unavailable = CaptureSelectorState(displays: [display], purpose: purpose)
+        try expect(unavailable.canQueryWindowHint && unavailable.windowHint == nil)
+        unavailable.receive(.leftDown(anchor)); unavailable.receive(.leftDrag(end)); unavailable.receive(.leftUp(end))
+        try expect(unavailable.outcome == .selected(rectangle))
+    }
+    // OCR retains its original 2-point ROI minimum, not F1's 4-point click jitter.
+    var small = CaptureSelectorState(displays: [display], candidate: target)
+    small.receive(.leftDown(anchor)); small.receive(.leftUp(CGPoint(x: 203, y: 203)))
+    try expect(small.outcome == .selected(CGRect(x: 200, y: 200, width: 3, height: 3)))
 }
 
 // Pure metadata, geometry, gesture and cancellation fixtures. No window-server

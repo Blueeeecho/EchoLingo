@@ -12,3 +12,41 @@ dialog { width:min(480px,calc(100vw - 48px)); border:1px solid var(--border); bo
 dialog:not([open]) { display:none; }
 .screenshot-modal-backdrop { position:fixed; inset:0; z-index:100; background:#17182166; }
 dialog[data-dialog-fallback][open] { display:block; position:fixed; inset:50% auto auto 50%; transform:translate(-50%,-50%); margin:0; max-height:calc(100vh - 40px); overflow:auto; }
+
+/* F1 keeps the native capture overlay in place. Only its selected bitmap is
+   editable; the transparent exterior never becomes part of an export. */
+.inplace-only { display:none; }
+:root[data-inplace=true] { background:transparent; }
+body[data-inplace=true] { min-width:0; display:block; background:#10131a55; }
+body[data-inplace=true] .editor-header,
+body[data-inplace=true] .editor-note,
+body[data-inplace=true] .editor-footer { display:none; }
+body[data-inplace=true] #editor-workspace { position:fixed; inset:0; padding:0; overflow:hidden; display:block; }
+body[data-inplace=true] #canvas-frame { position:absolute; margin:0; outline:2px solid #43b6e7; box-shadow:0 0 0 1px #fff8; }
+body[data-inplace=true] #image-canvas[data-tool=select] { cursor:default; }
+body[data-inplace=true] .editor-toolbar { position:fixed; z-index:5; width:max-content; max-width:calc(100vw - 16px); max-height:calc(100vh - 16px); overflow:auto; padding:7px; gap:6px; border:1px solid var(--border); border-radius:10px; box-shadow:0 5px 24px #0003; }
+body[data-inplace=true] .tool-group { flex-wrap:wrap; }
+body[data-inplace=true] .tool-group span { display:none; }
+body[data-inplace=true] .tool-group button { min-width:32px; }
+body[data-inplace=true] .tool-options { gap:6px; }
+body[data-inplace=true] .history-actions { margin-left:0; }
+body[data-inplace=true] .history-actions button { font-size:0; }
+body[data-inplace=true] #undo-edit::before { content:'↶'; font-size:20px; }
+body[data-inplace=true] #redo-edit::before { content:'↷'; font-size:20px; }
+body[data-inplace=true] .inplace-only { display:block; }
+body[data-inplace=true] .inplace-actions { display:flex; gap:3px; border-left:1px solid var(--border); padding-left:5px; }
+body[data-inplace=true] .inplace-actions button { font-size:23px; line-height:1; min-width:34px; }
+#overlay-copy { color:#218b67; } #overlay-cancel { color:#c65360; }
+body[data-inplace=true] #overlay-info { position:fixed; z-index:4; background:var(--surface); padding:5px 9px; border-radius:6px; box-shadow:0 2px 8px #0002; font-variant-numeric:tabular-nums; pointer-events:none; }
+body[data-inplace=true] .status-line { position:fixed; z-index:6; left:8px; bottom:8px; max-width:min(650px,calc(100vw - 16px)); border:1px solid var(--border); border-radius:7px; padding:6px 10px; box-shadow:0 2px 10px #0002; pointer-events:none; }
+body[data-inplace=true] #empty-state { display:none; }
+/* A narrow selected monitor must wrap groups, not overflow into another display.
+   Completion actions stay pinned within the toolbar if vertical space is tight. */
+body[data-inplace=true] .tool-group,
+body[data-inplace=true] .tool-options { min-width:0; max-width:100%; flex-wrap:wrap; }
+body[data-inplace=true] .tool-options label { max-width:100%; }
+body[data-inplace=true] .inplace-actions { position:sticky; bottom:0; background:var(--surface); flex-shrink:0; margin-left:auto; }
+body[data-inplace=true] #overlay-info { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+body[data-inplace=true] .editor-toolbar[data-compact=true] .inplace-actions { order:-1; width:100%; justify-content:flex-end; flex-wrap:wrap; position:sticky; top:0; bottom:auto; z-index:1; border-left:0; padding-left:0; }
+/* Messages may overlap a huge selection but never paint over action controls. */
+body[data-inplace=true] .status-line { z-index:4; }

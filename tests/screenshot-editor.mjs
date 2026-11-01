@@ -18,6 +18,7 @@ try {
     });
     await page.addInitScript(() => {
       window.isTauri = true;
+      Object.defineProperty(navigator, 'platform', { configurable: true, get: () => 'Win32' });
       if (new URL(location.href).searchParams.has('fallbackDialog')) for (const name of ['showModal', 'close']) Object.defineProperty(HTMLDialogElement.prototype, name, { configurable: true, value: undefined });
       const callbacks = new Map(), listeners = new Map(); let callbackId = 0, nextId = 0;
       const image = (width = 96, height = 64) => {
@@ -58,6 +59,10 @@ try {
             if (mode === 'newer') q.publish(80, 48);
             return snapshot;
           }
+          if (command === 'focus_screenshot_overlay') {
+            if (q.holdFocus) await new Promise(resolve => { q.releaseFocus = resolve; });
+            if (q.focusError) throw new Error('QA focus failed'); return;
+          }
           if (command === 'screenshot_editor_ready') { q.ready.push(args.sessionId); return; }
           if (command === 'open_screenshot_image') {
             if (q.openError) throw new Error('QA damaged local image');
@@ -66,11 +71,12 @@ try {
             q.session = q.nextOpen; q.nextOpen = null; q.emit('screenshot-session', structuredClone(q.session)); return structuredClone(q.session);
           }
           if (command === 'save_screenshot_image') {
+            if (q.saveError) throw new Error('QA save failed');
             q.saves.push(structuredClone(args)); if (q.holdSave) await new Promise(resolve => { q.releaseSave = resolve; });
             return q.saveCancel ? null : { path: '/fixture/Desktop/EchoLingo-2026-10-31-120000.png', fileName: 'EchoLingo-2026-10-31-120000.png' };
           }
-          if (command === 'copy_screenshot_image') { q.copies.push(structuredClone(args)); return; }
-          if (command === 'close_screenshot_editor') { q.closed.push(args.sessionId); q.emit('screenshot-session-cleared', { id: args.sessionId }); return; }
+          if (command === 'copy_screenshot_image') { if (q.copyError) throw new Error('QA copy failed'); q.copies.push(structuredClone(args)); return; }
+          if (command === 'close_screenshot_editor') { if (q.closeError) throw new Error('QA close failed'); q.closed.push(args.sessionId); q.emit('screenshot-session-cleared', { id: args.sessionId }); return; }
           throw new Error(`Unexpected IPC from image editor: ${command}`);
         },
       };
@@ -83,7 +89,7 @@ try {
       await page.waitForFunction(id => window.__screenshotQA.ready.includes(id), id); return id;
     };
     const drag = async (tool, start, end) => {
-      await page.locator(`[data-tool="${tool}"]`).click();
+      await page.locator(`.editor-toolbar button[data-tool="${tool}"]`).click();
       const bounds = await page.locator('#image-canvas').boundingBox();
       const size = await page.locator('#image-canvas').evaluate(c => [c.width, c.height]);
       const xy = p => [bounds.x + p[0] * bounds.width / size[0], bounds.y + p[1] * bounds.height / size[1]];
@@ -108,7 +114,7 @@ try {
 
     // Native textarea handles Chinese composition; neither Enter nor Ctrl+Enter
     // may prematurely commit an active IME candidate. Text is plain, not HTML.
-    await fresh(); await page.locator('[data-tool="text"]').click();
+    await fresh(); await page.locator('.editor-toolbar button[data-tool="text"]').click();
     await page.locator('#image-canvas').click({ position: { x: 5, y: 5 } });
     await page.locator('#annotation-text').fill('中文标注\n<script>alert(1)</script>');
     await page.locator('#annotation-text').dispatchEvent('compositionstart');
@@ -122,7 +128,7 @@ try {
     assert.equal(await page.locator('#text-dialog').evaluate(d => d.open), true, 'compositionend before the Escape default must retain text');
     await page.locator('#apply-text').click(); assert.equal(await page.locator('#text-dialog').evaluate(d => d.open), false);
     assert.equal(await page.locator('#undo-edit').isEnabled(), true);
-    await page.locator('[data-tool="text"]').click(); await page.locator('#image-canvas').click({ position: { x: 5, y: 5 } });
+    await page.locator('.editor-toolbar button[data-tool="text"]').click(); await page.locator('#image-canvas').click({ position: { x: 5, y: 5 } });
     await page.locator('#annotation-text').fill('字'.repeat(2000)); assert.equal(await page.locator('#annotation-text').inputValue().then(x => x.length), 2000);
     await page.locator('#cancel-text').click();
 
@@ -239,7 +245,7 @@ try {
     // Exercise the fallback, including focus containment and Escape cancellation.
     await page.goto(new URL('screenshot.html?fallbackDialog=1', base).href);
     await page.waitForFunction(() => window.__screenshotQA.ready.length === 1);
-    await page.locator('[data-tool="text"]').click(); await page.locator('#image-canvas').click({ position: { x: 5, y: 5 } });
+    await page.locator('.editor-toolbar button[data-tool="text"]').click(); await page.locator('#image-canvas').click({ position: { x: 5, y: 5 } });
     await page.locator('#annotation-text').fill('兼容旧版系统 WebView');
     await page.keyboard.press('Shift+Tab'); assert.equal(await page.evaluate(() => document.activeElement.id), 'apply-text');
     await page.locator('#cancel-text').click(); assert.equal(await page.locator('#text-dialog').isVisible(), false);
@@ -265,6 +271,158 @@ try {
     assert.deepEqual(await page.evaluate(() => Object.keys(localStorage)), [], 'no image data persisted in web storage');
     const commands = await page.evaluate(() => window.__screenshotQA.calls.map(x => x.command));
     assert.equal(commands.some(x => /ocr|translate|history|provider/i.test(x)), false, 'F1 editor never invokes OCR, translation, providers, or history');
+    // F1 in-place presentation reuses the renderer without an activation or
+    // clipboard side effect. Coordinates are CSS/logical; output stays pixels.
+    const overlayFresh = async (geometry = { x: 24, y: 100, width: 192, height: 128, viewportWidth: 600, viewportHeight: 540 }) => {
+      const id = await page.evaluate(overlay => {
+        const q = window.__screenshotQA;
+        q.copyError = q.saveError = q.saveCancel = q.closeError = false;
+        q.session = { ...q.image(), overlay };
+        q.emit('screenshot-session', structuredClone(q.session)); return q.session.id;
+      }, geometry);
+      await page.waitForFunction(id => window.__screenshotQA.ready.includes(id), id);
+      return id;
+    };
+    const beforeOverlay = await page.evaluate(() => ({ copies: window.__screenshotQA.copies.length, saves: window.__screenshotQA.saves.length }));
+    let overlayId = await overlayFresh();
+    assert.equal(await page.evaluate(() => window.__screenshotQA.calls.filter(call => call.command === 'focus_screenshot_overlay').length), 0, 'capture ready never requests activation');
+    await page.evaluate(() => { window.__screenshotQA.holdFocus = true; });
+    const beforeFocus = await page.evaluate(() => window.__screenshotQA.calls.length);
+    await page.locator('.editor-toolbar button[data-tool="rectangle"]').click();
+    const initialOverlay = await pixels();
+    await drag('rectangle', [5, 5], [25, 20]);
+    assert.notDeepEqual(await pixels(), initialOverlay, 'pending focus never delays pointer drawing');
+    assert.equal(await page.evaluate(start => window.__screenshotQA.calls.slice(start).filter(call => call.command === 'focus_screenshot_overlay').length, beforeFocus), 1, 'tool and canvas clicks share one pending focus');
+    await page.evaluate(() => { window.__screenshotQA.holdFocus = false; window.__screenshotQA.releaseFocus(); });
+    await page.locator('#undo-edit').click();
+    await page.locator('.editor-toolbar button[data-tool="select"]').click();
+    assert.equal(await page.locator('.editor-toolbar button[data-tool="select"]').getAttribute('aria-pressed'), 'true', 'capture starts without an annotation tool');
+    await drag('crop', [10, 8], [42, 32]);
+    assert.deepEqual(await page.locator('#image-canvas').boundingBox().then(({ x, y, width, height }) => [x, y, width, height]), [44, 116, 64, 48], 'cropped bitmap retains original screen-local origin and scale');
+    await page.locator('#undo-edit').click();
+    await page.locator('.editor-toolbar button[data-tool="select"]').click();
+    await page.locator('#image-canvas').focus(); await page.keyboard.press('Control+Shift+s');
+    await page.waitForFunction(() => document.querySelector('#editor-status').textContent === '原地截图使用设置中的保存目录；请在设置修改目录');
+    assert.equal(await page.evaluate(() => window.__screenshotQA.saves.length), beforeOverlay.saves, 'in-place Save As cannot open a separate native sheet');
+    const overlayPixels = await pixels();
+    assert.equal(await page.locator('.editor-header').isVisible(), false);
+    assert.equal(await page.locator('.editor-toolbar button[data-tool="select"]').getAttribute('aria-pressed'), 'true');
+    assert.deepEqual(await page.locator('#image-canvas').boundingBox().then(({ x, y, width, height }) => [x, y, width, height]), [24, 100, 192, 128]);
+    await page.locator('#image-canvas').click({ position: { x: 30, y: 30 } });
+    assert.deepEqual(await pixels(), overlayPixels, 'default selection tool never annotates');
+    assert.deepEqual(await page.evaluate(() => ({ copies: window.__screenshotQA.copies.length, saves: window.__screenshotQA.saves.length })), beforeOverlay);
+    await drag('solid', [8, 8], [24, 24]);
+    const editedOverlay = await pixels();
+    await page.evaluate(() => { window.__screenshotQA.copyError = true; });
+    await page.locator('#overlay-copy').click();
+    await page.waitForFunction(() => document.querySelector('#editor-status').textContent.includes('QA copy failed'));
+    assert.deepEqual(await pixels(), editedOverlay, 'copy failure retains edits');
+    assert.equal(await page.locator('#overlay-copy').isEnabled(), true);
+    await page.evaluate(() => { window.__screenshotQA.copyError = false; window.__screenshotQA.closeError = true; });
+    await page.locator('#image-canvas').focus(); await page.keyboard.press('Enter');
+    await page.waitForFunction(() => document.querySelector('#editor-status').textContent.includes('图片已复制到剪贴板；退出失败'));
+    assert.deepEqual(await pixels(), editedOverlay, 'dismissal failure retains the edited document');
+    assert.equal(await page.evaluate(id => window.__screenshotQA.closed.includes(id), overlayId), false);
+    await page.evaluate(() => { window.__screenshotQA.closeError = false; });
+    await page.locator('#overlay-cancel').click();
+    await page.waitForFunction(id => window.__screenshotQA.closed.includes(id), overlayId);
+    assert.equal(await page.evaluate(() => window.__screenshotQA.copies.length), beforeOverlay.copies + 1);
+    const exported = await page.evaluate(async () => {
+      const q = window.__screenshotQA, image = new Image(); image.src = 'data:image/png;base64,' + q.copies.at(-1).pngBase64; await image.decode();
+      const canvas = document.createElement('canvas'); canvas.width = image.width; canvas.height = image.height; const ctx = canvas.getContext('2d'); ctx.drawImage(image, 0, 0);
+      return [...ctx.getImageData(0, 0, canvas.width, canvas.height).data];
+    });
+    assert.deepEqual(exported, editedOverlay.data, 'completion exports only flattened edited pixels');
+    overlayId = await overlayFresh();
+    await page.locator('.editor-toolbar button[data-tool="text"]').click(); await page.locator('#image-canvas').click({ position: { x: 8, y: 8 } });
+    await page.locator('#annotation-text').fill('中文');
+    await page.locator('#annotation-text').dispatchEvent('compositionstart');
+    await page.evaluate(id => { const q = window.__screenshotQA; q.emit('screenshot-overlay-key', { sessionId: id, key: 'Enter' }); q.emit('screenshot-overlay-key', { sessionId: id, key: 'Escape' }); }, overlayId);
+    assert.equal(await page.locator('#text-dialog').isVisible(), true);
+    assert.equal(await page.evaluate(id => window.__screenshotQA.closed.includes(id), overlayId), false);
+    assert.equal(await page.evaluate(id => window.__screenshotQA.calls.filter(call => call.command === 'focus_screenshot_overlay' && call.sessionId === id).length, overlayId), 1, 'text awaits the session focus without duplicate IPC');
+    await page.locator('#annotation-text').dispatchEvent('compositionend');
+    await page.keyboard.press('Enter'); assert.equal(await page.locator('#text-dialog').isVisible(), true, 'textarea Enter is a newline, not completion');
+    await page.locator('#cancel-text').click();
+    await page.evaluate(() => { window.__screenshotQA.saveError = true; });
+    await page.locator('#overlay-save').click();
+    await page.waitForFunction(() => document.querySelector('#editor-status').textContent.includes('QA save failed'));
+    assert.equal(await page.locator('#canvas-frame').isVisible(), true);
+    await page.evaluate(() => { window.__screenshotQA.saveError = false; window.__screenshotQA.saveCancel = true; });
+    await page.locator('#overlay-save').click();
+    await page.waitForFunction(() => document.querySelector('#editor-status').textContent.includes('已取消保存'));
+    assert.equal(await page.evaluate(id => window.__screenshotQA.closed.includes(id), overlayId), false);
+    await page.evaluate(() => { window.__screenshotQA.saveCancel = false; window.__screenshotQA.closeError = true; });
+    await page.locator('#overlay-save').click();
+    await page.waitForFunction(() => document.querySelector('#editor-status').textContent.includes('图片已保存：') && document.querySelector('#editor-status').textContent.includes('退出失败'));
+    assert.equal(await page.locator('#save-indicator').textContent(), '已保存');
+    assert.equal(await page.locator('#canvas-frame').isVisible(), true);
+    const savedOnce = await page.evaluate(() => window.__screenshotQA.saves.length);
+    await page.evaluate(() => { window.__screenshotQA.closeError = false; });
+    await page.locator('#overlay-cancel').click(); await page.waitForFunction(id => window.__screenshotQA.closed.includes(id), overlayId);
+    assert.equal(await page.evaluate(() => window.__screenshotQA.saves.length), savedOnce, 'retrying close never repeats the completed save');
+    overlayId = await overlayFresh({ x: 398, y: 402, width: 192, height: 128, viewportWidth: 600, viewportHeight: 540 });
+    const toolbarBox = await page.locator('.editor-toolbar').boundingBox();
+    assert.ok(toolbarBox.x >= 0 && toolbarBox.y >= 0 && toolbarBox.x + toolbarBox.width <= 600 && toolbarBox.y + toolbarBox.height <= 540, JSON.stringify(toolbarBox));
+    const beforeDiscard = await page.evaluate(() => [window.__screenshotQA.copies.length, window.__screenshotQA.saves.length]);
+    await page.evaluate(id => window.__screenshotQA.emit('screenshot-overlay-key', { sessionId: id - 1, key: 'Escape' }), overlayId);
+    assert.equal(await page.evaluate(id => window.__screenshotQA.closed.includes(id), overlayId), false, 'stale native keys cannot close a newer capture');
+    await page.locator('#overlay-cancel').click(); await page.waitForFunction(id => window.__screenshotQA.closed.includes(id), overlayId);
+    assert.equal(await page.locator('#discard-dialog').isVisible(), false, 'explicit X discards without a second prompt');
+    assert.deepEqual(await page.evaluate(() => [window.__screenshotQA.copies.length, window.__screenshotQA.saves.length]), beforeDiscard, 'discard never copies or writes/deletes a file');
+    overlayId = await overlayFresh();
+    await page.locator('#image-canvas').focus(); await page.keyboard.press('Escape');
+    await page.waitForFunction(id => window.__screenshotQA.closed.includes(id), overlayId);
+    assert.deepEqual(await page.evaluate(() => [window.__screenshotQA.copies.length, window.__screenshotQA.saves.length]), beforeDiscard);
+    overlayId = await overlayFresh();
+    await page.evaluate(id => window.__screenshotQA.emit('screenshot-overlay-key', { sessionId: id, key: 'Enter' }), overlayId);
+    await page.waitForFunction(id => window.__screenshotQA.closed.includes(id), overlayId);
+    overlayId = await overlayFresh();
+    await page.evaluate(() => { window.__screenshotQA.focusError = true; });
+    const focusPixels = await pixels();
+    await page.locator('.editor-toolbar button[data-tool="rectangle"]').click();
+    await page.waitForFunction(() => document.querySelector('#editor-status').textContent.includes('QA focus failed'));
+    assert.deepEqual(await pixels(), focusPixels);
+    await page.evaluate(() => { window.__screenshotQA.focusError = false; });
+    await page.locator('.editor-toolbar button[data-tool="select"]').click();
+    assert.equal(await page.evaluate(id => window.__screenshotQA.calls.filter(call => call.command === 'focus_screenshot_overlay' && call.sessionId === id).length, overlayId), 2, 'failed explicit focus can retry');
+    await page.locator('#overlay-cancel').click(); await page.waitForFunction(id => window.__screenshotQA.closed.includes(id), overlayId);
+    for (const action of ['#overlay-copy', '#overlay-cancel', '#overlay-save']) {
+      overlayId = await overlayFresh(); await page.locator(action).click();
+      await page.waitForFunction(id => window.__screenshotQA.closed.includes(id), overlayId);
+      assert.equal(await page.evaluate(id => window.__screenshotQA.calls.filter(call => call.command === 'focus_screenshot_overlay' && call.sessionId === id).length, overlayId), 0, `${action} must not activate before completion`);
+    }
+    // Monitor-local edges/corners, tiny selections and compact wrapping. DPR
+    // coverage comes from this suite's outer 1x/2x loop; no pixel screenshots.
+    const placementCases = [
+      { viewport: [600, 540], roi: { x: 300, y: 530, width: 1, height: 1 }, monitor: { x: 300, y: 0, width: 300, height: 540 } },
+      { viewport: [600, 540], roi: { x: 599, y: 0, width: 1, height: 1 }, monitor: { x: 300, y: 0, width: 300, height: 540 } },
+      { viewport: [600, 540], roi: { x: 0, y: 0, width: 1, height: 1 }, monitor: { x: -40, y: -20, width: 340, height: 560 } },
+      { viewport: [220, 340], roi: { x: 219, y: 339, width: 1, height: 1 } },
+      { viewport: [220, 340], roi: { x: 0, y: 0, width: 220, height: 340 } },
+    ];
+    for (const fixture of placementCases) {
+      const [width, height] = fixture.viewport; await page.setViewportSize({ width, height });
+      overlayId = await overlayFresh({ ...fixture.roi, viewportWidth: width, viewportHeight: height, ...(fixture.monitor ? { toolbarBounds: fixture.monitor } : {}) });
+      await page.locator('.editor-toolbar button[data-tool="text"]').click(); // reveal the variable-size options
+      await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+      const layout = await page.evaluate(() => {
+        const rect = element => { const r = element.getBoundingClientRect(); return { x: r.x, y: r.y, right: r.right, bottom: r.bottom }; };
+        return { boxes: ['.editor-toolbar', '#overlay-info', '#editor-status'].map(selector => rect(document.querySelector(selector))),
+          actions: ['#overlay-copy', '#overlay-cancel', '#overlay-save'].map(selector => {
+            const button = document.querySelector(selector), r = button.getBoundingClientRect(), hit = document.elementFromPoint(r.x + r.width / 2, r.y + r.height / 2);
+            return { selector, ...rect(button), clickable: !button.disabled && (hit === button || button.contains(hit)) };
+          }) };
+      });
+      const monitor = fixture.monitor ?? { x: 0, y: 0, width, height };
+      const left = Math.max(0, monitor.x), top = Math.max(0, monitor.y), right = Math.min(width, monitor.x + monitor.width), bottom = Math.min(height, monitor.y + monitor.height);
+      for (const box of [...layout.boxes, ...layout.actions]) {
+        assert.ok(box.x >= left - 1 && box.y >= top - 1 && box.right <= right + 1 && box.bottom <= bottom + 1, JSON.stringify({ fixture, layout }));
+      }
+      assert.ok(layout.actions.every(action => action.clickable), JSON.stringify({ fixture, layout }));
+      if (fixture.roi.y >= height - 10) assert.ok(layout.boxes[0].bottom < fixture.roi.y, 'bottom-edge toolbar flips above');
+      await page.locator('#overlay-cancel').click(); await page.waitForFunction(id => window.__screenshotQA.closed.includes(id), overlayId);
+    }
     await context.close();
   }
   assert.deepEqual(errors, []); assert.deepEqual(externalRequests, []);

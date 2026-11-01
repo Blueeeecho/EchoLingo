@@ -56,9 +56,38 @@ class MacSelectionRecoveryContract(unittest.TestCase):
     def test_ax_request_token_is_checked_before_read_and_released_at_exit(self):
         check = section(SWIFT, "func requireSelectionRequestSource(", "struct SelectionApplicationSnapshot")
         self.assertIn("SelectionRequestWindowStore.window(for: expected)", check)
-        self.assertIn("selectionAnchoredWindowMatches(window, current, same: { CFEqual($0, $1) })", check)
-        self.assertIn("} else { matches = false }", check)
+        self.assertIn("selectionRequestAXRejection(window, current, same: { CFEqual($0, $1) })", check)
+        self.assertIn("} else { rejection = .axTokenUnavailable }", check)
+        self.assertIn('throw NativeError("SOURCE_CHANGED:', check)
+        self.assertIn('"requestSourceReason": rejection?.rawValue ?? "verified"', check)
         self.assertIn("defer { SelectionRequestWindowStore.remove(requestSource?.axWindowToken) }", SWIFT)
+
+    def test_launch_identity_is_lossless_and_keeps_exact_source_equality(self):
+        identity = section(SWIFT, "struct SelectionRequestSource:", "// Opaque AX identities")
+        self.assertIn("let launchIdentity: String?", identity)
+        self.assertNotIn("let launchedAt: TimeInterval?", identity)
+        self.assertIn("$0.bitPattern", identity)
+        self.assertIn("identity.utf8.count == 16", identity)
+        self.assertIn("expected.launchIdentity == current.launchIdentity", identity)
+        self.assertIn("return .launchIdentityMismatch", identity)
+        anchors = section(SWIFT, "struct SelectionWindowAnchors<Window>", "enum SelectionRequestWindowStore")
+        self.assertIn("entry.source == source", anchors)
+
+    def test_real_bridge_regression_crosses_the_production_rust_json_path(self):
+        fixture = section(PLATFORM, "fn mac_selection_source_identity_survives_real_swift_rust_swift_json_bridge()",
+                          "fn mac_capture_selector_fixture_checks_geometry_without_capturing_the_desktop()")
+        self.assertIn('super::run("selection-source-bridge-fixture", None)', fixture)
+        self.assertIn('super::run("selection-source-bridge-verify", Some(&input.to_string()))', fixture)
+        self.assertIn('"legacyNumericMismatchCount"', fixture)
+        self.assertIn('["launchIdentity", "pid", "windowID"]', fixture)
+
+    def test_source_failure_feedback_does_not_remove_supersession_guard(self):
+        self.assertIn('if error.starts_with("SOURCE_CHANGED:")', MAIN)
+        self.assertIn("fn source_identity_failure_is_actionable_but_superseded_selection_stays_quiet()", MAIN)
+        self.assertIn("finish_native_text(text, worker_request.cancelled() || source_changed)", MAIN)
+        action = section(MAIN, "fn start_action(", "async fn hide_native_capture_window(")
+        self.assertLess(action.index("if !native_request_is_current(&app, &request, presentation, keep_popup)"),
+                        action.index("match result {\n                Ok(text)"))
 
     def test_snapshot_endpoint_does_not_wait_for_clipboard_lock(self):
         bridge = section(PLATFORM, 'fn run(mode: &str, input: Option<&str>) -> Result<Value, String> {\n    use std::ffi',

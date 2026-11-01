@@ -68,6 +68,99 @@ pub fn capture_ocr_cancelable(cancel: NativeCancel) -> Result<String, String> {
 pub fn capture_image_cancelable(cancel: NativeCancel) -> Result<String, String> {
     image_response(run_cancelable("capture-image", cancel)?)
 }
+#[derive(Clone, Debug, serde::Deserialize)]
+pub struct ScreenshotScreen {
+    pub x: f64,
+    pub y: f64,
+    pub width: f64,
+    pub height: f64,
+}
+#[derive(Clone, Debug, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ScreenshotGeometry {
+    pub x: f64,
+    pub y: f64,
+    pub width: f64,
+    pub height: f64,
+    pub screen_x: f64,
+    pub screen_y: f64,
+    pub screen_width: f64,
+    pub screen_height: f64,
+    pub scale: f64,
+    #[serde(default)]
+    pub screens: Vec<ScreenshotScreen>,
+}
+impl ScreenshotGeometry {
+    pub fn validate(&self) -> Result<(), String> {
+        let values = [
+            self.x,
+            self.y,
+            self.width,
+            self.height,
+            self.screen_x,
+            self.screen_y,
+            self.screen_width,
+            self.screen_height,
+            self.scale,
+        ];
+        if values.iter().any(|v| !v.is_finite())
+            || self.width <= 0.0
+            || self.height <= 0.0
+            || self.screen_width <= 0.0
+            || self.screen_height <= 0.0
+            || self.scale <= 0.0
+            || self.scale > 8.0
+            || self.screen_width > 65536.0
+            || self.screen_height > 65536.0
+            || self.x < self.screen_x - 1.0
+            || self.y < self.screen_y - 1.0
+            || self.x + self.width > self.screen_x + self.screen_width + 1.0
+            || self.y + self.height > self.screen_y + self.screen_height + 1.0
+        {
+            return Err("SCREENSHOT_GEOMETRY: 无法验证原地截图坐标，请重新截图".into());
+        }
+        if self.screens.len() > 64
+            || self.screens.iter().any(|screen| {
+                [screen.x, screen.y, screen.width, screen.height]
+                    .iter()
+                    .any(|v| !v.is_finite())
+                    || screen.width <= 0.0
+                    || screen.height <= 0.0
+                    || screen.x < self.screen_x - 1.0
+                    || screen.y < self.screen_y - 1.0
+                    || screen.x + screen.width > self.screen_x + self.screen_width + 1.0
+                    || screen.y + screen.height > self.screen_y + self.screen_height + 1.0
+            })
+        {
+            return Err("SCREENSHOT_GEOMETRY: 截图显示器边界无效".into());
+        }
+        Ok(())
+    }
+}
+pub fn capture_screenshot_with_geometry_cancelable(
+    cancel: NativeCancel,
+) -> Result<(String, ScreenshotGeometry), String> {
+    let response = run_cancelable("capture-screenshot", cancel)?;
+    let mut geometry: ScreenshotGeometry = serde_json::from_value(
+        response
+            .get("captureGeometry")
+            .cloned()
+            .ok_or("SCREENSHOT_GEOMETRY: 原生截图未返回选区位置")?,
+    )
+    .map_err(|_| "SCREENSHOT_GEOMETRY: 原生截图选区位置无效")?;
+    geometry.screens = serde_json::from_value(
+        response
+            .get("captureScreens")
+            .cloned()
+            .ok_or("SCREENSHOT_GEOMETRY: 原生截图未返回显示器边界")?,
+    )
+    .map_err(|_| "SCREENSHOT_GEOMETRY: 原生截图显示器边界无效")?;
+    if geometry.screens.is_empty() {
+        return Err("SCREENSHOT_GEOMETRY: 截图显示器已不可用".into());
+    }
+    geometry.validate()?;
+    Ok((image_response(response)?, geometry))
+}
 /// F1 screenshot only: hover/click a visible window or drag a rectangle.
 /// OCR and translation continue to use the existing drag-only capture mode.
 pub fn capture_screenshot_cancelable(cancel: NativeCancel) -> Result<String, String> {
@@ -2618,6 +2711,70 @@ mod tests {
             assert!(super::open_permission_settings(kind)
                 .unwrap_err()
                 .starts_with("PERMISSION_KIND:"));
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn mac_selection_source_identity_survives_real_swift_rust_swift_json_bridge() {
+        // Exact production C ABI and Rust Value parse/reserialization, using
+        // generated Date values only. No AX, source application or clipboard.
+        let fixture = super::run("selection-source-bridge-fixture", None).unwrap();
+        let input = serde_json::json!({
+            "sources": fixture["sources"].clone(),
+            "legacyLaunchValues": fixture["legacyLaunchValues"].clone(),
+        });
+        let sources = input["sources"].as_array().unwrap();
+        assert!(sources.len() >= 6);
+        assert!(sources
+            .iter()
+            .any(|source| source["launchIdentity"].is_string()));
+        assert!(sources
+            .iter()
+            .any(|source| source["launchIdentity"].is_null()));
+        assert!(sources
+            .iter()
+            .any(|source| source["axWindowToken"].is_string()));
+        let result =
+            super::run("selection-source-bridge-verify", Some(&input.to_string())).unwrap();
+        let diagnostic = &result["diagnostics"];
+        assert_eq!(diagnostic["selectionSourceBridgeFixturePassed"], true);
+        assert_eq!(diagnostic["exactSourcesMatch"], true);
+        assert_eq!(
+            diagnostic["sourceCount"].as_u64(),
+            Some(sources.len() as u64)
+        );
+        assert_eq!(diagnostic["selectionRead"], false);
+        assert_eq!(diagnostic["clipboardTouched"], false);
+        // This reports whether the actual locked parser/Foundation chain also
+        // reproduces the old floating-number drift; the fixed string identity
+        // must remain exact even if future parser features remove that drift.
+        eprintln!(
+            "generated selection-source bridge: legacyNumericMismatchCount={}",
+            diagnostic["legacyNumericMismatchCount"]
+        );
+
+        let index = sources
+            .iter()
+            .position(|source| {
+                source["launchIdentity"].is_string() && source["windowID"].is_number()
+            })
+            .unwrap();
+        for key in ["launchIdentity", "pid", "windowID"] {
+            let mut changed = input.clone();
+            if key == "launchIdentity" {
+                let mut identity = changed["sources"][index][key].as_str().unwrap().to_owned();
+                let last = identity.pop().unwrap();
+                identity.push(if last == '0' { '1' } else { '0' });
+                changed["sources"][index][key] = serde_json::json!(identity);
+            } else {
+                let value = changed["sources"][index][key].as_u64().unwrap();
+                changed["sources"][index][key] = serde_json::json!(value + 1);
+            }
+            assert!(
+                super::run("selection-source-bridge-verify", Some(&changed.to_string())).is_err(),
+                "changed {key} must not pass source identity verification"
+            );
         }
     }
 

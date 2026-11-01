@@ -35,6 +35,7 @@ for required in (
     "screenshotWindowPolicyFixturePassed",
     "screenshotCancellationFixturePassed",
     "mixedSelectionRecoveryFixturePassed",
+    "chatMultiSelectionFixturePassed",
     "selectionFocusRecoveryFixturePassed",
     "selectionSourceAnchorFixturePassed",
     "selectionTraceRetentionFixturePassed",
@@ -48,4 +49,5 @@ for required in (
     assert checks.get(required) is True, f"Missing or failed native fixture: {required}"
 assert checks.get("generalClipboardTouched") is False, "Self-test touched the general clipboard"
 assert checks.get("codexInteractiveSelectionTested") is False, "Fixtures must not claim Codex interactive acceptance"
+assert checks.get("qqInteractiveMultiSelectionTested") is False, "Fixtures must not claim QQ interactive acceptance"
 PY_CHECK

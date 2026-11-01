@@ -37,7 +37,7 @@ dependencies = [
 
 [[package]]
 name = "echolingo-native-capture"
-version = "0.2.4"
+version = "0.2.6"
 dependencies = [
  "base64",
  "png",

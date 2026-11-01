@@ -18,7 +18,7 @@ class ScreenshotWindowContract(unittest.TestCase):
         self.assertIn('Some("capture-screenshot") if owner.is_some_and', native)
         swift = read('src-tauri/native/macos.swift')
         self.assertIn('case "--capture-image": return ["ok": true, "imageBase64": try captureImage()]', swift)
-        self.assertIn('captureImage(purpose: .screenshot, cancellation: operation)', swift)
+        self.assertIn('captureScreenshotResponse(cancellation: operation)', swift)
 
     def test_windows_revalidates_before_and_after_visible_pixel_copy(self):
         native = read('src-tauri/src/windows_capture_native.rs')

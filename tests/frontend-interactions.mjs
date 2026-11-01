@@ -3191,9 +3191,9 @@ try {
   }));
   assert.match(readingFonts.result, /^"?Times New Roman"?,/);
   assert.match(readingFonts.result, /SimSun/);
-  assert.match(readingFonts.source, /^SimSun,/);
+  assert.equal(readingFonts.source, readingFonts.result);
   assert.doesNotMatch(readingFonts.action, /Times New Roman/);
-  console.log('PASS: translated Latin font prefers installed Times New Roman; Windows retains SimSun CJK fallback/source and UI action typography. Computed CSS only, not physical font rendering.');
+  console.log('PASS: translated Latin font prefers installed Times New Roman; source and result share SimSun CJK fallback while UI action typography stays independent. Computed CSS only, not physical font rendering.');
   for (const platform of ['mac', 'windows']) {
     const url = new URL(process.env.ECHOLINGO_TEST_URL ?? 'http://127.0.0.1:1420/');
     if (platform === 'windows') url.searchParams.set('windowsSelectionFixture', '1');
@@ -3330,13 +3330,19 @@ try {
           const selection = window.getSelection(), range = document.createRange();
           range.selectNodeContents(result); selection.removeAllRanges(); selection.addRange(range);
           const selected = selection.toString(); selection.removeAllRanges();
-          return { sourceRatio: parseFloat(sourceStyle.lineHeight) / parseFloat(sourceStyle.fontSize),
+          return { sourceFont: sourceStyle.fontFamily, resultFont: resultStyle.fontFamily,
+            sourceSize: sourceStyle.fontSize, resultSize: resultStyle.fontSize,
+            sourceLeft: source.getBoundingClientRect().left, resultLeft: result.getBoundingClientRect().left,
+            sourceRatio: parseFloat(sourceStyle.lineHeight) / parseFloat(sourceStyle.fontSize),
             resultRatio: parseFloat(resultStyle.lineHeight) / parseFloat(resultStyle.fontSize),
             resultHeight: result.getBoundingClientRect().height, oldHeight, selected,
             resultOverflow: result.scrollWidth > result.clientWidth + 1,
             sourceOverflow: source.scrollWidth > source.clientWidth + 1,
             runLineHeight: parseFloat(resultStyle.lineHeight), fontSize: parseFloat(resultStyle.fontSize) };
         });
+        assert.equal(geometry.sourceFont, geometry.resultFont, 'shared reading font stack');
+        assert.equal(geometry.sourceSize, geometry.resultSize, 'shared reading size');
+        assert.ok(Math.abs(geometry.sourceLeft - geometry.resultLeft) < 1, 'aligned text left inset');
         assert.ok(Math.abs(geometry.sourceRatio - 1.45) < .01, `${platform}/${width}/${fixture.name}: source line height`);
         assert.ok(Math.abs(geometry.resultRatio - 1.45) < .01, `${platform}/${width}/${fixture.name}: result line height`);
         assert.ok(geometry.runLineHeight > geometry.fontSize, 'keep glyph ascent/descent breathing room');
@@ -3678,6 +3684,47 @@ try {
     await page.evaluate(() => window.dispatchEvent(new Event('blur')));
     assert.equal(await more.evaluate(element => document.activeElement === element), true, 'clearing restoration ring never blurs or redirects focus');
     assert.equal(await more.evaluate(element => getComputedStyle(element).outlineStyle), 'none');
+    // Settings has a different header: the old popup-only selector missed its
+    // Back button. Model native restoration explicitly; IPC is still mocked.
+    const back = page.locator('.management-header > [data-view="translate"]');
+    const closeManagement = page.locator('#close-management');
+    const reopenSettings = async () => {
+      const shows = await page.evaluate(() => {
+        window.dispatchEvent(new Event('blur'));
+        const q = window.__qa, shows = q.managementShows.length;
+        const state = q.nativeHide();
+        q.emit('open-settings', { presentationEpoch: state.epoch });
+        return shows;
+      });
+      await page.waitForFunction(shows => window.__qa.managementShows.length === shows + 1, shows);
+      await back.evaluate(element => element.focus({ preventScroll: true }));
+      assert.equal(await back.evaluate(element => document.activeElement === element), true);
+      assert.equal(await back.evaluate(element => getComputedStyle(element).outlineStyle), 'none', 'settings Back native/restored focus is quiet');
+    };
+    await reopenSettings();
+    await page.keyboard.press('Tab');
+    assert.equal(await closeManagement.evaluate(element => document.activeElement === element), true);
+    assert.equal(await closeManagement.evaluate(element => getComputedStyle(element).outlineStyle), 'solid');
+    await page.keyboard.press('Shift+Tab');
+    assert.equal(await back.evaluate(element => document.activeElement === element), true);
+    assert.equal(await back.evaluate(element => getComputedStyle(element).outlineStyle), 'solid', 'settings Back remains keyboard-visible');
+    await page.keyboard.press('Enter');
+    assert.equal(await page.locator('body').getAttribute('data-view'), 'translate', 'keyboard Back still navigates');
+    await reopenSettings();
+    await page.keyboard.press('Tab');
+    await closeManagement.dispatchEvent('pointerdown', { pointerId: 1, pointerType: 'mouse' });
+    assert.equal(await closeManagement.evaluate(element => getComputedStyle(element).outlineStyle), 'none', 'pointer intent clears settings keyboard ring');
+    assert.equal(await closeManagement.evaluate(element => document.activeElement === element), true, 'clearing a ring does not move focus');
+    await page.locator('#add-provider').click();
+    assert.equal(await page.locator('#close-provider-dialog').evaluate(element => document.activeElement === element), true, 'dialog autofocus is not redirected');
+    await page.keyboard.press('Tab'); await page.keyboard.press('Shift+Tab');
+    assert.equal(await page.locator('#close-provider-dialog').evaluate(element => getComputedStyle(element).outlineStyle), 'solid', 'dialog keyboard focus keeps its native cue');
+    await page.locator('#provider-name').focus();
+    assert.equal(await page.locator('#provider-name').evaluate(element => getComputedStyle(element).outlineStyle), 'solid', 'dialog input focus keeps its native cue');
+    await page.keyboard.press('Escape');
+    await back.click();
+    assert.equal(await page.locator('body').getAttribute('data-view'), 'translate', 'pointer Back still navigates');
+    await more.evaluate(element => element.focus({ preventScroll: true }));
     await page.keyboard.press('Shift+Tab');
     await page.evaluate(() => {
       delete document.body.dataset.popupFocusManaged;
@@ -3686,7 +3733,7 @@ try {
     assert.equal(await pin.evaluate(element => getComputedStyle(element).outlineStyle), 'solid', 'unmanaged browser/demo toolbar keeps the browser keyboard focus cue');
   }
   assert.deepEqual(errors, []);
-  console.log('PASS: macOS and Windows toolbar restored/programmatic and pointer focus stay quiet; Tab/Shift+Tab and keyboard activation retain accessible focus rings without changing pin or moving focus. Mock IPC only.');
+  console.log('PASS: simulated macOS and Windows popup/settings header restored/programmatic and pointer focus stay quiet; Tab/Shift+Tab and keyboard activation retain accessible focus rings without changing pin or moving focus. Mock IPC only.');
   // Backend NO_TEXT and empty successful recognition map to this exact blank
   // input delivery (Rust policy tests exercise both native result forms). Never
   // fake an OCR engine success or globally silence arbitrary provider errors.
