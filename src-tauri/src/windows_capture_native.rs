@@ -1545,11 +1545,7 @@ impl Picker {
                 Event::Dpi { role, hwnd, value } => {
                     if matches!(
                         role,
-                        Role::Probe
-                            | Role::Mailbox
-                            | Role::Loupe
-                            | Role::Handle
-                            | Role::Action(_)
+                        Role::Probe | Role::Mailbox | Role::Loupe | Role::Handle | Role::Action(_)
                     ) {
                         continue;
                     }
