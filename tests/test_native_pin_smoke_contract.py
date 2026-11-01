@@ -30,6 +30,15 @@ class NativePinSmokeContract(unittest.TestCase):
         self.assertNotIn('__TAURI_INTERNALS__', source)
         self.assertIn('Duration::from_secs(40)', source)
 
+    def test_callback_uses_take_once_ownership_for_tauri_fn(self):
+        source = (ROOT / 'src-tauri/src/native_pin_smoke.rs').read_text()
+        self.assertIn('-> impl Fn(String) + Send', source)
+        self.assertIn('let pending = Mutex::new(Some(send));', source)
+        self.assertIn('if let Some(send) = pending.take()', source)
+        self.assertIn('.eval_with_callback(script, js_callback(send))', source)
+        self.assertIn('repeated_fn_callback_keeps_first_result', source)
+        self.assertIn('callback_after_timeout_or_receiver_drop_is_harmless', source)
+
     def test_runner_checks_release_bytes_and_keeps_failed_evidence(self):
         source = (ROOT / 'tests/macos-pin-native-smoke.sh').read_text()
         for required in ('DEBUG_SMOKE_ENTRY_PRESENT_IN_RELEASE', 'timeout=70',

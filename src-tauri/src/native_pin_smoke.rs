@@ -52,12 +52,22 @@ fn need(value: bool, message: &str) -> Result<(), String> {
         Err(message.into())
     }
 }
+fn js_callback(send: tokio::sync::oneshot::Sender<bool>) -> impl Fn(String) + Send + 'static {
+    // Tauri accepts Fn (not FnOnce): take the one-shot only on first delivery.
+    // Late/repeated callbacks after completion or timeout are harmless.
+    let pending = Mutex::new(Some(send));
+    move |value| {
+        if let Ok(mut pending) = pending.lock() {
+            if let Some(send) = pending.take() {
+                let _ = send.send(value == "true");
+            }
+        }
+    }
+}
 async fn js(window: &tauri::WebviewWindow, script: &'static str) -> Result<bool, String> {
     let (send, receive) = tokio::sync::oneshot::channel();
     window
-        .eval_with_callback(script, move |value| {
-            let _ = send.send(value == "true");
-        })
+        .eval_with_callback(script, js_callback(send))
         .map_err(|_| "SMOKE_JS_SCHEDULE")?;
     tokio::time::timeout(Duration::from_secs(5), receive)
         .await
@@ -349,5 +359,30 @@ pub fn run() -> i32 {
         0
     } else {
         1
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::js_callback;
+
+    #[test]
+    fn repeated_fn_callback_keeps_first_result() {
+        fn invoke_twice(callback: impl Fn(String)) {
+            callback("true".into());
+            callback("false".into());
+        }
+        let (send, mut receive) = tokio::sync::oneshot::channel();
+        invoke_twice(js_callback(send));
+        assert!(receive.try_recv().unwrap());
+    }
+
+    #[test]
+    fn callback_after_timeout_or_receiver_drop_is_harmless() {
+        let (send, receive) = tokio::sync::oneshot::channel();
+        let callback = js_callback(send);
+        drop(receive);
+        callback("true".into());
+        callback("false".into());
     }
 }
