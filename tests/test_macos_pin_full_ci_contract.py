@@ -22,6 +22,7 @@ class MacPinFullCIContract(unittest.TestCase):
             self.assertNotIn('continue-on-error:', gate)
             self.assertNotIn('|| true', gate)
             self.assertLess(desktop.index('- name: Build desktop installer'), start)
+            self.assertIn("runner.os == 'Windows' && 'nsis' || 'app,dmg'", desktop[:start])
 
     def test_full_ci_keeps_pin_failure_evidence(self):
         source = (ROOT / '.github/workflows/ci.yml').read_text()

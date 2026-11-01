@@ -27,7 +27,7 @@ class RustInputPreparationContract(unittest.TestCase):
             source = (ROOT / '.github/workflows' / name).read_text()
             self.assertIn("python3 -m unittest discover -s tests -p 'test_*.py' -v", source)
             self.assertIn("cargo test --manifest-path src-tauri/Cargo.toml --locked", source)
-            bundles = 'app,dmg' if name == 'release-checks.yml' else 'dmg'
+            bundles = 'app,dmg'
             self.assertIn("npm run tauri build -- --bundles ${{ runner.os == 'Windows' && 'nsis' || '" + bundles + "' }} -- --locked", source)
 
 

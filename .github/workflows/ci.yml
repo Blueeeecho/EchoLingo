@@ -600,7 +600,7 @@ jobs:
       - name: Rust formatting
         run: cargo fmt --manifest-path src-tauri/Cargo.toml --check
       - name: Build desktop installer
-        run: npm run tauri build -- --bundles ${{ runner.os == 'Windows' && 'nsis' || 'dmg' }} -- --locked
+        run: npm run tauri build -- --bundles ${{ runner.os == 'Windows' && 'nsis' || 'app,dmg' }} -- --locked
       - name: Build same-source isolated Mac debug pin host
         if: runner.os == 'macOS'
         shell: bash

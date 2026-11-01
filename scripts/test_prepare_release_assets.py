@@ -193,7 +193,7 @@ class ReleaseAssetsTests(unittest.TestCase):
         start = expected.index('      - name: Preserve actual Mac pin lifecycle evidence')
         end = expected.index('      - name: Identify the actual embedded', start)
         expected = expected[:start] + expected[end:]
-        normalized = normalized.replace('        id: package_build\n', '').replace("'app,dmg'", "'dmg'")
+        normalized = normalized.replace('        id: package_build\n', '')
         normalized = normalized.replace('        run: |\n          cargo fmt --manifest-path src-tauri/Cargo.toml --check\n          cargo fmt --manifest-path src-tauri/native-capture/Cargo.toml --check', '        run: cargo fmt --manifest-path src-tauri/Cargo.toml --check')
         self.assertEqual(normalized.strip(), expected.strip())
         self.assertNotIn("actions: read", release)
