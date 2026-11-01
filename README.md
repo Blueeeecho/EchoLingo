@@ -3,26 +3,24 @@
 <h1 align="center">EchoLingo · 回声译</h1>
 <p align="center"><strong>让陌生的语言，有熟悉的回声。</strong></p>
 <p align="center">轻量的桌面选词翻译与无感 OCR 工具，让理解跟上思路。</p>
-<p align="center"><a href="https://blueeeecho.github.io/EchoLingo/">官方网站</a> · <a href="https://github.com/Blueeeecho/EchoLingo/releases/tag/0.2.6">Windows 0.2.6 测试版</a> · <a href="https://github.com/Blueeeecho/EchoLingo/releases/tag/0.2.6">macOS 0.2.6 测试版</a> · <a href="https://github.com/Blueeeecho/EchoLingo/issues">反馈与建议</a></p>
+<p align="center"><a href="https://blueeeecho.github.io/EchoLingo/">官方网站</a> · <a href="https://github.com/Blueeeecho/EchoLingo/releases/tag/0.2.8">Windows 0.2.8 测试版</a> · <a href="https://github.com/Blueeeecho/EchoLingo/releases/tag/0.2.8">macOS 0.2.8 测试版</a> · <a href="https://github.com/Blueeeecho/EchoLingo/issues">反馈与建议</a></p>
 
 ## 下载与安装
 
-**[下载 Windows 0.2.6 测试版（x64）](https://github.com/Blueeeecho/EchoLingo/releases/download/0.2.6/EchoLingo_0.2.6_x64-setup.exe)** · **[下载 macOS 0.2.6 测试版（Apple 芯片）](https://github.com/Blueeeecho/EchoLingo/releases/download/0.2.6/EchoLingo_0.2.6_aarch64.dmg)**
+**[下载 Windows 0.2.8 测试版（x64）](https://github.com/Blueeeecho/EchoLingo/releases/download/0.2.8/EchoLingo_0.2.8_windows_x64-setup.exe)** · **[下载 macOS 0.2.8 测试版（Apple 芯片）](https://github.com/Blueeeecho/EchoLingo/releases/download/0.2.8/EchoLingo_0.2.8_macos_arm64.dmg)**
 
 Windows 适用于 Windows 10 1809+ / Windows 11；macOS 安装包适用于 Apple 芯片 Mac、macOS 12+，Apple 系统翻译需要 macOS 26+。安装后打开回声译，应用会驻留托盘或菜单栏；升级前先完整退出旧版。
 
-Windows 与 macOS 现统一提供 0.2.6 测试版。翻译与 OCR 服务独立管理，免费推荐列表可折叠；默认启用 `Alt+D`、`Alt+S`，另提供独立的 `F1` 截图与本地编辑；快捷键可修改、清空或自定义。
+Windows 与 macOS 现统一提供 0.2.8 测试版。翻译与 OCR 服务独立管理，免费推荐列表可折叠；默认启用 `Alt+D`、`Alt+S`，另提供独立的 `F1` 截图与本地编辑；快捷键可修改、清空或自定义。
 
-Windows 偶发 HTML 剪贴板恢复异常、快速连续取词的历史写入问题尚未确认解决；Mac 拖动手感、首帧清晰度与多屏表现仍需实机复测，详见版本说明。
+真实应用取词、中文输入法候选窗、物理多屏与混合 DPI 仍需实际使用验收；Mac 系统翻译资源恢复效果也需要在具体设备上验证，详见版本说明。
 
 这是内测预发布版本，不是稳定版。Windows 未商业签名；macOS 使用 ad hoc 签名，未经 Apple 公证。系统可能提示风险或要求重新授权，请仅安装来自本仓库发布页且校验值相符的文件。
 
-- **Windows 0.2.6**：[版本说明](https://github.com/Blueeeecho/EchoLingo/releases/tag/0.2.6) · [SHA-256 校验值](https://github.com/Blueeeecho/EchoLingo/releases/download/0.2.6/SHA256SUMS.txt) · [发布清单](https://github.com/Blueeeecho/EchoLingo/releases/download/0.2.6/RELEASE-MANIFEST.json)
-- **macOS 0.2.6**：[版本说明](https://github.com/Blueeeecho/EchoLingo/releases/tag/0.2.6) · [SHA-256 校验值](https://github.com/Blueeeecho/EchoLingo/releases/download/0.2.6/SHA256SUMS.txt) · [发布清单](https://github.com/Blueeeecho/EchoLingo/releases/download/0.2.6/RELEASE-MANIFEST.json)
+- **Windows 0.2.8**：[版本说明](https://github.com/Blueeeecho/EchoLingo/releases/tag/0.2.8) · [SHA-256 校验值](https://github.com/Blueeeecho/EchoLingo/releases/download/0.2.8/SHA256SUMS.txt) · [发布清单](https://github.com/Blueeeecho/EchoLingo/releases/download/0.2.8/RELEASE-MANIFEST.json)
+- **macOS 0.2.8**：[版本说明](https://github.com/Blueeeecho/EchoLingo/releases/tag/0.2.8) · [SHA-256 校验值](https://github.com/Blueeeecho/EchoLingo/releases/download/0.2.8/SHA256SUMS.txt) · [发布清单](https://github.com/Blueeeecho/EchoLingo/releases/download/0.2.8/RELEASE-MANIFEST.json)
 
-0.2.6 是测试预发布版，不使用 GitHub 的稳定版 `Latest` 标记。历史版本见[全部发布](https://github.com/Blueeeecho/EchoLingo/releases)。安装包对应 [0.2.6 标签源码](https://github.com/Blueeeecho/EchoLingo/tree/0.2.6)，不等同于默认分支源码；本次仅同步仓库首页说明。
-
-原始构建的初次安装包检查曾失败，后续对相同字节的两平台安装包完成独立检查，未重建或修改二进制；这不等于安装后运行验收。真实 Codex、飞书、QQ、中文输入法候选窗、物理多屏与混合 DPI 仍待实机验收，详见版本说明。
+0.2.8 是测试预发布版，不使用 GitHub 的稳定版 `Latest` 标记。历史版本见[全部发布](https://github.com/Blueeeecho/EchoLingo/releases)。安装包对应 [0.2.8 标签源码](https://github.com/Blueeeecho/EchoLingo/tree/0.2.8)，不等同于默认分支源码；安装包源码与实际文件对应关系请查看发布清单。上一内测版 [0.2.6](https://github.com/Blueeeecho/EchoLingo/releases/tag/0.2.6) 仍可下载。
 
 [macOS 首次安装说明](docs/macos-install.zh-CN.md) · [源码构建](docs/build.md)
 
@@ -31,7 +29,7 @@ Windows 偶发 HTML 剪贴板恢复异常、快速连续取词的历史写入问
 - **选词翻译**：在原应用中选中文字，按 `Alt+D`，原文自动填入浮窗并翻译。
 - **无感 OCR**：按 `Alt+S`，用鼠标左键拖动框选，松开后自动识字、填入原文并翻译。
 
-- **截图与原位编辑**：按 `F1`，点击选择窗口或拖动框选；在原位置添加矩形、箭头、文字、裁剪与遮挡，再复制或保存 PNG。全程本机处理，不调用 OCR 或翻译服务。
+- **截图与原位编辑**：按 `F1`，点击选择窗口或拖动框选；在同一编辑界面再次调整范围，直接在画布上输入文字或便签；支持画笔、高亮、椭圆、编号箭头、标注移动与再编辑、局部笔画擦除，也可固定贴图对照，再复制或保存 PNG。全程本机处理，不调用 OCR 或翻译服务。
 
 空按 `Alt+D` 可以直接输入。原文随时可编辑，`Enter` 翻译，`Shift+Enter` 换行，`Esc` 取消框选。快捷键可在设置中修改；Mac 上 Alt 对应 Option。
 

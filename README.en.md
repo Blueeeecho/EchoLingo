@@ -3,26 +3,24 @@
 <h1 align="center">EchoLingo · 回声译</h1>
 <p align="center"><strong>A familiar echo for unfamiliar words.</strong></p>
 <p align="center">A lightweight desktop app for selection translation and seamless OCR, so understanding can keep up with your reading.</p>
-<p align="center"><a href="https://blueeeecho.github.io/EchoLingo/">Website</a> · <a href="https://github.com/Blueeeecho/EchoLingo/releases/tag/0.2.6">Windows 0.2.6 test prerelease</a> · <a href="https://github.com/Blueeeecho/EchoLingo/releases/tag/0.2.6">macOS 0.2.6 test prerelease</a> · <a href="https://github.com/Blueeeecho/EchoLingo/issues">Feedback</a></p>
+<p align="center"><a href="https://blueeeecho.github.io/EchoLingo/">Website</a> · <a href="https://github.com/Blueeeecho/EchoLingo/releases/tag/0.2.8">Windows 0.2.8 test prerelease</a> · <a href="https://github.com/Blueeeecho/EchoLingo/releases/tag/0.2.8">macOS 0.2.8 test prerelease</a> · <a href="https://github.com/Blueeeecho/EchoLingo/issues">Feedback</a></p>
 
 ## Download and install
 
-**[Download Windows 0.2.6 test prerelease (x64)](https://github.com/Blueeeecho/EchoLingo/releases/download/0.2.6/EchoLingo_0.2.6_x64-setup.exe)** · **[Download macOS 0.2.6 test prerelease (Apple silicon)](https://github.com/Blueeeecho/EchoLingo/releases/download/0.2.6/EchoLingo_0.2.6_aarch64.dmg)**
+**[Download Windows 0.2.8 test prerelease (x64)](https://github.com/Blueeeecho/EchoLingo/releases/download/0.2.8/EchoLingo_0.2.8_windows_x64-setup.exe)** · **[Download macOS 0.2.8 test prerelease (Apple silicon)](https://github.com/Blueeeecho/EchoLingo/releases/download/0.2.8/EchoLingo_0.2.8_macos_arm64.dmg)**
 
 Windows supports Windows 10 1809+ and Windows 11. The macOS package is for Apple silicon Macs on macOS 12 or later. Apple system translation needs macOS 26 or later. After installation, EchoLingo stays in the tray or menu bar. Quit the previous version completely before you upgrade.
 
-Windows and macOS now both offer the 0.2.6 test prerelease. Translation and OCR services are managed separately, with collapsible free-service recommendations. The defaults are `Alt+D`, `Alt+S`, and a separate `F1` screenshot and local editor action; shortcuts can be changed, cleared, or customized.
+Windows and macOS now both offer the 0.2.8 test prerelease. Translation and OCR services are managed separately, with collapsible free-service recommendations. The defaults are `Alt+D`, `Alt+S`, and a separate `F1` screenshot and local editor action; shortcuts can be changed, cleared, or customized.
 
-Intermittent Windows HTML clipboard restoration and history recording during rapid consecutive selections are not confirmed fixed. Mac drag feel, first-frame clarity, and multi-display behavior still need real-machine testing; see the release notes.
+Real-application selection, Chinese IME candidate windows, physical multi-monitor setups and mixed DPI still need hands-on acceptance. Mac system-translation resource recovery also needs verification on the actual device; see the release notes.
 
 This is an internal prerelease, not a stable release. Windows has no commercial code signature; macOS uses ad hoc signing and is not notarized by Apple. Your system may show warnings or request permissions again. Install only files from this repository’s release page with matching checksums.
 
-- **Windows 0.2.6**: [Release notes](https://github.com/Blueeeecho/EchoLingo/releases/tag/0.2.6) · [SHA-256 checksums](https://github.com/Blueeeecho/EchoLingo/releases/download/0.2.6/SHA256SUMS.txt) · [Release manifest](https://github.com/Blueeeecho/EchoLingo/releases/download/0.2.6/RELEASE-MANIFEST.json)
-- **macOS 0.2.6**: [Release notes](https://github.com/Blueeeecho/EchoLingo/releases/tag/0.2.6) · [SHA-256 checksums](https://github.com/Blueeeecho/EchoLingo/releases/download/0.2.6/SHA256SUMS.txt) · [Release manifest](https://github.com/Blueeeecho/EchoLingo/releases/download/0.2.6/RELEASE-MANIFEST.json)
+- **Windows 0.2.8**: [Release notes](https://github.com/Blueeeecho/EchoLingo/releases/tag/0.2.8) · [SHA-256 checksums](https://github.com/Blueeeecho/EchoLingo/releases/download/0.2.8/SHA256SUMS.txt) · [Release manifest](https://github.com/Blueeeecho/EchoLingo/releases/download/0.2.8/RELEASE-MANIFEST.json)
+- **macOS 0.2.8**: [Release notes](https://github.com/Blueeeecho/EchoLingo/releases/tag/0.2.8) · [SHA-256 checksums](https://github.com/Blueeeecho/EchoLingo/releases/download/0.2.8/SHA256SUMS.txt) · [Release manifest](https://github.com/Blueeeecho/EchoLingo/releases/download/0.2.8/RELEASE-MANIFEST.json)
 
-0.2.6 is a test prerelease, not a stable GitHub `Latest` release. See [all releases](https://github.com/Blueeeecho/EchoLingo/releases) for earlier versions. The installers correspond to the [0.2.6 source tag](https://github.com/Blueeeecho/EchoLingo/tree/0.2.6), not the default branch; this update only synchronizes the repository overview.
-
-The original build failed its initial package inspections. Separate checks subsequently inspected the exact same installer bytes on both platforms, without rebuilding or modifying binaries; this is not post-install runtime acceptance. Real Codex, Feishu, QQ, Chinese IME candidate windows, physical multi-monitor setups, and mixed DPI still need hands-on acceptance; see the release notes.
+0.2.8 is a test prerelease, not a stable GitHub `Latest` release. See [all releases](https://github.com/Blueeeecho/EchoLingo/releases) for earlier versions. The installers correspond to the [0.2.8 source tag](https://github.com/Blueeeecho/EchoLingo/tree/0.2.8), not the default branch; See the release manifest for the relationship between source and installer bytes. The previous [0.2.6 preview](https://github.com/Blueeeecho/EchoLingo/releases/tag/0.2.6) remains available.
 
 [First-launch notes for macOS](docs/macos-install.zh-CN.md) (Chinese) · [Build from source](docs/build.md) (Chinese)
 
@@ -31,7 +29,7 @@ The original build failed its initial package inspections. Separate checks subse
 - **Selection translation**: select text in the app you are using, then press `Alt+D`. The popup fills in the text and translates it.
 - **Seamless OCR**: press `Alt+S` and drag with the left mouse button. When you release, EchoLingo reads the text, fills it in, and translates it.
 
-- **Screenshot and in-place editing**: press `F1`, then click a window or drag a region. Add rectangles, arrows, text, cropping, or redaction in place, then copy or save a PNG. Capture and editing stay local, without OCR or translation services.
+- **Screenshot and in-place editing**: press `F1`, then click a window or drag a region. Readjust the capture bounds in the same editor; type text or notes on the canvas and annotate with a pen, highlighter, ellipses or numbered arrows. Move or re-edit annotations, erase parts of strokes, pin a reference image, or copy/save a PNG. Capture and editing stay local, without OCR or translation services.
 
 Press `Alt+D` with nothing selected to type directly. The source stays editable. `Enter` translates, `Shift+Enter` inserts a line break, and `Esc` cancels a region selection. Shortcuts can be changed in Settings. On a Mac, Alt is Option.
 
