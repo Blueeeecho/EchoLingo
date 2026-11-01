@@ -305,6 +305,9 @@ $('.editor-toolbar').addEventListener('pointerdown', focusFromEditorPointer, tru
 canvas.addEventListener('pointerdown', focusFromEditorPointer, true);
 canvas.addEventListener('pointerdown', async event => {
   if (event.button !== 0 || busy || loading || !model ) return;
+  // Text owns focus from this pointer gesture. The browser's later default
+  // mousedown focus on the canvas would otherwise immediately blur/commit it.
+  if (tool === 'text') event.preventDefault();
   const start = point(event); canvas.focus({ preventScroll: true });
   if (textOpen() && !commitText()) return;
   if (tool === 'select') {

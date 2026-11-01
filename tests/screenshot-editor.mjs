@@ -152,6 +152,7 @@ try {
     // may prematurely commit an active IME candidate. Text is plain, not HTML.
     await fresh(); await page.locator('.editor-toolbar button[data-tool="text"]').click();
     await page.locator('#image-canvas').click({ position: { x: 5, y: 5 } });
+    assert.equal(await page.locator('#annotation-text').evaluate(input => document.activeElement === input && !input.closest('[hidden]')), true, 'the canvas click retains direct-input focus after native pointer defaults');
     await page.locator('#annotation-text').fill('中文标注\n<script>alert(1)</script>');
     await page.locator('#annotation-text').dispatchEvent('compositionstart');
     await page.locator('#annotation-text').dispatchEvent('keydown', { key: 'Enter', code: 'Enter', ctrlKey: true, isComposing: true, keyCode: 229 });
