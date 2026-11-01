@@ -239,8 +239,50 @@ public static class WindowsBrowserSelectionBridge {
     // Supplemental later representation only, never a retry of the acceptance
     // check. DataObject's explicit ComTypes interface forwards to its existing
     // OLE object. Do not reacquire, reflect into the wrapper, or release its RCW.
+    // Only the first original mismatch among the three fixed synthetic formats
+    // may be observed. Never query a passing format or arbitrary clipboard name.
+    static int FirstFailedKnownFormat(List<Dictionary<string,object>> formats){
+        if(formats==null)return 0;
+        foreach(var row in formats){
+            object equal,name;
+            if(!row.TryGetValue("exactEqual",out equal)||!(equal is bool)||(bool)equal
+                ||!row.TryGetValue("format",out name)||!(name is string))continue;
+            if((string)name==DataFormats.UnicodeText)return 1;
+            if((string)name==DataFormats.Html)return 2;
+            if((string)name==DataFormats.Rtf)return 3;
+        }
+        return 0;
+    }
+    static string KnownComFormat(int kind){
+        return kind==1?DataFormats.UnicodeText:kind==2?DataFormats.Html:kind==3?DataFormats.Rtf:null;
+    }
+    static Encoding KnownComEncoding(int kind){
+        return kind==1?Encoding.Unicode:kind==2?Encoding.UTF8:kind==3?Encoding.ASCII:null;
+    }
+    static void FailedComFormatPolicySelfTest(){
+        var rows=new List<Dictionary<string,object>>();
+        Need(FirstFailedKnownFormat(null)==0&&FirstFailedKnownFormat(rows)==0,"COM_FORMAT_NO_EVIDENCE_NO_REQUEST");
+        rows.Add(new Dictionary<string,object>{{"format","Unknown generated format"},{"exactEqual",false}});
+        rows.Add(new Dictionary<string,object>{{"format",DataFormats.UnicodeText},{"exactEqual",true}});
+        Need(FirstFailedKnownFormat(rows)==0,"COM_FORMAT_UNKNOWN_AND_PASSING_NOT_READ");
+        rows.Add(new Dictionary<string,object>{{"format",DataFormats.Html},{"exactEqual",false}});
+        rows.Add(new Dictionary<string,object>{{"format",DataFormats.Rtf},{"exactEqual",false}});
+        Need(FirstFailedKnownFormat(rows)==2,"COM_FORMAT_FIRST_FAILED_HTML_NOT_PASSING_UNICODE");
+        rows[2]["exactEqual"]=true;
+        Need(FirstFailedKnownFormat(rows)==3,"COM_FORMAT_FAILED_RTF_SELECTED");
+        rows[1]["exactEqual"]=false;
+        Need(FirstFailedKnownFormat(rows)==1,"COM_FORMAT_FIRST_FAILED_UNICODE_SELECTED");
+        rows[1]["exactEqual"]=0;rows[3].Remove("exactEqual");
+        Need(FirstFailedKnownFormat(rows)==0,"COM_FORMAT_MALFORMED_VERDICT_NOT_READ");
+        foreach(int kind in new int[]{1,2,3}){
+            byte[] bytes=KnownComEncoding(kind).GetBytes("Generated 2468\0");
+            Need(KnownComFormat(kind)!=null&&TerminatedBytes(bytes,kind==1)==bytes.Length
+                &&ExactPayload(bytes,bytes,kind==1),"COM_FORMAT_FIXED_ENCODING_AND_TERMINATOR");
+        }
+        Need(KnownComFormat(0)==null&&KnownComEncoding(4)==null,"COM_FORMAT_UNSUPPORTED_REJECTED");
+    }
     static Dictionary<string,object> ObserveFailedOleCom(IDataObject actual,DataObject expected,Dictionary<string,object> observation){
-        var result=new Dictionary<string,object>{{"requested",0},{"sameAcquiredObject",1},{"originalVerdictChanged",0},{"laterRepresentationOnly",1},{"mediumReleased",0}};
+        var result=new Dictionary<string,object>{{"requested",0},{"formatKind",0},{"sameAcquiredObject",1},{"originalVerdictChanged",0},{"laterRepresentationOnly",1},{"mediumReleased",0}};
         ComTypes.STGMEDIUM medium=new ComTypes.STGMEDIUM();bool received=false;
         try{
             uint generation=GetClipboardSequenceNumber();
@@ -248,10 +290,20 @@ public static class WindowsBrowserSelectionBridge {
             // fixed seed payloads under one native lock, already released.
             bool guarded=!NoClipboardProbe&&FailedOleCleanupGeneration(observation,generation);
             result["ownedGenerationGuardPassed"]=guarded?1:0;if(!guarded)return result;
+            object formats;
+            if(!observation.TryGetValue("formats",out formats))return result;
+            int kind=FirstFailedKnownFormat(formats as List<Dictionary<string,object>>);
+            result["formatKind"]=kind;string selected=KnownComFormat(kind);Encoding encoding=KnownComEncoding(kind);
+            if(selected==null||encoding==null)return result;
+            string expectedText=expected.GetData(selected,false) as string;if(expectedText==null)return result;
+            if(kind==3)foreach(char character in expectedText)if(character>127)return result;
+            byte[] wanted=encoding.GetBytes(expectedText+"\0");
+            if(wanted.Length>65536)return result;
+            uint nativeFormat=kind==1?13u:RegisterClipboardFormat(selected);if(nativeFormat==0)return result;
             var com=actual as ComTypes.IDataObject;
             result["sameObjectComInterfaceAvailable"]=com!=null?1:0;if(com==null)return result;
             if(GetClipboardSequenceNumber()!=generation){result["generationChangedBeforeRequest"]=1;return result;}
-            var format=new ComTypes.FORMATETC {cfFormat=13,dwAspect=ComTypes.DVASPECT.DVASPECT_CONTENT,lindex=-1,ptd=IntPtr.Zero,tymed=ComTypes.TYMED.TYMED_HGLOBAL};
+            var format=new ComTypes.FORMATETC {cfFormat=unchecked((short)nativeFormat),dwAspect=ComTypes.DVASPECT.DVASPECT_CONTENT,lindex=-1,ptd=IntPtr.Zero,tymed=ComTypes.TYMED.TYMED_HGLOBAL};
             result["requested"]=1;
             // NEVER hold OpenClipboard across this COM call (delayed rendering).
             com.GetData(ref format,out medium);received=true;result["hresult"]=0;
@@ -265,9 +317,8 @@ public static class WindowsBrowserSelectionBridge {
             try{
                 if(GetClipboardSequenceNumber()!=generation){result["generationChangedBeforePayloadRead"]=1;return result;}
                 byte[] bytes=new byte[(int)size];Marshal.Copy(pointer,bytes,0,bytes.Length);
-                result["terminatedBytes"]=TerminatedBytes(bytes,true);
-                byte[] wanted=Encoding.Unicode.GetBytes((string)expected.GetData(DataFormats.UnicodeText,false)+"\0");
-                result["fixedSeedExactEqual"]=ExactPayload(bytes,wanted,true)?1:0;
+                result["terminatedBytes"]=TerminatedBytes(bytes,kind==1);
+                result["fixedSeedExactEqual"]=ExactPayload(bytes,wanted,kind==1)?1:0;
                 result["generationUnchangedAfterPayloadRead"]=GetClipboardSequenceNumber()==generation?1:0;
             }finally{GlobalUnlock(medium.unionmember);}
         }catch(COMException error){result["hresult"]=error.ErrorCode;result["comException"]=1;}
@@ -617,7 +668,7 @@ public static class WindowsBrowserSelectionBridge {
     }
     public static void Run(string helper,string assembly,string browser,string application,string mockUrl,string provider,string hash,long bytes,bool diagnostics,string shortcutGesture,bool noClipboardProbe){
         NoClipboardProbe=noClipboardProbe;Need(!noClipboardProbe||(!String.IsNullOrEmpty(application)&&!diagnostics),"NO_PROBE_REQUIRES_ORDINARY_ACTUAL_APPLICATION");
-        RawPayloadSelfTest();ClipboardCleanupPolicySelfTest();FailedOleCleanupPolicySelfTest();
+        RawPayloadSelfTest();ClipboardCleanupPolicySelfTest();FailedOleCleanupPolicySelfTest();FailedComFormatPolicySelfTest();
         Need(shortcutGesture=="instant"||shortcutGesture=="paced","SHORTCUT_GESTURE_INVALID");Need(shortcutGesture=="instant"||!String.IsNullOrEmpty(application),"PACED_GESTURE_REQUIRES_APPLICATION");ShortcutGesture=shortcutGesture;
         Helper=String.IsNullOrEmpty(helper)?null:Path.GetFullPath(helper);Assembly=String.IsNullOrEmpty(assembly)?null:Path.GetFullPath(assembly);Browser=Path.GetFullPath(browser);Need(Helper==null||!Helper.Contains("\"")&&!Assembly.Contains("\""),"INVALID_FIXTURE_PATH");
         IDataObject existing=Clipboard.GetDataObject();Need(existing==null||existing.GetFormats(false).Length==0,"FRESH_EMPTY_CLIPBOARD_REQUIRED");

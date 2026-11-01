@@ -43,7 +43,8 @@ class BrowserClipboardCleanupContract(unittest.TestCase):
             self.assertNotIn(forbidden, probe)
         self.assertLess(probe.index("FailedOleCleanupGeneration"), probe.index("com.GetData("))
         self.assertLess(probe.index("generationChangedBeforePayloadRead"), probe.index("Marshal.Copy"))
-        self.assertIn("cfFormat=13", probe)
+        self.assertIn("cfFormat=unchecked((short)nativeFormat)", probe)
+        self.assertIn("uint nativeFormat=kind==1?13u:RegisterClipboardFormat(selected)", probe)
         self.assertIn("lindex=-1", probe)
         self.assertIn("tymed=ComTypes.TYMED.TYMED_HGLOBAL", probe)
 
@@ -53,8 +54,24 @@ class BrowserClipboardCleanupContract(unittest.TestCase):
         self.assertIn("finally{GlobalUnlock(medium.unionmember);}", probe)
         self.assertIn("if(received){try{ReleaseStgMedium(ref medium);", probe)
         self.assertIn('catch(COMException error){result["hresult"]=error.ErrorCode;', probe)
-        self.assertIn('result["fixedSeedExactEqual"]=ExactPayload(bytes,wanted,true)?1:0;', probe)
+        self.assertIn('result["fixedSeedExactEqual"]=ExactPayload(bytes,wanted,kind==1)?1:0;', probe)
         self.assertNotIn('result["payload"]', probe)
+
+    def test_com_probe_selects_only_first_original_failed_known_format(self):
+        policy = SOURCE.split("    static int FirstFailedKnownFormat", 1)[1].split("    static Dictionary<string,object> ObserveFailedOleCom", 1)[0]
+        self.assertIn('!(equal is bool)||(bool)equal', policy)
+        for name in ('UnicodeText', 'Html', 'Rtf'):
+            self.assertIn('DataFormats.' + name, policy)
+        self.assertIn('kind==1?Encoding.Unicode:kind==2?Encoding.UTF8:kind==3?Encoding.ASCII:null', policy)
+        self.assertIn('FailedComFormatPolicySelfTest();', SOURCE)
+        for label in ('NO_EVIDENCE_NO_REQUEST', 'UNKNOWN_AND_PASSING_NOT_READ', 'FIRST_FAILED_HTML_NOT_PASSING_UNICODE', 'FAILED_RTF_SELECTED', 'FIRST_FAILED_UNICODE_SELECTED', 'MALFORMED_VERDICT_NOT_READ', 'FIXED_ENCODING_AND_TERMINATOR', 'UNSUPPORTED_REJECTED'):
+            self.assertIn('COM_FORMAT_' + label, policy)
+        probe = SOURCE.split("    static Dictionary<string,object> ObserveFailedOleCom", 1)[1].split("    static Dictionary<string,object> QueryDiagnostics", 1)[0]
+        self.assertIn('FirstFailedKnownFormat(formats as List<Dictionary<string,object>>)', probe)
+        self.assertIn('result["formatKind"]=kind;', probe)
+        self.assertIn('if(selected==null||encoding==null)return result;', probe)
+        self.assertEqual(probe.count('com.GetData(ref format,out medium)'), 1)
+        self.assertIn('TerminatedBytes(bytes,kind==1)', probe)
 
 
 if __name__ == "__main__":
