@@ -16,6 +16,15 @@ jobs:
       - name: Compile exact native helper without the app or offline engine
         shell: powershell
         run: powershell.exe -NoProfile -STA -ExecutionPolicy Bypass -File scripts/build-windows-native-helper.ps1 -HelperPath src-tauri/native/windows.ps1 -OutputPath "$env:RUNNER_TEMP/echolingo-native-diagnostics.dll"
+      - name: Verify actual Unicode ANSI OEM and absent-format readiness
+        shell: powershell
+        run: |
+          $global:LASTEXITCODE = 1
+          $output = @(& powershell.exe -NoProfile -STA -ExecutionPolicy Bypass -File tests/windows-clipboard-readiness-smoke.ps1 -IsolatedTestSession 2>&1)
+          $fixtureExit = $LASTEXITCODE
+          $output | Out-File "$env:RUNNER_TEMP/echolingo-clipboard-readiness.log" -Encoding utf8
+          $output | Write-Output
+          exit $fixtureExit
       - name: Compare generated clipboard publication without changing original acceptance
         id: comparison
         shell: powershell
@@ -28,11 +37,22 @@ jobs:
           $output | Out-File "$env:RUNNER_TEMP/echolingo-clipboard-publication-comparison.log" -Encoding utf8
           $output | Write-Output
           exit $fixtureExit
+      - name: Preserve original selected-text clipboard smoke as a hard gate
+        shell: powershell
+        run: |
+          $global:LASTEXITCODE = 1
+          $output = @(& powershell.exe -NoProfile -STA -ExecutionPolicy Bypass -File tests/windows-native-smoke.ps1 2>&1)
+          $fixtureExit = $LASTEXITCODE
+          $output | Out-File "$env:RUNNER_TEMP/echolingo-original-native-smoke.log" -Encoding utf8
+          $output | Write-Output
+          exit $fixtureExit
       - uses: actions/upload-artifact@v4
         if: always()
         with:
           name: EchoLingo-028-clipboard-publication-comparison
           if-no-files-found: error
           path: |
+            ${{ runner.temp }}/echolingo-clipboard-readiness.log
+            ${{ runner.temp }}/echolingo-original-native-smoke.log
             ${{ runner.temp }}/echolingo-clipboard-comparison-source.txt
             ${{ runner.temp }}/echolingo-clipboard-publication-comparison.log

@@ -497,6 +497,14 @@ public static class SelectionCopyPolicy {
         throw new InvalidOperationException("NO_SELECTION: No text is selected in the source application.");
     }
 
+    // A source may clear first and publish text later. Do not enter WinForms
+    // OLE/RPC (including its hidden retries) while no Unicode text is offered.
+    // This is readiness only; CompleteCopy still owns the deadline, generation,
+    // source and restoration checks. A ready OLE provider can still block.
+    public static string ReadPublishedUnicode(bool available, Func<string> read) {
+        return available ? read() : null;
+    }
+
     public enum Observation { Waiting, Completed, UnchangedTimeout, UnfinishedTimeout, Superseded }
     public sealed class Completion {
         readonly uint initial;
@@ -620,6 +628,7 @@ public static class EchoLingoNative {
     [DllImport("user32.dll")] static extern uint GetClipboardSequenceNumber();
     [DllImport("user32.dll")] static extern bool IsClipboardFormatAvailable(uint format);
     [DllImport("user32.dll")] static extern IntPtr GetClipboardOwner();
+    [DllImport("user32.dll")] static extern IntPtr GetOpenClipboardWindow();
     [DllImport("user32.dll", SetLastError=true)] static extern bool OpenClipboard(IntPtr owner);
     [DllImport("user32.dll", SetLastError=true)] static extern bool EmptyClipboard();
     [DllImport("user32.dll")] static extern bool CloseClipboard();
@@ -1190,20 +1199,35 @@ public static class EchoLingoNative {
             throw new InvalidOperationException("CLIPBOARD_CHANGED: The new clipboard data does not belong to the verified source; current contents were preserved.");
     }
     static string ReadSelectionClipboardText() {
-        // Opt-in diagnostics for generated fixtures only. Do not change the
-        // existing OLE read, readiness decision, deadline or restoration policy.
-        if (Environment.GetEnvironmentVariable("ECHOLINGO_SELECTION_TRACE") != "1")
-            return Clipboard.ContainsText() ? Clipboard.GetText(TextDataFormat.UnicodeText) : null;
+        // Windows advertises synthesized Unicode for CF_TEXT/CF_OEMTEXT too.
+        // This metadata query neither opens the clipboard nor asks the owner
+        // to render data. A source publishing after this check is observed on
+        // the next iteration under the unchanged 1200ms completion deadline.
+        bool available = IsClipboardFormatAvailable(13);
+        bool trace = Environment.GetEnvironmentVariable("ECHOLINGO_SELECTION_TRACE") == "1";
+        if (!trace) return SelectionCopyPolicy.ReadPublishedUnicode(available,
+            delegate { return Clipboard.ContainsText() ? Clipboard.GetText(TextDataFormat.UnicodeText) : null; });
         Stopwatch readClock = Stopwatch.StartNew();
-        Console.Error.WriteLine("CLIPBOARD_READ stage=start unicodeAvailable=" + (IsClipboardFormatAvailable(13) ? 1 : 0)
+        Console.Error.WriteLine("CLIPBOARD_READ stage=start unicodeAvailable=" + (available ? 1 : 0)
+            + " ownerPresent=" + (GetClipboardOwner() != IntPtr.Zero ? 1 : 0)
+            + " openWindowPresent=" + (GetOpenClipboardWindow() != IntPtr.Zero ? 1 : 0)
             + " sequence=" + GetClipboardSequenceNumber() + " utcMs=" + (DateTime.UtcNow.Ticks / TimeSpan.TicksPerMillisecond));
-        bool contains = Clipboard.ContainsText();
-        Console.Error.WriteLine("CLIPBOARD_READ stage=contains present=" + (contains ? 1 : 0)
-            + " elapsedMs=" + readClock.ElapsedMilliseconds + " sequence=" + GetClipboardSequenceNumber());
-        string text = contains ? Clipboard.GetText(TextDataFormat.UnicodeText) : null;
-        Console.Error.WriteLine("CLIPBOARD_READ stage=finished textPresent=" + (!String.IsNullOrWhiteSpace(text) ? 1 : 0)
-            + " elapsedMs=" + readClock.ElapsedMilliseconds + " sequence=" + GetClipboardSequenceNumber());
-        return text;
+        if (!available) Console.Error.WriteLine("CLIPBOARD_READ stage=not-ready oleCalls=0 sequence=" + GetClipboardSequenceNumber());
+        return SelectionCopyPolicy.ReadPublishedUnicode(available, delegate {
+            // Same operations as ContainsText(UnicodeText), split only for the
+            // opt-in generated fixture. No extra OLE acquisition or retries.
+            Console.Error.WriteLine("CLIPBOARD_READ stage=ole-object-start elapsedMs=" + readClock.ElapsedMilliseconds);
+            IDataObject data = Clipboard.GetDataObject();
+            Console.Error.WriteLine("CLIPBOARD_READ stage=ole-object-finished objectPresent=" + (data != null ? 1 : 0)
+                + " elapsedMs=" + readClock.ElapsedMilliseconds + " sequence=" + GetClipboardSequenceNumber());
+            bool contains = data != null && data.GetDataPresent(DataFormats.UnicodeText, false);
+            Console.Error.WriteLine("CLIPBOARD_READ stage=contains present=" + (contains ? 1 : 0)
+                + " elapsedMs=" + readClock.ElapsedMilliseconds + " sequence=" + GetClipboardSequenceNumber());
+            string text = contains ? Clipboard.GetText(TextDataFormat.UnicodeText) : null;
+            Console.Error.WriteLine("CLIPBOARD_READ stage=finished textPresent=" + (!String.IsNullOrWhiteSpace(text) ? 1 : 0)
+                + " elapsedMs=" + readClock.ElapsedMilliseconds + " sequence=" + GetClipboardSequenceNumber());
+            return text;
+        });
     }
     sealed class ClipboardSnapshotException : InvalidOperationException {
         public readonly int Kind;
