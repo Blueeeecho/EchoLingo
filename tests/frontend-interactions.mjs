@@ -2194,7 +2194,11 @@ try {
   assert.equal(await page.evaluate(() => window.__qa.translationRequests.at(-1).text), 'QA latest reopened ticket wins');
   assert.equal(await page.locator('.result-text').isVisible(), true);
   assert.match(await page.locator('.result-text').evaluate((element) => getComputedStyle(element).fontFamily), /^"?Times New Roman"?,/);
-  assert.doesNotMatch(await page.locator('#source-text').evaluate((element) => getComputedStyle(element).fontFamily), /Times New Roman/);
+  // Both reading panels deliberately share the platform reading stack; only
+  // controls keep UI typography (the same contract is checked on Windows below).
+  assert.equal(await page.locator('#source-text').evaluate((element) => getComputedStyle(element).fontFamily),
+    await page.locator('.result-text').evaluate((element) => getComputedStyle(element).fontFamily));
+  assert.doesNotMatch(await page.locator('.result-actions button').first().evaluate((element) => getComputedStyle(element).fontFamily), /Times New Roman/);
 
   // Fitting content is asynchronous. An older capture must not show its popup
   // after the user has already hidden it and reopened a newer input window.
