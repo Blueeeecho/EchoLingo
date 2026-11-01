@@ -19,6 +19,45 @@ public static partial class EchoLingoApplicationSmoke {
     [DllImport("kernel32.dll")] static extern UIntPtr GlobalSize(IntPtr memory);
     [DllImport("kernel32.dll")] static extern IntPtr GlobalLock(IntPtr memory);
     [DllImport("kernel32.dll")] static extern bool GlobalUnlock(IntPtr memory);
+    [DllImport("user32.dll")] static extern bool GetClientRect(IntPtr window,out RECT rect);
+    [DllImport("user32.dll")] static extern bool ClientToScreen(IntPtr window,ref Point point);
+    [DllImport("user32.dll")] static extern uint GetDpiForWindow(IntPtr window);
+    [DllImport("user32.dll")] static extern int GetSystemMetricsForDpi(int index,uint dpi);
+    [StructLayout(LayoutKind.Sequential,CharSet=CharSet.Unicode)] struct ScreenshotOsVersion {
+        public uint size,major,minor,build,platform;
+        [MarshalAs(UnmanagedType.ByValTStr,SizeConst=128)] public string servicePack;
+    }
+    [DllImport("ntdll.dll",CharSet=CharSet.Unicode)] static extern int RtlGetVersion(ref ScreenshotOsVersion version);
+    static bool ScreenshotClientFrameMatches(int[] insets,int frame,int top) {return frame>0&&insets.Length==4&&insets[0]==frame&&insets[1]==top&&insets[2]==frame&&insets[3]==frame;}
+    static bool ScreenshotMeasureClientFrame(IntPtr pin,int expectedPid,Dictionary<string,object> result) {
+        uint pid;GetWindowThreadProcessId(pin,out pid);Assert(pid==expectedPid&&IsWindow(pin)&&IsWindowVisible(pin),"Pin frame measurement requires the visible owned pin.");
+        // Tao 0.37.2 keeps WS_CAPTION on top-level undecorated windows. Its
+        // WM_NCCALCSIZE and util::calculate_insets_for_dpi define the real frame.
+        // https://github.com/tauri-apps/tao/blob/tao-v0.37.2/src/platform_impl/windows/util.rs
+        long style=GetWindowLongPtr(pin,-16).ToInt64();result["nativePinStyle"]=style;
+        RECT outer=new RECT(),client=new RECT();Assert(GetWindowRect(pin,out outer)&&GetClientRect(pin,out client),"Cannot measure owned pin client frame.");
+        Point first=new Point(client.left,client.top),last=new Point(client.right,client.bottom);
+        Assert(ClientToScreen(pin,ref first)&&ClientToScreen(pin,ref last),"Cannot map owned pin client frame.");
+        uint dpi=GetDpiForWindow(pin);ScreenshotOsVersion version=new ScreenshotOsVersion();version.size=(uint)Marshal.SizeOf(typeof(ScreenshotOsVersion));
+        Assert(dpi>=96&&dpi<=768&&RtlGetVersion(ref version)==0,"Cannot establish actual pin DPI/Windows build.");
+        int frame=GetSystemMetricsForDpi(32,dpi)+GetSystemMetricsForDpi(92,dpi);
+        int top=version.build>=22000?(int)Math.Floor(dpi/96.0+0.5):0;
+        int[] insets=new int[]{first.X-outer.left,first.Y-outer.top,outer.right-last.X,outer.bottom-last.Y};
+        result["nativePinClientFrame"]=new Dictionary<string,object>{{"dpi",dpi},{"windowsBuild",version.build},{"frameThickness",frame},{"insets",insets}};
+        Assert(client.left==0&&client.top==0&&client.right>0&&client.bottom>0,"Invalid measured client area.");
+        return ScreenshotClientFrameMatches(insets,frame,top);
+    }
+    static void ScreenshotVerifyPinClientFrame(Form source,Process app,IntPtr pin,Dictionary<string,object> result) {
+        Assert(ScreenshotMeasureClientFrame(pin,app.Id,result),"Pinned image has unexpected nonclient/title-bar geometry.");
+        Dictionary<string,object> decorated=new Dictionary<string,object>();
+        Assert(!ScreenshotMeasureClientFrame(source.Handle,Process.GetCurrentProcess().Id,decorated),"Client-frame oracle accepted the actual decorated generated source.");
+        result["nativeDecoratedSourceFrame"]=decorated;
+        Dictionary<string,object> metrics=(Dictionary<string,object>)decorated["nativePinClientFrame"];
+        int expectedTop=Convert.ToUInt32(metrics["windowsBuild"])>=22000?(int)Math.Floor(Convert.ToUInt32(metrics["dpi"])/96.0+0.5):0;
+        Assert((((long)decorated["nativePinStyle"])&0x00C00000L)==0x00C00000L&&((int[])metrics["insets"])[1]>expectedTop,"Generated source negative control lacks an actual caption strip.");
+        result["nativeDecoratedSourceRejected"]=true;
+        result["nativeBorderlessVerified"]=true;
+    }
     static ScreenshotClipboardLease ScreenshotOwnedClipboard;
     static Bitmap ScreenshotExpectedWindow;
     static List<Dictionary<string,object>> ScreenshotNativeOpenObservations,ScreenshotNativeCancelObservations;
@@ -707,7 +746,7 @@ public static partial class EchoLingoApplicationSmoke {
             Assert(!Convert.ToBoolean(completedForeground["isPin"])&&!Convert.ToBoolean(completedForeground["isMain"]),"Completed handoff activated the pin or main window.");
             if(!annotated)RequireForeground(form);Assert(ScreenshotPinTopmost(pin),"New reference window is not native topmost.");
             Rectangle work=Screen.FromPoint(first).WorkingArea,initial=ScreenshotPinBounds(pin);Assert(work.Contains(initial),"Pinned outer frame is not clamped to capture monitor work area.");
-            ScreenshotPinPixels(app,pin,selected,annotated);result["rasterVisible"]=true;result["editedRasterVisible"]=annotated;result["passiveShowPreservedSourceForeground"]=!annotated;result["pinAndMainNotObservedForeground"]=true;result["decodedReferenceVisibleAndCaptureDismissed"]=true;Assert((GetWindowLongPtr(pin,-16).ToInt64()&0x00C00000L)==0,"Pinned image still has a native title bar.");result["nativeBorderlessVerified"]=true;result["nativeTopmostInitially"]=true;result["initialOuterFrameWithinSourceWorkArea"]=true;
+            ScreenshotPinPixels(app,pin,selected,annotated);result["rasterVisible"]=true;result["editedRasterVisible"]=annotated;result["passiveShowPreservedSourceForeground"]=!annotated;result["pinAndMainNotObservedForeground"]=true;result["decodedReferenceVisibleAndCaptureDismissed"]=true;ScreenshotVerifyPinClientFrame(form,app,pin,result);result["nativeTopmostInitially"]=true;result["initialOuterFrameWithinSourceWorkArea"]=true;
             ScreenshotPinToggle(app,pin,true,result);result["nativeUnpinVerified"]=true;ScreenshotPinToggle(app,pin,false,result);result["nativeRepinVerified"]=true;
             // Native Move/Size exercises actual HWND geometry without a global
             // mouse marathon or accidental drag into a foreign application.

@@ -45,6 +45,24 @@ def verify_adjustment(case, action):
             raise ValueError('Web adjustment evidence absent: ' + field)
 
 
+def verify_pin_client_frame(case):
+    state = case.get('nativePinClientFrame')
+    if type(case.get('nativePinStyle')) is not int or not isinstance(state, dict):
+        raise ValueError('Raw pin style and actual client frame are required')
+    for key in ('dpi', 'windowsBuild', 'frameThickness'):
+        if type(state.get(key)) is not int:
+            raise ValueError('Exact native frame metrics required')
+    dpi, build, frame = (state[key] for key in ('dpi', 'windowsBuild', 'frameThickness'))
+    if not 96 <= dpi <= 768 or build <= 0 or frame <= 0:
+        raise ValueError('Invalid native frame metrics')
+    insets = state.get('insets')
+    if not isinstance(insets, list) or len(insets) != 4 or any(type(x) is not int for x in insets):
+        raise ValueError('Four exact physical client insets required')
+    top = (dpi + 48) // 96 if build >= 22000 else 0
+    if insets != [frame, top, frame, frame]:
+        raise ValueError('Unexpected title-bar/nonclient geometry')
+
+
 def verify_pin(report):
     if any(type(report.get(field)) is not int or report[field] != 2 for field in ('screenshotPinRequiredCases', 'screenshotPinPassedCases')):
         raise ValueError('Both passive and annotated native pin cases are required')
@@ -60,6 +78,28 @@ def verify_pin(report):
                 raise ValueError('Native pin evidence absent: ' + field)
         if type(case.get('webAdjustmentHandleCount')) is not int or case['webAdjustmentHandleCount'] != 8:
             raise ValueError('All eight Web resize handles must be exercised')
+        verify_pin_client_frame(case)
+        if case.get('nativeDecoratedSourceRejected') is not True:
+            raise ValueError('Actual decorated source negative control required')
+        decorated = case.get('nativeDecoratedSourceFrame')
+        if not isinstance(decorated, dict):
+            raise ValueError('Actual decorated source frame metrics required')
+        try:
+            verify_pin_client_frame(decorated)
+        except ValueError:
+            frame = decorated.get('nativePinClientFrame', {})
+            if (type(decorated.get('nativePinStyle')) is not int or not isinstance(frame, dict)
+                    or not isinstance(frame.get('insets'), list) or len(frame['insets']) != 4
+                    or any(type(x) is not int for x in frame['insets'])
+                    or type(frame.get('dpi')) is not int or not 96 <= frame['dpi'] <= 768
+                    or type(frame.get('windowsBuild')) is not int or frame['windowsBuild'] <= 0
+                    or type(frame.get('frameThickness')) is not int or frame['frameThickness'] <= 0):
+                raise ValueError('Malformed decorated negative-control metrics')
+            expected_top = (frame['dpi'] + 48) // 96 if frame['windowsBuild'] >= 22000 else 0
+            if decorated['nativePinStyle'] & 0x00C00000 != 0x00C00000 or frame['insets'][1] <= expected_top:
+                raise ValueError('Decorated negative control must contain an actual caption strip')
+        else:
+            raise ValueError('Decorated negative control matched borderless frame')
         verify_adjustment(case, 'solid' if annotated else 'pin')
         if annotated and (case.get('initialEditorShowPreservedSourceForeground') is not True or case.get('webInitialToolSelected') is not True or case.get('explicitEditorInteractionVerified') is not True or case.get('postCaptureInteractionTarget') != 'selected-solid-tool' or type(case.get('postCaptureInteractionClicks')) is not int or case.get('postCaptureInteractionClicks') != 1):
             raise ValueError('Web solid tool must be selected before intentional editor annotation')

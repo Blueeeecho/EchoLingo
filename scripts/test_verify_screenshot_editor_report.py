@@ -3,7 +3,7 @@ import json
 import hashlib
 import unittest
 from unittest import mock
-from verify_screenshot_editor_report import EXPECTED_CASES, PIN_CASES, PIN_FIELDS, verify, verify_report, verify_installed_acceptance
+from verify_screenshot_editor_report import EXPECTED_CASES, PIN_CASES, PIN_FIELDS, verify, verify_report, verify_installed_acceptance, verify_pin_client_frame
 
 
 def adjustment(action):
@@ -36,6 +36,8 @@ def complete(installed=False):
             nativeNoActivateBeforePhysicalClick=not annotated, physicalPinClickOwnedTargetVerified=not annotated, handoffForegroundSamples=1,
             foregroundBeforePinInvoke=copy.deepcopy(editor if annotated else source), foregroundAfterPinInvoke=copy.deepcopy(editor if annotated else source),
             foregroundDuringPinHandoff=copy.deepcopy(source), foregroundAtVisibleHandoff=copy.deepcopy(source))
+        case.update(nativePinStyle=0x00C00000, nativePinClientFrame=dict(dpi=96, windowsBuild=26100, frameThickness=8, insets=[8,1,8,8]))
+        case.update(nativeDecoratedSourceRejected=True, nativeDecoratedSourceFrame=dict(nativePinStyle=0x00C00000,nativePinClientFrame=dict(dpi=96,windowsBuild=26100,frameThickness=8,insets=[8,31,8,8])))
         case.update(adjustment('solid' if annotated else 'pin'))
         if annotated: case.update(explicitEditorInteractionVerified=True, postCaptureInteractionTarget="selected-solid-tool", postCaptureInteractionClicks=1, webInitialToolSelected=True, initialEditorShowPreservedSourceForeground=True)
         report['screenshotPinCases'].append(case)
@@ -305,4 +307,29 @@ class ScreenshotEditorReport(unittest.TestCase):
         report=complete();report['screenshotNativeCompletion']['nativeCaptureBackend']=True;self.rejects(report)
 
 
-if __name__ == '__main__': unittest.main()
+
+
+class PinClientFrameTests(unittest.TestCase):
+    def test_complete_report_requires_actual_decorated_negative_control(self):
+        for field, value in (('nativeDecoratedSourceRejected', False), ('nativeDecoratedSourceFrame', {}), ('nativePinClientFrame', {})):
+            report=complete();report['screenshotPinCases'][0][field]=value
+            with self.assertRaises(ValueError): verify_report(report)
+        report=complete();case=report['screenshotPinCases'][0]
+        case['nativeDecoratedSourceFrame']['nativePinClientFrame']['insets']=[9,1,8,8]
+        with self.assertRaises(ValueError): verify_report(report)
+
+    def test_tao_shadow_insets_accept_caption_bits_but_reject_caption_geometry(self):
+        for dpi, frame in ((96,8),(144,12),(192,16)):
+            for build in (19045,26100):
+                top=(dpi+48)//96 if build>=22000 else 0
+                case=dict(nativePinStyle=0x00C00000, nativePinClientFrame=dict(dpi=dpi,windowsBuild=build,frameThickness=frame,insets=[frame,top,frame,frame]))
+                verify_pin_client_frame(case)
+                for bad_top in (top+1,top+23,top+31):
+                    invalid=copy.deepcopy(case);invalid['nativePinClientFrame']['insets'][1]=bad_top
+                    with self.assertRaises(ValueError): verify_pin_client_frame(invalid)
+                for invalid_insets in ([-1,top,frame,frame],[frame,top,frame], [frame,True,frame,frame]):
+                    invalid=copy.deepcopy(case);invalid['nativePinClientFrame']['insets']=invalid_insets
+                    with self.assertRaises(ValueError): verify_pin_client_frame(invalid)
+
+if __name__ == "__main__":
+    unittest.main()

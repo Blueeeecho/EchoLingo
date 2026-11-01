@@ -1,4 +1,4 @@
-name: Retained 0.2.9 complete DOM diagnostic after fixture compile repair
+name: Retained 0.2.9 complete F1 with corrected native client-frame oracle
 on:
   push:
     branches: [diag/029-f1-geometry]
@@ -22,17 +22,17 @@ jobs:
         with:
           script: |
             const fs = require('node:fs'), crypto = require('node:crypto'), path = require('node:path');
-            const owner='Blueeeecho', repo='EchoLingo', runId=41314313059;
-            const source='68aacb5b08028f33fd183e743607e70359b69c23';
+            const owner='Blueeeecho', repo='EchoLingo', runId=41315698152;
+            const source='7665a9354bfc30a997ef130d6c62ba75ea431ba4';
             if (context.repo.owner !== owner || context.repo.repo !== repo) throw Error('Unexpected repository');
             const {data: run} = await github.rest.actions.getWorkflowRun({owner,repo,run_id:runId});
             if (run.head_sha !== source || run.repository.id !== 1432139657) throw Error('Original source mismatch');
-            const {data: a} = await github.rest.actions.getArtifact({owner,repo,artifact_id:13086149183});
-            const hash='b04b7948493c38d2f1963c59a40fb377cab74ed0c785fad09b509783fe0858af';
-            if (a.expired || a.name !== 'EchoLingo-029-isolated-DOM-pointer-diagnostic' || a.workflow_run.id !== runId || a.workflow_run.head_sha !== source || a.size_in_bytes !== 18938994 || a.digest !== `sha256:${hash}`) throw Error('Retained evidence identity mismatch');
-            const {data} = await github.rest.actions.downloadArtifact({owner,repo,artifact_id:13086149183,archive_format:'zip'});
+            const {data: a} = await github.rest.actions.getArtifact({owner,repo,artifact_id:13088250749});
+            const hash='5d6417cd87ddf3b9a7eea006761f67bc373424b5d0bb52206d64a2d78aa5214b';
+            if (a.expired || a.name !== 'EchoLingo-Windows-offline-evidence' || a.workflow_run.id !== runId || a.workflow_run.head_sha !== source || a.size_in_bytes !== 19073864 || a.digest !== `sha256:${hash}`) throw Error('Retained evidence identity mismatch');
+            const {data} = await github.rest.actions.downloadArtifact({owner,repo,artifact_id:13088250749,archive_format:'zip'});
             const bytes=Buffer.from(data);
-            if (bytes.length !== 18938994 || crypto.createHash('sha256').update(bytes).digest('hex') !== hash) throw Error('Evidence bytes mismatch');
+            if (bytes.length !== 19073864 || crypto.createHash('sha256').update(bytes).digest('hex') !== hash) throw Error('Evidence bytes mismatch');
             fs.writeFileSync(path.join(process.env.RUNNER_TEMP,'retained-evidence.zip'),bytes,{flag:'wx'});
       - name: Extract only exact built executable and its exact embedded capture helper
         shell: bash
@@ -41,8 +41,8 @@ jobs:
           import hashlib,json,os,pathlib,stat,zipfile
           root=pathlib.Path(os.environ['RUNNER_TEMP'])
           member='EchoLingo/EchoLingo/src-tauri/target/release/echolingo.exe'
-          expected='033f0fac57f17768e05c24969ee17d0ffecab43f7b3dd973bdf9062e2a0fa5ce'
-          helper_sha='6c82ca5299e8f79e46767773344275188da9cf3ae95ec6000ba8965b65e9ca1d'
+          expected='d58c7821203d20b77cd21ddd74444d0d144a01f62b4c5233f35672a322a4babc'
+          helper_sha='416fa5c7529589af466f8fcc4c903b235873ec58a0e4b0cac85b5c5f939968ea'
           with zipfile.ZipFile(root/'retained-evidence.zip') as archive:
               entries=[x for x in archive.infolist() if x.filename==member]
               assert len(entries)==1
@@ -54,9 +54,9 @@ jobs:
           assert len(helper)==472064 and helper[:2]==b'MZ' and hashlib.sha256(helper).hexdigest()==helper_sha
           with (root/'retained-echolingo.exe').open('xb') as f: f.write(data)
           with (root/'retained-native-capture.exe').open('xb') as f: f.write(helper)
-          (root/'retained-f1-identity.json').write_text(json.dumps({'source':'68aacb5b08028f33fd183e743607e70359b69c23','sourceRun':41314313059,'artifact':13086149183,'fixtureCommit':os.environ['GITHUB_SHA'],'applicationSha256':expected,'applicationBytes':len(data),'helperOffset':5978101,'helperBytes':len(helper),'helperSha256':helper_sha,'diagnosticOnly':True,'releaseAcceptance':False,'rebuilt':False,'retries':0,'fixtureInvocations':1,'pointerProbeCompiled':True,'priorApplicationTested':False,'priorFailure':'fixture-csharp-local-name-conflict'}),encoding='utf-8')
+          (root/'retained-f1-identity.json').write_text(json.dumps({'source':'7665a9354bfc30a997ef130d6c62ba75ea431ba4','sourceRun':41315698152,'artifact':13088250749,'fixtureCommit':os.environ['GITHUB_SHA'],'applicationSha256':expected,'applicationBytes':len(data),'helperOffset':5978101,'helperBytes':len(helper),'helperSha256':helper_sha,'diagnosticOnly':True,'releaseAcceptance':False,'rebuilt':False,'retries':0,'fixtureInvocations':1,'pointerProbeCompiled':False,'priorApplicationTested':True,'priorFailure':'fixture-caption-style-not-client-frame'}),encoding='utf-8')
           PY
-      - name: Run original complete F1 fixture exactly once with complete bounded DOM and native geometry observations
+      - name: Run original complete F1 fixture exactly once with actual client-frame and decorated negative-control evidence
         id: f1
         continue-on-error: true
         timeout-minutes: 10
@@ -69,12 +69,19 @@ jobs:
           $output | Out-File "$env:RUNNER_TEMP/retained-f1-geometry.log" -Encoding utf8
           $output | Write-Output
           exit $fixtureExit
+      - name: Verify the same full report against the exact retained executable
+        if: always()
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          python scripts/verify_screenshot_editor_report.py "$env:RUNNER_TEMP/retained-f1-geometry.log" --application "$env:RUNNER_TEMP/retained-echolingo.exe" 2>&1 | Tee-Object -FilePath "$env:RUNNER_TEMP/retained-f1-strict.log"
+          if ($LASTEXITCODE -ne 0) { throw 'Strict full F1 report verification failed.' }
       - name: Verify immutable inputs after the single fixture
         if: always()
         shell: powershell
         run: |
           $ErrorActionPreference = 'Stop'
-          foreach ($item in @(@('retained-echolingo.exe',8424448,'033f0fac57f17768e05c24969ee17d0ffecab43f7b3dd973bdf9062e2a0fa5ce'),@('retained-native-capture.exe',472064,'6c82ca5299e8f79e46767773344275188da9cf3ae95ec6000ba8965b65e9ca1d'))) {
+          foreach ($item in @(@('retained-echolingo.exe',8424448,'d58c7821203d20b77cd21ddd74444d0d144a01f62b4c5233f35672a322a4babc'),@('retained-native-capture.exe',472064,'416fa5c7529589af466f8fcc4c903b235873ec58a0e4b0cac85b5c5f939968ea'))) {
             $path = Join-Path $env:RUNNER_TEMP $item[0]
             if ((Get-Item -LiteralPath $path).Length -ne $item[1] -or (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash.ToLowerInvariant() -ne $item[2]) { throw 'Retained input changed or was unavailable.' }
           }
@@ -82,12 +89,13 @@ jobs:
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: EchoLingo-029-retained-complete-DOM-diagnostic
+          name: EchoLingo-029-retained-pin-client-frame-evidence
           if-no-files-found: error
           path: |
             ${{ runner.temp }}/retained-f1-geometry.log
             ${{ runner.temp }}/retained-f1-identity.json
             ${{ runner.temp }}/retained-f1-after.txt
+            ${{ runner.temp }}/retained-f1-strict.log
       - name: Preserve original verdict without replacing final release acceptance
         if: always()
         shell: powershell
