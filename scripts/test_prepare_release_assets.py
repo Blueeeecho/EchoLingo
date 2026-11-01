@@ -5,7 +5,6 @@ from pathlib import Path
 import tempfile
 import unittest
 from unittest.mock import patch
-import re
 import zipfile
 
 from test_verify_screenshot_editor_report import complete as screenshot_report
@@ -173,9 +172,18 @@ class ReleaseAssetsTests(unittest.TestCase):
         normalized = normalized[:start] + normalized[end:]
         normalized = normalized.replace('        id: package_build\n', '').replace("'app,dmg'", "'dmg'")
         normalized = normalized.replace('        run: |\n          cargo fmt --manifest-path src-tauri/Cargo.toml --check\n          cargo fmt --manifest-path src-tauri/native-capture/Cargo.toml --check', '        run: cargo fmt --manifest-path src-tauri/Cargo.toml --check')
-        normalize_version = lambda value: re.sub(r"\*0\.2\.\d+\*x64\*setup\.exe", '*VERSION*x64*setup.exe', value)
-        self.assertEqual(normalize_version(normalized).strip(), normalize_version(expected).strip())
+        self.assertEqual(normalized.strip(), expected.strip())
         self.assertNotIn("actions: read", release)
+
+    def test_upper_window_acceptance_selects_exact_current_installer_in_both_workflows(self):
+        root = Path(__file__).resolve().parents[1]
+        for name in ('ci.yml', 'release-checks.yml'):
+            source = (root / '.github/workflows' / name).read_text()
+            step = source.split('        id: windows_capture_upper_windows', 1)[1].split('      - name:', 1)[0]
+            self.assertIn(f"-Filter 'EchoLingo_{RELEASE.VERSION}_x64-setup.exe'", step)
+            self.assertIn("if ($installers.Count -ne 1) { throw", step)
+            self.assertIn('-InstallerPath $installers[0].FullName -IsolatedTestSession', step)
+            self.assertNotIn("-Filter '*", step)
 
     def test_publication_is_main_or_version_tag_only_and_keeps_prerelease_gate(self):
         root = Path(__file__).resolve().parents[1]

@@ -857,7 +857,7 @@ jobs:
         timeout-minutes: 5
         shell: powershell
         run: |
-          $installers = @(Get-ChildItem src-tauri/target/release/bundle/nsis -File -Filter '*0.2.4*x64*setup.exe')
+          $installers = @(Get-ChildItem src-tauri/target/release/bundle/nsis -File -Filter 'EchoLingo_0.2.7_x64-setup.exe')
           if ($installers.Count -ne 1) { throw 'Expected exactly one own versioned NSIS installer.' }
           rustc --edition=2021 tests/windows-native-capture-harness.rs -O -o "$env:RUNNER_TEMP/echolingo-upper-capture-harness.exe"
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
