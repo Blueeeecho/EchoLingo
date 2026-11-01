@@ -6,7 +6,8 @@ param(
     [string]$HelperPath = '',
     # Runs only the production pure capture-state fixtures. It creates no
     # windows and neither reads nor writes the real desktop/clipboard.
-    [switch]$CaptureStateOnly
+    [switch]$CaptureStateOnly,
+    [switch]$ClipboardPublicationComparison
 )
 $ErrorActionPreference = 'Stop'
 [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)
@@ -89,6 +90,17 @@ public static class EchoLingoDesktopSmoke {
     [DllImport("user32.dll", SetLastError=true)] static extern IntPtr OpenInputDesktop(uint flags, bool inherit, uint access);
     [DllImport("user32.dll")] static extern bool CloseDesktop(IntPtr desktop);
     [DllImport("user32.dll", CharSet=CharSet.Unicode, SetLastError=true)] static extern bool GetUserObjectInformation(IntPtr handle, int index, StringBuilder information, int length, out int needed);
+    [DllImport("user32.dll")] static extern bool OpenClipboard(IntPtr owner);
+    [DllImport("user32.dll")] static extern bool CloseClipboard();
+    [DllImport("user32.dll")] static extern bool EmptyClipboard();
+    [DllImport("user32.dll")] static extern bool IsClipboardFormatAvailable(uint format);
+    [DllImport("user32.dll", SetLastError=true)] static extern int CountClipboardFormats();
+    [DllImport("kernel32.dll", EntryPoint="SetLastError")] static extern void SetNativeError(uint error);
+    [DllImport("user32.dll", CharSet=CharSet.Unicode)] static extern uint RegisterClipboardFormat(string format);
+    [DllImport("user32.dll")] static extern IntPtr GetClipboardData(uint format);
+    [DllImport("kernel32.dll")] static extern UIntPtr GlobalSize(IntPtr memory);
+    [DllImport("kernel32.dll")] static extern IntPtr GlobalLock(IntPtr memory);
+    [DllImport("kernel32.dll")] static extern bool GlobalUnlock(IntPtr memory);
     static readonly object processLock = new object();
     static Process activeHelper;
     static volatile bool cancelled;
@@ -158,6 +170,10 @@ public static class EchoLingoDesktopSmoke {
     sealed class CopyFallbackControl : Control {
         public int CopyCount;
         public bool DelayPublication;
+        public bool Comparison, NativeEmpty;
+        public uint SeedSequence, PublishedSequence;
+        public string Marker;
+        public string ComparisonError;
         public readonly List<Dictionary<string, object>> PublicationTimings = new List<Dictionary<string, object>>();
         System.Windows.Forms.Timer publicationTimer;
         public const string Selection = "EchoLingo real Ctrl+C fallback 97531";
@@ -179,7 +195,17 @@ public static class EchoLingoDesktopSmoke {
                 PublicationTimings.Add(timing);
                 if (DelayPublication) {
                     timing["clearStartedMs"] = publicationClock.ElapsedMilliseconds;
-                    Clipboard.Clear();
+                    if (Comparison) {
+                        timing["beforeClear"] = PublicationMetadata();
+                        bool owned = NativeEmpty ? EmptyGenerated(SeedSequence, Marker, null) : OwnGenerated(SeedSequence, Marker, null, false);
+                        timing["ownedSeedVerified"] = owned;
+                        if (!owned) { ComparisonError = "OWNED_SEED_GUARD_FAILED"; return true; }
+                        if (!NativeEmpty) {
+                            if (GetClipboardSequenceNumber() != SeedSequence) { ComparisonError = "SEED_CHANGED_BEFORE_OLE_CLEAR"; return true; }
+                            Clipboard.Clear();
+                        }
+                        timing["afterClear"] = PublicationMetadata();
+                    } else Clipboard.Clear();
                     timing["clearFinishedMs"] = publicationClock.ElapsedMilliseconds;
                     publicationTimer = new System.Windows.Forms.Timer();
                     publicationTimer.Interval = 80;
@@ -188,6 +214,7 @@ public static class EchoLingoDesktopSmoke {
                         publicationTimer.Stop(); publicationTimer.Dispose(); publicationTimer = null;
                         Clipboard.SetText(Selection, TextDataFormat.UnicodeText);
                         timing["publishedMs"] = publicationClock.ElapsedMilliseconds;
+                        if (Comparison) { PublishedSequence = GetClipboardSequenceNumber(); timing["afterPublication"] = PublicationMetadata(); }
                     };
                     publicationTimer.Start();
                 } else {
@@ -349,6 +376,133 @@ public static class EchoLingoDesktopSmoke {
         }
     }
 
+    static Dictionary<string, object> PublicationMetadata() {
+        uint process; IntPtr owner = GetClipboardOwner();
+        uint thread = GetWindowThreadProcessId(owner, out process);
+        return new Dictionary<string, object> {
+            {"sequence", GetClipboardSequenceNumber()}, {"ownerPresent", owner != IntPtr.Zero},
+            {"ownerIsFixtureProcess", process == (uint)Process.GetCurrentProcess().Id},
+            {"ownerIsCallingThread", thread != 0 && thread == GetCurrentThreadId()},
+            {"unicodeAvailable", IsClipboardFormatAvailable(13)}
+        };
+    }
+    static bool ExactGeneratedHandle(uint format, byte[] expected) {
+        IntPtr handle = GetClipboardData(format); if (handle == IntPtr.Zero) return false;
+        ulong size = GlobalSize(handle).ToUInt64();
+        if (size < (ulong)expected.Length || size > 65536) return false;
+        IntPtr pointer = GlobalLock(handle); if (pointer == IntPtr.Zero) return false;
+        try {
+            byte[] bytes = new byte[expected.Length]; Marshal.Copy(pointer, bytes, 0, bytes.Length);
+            for (int i = 0; i < bytes.Length; i++) if (bytes[i] != expected[i]) return false;
+            return true;
+        } finally { GlobalUnlock(handle); }
+    }
+    static bool OwnedPublicationPolicy(Func<bool> same, Func<bool> matches, Func<bool> clear) {
+        return same() && matches() && same() && clear();
+    }
+    static void PublicationPolicySelfTest() {
+        int reads = 0, clears = 0, checks = 0;
+        Assert(!OwnedPublicationPolicy(delegate { return false; }, delegate { reads++; return true; }, delegate { clears++; return true; }) && reads == 0 && clears == 0, "FOREIGN_GENERATION_UNREAD");
+        Assert(!OwnedPublicationPolicy(delegate { return true; }, delegate { return false; }, delegate { clears++; return true; }) && clears == 0, "WRONG_NONCE_PRESERVED");
+        Assert(!OwnedPublicationPolicy(delegate { return ++checks == 1; }, delegate { return true; }, delegate { clears++; return true; }) && clears == 0, "GENERATION_CHANGED_DURING_READ_PRESERVED");
+        Assert(OwnedPublicationPolicy(delegate { return true; }, delegate { return true; }, delegate { clears++; return true; }) && clears == 1, "OWNED_GENERATION_ALLOWED");
+    }
+    static bool OwnGenerated(uint generation, string marker, string text, bool clear) {
+        if (generation == 0 || !OpenClipboard(IntPtr.Zero)) return false;
+        try {
+            return OwnedPublicationPolicy(delegate { return GetClipboardSequenceNumber() == generation; }, delegate {
+                return marker != null
+                    ? ExactGeneratedHandle(RegisterClipboardFormat(marker), Encoding.ASCII.GetBytes(marker))
+                    : text != null && ExactGeneratedHandle(13, Encoding.Unicode.GetBytes(text + "\0"));
+            }, delegate {
+                if (!clear) return true;
+                if (!EmptyClipboard()) return false;
+                SetNativeError(0); return CountClipboardFormats() == 0 && Marshal.GetLastWin32Error() == 0;
+            });
+        } finally { CloseClipboard(); }
+    }
+    static bool EmptyGenerated(uint generation, string marker, string text) {
+        return OwnGenerated(generation, marker, text, true);
+    }
+    static bool NativeClipboardEmpty() {
+        if (!OpenClipboard(IntPtr.Zero)) return false;
+        try { SetNativeError(0); return CountClipboardFormats() == 0 && Marshal.GetLastWin32Error() == 0; }
+        finally { CloseClipboard(); }
+    }
+    public static Dictionary<string, object> RunPublicationComparison(string helperPath) {
+        PublicationPolicySelfTest();
+        cancelled = false; selectionCopyTrace.Clear();
+        var cases = new List<Dictionary<string, object>>();
+        var report = new Dictionary<string, object> {
+            {"ok", false}, {"diagnosticOnly", true}, {"originalGateReplaced", false},
+            {"deadlineChanged", false}, {"ownershipPolicyAssertions", 4}, {"cases", cases}, {"selectionCopyTrace", selectionCopyTrace}
+        };
+        // Unlike the legacy acceptance fixture, this diagnostic never snapshots
+        // or restores arbitrary clipboard content. An unknown initial clipboard
+        // blocks the comparison without any payload read or write.
+        if (!NativeClipboardEmpty()) { report["error"] = "FRESH_NATIVE_EMPTY_REQUIRED"; return report; }
+        using (Form form = new Form()) using (CopyFallbackControl source = new CopyFallbackControl()) {
+            form.Text = "EchoLingo generated clipboard publication comparison";
+            form.ClientSize = new Size(560, 120); source.Dock = DockStyle.Fill;
+            source.Comparison = true; source.DelayPublication = true; form.Controls.Add(source);
+            Thread worker = null; bool finished = false;
+            form.FormClosing += delegate(object sender, FormClosingEventArgs e) { if (!finished) e.Cancel = true; };
+            form.Shown += delegate {
+                worker = new Thread(delegate() {
+                    try {
+                        foreach (bool native in new bool[] { false, true }) {
+                            var row = new Dictionary<string, object> {{"mode", native ? "native-empty" : "winforms-clear"}, {"ok", false}};
+                            cases.Add(row);
+                            if (!NativeClipboardEmpty()) { row["error"] = "PREDECESSOR_CLIPBOARD_PRESERVED"; break; }
+                            string marker = "EchoLingo.Publication." + Guid.NewGuid().ToString("N");
+                            DataObject seed = new DataObject();
+                            seed.SetData(DataFormats.UnicodeText, false, "Generated original " + marker);
+                            seed.SetData(DataFormats.Html, false, "<p>Generated original</p>");
+                            seed.SetData(DataFormats.Rtf, false, "{\\rtf1 Generated original}");
+                            seed.SetData(marker, false, new MemoryStream(Encoding.ASCII.GetBytes(marker)));
+                            Clipboard.SetDataObject(seed, true, 0, 0);
+                            uint seeded = GetClipboardSequenceNumber();
+                            int before = source.CopyCount;
+                            FocusFixture(form, source, delegate {
+                                source.NativeEmpty = native; source.SeedSequence = seeded;
+                                source.PublishedSequence = 0; source.Marker = marker; source.ComparisonError = null;
+                            });
+                            bool success = false;
+                            try {
+                                Reply reply = CaptureFixtureSelection(form, helperPath);
+                                row["helperOk"] = reply.Ok; row["helperExitCode"] = reply.ExitCode;
+                                // Fixed category only: never retain arbitrary helper text.
+                                row["helperErrorCategory"] = reply.Error == null ? null : reply.Error.Split(':')[0];
+                                success = reply.Ok && reply.ExitCode == 0 && reply.Text == CopyFallbackControl.Selection;
+                                OnUi(form, delegate {
+                                    row["copies"] = source.CopyCount - before; row["sourceError"] = source.ComparisonError;
+                                    row["publication"] = source.PublicationTimings[source.PublicationTimings.Count - 1];
+                                });
+                                row["ok"] = success && source.CopyCount - before == 1 && source.ComparisonError == null;
+                            } catch { row["error"] = "COMPARISON_OBSERVATION_FAILED"; }
+                            finally {
+                                // A successful helper restored our random marked seed;
+                                // an unsuccessful helper may have left our exact source
+                                // publication. Neither path adopts an unrelated generation.
+                                uint current = GetClipboardSequenceNumber();
+                                bool cleaned = success ? EmptyGenerated(current, marker, null)
+                                    : EmptyGenerated(source.PublishedSequence != 0 ? source.PublishedSequence : seeded,
+                                        source.PublishedSequence != 0 ? null : marker,
+                                        source.PublishedSequence != 0 ? CopyFallbackControl.Selection : null);
+                                row["ownedCleanup"] = cleaned;
+                                if (!cleaned) row["ok"] = false;
+                            }
+                        }
+                        report["ok"] = cases.Count == 2 && (bool)cases[0]["ok"] && (bool)cases[1]["ok"];
+                    } catch { report["error"] = "COMPARISON_SETUP_FAILED"; }
+                    finally { OnUi(form, delegate { finished = true; form.Close(); }); }
+                });
+                worker.SetApartmentState(ApartmentState.STA); worker.Start();
+            };
+            Application.Run(form); if (worker != null) worker.Join(5000);
+        }
+        return report;
+    }
     public static Dictionary<string, object> Run(string helperPath) {
         cancelled = false;
         Dictionary<string, object> report = new Dictionary<string, object>();
@@ -505,7 +659,9 @@ public static class EchoLingoDesktopSmoke {
 }
 '@
     Add-Type -TypeDefinition $source -ReferencedAssemblies $references
-    $result = [EchoLingoDesktopSmoke]::Run($HelperPath)
+    $result = if ($ClipboardPublicationComparison) {
+        [EchoLingoDesktopSmoke]::RunPublicationComparison($HelperPath)
+    } else { [EchoLingoDesktopSmoke]::Run($HelperPath) }
     $result['captureStateFixturePassed'] = $captureState.diagnostics.captureStateFixturePassed
     $result['captureStateFixtureAssertions'] = $captureState.diagnostics.fixtureAssertions
     $result['selectionPolicyFixturePassed'] = $true
