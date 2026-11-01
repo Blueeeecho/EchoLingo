@@ -113,3 +113,13 @@ body[data-compact-editor=true] .tool-options label { font-size:11px; }
 body[data-compact-editor=true] .zoom-controls { gap:2px; padding:4px; }
 body[data-compact-editor=true] #zoom-fit,
 body[data-compact-editor=true] #zoom-actual { width:auto; padding:6px 8px; }
+
+/* Filled two-tone faces and a restrained lower edge give small icons weight
+   without changing hit targets, geometry, accessible labels, or actions. */
+.toolbar-icon { stroke-width:2.1; }
+.toolbar-icon .icon-depth { opacity:.22; stroke-width:2.6; }
+.toolbar-icon .icon-face { stroke-width:2.1; }
+[data-tool=select] .icon-face path { fill:currentColor; fill-opacity:.65; }
+#overlay-copy .icon-face, #copy-image .icon-face { stroke-width:3; }
+#overlay-cancel .icon-face, #close-editor .icon-face { stroke-width:2.7; }
+@media(prefers-color-scheme:dark) { .toolbar-icon .icon-depth { opacity:.32; } }
