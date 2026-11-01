@@ -35,7 +35,10 @@ try {
     [DllImport("user32.dll",SetLastError=true)] static extern bool GetWindowDisplayAffinity(IntPtr window,out uint affinity);
     static readonly string[] ScreenshotActions={"select","rectangle","arrow","text","number","pen","highlight","mosaic","solid","crop","copy","save","pin","cancel"};
     static string ScreenshotRole(IntPtr window,int helper) {
-        Need(Class(window)=="EchoLingoNativeCapture-"+helper,"Screenshot role has an unexpected native class.");
+        // Runtime-owned hidden windows are not screenshot decorations. Returning
+        // null preserves Ready's original visibility/style/geometry rejection;
+        // this is not permission to ignore an unknown visible helper window.
+        if(Class(window)!="EchoLingoNativeCapture-"+helper)return null;
         StringBuilder title=new StringBuilder(128);GetWindowText(window,title,title.Capacity);string text=title.ToString();
         if(text=="EchoLingoCaptureResizeHandle")return "handle";
         if(text=="EchoLingoCaptureAdjustmentHint")return "hint";

@@ -125,6 +125,22 @@ class ScreenshotWindowContract(unittest.TestCase):
         self.assertNotIn('ScreenshotChooseSelect', native)
         self.assertIn('if kind == 0x202 {\n            self.validate_window()?;', read('src-tauri/src/windows_capture_native.rs'))
 
+    def test_adjustment_classifier_does_not_reject_hidden_runtime_windows_or_skip_visible_unknowns(self):
+        screenshot = read('tests/windows-screenshot-window-smoke.ps1')
+        role = screenshot.split('static string ScreenshotRole(', 1)[1].split('static bool ScreenshotInventory(', 1)[0]
+        self.assertIn('if(Class(window)!="EchoLingoNativeCapture-"+helper)return null;', role)
+        self.assertLess(role.index('if(Class(window)'), role.index('GetWindowText('))
+        self.assertIn('Unknown titled screenshot role.', role)
+        self.assertNotIn('Screenshot role has an unexpected native class.', screenshot)
+        self.assertIn('if(role!=null){Need(!IsWindowVisible(window)', screenshot)
+        native = read('tests/windows-native-capture-smoke.ps1')
+        ready = native.split('static bool Ready(', 1)[1].split('static ', 1)[0]
+        self.assertIn('if (!IsWindowVisible(window)) return true;', ready)
+        self.assertIn('Unknown visible helper surface.', ready)
+        self.assertIn('Math.Min(r.Width,r.Height)<=2', ready)
+        self.assertIn('int VisibleOwnedWindows(int helper)', native)
+        self.assertIn('if(pid==helper&&IsWindowVisible(window))count++', native)
+
     def test_generated_windows_are_ready_before_any_input_or_capture(self):
         existing = read('tests/windows-native-capture-smoke.ps1')
         setup = existing.split('public Sources(Dictionary<string,object> report=null)', 1)[1].split('void Prepare(', 1)[0]

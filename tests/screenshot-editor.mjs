@@ -608,6 +608,10 @@ try {
       if (fixture.roi.y >= height - 10) assert.ok(layout.boxes[0].bottom < fixture.roi.y, 'bottom-edge toolbar flips above');
       await page.locator('#overlay-cancel').click(); await page.waitForFunction(id => window.__screenshotQA.closed.includes(id), overlayId);
     }
+    // Restore the regular monitor after the 220px edge-placement fixtures.
+    // The following native intents use a 192px selection at x=30; carrying the
+    // tiny viewport forward correctly fails the production geometry guard.
+    await page.setViewportSize({ width: 600, height: 540 });
     // Native adjusted selection transfers an intent, never an extra confirm step.
     // A duplicate durable snapshot/event cannot copy/save/pin twice.
     for (const [initialAction, collection] of [['copy', 'copies'], ['save', 'saves'], ['pin', 'pins']]) {
