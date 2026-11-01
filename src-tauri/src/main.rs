@@ -35,6 +35,8 @@ mod translation_selection;
 mod update_notice;
 mod window_layout;
 #[cfg(target_os = "windows")]
+mod windows_atomic_file;
+#[cfg(target_os = "windows")]
 mod windows_capture_input;
 #[cfg(target_os = "windows")]
 mod windows_mouse_shortcuts;
@@ -397,6 +399,12 @@ fn write_json(path: &Path, value: &impl Serialize) -> Result<(), String> {
         use std::os::unix::fs::OpenOptionsExt;
         options.mode(0o600);
     }
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        // GENERIC_WRITE | DELETE: rename the exact exclusively-created handle.
+        options.access_mode(0x40000000 | 0x00010000);
+    }
     let file = options.open(&tmp).map_err(|_| "无法写入本地数据目录")?;
     struct TemporaryFile(PathBuf);
     impl Drop for TemporaryFile {
@@ -411,31 +419,13 @@ fn write_json(path: &Path, value: &impl Serialize) -> Result<(), String> {
     use std::io::Write;
     file.write_all(&bytes).map_err(|_| "无法写入本地数据")?;
     file.sync_all().map_err(|_| "无法同步本地数据")?;
-    drop(file);
     #[cfg(target_os = "windows")]
     {
-        use std::os::windows::ffi::OsStrExt;
-        #[link(name = "kernel32")]
-        unsafe extern "system" {
-            fn MoveFileExW(existing: *const u16, new: *const u16, flags: u32) -> i32;
-        }
-        let from: Vec<u16> = tmp.as_os_str().encode_wide().chain(Some(0)).collect();
-        let to: Vec<u16> = path.as_os_str().encode_wide().chain(Some(0)).collect();
-        // Windows destination replacement is not a writer-coordination primitive:
-        // overlapping MoveFileExW calls can fail on each other's open handles.
-        // Serialize only the commit, not serialization, writing or file sync.
-        // No caller lock is acquired while this guard is held.
-        static COMMIT: Mutex<()> = Mutex::new(());
-        let _commit = locked(&COMMIT)?;
-        // Atomic same-volume replace; never remove the old settings/history first.
-        if unsafe { MoveFileExW(from.as_ptr(), to.as_ptr(), 0x1 | 0x8) } == 0 {
-            let code = std::io::Error::last_os_error().raw_os_error().unwrap_or(0);
-            return Err(format!("无法原子替换本地数据；原文件保留 (Windows {code})"));
-        }
-        Ok(())
+        windows_atomic_file::replace(&file, path)
     }
     #[cfg(not(target_os = "windows"))]
     {
+        drop(file);
         fs::rename(tmp, path).map_err(|_| "无法保存本地数据".to_string())
     }
 }

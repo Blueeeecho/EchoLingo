@@ -43,7 +43,7 @@ keyring = { version = "3", features = ["apple-native"] }
 global-hotkey = "=0.8.0"
 png = "0.18.1"
 regex = "1.13.1"
-windows = { version = "0.62.2", features = ["Foundation", "Globalization", "Graphics_Imaging", "Media_Ocr", "Storage_Streams", "Win32_System_WinRT", "Win32_System_Com"] }
+windows = { version = "0.62.2", features = ["Foundation", "Globalization", "Graphics_Imaging", "Media_Ocr", "Storage_Streams", "Win32_System_WinRT", "Win32_System_Com", "Win32_Storage_FileSystem"] }
 windows-future = "0.3.2"
 keyring = { version = "3", features = ["windows-native"] }
 
