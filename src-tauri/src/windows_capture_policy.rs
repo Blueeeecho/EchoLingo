@@ -98,6 +98,74 @@ pub struct CaptureWindowTarget {
     pub frame: Rect,
 }
 
+/// Wire values are shared with the editor; cancel never produces an image.
+pub const SCREENSHOT_ACTIONS: [&str; 14] = [
+    "select",
+    "rectangle",
+    "arrow",
+    "text",
+    "number",
+    "pen",
+    "highlight",
+    "mosaic",
+    "solid",
+    "crop",
+    "copy",
+    "save",
+    "pin",
+    "cancel",
+];
+pub const SCREENSHOT_LABELS: [&str; 14] = [
+    "选择",
+    "矩形",
+    "箭头",
+    "文字",
+    "序号",
+    "画笔",
+    "荧光笔",
+    "马赛克",
+    "遮盖",
+    "裁剪",
+    "✓ 复制",
+    "↓ 保存",
+    "贴图",
+    "× 取消",
+];
+
+/// All toolbar geometry is physical and kept inside one real display work area.
+pub fn screenshot_actions_layout(selected: Rect, area: Rect, dpi: u32) -> Vec<Rect> {
+    if !area.valid() || !selected.valid() {
+        return Vec::new();
+    }
+    let unit = |n: i32| (n * dpi.clamp(96, 768) as i32 + 95) / 96;
+    let (width, height, gap) = (unit(64), unit(30), unit(4));
+    let columns = ((area.width - gap) / (width + gap)).clamp(1, 7);
+    let rows = (SCREENSHOT_ACTIONS.len() as i32 + columns - 1) / columns;
+    let total_width = columns * (width + gap) + gap;
+    let total_height = rows * (height + gap) + gap;
+    if total_width > area.width || total_height > area.height {
+        return Vec::new();
+    }
+    let x = selected.x.clamp(area.x, area.right() - total_width);
+    let below = selected.bottom().saturating_add(unit(10));
+    let y = if below.saturating_add(total_height) <= area.bottom() {
+        below
+    } else {
+        selected.y.saturating_sub(total_height + unit(10))
+    }
+    .clamp(area.y, area.bottom() - total_height);
+    (0..SCREENSHOT_ACTIONS.len())
+        .map(|i| {
+            Rect::new(
+                x + gap + (i as i32 % columns) * (width + gap),
+                y + gap + (i as i32 / columns) * (height + gap),
+                width,
+                height,
+            )
+        })
+        .collect()
+}
+
 #[derive(Clone, Debug)]
 pub struct CaptureSelectionState {
     screens: Vec<Rect>,
@@ -108,6 +176,13 @@ pub struct CaptureSelectionState {
     candidate: Option<CaptureWindowTarget>,
     pressed_window: Option<CaptureWindowTarget>,
     pub selected_window: Option<CaptureWindowTarget>,
+    pub adjusting: bool,
+    pub initial_action: Option<&'static str>,
+    action_bounds: Vec<Rect>,
+    pressed_action: Option<usize>,
+    adjustment: Option<usize>, // 0..8 handles, 8 interior move
+    adjustment_start: Rect,
+    handle_size: i32,
     pub desktop: Rect,
     pub dragging: bool,
     pub finished: bool,
@@ -142,6 +217,13 @@ impl CaptureSelectionState {
             candidate: None,
             pressed_window: None,
             selected_window: None,
+            adjusting: false,
+            initial_action: None,
+            action_bounds: Vec::new(),
+            pressed_action: None,
+            adjustment: None,
+            adjustment_start: Rect::default(),
+            handle_size: 8,
             desktop,
             dragging: false,
             finished: false,
@@ -154,7 +236,7 @@ impl CaptureSelectionState {
     }
     /// Supplied from a fresh native hit-test immediately before button down.
     pub fn set_window_candidate(&mut self, candidate: Option<CaptureWindowTarget>, dpi: u32) {
-        if !self.dragging && !self.finished {
+        if !self.dragging && !self.finished && !self.adjusting {
             self.candidate = candidate;
             // Four logical pixels of jitter on the display where the press began.
             self.click_threshold = ((4 * dpi.clamp(96, 768) + 95) / 96) as i32;
@@ -183,6 +265,52 @@ impl CaptureSelectionState {
             .iter()
             .position(|r| r.contains(p))
             .map_or(-1, |i| i as i32);
+        if self.dragging && self.adjusting {
+            let end = self.clamp(p);
+            let start = self.adjustment_start;
+            let dx = i64::from(end.x) - i64::from(self.origin.x);
+            let dy = i64::from(end.y) - i64::from(self.origin.y);
+            if let Some(handle) = self.adjustment {
+                if handle == 8 {
+                    self.selected.x = (i64::from(start.x) + dx).clamp(
+                        i64::from(self.desktop.x),
+                        i64::from(self.desktop.right() - start.width),
+                    ) as i32;
+                    self.selected.y = (i64::from(start.y) + dy).clamp(
+                        i64::from(self.desktop.y),
+                        i64::from(self.desktop.bottom() - start.height),
+                    ) as i32;
+                } else {
+                    let mut left = start.x;
+                    let mut top = start.y;
+                    let mut right = start.right();
+                    let mut bottom = start.bottom();
+                    if matches!(handle, 0 | 6 | 7) {
+                        left = (i64::from(start.x) + dx)
+                            .clamp(i64::from(self.desktop.x), i64::from(right - 3))
+                            as i32;
+                    }
+                    if matches!(handle, 2 | 3 | 4) {
+                        right = (i64::from(start.right()) + dx)
+                            .clamp(i64::from(left + 3), i64::from(self.desktop.right()))
+                            as i32;
+                    }
+                    if matches!(handle, 0 | 1 | 2) {
+                        top = (i64::from(start.y) + dy)
+                            .clamp(i64::from(self.desktop.y), i64::from(bottom - 3))
+                            as i32;
+                    }
+                    if matches!(handle, 4 | 5 | 6) {
+                        bottom = (i64::from(start.bottom()) + dy)
+                            .clamp(i64::from(top + 3), i64::from(self.desktop.bottom()))
+                            as i32;
+                    }
+                    self.selected =
+                        Rect::from_ltrb(left, top, right, bottom).intersect(self.desktop);
+                }
+            }
+            return;
+        }
         if self.dragging {
             let end = self.clamp(p);
             // Sticky: moving away and returning must never turn a drag into a click.
@@ -208,6 +336,20 @@ impl CaptureSelectionState {
             return;
         }
         self.origin = self.clamp(p);
+        if self.adjusting {
+            self.pressed_action = self.action_bounds.iter().position(|r| r.contains(p));
+            self.adjustment = if self.pressed_action.is_some() {
+                None
+            } else {
+                self.handles()
+                    .iter()
+                    .position(|r| r.contains(p))
+                    .or_else(|| self.selected.contains(p).then_some(8))
+            };
+            self.adjustment_start = self.selected;
+            self.dragging = true;
+            return;
+        }
         self.drag_exceeded = false;
         self.pressed_window = self.candidate.filter(|target| target.frame.contains(p));
         self.selected_window = None;
@@ -220,6 +362,21 @@ impl CaptureSelectionState {
         }
         self.move_to(p);
         self.dragging = false;
+        if self.adjusting {
+            if let Some(index) = self.pressed_action.take() {
+                if self.action_bounds.get(index).is_some_and(|r| r.contains(p)) {
+                    let action = SCREENSHOT_ACTIONS[index];
+                    if action == "cancel" {
+                        self.cancel();
+                    } else {
+                        self.initial_action = Some(action);
+                        self.finished = true;
+                    }
+                }
+            }
+            self.adjustment = None;
+            return;
+        }
         self.finished = true;
         if self.is_window_click() {
             if let Some(target) = self.pressed_window {
@@ -230,6 +387,54 @@ impl CaptureSelectionState {
             }
         }
         self.cancelled = self.selected.width < 3 || self.selected.height < 3;
+        if self.purpose == CapturePurpose::Screenshot && !self.cancelled {
+            self.finished = false;
+            self.adjusting = true;
+        }
+    }
+    pub fn confirm_copy(&mut self) {
+        if self.adjusting && !self.finished && !self.dragging {
+            self.initial_action = Some("copy");
+            self.finished = true;
+        }
+    }
+    pub fn set_action_bounds(&mut self, bounds: Vec<Rect>, dpi: u32) {
+        // Do not move a pressed button underneath its release.
+        if !self.dragging
+            && bounds.len() == SCREENSHOT_ACTIONS.len()
+            && bounds.iter().all(|r| r.valid())
+        {
+            self.action_bounds = bounds;
+            self.handle_size = ((8 * dpi.clamp(96, 768) + 95) / 96) as i32;
+        }
+    }
+    pub fn handles(&self) -> Vec<Rect> {
+        let r = self.selected;
+        let x = r.x + r.width / 2;
+        let y = r.y + r.height / 2;
+        [
+            (r.x, r.y),
+            (x, r.y),
+            (r.right(), r.y),
+            (r.right(), y),
+            (r.right(), r.bottom()),
+            (x, r.bottom()),
+            (r.x, r.bottom()),
+            (r.x, y),
+        ]
+        .into_iter()
+        .map(|(x, y)| {
+            Rect::new(
+                x.saturating_sub(self.handle_size / 2),
+                y.saturating_sub(self.handle_size / 2),
+                self.handle_size,
+                self.handle_size,
+            )
+        })
+        .collect()
+    }
+    pub fn action_bounds(&self) -> &[Rect] {
+        &self.action_bounds
     }
     pub fn cancel(&mut self) {
         if !self.finished {
@@ -1944,5 +2149,253 @@ mod screenshot_window_tests {
         state.end(Point::new(1, 1));
         assert!(state.finished && state.cancelled);
         assert_eq!(state.selected_window, None);
+    }
+}
+
+#[cfg(test)]
+mod screenshot_adjustment_tests {
+    use super::*;
+    fn selected() -> CaptureSelectionState {
+        let mut s = CaptureSelectionState::with_purpose(
+            vec![Rect::new(-500, -200, 1400, 1000)],
+            Point::new(0, 0),
+            CapturePurpose::Screenshot,
+        )
+        .unwrap();
+        s.begin(Point::new(10, 10));
+        s.end(Point::new(210, 110));
+        assert!(s.adjusting && !s.finished && !s.cancelled);
+        s
+    }
+    #[test]
+    fn f1_waits_for_explicit_paired_action_and_reports_exact_wire_value() {
+        for (index, action) in SCREENSHOT_ACTIONS.iter().enumerate() {
+            let mut s = selected();
+            let bounds = screenshot_actions_layout(s.selected, s.desktop, 96);
+            let r = bounds[index];
+            let p = Point::new(r.x + 3, r.y + 3);
+            s.set_action_bounds(bounds, 96);
+            s.end(p); // release without owned press cannot finish
+            assert!(!s.finished);
+            s.begin(p);
+            assert!(!s.finished);
+            s.end(p);
+            assert!(s.finished);
+            if *action == "cancel" {
+                assert!(s.cancelled && s.initial_action.is_none());
+            } else {
+                assert!(!s.cancelled);
+                assert_eq!(s.initial_action, Some(*action));
+            }
+        }
+    }
+    #[test]
+    fn keyboard_copy_requires_adjusting_and_no_pending_pointer_gesture() {
+        let mut s = selected();
+        s.begin(Point::new(80, 60));
+        s.confirm_copy();
+        assert!(!s.finished);
+        s.end(Point::new(100, 80));
+        s.confirm_copy();
+        assert!(s.finished && s.initial_action == Some("copy"));
+        let mut region =
+            CaptureSelectionState::new(vec![Rect::new(0, 0, 500, 400)], Point::new(0, 0)).unwrap();
+        region.confirm_copy();
+        assert!(!region.finished && region.initial_action.is_none());
+    }
+    #[test]
+    fn action_release_outside_does_not_capture_or_change_selection() {
+        let mut s = selected();
+        let original = s.selected;
+        let bounds = screenshot_actions_layout(s.selected, s.desktop, 96);
+        let p = Point::new(bounds[10].x + 3, bounds[10].y + 3);
+        s.set_action_bounds(bounds, 96);
+        s.begin(p);
+        s.end(Point::new(-450, -150));
+        assert!(!s.finished && s.initial_action.is_none());
+        assert_eq!(s.selected, original);
+    }
+    #[test]
+    fn all_eight_handles_resize_and_keep_minimum_valid_area() {
+        for index in 0..8 {
+            let mut s = selected();
+            let original = s.selected;
+            let h = s.handles()[index];
+            let p = Point::new(h.x + 4, h.y + 4);
+            s.begin(p);
+            s.end(Point::new(p.x + 30, p.y + 25));
+            assert_ne!(s.selected, original);
+            assert!(s.desktop.contains_rect(s.selected));
+            assert!(s.selected.width >= 3 && s.selected.height >= 3);
+            assert!(!s.finished && s.adjusting);
+        }
+    }
+    #[test]
+    fn resize_handle_margin_press_without_movement_does_not_jump() {
+        for index in 0..8 {
+            let mut s = selected();
+            let original = s.selected;
+            let h = s.handles()[index];
+            let p = Point::new(h.x + 1, h.y + 1);
+            s.begin(p);
+            s.end(p);
+            assert_eq!(s.selected, original);
+        }
+    }
+    #[test]
+    fn interior_move_clamps_without_resizing_and_keeps_source_ticket() {
+        let mut s = selected();
+        let target = CaptureWindowTarget {
+            window: 1,
+            process: 2,
+            thread: 3,
+            frame: s.selected,
+        };
+        s.selected_window = Some(target);
+        s.begin(Point::new(80, 60));
+        s.end(Point::new(-2000, -2000));
+        assert_eq!(s.selected, Rect::new(-500, -200, 200, 100));
+        assert_eq!(s.selected_window, Some(target));
+    }
+    #[test]
+    fn adjustment_cancel_and_timeout_cannot_be_revived() {
+        for timeout in [false, true] {
+            let mut s = selected();
+            if timeout {
+                s.expire(120_000);
+            } else {
+                s.cancel();
+            }
+            s.begin(Point::new(50, 50));
+            s.end(Point::new(100, 100));
+            assert!(s.finished && s.cancelled && s.initial_action.is_none());
+        }
+    }
+    #[test]
+    fn toolbar_wraps_inside_negative_coordinate_mixed_dpi_work_area() {
+        for dpi in [96, 144, 192] {
+            let area = Rect::new(-1400, -900, 1400, 900);
+            let bounds = screenshot_actions_layout(Rect::new(-10, -30, 10, 30), area, dpi);
+            assert_eq!(bounds.len(), 14);
+            assert!(bounds.iter().all(|r| area.contains_rect(*r)));
+        }
+        assert!(
+            screenshot_actions_layout(Rect::new(0, 0, 10, 10), Rect::new(0, 0, 50, 50), 96)
+                .is_empty()
+        );
+    }
+    #[test]
+    fn wrapped_toolbar_fits_small_negative_coordinate_work_area() {
+        let area = Rect::new(-220, -360, 220, 360);
+        let bounds = screenshot_actions_layout(Rect::new(-100, -200, 80, 80), area, 96);
+        assert_eq!(bounds.len(), 14);
+        assert!(bounds.iter().all(|r| area.contains_rect(*r)));
+        assert!(
+            screenshot_actions_layout(Rect::new(0, 0, 10, 10), Rect::new(0, 0, 50, 50), 96)
+                .is_empty()
+        );
+    }
+    #[test]
+    fn alt_s_region_still_finishes_on_first_release_without_action() {
+        let mut s =
+            CaptureSelectionState::new(vec![Rect::new(0, 0, 500, 400)], Point::new(0, 0)).unwrap();
+        s.begin(Point::new(20, 20));
+        s.end(Point::new(200, 100));
+        assert!(s.finished && !s.cancelled && !s.adjusting && s.initial_action.is_none());
+    }
+}
+
+/// Screenshot-only confirmation shares the existing owned-key shutdown contract.
+/// Modified Enter is swallowed without confirmation; pre-held/Region keys stay foreign.
+pub struct CaptureConfirmKey {
+    enabled: std::sync::atomic::AtomicBool,
+    initial: std::sync::atomic::AtomicBool,
+    eligible: std::sync::atomic::AtomicBool,
+    pub ownership: EscOwnership,
+}
+impl CaptureConfirmKey {
+    pub fn new(initial: bool) -> Self {
+        Self {
+            enabled: std::sync::atomic::AtomicBool::new(false),
+            initial: std::sync::atomic::AtomicBool::new(initial),
+            eligible: std::sync::atomic::AtomicBool::new(false),
+            ownership: EscOwnership::default(),
+        }
+    }
+    pub fn set_enabled(&self, enabled: bool) {
+        self.enabled
+            .store(enabled, std::sync::atomic::Ordering::SeqCst);
+    }
+    pub fn event(&self, down: bool, up: bool, unmodified: bool) -> (bool, bool) {
+        use std::sync::atomic::Ordering::SeqCst;
+        let enabled = self.enabled.load(SeqCst);
+        if !enabled && !self.ownership.owned() {
+            if down {
+                self.initial.store(true, SeqCst);
+            }
+            if up {
+                self.initial.store(false, SeqCst);
+            }
+            return (false, false);
+        }
+        if self.initial.load(SeqCst) {
+            if up {
+                self.initial.store(false, SeqCst);
+            }
+            return (false, false);
+        }
+        if down {
+            let repeated = self.ownership.owned();
+            if self.ownership.down() {
+                if !repeated {
+                    self.eligible.store(unmodified, SeqCst);
+                }
+                return (true, false);
+            }
+        }
+        if up && self.ownership.up() {
+            let eligible = self.eligible.swap(false, SeqCst);
+            return (true, enabled && unmodified && eligible);
+        }
+        (false, false)
+    }
+}
+#[cfg(test)]
+mod confirm_key_tests {
+    use super::*;
+    #[test]
+    fn region_keys_remain_foreign_and_preheld_enter_cannot_confirm() {
+        let key = CaptureConfirmKey::new(false);
+        assert_eq!(key.event(true, false, true), (false, false));
+        key.set_enabled(true);
+        assert_eq!(key.event(true, false, true), (false, false));
+        assert_eq!(key.event(false, true, true), (false, false));
+        assert_eq!(key.event(true, false, true), (true, false));
+        assert_eq!(key.event(false, true, true), (true, true));
+    }
+    #[test]
+    fn only_matching_release_confirms_and_repeat_never_confirms_twice() {
+        let key = CaptureConfirmKey::new(false);
+        key.set_enabled(true);
+        assert_eq!(key.event(false, true, true), (false, false));
+        assert_eq!(key.event(true, false, true), (true, false));
+        assert_eq!(key.event(true, false, true), (true, false));
+        assert_eq!(key.event(false, true, true), (true, true));
+        assert_eq!(key.event(false, true, true), (false, false));
+    }
+    #[test]
+    fn modified_enter_is_owned_without_copy_and_shutdown_drains_keyup() {
+        let key = CaptureConfirmKey::new(false);
+        key.set_enabled(true);
+        assert_eq!(key.event(true, false, false), (true, false));
+        assert_eq!(key.event(false, true, true), (true, false));
+        assert_eq!(key.event(true, false, true), (true, false));
+        assert_eq!(key.event(false, true, false), (true, false));
+        assert_eq!(key.event(true, false, true), (true, false));
+        key.set_enabled(false);
+        key.ownership.request_close();
+        assert!(!key.ownership.may_exit());
+        assert_eq!(key.event(false, true, true), (true, false));
+        assert!(key.ownership.may_exit());
     }
 }

@@ -6,6 +6,12 @@ from unittest import mock
 from verify_screenshot_editor_report import EXPECTED_CASES, PIN_CASES, PIN_FIELDS, verify, verify_report, verify_installed_acceptance
 
 
+def adjustment(action):
+    return dict(nativeInitialAction=action, nativeActionClickCount=1, nativeAdjustmentHandleCount=8,
+                nativeAdjustmentVisible=True, initialNativeAdjustmentPreservedSourceForeground=True,
+                nativeActionOwnedTargetVerified=True)
+
+
 def complete(installed=False):
     report = {field: True for field in ('ok', 'actualApplicationTested', 'screenshotEditorTestsRequested',
         'defaultCaptureWithoutEnvironmentRequested', 'captureBackendEnvironmentAbsent', 'rustCaptureRequested',
@@ -26,10 +32,12 @@ def complete(installed=False):
         editor = dict(isGeneratedSource=False, isEditor=True, isPin=False, isMain=False, isApp=True, isZero=False)
         case = dict(case=name, shortcut='F1', hotkeyPresses=1, ok=True, **{field: True for field in PIN_FIELDS})
         case.update(annotationApplied=annotated, editedRasterVisible=annotated, passiveShowPreservedSourceForeground=not annotated,
-            pinInputMethod='uia-invoke-from-active-editor' if annotated else 'owned-physical-click', physicalPinClickCount=0 if annotated else 1,
+            pinInputMethod='uia-invoke-from-active-editor' if annotated else 'owned-native-adjustment-click', physicalPinClickCount=0 if annotated else 1,
             nativeNoActivateBeforePhysicalClick=not annotated, physicalPinClickOwnedTargetVerified=not annotated, handoffForegroundSamples=1,
             foregroundBeforePinInvoke=copy.deepcopy(editor if annotated else source), foregroundAfterPinInvoke=copy.deepcopy(editor if annotated else source),
             foregroundDuringPinHandoff=copy.deepcopy(source), foregroundAtVisibleHandoff=copy.deepcopy(source))
+        case.update(adjustment('solid' if annotated else 'pin'))
+        if annotated: case.update(nativeInitialToolClaimed=True, initialEditorShowPreservedSourceForeground=True)
         report['screenshotPinCases'].append(case)
     report['screenshotCases'][1].update({field: True for field in ('allExportPixelsMatchSystemClipboard', 'noOverwrite',
         'noHiddenPngMetadataOrTrailingData', 'nativeSaveAsCancelPreservedImage', 'nativeOpenCancelPreservedImage')})
@@ -37,6 +45,10 @@ def complete(installed=False):
         savedCaptureReopenedThroughSettings=True, standaloneCollisionNumberingVerified=True, standaloneCollisionSaveCount=2, recapturedSaveSessions=[dict(shortcut='F1', hotkeyPresses=1) for _ in range(2)])
     report['screenshotCases'][2].update(visibleWindowPixelSize=[700, 200], expectedWindowDimensions=[700, 200], inplaceCopyDismissed=True,
         inplaceCancelPreservedClipboard=True, cancelSession=dict(shortcut='F1', hotkeyPresses=1))
+    report['screenshotCases'][1].update(adjustment('solid'))
+    for saved in report['screenshotCases'][1]['recapturedSaveSessions']: saved.update(adjustment('solid'))
+    report['screenshotCases'][2].update(adjustment('select'))
+    report['screenshotCases'][2]['cancelSession'].update(adjustment('select'))
     report.update(screenshotLocalOpenRequiredCases=2, screenshotLocalOpenPassedCases=2,
         screenshotFinalExportCount=6, screenshotEditorSurvivedOwnedFocusLoss=True)
     report['screenshotLocalOpenCases'] = [dict(format=kind, ok=True, nativeDialogSubmitted=True,
@@ -93,6 +105,32 @@ class ScreenshotEditorReport(unittest.TestCase):
         ):
             report = complete()
             mutate(report)
+            with self.assertRaises(ValueError): verify_report(report)
+
+    def test_native_adjustment_fields_and_exact_action_cannot_be_omitted_or_forged(self):
+        for index in (0, 1):
+            for field, value in (
+                ('nativeInitialAction', 'copy'), ('nativeActionClickCount', True),
+                ('nativeActionClickCount', 2), ('nativeAdjustmentHandleCount', 7),
+                ('nativeAdjustmentHandleCount', 8.0),
+                ('nativeAdjustmentVisible', False), ('nativeActionOwnedTargetVerified', False),
+                ('nativeAdjustmentGeometryRestored', False), ('nativeAdjustmentMoveResizeVerified', False)):
+                report = complete()
+                report['screenshotPinCases'][index][field] = value
+                with self.assertRaises(ValueError): verify_report(report)
+        for field in ('nativeInitialToolClaimed', 'initialEditorShowPreservedSourceForeground'):
+            report = complete()
+            del report['screenshotPinCases'][1][field]
+            with self.assertRaises(ValueError): verify_report(report)
+
+    def test_every_full_capture_requires_explicit_native_action_after_adjustment(self):
+        for target in ('drag', 'save0', 'save1', 'click', 'cancel'):
+            report = complete()
+            drag, click = report['screenshotCases'][1:]
+            case = {'drag': drag, 'save0': drag['recapturedSaveSessions'][0],
+                    'save1': drag['recapturedSaveSessions'][1], 'click': click,
+                    'cancel': click['cancelSession']}[target]
+            del case['nativeActionOwnedTargetVerified']
             with self.assertRaises(ValueError): verify_report(report)
 
     def test_pin_only_cannot_substitute_for_complete_editor(self):

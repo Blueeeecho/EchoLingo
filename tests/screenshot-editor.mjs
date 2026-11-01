@@ -20,7 +20,7 @@ try {
       window.isTauri = true;
       Object.defineProperty(navigator, 'platform', { configurable: true, get: () => 'Win32' });
       if (new URL(location.href).searchParams.has('fallbackDialog')) for (const name of ['showModal', 'close']) Object.defineProperty(HTMLDialogElement.prototype, name, { configurable: true, value: undefined });
-      const callbacks = new Map(), listeners = new Map(); let callbackId = 0, nextId = 0;
+      const callbacks = new Map(), listeners = new Map(), consumedActions = new Set(); let callbackId = 0, nextId = 0;
       const image = (width = 96, height = 64) => {
         const canvas = document.createElement('canvas'); canvas.width = width; canvas.height = height;
         const ctx = canvas.getContext('2d'), pixels = ctx.createImageData(width, height);
@@ -36,6 +36,9 @@ try {
         emit: (event, payload) => listeners.get(event)?.({ event, id: 1, payload }),
         publish(width = 96, height = 64) { this.session = image(width, height); this.emit('screenshot-session', structuredClone(this.session)); return this.session.id; },
       };
+      const replayAction = new URL(location.href).searchParams.get('initialActionReload');
+      if (new URL(location.href).searchParams.has('failInitialCopy')) q.copyError = true;
+      if (replayAction) q.session = { ...q.session, initialAction: replayAction === 'copy-failure' ? 'copy' : replayAction, overlay: { x: 30, y: 100, width: 192, height: 128, viewportWidth: innerWidth, viewportHeight: innerHeight } };
       const getImageData = CanvasRenderingContext2D.prototype.getImageData;
       CanvasRenderingContext2D.prototype.getImageData = function(...args) {
         if (q.failPixelRead && this.canvas.id === 'image-canvas') throw new Error('QA simulated pixel allocation failure');
@@ -63,7 +66,16 @@ try {
             if (q.holdFocus) await new Promise(resolve => { q.releaseFocus = resolve; });
             if (q.focusError) throw new Error('QA focus failed'); return;
           }
-          if (command === 'screenshot_editor_ready') { q.ready.push(args.sessionId); return; }
+          if (command === 'screenshot_editor_ready') { q.ready.push(args.sessionId); if (q.holdReady) await new Promise(resolve => { q.releaseReady = resolve; }); return; }
+          if (command === 'consume_screenshot_initial_action') {
+            if (args.sessionId !== q.session.id) throw new Error('stale initial action');
+            if (q.claimError) throw new Error('QA claim failed');
+            const replayKey = 'qa-claimed-' + replayAction;
+            if (consumedActions.has(args.sessionId) || replayAction && sessionStorage.getItem(replayKey)) return null;
+            consumedActions.add(args.sessionId); if (replayAction) sessionStorage.setItem(replayKey, '1');
+            return q.session.initialAction ?? null;
+          }
+          if (command === 'restart_screenshot_capture') { if (args.sessionId !== q.session.id) throw new Error('stale restart'); q.restarted = args.sessionId; q.closed.push(args.sessionId); q.emit('screenshot-session-cleared', { id: args.sessionId }); return; }
           if (command === 'open_screenshot_image') {
             if (q.openError) throw new Error('QA damaged local image');
             if (q.holdOpen) await new Promise(resolve => { q.releaseOpen = resolve; });
@@ -153,6 +165,38 @@ try {
     assert.deepEqual(await pixels(), deletionRaster, 'late drag events cannot mutate the next object after deletion');
     await page.locator('#undo-edit').click(); assert.deepEqual(await pixels(), bothRectangles, 'one undo restores only the deleted object');
     await page.locator('#undo-edit').click(); assert.deepEqual(await pixels(), firstRectangle);
+
+    // Freehand/highlight and ellipse use source pixels; one eraser gesture
+    // changes only ink. Existing masks remain opaque in the final raster.
+    await fresh(320, 240); const unmarked = await pixels();
+    await page.locator('#edit-color').fill('#dd2233');
+    await drag('pen', [10, 40], [280, 40]); const painted = await pixels(); assert.notDeepEqual(painted, unmarked);
+    await page.locator('#undo-edit').click(); assert.deepEqual(await pixels(), unmarked);
+    await page.locator('#redo-edit').click(); assert.deepEqual(await pixels(), painted);
+    const cancelInkBounds = await page.locator('#image-canvas').boundingBox();
+    await page.mouse.move(cancelInkBounds.x + 20, cancelInkBounds.y + 100); await page.mouse.down(); await page.mouse.move(cancelInkBounds.x + 80, cancelInkBounds.y + 100);
+    await page.keyboard.press('Escape'); await page.mouse.up(); assert.deepEqual(await pixels(), painted, 'cancelled ink preview never enters history or export');
+    await page.mouse.move(cancelInkBounds.x + 20, cancelInkBounds.y + 100); await page.mouse.down(); await page.mouse.move(cancelInkBounds.x + 80, cancelInkBounds.y + 100);
+    await page.locator('#image-canvas').dispatchEvent('contextlost');
+    for (const button of ['#copy-image', '#save-image', '#pin-image']) assert.equal(await page.locator(button).isDisabled(), true, 'lost context cannot export an in-flight ink preview');
+    await page.mouse.up();
+    await page.locator('#undo-edit').click();
+    assert.equal(await page.locator('#copy-image').isDisabled(), true, 'history navigation cannot rearm export before context restoration');
+    await page.locator('#image-canvas').dispatchEvent('contextrestored');
+    assert.deepEqual(await pixels(), unmarked, 'restoration replays committed history, never the interrupted ink');
+    await page.locator('#redo-edit').click(); assert.deepEqual(await pixels(), painted);
+    await drag('highlight', [10, 80], [280, 80]);
+    await page.locator('[data-tool="rectangle"]').click(); await page.locator('#shape-style').selectOption('ellipse');
+    await drag('rectangle', [50, 130], [150, 190]);
+    await page.locator('#shape-style').selectOption('rectangle');
+    await page.locator('#edit-color').fill('#112233'); await drag('solid', [30, 20], [60, 100]);
+    const inkAndMask = await pixels();
+    await drag('eraser', [100, 20], [100, 100]); const erasedInk = await pixels(); assert.notDeepEqual(erasedInk, inkAndMask);
+    await page.locator('#undo-edit').click(); assert.deepEqual(await pixels(), inkAndMask);
+    await page.locator('#redo-edit').click(); assert.deepEqual(await pixels(), erasedInk);
+    await drag('eraser', [45, 20], [45, 100]);
+    const privacyPixel = await page.locator('#image-canvas').evaluate(c => [...c.getContext('2d').getImageData(45, 40, 1, 1).data]);
+    assert.deepEqual(privacyPixel, [17, 34, 51, 255], 'local ink eraser never removes privacy mask');
 
     // New annotation interactions use a nonmodal inline editor and one shared
     // history. Coordinates are source pixels at both DPRs, not CSS pixel guesses.
@@ -367,6 +411,10 @@ try {
     await page.emulateMedia({ colorScheme: 'dark' }); await page.setViewportSize({ width: 600, height: 540 });
     await page.screenshot({ path: `test-results/screenshot-editor-dark-narrow-dpr${deviceScaleFactor}.png` });
     assert.equal(await page.locator('body').evaluate(b => b.scrollWidth <= innerWidth), true);
+    assert.deepEqual(await page.locator('.tool-group button').evaluateAll(buttons => buttons.filter(button => {
+      const rect = button.getBoundingClientRect();
+      return rect.left < 0 || rect.right > innerWidth;
+    }).map(button => button.dataset.tool)), [], 'all annotation tools remain within the narrow editor, not merely clipped');
     assert.deepEqual(await page.evaluate(() => Object.keys(localStorage)), [], 'no image data persisted in web storage');
     const commands = await page.evaluate(() => window.__screenshotQA.calls.map(x => x.command));
     assert.equal(commands.some(x => /ocr|translate|history|provider/i.test(x)), false, 'F1 editor never invokes OCR, translation, providers, or history');
@@ -545,7 +593,7 @@ try {
       await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
       const layout = await page.evaluate(() => {
         const rect = element => { const r = element.getBoundingClientRect(); return { x: r.x, y: r.y, right: r.right, bottom: r.bottom }; };
-        return { boxes: ['.editor-toolbar', '#overlay-info', '#editor-status'].map(selector => rect(document.querySelector(selector))),
+        return { boxes: ['.editor-toolbar', '#overlay-info', '#editor-status'].map(selector => document.querySelector(selector)).filter(element => !element.hidden).map(rect),
           actions: ['#overlay-copy', '#overlay-cancel', '#overlay-save', '#overlay-pin'].map(selector => {
             const button = document.querySelector(selector), r = button.getBoundingClientRect(), hit = document.elementFromPoint(r.x + r.width / 2, r.y + r.height / 2);
             return { selector, ...rect(button), clickable: !button.disabled && (hit === button || button.contains(hit)) };
@@ -560,6 +608,67 @@ try {
       if (fixture.roi.y >= height - 10) assert.ok(layout.boxes[0].bottom < fixture.roi.y, 'bottom-edge toolbar flips above');
       await page.locator('#overlay-cancel').click(); await page.waitForFunction(id => window.__screenshotQA.closed.includes(id), overlayId);
     }
+    // Restore the regular monitor after the 220px edge-placement fixtures.
+    // The following native intents use a 192px selection at x=30; carrying the
+    // tiny viewport forward correctly fails the production geometry guard.
+    await page.setViewportSize({ width: 600, height: 540 });
+    // Native adjusted selection transfers an intent, never an extra confirm step.
+    // A duplicate durable snapshot/event cannot copy/save/pin twice.
+    for (const [initialAction, collection] of [['copy', 'copies'], ['save', 'saves'], ['pin', 'pins']]) {
+      const before = await page.evaluate(collection => window.__screenshotQA[collection].length, collection);
+      const id = await page.evaluate(initialAction => {
+        const q = window.__screenshotQA; q.copyError = q.saveError = q.pinError = q.closeError = q.saveCancel = false;
+        q.session = { ...q.image(), overlay: { x: 30, y: 100, width: 192, height: 128, viewportWidth: innerWidth, viewportHeight: innerHeight }, initialAction };
+        q.emit('screenshot-session', structuredClone(q.session)); q.emit('screenshot-session', structuredClone(q.session)); return q.session.id;
+      }, initialAction);
+      await page.waitForFunction(([id, collection, before]) => window.__screenshotQA.closed.includes(id) && window.__screenshotQA[collection].length === before + 1, [id, collection, before]);
+    }
+    const beforeStale = await page.evaluate(() => window.__screenshotQA.copies.length);
+    const heldId = await page.evaluate(() => {
+      const q = window.__screenshotQA; q.holdReady = true;
+      q.session = { ...q.image(), overlay: { x: 30, y: 100, width: 192, height: 128, viewportWidth: innerWidth, viewportHeight: innerHeight }, initialAction: 'copy' };
+      q.emit('screenshot-session', structuredClone(q.session)); return q.session.id;
+    });
+    await page.waitForFunction(id => window.__screenshotQA.ready.includes(id), heldId);
+    await page.evaluate(() => { window.__screenshotQA.holdReady = false; });
+    await fresh(); await page.evaluate(() => window.__screenshotQA.releaseReady());
+    await page.waitForTimeout(30); assert.equal(await page.evaluate(() => window.__screenshotQA.copies.length), beforeStale, 'stale initial intent never exports a replacement session');
+    overlayId = await page.evaluate(() => {
+      const q = window.__screenshotQA; q.session = { ...q.image(), overlay: { x: 30, y: 100, width: 192, height: 128, viewportWidth: innerWidth, viewportHeight: innerHeight }, initialAction: 'pen' };
+      q.emit('screenshot-session', structuredClone(q.session)); return q.session.id;
+    });
+    await page.waitForFunction(id => window.__screenshotQA.ready.includes(id), overlayId);
+    await page.waitForFunction(() => document.querySelector('[data-tool="pen"]').getAttribute('aria-pressed') === 'true');
+    assert.equal(await page.locator('#overlay-info').textContent(), '96 × 64');
+    assert.equal(await page.locator('#editor-status').isVisible(), false, 'no permanent annotation-stage hint or empty status bubble');
+    await drag('pen', [10, 20], [80, 20]);
+    await page.locator('#restart-selection').click(); await page.locator('#discard-cancel').click();
+    assert.equal(await page.evaluate(() => window.__screenshotQA.restarted), undefined, 'cancel reselect keeps image');
+    await page.locator('#restart-selection').click(); await page.locator('#discard-confirm').click();
+    await page.waitForFunction(id => window.__screenshotQA.restarted === id, overlayId);
+    assert.equal(await page.evaluate(() => window.__screenshotQA.copies.length), beforeStale, 'reselect never copies');
+    const failedClaimId = await page.evaluate(() => {
+      const q = window.__screenshotQA; q.claimError = true;
+      q.session = { ...q.image(), overlay: { x: 30, y: 100, width: 192, height: 128, viewportWidth: innerWidth, viewportHeight: innerHeight }, initialAction: 'copy' };
+      q.emit('screenshot-session', structuredClone(q.session)); return q.session.id;
+    });
+    await page.waitForFunction(() => document.querySelector('#editor-status').textContent.includes('QA claim failed'));
+    assert.equal(await page.locator('#canvas-frame').isVisible(), true, 'claim failure retains an editable image');
+    assert.equal(await page.locator('#overlay-copy').isEnabled(), true, 'claim failure offers explicit manual completion');
+    assert.equal(await page.evaluate(id => window.__screenshotQA.closed.includes(id), failedClaimId), false);
+    await page.evaluate(() => { window.__screenshotQA.claimError = false; });
+    await page.locator('#overlay-cancel').click();
+    await page.goto(new URL('screenshot.html?initialActionReload=copy-failure&failInitialCopy=1', base).href);
+    await page.waitForFunction(() => document.querySelector('#editor-status').textContent.includes('QA copy failed'));
+    await page.reload();
+    await page.waitForFunction(() => window.__screenshotQA.calls.some(x => x.command === 'consume_screenshot_initial_action'));
+    await page.waitForTimeout(30);
+    assert.equal(await page.evaluate(() => window.__screenshotQA.calls.filter(x => x.command === 'copy_screenshot_image').length), 0, 'failed claimed export is not automatically retried by reload');
+    await page.goto(new URL('screenshot.html?initialActionReload=copy', base).href);
+    await page.waitForFunction(() => window.__screenshotQA.copies.length === 1);
+    await page.reload();
+    await page.waitForFunction(() => window.__screenshotQA.calls.some(x => x.command === 'consume_screenshot_initial_action'));
+    await page.waitForTimeout(30); assert.equal(await page.evaluate(() => window.__screenshotQA.copies.length), 0, 'backend consumed action is not repeated after WebView reload');
     await context.close();
   }
   assert.deepEqual(errors, []); assert.deepEqual(externalRequests, []);

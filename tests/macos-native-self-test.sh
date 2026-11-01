@@ -51,3 +51,39 @@ assert checks.get("generalClipboardTouched") is False, "Self-test touched the ge
 assert checks.get("codexInteractiveSelectionTested") is False, "Fixtures must not claim Codex interactive acceptance"
 assert checks.get("qqInteractiveMultiSelectionTested") is False, "Fixtures must not claim QQ interactive acceptance"
 PY_CHECK
+
+# Reuse the same compiled helper. These are synthetic policy/state tests, not
+# an Apple engine request, a language download, or physical-device acceptance.
+"$fixture_dir/echolingo-native-helper" --system-translation-self-test | tee "$fixture_dir/system-translation.json"
+swiftc --version > "$fixture_dir/swift-version.txt"
+sw_vers -productVersion > "$fixture_dir/macos-version.txt"
+python3 - "$fixture_dir/system-translation.json" "$fixture_dir/swift-version.txt" "$fixture_dir/macos-version.txt" <<'PY_SYSTEM'
+import json
+import re
+import sys
+from pathlib import Path
+
+report = json.loads(Path(sys.argv[1]).read_text())
+assert report.get("ok") is True, "System translation synthetic self-test failed"
+checks = report.get("diagnostics", {})
+for required in (
+    "systemTranslationPolicyFixturePassed",
+    "systemTranslationTraceRecoveryFixturePassed",
+    "systemTranslationOutputFixturePassed",
+):
+    assert checks.get(required) is True, f"Missing system translation policy check: {required}"
+assert checks.get("translationEngineCalled") is False, "Policy checks invoked Apple translation"
+assert checks.get("languageDownloadRequested") is False, "Policy checks requested language downloads"
+version = re.search(r"Swift version (\d+)\.(\d+)", Path(sys.argv[2]).read_text())
+assert version, "Cannot establish Swift compiler capability"
+compiler = tuple(map(int, version.groups()))
+macos_major = int(Path(sys.argv[3]).read_text().strip().split(".")[0])
+capable = compiler >= (6, 2) and macos_major >= 26
+if capable:
+    assert checks.get("systemTranslationInstalledOnlyFixturePassed") is True, "Capable runner skipped installed-only/recovery policy tests"
+    assert checks.get("systemTranslationCancellationFixturePassed") is True, "Capable runner skipped cancellation policy tests"
+else:
+    assert checks.get("systemTranslationInstalledOnlyFixturePassed") is False, "Unsupported runner claimed macOS 26 policy coverage"
+    print("Installed-only/recovery Translation API policy checks skipped: macOS 26 and Swift 6.2 required.")
+print("Synthetic system translation policy/recovery checks passed; no engine/download or real-device acceptance claimed.")
+PY_SYSTEM

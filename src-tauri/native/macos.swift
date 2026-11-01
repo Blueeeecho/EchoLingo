@@ -3263,7 +3263,10 @@ func captureScreenshotResponse(cancellation: CaptureScreenshotOperation) throws 
                     "width": Double(usable.width), "height": Double(usable.height)]
         }
     }
-    return ["ok": true, "imageBase64": encoded,
+    guard let action = captured.plan.initialAction, action != .cancel else {
+        throw NativeError("CAPTURE_ACTION: 截图操作未选择，请重新截图。")
+    }
+    return ["ok": true, "imageBase64": encoded, "initialAction": action.rawValue,
             "captureGeometry": try captureEditorGeometry(captured.plan, primaryHeight: captured.plan.primaryHeight),
             "captureScreens": captureScreens]
 }
@@ -3815,7 +3818,7 @@ func systemTranslationFailure(_ error: Error) -> NativeError {
     if let native = error as? NativeError { return native }
     switch error {
     case TranslationError.notInstalled:
-        return NativeError("SYSTEM_TRANSLATION_DOWNLOAD_REQUIRED: 请在设置中点击「准备系统翻译」，确认下载所需语言后重试。")
+        return NativeError("SYSTEM_TRANSLATION_DOWNLOAD_REQUIRED: Apple 系统翻译当前无法使用此语言组合的本机资源。请点击「准备系统翻译」检查并准备后重试。")
     case TranslationError.unsupportedSourceLanguage, TranslationError.unsupportedTargetLanguage,
          TranslationError.unsupportedLanguagePairing:
         return NativeError("SYSTEM_TRANSLATION_UNSUPPORTED: Apple 系统翻译不支持当前语言组合，请选择其他语言或翻译服务。")
@@ -3829,13 +3832,30 @@ func systemTranslationFailure(_ error: Error) -> NativeError {
 }
 
 @available(macOS 26.0, *)
+func systemTranslationErrorKind(_ error: Error) -> String {
+    switch error {
+    case TranslationError.notInstalled: return "notInstalled"
+    case TranslationError.unsupportedSourceLanguage: return "unsupportedSourceLanguage"
+    case TranslationError.unsupportedTargetLanguage: return "unsupportedTargetLanguage"
+    case TranslationError.unsupportedLanguagePairing: return "unsupportedLanguagePairing"
+    case TranslationError.unableToIdentifyLanguage: return "unableToIdentifyLanguage"
+    case TranslationError.alreadyCancelled, is CancellationError: return "cancelled"
+    default: return "other"
+    }
+}
+
+@available(macOS 26.0, *)
 func systemInstalledTranslationContractSelfTest() throws {
     let session = TranslationSession(installedSource: Locale.Language(identifier: "zh-Hans"),
                                      target: Locale.Language(identifier: "en"))
     guard !session.canRequestDownloads,
           systemTranslationFailure(TranslationError.notInstalled).message.hasPrefix("SYSTEM_TRANSLATION_DOWNLOAD_REQUIRED:"),
           systemTranslationFailure(TranslationError.unsupportedLanguagePairing).message.hasPrefix("SYSTEM_TRANSLATION_UNSUPPORTED:"),
-          systemTranslationFailure(CancellationError()).message.hasPrefix("SYSTEM_TRANSLATION_CANCELLED:") else {
+          systemTranslationFailure(CancellationError()).message.hasPrefix("SYSTEM_TRANSLATION_CANCELLED:"),
+          systemTranslationErrorKind(TranslationError.notInstalled) == "notInstalled",
+          systemTranslationErrorKind(TranslationError.unsupportedLanguagePairing) == "unsupportedLanguagePairing",
+          systemTranslationErrorKind(CancellationError()) == "cancelled",
+          systemTranslationErrorKind(NSError(domain: "private", code: 1)) == "other" else {
         throw NativeError("SELF_TEST: Installed-only translation contract failed.")
     }
     try systemTranslationStatusPolicySelfTest()
@@ -3843,15 +3863,17 @@ func systemInstalledTranslationContractSelfTest() throws {
 
 @available(macOS 26.0, *)
 func systemTranslationStatusPayload(_ state: LanguageAvailability.Status, source: String,
-                                    target: String, starterPair: Bool) -> [String: Any] {
+                                    target: String, starterPair: Bool, recoveryRequired: Bool = false) -> [String: Any] {
     let status: String
     let available: Bool
     let requiresSetup: Bool
     var message: String
     switch state {
     case .installed:
-        status = "installed"; available = true; requiresSetup = false
-        message = "此语言组合已可使用 Apple 系统翻译，无需 API 密钥。"
+        status = "installed"; available = !recoveryRequired; requiresSetup = recoveryRequired
+        message = recoveryRequired
+            ? "系统显示此语言组合已安装，但最近一次翻译未能使用本机资源。请点击「准备系统翻译」重新准备。"
+            : "系统报告此语言组合已安装，可尝试 Apple 系统翻译，无需 API 密钥。"
     case .supported:
         status = "supported"; available = false; requiresSetup = true
         message = "此语言组合受系统支持，可直接尝试翻译；需要语言包时再点击「准备系统翻译」。"
@@ -3873,7 +3895,8 @@ func systemTranslationStatusPayload(_ state: LanguageAvailability.Status, source
 func systemTranslationStatusPolicySelfTest() throws {
     let supported = systemTranslationStatusPayload(.supported, source: "zh-Hans", target: "en", starterPair: false)
     let installed = systemTranslationStatusPayload(.installed, source: "en", target: "zh-Hans", starterPair: false)
-    let unsupported = systemTranslationStatusPayload(.unsupported, source: "ja", target: "ko", starterPair: true)
+    let recovery = systemTranslationStatusPayload(.installed, source: "zh-Hans", target: "en", starterPair: false, recoveryRequired: true)
+    let unsupported = systemTranslationStatusPayload(.unsupported, source: "ja", target: "ko", starterPair: true, recoveryRequired: true)
     guard supported["status"] as? String == "supported",
           supported["available"] as? Bool == false,
           supported["requiresSetup"] as? Bool == true,
@@ -3881,6 +3904,9 @@ func systemTranslationStatusPolicySelfTest() throws {
           installed["status"] as? String == "installed",
           installed["available"] as? Bool == true,
           installed["requiresSetup"] as? Bool == false,
+          recovery["status"] as? String == "installed",
+          recovery["available"] as? Bool == false,
+          recovery["requiresSetup"] as? Bool == true,
           unsupported["status"] as? String == "unsupported",
           unsupported["requiresSetup"] as? Bool == false,
           unsupported["starterPair"] as? Bool == true,
@@ -3894,8 +3920,20 @@ func availableSystemTranslation(_ request: SystemTranslationInput) async throws 
     let (source, starterPair) = try systemSourceLanguage(request, forTranslation: false)
     let state: LanguageAvailability.Status
     if systemLanguagesEquivalent(source, request.target) { state = .installed }
-    else { state = await LanguageAvailability().status(from: Locale.Language(identifier: source), to: Locale.Language(identifier: request.target)) }
-    return systemTranslationStatusPayload(state, source: source, target: request.target, starterPair: starterPair)
+    else {
+        state = await LanguageAvailability().status(from: Locale.Language(identifier: source), to: Locale.Language(identifier: request.target))
+        let observed: String
+        switch state {
+        case .installed: observed = "installed"
+        case .supported: observed = "supported"
+        case .unsupported: observed = "unsupported"
+        @unknown default: observed = "unknown"
+        }
+        // Historical completed query, not a claim about the next failure instant.
+        SystemTranslationTrace.availabilityObserved(source: source, target: request.target, status: observed)
+    }
+    return systemTranslationStatusPayload(state, source: source, target: request.target, starterPair: starterPair,
+                                          recoveryRequired: systemTranslationRecovery.needsPreparation(source: source, target: request.target))
 }
 
 @available(macOS 13.0, *)
@@ -3921,6 +3959,7 @@ func systemLanguagesEquivalent(_ source: String, _ target: String) -> Bool {
 func translateWithSystem(_ request: SystemTranslationInput, trace: SystemTranslationTrace) async throws -> [String: Any] {
     let (source, _) = try systemSourceLanguage(request, forTranslation: true)
     let text = request.text ?? ""
+    trace.languages(source: source, target: request.target)
     // Preserve the requested Chinese script. Do not substitute generic zh or
     // another target if Apple's availability/session rejects the exact pair.
     if systemLanguagesEquivalent(source, request.target) {
@@ -3928,9 +3967,15 @@ func translateWithSystem(_ request: SystemTranslationInput, trace: SystemTransla
     }
     // Availability is advisory in Settings and can be transient. This session
     // cannot request downloads; translate reports the actual installed state.
+    let recoveryTicket = try systemTranslationRecovery.begin(source: source, target: request.target)
     trace.phase("createSession")
     let session = TranslationSession(installedSource: Locale.Language(identifier: source), target: Locale.Language(identifier: request.target))
+    trace.sessionLanguages(source: session.sourceLanguage?.minimalIdentifier,
+                           target: session.targetLanguage?.minimalIdentifier,
+                           sourceMaximal: session.sourceLanguage?.maximalIdentifier,
+                           targetMaximal: session.targetLanguage?.maximalIdentifier)
     guard !session.canRequestDownloads else {
+        systemTranslationRecovery.finish(recoveryTicket, outcome: .unchanged)
         throw NativeError("SYSTEM_TRANSLATION_FAILED: 系统翻译未能进入本机语言模式。")
     }
     do {
@@ -3945,10 +3990,20 @@ func translateWithSystem(_ request: SystemTranslationInput, trace: SystemTransla
             guard systemTargetLanguageMatches(request.target, response.targetLanguage) else {
                 throw NativeError("SYSTEM_TRANSLATION_UNSUPPORTED: Apple 系统翻译未保留所选目标语言，请选择其他翻译服务。")
             }
+            systemTranslationRecovery.finish(recoveryTicket, outcome: .succeeded)
             return ["text": normalizeSystemTranslationOutput(source: text, translated: response.targetText),
                     "sourceLanguage": source, "targetLanguage": request.target]
         }, onCancel: { session.cancel() })
-    } catch { trace.failure(error); throw systemTranslationFailure(error) }
+    } catch {
+        // Keep the actual translation error even when advisory availability
+        // disagrees. Never retry translation, query advisory state or start a
+        // download here: diagnostics must not delay the known original error.
+        trace.failure(error)
+        let kind = systemTranslationErrorKind(error)
+        trace.translationFailureKind(kind)
+        systemTranslationRecovery.finish(recoveryTicket, outcome: kind == "notInstalled" ? .notInstalled : .unchanged)
+        throw systemTranslationFailure(error)
+    }
 }
 
 @available(macOS 26.0, *)
@@ -4051,24 +4106,34 @@ func prepareSystemTranslation(_ request: SystemTranslationInput) throws -> [Stri
     let state = try awaitSystemTranslation(seconds: 15) { try await availableSystemTranslation(request) }
     if state["available"] as? Bool == true { return state }
     guard state["requiresSetup"] as? Bool == true else {
-        throw NativeError("SYSTEM_TRANSLATION_UNSUPPORTED: Apple 系统翻译不支持当前语言组合，请选择其他语言或翻译服务。")
+        if state["status"] as? String == "unsupported" {
+            throw NativeError("SYSTEM_TRANSLATION_UNSUPPORTED: Apple 系统翻译不支持当前语言组合，请选择其他语言或翻译服务。")
+        }
+        throw NativeError("SYSTEM_TRANSLATION_FAILED: 无法确认此语言组合的系统翻译状态，请重试检查。")
     }
     let (source, _) = try systemSourceLanguage(request, forTranslation: false)
+    var recoveryTicket: SystemTranslationRecovery.Ticket?
     let waiter = SystemTranslationWaiter()
     let preparation = SystemTranslationPreparation(waiter: waiter)
-    try onMainThread {
-        guard activeSystemTranslationPreparation == nil else {
-            throw NativeError("SYSTEM_TRANSLATION_BUSY: 系统翻译正在准备，请先完成或取消当前操作。")
-        }
-        activeSystemTranslationPreparation = preparation
-        preparation.show(source: source, target: request.target)
-    }
+    var preparationShown = false
     do {
+        try onMainThread {
+            guard activeSystemTranslationPreparation == nil else {
+                throw NativeError("SYSTEM_TRANSLATION_BUSY: 系统翻译正在准备，请先完成或取消当前操作。")
+            }
+            recoveryTicket = try systemTranslationRecovery.begin(source: source, target: request.target)
+            activeSystemTranslationPreparation = preparation
+            preparation.show(source: source, target: request.target)
+        }
+        preparationShown = true
         _ = try waiter.wait(seconds: 180)
+        SystemTranslationTrace.preparationObserved(source: source, target: request.target)
+        if let recoveryTicket { systemTranslationRecovery.finish(recoveryTicket, outcome: .succeeded) }
         return try awaitSystemTranslation(seconds: 15) { try await availableSystemTranslation(request) }
     } catch {
+        if let recoveryTicket { systemTranslationRecovery.finish(recoveryTicket, outcome: .unchanged) }
         // Timeout cancellation belongs to this operation only.
-        DispatchQueue.main.async { preparation.cancel() }
+        if preparationShown { DispatchQueue.main.async { preparation.cancel() } }
         throw error
     }
 }
@@ -4099,12 +4164,106 @@ func systemTranslationResponse(mode: String, input: Data) throws -> [String: Any
     throw NativeError("SYSTEM_TRANSLATION_UNAVAILABLE: 当前免 API 系统翻译需要 macOS 26 或更新版本；也可以配置自己的翻译服务。")
 }
 
+// Separate operational state from the latest diagnostic snapshot. Entries are
+// retained only while active or requiring explicit recovery; never evict an
+// unresolved failure and silently turn it into a healthy pair.
+final class SystemTranslationRecovery: @unchecked Sendable {
+    struct Pair: Hashable { let source: String; let target: String }
+    struct Ticket { let pair: Pair; let generation: UInt64 }
+    enum Outcome { case succeeded, notInstalled, unchanged }
+    private struct Entry { var generation: UInt64; var requiresPreparation: Bool; var active: Bool }
+    private let lock = NSLock()
+    private var generation: UInt64 = 0
+    private var entries: [Pair: Entry] = [:]
+    private let capacity: Int
+    init(capacity: Int = 64) { self.capacity = capacity }
+    func begin(source: String, target: String) throws -> Ticket {
+        lock.lock(); defer { lock.unlock() }
+        let pair = Pair(source: source, target: target)
+        guard entries[pair] != nil || entries.count < capacity else {
+            throw NativeError("SYSTEM_TRANSLATION_BUSY: 待准备的语言组合过多，请先完成已有语言组合的准备。")
+        }
+        generation &+= 1
+        entries[pair] = Entry(generation: generation, requiresPreparation: entries[pair]?.requiresPreparation ?? false, active: true)
+        return Ticket(pair: pair, generation: generation)
+    }
+    func finish(_ ticket: Ticket, outcome: Outcome) {
+        lock.lock(); defer { lock.unlock() }
+        guard var entry = entries[ticket.pair], entry.generation == ticket.generation, entry.active else { return }
+        entry.active = false
+        switch outcome {
+        case .succeeded: entry.requiresPreparation = false
+        case .notInstalled: entry.requiresPreparation = true
+        case .unchanged: break
+        }
+        if entry.requiresPreparation { entries[ticket.pair] = entry }
+        else { entries.removeValue(forKey: ticket.pair) }
+    }
+    func needsPreparation(source: String, target: String) -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        return entries[Pair(source: source, target: target)]?.requiresPreparation ?? false
+    }
+}
+let systemTranslationRecovery = SystemTranslationRecovery()
+
+func systemTranslationRecoverySelfTest() throws {
+    let recovery = SystemTranslationRecovery(capacity: 2)
+    let first = try recovery.begin(source: "zh-Hans", target: "en")
+    recovery.finish(first, outcome: .notInstalled)
+    let pending = try recovery.begin(source: "zh-Hans", target: "en")
+    _ = SystemTranslationTrace() // Diagnostic resets cannot reset recovery.
+    let other = try recovery.begin(source: "en", target: "zh-Hans")
+    recovery.finish(other, outcome: .succeeded)
+    recovery.finish(pending, outcome: .unchanged) // Generic/query/cancel failure.
+    guard recovery.needsPreparation(source: "zh-Hans", target: "en"),
+          !recovery.needsPreparation(source: "en", target: "zh-Hans") else {
+        throw NativeError("SELF_TEST: New requests, other pairs or generic errors cleared recovery.")
+    }
+    let staleSuccess = try recovery.begin(source: "zh-Hans", target: "en")
+    let latestFailure = try recovery.begin(source: "zh-Hans", target: "en")
+    recovery.finish(latestFailure, outcome: .notInstalled)
+    recovery.finish(staleSuccess, outcome: .succeeded)
+    guard recovery.needsPreparation(source: "zh-Hans", target: "en") else {
+        throw NativeError("SELF_TEST: Stale success cleared newer recovery.")
+    }
+    let staleFailure = try recovery.begin(source: "zh-Hans", target: "en")
+    let latestSuccess = try recovery.begin(source: "zh-Hans", target: "en")
+    recovery.finish(latestSuccess, outcome: .succeeded)
+    recovery.finish(staleFailure, outcome: .notInstalled)
+    guard !recovery.needsPreparation(source: "zh-Hans", target: "en") else {
+        throw NativeError("SELF_TEST: Stale failure overwrote successful recovery.")
+    }
+    let a = try recovery.begin(source: "zh-Hans", target: "en")
+    recovery.finish(a, outcome: .notInstalled)
+    let b = try recovery.begin(source: "en", target: "zh-Hans")
+    recovery.finish(b, outcome: .notInstalled)
+    do {
+        _ = try recovery.begin(source: "fr", target: "en")
+        throw NativeError("SELF_TEST: Recovery state exceeded its bound.")
+    } catch let error as NativeError {
+        guard error.message.hasPrefix("SYSTEM_TRANSLATION_BUSY:") else { throw error }
+    }
+    guard recovery.needsPreparation(source: "zh-Hans", target: "en"),
+          recovery.needsPreparation(source: "en", target: "zh-Hans") else {
+        throw NativeError("SELF_TEST: Capacity handling erased unresolved recovery.")
+    }
+    recovery.finish(a, outcome: .succeeded)
+    guard recovery.needsPreparation(source: "zh-Hans", target: "en") else {
+        throw NativeError("SELF_TEST: A completed failure ticket was accepted twice.")
+    }
+    let repaired = try recovery.begin(source: "zh-Hans", target: "en")
+    recovery.finish(repaired, outcome: .succeeded)
+    _ = try recovery.begin(source: "fr", target: "en")
+}
+
 // Latest Apple translation operation only. No source/target text, arbitrary
 // error descriptions/userInfo, clipboard data or credentials are retained.
 final class SystemTranslationTrace: @unchecked Sendable {
     private static let lock = NSLock()
     private static var next: UInt64 = 0
     private static var latest: [String: Any] = [:]
+    private static var lastAvailability: [String: Any] = [:]
+    private static var lastPreparation: [String: Any] = [:]
     private let id: UInt64
     private let started = ProcessInfo.processInfo.systemUptime
     init() {
@@ -4143,6 +4302,46 @@ final class SystemTranslationTrace: @unchecked Sendable {
         Self.latest["phase"] = "failed"
         Self.latest["elapsedMs"] = (ProcessInfo.processInfo.systemUptime - started) * 1000
     }
+    func languages(source: String, target: String) {
+        Self.lock.lock(); defer { Self.lock.unlock() }
+        guard Self.latest["attemptId"] as? UInt64 == id else { return }
+        // Only validated language identifiers; never source text or error userInfo.
+        if validSystemLanguage(source), validSystemLanguage(target) {
+            Self.latest["sourceLanguage"] = source; Self.latest["targetLanguage"] = target
+        }
+    }
+    func sessionLanguages(source: String?, target: String?, sourceMaximal: String?, targetMaximal: String?) {
+        Self.lock.lock(); defer { Self.lock.unlock() }
+        guard Self.latest["attemptId"] as? UInt64 == id else { return }
+        // Session configuration properties, not successful-response language detection.
+        for (key, value) in [("sessionSourceLanguage", source), ("sessionTargetLanguage", target),
+                             ("sessionSourceMaximalIdentifier", sourceMaximal), ("sessionTargetMaximalIdentifier", targetMaximal)] {
+            if let value, validSystemLanguage(value) { Self.latest[key] = value }
+            else { Self.latest[key] = NSNull() }
+        }
+    }
+    static func availabilityObserved(source: String, target: String, status: String) {
+        guard validSystemLanguage(source), validSystemLanguage(target),
+              ["installed", "supported", "unsupported", "unknown"].contains(status) else { return }
+        lock.lock(); defer { lock.unlock() }
+        lastAvailability = ["sourceLanguage": source, "targetLanguage": target, "status": status,
+                            "completedAtUnixMs": Int64(Date().timeIntervalSince1970 * 1000)]
+    }
+    static func preparationObserved(source: String, target: String) {
+        guard validSystemLanguage(source), validSystemLanguage(target) else { return }
+        lock.lock(); defer { lock.unlock() }
+        lastPreparation = ["sourceLanguage": source, "targetLanguage": target,
+                           "completedAtUnixMs": Int64(Date().timeIntervalSince1970 * 1000)]
+    }
+    static func observationsSnapshot() -> [String: Any] {
+        lock.lock(); defer { lock.unlock() }
+        return ["lastCompletedAvailabilityQuery": lastAvailability, "lastSuccessfulExplicitPreparation": lastPreparation]
+    }
+    func translationFailureKind(_ kind: String) {
+        Self.lock.lock(); defer { Self.lock.unlock() }
+        guard Self.latest["attemptId"] as? UInt64 == id else { return }
+        Self.latest["translationErrorKind"] = kind
+    }
     static func snapshot() -> [String: Any] {
         lock.lock(); defer { lock.unlock() }; return latest
     }
@@ -4168,6 +4367,34 @@ func systemTranslationTraceSelfTest() throws {
         throw NativeError("SELF_TEST: Old translation overwrote newer diagnostics.")
     }
     current.phase("completed")
+    try systemTranslationRecoverySelfTest()
+    let reset = SystemTranslationTrace()
+    reset.languages(source: "private source text", target: "en")
+    guard SystemTranslationTrace.snapshot()["sourceLanguage"] == nil else {
+        throw NativeError("SELF_TEST: Translation diagnostics accepted unvalidated language content.")
+    }
+    reset.sessionLanguages(source: "zh", target: "en", sourceMaximal: "zh-Hans-CN", targetMaximal: "en-Latn-US")
+    old.sessionLanguages(source: "fr", target: "de", sourceMaximal: nil, targetMaximal: nil)
+    SystemTranslationTrace.availabilityObserved(source: "zh-Hans", target: "en", status: "installed")
+    SystemTranslationTrace.preparationObserved(source: "zh-Hans", target: "en")
+    SystemTranslationTrace.availabilityObserved(source: "private text", target: "en", status: "installed")
+    SystemTranslationTrace.availabilityObserved(source: "en", target: "fr", status: "private status")
+    SystemTranslationTrace.preparationObserved(source: "en", target: "private text")
+    let observations = SystemTranslationTrace.observationsSnapshot()
+    let availability = observations["lastCompletedAvailabilityQuery"] as? [String: Any]
+    let preparation = observations["lastSuccessfulExplicitPreparation"] as? [String: Any]
+    let observationJSON = String(data: try JSONSerialization.data(withJSONObject: observations), encoding: .utf8) ?? ""
+    guard SystemTranslationTrace.snapshot()["sessionSourceLanguage"] as? String == "zh",
+          SystemTranslationTrace.snapshot()["sessionSourceMaximalIdentifier"] as? String == "zh-Hans-CN",
+          availability?["sourceLanguage"] as? String == "zh-Hans",
+          availability?["status"] as? String == "installed",
+          availability?["completedAtUnixMs"] is Int64,
+          preparation?["targetLanguage"] as? String == "en",
+          preparation?["completedAtUnixMs"] is Int64,
+          !observationJSON.contains("private") else {
+        throw NativeError("SELF_TEST: Translation observations lost exact metadata or retained content.")
+    }
+    reset.phase("completed")
 }
 
 func diagnostics() -> [String: Any] {
@@ -4180,6 +4407,7 @@ func diagnostics() -> [String: Any] {
             "selection": "Accessibility selected text, then Cmd+C with clipboard restoration",
             "lastSelectionCapture": SelectionTrace.lastSnapshot(),
             "lastSystemTranslation": SystemTranslationTrace.snapshot(),
+            "systemTranslationObservations": SystemTranslationTrace.observationsSnapshot(),
             "screens": displayDiagnostics()]
 }
 
@@ -4399,7 +4627,7 @@ func nativeResponse(mode: String, input: Data = Data()) -> [String: Any] {
                 }
                 #endif
             }
-            return ["ok": true, "diagnostics": ["systemTranslationPolicyFixturePassed": true, "systemTranslationOutputFixturePassed": true, "systemTranslationOutputFixtureCount": 19, "systemTranslationCancellationFixturePassed": cancellationTested, "systemTranslationCancellationFixtureSkipped": !cancellationTested, "systemTranslationInstalledOnlyFixturePassed": installedOnlyContractTested, "translationEngineCalled": false, "languageDownloadRequested": false]]
+            return ["ok": true, "diagnostics": ["systemTranslationPolicyFixturePassed": true, "systemTranslationTraceRecoveryFixturePassed": true, "systemTranslationOutputFixturePassed": true, "systemTranslationOutputFixtureCount": 19, "systemTranslationCancellationFixturePassed": cancellationTested, "systemTranslationCancellationFixtureSkipped": !cancellationTested, "systemTranslationInstalledOnlyFixturePassed": installedOnlyContractTested, "translationEngineCalled": false, "languageDownloadRequested": false]]
         case "--detect-language":
             guard input.count <= 2 * 1024 * 1024, let text = String(data: input, encoding: .utf8) else {
                 throw NativeError("SYSTEM_TRANSLATION_LANGUAGE: 无法检测原文语言，请手动选择源语言。")

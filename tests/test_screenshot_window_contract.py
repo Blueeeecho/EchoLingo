@@ -101,6 +101,45 @@ class ScreenshotWindowContract(unittest.TestCase):
         self.assertIn('CAPTURE_WINDOW_CHANGED:', new)
         self.assertNotIn('SetWindowDisplayAffinity', read('src-tauri/src/windows_capture_native.rs'))
 
+    def test_isolated_f1_accounts_exact_native_roles_and_explicit_action_without_changing_region_gate(self):
+        native = read('tests/windows-native-capture-smoke.ps1')
+        screenshot = read('tests/windows-screenshot-window-smoke.ps1')
+        # Every replacement is a single bounded known-source edit, not a relaxed gate.
+        for marker in ('int allocated=0,loupes=0;bool loupeNear=false,pixelsReady=false;',
+                       'long edges=0x08000000L|0x80000L|0x20L;',
+                       'bool exact=thin.Count==8 && allocated==12*Screen.AllScreens.Length;'):
+            self.assertEqual(native.count(marker), 1)
+            self.assertIn(marker, screenshot)
+        self.assertIn('ScreenshotInventory(screenshotRoles)', screenshot)
+        self.assertIn('if(roles.Count!=15)return false', screenshot)
+        self.assertIn('roles["handle"]==8', screenshot)
+        self.assertIn('if(!rejected)ScreenshotChooseSelect(helper,source,expected,report)', screenshot)
+        self.assertLess(screenshot.index('if(!rejected)ScreenshotChooseSelect'), screenshot.index('reply=host.Finish(report,12000)'))
+        action = screenshot.split('static void ScreenshotChooseSelect(', 1)[1].split('static void ScreenshotPressed(', 1)[0]
+        for required in ('wanted.SetEquals(handles)', 'owner==helper', 'Screen.FromHandle(window).WorkingArea.Contains(bounds)',
+                         '0x08000000L|0x80000L|0x20L|0x80L|8', 'Send(new INPUT[]{Mouse(2),Mouse(4)})'):
+            self.assertIn(required, action)
+        for forbidden in ('SetForegroundWindow', 'CopyFromScreen', 'Clipboard', 'SetWindowPos'):
+            self.assertNotIn(forbidden, action)
+        self.assertNotIn('ScreenshotChooseSelect', native)
+        self.assertIn('if kind == 0x202 {\n            self.validate_window()?;', read('src-tauri/src/windows_capture_native.rs'))
+
+    def test_adjustment_classifier_does_not_reject_hidden_runtime_windows_or_skip_visible_unknowns(self):
+        screenshot = read('tests/windows-screenshot-window-smoke.ps1')
+        role = screenshot.split('static string ScreenshotRole(', 1)[1].split('static bool ScreenshotInventory(', 1)[0]
+        self.assertIn('if(Class(window)!="EchoLingoNativeCapture-"+helper)return null;', role)
+        self.assertLess(role.index('if(Class(window)'), role.index('GetWindowText('))
+        self.assertIn('Unknown titled screenshot role.', role)
+        self.assertNotIn('Screenshot role has an unexpected native class.', screenshot)
+        self.assertIn('if(role!=null){Need(!IsWindowVisible(window)', screenshot)
+        native = read('tests/windows-native-capture-smoke.ps1')
+        ready = native.split('static bool Ready(', 1)[1].split('static ', 1)[0]
+        self.assertIn('if (!IsWindowVisible(window)) return true;', ready)
+        self.assertIn('Unknown visible helper surface.', ready)
+        self.assertIn('Math.Min(r.Width,r.Height)<=2', ready)
+        self.assertIn('int VisibleOwnedWindows(int helper)', native)
+        self.assertIn('if(pid==helper&&IsWindowVisible(window))count++', native)
+
     def test_generated_windows_are_ready_before_any_input_or_capture(self):
         existing = read('tests/windows-native-capture-smoke.ps1')
         setup = existing.split('public Sources(Dictionary<string,object> report=null)', 1)[1].split('void Prepare(', 1)[0]

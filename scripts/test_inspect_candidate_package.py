@@ -1,5 +1,6 @@
 """Generated static fixtures only: no installers, native apps or permission APIs."""
 import importlib.util
+import hashlib
 import io
 import json
 from pathlib import Path
@@ -135,9 +136,9 @@ class CandidateInspectionTests(unittest.TestCase):
                     MODULE.verify_pe(path)
 
     def test_windows_versions_require_both_numeric_and_display_match(self):
-        valid = {"fileVersion": "0.2.7.0", "productVersion": "0.2.7", "fileParts": [0, 2, 7, 0], "productParts": [0, 2, 7, 0]}
+        valid = {"fileVersion": "0.2.8.0", "productVersion": "0.2.8", "fileParts": [0, 2, 8, 0], "productParts": [0, 2, 8, 0]}
         MODULE.verify_windows_version(valid)
-        for key, value in (("fileVersion", "0.2.5"), ("fileVersion", "0.2.7.1"), ("productVersion", "0.2.7-preview"),
+        for key, value in (("fileVersion", "0.2.5"), ("fileVersion", "0.2.8.1"), ("productVersion", "0.2.8-preview"),
                            ("fileParts", [0, 2, 6, 1]), ("productParts", [0, 2, 5, 0]), ("fileParts", [False, 2, 6, 0])):
             with self.subTest(key=key, value=value), self.assertRaises(MODULE.InspectionError):
                 MODULE.verify_windows_version({**valid, key: value})
@@ -188,13 +189,14 @@ class CandidateInspectionTests(unittest.TestCase):
                 def execute(command, **_):
                     calls.append(command)
                     if command[1] == "attach":
+                        self.assertEqual(_.get("input_bytes"), b"Y\n")
                         if failed_attach:
                             raise MODULE.InspectionError("generated attach failure")
                         data = {"system-entities": [{"dev-entry": "/dev/disk9"},
                                                     {"dev-entry": "/dev/disk9s1", "mount-point": str(mount)}]}
                         return subprocess.CompletedProcess(command, 0, plistlib.dumps(data), b"")
                     return subprocess.CompletedProcess(command, 0, b"", b"")
-                with mock.patch.object(MODULE, "tool", return_value="hdiutil"), mock.patch.object(MODULE, "checked_command", side_effect=execute):
+                with mock.patch.object(MODULE, "tool", return_value="hdiutil"), mock.patch.object(MODULE, "own_dmg_license_input", return_value=b"Y\n"), mock.patch.object(MODULE, "checked_command", side_effect=execute):
                     with self.assertRaises(MODULE.InspectionError):
                         with MODULE.readonly_dmg(Path(folder) / "fixture.dmg", mount):
                             raise MODULE.InspectionError("generated inspection failure")
@@ -203,6 +205,61 @@ class CandidateInspectionTests(unittest.TestCase):
                 self.assertIn("-readonly", calls[1])
                 self.assertIn("-nobrowse", calls[1])
                 self.assertIn("-noautoopen", calls[1])
+
+    def test_only_exact_reviewed_own_dmg_license_can_supply_confirmation(self):
+        license_bytes = (Path(MODULE.ROOT) / "LICENSE").read_bytes()
+        self.assertEqual(hashlib.sha256(license_bytes).hexdigest(), MODULE.OWN_LICENSE_SHA256)
+        def dmg(resources):
+            xml = plistlib.dumps({"resource-fork": resources})
+            trailer = bytearray(512); trailer[:4] = b"koly"
+            struct.pack_into(">QQ", trailer, 216, 8, len(xml))
+            return b"fixture!" + xml + trailer
+        own = {"TEXT": [{"ID": "5000", "Data": license_bytes}]}
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder); path = root / "own.dmg"; project_license = root / "LICENSE"
+            project_license.write_bytes(license_bytes); path.write_bytes(dmg(own))
+            self.assertEqual(MODULE.own_dmg_license_input(path, root), b"Y\n")
+            for resources in ({}, {"TEXT": []}, {"TEXT": own["TEXT"] * 2},
+                              {"TEXT": [{"ID": "5001", "Data": license_bytes}]},
+                              {"TEXT": [{"ID": "5000", "Data": b"different license"}]},
+                              {**own, "RTF ": [{"ID": "5000", "Data": b"other agreement"}]}):
+                path.write_bytes(dmg(resources))
+                with self.assertRaises(MODULE.InspectionError): MODULE.own_dmg_license_input(path, root)
+            path.write_bytes(dmg(own)); project_license.write_bytes(b"unreviewed new project license")
+            with self.assertRaisesRegex(MODULE.InspectionError, 'explicit review'): MODULE.own_dmg_license_input(path, root)
+            project_license.write_bytes(license_bytes)
+            for offset, size in [(8, MODULE.MAX_LISTING + 1), (2**63, 10), (8, 0)]:
+                data = bytearray(dmg(own)); struct.pack_into('>QQ', data, len(data) - 512 + 216, offset, size); path.write_bytes(data)
+                with self.assertRaisesRegex(MODULE.InspectionError, 'bounds'): MODULE.own_dmg_license_input(path, root)
+
+    def test_license_failure_never_attaches_or_supplies_confirmation(self):
+        with tempfile.TemporaryDirectory() as folder, mock.patch.object(MODULE, 'tool', return_value='hdiutil'), \
+                mock.patch.object(MODULE, 'checked_command') as execute, \
+                mock.patch.object(MODULE, 'own_dmg_license_input', side_effect=MODULE.InspectionError('unknown license')):
+            with self.assertRaisesRegex(MODULE.InspectionError, 'unknown license'):
+                with MODULE.readonly_dmg(Path(folder)/'own.dmg', Path(folder)/'mount'): self.fail('must not attach')
+            execute.assert_called_once_with(['hdiutil', 'verify', Path(folder)/'own.dmg'])
+
+    def test_checked_command_delivers_only_bounded_explicit_stdin(self):
+        command = [sys.executable, '-c', 'import sys; sys.stdout.buffer.write(sys.stdin.buffer.read())']
+        self.assertEqual(MODULE.checked_command(command).stdout, b'')
+        self.assertEqual(MODULE.checked_command(command, input_bytes=b'Y\n').stdout, b'Y\n')
+        with self.assertRaisesRegex(MODULE.InspectionError, 'stdin exceeds limit'):
+            MODULE.checked_command(command, input_bytes=b'Y' * 17)
+
+    def test_nsis_identity_reuses_exact_full_tauri_marker_without_modifying_files(self):
+        marker, replacement = b'__TAURI_BUNDLE_TYPE_VAR_UNK', b'__TAURI_BUNDLE_TYPE_VAR_NSS'
+        stage = b'UNK elsewhere: ' + marker + b' complete PE tail'
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder)/'echolingo.exe'; path.write_bytes(stage)
+            expected = MODULE.expected_nsis_application_sha256(path)
+            self.assertEqual(expected, hashlib.sha256(stage.replace(marker, replacement)).hexdigest())
+            self.assertEqual(path.read_bytes(), stage)
+            for modified in [stage, stage.replace(marker, replacement) + b'extra', stage.replace(marker, replacement).replace(b'PE', b'XX')]:
+                self.assertNotEqual(expected, hashlib.sha256(modified).hexdigest())
+            for bad in [stage.replace(marker, b'UNK'), stage + marker]:
+                path.write_bytes(bad)
+                with self.assertRaisesRegex(MODULE.InspectionError, 'Exactly one'): MODULE.expected_nsis_application_sha256(path)
 
     def test_bounded_capture_rejects_stdout_before_unbounded_allocation(self):
         result = MODULE.checked_command([sys.executable, "-c", "print('generated')"], maximum_bytes=32)
@@ -232,7 +289,7 @@ class CandidateInspectionTests(unittest.TestCase):
                 if command[1] == "detach":
                     raise MODULE.InspectionError("hdiutil detach failed (exit 1); stderr: not mounted")
                 return subprocess.CompletedProcess(command, 0, b"", b"")
-            with mock.patch.object(MODULE, "tool", return_value="hdiutil"), mock.patch.object(MODULE, "checked_command", side_effect=execute):
+            with mock.patch.object(MODULE, "tool", return_value="hdiutil"), mock.patch.object(MODULE, "own_dmg_license_input", return_value=b"Y\n"), mock.patch.object(MODULE, "checked_command", side_effect=execute):
                 with self.assertRaisesRegex(MODULE.InspectionError, "hdiutil attach failed.*permission denied.*cleanup also failed.*hdiutil detach"):
                     with MODULE.readonly_dmg(Path(folder) / "fixture.dmg", mount):
                         self.fail("Failed attach must not yield")
@@ -247,7 +304,7 @@ class CandidateInspectionTests(unittest.TestCase):
                     return subprocess.CompletedProcess(command, 0, plistlib.dumps(data), b"")
                 if command[1] == "detach": raise MODULE.InspectionError("generated detach failure")
                 return subprocess.CompletedProcess(command, 0, b"", b"")
-            with mock.patch.object(MODULE, "tool", return_value="hdiutil"), mock.patch.object(MODULE, "checked_command", side_effect=execute):
+            with mock.patch.object(MODULE, "tool", return_value="hdiutil"), mock.patch.object(MODULE, "own_dmg_license_input", return_value=b"Y\n"), mock.patch.object(MODULE, "checked_command", side_effect=execute):
                 with self.assertRaisesRegex(MODULE.InspectionError, "generated detach failure"):
                     with MODULE.readonly_dmg(Path(folder) / "fixture.dmg", mount): pass
 
@@ -260,7 +317,7 @@ class CandidateInspectionTests(unittest.TestCase):
                     data = plistlib.dumps({"system-entities": [{"dev-entry": "/dev/disk9"}]})
                     return subprocess.CompletedProcess(command, 1, data, b"generated mount failure")
                 return subprocess.CompletedProcess(command, 0, b"", b"")
-            with mock.patch.object(MODULE, "tool", return_value="hdiutil"), mock.patch.object(MODULE, "checked_command", side_effect=execute):
+            with mock.patch.object(MODULE, "tool", return_value="hdiutil"), mock.patch.object(MODULE, "own_dmg_license_input", return_value=b"Y\n"), mock.patch.object(MODULE, "checked_command", side_effect=execute):
                 with self.assertRaises(MODULE.InspectionError):
                     with MODULE.readonly_dmg(Path(folder) / "fixture.dmg", Path(folder) / "mount"):
                         self.fail("Failed attachment must not inspect a bundle")
@@ -288,21 +345,21 @@ class CandidateInspectionTests(unittest.TestCase):
     def test_report_only_after_matching_static_application_and_stable_source(self):
         with tempfile.TemporaryDirectory() as folder:
             root = Path(folder)
-            installer = root / "EchoLingo_0.2.7_x64-setup.exe"
+            installer = root / "EchoLingo_0.2.8_x64-setup.exe"
             built = root / "echolingo.exe"
             installer.write_bytes(b"generated installer container")
-            built.write_bytes(pe())
+            built.write_bytes(pe() + b"__TAURI_BUNDLE_TYPE_VAR_UNK")
             identity = ("a" * 40, "b" * 40)
             def extract(_, output, expected_size):
                 self.assertEqual(expected_size, built.stat().st_size)
                 path = output / "echolingo.exe"
-                path.write_bytes(built.read_bytes())
+                path.write_bytes(built.read_bytes().replace(b"__TAURI_BUNDLE_TYPE_VAR_UNK", b"__TAURI_BUNDLE_TYPE_VAR_NSS"))
                 return path
             with mock.patch.object(MODULE.sys, "platform", "win32"), mock.patch.object(MODULE, "source_identity", return_value=identity), mock.patch.object(MODULE, "inspect_windows", side_effect=extract):
                 report = MODULE.inspect("Windows", installer, built, root / "inspection", "https://github.com/a/b/actions/runs/1",
                                         locked_build_passed=True, focused_tests_passed=True)
-                self.assertEqual(report["version"], "0.2.7")
-                self.assertEqual(report["applicationMetadata"], {"version": "0.2.7", "architecture": "x64"})
+                self.assertEqual(report["version"], "0.2.8")
+                self.assertEqual(report["applicationMetadata"], {"version": "0.2.8", "architecture": "x64"})
                 self.assertEqual(report["applicationSha256"], report["extractedApplicationSha256"])
                 self.assertTrue(all(value is True for value in report["checks"].values()))
                 self.assertEqual(json.loads((root / "inspection/checks.json").read_text()), report)
@@ -323,9 +380,9 @@ class CandidateInspectionTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as folder:
             root = Path(folder)
             (root / "src-tauri").mkdir()
-            (root / "package.json").write_text('{"version":"0.2.7"}')
-            (root / "src-tauri/tauri.conf.json").write_text('{"version":"0.2.7"}')
-            (root / "src-tauri/Cargo.toml").write_text('[package]\nversion="0.2.7"\n')
+            (root / "package.json").write_text('{"version":"0.2.8"}')
+            (root / "src-tauri/tauri.conf.json").write_text('{"version":"0.2.8"}')
+            (root / "src-tauri/Cargo.toml").write_text('[package]\nversion="0.2.8"\n')
             def git(*args):
                 subprocess.run(["git", "-C", str(root), *args], check=True, capture_output=True)
             git("init", "-q")
@@ -349,9 +406,9 @@ class CandidateInspectionTests(unittest.TestCase):
             root = Path(folder)
             (root / "src-tauri").mkdir()
             manifests = {
-                "package.json": '{"version":"0.2.7","description":"描述"}',
-                "src-tauri/tauri.conf.json": '{"version":"0.2.7","productName":"描述"}',
-                "src-tauri/Cargo.toml": '[package]\nversion="0.2.7"\ndescription="描述"\n',
+                "package.json": '{"version":"0.2.8","description":"描述"}',
+                "src-tauri/tauri.conf.json": '{"version":"0.2.8","productName":"描述"}',
+                "src-tauri/Cargo.toml": '[package]\nversion="0.2.8"\ndescription="描述"\n',
             }
             for name, content in manifests.items():
                 (root / name).write_text(content, encoding="utf-8")

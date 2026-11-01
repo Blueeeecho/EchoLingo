@@ -10,7 +10,8 @@ EXPECTED_CASES = ('escape-cancel', 'inplace-drag-copy-recapture-save-twice', 'cl
 
 
 PIN_CASES = ('inplace-pin-passive-physical', 'inplace-pin-annotated-active-editor')
-PIN_FIELDS = ('rasterVisible', 'initialEditorShowPreservedSourceForeground', 'pinAndMainNotObservedForeground',
+PIN_FIELDS = ('rasterVisible', 'initialNativeAdjustmentPreservedSourceForeground', 'pinAndMainNotObservedForeground',
+              'nativeAdjustmentVisible', 'nativeAdjustmentMoveResizeVerified', 'nativeAdjustmentGeometryRestored', 'nativeActionOwnedTargetVerified',
               'decodedReferenceVisibleAndCaptureDismissed', 'nativeTopmostInitially',
               'initialOuterFrameWithinSourceWorkArea', 'nativeUnpinVerified', 'nativeRepinVerified',
               'nativeMoveResizeVerified', 'rasterRetainedAfterResize', 'nativeWindowDestroyed',
@@ -20,6 +21,16 @@ PIN_FIELDS = ('rasterVisible', 'initialEditorShowPreservedSourceForeground', 'pi
 NATIVE_COMPLETION = (('nativeCaptureBackend', 1), ('attemptStage', 4), ('helperResponseReceived', 1),
                      ('nativeHostStopped', 1), ('ocrInvocationCount', 0), ('hookRunningAfterStop', 0),
                      ('inputPlaneRemainingAfterCleanup', 0), ('currentHostSessionReserved', 0), ('currentHostOwnedButtons', 0))
+
+
+def verify_adjustment(case, action):
+    if (not isinstance(case, dict) or case.get('nativeInitialAction') != action
+            or type(case.get('nativeActionClickCount')) is not int or case['nativeActionClickCount'] != 1
+            or type(case.get('nativeAdjustmentHandleCount')) is not int or case['nativeAdjustmentHandleCount'] != 8):
+        raise ValueError('Exact native adjustment action and eight handles are required')
+    for field in ('nativeAdjustmentVisible', 'initialNativeAdjustmentPreservedSourceForeground', 'nativeActionOwnedTargetVerified'):
+        if case.get(field) is not True:
+            raise ValueError('Native adjustment evidence absent: ' + field)
 
 
 def verify_pin(report):
@@ -35,11 +46,14 @@ def verify_pin(report):
         for field in PIN_FIELDS:
             if case.get(field) is not True:
                 raise ValueError('Native pin evidence absent: ' + field)
+        verify_adjustment(case, 'solid' if annotated else 'pin')
+        if annotated and (case.get('initialEditorShowPreservedSourceForeground') is not True or case.get('nativeInitialToolClaimed') is not True):
+            raise ValueError('Native solid action must be claimed before intentional editor annotation')
         if case.get('annotationApplied') is not annotated or case.get('editedRasterVisible') is not annotated:
             raise ValueError('Annotated and pristine raster evidence must not be conflated')
         if case.get('passiveShowPreservedSourceForeground') is not (not annotated):
             raise ValueError('Only passive physical pinning claims source foreground preservation')
-        if case.get('pinInputMethod') != ('uia-invoke-from-active-editor' if annotated else 'owned-physical-click'):
+        if case.get('pinInputMethod') != ('uia-invoke-from-active-editor' if annotated else 'owned-native-adjustment-click'):
             raise ValueError('Pin input must represent the tested foreground state')
         if type(case.get('physicalPinClickCount')) is not int or case['physicalPinClickCount'] != (0 if annotated else 1):
             raise ValueError('Only the passive case sends exactly one physical pin click')
@@ -127,6 +141,7 @@ def verify_report(report, expected_sha=None, installed=False, pin_only=False):
                 or type(case.get('hotkeyPresses')) is not int or case['hotkeyPresses'] != presses):
             raise ValueError('F1 workflows must preserve exact cancel/copy/save-recapture counts')
     drag = cases[1]
+    verify_adjustment(drag, 'solid')
     for field in ('allExportPixelsMatchSystemClipboard', 'noOverwrite', 'noHiddenPngMetadataOrTrailingData',
                   'nativeSaveAsCancelPreservedImage', 'nativeOpenCancelPreservedImage'):
         if drag.get(field) is not True:
@@ -141,9 +156,13 @@ def verify_report(report, expected_sha=None, installed=False, pin_only=False):
     saves = drag.get('recapturedSaveSessions')
     if not isinstance(saves, list) or len(saves) != 2 or any(not isinstance(item, dict) or item.get('shortcut') != 'F1' or type(item.get('hotkeyPresses')) is not int or item['hotkeyPresses'] != 1 for item in saves):
         raise ValueError('Both saves require a fresh native capture')
+    for saved in saves:
+        verify_adjustment(saved, 'solid')
     click = cases[2]
+    verify_adjustment(click, 'select')
     if click.get('inplaceCopyDismissed') is not True or click.get('inplaceCancelPreservedClipboard') is not True or not isinstance(click.get('cancelSession'), dict) or click['cancelSession'].get('shortcut') != 'F1' or type(click['cancelSession'].get('hotkeyPresses')) is not int or click['cancelSession']['hotkeyPresses'] != 1:
         raise ValueError('Clicked capture must copy-dismiss then cancel a fresh capture')
+    verify_adjustment(click['cancelSession'], 'select')
     size = click.get('visibleWindowPixelSize')
     if (not isinstance(size, list) or len(size) != 2 or any(type(value) is not int or value <= 0 for value in size)
             or size != click.get('expectedWindowDimensions')):

@@ -1,4 +1,4 @@
-import { mosaicPixels, wrapText, operationBounds, screenshotTextFont, type EditOperation, type Size, type Point } from './screenshot-model';
+import { mosaicPixels, wrapText, operationBounds, screenshotTextFont, type EditOperation, type Size, type Point, type StrokeOperation } from './screenshot-model';
 const context = (canvas: HTMLCanvasElement) => {
   const ctx = canvas.getContext('2d', { willReadFrequently: true });
   if (!ctx) throw new Error('无法创建图片画布，请重新打开截图窗口。');
@@ -12,6 +12,25 @@ function drawBadge(ctx: CanvasRenderingContext2D, point: Point, size: number, nu
   ctx.font = `600 ${screenshotTextFont(size * (number > 999 ? .32 : number > 99 ? .42 : .55))}`;
   ctx.textAlign = 'center'; ctx.textBaseline = 'middle'; ctx.fillText(String(number), point.x, point.y);
 }
+function strokePath(ctx: CanvasRenderingContext2D, points: readonly Point[], width: number): void {
+  ctx.lineWidth = width; ctx.lineCap = 'round'; ctx.lineJoin = 'round';
+  if (points.length === 1) { ctx.beginPath(); ctx.arc(points[0].x, points[0].y, width / 2, 0, Math.PI * 2); ctx.fill(); return; }
+  ctx.beginPath(); ctx.moveTo(points[0].x, points[0].y); for (const point of points.slice(1)) ctx.lineTo(point.x, point.y); ctx.stroke();
+}
+function drawStroke(ctx: CanvasRenderingContext2D, operation: StrokeOperation, width: number, height: number): void {
+  // Erasure is isolated to this transparent annotation surface. Never use
+  // destination-out on the source image or any mosaic/opaque privacy mask.
+  const bounds = operationBounds(operation), x = Math.max(0, Math.floor(bounds.x)), y = Math.max(0, Math.floor(bounds.y));
+  const right = Math.min(width, Math.ceil(bounds.x + bounds.width)), bottom = Math.min(height, Math.ceil(bounds.y + bounds.height));
+  if (right <= x || bottom <= y) return;
+  const layer = document.createElement('canvas'); layer.width = right - x; layer.height = bottom - y;
+  const paint = context(layer); paint.translate(-x, -y); paint.fillStyle = operation.color; paint.strokeStyle = operation.color;
+  strokePath(paint, operation.points, operation.width);
+  paint.globalCompositeOperation = 'destination-out';
+  for (const erasure of operation.erasures ?? []) strokePath(paint, erasure.points, erasure.width);
+  ctx.save(); ctx.globalAlpha = operation.kind === 'highlight' ? .3 : 1; ctx.drawImage(layer, x, y); ctx.restore();
+  layer.width = layer.height = 1;
+}
 /** Each render starts with the immutable decoded source. Crops change actual
  * canvas dimensions, not a viewport or exported hidden layer. */
 export function renderScreenshot(canvas: HTMLCanvasElement, original: CanvasImageSource, size: Size, operations: readonly EditOperation[]): void {
@@ -24,12 +43,17 @@ export function renderScreenshot(canvas: HTMLCanvasElement, original: CanvasImag
       canvas.width = width; canvas.height = height; ctx = context(canvas); ctx.putImageData(cropped, 0, 0); continue;
     }
     ctx.save();
-    if (operation.kind === 'mosaic') {
+    if (operation.kind === 'pen' || operation.kind === 'highlight') {
+      drawStroke(ctx, operation, canvas.width, canvas.height);
+    } else if (operation.kind === 'mosaic') {
       const { x, y, width, height } = operation.rect, pixels = ctx.getImageData(x, y, width, height);
       mosaicPixels(pixels.data, width, height, operation.blockSize); ctx.putImageData(pixels, x, y);
     } else {
       ctx.strokeStyle = operation.color; ctx.fillStyle = operation.color;
-      if (operation.kind === 'rectangle') {
+      if (operation.kind === 'ellipse') {
+        const { x, y, width, height } = operation.rect; ctx.lineWidth = operation.width;
+        ctx.beginPath(); ctx.ellipse(x + width / 2, y + height / 2, Math.max(0, (width - operation.width) / 2), Math.max(0, (height - operation.width) / 2), 0, 0, Math.PI * 2); ctx.stroke();
+      } else if (operation.kind === 'rectangle') {
         const { x, y, width, height } = operation.rect;
         if (operation.solid) ctx.fillRect(x, y, width, height);
         else { ctx.lineWidth = operation.width; const inset = Math.min(width / 2, height / 2, operation.width / 2);

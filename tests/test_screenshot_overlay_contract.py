@@ -31,7 +31,7 @@ class ScreenshotOverlayContract(unittest.TestCase):
         self.assertIn('state.image.is_none()', source)
         dismiss = source.split('fn dismiss_current(', 1)[1].split('#[cfg(test)]', 1)[0]
         self.assertLess(dismiss.index('dismiss()?'), dismiss.index('*state = SessionState::default()'))
-        close = source.split('pub async fn close_screenshot_editor(', 1)[1].split('#[derive(Serialize)]', 1)[0]
+        close = source.split('pub async fn close_screenshot_editor(', 1)[1].split('pub async fn restart_screenshot_capture(', 1)[0]
         self.assertLess(close.index('dismiss_current('), close.index('emit_cleared('))
     def test_windows_geometry_is_from_selected_pixels_and_process_finishes(self):
         source = read('src-tauri/src/windows_capture_native.rs')

@@ -54,13 +54,13 @@ class CandidatePackageTests(unittest.TestCase):
         self.root = self.folder / "source"
         self.root.mkdir()
         files = {
-            "package.json": {"version": "0.2.7"},
-            "package-lock.json": {"version": "0.2.7", "packages": {"": {"version": "0.2.7"}}},
-            "src-tauri/tauri.conf.json": {"version": "0.2.7"},
-            "src-tauri/Cargo.toml": '[package]\nname = "echolingo"\nversion = "0.2.7"\n',
-            "src-tauri/Cargo.lock": '[[package]]\nname = "echolingo"\nversion = "0.2.7"\n',
-            "src-tauri/native-capture/Cargo.toml": '[package]\nname = "echolingo-native-capture"\nversion = "0.2.7"\n',
-            "src-tauri/native-capture/Cargo.lock": '[[package]]\nname = "echolingo-native-capture"\nversion = "0.2.7"\n',
+            "package.json": {"version": "0.2.8"},
+            "package-lock.json": {"version": "0.2.8", "packages": {"": {"version": "0.2.8"}}},
+            "src-tauri/tauri.conf.json": {"version": "0.2.8"},
+            "src-tauri/Cargo.toml": '[package]\nname = "echolingo"\nversion = "0.2.8"\n',
+            "src-tauri/Cargo.lock": '[[package]]\nname = "echolingo"\nversion = "0.2.8"\n',
+            "src-tauri/native-capture/Cargo.toml": '[package]\nname = "echolingo-native-capture"\nversion = "0.2.8"\n',
+            "src-tauri/native-capture/Cargo.lock": '[[package]]\nname = "echolingo-native-capture"\nversion = "0.2.8"\n',
         }
         for name, content in files.items():
             path = self.root / name
@@ -77,7 +77,7 @@ class CandidatePackageTests(unittest.TestCase):
         return subprocess.check_output(["git", *args], cwd=self.root, text=True).strip()
 
     def inputs(self, platform="macOS"):
-        installer = self.folder / ("EchoLingo_0.2.7_aarch64.dmg" if platform == "macOS" else "EchoLingo_0.2.7_x64-setup.exe")
+        installer = self.folder / ("EchoLingo_0.2.8_aarch64.dmg" if platform == "macOS" else "EchoLingo_0.2.8_x64-setup.exe")
         application = self.folder / ("echolingo" if platform == "macOS" else "echolingo.exe")
         installer.write_bytes(dmg() if platform == "macOS" else pe(0x14C))
         application.write_bytes(macho() if platform == "macOS" else pe())
@@ -86,10 +86,10 @@ class CandidatePackageTests(unittest.TestCase):
                                output=self.folder / (platform + "-CANDIDATE-MANIFEST.json"),
                                run_url=RUN_URL, offline_staging_manifest=None, offline_source_archive=None)
         provenance = VERIFY.source_provenance(self.root)
-        checks = {"schemaVersion": 1, "platform": platform, "version": "0.2.7",
+        checks = {"schemaVersion": 1, "platform": platform, "version": "0.2.8",
                   "commit": provenance["commit"], "tree": provenance["tree"], "runUrl": RUN_URL,
                   "checks": {name: True for name in VERIFY.CHECK_NAMES},
-                  "applicationMetadata": {"version": "0.2.7", "architecture": "arm64" if platform == "macOS" else "x64"},
+                  "applicationMetadata": {"version": "0.2.8", "architecture": "arm64" if platform == "macOS" else "x64"},
                   "installerSha256": VERIFY.sha256(installer), "applicationSha256": VERIFY.sha256(application),
                   "extractedApplicationSha256": VERIFY.sha256(application)}
         args.checks_json.write_text(json.dumps(checks), encoding="utf-8")
@@ -113,7 +113,7 @@ class CandidatePackageTests(unittest.TestCase):
             path = self.root / name
             original = path.read_text()
             with self.subTest(path=name):
-                path.write_text(original.replace("0.2.7", "0.2.4", 1))
+                path.write_text(original.replace("0.2.8", "0.2.4", 1))
                 with self.assertRaises(ValueError):
                     VERIFY.check_versions(self.root)
             path.write_text(original)

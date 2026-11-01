@@ -32,6 +32,8 @@ pub struct Session {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub source_name: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub initial_action: Option<super::platform::ScreenshotInitialAction>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub overlay: Option<super::screenshot_overlay::Layout>,
     #[serde(skip)]
     capture_geometry: Option<super::platform::ScreenshotGeometry>,
@@ -79,6 +81,21 @@ impl Controller {
         operation: impl FnOnce() -> Result<T, String>,
     ) -> Result<T, String> {
         self.with_image(id, |_| operation())
+    }
+    fn take_initial_action(
+        &self,
+        id: u64,
+    ) -> Result<Option<super::platform::ScreenshotInitialAction>, String> {
+        let mut state = super::locked(&self.state)?;
+        if state.intent != Some(id) {
+            return Err(STALE.into());
+        }
+        let image = state
+            .image
+            .as_mut()
+            .filter(|image| image.public.id == id)
+            .ok_or(STALE)?;
+        Ok(image.public.initial_action.take())
     }
     fn cancel_pending(&self) {
         if let Ok(mut state) = self.state.lock() {
@@ -300,6 +317,7 @@ fn make_session(
         height: pixels.height(),
         captured_at,
         source_name,
+        initial_action: None,
         overlay: None,
         capture_geometry: None,
     })
@@ -548,6 +566,16 @@ pub fn get_screenshot_session(
         .map(|image| image.public.clone()))
 }
 #[tauri::command]
+pub fn consume_screenshot_initial_action(
+    window: tauri::WebviewWindow,
+    state: tauri::State<super::AppState>,
+    session_id: u64,
+) -> Result<Option<super::platform::ScreenshotInitialAction>, String> {
+    ensure_editor(&window)?;
+    state.screenshots.take_initial_action(session_id)
+}
+
+#[tauri::command]
 pub async fn screenshot_editor_ready(
     window: tauri::WebviewWindow,
     app: tauri::AppHandle,
@@ -622,6 +650,39 @@ pub async fn close_screenshot_editor(
     })
     .await?
 }
+#[tauri::command]
+pub async fn restart_screenshot_capture(
+    window: tauri::WebviewWindow,
+    app: tauri::AppHandle,
+    session_id: u64,
+) -> Result<(), String> {
+    ensure_editor(&window)?;
+    let handle = app.clone();
+    dialog(&app, move || {
+        let state = handle.state::<super::AppState>();
+        let _operation = state
+            .screenshots
+            .operations
+            .try_acquire()
+            .map_err(|_| "SCREENSHOT_BUSY: 请先完成当前图片操作")?;
+        if state.screenshots.dialog_active.load(Ordering::SeqCst) {
+            return Err("SCREENSHOT_DIALOG: 请先取消或完成系统文件对话框".to_owned());
+        }
+        // The user explicitly discarded this bitmap. Hide only while the same
+        // session is current; an old callback cannot hide a newer editor.
+        state.screenshots.dismiss_current(Some(session_id), || {
+            super::screenshot_overlay::hide(&window)
+        })?;
+        emit_cleared(&handle, Some(session_id));
+        // Same new-intent path as F1: no synthetic keys, source activation,
+        // old screen bitmap reuse, OCR or clipboard work. Cancelling the new
+        // selector does not resurrect the explicitly discarded old session.
+        start_capture(handle.clone());
+        Ok(())
+    })
+    .await?
+}
+
 #[derive(Serialize)]
 pub struct SaveResult {
     path: String,
@@ -1021,7 +1082,7 @@ pub fn start_capture(app: tauri::AppHandle) {
                 if !state.screenshots.current(worker_request.id()) {
                     return Err(STALE.into());
                 }
-                let (encoded, geometry) =
+                let (encoded, geometry, action) =
                     super::platform::capture_screenshot_with_geometry_cancelable(
                         worker_request.cancellation(),
                     )?;
@@ -1037,6 +1098,7 @@ pub fn start_capture(app: tauri::AppHandle) {
                     .map_err(|_| "SCREENSHOT_FORMAT: 无效截图数据")?;
                 let mut session = make_session(worker_request.id(), &bytes, captured_at, None)?;
                 session.capture_geometry = Some(geometry);
+                session.initial_action = Some(action);
                 if worker_request.cancelled() {
                     return Err(STALE.into());
                 }
@@ -1071,6 +1133,24 @@ mod tests {
     fn png() -> Vec<u8> {
         encode(&RgbaImage::from_pixel(3, 2, image::Rgba([12, 34, 56, 255]))).unwrap()
     }
+    #[test]
+    fn native_initial_action_is_consumed_once_and_never_by_a_stale_session() {
+        let controller = Controller::default();
+        controller.begin(1).unwrap();
+        let mut session = make_session(1, &png(), 1, None).unwrap();
+        assert!(session.initial_action.is_none()); // Ordinary local images have no automatic action.
+        session.initial_action = Some(super::super::platform::ScreenshotInitialAction::Copy);
+        controller.install(session, "capture.png".into()).unwrap();
+        assert!(controller.take_initial_action(2).is_err());
+        assert_eq!(
+            controller.take_initial_action(1).unwrap(),
+            Some(super::super::platform::ScreenshotInitialAction::Copy)
+        );
+        assert_eq!(controller.take_initial_action(1).unwrap(), None);
+        controller.begin(2).unwrap();
+        assert!(controller.take_initial_action(1).is_err());
+    }
+
     #[test]
     fn image_round_trip_is_png_pixels_only_and_has_bounded_dimensions() {
         let bytes = png();

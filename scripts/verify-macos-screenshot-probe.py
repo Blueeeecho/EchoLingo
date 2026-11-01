@@ -117,6 +117,11 @@ def verify(report):
             if case.get('nativeCancelled') is not True or 'imageWidth' in case or 'imageHeight' in case:
                 raise ValueError('Native cancellation must return no image')
         else:
+            if (case.get('nativeAdjustmentVerified') is not True or case.get('nativeAction') != 'select'
+                    or type(case.get('nativeActionClickCount')) is not int or case['nativeActionClickCount'] != 1):
+                raise ValueError('Native screenshot requires exact adjustment and one owned action click')
+            if case['mode'] == 'rectangle-phase1' and case.get('nativeAdjustmentMoveResizeRestored') is not True:
+                raise ValueError('Native rectangle must prove move, resize and exact geometry restoration')
             if any(type(case.get(field)) is not int or case[field] <= 0 for field in ('imageWidth', 'imageHeight')):
                 raise ValueError('Native screenshot has no actual image dimensions')
             if case.get('generatedVisiblePixelsVerified') is not True or case.get('ownOverlayPixelsAbsent') is not True:

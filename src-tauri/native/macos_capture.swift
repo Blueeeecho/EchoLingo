@@ -15,6 +15,69 @@ struct CaptureDisplayGeometry: Equatable {
 
 enum CapturePurpose: Equatable { case region, screenshot }
 
+enum CaptureScreenshotAction: String, CaseIterable {
+    case select, rectangle, arrow, text, number, pen, highlight, mosaic, solid, crop, copy, save, pin, cancel
+    var caption: String {
+        switch self {
+        case .select: return "选择标注"
+        case .rectangle: return "矩形"
+        case .arrow: return "箭头"
+        case .text: return "文字"
+        case .number: return "序号"
+        case .pen: return "画笔"
+        case .highlight: return "荧光笔"
+        case .mosaic: return "马赛克"
+        case .solid: return "遮挡"
+        case .crop: return "裁剪"
+        case .copy: return "✓ 复制"
+        case .save: return "↓ 保存"
+        case .pin: return "贴图"
+        case .cancel: return "× 取消"
+        }
+    }
+}
+
+// AppKit global points, including displays left/below the primary display.
+func captureAdjustmentHandles(_ rect: CGRect) -> [(Int, CGPoint)] {
+    [(5, CGPoint(x: rect.minX, y: rect.minY)), (4, CGPoint(x: rect.midX, y: rect.minY)),
+     (6, CGPoint(x: rect.maxX, y: rect.minY)), (2, CGPoint(x: rect.maxX, y: rect.midY)),
+     (10, CGPoint(x: rect.maxX, y: rect.maxY)), (8, CGPoint(x: rect.midX, y: rect.maxY)),
+     (9, CGPoint(x: rect.minX, y: rect.maxY)), (1, CGPoint(x: rect.minX, y: rect.midY))]
+}
+
+func captureAdjustedRectangle(_ rect: CGRect, origin: CGPoint, point: CGPoint, handle: Int, desktop: CGRect) -> CGRect {
+    let dx = point.x - origin.x, dy = point.y - origin.y
+    if handle == 0 {
+        return CGRect(x: min(max(rect.minX + dx, desktop.minX), max(desktop.minX, desktop.maxX - rect.width)),
+                      y: min(max(rect.minY + dy, desktop.minY), max(desktop.minY, desktop.maxY - rect.height)),
+                      width: rect.width, height: rect.height)
+    }
+    var left = rect.minX, right = rect.maxX, bottom = rect.minY, top = rect.maxY
+    if handle & 1 != 0 { left = max(desktop.minX, min(right - 2, left + dx)) }
+    if handle & 2 != 0 { right = min(desktop.maxX, max(left + 2, right + dx)) }
+    if handle & 4 != 0 { bottom = max(desktop.minY, min(top - 2, bottom + dy)) }
+    if handle & 8 != 0 { top = min(desktop.maxY, max(bottom + 2, top + dy)) }
+    return CGRect(x: left, y: bottom, width: right - left, height: top - bottom)
+}
+
+func captureActionButtons(selection: CGRect, usable: CGRect) -> [(CaptureScreenshotAction, CGRect)] {
+    guard [usable.minX, usable.minY, usable.width, usable.height, selection.minX, selection.minY, selection.width, selection.height].allSatisfy({ $0.isFinite }),
+          usable.width >= 120, usable.height >= 100 else { return [] }
+    let actions = CaptureScreenshotAction.allCases
+    let columns = max(1, min(7, Int((usable.width - 16) / 40)))
+    let rows = (actions.count + columns - 1) / columns
+    let cellWidth = min(64, (usable.width - 16) / CGFloat(columns))
+    let width = CGFloat(columns) * cellWidth, height = CGFloat(rows) * 30
+    guard height <= usable.height - 16 else { return [] }
+    let x = min(max(selection.minX, usable.minX + 8), usable.maxX - width - 8)
+    let below = selection.minY - height - 8
+    let preferred = below >= usable.minY + 8 ? below : selection.maxY + 8
+    let y = min(max(preferred, usable.minY + 8), max(usable.minY + 8, usable.maxY - height - 8))
+    return actions.enumerated().map { index, action in
+        (action, CGRect(x: x + CGFloat(index % columns) * cellWidth, y: y + CGFloat(rows - 1 - index / columns) * 30, width: cellWidth - 2, height: 28))
+    }
+}
+
 struct CaptureWindowTarget: Equatable {
     let id: CGWindowID
     let pid: Int32
@@ -31,6 +94,7 @@ struct CaptureRegionPlan {
     // Freeze the AppKit/global-top-left conversion with the selection plan.
     let primaryHeight: CGFloat = CGDisplayBounds(CGMainDisplayID()).height
     var window: CaptureWindowTarget? = nil
+    var initialAction: CaptureScreenshotAction? = nil
 }
 
 // Strict projection of public WindowServer metadata. Never read window names.
@@ -159,6 +223,7 @@ enum CaptureSelectorEvent {
     case leftDown(CGPoint)
     case leftDrag(CGPoint)
     case leftUp(CGPoint)
+    case action(CaptureScreenshotAction)
     case cancel
 }
 
@@ -178,12 +243,29 @@ struct CaptureSelectorState {
     private(set) var anchor: CGPoint?
     private(set) var selection: CGRect?
     private(set) var outcome: CaptureSelectorOutcome?
+    private(set) var adjusting = false
+    private(set) var selectedWindow: CaptureWindowTarget?
+    private(set) var initialAction: CaptureScreenshotAction?
+    private var adjustment: (origin: CGPoint, rectangle: CGRect, handle: Int)?
+    private var desktop: CGRect { displays.map(\.frame).reduce(CGRect.null) { $0.union($1) } }
+
+    init(displays: [CaptureDisplayGeometry], purpose: CapturePurpose = .region, candidate: CaptureWindowTarget? = nil) {
+        self.displays = displays
+        self.purpose = purpose
+        self.candidate = candidate
+    }
+
+    private mutating func adjust(to point: CGPoint) {
+        guard let gesture = adjustment else { return }
+        selection = captureAdjustedRectangle(gesture.rectangle, origin: gesture.origin, point: point,
+                                             handle: gesture.handle, desktop: desktop)
+    }
 
     // The window outline is a hint in both modes. Only F1 can retain a
     // pressed window as a click target; OCR remains a free rectangle drag.
-    var canQueryWindowHint: Bool { outcome == nil && anchor == nil }
+    var canQueryWindowHint: Bool { outcome == nil && anchor == nil && !adjusting }
     var windowHint: CaptureWindowTarget? {
-        guard outcome == nil else { return nil }
+        guard outcome == nil && !adjusting else { return nil }
         if anchor == nil { return candidate }
         return purpose == .screenshot && !dragExceeded ? pressedWindow : nil
     }
@@ -193,6 +275,10 @@ struct CaptureSelectorState {
         switch event {
         case .cancel:
             outcome = .cancelled
+        case .action(let action):
+            guard purpose == .screenshot, adjusting, adjustment == nil, let selection = selection else { return }
+            if action == .cancel { outcome = .cancelled }
+            else { initialAction = action; outcome = .selected(selection) }
         case .move(let point):
             highlightedDisplay = captureDisplay(at: point, displays: displays)
             if purpose == .screenshot, let anchor = anchor {
@@ -200,6 +286,14 @@ struct CaptureSelectorState {
                 if dragExceeded { selection = captureRectangle(anchor, point) }
             }
         case .leftDown(let point):
+            if adjusting, let selection = selection {
+                let hit = captureAdjustmentHandles(selection).first { abs($0.1.x - point.x) <= 7 && abs($0.1.y - point.y) <= 7 }
+                if let handle = hit?.0 ?? (selection.contains(point) ? 0 : nil) {
+                    adjustment = (point, selection, handle)
+                    return
+                }
+                adjusting = false; selectedWindow = nil; self.selection = nil
+            }
             guard captureDisplay(at: point, displays: displays) != nil else { return }
             highlightedDisplay = captureDisplay(at: point, displays: displays)
             guard anchor == nil else { return }
@@ -208,20 +302,26 @@ struct CaptureSelectorState {
             dragExceeded = false
             selection = nil
         case .leftDrag(let point):
+            if adjusting { adjust(to: point); return }
             highlightedDisplay = captureDisplay(at: point, displays: displays)
             if let anchor = anchor {
                 dragExceeded = dragExceeded || abs(point.x - anchor.x) > 4 || abs(point.y - anchor.y) > 4
                 selection = captureRectangle(anchor, point)
             }
         case .leftUp(let point):
+            if adjusting { adjust(to: point); adjustment = nil; return }
             guard let anchor = anchor else { return }
             let rectangle = captureRectangle(anchor, point)
             dragExceeded = dragExceeded || rectangle.width > 4 || rectangle.height > 4
             if purpose == .screenshot && !dragExceeded {
-                outcome = pressedWindow.map { .windowSelected($0) } ?? .cancelled
+                if let window = pressedWindow {
+                    selection = captureVisibleWindowRectangle(window.frame, displays: displays)
+                    selectedWindow = window; adjusting = true; self.anchor = nil
+                } else { outcome = .cancelled }
             } else if rectangle.width >= 2 && rectangle.height >= 2 {
                 selection = rectangle
-                outcome = .selected(rectangle)
+                if purpose == .screenshot { adjusting = true; self.anchor = nil }
+                else { outcome = .selected(rectangle) }
             } else {
                 // An ordinary click is not a capture.
                 // Stay armed, allowing the user to start another left drag.
@@ -567,6 +667,8 @@ final class CaptureSelectionView: NSView {
     var hoveredWindow: CGRect?
     var loupeAnchor: CGPoint?
     var loupe: CaptureLoupe?
+    var handles: [CGPoint] = []
+    var actionButtons: [(CaptureScreenshotAction, CGRect)] = []
     override var isOpaque: Bool { false }
     override var acceptsFirstResponder: Bool { true }
     override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
@@ -589,6 +691,18 @@ final class CaptureSelectionView: NSView {
             let outline = NSBezierPath(rect: selection.insetBy(dx: 0.75, dy: 0.75))
             outline.lineWidth = 1.5
             outline.stroke()
+        }
+        for point in handles {
+            let dot = NSBezierPath(rect: CGRect(x: point.x - 4, y: point.y - 4, width: 8, height: 8))
+            NSColor.white.setFill(); dot.fill()
+            NSColor.systemBlue.setStroke(); dot.lineWidth = 1; dot.stroke()
+        }
+        for (action, frame) in actionButtons {
+            NSColor(calibratedWhite: 0.12, alpha: 0.98).setFill()
+            NSBezierPath(roundedRect: frame, xRadius: 5, yRadius: 5).fill()
+            let title = NSAttributedString(string: action.caption, attributes: [.font: NSFont.systemFont(ofSize: frame.width < 50 ? 10 : 12), .foregroundColor: NSColor.white])
+            let size = title.size()
+            title.draw(at: CGPoint(x: frame.midX - size.width / 2, y: frame.midY - size.height / 2))
         }
         guard let loupe = loupe else { return }
         let plate = NSBezierPath(roundedRect: loupe.frame, xRadius: 6, yRadius: 6)
@@ -640,6 +754,10 @@ final class CaptureSelectionSession {
     private let waiter: CaptureResultWaiter<CaptureRegionPlan>
     fileprivate let lifetime: CaptureSelectionLifetime
     private var completed = false
+    private var actionButtons: [(CaptureScreenshotAction, CGRect)] = []
+    private var pressedAction: CaptureScreenshotAction?
+    private var actionDisplayID: CGDirectDisplayID?
+    private var ownsEnter = false
     private var pointer = NSEvent.mouseLocation
     private var lastWindowQuery = Date.distantPast
     private let operation: CaptureScreenshotOperation?
@@ -664,20 +782,41 @@ final class CaptureSelectionSession {
             panel.contentView = view
             panels.append((geometry, panel, view))
         }
-        let mask: NSEvent.EventTypeMask = [.keyDown, .mouseMoved, .rightMouseDown, .rightMouseDragged,
+        let mask: NSEvent.EventTypeMask = [.keyDown, .keyUp, .mouseMoved, .rightMouseDown, .rightMouseDragged,
                                            .rightMouseUp, .leftMouseDown, .leftMouseDragged, .leftMouseUp]
         monitor = NSEvent.addLocalMonitorForEvents(matching: mask) { [weak self] event in
             guard let self = self, !self.completed else { return event }
             let isCaptureWindow = self.panels.contains { $0.1 === event.window }
             // Making a nonactivating panel key routes Esc locally, even when
             // Accessibility/Input Monitoring were never granted.
-            if event.type == .keyDown {
+            if event.type == .keyDown || event.type == .keyUp {
                 guard isCaptureWindow else { return event }
-                if event.keyCode == 53 { self.receive(.cancel) }
+                if event.type == .keyDown && event.keyCode == 53 { self.receive(.cancel) }
+                if self.state.purpose == .screenshot && event.keyCode == 36 {
+                    if event.type == .keyDown && !event.isARepeat && self.state.adjusting &&
+                        event.modifierFlags.intersection([.command, .control, .option, .shift]).isEmpty { self.ownsEnter = true }
+                    if event.type == .keyUp && self.ownsEnter {
+                        self.ownsEnter = false
+                        if event.modifierFlags.intersection([.command, .control, .option, .shift]).isEmpty {
+                            self.receive(.action(.copy))
+                        }
+                    }
+                }
                 return nil
             }
             guard isCaptureWindow else { return event }
             let point = event.window?.convertPoint(toScreen: event.locationInWindow) ?? NSEvent.mouseLocation
+            if event.type == .leftMouseDown,
+               let action = self.actionButtons.first(where: { $0.1.contains(point) })?.0 {
+                self.pressedAction = action
+                return nil
+            }
+            if event.type == .leftMouseUp, let action = self.pressedAction {
+                self.pressedAction = nil
+                if self.actionButtons.first(where: { $0.1.contains(point) })?.0 == action { self.receive(.action(action)) }
+                return nil
+            }
+            if self.pressedAction != nil { return nil }
             switch event.type {
             case .mouseMoved: self.receive(.move(point))
             case .leftMouseDown: self.receive(.leftDown(point))
@@ -723,11 +862,15 @@ final class CaptureSelectionSession {
         switch event {
         case .move(let point), .leftDown(let point), .leftDrag(let point), .leftUp(let point):
             pointer = point
-        case .cancel:
+        case .cancel, .action:
             break
         }
         if operation?.isCancelled == true { state.receive(.cancel) }
-        if state.canQueryWindowHint {
+        let startsNewSelection: Bool = {
+            guard state.adjusting, case .leftDown(let point) = event, let selection = state.selection else { return false }
+            return !selection.contains(point) && !captureAdjustmentHandles(selection).contains { abs($0.1.x - point.x) <= 7 && abs($0.1.y - point.y) <= 7 }
+        }()
+        if state.canQueryWindowHint || startsNewSelection {
             let now = Date()
             let isPress: Bool
             if case .leftDown = event { isPress = true } else { isPress = false }
@@ -744,8 +887,13 @@ final class CaptureSelectionSession {
             switch outcome {
             case .cancelled: finish(.failure(NativeError("CANCELLED: 已取消截图。")))
             case .selected(let rectangle):
-                do { finish(.success(try capturePlan(rectangle, displays: state.displays))) }
-                catch { finish(.failure(error)) }
+                do {
+                    try captureValidateWindow(state.selectedWindow)
+                    var plan = try capturePlan(rectangle, displays: state.displays)
+                    plan.window = state.selectedWindow
+                    plan.initialAction = state.initialAction
+                    finish(.success(plan))
+                } catch { finish(.failure(error)) }
             case .windowSelected(let window):
                 do {
                     try captureValidateWindow(window)
@@ -757,7 +905,26 @@ final class CaptureSelectionSession {
             }
             return
         }
+        actionButtons = []
+        if state.adjusting, let selection = state.selection {
+            let target = panels.filter { !selection.intersection($0.0.frame).isEmpty }.max { left, right in
+                let a = selection.intersection(left.0.frame), b = selection.intersection(right.0.frame)
+                return (a.isNull ? 0 : a.width * a.height) < (b.isNull ? 0 : b.width * b.height)
+            } ?? panels.first { $0.0.id == actionDisplayID }
+            if let target = target {
+                actionDisplayID = target.0.id
+                let usable = NSScreen.screens.first { ($0.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber)?.uint32Value == target.0.id }?.visibleFrame ?? target.0.frame
+                actionButtons = captureActionButtons(selection: selection, usable: usable)
+                if actionButtons.isEmpty {
+                    finish(.failure(NativeError("CAPTURE_GEOMETRY: 当前屏幕工作区太小，无法放置截图工具栏。")))
+                    return
+                }
+            }
+        }
         for (geometry, panel, view) in panels {
+            view.handles = state.adjusting ? (state.selection.map(captureAdjustmentHandles) ?? []).map { $0.1 }.filter { geometry.frame.contains($0) }.map { CGPoint(x: $0.x - geometry.frame.minX, y: $0.y - geometry.frame.minY) } : []
+            view.actionButtons = actionButtons.filter { geometry.frame.contains($0.1.origin) }.map { ($0.0, $0.1.offsetBy(dx: -geometry.frame.minX, dy: -geometry.frame.minY)) }
+            if state.adjusting { view.loupe = nil; view.needsDisplay = true }
             let pointerOnDisplay = state.highlightedDisplay == geometry.id
             let highlight = pointerOnDisplay && state.purpose == .region
             let hovered = state.windowHint?.frame.intersection(geometry.frame)
@@ -770,7 +937,7 @@ final class CaptureSelectionSession {
                 if rectangle.isEmpty || rectangle.isNull { return nil }
                 return rectangle.offsetBy(dx: -geometry.frame.minX, dy: -geometry.frame.minY)
             }
-            let localPointer = geometry.frame.contains(pointer) && pointerOnDisplay
+            let localPointer = !state.adjusting && geometry.frame.contains(pointer) && pointerOnDisplay
                 ? CGPoint(x: pointer.x - geometry.frame.minX, y: pointer.y - geometry.frame.minY) : nil
             let pointerMoved: Bool = {
                 switch (view.loupeAnchor, localPointer) {
@@ -1221,13 +1388,19 @@ func captureWindowHintSelfTest() throws {
             state.receive(.leftDown(anchor)); state.receive(.leftUp(anchor))
             try expect(state.outcome == nil && state.canQueryWindowHint)
         } else {
-            try expect(state.outcome == .windowSelected(target))
+            try expect(state.outcome == nil && state.adjusting && state.selectedWindow == target)
+            state.receive(.action(.copy))
+            try expect(state.outcome == .selected(target.frame) && state.initialAction == .copy)
             try expect(!state.canQueryWindowHint && state.windowHint == nil)
         }
         var drag = CaptureSelectorState(displays: [display], purpose: purpose, candidate: target)
         drag.receive(.leftDown(anchor)); drag.receive(.leftDrag(end))
         try expect(!drag.canQueryWindowHint && drag.windowHint == nil)
         drag.receive(.leftUp(end))
+        if purpose == .screenshot {
+            try expect(drag.adjusting && drag.outcome == nil)
+            drag.receive(.action(.rectangle))
+        }
         try expect(drag.outcome == .selected(rectangle) && drag.windowHint == nil)
         var cancelled = CaptureSelectorState(displays: [display], purpose: purpose, candidate: target)
         cancelled.receive(.cancel); cancelled.receive(.leftDown(anchor))
@@ -1237,6 +1410,7 @@ func captureWindowHintSelfTest() throws {
         var unavailable = CaptureSelectorState(displays: [display], purpose: purpose)
         try expect(unavailable.canQueryWindowHint && unavailable.windowHint == nil)
         unavailable.receive(.leftDown(anchor)); unavailable.receive(.leftDrag(end)); unavailable.receive(.leftUp(end))
+        if purpose == .screenshot { unavailable.receive(.action(.copy)) }
         try expect(unavailable.outcome == .selected(rectangle))
     }
     // OCR retains its original 2-point ROI minimum, not F1's 4-point click jitter.
@@ -1315,17 +1489,22 @@ func captureScreenshotSelfTest() throws {
     var click = CaptureSelectorState(displays: displays, purpose: .screenshot, candidate: target)
     click.receive(.leftDown(anchor)); click.candidate = nil
     click.receive(.leftUp(CGPoint(x: -96, y: 253)))
-    try expect(click.outcome == .windowSelected(target))
+    try expect(click.outcome == nil && click.adjusting && click.selectedWindow == target)
+    click.receive(.action(.pin))
+    try expect(click.outcome == .selected(target.frame) && click.initialAction == .pin)
     var missing = CaptureSelectorState(displays: displays, purpose: .screenshot)
     missing.receive(.leftDown(anchor)); missing.receive(.leftUp(CGPoint(x: -96, y: 254)))
     try expect(missing.outcome == .cancelled)
     var drag = CaptureSelectorState(displays: displays, purpose: .screenshot, candidate: target)
     drag.receive(.leftDown(anchor)); drag.receive(.leftDrag(CGPoint(x: 30, y: 330)))
     drag.receive(.leftUp(CGPoint(x: 30, y: 330)))
+    try expect(drag.outcome == nil && drag.adjusting)
+    drag.receive(.action(.text))
     try expect(drag.outcome == .selected(CGRect(x: -100, y: 250, width: 130, height: 80)))
     var returned = CaptureSelectorState(displays: displays, purpose: .screenshot, candidate: target)
     returned.receive(.leftDown(anchor)); returned.receive(.leftDrag(CGPoint(x: -50, y: 300)))
     returned.receive(.leftUp(CGPoint(x: -97, y: 253)))
+    returned.receive(.action(.copy))
     try expect(returned.outcome == .selected(CGRect(x: -100, y: 250, width: 3, height: 3)))
     var cancelled = CaptureSelectorState(displays: displays, purpose: .screenshot, candidate: target)
     cancelled.receive(.leftDown(anchor)); cancelled.receive(.cancel); cancelled.receive(.leftUp(anchor))
@@ -1334,6 +1513,38 @@ func captureScreenshotSelfTest() throws {
     try expect(clipped == CGRect(x: -1920, y: -180, width: 2120, height: 480))
     let plan = try capturePlan(target.frame, displays: displays)
     try expect(plan.scale == 2 && plan.pixelWidth == 1000 && plan.pixelHeight == 600 && plan.displays.count == 2)
+    // Every resize handle clamps in the frozen global display bounds; move
+    // preserves size and can cross a negative-coordinate monitor boundary.
+    let desktop = primary.frame.union(left.frame)
+    let rect = CGRect(x: -300, y: 50, width: 160, height: 100)
+    for (handle, point) in captureAdjustmentHandles(rect) {
+        for end in [CGPoint(x: -10000, y: -10000), CGPoint(x: 10000, y: 10000)] {
+            let adjusted = captureAdjustedRectangle(rect, origin: point, point: end, handle: handle, desktop: desktop)
+            try expect(adjusted.width >= 2 && adjusted.height >= 2 && desktop.contains(adjusted))
+        }
+    }
+    let shifted = captureAdjustedRectangle(rect, origin: .zero, point: CGPoint(x: 500, y: 100), handle: 0, desktop: desktop)
+    try expect(shifted == rect.offsetBy(dx: 500, dy: 100))
+    for usable in [CGRect(x: -1920, y: -180, width: 1920, height: 1040), CGRect(x: -180, y: -140, width: 180, height: 140)] {
+        let buttons = captureActionButtons(selection: CGRect(x: usable.maxX - 2, y: usable.maxY - 2, width: 2, height: 2), usable: usable)
+        try expect(buttons.count == CaptureScreenshotAction.allCases.count)
+        try expect(buttons.allSatisfy { usable.contains($0.1) })
+    }
+    try expect(captureActionButtons(selection: rect, usable: CGRect(x: 0, y: 0, width: 80, height: 80)).isEmpty)
+    var adjusting = CaptureSelectorState(displays: displays, purpose: .screenshot)
+    adjusting.receive(.leftDown(CGPoint(x: -300, y: 50))); adjusting.receive(.leftUp(CGPoint(x: -140, y: 150)))
+    try expect(adjusting.adjusting && adjusting.outcome == nil && adjusting.initialAction == nil)
+    adjusting.receive(.leftDown(CGPoint(x: -220, y: 100)))
+    adjusting.receive(.action(.copy))
+    try expect(adjusting.outcome == nil) // Never commit during a held adjustment.
+    adjusting.receive(.leftDrag(CGPoint(x: 280, y: 200))); adjusting.receive(.leftUp(CGPoint(x: 280, y: 200)))
+    try expect(adjusting.selection == shifted && adjusting.outcome == nil)
+    adjusting.receive(.action(.pen)); adjusting.receive(.action(.save)); adjusting.receive(.cancel)
+    try expect(adjusting.outcome == .selected(shifted) && adjusting.initialAction == .pen)
+    var discard = CaptureSelectorState(displays: displays, purpose: .screenshot)
+    discard.receive(.leftDown(CGPoint(x: 20, y: 20))); discard.receive(.leftUp(CGPoint(x: 120, y: 100)))
+    discard.receive(.cancel); discard.receive(.action(.copy))
+    try expect(discard.outcome == .cancelled && discard.initialAction == nil)
     let operations = CaptureScreenshotOperations()
     let first = try operations.begin(), second = try operations.begin()
     guard let old = operations.lookup(first), let current = operations.lookup(second) else {
