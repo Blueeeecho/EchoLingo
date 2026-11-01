@@ -3858,7 +3858,9 @@ mod tests {
             let rejected = super::capture_diagnostic_payload(serde_json::json!({
                 "nativeDeferredCapture": invalid,
             }));
-            assert!(rejected["diagnostics"].get("nativeDeferredCapture").is_none());
+            assert!(rejected["diagnostics"]
+                .get("nativeDeferredCapture")
+                .is_none());
         }
     }
     use super::*;
