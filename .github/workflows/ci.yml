@@ -213,7 +213,12 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: screenshot-pin-${{ runner.os }}
-          path: ${{ runner.temp }}/screenshot-pin
+          path: |
+            ${{ runner.temp }}/screenshot-pin
+            src-tauri/target/debug/echolingo
+            src-tauri/target/release/echolingo
+            src-tauri/target/release/echolingo.exe
+            ${{ steps.windows_native_candidate.outputs.capturePath }}
           if-no-files-found: warn
       - name: State native acceptance limits
         if: always()
