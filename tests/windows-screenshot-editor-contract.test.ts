@@ -288,3 +288,13 @@ it('keeps exact whole-window pixel equality while recording bounded mismatch geo
   expect(fixture).toContain('ScreenshotWindowPixelsMatch(actual,windowPixels)');
   expect(fixture).toContain('Clipboard image does not match the generated fixture content; preserved.');
 });
+
+it('copies the final window through one owned passive click without changing pixel oracles', () => {
+  const copy = fixture.split('static void ScreenshotPassiveWindowCopy(')[1].split('static void ScreenshotRecordCaptureCounts')[0];
+  for (const token of ['ScreenshotRetainedEditor(app,helper)==editor', '0x08000000L', 'ScreenshotWebPoint(form,app,editor,point)', 'BoundingRectangle.Contains(point.X,point.Y)', 'Send(new INPUT[]{down,up})', 'copySourceForegroundAfterClick']) expect(copy).toContain(token);
+  expect(copy.match(/Send\(/g)).toHaveLength(1);
+  for (const forbidden of ['SetForegroundWindow', 'ScreenshotInvoke', 'Thread.Sleep', 'CopyFromScreen']) expect(copy).not.toContain(forbidden);
+  expect(fixture).toContain('if(invokeCopy!=null)invokeCopy();else ScreenshotInvoke');
+  expect(fixture).toContain('ScreenshotWindowPixelsMatch(actual,windowPixels)');
+  expect(fixture).toContain('copySourceForegroundAfterCommit');
+});

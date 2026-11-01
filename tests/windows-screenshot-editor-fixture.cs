@@ -346,8 +346,8 @@ public static partial class EchoLingoApplicationSmoke {
             if(actual.GetPixel(x,y).ToArgb()!=expected.ToArgb())return false;
         }return true;
     }
-    static Bitmap ScreenshotClipboard(Process app,IntPtr editor,Size expected,Func<Bitmap,bool> generatedPixelsMatch,string copyPhase,Action<string> observeCopy=null) {
-        ScreenshotOwnedClipboard.BeginCopy(copyPhase);ScreenshotOwnedClipboard.Seed();AutomationElement inplace=ScreenshotButton(editor,"\u590d\u5236\u622a\u56fe\u5e76\u5b8c\u6210");bool closes=inplace!=null&&!inplace.Current.IsOffscreen;if(observeCopy!=null)observeCopy("beforeInvoke");ScreenshotInvoke(app,editor,closes?"\u590d\u5236\u622a\u56fe\u5e76\u5b8c\u6210":"\u590d\u5236\u56fe\u7247");if(observeCopy!=null)observeCopy("afterInvoke");
+    static Bitmap ScreenshotClipboard(Process app,IntPtr editor,Size expected,Func<Bitmap,bool> generatedPixelsMatch,string copyPhase,Action<string> observeCopy=null,Action invokeCopy=null) {
+        ScreenshotOwnedClipboard.BeginCopy(copyPhase);ScreenshotOwnedClipboard.Seed();AutomationElement inplace=ScreenshotButton(editor,"\u590d\u5236\u622a\u56fe\u5e76\u5b8c\u6210");bool closes=inplace!=null&&!inplace.Current.IsOffscreen;if(observeCopy!=null)observeCopy("beforeInvoke");if(invokeCopy!=null)invokeCopy();else ScreenshotInvoke(app,editor,closes?"\u590d\u5236\u622a\u56fe\u5e76\u5b8c\u6210":"\u590d\u5236\u56fe\u7247");if(observeCopy!=null)observeCopy("afterInvoke");
         Bitmap result=null;bool accepted=false;
         try{WaitFor(delegate{
             uint generation=GetClipboardSequenceNumber();
@@ -698,6 +698,22 @@ public static partial class EchoLingoApplicationSmoke {
             AutomationElement undo=ScreenshotButton(editor,"\u64a4\u9500");Assert(undo!=null&&!undo.Current.IsEnabled,"Choosing a tool created an edit.");evidence["toolSelectionDidNotCapturePixels"]=true;
         } else {evidence["physicalPinClickCount"]=1;evidence["nativeNoActivateBeforePhysicalClick"]=true;evidence["physicalPinClickOwnedTargetVerified"]=true;}
     }
+    static void ScreenshotPassiveWindowCopy(Form form,Process app,uint helper,IntPtr editor,Dictionary<string,object> evidence) {
+        Assert(ScreenshotRetainedEditor(app,helper)==editor,"Window Copy lost its retained selection editor.");RequireForeground(form);
+        Assert((GetWindowLongPtr(editor,-20).ToInt64()&0x08000000L)!=0,"Window Copy requires the passive NOACTIVATE editor.");
+        const string name="\u590d\u5236\u622a\u56fe\u5e76\u5b8c\u6210";
+        AutomationElement button=ScreenshotButton(editor,name);
+        Assert(button!=null&&button.Current.IsEnabled&&!button.Current.IsOffscreen,"Passive window Copy control is unavailable.");
+        System.Windows.Rect bounds=button.Current.BoundingRectangle;Point point=new Point((int)(bounds.X+bounds.Width/2),(int)(bounds.Y+bounds.Height/2));
+        Assert(SystemInformation.VirtualScreen.Contains(point),"Passive window Copy control is outside the desktop.");
+        ScreenshotWebPoint(form,app,editor,point);
+        AutomationElement current=ScreenshotButton(editor,name);
+        Assert(ScreenshotRetainedEditor(app,helper)==editor&&current!=null&&current.Current.IsEnabled&&!current.Current.IsOffscreen&&current.Current.BoundingRectangle.Contains(point.X,point.Y),"Passive Copy control moved before its single click.");
+        evidence["copyPhysicalTargetOwned"]=true;evidence["copyNoActivateVerified"]=true;evidence["copySourceForegroundBefore"]=true;
+        INPUT down=new INPUT();down.data.mouse.flags=2;INPUT up=new INPUT();up.data.mouse.flags=4;Send(new INPUT[]{down,up});
+        evidence["copyInputMethod"]="owned-passive-physical-click";evidence["copyClickCount"]=1;
+        RequireForeground(form);evidence["copySourceForegroundAfterClick"]=true;
+    }
     static void ScreenshotRecordCaptureCounts(Dictionary<string,object> report,Dictionary<string,object> after,int selections,int deferred) {
         Assert(VerifiedNativeChildren.Count==selections,"F1 picker identity count differs from exact selection cycles.");
         long attempts=CaptureNumber(after,"attemptId")-ScreenshotInitialAttempt;
@@ -917,7 +933,7 @@ public static partial class EchoLingoApplicationSmoke {
         WaitFor(delegate{return IsWindowVisible(editor)&&Element(editor,ScreenshotCanvasName)!=null&&AppOverlays(app.Id)==0;},25,"Click-visible-window native select did not open editor.",app);
         int[] windowSize=(int[])clicked["expectedWindowDimensions"];
         Dictionary<string,object> windowPixels=new Dictionary<string,object>{{"baselineFrame",RectValue(sourceFrame)},{"baselineClientRelativeToFrame",RectValue(ScreenshotExpectedWindowClient)},{"baselineTakenBeforeF1",true},{"baselineSourceForegroundVerified",true}};report["screenshotWindowPixelComparison"]=windowPixels;
-        using(Bitmap copy=ScreenshotClipboard(app,editor,new Size(windowSize[0],windowSize[1]),delegate(Bitmap actual){return ScreenshotWindowPixelsMatch(actual,windowPixels);},"clicked-window",delegate(string phase){ScreenshotObserveWindowCopy(form,app,editor,sourceFrame,phase,windowPixels);})) { clicked["visibleWindowPixelSize"]=new int[]{copy.Width,copy.Height}; }
+        using(Bitmap copy=ScreenshotClipboard(app,editor,new Size(windowSize[0],windowSize[1]),delegate(Bitmap actual){return ScreenshotWindowPixelsMatch(actual,windowPixels);},"clicked-window",delegate(string phase){ScreenshotObserveWindowCopy(form,app,editor,sourceFrame,phase,windowPixels);},delegate{ScreenshotPassiveWindowCopy(form,app,Convert.ToUInt32(clicked["helperProcessId"]),editor,clicked);})) { clicked["visibleWindowPixelSize"]=new int[]{copy.Width,copy.Height};RequireForeground(form);clicked["copySourceForegroundAfterCommit"]=true; }
         Dictionary<string,object> cancelClick=ScreenshotPicker(form,image,app,first,Convert.ToUInt32(clicked["helperProcessId"]));RequireForeground(form);Send(new INPUT[]{down,up});
         ScreenshotWaitAdjustment(form,app,Convert.ToUInt32(cancelClick["helperProcessId"]),sourceFrame,cancelClick);ScreenshotWebAction(form,app,Convert.ToUInt32(cancelClick["helperProcessId"]),"select",cancelClick);
         WaitFor(delegate{return IsWindowVisible(editor)&&Element(editor,ScreenshotCanvasName)!=null&&AppOverlays(app.Id)==0;},25,"Second native select did not prepare cancel-only window capture.",app);

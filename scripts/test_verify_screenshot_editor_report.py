@@ -45,6 +45,7 @@ def complete(installed=False):
         'noHiddenPngMetadataOrTrailingData', 'nativeSaveAsCancelPreservedImage', 'nativeOpenCancelPreservedImage')})
     report['screenshotCases'][1].update(savedPngCount=2, copiedPixelSize=[624, 94], inplaceCopyAndSavesDismissed=True,
         savedCaptureReopenedThroughSettings=True, standaloneCollisionNumberingVerified=True, standaloneCollisionSaveCount=2, recapturedSaveSessions=[dict(shortcut='F1', hotkeyPresses=1) for _ in range(2)])
+    report['screenshotCases'][2].update(copyInputMethod='owned-passive-physical-click',copyClickCount=1,copyPhysicalTargetOwned=True,copyNoActivateVerified=True,copySourceForegroundBefore=True,copySourceForegroundAfterClick=True,copySourceForegroundAfterCommit=True)
     report['screenshotCases'][2].update(visibleWindowPixelSize=[700, 200], expectedWindowDimensions=[700, 200], inplaceCopyDismissed=True,
         inplaceCancelPreservedClipboard=True, cancelSession=dict(shortcut='F1', hotkeyPresses=1))
     report['screenshotCases'][1].update(adjustment('solid'))
@@ -308,6 +309,12 @@ class ScreenshotEditorReport(unittest.TestCase):
 
 
 
+
+class PassiveWindowCopyTests(unittest.TestCase):
+    def test_exact_passive_click_and_source_preservation_required(self):
+        for key, invalid in (('copyClickCount', True), ('copyClickCount', 2), ('copyInputMethod', 'uia'), ('copyPhysicalTargetOwned', False), ('copyNoActivateVerified', False), ('copySourceForegroundBefore', False), ('copySourceForegroundAfterClick', False), ('copySourceForegroundAfterCommit', False)):
+            report=complete();report['screenshotCases'][2][key]=invalid
+            with self.assertRaises(ValueError): verify_report(report)
 
 class PinClientFrameTests(unittest.TestCase):
     def test_complete_report_requires_actual_decorated_negative_control(self):

@@ -196,6 +196,14 @@ def verify_report(report, expected_sha=None, installed=False, pin_only=False):
         if (case.get('ok') is not True or case.get('shortcut') != 'F1'
                 or type(case.get('hotkeyPresses')) is not int or case['hotkeyPresses'] != presses):
             raise ValueError('F1 workflows must preserve exact cancel/copy/save-recapture counts')
+    clicked = cases[2]
+    if (clicked.get('copyInputMethod') != 'owned-passive-physical-click'
+            or type(clicked.get('copyClickCount')) is not int or clicked['copyClickCount'] != 1):
+        raise ValueError('Window Copy requires one owned passive physical click')
+    for field in ('copyPhysicalTargetOwned', 'copyNoActivateVerified', 'copySourceForegroundBefore',
+                  'copySourceForegroundAfterClick', 'copySourceForegroundAfterCommit'):
+        if clicked.get(field) is not True:
+            raise ValueError('Passive window Copy evidence absent: ' + field)
     drag = cases[1]
     verify_adjustment(drag, 'solid')
     for field in ('allExportPixelsMatchSystemClipboard', 'noOverwrite', 'noHiddenPngMetadataOrTrailingData',
