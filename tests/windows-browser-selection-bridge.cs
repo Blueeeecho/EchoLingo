@@ -47,6 +47,9 @@ public static class WindowsBrowserSelectionBridge {
     [DllImport("user32.dll")] static extern IntPtr GetClipboardOwner();
     [DllImport("user32.dll")] static extern bool OpenClipboard(IntPtr window);
     [DllImport("user32.dll")] static extern bool CloseClipboard();
+    [DllImport("user32.dll")] static extern bool EmptyClipboard();
+    [DllImport("user32.dll",SetLastError=true)] static extern int CountClipboardFormats();
+    [DllImport("kernel32.dll",EntryPoint="SetLastError")] static extern void CleanupSetLastError(uint error);
     [DllImport("user32.dll",CharSet=CharSet.Unicode)] static extern uint RegisterClipboardFormat(string name);
     [DllImport("user32.dll")] static extern IntPtr GetClipboardData(uint format);
     [DllImport("kernel32.dll")] static extern UIntPtr GlobalSize(IntPtr memory);
@@ -59,6 +62,7 @@ public static class WindowsBrowserSelectionBridge {
     static string Helper,Assembly,Browser;
     static uint ownedClipboard;
     static bool seeded;
+    static DataObject ownedSeed;
     static string Stage="setup";static Dictionary<string,object> LastMetadata;
     static AppSession HostedApplication;
     static string ShortcutGesture="instant";
@@ -189,7 +193,7 @@ public static class WindowsBrowserSelectionBridge {
         finally{result["sequenceWhileLocked"]=GetClipboardSequenceNumber();CloseClipboard();result["sequenceAfterUnlock"]=GetClipboardSequenceNumber();}
     }
     static DataObject Seed(){
-        DataObject data=new DataObject();data.SetData(DataFormats.UnicodeText,false,"Generated browser clipboard original 24680");data.SetData(DataFormats.Html,false,"<p>Generated browser rich original 24680</p>");data.SetData(DataFormats.Rtf,false,"{\\rtf1 Generated browser rich original 24680}");if(!NoClipboardProbe)data.SetData(ProbeFormat,false,new MemoryStream(Encoding.ASCII.GetBytes(ProbeNonce)));Clipboard.SetDataObject(data,true,0,0);ownedClipboard=GetClipboardSequenceNumber();seeded=true;
+        DataObject data=new DataObject();data.SetData(DataFormats.UnicodeText,false,"Generated browser clipboard original 24680");data.SetData(DataFormats.Html,false,"<p>Generated browser rich original 24680</p>");data.SetData(DataFormats.Rtf,false,"{\\rtf1 Generated browser rich original 24680}");if(!NoClipboardProbe)data.SetData(ProbeFormat,false,new MemoryStream(Encoding.ASCII.GetBytes(ProbeNonce)));Clipboard.SetDataObject(data,true,0,0);ownedClipboard=GetClipboardSequenceNumber();ownedSeed=data;seeded=true;
         if(LastMetadata!=null)LastMetadata["clipboardProbeEnabled"]=!NoClipboardProbe;
         if(NoClipboardProbe)return data; // no raw acquisition before the original OLE verdict
         var seedObservation=ObserveSyntheticFormats(data);
@@ -289,9 +293,43 @@ public static class WindowsBrowserSelectionBridge {
             return metadata;
         }
     }
+    // Called only under the native clipboard lock. Never inspect a newer
+    // generation, and recheck after potentially delayed representation reads.
+    static bool ReclaimOwnedClipboard(Func<bool> same,Func<bool> content,Func<bool> clear){
+        return same()&&content()&&same()&&clear();
+    }
+    static void ClipboardCleanupPolicySelfTest(){
+        int reads=0,clears=0,checks=0;
+        Need(!ReclaimOwnedClipboard(delegate{return false;},delegate{reads++;return true;},delegate{clears++;return true;})&&reads==0&&clears==0,"CLEANUP_FOREIGN_GENERATION_PRESERVED");
+        Need(!ReclaimOwnedClipboard(delegate{return true;},delegate{return false;},delegate{clears++;return true;})&&clears==0,"CLEANUP_CHANGED_CONTENT_PRESERVED");
+        Need(!ReclaimOwnedClipboard(delegate{return ++checks==1;},delegate{return true;},delegate{clears++;return true;})&&clears==0,"CLEANUP_CHANGED_DURING_READ_PRESERVED");
+        Need(ReclaimOwnedClipboard(delegate{return true;},delegate{return true;},delegate{clears++;return true;})&&clears==1,"CLEANUP_OWNED_GENERATION_CLEARED");
+        Need(!ReclaimOwnedClipboard(delegate{return true;},delegate{return true;},delegate{return false;}),"CLEANUP_FAILURE_REPORTED");
+    }
+    static bool OwnedPayloadsLocked(){
+        if(ownedSeed==null)return false;
+        if(!NoClipboardProbe){
+            long allocation;int error;byte[] actual=LockedBytes(RegisterClipboardFormat(ProbeFormat),256,out allocation,out error),expected=Encoding.ASCII.GetBytes(ProbeNonce);
+            if(actual==null||actual.Length<expected.Length)return false;
+            for(int i=0;i<expected.Length;i++)if(actual[i]!=expected[i])return false;
+        }
+        var values=new Dictionary<string,object>{{"unicodeExactEqual",0},{"rtfExactEqual",0},{"htmlExactEqual",0}};
+        ObserveLockedFormat(values,"unicode",13,(string)ownedSeed.GetData(DataFormats.UnicodeText,false),Encoding.Unicode,true);
+        ObserveLockedFormat(values,"rtf",RegisterClipboardFormat(DataFormats.Rtf),(string)ownedSeed.GetData(DataFormats.Rtf,false),Encoding.ASCII,false);
+        ObserveLockedFormat(values,"html",RegisterClipboardFormat(DataFormats.Html),(string)ownedSeed.GetData(DataFormats.Html,false),Encoding.UTF8,false);
+        return Convert.ToInt32(values["unicodeExactEqual"])==1&&Convert.ToInt32(values["rtfExactEqual"])==1&&Convert.ToInt32(values["htmlExactEqual"])==1;
+    }
     static bool ClearOwnedClipboard(){
-        if(!seeded)return true;bool owned=GetClipboardSequenceNumber()==ownedClipboard;seeded=false;
-        if(!owned)return false;Clipboard.Clear();return true;
+        if(!seeded)return true;seeded=false; // one cleanup attempt, including failure
+        if(!OpenClipboard(IntPtr.Zero))return false;
+        try{
+            // Framework Clipboard.Clear publishes an empty OLE DataObject;
+            // that is not proof of zero native formats for the next F1 fixture.
+            return ReclaimOwnedClipboard(delegate{return GetClipboardSequenceNumber()==ownedClipboard;},OwnedPayloadsLocked,delegate{
+                if(!EmptyClipboard())return false;
+                CleanupSetLastError(0);return CountClipboardFormats()==0&&Marshal.GetLastWin32Error()==0;
+            });
+        }finally{CloseClipboard();ownedSeed=null;}
     }
     static Dictionary<string,object> GuardMouseStart(Dictionary<string,object> command){
         IntPtr root=BrowserMain(Convert.ToInt32(command["browserPid"]));Need(GetForegroundWindow()==root,"MOUSE_SOURCE_BROWSER_NOT_FOREGROUND");
@@ -489,7 +527,7 @@ public static class WindowsBrowserSelectionBridge {
     }
     public static void Run(string helper,string assembly,string browser,string application,string mockUrl,string provider,string hash,long bytes,bool diagnostics,string shortcutGesture,bool noClipboardProbe){
         NoClipboardProbe=noClipboardProbe;Need(!noClipboardProbe||(!String.IsNullOrEmpty(application)&&!diagnostics),"NO_PROBE_REQUIRES_ORDINARY_ACTUAL_APPLICATION");
-        RawPayloadSelfTest();
+        RawPayloadSelfTest();ClipboardCleanupPolicySelfTest();
         Need(shortcutGesture=="instant"||shortcutGesture=="paced","SHORTCUT_GESTURE_INVALID");Need(shortcutGesture=="instant"||!String.IsNullOrEmpty(application),"PACED_GESTURE_REQUIRES_APPLICATION");ShortcutGesture=shortcutGesture;
         Helper=String.IsNullOrEmpty(helper)?null:Path.GetFullPath(helper);Assembly=String.IsNullOrEmpty(assembly)?null:Path.GetFullPath(assembly);Browser=Path.GetFullPath(browser);Need(Helper==null||!Helper.Contains("\"")&&!Assembly.Contains("\""),"INVALID_FIXTURE_PATH");
         IDataObject existing=Clipboard.GetDataObject();Need(existing==null||existing.GetFormats(false).Length==0,"FRESH_EMPTY_CLIPBOARD_REQUIRED");
