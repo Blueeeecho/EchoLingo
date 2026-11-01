@@ -18,6 +18,21 @@ describe('actual Windows screenshot fixture source wiring (not native acceptance
     expect(fixture).not.toContain('__TAURI_INTERNALS__');
     for (const name of ['escape-cancel', 'inplace-drag-copy-recapture-save-twice', 'click-window-copy-then-cancel']) expect(fixture).toContain(`"${name}"`);
   });
+  it('matches exact current in-place crop dimensions including its phase label', () => {
+    const editor = readFileSync(new URL('../src/screenshot-editor.ts', import.meta.url), 'utf8');
+    const template = editor.match(/\$\('#overlay-info'\)\.textContent = model \? `([^`]+)`/)?.[1];
+    const matcher = fixture.slice(fixture.indexOf('static bool ScreenshotInplaceDimensionsMatch('), fixture.indexOf('static AutomationElement ScreenshotButton('));
+    const labels = matcher.match(/pixels\.Width\+"([^"]*)"\+pixels\.Height\+"([^"]*)"/);
+    expect(template).toBeDefined(); expect(labels).not.toBeNull();
+    const actualLabel = `624${JSON.parse(`"${labels![1]}"`)}94${JSON.parse(`"${labels![2]}"`)}`;
+    expect(actualLabel).toBe(template!.replace('${model.size.width}', '624').replace('${model.size.height}', '94'));
+    expect(matcher).toContain('return Element(editor,');
+    expect(matcher).not.toMatch(/Contains\(|StartsWith\(/);
+    expect(fixture.match(/ScreenshotInplaceDimensionsMatch\(editor,cropped\)/g)).toHaveLength(2);
+    expect(fixture).toContain('new Size(selected.Width-16,selected.Height-16)');
+    expect(fixture).toContain('},10,"Actual pixel crop dimensions did not render before export.",app)');
+    expect(fixture).toContain('},10,"Fresh cropped save pixels were not ready.",app)');
+  });
   it('bounds exported data and asserts no overwrite, hidden PNG payload, OCR, provider traffic or history', () => {
     for (const required of ['bytes.Length<=32*1024*1024', 'position==bytes.Length', 'kind!="eXIf"', 'kind!="iTXt"', 'File.ReadAllBytes(firstPath)', 'CaptureNumber(after,"ocrInvocationCount")==0', 'server.Connections==0&&server.Count==0&&server.Error==null', 'Deserialize<object[]>(File.ReadAllText(history)).Length==0', 'desktopDirectoryWritten', 'no global packet capture', 'screenshotLocalOpenRequiredCases', 'sourceBytesUnchanged', 'FileMode.CreateNew', 'screenshotEditorSurvivedOwnedFocusLoss']) expect(fixture).toContain(required);
     expect(wrapper).toContain('payload.ContainsKey("ocrInvocationCount")');
