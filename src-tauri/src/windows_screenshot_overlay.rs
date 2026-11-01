@@ -246,6 +246,12 @@ pub fn prepare(
     window
         .set_min_size(None::<tauri::LogicalSize<f64>>)
         .map_err(|_| "SCREENSHOT_WINDOW: 无法准备截图尺寸")?;
+    // Tao's undecorated shadow reserves non-client border pixels even when
+    // decorations are disabled. The capture canvas must cover the exact native
+    // frame, so remove that shadow before applying and verifying the viewport.
+    window
+        .set_shadow(false)
+        .map_err(|_| "SCREENSHOT_WINDOW: 无法移除截图层边框阴影")?;
     window
         .set_decorations(false)
         .map_err(|_| "SCREENSHOT_WINDOW: 无法准备无边框截图层")?;
@@ -364,6 +370,18 @@ pub fn hide(window: &tauri::WebviewWindow) -> Result<(), String> {
     window
         .set_decorations(true)
         .map_err(|_| "SCREENSHOT_WINDOW: 无法恢复图片窗口")?;
+    let shadow = window
+        .app_handle()
+        .config()
+        .app
+        .windows
+        .iter()
+        .find(|configuration| configuration.label == window.label())
+        .map(|configuration| configuration.shadow)
+        .unwrap_or(true);
+    window
+        .set_shadow(shadow)
+        .map_err(|_| "SCREENSHOT_WINDOW: 无法恢复图片窗口阴影")?;
     window
         .set_resizable(true)
         .map_err(|_| "SCREENSHOT_WINDOW: 无法恢复图片窗口")?;
