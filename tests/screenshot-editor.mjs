@@ -182,6 +182,7 @@ try {
     await page.locator('#annotation-text').press('Enter');
     await page.locator('#annotation-text').pressSequentially('Second line');
     assert.equal(await page.locator('#annotation-text').inputValue(), 'Direct typing\nSecond line');
+    assert.deepEqual(await page.locator('#annotation-text').evaluate(input => ({ top: input.scrollTop, fits: input.scrollHeight <= input.clientHeight })), { top: 0, fits: true }, 'both direct-input lines are visible without a scrollbar shrinking the typing area');
     const copiesDuringIME = await page.evaluate(() => window.__screenshotQA.copies.length);
     await page.locator('#annotation-text').dispatchEvent('compositionstart');
     await page.locator('#copy-image').click();

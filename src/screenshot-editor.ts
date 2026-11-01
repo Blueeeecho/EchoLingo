@@ -167,15 +167,22 @@ function placeTextEditor(): void {
   const measure = document.createElement('canvas').getContext('2d')!;
   measure.font = screenshotTextFont(size);
   const lines = wrapText(textInput.value || ' ', maxWidth, text => measure.measureText(text).width);
-  const naturalWidth = Math.max(size * 2, ...lines.map(line => measure.measureText(line).width + 2));
+  const naturalWidth = Math.max(size * 2, ...lines.map(line => Math.ceil(measure.measureText(line).width) + 4));
   textDialog.style.left = `${r.x + (textPoint.x - offset.x) * scale}px`;
   textDialog.style.top = `${r.y + (textPoint.y - offset.y) * scaleY}px`;
-  textDialog.style.width = `${Math.max(1, Math.min(maxWidth, naturalWidth) * scale)}px`;
-  textDialog.style.height = `${Math.max(1, Math.min(sourceSize.height - textPoint.y, Math.max(1, lines.length) * size * 1.35) * scale)}px`;
+  textDialog.style.width = `${Math.max(1, Math.min(maxWidth * scale, Math.ceil(naturalWidth * scale)))}px`;
   textInput.style.font = screenshotTextFont(size * scale);
   textInput.style.lineHeight = '1.35';
   textInput.style.color = $<HTMLInputElement>('#edit-color').value;
   textInput.style.backgroundColor = $<HTMLSelectElement>('#note-style').value || 'transparent';
+  // Measure the actual textarea line boxes after font/width settle. Fractional
+  // CSS heights otherwise create a scrollbar that narrows and rewraps the text.
+  textInput.style.height = '0px';
+  const contentHeight = textInput.scrollHeight + 1;
+  const availableHeight = Math.max(1, (sourceSize.height - textPoint.y) * scaleY);
+  textDialog.style.height = `${Math.min(availableHeight, contentHeight)}px`;
+  textInput.style.height = '100%';
+  if (contentHeight <= availableHeight) textInput.scrollTop = 0;
 }
 
 function beginText(p: Point, index: number | null = null): void {
