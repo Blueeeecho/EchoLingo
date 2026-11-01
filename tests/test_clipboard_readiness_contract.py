@@ -26,6 +26,12 @@ class ClipboardReadinessContract(unittest.TestCase):
         for text in ('Absent format must not enter blocking OLE', 'Non-text updates retain the original 1200ms limit', 'Only the completed generation restores'):
             self.assertIn(text, POLICY)
 
+    def test_generated_trace_cannot_escape_as_native_stderr_failure(self):
+        self.assertIn('if(trace) Console.SetError(diagnostic);', FIXTURE)
+        self.assertIn('if(trace) { Console.SetError(originalError); row["generatedTrace"]=diagnostic.ToString(); }', FIXTURE)
+        self.assertIn('finally {', FIXTURE)
+        self.assertIn('catch { row["errorKind"]=1; }', FIXTURE)
+
     def test_native_fixture_checks_synthesized_unicode_and_both_adapter_modes(self):
         self.assertIn('new uint[]{13,1,7,0}', FIXTURE)
         self.assertIn('new bool[]{false,true}', FIXTURE)

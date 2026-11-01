@@ -3,6 +3,7 @@
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
+using System.IO;
 using System.Reflection;
 using System.Runtime.InteropServices;
 using System.Text;
@@ -83,7 +84,21 @@ public static class WindowsClipboardReadinessFixture {
                         foreach(bool trace in new bool[]{false,true}) {
                             Environment.SetEnvironmentVariable("ECHOLINGO_SELECTION_TRACE",trace?"1":null);
                             uint before=GetClipboardSequenceNumber(); Stopwatch clock=Stopwatch.StartNew();
-                            string actual=(string)read.Invoke(null,null);
+                            string actual;
+                            // The production trace intentionally uses stderr. Windows
+                            // PowerShell can promote a child native stderr line to a
+                            // terminating NativeCommandError before its JSON is saved.
+                            // Capture only this generated, synchronous adapter call;
+                            // native exceptions still fail, and stderr is always restored.
+                            TextWriter originalError=Console.Error;
+                            using(StringWriter diagnostic=new StringWriter()) {
+                                try {
+                                    if(trace) Console.SetError(diagnostic);
+                                    actual=(string)read.Invoke(null,null);
+                                } finally {
+                                    if(trace) { Console.SetError(originalError); row["generatedTrace"]=diagnostic.ToString(); }
+                                }
+                            }
                             row[trace?"traceElapsedMs":"productionElapsedMs"]=clock.ElapsedMilliseconds;
                             bool exact=format==0?actual==null:actual==expected;
                             row[trace?"traceExact":"productionExact"]=exact; Need(exact);

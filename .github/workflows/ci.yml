@@ -19,6 +19,7 @@ jobs:
       - name: Verify actual Unicode ANSI OEM and absent-format readiness
         shell: powershell
         run: |
+          $ErrorActionPreference = 'Continue'
           $global:LASTEXITCODE = 1
           $output = @(& powershell.exe -NoProfile -STA -ExecutionPolicy Bypass -File tests/windows-clipboard-readiness-smoke.ps1 -IsolatedTestSession 2>&1)
           $fixtureExit = $LASTEXITCODE
@@ -40,6 +41,7 @@ jobs:
       - name: Preserve original selected-text clipboard smoke as a hard gate
         shell: powershell
         run: |
+          $ErrorActionPreference = 'Continue'
           $global:LASTEXITCODE = 1
           $output = @(& powershell.exe -NoProfile -STA -ExecutionPolicy Bypass -File tests/windows-native-smoke.ps1 2>&1)
           $fixtureExit = $LASTEXITCODE
