@@ -1,7 +1,9 @@
 import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
-const wrapper = readFileSync(new URL('./windows-application-smoke.ps1', import.meta.url), 'utf8');
-describe('bounded Windows core failure evidence (source contracts, not native acceptance)', () => {
+const source = readFileSync(new URL('./windows-application-smoke.ps1', import.meta.url), 'utf8').replace(/\r\n/g, '\n');
+describe.each(['LF', 'CRLF'])('bounded Windows core failure evidence with %s checkout (source contracts, not native acceptance)', (ending) => {
+  const checkout = ending === 'CRLF' ? source.replace(/\n/g, '\r\n') : source;
+  const wrapper = checkout.replace(/\r\n/g, '\n');
   it('routes only exact capture phases to the existing capture diagnostic', () => {
     const route = wrapper.slice(wrapper.indexOf('static bool IsCoreCaptureFailure('), wrapper.indexOf('// Failure-only generated-fixture'));
     const expression = route.match(/return ([\s\S]+?);/)![1].replaceAll('(string)', '');
