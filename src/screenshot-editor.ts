@@ -3,7 +3,7 @@ import { overlayToolBounds, clampOverlayBox, placeOverlayToolbar, type OverlayRe
 import { closeDialog, dialogOpen, showDialog } from './screenshot-dialog';
 import { invoke, isTauri } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
-import { ScreenshotDocument, imagePoint, selectionRect, validateSize, MAX_ENCODED_BYTES, operationBounds, screenshotTextFont, wrapText, translateOperation, type Point, type EditOperation, MAX_STROKE_POINTS, strokePathsIntersect } from './screenshot-model';
+import { ScreenshotDocument, imagePoint, selectionRect, validateSize, MAX_ENCODED_BYTES, operationBounds, screenshotTextFont, translateOperation, type Point, type EditOperation, MAX_STROKE_POINTS, strokePathsIntersect } from './screenshot-model';
 import { flattenedPng, renderScreenshot } from './screenshot-renderer';
 interface ScreenshotOverlay { x: number; y: number; width: number; height: number; viewportWidth: number; viewportHeight: number; toolbarBounds?: OverlayRect }
 interface ScreenshotSession { id: number; pngBase64: string; width: number; height: number; capturedAt: number; sourceName?: string; overlay?: ScreenshotOverlay; initialAction?: InitialAction }
@@ -164,17 +164,17 @@ function placeTextEditor(): void {
   const scale = r.width / model.size.width, scaleY = r.height / model.size.height, size = Number($<HTMLSelectElement>('#edit-font-size').value);
   const sourceSize = editingIndex === null ? model.size : model.operationSize(editingIndex);
   const maxWidth = Math.max(1, sourceSize.width - textPoint.x);
-  const measure = document.createElement('canvas').getContext('2d')!;
-  measure.font = screenshotTextFont(size);
-  const lines = wrapText(textInput.value || ' ', maxWidth, text => measure.measureText(text).width);
-  const naturalWidth = Math.max(size * 2, ...lines.map(line => Math.ceil(measure.measureText(line).width) + 4));
   textDialog.style.left = `${r.x + (textPoint.x - offset.x) * scale}px`;
   textDialog.style.top = `${r.y + (textPoint.y - offset.y) * scaleY}px`;
-  textDialog.style.width = `${Math.max(1, Math.min(maxWidth * scale, Math.ceil(naturalWidth * scale)))}px`;
   textInput.style.font = screenshotTextFont(size * scale);
   textInput.style.lineHeight = '1.35';
   textInput.style.color = $<HTMLInputElement>('#edit-color').value;
   textInput.style.backgroundColor = $<HTMLSelectElement>('#note-style').value || 'transparent';
+  // Use this control's real glyph metrics, not a different canvas font context.
+  textInput.style.whiteSpace = 'pre'; textInput.style.width = '1px';
+  const naturalWidth = Math.max(size * scale * 2, textInput.scrollWidth + 2);
+  textDialog.style.width = `${Math.max(1, Math.min(maxWidth * scale, Math.ceil(naturalWidth)))}px`;
+  textInput.style.width = '100%'; textInput.style.whiteSpace = 'pre-wrap';
   // Measure the actual textarea line boxes after font/width settle. Fractional
   // CSS heights otherwise create a scrollbar that narrows and rewraps the text.
   textInput.style.height = '0px';

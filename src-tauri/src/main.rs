@@ -2435,9 +2435,7 @@ fn clipboard_restoration_notice(error: &str) -> Option<String> {
     if error.starts_with("CLIPBOARD_RESTORE_FAILED:") {
         Some("原剪贴板恢复失败，当前剪贴板可能仍是刚才复制的选中文字。".into())
     } else if error.starts_with("CLIPBOARD_RESTORE_SKIPPED:") {
-        Some(
-            "复制未能安全完成，暂未恢复原剪贴板，已保留当前内容。请重试或使用截图识别。".into(),
-        )
+        Some("复制未能安全完成，暂未恢复原剪贴板，已保留当前内容。请重试或使用截图识别。".into())
     } else {
         None
     }
