@@ -73,7 +73,7 @@ describe('actual Windows screenshot fixture source wiring (not native acceptance
     }
   });
   it('cleans failed runs only after locked generation and exact generated-content ownership checks', () => {
-    for (const required of ['FRESH_EMPTY_CLIPBOARD_REQUIRED', 'Guid.NewGuid()', 'ScreenshotClipboardPolicyTests()', 'ScreenshotOwnedClipboard.Cleanup()', 'screenshotOwnedClipboardCleared', 'generation-changed-preserved', 'content-changed-preserved', 'GetClipboardSequenceNumber()==generation&&GetClipboardOwner()==owner', 'LockedDigest(format)==digest', 'ScreenshotPixelsEqual(actual,expected)', 'ScreenshotPixelsEqual(actual,ScreenshotExpectedWindow)', 'ScreenshotCroppedPixels', 'DwmFlush()', 'control.Enabled=false']) expect(fixture).toContain(required);
+    for (const required of ['FRESH_EMPTY_CLIPBOARD_REQUIRED', 'Guid.NewGuid()', 'ScreenshotClipboardPolicyTests()', 'ScreenshotOwnedClipboard.Cleanup()', 'screenshotOwnedClipboardCleared', 'generation-changed-preserved', 'content-changed-preserved', 'GetClipboardSequenceNumber()==generation&&GetClipboardOwner()==owner', 'LockedDigest(format)==digest', 'ScreenshotPixelsEqual(actual,expected)', 'ScreenshotWindowPixelsMatch(actual,windowPixels)', 'ScreenshotCroppedPixels', 'DwmFlush()', 'control.Enabled=false']) expect(fixture).toContain(required);
     expect(fixture).not.toContain('Clipboard.Clear()');
     expect(fixture).not.toContain('Clipboard.SetText(');
     expect(fixture).toContain('return ScreenshotReclaim(SameGeneration,SameContent,EmptyClipboard)');
@@ -277,4 +277,14 @@ describe('actual Windows screenshot fixture source wiring (not native acceptance
     expect(fixture).toContain('finally{if(ForegroundPid()==app.Id)');
     expect(fixture).toContain('ForegroundPid()==app.Id&&GetForegroundWindow()==modal');
   });
+});
+
+it('keeps exact whole-window pixel equality while recording bounded mismatch geometry', () => {
+  const compare = fixture.split('static bool ScreenshotWindowPixelsMatch(')[1].split('static void ScreenshotObserveWindowCopy')[0];
+  for (const token of ['actual.GetPixel(x,y).ToArgb()==expected.GetPixel(x,y).ToArgb()', 'clientDifferentPixels', 'nonclientDifferentPixels', 'differenceBounds', 'return count==0']) expect(compare).toContain(token);
+  for (const forbidden of ['CopyFromScreen', '.Save(', 'GetForegroundWindow', 'SHA256', 'expected.GetPixel(minX']) expect(compare).not.toContain(forbidden);
+  expect(fixture).toContain('if(observeCopy!=null)observeCopy("beforeInvoke")');
+  expect(fixture).toContain('if(observeCopy!=null)observeCopy("afterInvoke")');
+  expect(fixture).toContain('ScreenshotWindowPixelsMatch(actual,windowPixels)');
+  expect(fixture).toContain('Clipboard image does not match the generated fixture content; preserved.');
 });
