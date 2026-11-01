@@ -223,11 +223,13 @@ describe('actual Windows screenshot fixture source wiring (not native acceptance
     expect(ownership).not.toContain('.Current.Name');
     expect(ownership).not.toContain('ProcessName');
   });
-  it('reads only the compile-time fixed diagnostic node through a complete bounded schema', () => {
-    const reader = fixture.slice(fixture.indexOf('static void ScreenshotDomPointerObservation('), fixture.indexOf('static bool ScreenshotObservationScope('));
-    for (const value of ['pid!=app.Id||ScreenshotWindow(app.Id)!=editor', 'screenshot-pointer-probe', 'EL_SCREENSHOT_POINTER_PROBE_V1:', 'value.Length>512', 'data.Count!=keys.Length', 'counts.Length!=17', '(int)item>255', 'state.Count!=14', 'result["domProbe"]=data']) expect(reader).toContain(value);
-    expect(reader.indexOf('state.Count!=14')).toBeLessThan(reader.indexOf('result["domProbe"]=data'));
-    for (const forbidden of ['Send(', 'SetForegroundWindow(', '.Invoke()', 'Thread.Sleep', 'result["raw"]', 'result["value"]']) expect(reader).not.toContain(forbidden);
+  it('validates the entire fixed V2 synthetic DOM schema before recording it', () => {
+    const schema = fixture.slice(fixture.indexOf('static bool ScreenshotProbeKeys('), fixture.indexOf('static bool ScreenshotObservationScope('));
+    for (const value of ['pid!=app.Id||ScreenshotWindow(app.Id)!=editor', 'EL_SCREENSHOT_POINTER_PROBE_V2:', 'value.Length>32768', 'counts.Length!=22', '(int)item>255', 'state.Count==14', 'samples.Count>18', '9007199254740991d', 'Double.IsInfinity', 'ScreenshotProbePayload(data)', 'ScreenshotProbeArray(geometry["pointer"],7,true)', 'ScreenshotProbeArray(geometry["frame"],4,false)', 'ScreenshotProbeKeys(exceptions,"error","rejection","category")']) expect(schema).toContain(value);
+    expect(schema.indexOf('if(!ScreenshotProbePayload(data))return')).toBeLessThan(schema.indexOf('result["domProbe"]=data'));
+    for (const forbidden of ['Send(', 'SetForegroundWindow(', '.Invoke()', 'Thread.Sleep', 'result["raw"]', 'result["value"]']) expect(schema).not.toContain(forbidden);
+    const observe = fixture.slice(fixture.indexOf('static Dictionary<string,object> ScreenshotPointerObservation('), fixture.indexOf('static void ScreenshotWebMoveResize('));
+    for (const value of ['GetCursorPos(out cursor)', '(GetAsyncKeyState(1)&0x8000)!=0', 'cursorRoot==editor&&cursorPid==app.Id', 'if(ownedCursor)result["osCursor"]', 'observation["afterUp"]']) expect(observe).toContain(value);
   });
   it('maps F1 exports to dismiss/re-capture while retaining standalone cancellation and collision oracles', () => {
     for (const value of ['if(closes)WaitFor', 'for(int save=0;save<2;save++)', 'recapturedSaveSessions', 'inplaceCopyAndSavesDismissed', 'savedCaptureReopenedThroughSettings', 'standaloneCollisionNumberingVerified', 'ScreenshotContinueOpen(app,dialogOwner)', 'inplaceCancelPreservedClipboard']) expect(fixture).toContain(value);

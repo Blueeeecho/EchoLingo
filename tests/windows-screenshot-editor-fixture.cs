@@ -24,6 +24,8 @@ public static partial class EchoLingoApplicationSmoke {
     static List<Dictionary<string,object>> ScreenshotNativeOpenObservations,ScreenshotNativeCancelObservations;
     [StructLayout(LayoutKind.Sequential)] struct ScreenshotGuiThreadInfo {public uint size,flags;public IntPtr active,focus,capture,menuOwner,moveSize,caret;public RECT caretRect;}
     [DllImport("user32.dll")] static extern bool GetGUIThreadInfo(uint thread,ref ScreenshotGuiThreadInfo info);
+    [DllImport("user32.dll")] static extern bool GetCursorPos(out Point point);
+    [DllImport("user32.dll")] static extern short GetAsyncKeyState(int key);
     [DllImport("user32.dll")] static extern bool IsChild(IntPtr parent,IntPtr child);
     [DllImport("user32.dll")] static extern int GetDlgCtrlID(IntPtr window);
     [DllImport("dwmapi.dll")] static extern int DwmFlush();
@@ -470,28 +472,48 @@ public static partial class EchoLingoApplicationSmoke {
                 if(message.StartsWith(code+":",StringComparison.Ordinal))observation["knownUpdateErrorCode"]=code;
         }catch(Exception){observation["failureStateUnavailable"]=true;}
     }
+    static bool ScreenshotProbeKeys(Dictionary<string,object> value,params string[] keys) {return value!=null&&value.Count==keys.Length&&!Array.Exists(keys,key=>!value.ContainsKey(key));}
+    static bool ScreenshotProbeEnum(object value,params string[] values) {return value is string&&Array.IndexOf(values,(string)value)>=0;}
+    static bool ScreenshotProbeNumber(object value) {
+        if(value==null)return true;
+        if(!(value is int||value is long||value is decimal||value is double||value is float))return false;
+        double number=Convert.ToDouble(value);return !Double.IsNaN(number)&&!Double.IsInfinity(number)&&Math.Abs(number)<=9007199254740991d;
+    }
+    static bool ScreenshotProbeArray(object value,int length,bool nullable) {if(value==null)return nullable;object[] items=value as object[];return items!=null&&items.Length==length&&!Array.Exists(items,item=>!ScreenshotProbeNumber(item));}
+    static bool ScreenshotProbeState(object value) {
+        Dictionary<string,object> state=value as Dictionary<string,object>;string[] flags=new string[]{"canAdjust","busy","loading","selection","model","drag","pending","gesture","moving","text","primary","owner"};
+        return state!=null&&state.Count==14&&!Array.Exists(flags,key=>!state.ContainsKey(key)||!(state[key] is bool))&&state.ContainsKey("button")&&state["button"] is int&&(int)state["button"]>= -1&&(int)state["button"]<=5&&state.ContainsKey("tool")&&ScreenshotProbeEnum(state["tool"],"select","rectangle","arrow","text","mosaic","solid","crop","number","pen","highlight","eraser");
+    }
+    static bool ScreenshotProbeSample(object value) {
+        Dictionary<string,object> sample=value as Dictionary<string,object>;if(!ScreenshotProbeKeys(sample,"state","geometry","result")||!ScreenshotProbeState(sample["state"]))return false;
+        Dictionary<string,object> geometry=sample["geometry"] as Dictionary<string,object>;
+        if(!ScreenshotProbeKeys(geometry,"viewport","frame","overlay","original","start","revision","sessionId","pointer","captured")||!ScreenshotProbeArray(geometry["viewport"],3,false)||!ScreenshotProbeArray(geometry["frame"],4,false)||!ScreenshotProbeArray(geometry["overlay"],4,true)||!ScreenshotProbeArray(geometry["original"],4,true)||!ScreenshotProbeArray(geometry["start"],2,true)||!ScreenshotProbeNumber(geometry["revision"])||!ScreenshotProbeNumber(geometry["sessionId"])||!ScreenshotProbeArray(geometry["pointer"],7,true)||!(geometry["captured"] is bool))return false;
+        if(sample["result"]==null)return true;
+        Dictionary<string,object> result=sample["result"] as Dictionary<string,object>;
+        return ScreenshotProbeKeys(result,"code","revision","id","rect")&&ScreenshotProbeEnum(result["code"],"none","CANCELLED","SCREENSHOT_BUSY","SCREENSHOT_SESSION","SCREENSHOT_REVISION","SCREENSHOT_SIZE","CAPTURE_DISPLAY_CHANGED","SCREENSHOT_GEOMETRY","SCREENSHOT_WINDOW","SCREENSHOT_INPUT","CAPTURE_GEOMETRY","TypeError","RangeError","NotFoundError","InvalidStateError","other")&&ScreenshotProbeNumber(result["revision"])&&ScreenshotProbeNumber(result["id"])&&ScreenshotProbeArray(result["rect"],4,true);
+    }
+    static bool ScreenshotProbePayload(Dictionary<string,object> data) {
+        if(!ScreenshotProbeKeys(data,"counts","stage","target","downTarget","downPrimary","downButton","state","samples","exceptions"))return false;
+        object[] counts=data["counts"] as object[];if(counts==null||counts.Length!=22||Array.Exists(counts,item=>!(item is int)||(int)item<0||(int)item>255))return false;
+        if(!ScreenshotProbeEnum(data["stage"],"ready","doc-down","doc-move","doc-up","doc-cancel","doc-got","doc-lost","canvas-down","begin-attempt","begin","move-attempt","move","up-attempt","update","updated","update-error","cancel","terminal","unchanged","blocked-up","update-result","late-result")||!ScreenshotProbeEnum(data["target"],"none","canvas","frame","handle","toolbar","other")||!ScreenshotProbeEnum(data["downTarget"],"none","canvas","frame","handle","toolbar","other")||!(data["downPrimary"] is bool)||!(data["downButton"] is int)||(int)data["downButton"]< -1||(int)data["downButton"]>5||!ScreenshotProbeState(data["state"]))return false;
+        Dictionary<string,object> samples=data["samples"] as Dictionary<string,object>;if(samples==null||samples.Count>18)return false;
+        foreach(KeyValuePair<string,object> sample in samples)if(!ScreenshotProbeEnum(sample.Key,"down","begin","move","up","terminal","unchanged","update","result","updated","failure","cancel","blocked","late","documentMove","documentUp","documentCancel","got","lost")||!ScreenshotProbeSample(sample.Value))return false;
+        Dictionary<string,object> exceptions=data["exceptions"] as Dictionary<string,object>;
+        return ScreenshotProbeKeys(exceptions,"error","rejection","category")&&exceptions["error"] is int&&(int)exceptions["error"]>=0&&(int)exceptions["error"]<=255&&exceptions["rejection"] is int&&(int)exceptions["rejection"]>=0&&(int)exceptions["rejection"]<=255&&ScreenshotProbeEnum(exceptions["category"],"none","Error","TypeError","RangeError","ReferenceError","SyntaxError","NotFoundError","InvalidStateError","SecurityError","AbortError","other");
+    }
     static void ScreenshotDomPointerObservation(Process app,IntPtr editor,Dictionary<string,object> result) {
-        // Diagnostic-only compiler flag creates this exact own-editor node.
-        // Validate the entire bounded schema before retaining any of its values.
+        // Isolated synthetic-fixture build only. Reject the complete payload
+        // unless every fixed field, bounded scalar and sample slot validates.
         result["domProbeFound"]=false;result["domProbeValid"]=false;
         try {
             uint pid;GetWindowThreadProcessId(editor,out pid);if(pid!=app.Id||ScreenshotWindow(app.Id)!=editor)return;
             AutomationElement root=AutomationElement.FromHandle(editor);
             AutomationElement node=root.FindFirst(TreeScope.Descendants,new PropertyCondition(AutomationElement.AutomationIdProperty,"screenshot-pointer-probe"));
             if(node==null)return;result["domProbeFound"]=true;
-            string value=node.Current.Name??"",prefix="EL_SCREENSHOT_POINTER_PROBE_V1:";
-            if(value.Length>512||!value.StartsWith(prefix,StringComparison.Ordinal))return;
+            string value=node.Current.Name??"",prefix="EL_SCREENSHOT_POINTER_PROBE_V2:";
+            if(value.Length>32768||!value.StartsWith(prefix,StringComparison.Ordinal))return;
             Dictionary<string,object> data=new JavaScriptSerializer().DeserializeObject(value.Substring(prefix.Length)) as Dictionary<string,object>;
-            string[] keys=new string[]{"counts","stage","target","downTarget","downPrimary","downButton","state"};
-            if(data==null||data.Count!=keys.Length||Array.Exists(keys,key=>!data.ContainsKey(key)))return;
-            string[] stages=new string[]{"ready","doc-down","doc-move","doc-up","doc-cancel","doc-got","doc-lost","canvas-down","begin-attempt","begin","move-attempt","move","up-attempt","update","updated","update-error","cancel"};
-            string[] targets=new string[]{"none","canvas","frame","handle","toolbar","other"};
-            object[] counts=data["counts"] as object[];if(counts==null||counts.Length!=17||Array.Exists(counts,item=>!(item is int)||(int)item<0||(int)item>255))return;
-            if(!(data["stage"] is string)||Array.IndexOf(stages,(string)data["stage"])<0||!(data["target"] is string)||Array.IndexOf(targets,(string)data["target"])<0||!(data["downTarget"] is string)||Array.IndexOf(targets,(string)data["downTarget"])<0||!(data["downPrimary"] is bool)||!(data["downButton"] is int)||(int)data["downButton"]< -1||(int)data["downButton"]>5)return;
-            Dictionary<string,object> state=data["state"] as Dictionary<string,object>;
-            string[] flags=new string[]{"canAdjust","busy","loading","selection","model","drag","pending","gesture","moving","text","primary","owner"};
-            string[] tools=new string[]{"select","rectangle","arrow","text","mosaic","solid","crop","number","pen","highlight","eraser"};
-            if(state==null||state.Count!=14||Array.Exists(flags,key=>!state.ContainsKey(key)||!(state[key] is bool))||!state.ContainsKey("button")||!state.ContainsKey("tool")||!(state["button"] is int)||(int)state["button"]< -1||(int)state["button"]>5||!(state["tool"] is string)||Array.IndexOf(tools,(string)state["tool"])<0)return;
+            if(!ScreenshotProbePayload(data))return;
             result["domProbeValid"]=true;result["domProbe"]=data;
         }catch(Exception){result["domProbeUnavailable"]=true;}
     }
@@ -531,6 +553,9 @@ public static partial class EchoLingoApplicationSmoke {
     static Dictionary<string,object> ScreenshotPointerObservation(Process app,IntPtr editor,Point point,bool inspectElement,Dictionary<int,DateTime> known) {
         Dictionary<string,object> result=new Dictionary<string,object>();
         try {
+            Point cursor;bool cursorRead=GetCursorPos(out cursor);result["osCursorRead"]=cursorRead;result["physicalLeftDown"]=(GetAsyncKeyState(1)&0x8000)!=0;
+            result["expectedPointer"]=new int[]{point.X,point.Y};result["desktopBounds"]=ScreenshotRectObservation(SystemInformation.VirtualScreen);
+            if(cursorRead){IntPtr cursorRoot=GetAncestor(WindowFromPoint(cursor),2);uint cursorPid;GetWindowThreadProcessId(cursorRoot,out cursorPid);bool ownedCursor=cursorRoot==editor&&cursorPid==app.Id;result["osCursorOwnedEditor"]=ownedCursor;result["osCursorMatchesExpected"]=cursor==point;if(ownedCursor)result["osCursor"]=new int[]{cursor.X,cursor.Y};}
             IntPtr hit=WindowFromPoint(point),root=hit==IntPtr.Zero?IntPtr.Zero:GetAncestor(hit,2);uint pid=0,rootPid=0;uint thread=hit==IntPtr.Zero?0:GetWindowThreadProcessId(hit,out pid),rootThread=root==IntPtr.Zero?0:GetWindowThreadProcessId(root,out rootPid);
             bool descendant=root==editor&&rootPid==app.Id&&(hit==editor||IsChild(editor,hit))&&ScreenshotOwnedProcess(app,pid,known,inspectElement);
             bool owned=ScreenshotObservationScope(root==editor,rootPid==app.Id,hit==editor||IsChild(editor,hit),descendant);
@@ -566,7 +591,7 @@ public static partial class EchoLingoApplicationSmoke {
                 if(!same||!visible)return false;
                 Rectangle actual=ScreenshotWebSelection(editor,observation);observation["lastObserved"]=ScreenshotRectObservation(actual);return actual==expected;
             },10,"Web adjustment gesture did not adopt exact expected geometry.",app);RequireForeground(form);observation["completed"]=true;
-        }catch{ScreenshotDomPointerObservation(app,editor,observation);ScreenshotAdjustmentFailureState(app,editor,observation);throw;}
+        }catch{observation["afterUp"]=ScreenshotPointerObservation(app,editor,last,false,knownProcesses);ScreenshotDomPointerObservation(app,editor,observation);ScreenshotAdjustmentFailureState(app,editor,observation);throw;}
     }
     static void ScreenshotWebMoveResize(Form form,Process app,uint helper,Rectangle original,Dictionary<string,object> evidence) {
         long before=CaptureNumber(ScreenshotCaptureHealth(),"attemptId");

@@ -74,7 +74,7 @@ jobs:
           files=[p for p in pathlib.Path('dist').rglob('*') if p.is_file()]
           assert files
           for p in files:
-              assert b'EL_SCREENSHOT_POINTER_PROBE_V1' not in p.read_bytes(), str(p)
+              assert b'EL_SCREENSHOT_POINTER_PROBE_' not in p.read_bytes(), str(p)
               assert b'screenshot-pointer-probe' not in p.read_bytes(), str(p)
           print('Default production UI contains no pointer diagnostic node or marker.')
           PYABSENCE
@@ -87,7 +87,7 @@ jobs:
           npm run tauri -- build --no-bundle -- --locked
           python3 - <<'PYPRESENCE'
           import pathlib
-          assert any(b'EL_SCREENSHOT_POINTER_PROBE_V1' in p.read_bytes() for p in pathlib.Path('dist').rglob('*') if p.is_file())
+          assert any(b'EL_SCREENSHOT_POINTER_PROBE_V2' in p.read_bytes() for p in pathlib.Path('dist').rglob('*') if p.is_file())
           PYPRESENCE
       - name: Identify the actual embedded precompiled Windows helper
         id: windows_native_candidate

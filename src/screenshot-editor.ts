@@ -1,5 +1,5 @@
 import './screenshot-editor.css';
-import { createScreenshotPointerProbe, type ProbeStage } from './screenshot-pointer-probe';
+import { createScreenshotPointerProbe, type ProbeStage, type ProbeResult } from './screenshot-pointer-probe';
 import { adjustSelection, selectionCancelDisabled, type SelectionHandle } from './screenshot-selection';
 import { overlayToolBounds, clampOverlayBox, placeOverlayToolbar, type OverlayRect } from './screenshot-overlay-layout';
 import { closeDialog, dialogOpen, showDialog } from './screenshot-dialog';
@@ -43,10 +43,22 @@ let gesture: { start: Point; end: Point; pointerId: number; points?: Point[] } |
 let discardResolve: ((value: boolean) => void) | null = null;
 // A non-empty inline draft is unsaved even before it enters operation history.
 const dirty = () => model !== null && (savedState !== model.stateId || (textOpen() && !!textInput.value.trim()));
-const pointerProbe: (stage: ProbeStage, event?: PointerEvent) => void = import.meta.env.VITE_SCREENSHOT_POINTER_PROBE === '1'
+const pointerProbe: (stage: ProbeStage, event?: PointerEvent, result?: ProbeResult) => void = import.meta.env.VITE_SCREENSHOT_POINTER_PROBE === '1'
   ? createScreenshotPointerProbe(event => ({ canAdjust: canAdjustSelection(), busy, loading, selection: !!selectionSession, model: !!model,
     drag: !!selectionDrag, pending: !!pendingStroke, gesture: !!gesture, moving: !!moveGesture, text: textOpen(), tool, primary: event?.isPrimary ?? false, button: event?.button ?? -1,
-    owner: !!event && event.pointerId === selectionDrag?.pointerId })) : () => {};
+    owner: !!event && event.pointerId === selectionDrag?.pointerId }), event => {
+    const r = frame.getBoundingClientRect(), o = session?.overlay, g = selectionDrag;
+    return { viewport: [innerWidth,innerHeight,devicePixelRatio], frame: [r.x,r.y,r.width,r.height], overlay: o ? [o.x,o.y,o.width,o.height] : null,
+      original: g ? [g.rect.x,g.rect.y,g.rect.width,g.rect.height] : null, start: g ? [g.start.x,g.start.y] : null,
+      revision: session?.revision ?? null, sessionId: session?.id ?? null,
+      pointer: event ? [event.pointerId,event.button,event.buttons,event.clientX,event.clientY,event.screenX,event.screenY] : null,
+      captured: !!event && frame.hasPointerCapture(event.pointerId) };
+  }) : () => {};
+function pointerProbeError(error: unknown): string {
+  const message = readableError(error);
+  return ['CANCELLED','SCREENSHOT_GEOMETRY','SCREENSHOT_WINDOW','SCREENSHOT_INPUT','CAPTURE_GEOMETRY','SCREENSHOT_BUSY','SCREENSHOT_SESSION','SCREENSHOT_REVISION','SCREENSHOT_SIZE','CAPTURE_DISPLAY_CHANGED'].find(code => message.startsWith(code + ':')) ??
+    (error instanceof Error && ['TypeError','RangeError','NotFoundError','InvalidStateError'].includes(error.name) ? error.name : 'other');
+}
 
 function status(message: string, error = false): void { $('#editor-status').textContent = message; $('#editor-status').hidden = !message; $('#editor-status').dataset.error = String(error); placeOverlayTools(); }
 function readableError(error: unknown): string { return error instanceof Error ? error.message : String(error); }
@@ -396,24 +408,36 @@ frame.addEventListener('pointermove', event => {
 });
 async function endSelectionDrag(event: PointerEvent, cancelled = false): Promise<void> {
   pointerProbe(cancelled ? 'cancel' : 'up-attempt', event);
-  if (!selectionDrag || selectionDrag.pointerId !== event.pointerId || !session?.overlay || !selectionSession) return;
+  if (!selectionDrag || selectionDrag.pointerId !== event.pointerId || !session?.overlay || !selectionSession) { pointerProbe('blocked-up', event); return; }
   const g = selectionDrag; selectionDrag = null;
   if (frame.hasPointerCapture(event.pointerId)) frame.releasePointerCapture(event.pointerId);
+  // The release is an authoritative terminal sample. Native WebViews may
+  // coalesce/delay all intermediate pointermoves while a passive host captures
+  // the mouse; never infer "no movement" only from the last preview frame.
+  if (!cancelled) {
+    const overlay = session.overlay;
+    session.overlay = { ...overlay, ...adjustSelection(g.rect, g.handle,
+      event.clientX - g.start.x, event.clientY - g.start.y,
+      { x: 0, y: 0, width: overlay.viewportWidth, height: overlay.viewportHeight }) };
+  }
+  pointerProbe('terminal', event);
   const token = generation, previous = selectionSession, rect = session.overlay;
   if (cancelled || ['x','y','width','height'].every(k => rect[k as keyof OverlayRect] === g.rect[k as keyof OverlayRect])) {
+    pointerProbe('unchanged', event);
     session.overlay = { ...session.overlay, ...g.rect }; canvas.hidden = false; if (model) applyZoom(); else placeSelectionFrame(); controls(); return;
   }
   selectionUpdating = true; busy = true; controls(); pointerProbe('update', event);
   try {
     const value = await invoke<SelectionSession>('update_screenshot_selection', { sessionId: previous.id, revision: previous.revision,
       rect: { x: rect.x, y: rect.y, width: rect.width, height: rect.height } });
-    if (token !== generation || session?.id !== previous.id) return;
+    pointerProbe('update-result', event, { resultId: value?.id, resultRevision: value?.revision, resultRect: value?.overlay ? [value.overlay.x,value.overlay.y,value.overlay.width,value.overlay.height] : undefined });
+    if (token !== generation || session?.id !== previous.id) { pointerProbe('late-result', event); return; }
     if (value.kind !== 'selection' || value.id !== previous.id || value.revision !== previous.revision + 1) throw new Error('选区更新版本无效');
     validateSize(value); validateOverlay(value.overlay);
     selectionSession = value; session = { ...value }; original = null; model = null; rendered = null; savedState = null;
     canvas.width = canvas.height = 1; placeSelectionFrame(); status(''); pointerProbe('updated', event);
   } catch (error) {
-    pointerProbe('update-error', event);
+    pointerProbe('update-error', event, { code: pointerProbeError(error) });
     if (token === generation && session) { session.overlay = previous.overlay; if (model) applyZoom(); else placeSelectionFrame(); status(`未调整选区：${readableError(error)}`, true); }
   } finally { if (token === generation) { canvas.hidden = false; selectionUpdating = false; busy = false; controls(); } }
 }
