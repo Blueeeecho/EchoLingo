@@ -466,9 +466,18 @@ pub async fn set_screenshot_pinned(
         if pinned {
             super::platform::ensure_popup_behavior(&window)?;
         }
-        window
-            .set_always_on_top(pinned)
-            .map_err(|_| "SCREENSHOT_PIN: 无法调整置顶状态".into())
+        // Native passive show leaves Tao's VISIBLE cache false on Windows.
+        // Its style setter would consequently hide this visible reference.
+        #[cfg(target_os = "windows")]
+        {
+            super::platform::set_topmost_without_activation(&window, pinned)
+        }
+        #[cfg(not(target_os = "windows"))]
+        {
+            window
+                .set_always_on_top(pinned)
+                .map_err(|_| "SCREENSHOT_PIN: 无法调整置顶状态".into())
+        }
     })
     .await?
 }
