@@ -20,7 +20,11 @@ class BorderlessPinContract(unittest.TestCase):
         self.assertIn('.start_resize_dragging(direction)', resize)
         self.assertIn('#[serde(rename_all = "lowercase")]', source)
         self.assertIn('"SMOKE_PIN_NOT_BORDERLESS"', (ROOT / 'src-tauri/src/native_pin_smoke.rs').read_text())
-        self.assertIn('0x00C00000L)==0', (ROOT / 'tests/windows-screenshot-editor-fixture.cs').read_text())
+        fixture = (ROOT / 'tests/windows-screenshot-editor-fixture.cs').read_text()
+        self.assertNotRegex(fixture, r'0x00C00000L\)\s*==\s*0(?![0-9A-Za-z_])')
+        self.assertIn('&0x00C00000L)==0x00C00000L', fixture)
+        for token in ('ScreenshotVerifyPinClientFrame(form,app,pin,result)', 'GetClientRect(pin,out client)', 'ClientToScreen(pin,ref first)', 'ClientToScreen(pin,ref last)', 'RtlGetVersion(ref version)==0', 'GetSystemMetricsForDpi(32,dpi)+GetSystemMetricsForDpi(92,dpi)', 'insets[1]==top', 'nativePinStyle'):
+            self.assertIn(token, fixture)
 
 
 if __name__ == "__main__":

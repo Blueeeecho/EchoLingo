@@ -55,7 +55,7 @@ jobs:
         run: rustfmt --edition 2021 --check src-tauri/src/bilingual_input.rs
   screenshot-pin-native:
     needs: validation-mode
-    if: needs.validation-mode.outputs.mode == 'screenshot-pins' || (github.event_name == 'pull_request' && (github.head_ref == 'feat/screenshot-pins' || github.head_ref == 'feat/screenshot-028' || github.head_ref == 'fix/028-unified-editor') && github.base_ref == 'main')
+    if: needs.validation-mode.outputs.mode == 'screenshot-pins' || (github.event_name == 'pull_request' && (github.head_ref == 'feat/screenshot-pins' || github.head_ref == 'feat/screenshot-028' || github.head_ref == 'fix/028-unified-editor' || github.head_ref == 'fix/029-persistent-capture-recovery') && github.base_ref == 'main')
     name: Screenshot pin native (${{ matrix.os }})
     permissions:
       contents: read

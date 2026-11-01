@@ -70,4 +70,25 @@ class ScreenshotOverlayContract(unittest.TestCase):
         self.assertRegex(source.split('pub fn hide(', 1)[1], r'SetWindowPos\(\s*native,\s*-2isize as w::H')
         self.assertIn('*saved_host = None;', source.split('pub fn hide(', 1)[1])
         self.assertRegex(source.split('pub fn focus_text(', 1)[1], r'webview\s*\.set_focus\(\)')
+    def test_explicit_windows_focus_does_not_depend_on_toolkit_visibility(self):
+        source = read('src-tauri/src/windows_screenshot_overlay.rs')
+        focus = source.split('pub fn focus_text(', 1)[1].split('#[cfg(test)]', 1)[0]
+        self.assertIn('verify_retained_host(window)?', focus)
+        self.assertIn('owner != std::process::id()', focus)
+        self.assertIn('w::IsWindowVisible(native)', focus)
+        self.assertEqual(focus.count('SetForegroundWindow(native)'), 1)
+        self.assertIn('explicit_focus_confirmed(requested,', focus)
+        self.assertIn('GetForegroundWindow() == native', focus)
+        self.assertIn('w::SetWindowLongPtrW(native, -20, extended)', focus)
+        self.assertNotRegex(focus, r'window\s*\.set_focus\(')
+        self.assertNotIn('.show(', focus)
+        self.assertNotIn('w::SendInput', focus)
+        self.assertLess(focus.index('explicit_focus_confirmed('), focus.index('webview.set_focus()'))
+        passive = source.split('pub fn resume(', 1)[1].split('fn verify_retained_host(', 1)[0]
+        self.assertIn('show_without_activation', passive)
+        self.assertNotIn('SetForegroundWindow', passive)
+        command = read('src-tauri/src/screenshot.rs').split('pub async fn focus_screenshot_overlay(', 1)[1].split('#[tauri::command]', 1)[0]
+        self.assertIn('ensure_editor(&window)?', command)
+        self.assertIn('with_presentable_geometry(session_id', command)
+
 if __name__ == '__main__': unittest.main()
