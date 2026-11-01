@@ -101,10 +101,19 @@ describe('actual Windows screenshot fixture source wiring (not native acceptance
     for (const forbidden of ['SetForegroundWindow(', 'form.Activate(', 'AllowSetForegroundWindow(', 'AttachThreadInput(']) expect(handoff).not.toContain(forbidden);
   });
   it('exercises actual pin HWND lifecycle and bounded generated pixels without mocked IPC', () => {
-    for (const value of ['ScreenshotPinCase(', 'ScreenshotPins(app.Id)', 'ScreenshotPinTopmost(pin)', 'ScreenshotPinToggle(app,pin,true)', 'ScreenshotPinToggle(app,pin,false)', 'SetWindowPos(pin,IntPtr.Zero', '!IsWindow(pin)&&ScreenshotPins(app.Id).Count==0', 'ScreenshotPinPixels(app,pin,selected,annotated)', 'new Bitmap(3,3)', 'ScreenshotOwnedClipboard.SeedUnchanged()', 'inplace-pin-passive-physical', 'inplace-pin-annotated-active-editor']) expect(fixture).toContain(value);
+    for (const value of ['ScreenshotPinCase(', 'ScreenshotPins(app.Id)', 'ScreenshotPinTopmost(pin)', 'ScreenshotPinToggle(app,pin,true,result)', 'ScreenshotPinToggle(app,pin,false,result)', 'SetWindowPos(pin,IntPtr.Zero', '!IsWindow(pin)&&ScreenshotPins(app.Id).Count==0', 'ScreenshotPinPixels(app,pin,selected,annotated)', 'new Bitmap(3,3)', 'ScreenshotOwnedClipboard.SeedUnchanged()', 'inplace-pin-passive-physical', 'inplace-pin-annotated-active-editor']) expect(fixture).toContain(value);
     expect(wrapper).toContain('[switch]$ScreenshotPinTests');
     expect(fixture).toContain('if(ScreenshotPinOnly)');
     expect(fixture).not.toContain('__TAURI_INTERNALS__');
+  });
+  it('records bounded native toggle state even when visibility is lost without relaxing acceptance', () => {
+    const toggle = fixture.slice(fixture.indexOf('static void ScreenshotPinToggle('), fixture.indexOf('static void ScreenshotPinPixels('));
+    for (const field of ['exists', 'visible', 'topmost', 'expectedLabelPresent', 'priorLabelPresent', 'expectedControlDisabled', 'priorControlDisabled']) expect(toggle).toContain(`observation["${field}"]`);
+    expect(toggle).toContain('result[before?"nativeUnpinObservation":"nativeRepinObservation"]=observation');
+    expect(toggle).toContain('return visible&&topmost!=before&&expected!=null;');
+    expect(toggle).toContain('},10,"Pin UI toggle did not change native WS_EX_TOPMOST.",app)');
+    expect(toggle.match(/toggle\.Toggle\(\)/g)).toHaveLength(1);
+    for (const forbidden of ['SetForegroundWindow(', 'SetWindowPos(', '.Current.Name', '.Current.Value']) expect(toggle).not.toContain(forbidden);
   });
   it('separates untouched physical pinning from intentionally active annotation without focus restoration', () => {
     const click = fixture.slice(fixture.indexOf('static void ScreenshotPassivePinClick('), fixture.indexOf('static Dictionary<string,object> ScreenshotPinCase('));

@@ -347,12 +347,21 @@ public static partial class EchoLingoApplicationSmoke {
     }
     static bool ScreenshotPinTopmost(IntPtr pin){return (GetWindowLongPtr(pin,-20).ToInt64()&8)!=0;}
     static Rectangle ScreenshotPinBounds(IntPtr pin){RECT r=new RECT();Assert(IsWindow(pin)&&GetWindowRect(pin,out r),"Generated pin HWND disappeared before measurement.");return Rectangle.FromLTRB(r.left,r.top,r.right,r.bottom);}
-    static void ScreenshotPinToggle(Process app,IntPtr pin,bool before) {
+    static void ScreenshotPinToggle(Process app,IntPtr pin,bool before,Dictionary<string,object> result) {
         string name=before?"\u53d6\u6d88\u7f6e\u9876":"\u7f6e\u9876\u8d34\u56fe";AutomationElement button=null;object pattern=null;
         WaitFor(delegate{button=ScreenshotButton(pin,name);return button!=null&&button.Current.IsEnabled&&!button.Current.IsOffscreen;},10,"Pin toggle not ready in actual WebView.",app);
         Assert(button.TryGetCurrentPattern(TogglePattern.Pattern,out pattern),"Pin toggle has no typed UIA TogglePattern.");
         TogglePattern toggle=(TogglePattern)pattern;Assert(toggle.Current.ToggleState==(before?ToggleState.On:ToggleState.Off),"Pin toggle initial accessibility state disagrees with native topmost state.");toggle.Toggle();
-        WaitFor(delegate{return IsWindowVisible(pin)&&ScreenshotPinTopmost(pin)!=before&&ScreenshotButton(pin,before?"\u7f6e\u9876\u8d34\u56fe":"\u53d6\u6d88\u7f6e\u9876")!=null;},10,"Pin UI toggle did not change native WS_EX_TOPMOST.",app);
+        Dictionary<string,object> observation=new Dictionary<string,object>();result[before?"nativeUnpinObservation":"nativeRepinObservation"]=observation;
+        WaitFor(delegate{
+            bool exists=IsWindow(pin),visible=IsWindowVisible(pin),topmost=exists&&ScreenshotPinTopmost(pin);
+            observation["exists"]=exists;observation["visible"]=visible;observation["topmost"]=topmost;
+            AutomationElement expected=exists?ScreenshotButton(pin,before?"\u7f6e\u9876\u8d34\u56fe":"\u53d6\u6d88\u7f6e\u9876"):null;
+            AutomationElement prior=exists?ScreenshotButton(pin,name):null;
+            observation["expectedLabelPresent"]=expected!=null;observation["priorLabelPresent"]=prior!=null;
+            observation["expectedControlDisabled"]=expected!=null&&!expected.Current.IsEnabled;observation["priorControlDisabled"]=prior!=null&&!prior.Current.IsEnabled;
+            return visible&&topmost!=before&&expected!=null;
+        },10,"Pin UI toggle did not change native WS_EX_TOPMOST.",app);
     }
     static void ScreenshotPinPixels(Process app,IntPtr pin,Size pixels,bool annotated) {
         AutomationElement image=null;WaitFor(delegate{return (image=Element(pin,PinnedImageName))!=null&&!image.Current.IsOffscreen;},10,"Decoded pinned image is missing from actual WebView accessibility.",app);
@@ -466,7 +475,7 @@ public static partial class EchoLingoApplicationSmoke {
             if(!annotated)RequireForeground(form);Assert(ScreenshotPinTopmost(pin),"New reference window is not native topmost.");
             Rectangle work=Screen.FromPoint(first).WorkingArea,initial=ScreenshotPinBounds(pin);Assert(work.Contains(initial),"Pinned outer frame is not clamped to capture monitor work area.");
             ScreenshotPinPixels(app,pin,selected,annotated);result["rasterVisible"]=true;result["editedRasterVisible"]=annotated;result["passiveShowPreservedSourceForeground"]=!annotated;result["pinAndMainNotObservedForeground"]=true;result["decodedReferenceVisibleAndCaptureDismissed"]=true;result["nativeTopmostInitially"]=true;result["initialOuterFrameWithinSourceWorkArea"]=true;
-            ScreenshotPinToggle(app,pin,true);result["nativeUnpinVerified"]=true;ScreenshotPinToggle(app,pin,false);result["nativeRepinVerified"]=true;
+            ScreenshotPinToggle(app,pin,true,result);result["nativeUnpinVerified"]=true;ScreenshotPinToggle(app,pin,false,result);result["nativeRepinVerified"]=true;
             // Native Move/Size exercises actual HWND geometry without a global
             // mouse marathon or accidental drag into a foreign application.
             int width=Math.Min(work.Width-32,initial.Width+80),height=Math.Min(work.Height-32,initial.Height+60);
