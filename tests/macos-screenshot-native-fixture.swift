@@ -468,12 +468,45 @@ private final class ScreenshotProbe {
         }
     }
 
+    // Only the generated, process-owned oracle window is described. Never
+    // serialize foreign-window records, titles, contents or arbitrary strings.
+    func recordOwnedOracleWindow(_ window: NSWindow, records: [[String: Any]]?, expectedFrame: CGRect) {
+        let pid = ProcessInfo.processInfo.processIdentifier
+        let id = window.windowNumber
+        let own = (records ?? []).filter {
+            captureWindowNumber($0[kCGWindowNumber as String]) == Double(id)
+                && captureWindowNumber($0[kCGWindowOwnerPID as String]) == Double(pid)
+        }
+        var value: [String: Any] = ["expectedPID": pid, "expectedWindowID": id,
+            "expectedFrame": [expectedFrame.minX, expectedFrame.minY, expectedFrame.width, expectedFrame.height],
+            "appKitFrame": [window.frame.minX, window.frame.minY, window.frame.width, window.frame.height],
+            "appKitVisible": window.isVisible, "appKitSharing": window.sharingType.rawValue,
+            "appKitLevel": window.level.rawValue, "recordsAvailable": records != nil,
+            "ownMatchingRecordCount": own.count]
+        if own.count == 1, let record = own.first {
+            for (name, key) in [("observedPID", kCGWindowOwnerPID), ("observedWindowID", kCGWindowNumber),
+                                ("observedLayer", kCGWindowLayer), ("observedSharing", kCGWindowSharingState),
+                                ("observedAlpha", kCGWindowAlpha)] {
+                value[name] = captureWindowNumber(record[key as String]) as Any? ?? NSNull()
+            }
+            value["observedOnScreen"] = record[kCGWindowIsOnscreen as String] as? Bool as Any? ?? NSNull()
+            if let bounds = record[kCGWindowBounds as String] as? [String: Any],
+               let frame = CGRect(dictionaryRepresentation: bounds as CFDictionary) {
+                value["observedQuartzFrame"] = [frame.minX, frame.minY, frame.width, frame.height]
+                value["observedAppKitFrame"] = [frame.minX, CGDisplayBounds(CGMainDisplayID()).height - frame.maxY,
+                                                frame.width, frame.height]
+            }
+        }
+        report["ownedOracleWindowDiagnostic"] = value
+    }
+
     @available(macOS 14.0, *)
     func captureVisibilityOracle(_ expected: CaptureWindowTarget, stage: String, occluded: Bool, phase: Int = 1,
                                  readinessDeadline: Date? = nil, priorPhaseObservations: Int = 0,
                                  completion: @escaping () -> Void) {
         guard !finished else { return }
         let deadline = readinessDeadline ?? Date().addingTimeInterval(8)
+        report["visibilityOracleStage"] = stage
         do {
             try fixtureNeed(Date() <= deadline, "visibility oracle exceeded its absolute deadline")
             let screen = try oracleSourceIdentity(expected)
@@ -489,9 +522,12 @@ private final class ScreenshotProbe {
                     && (currentScreen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber)?.uint32Value == displayID,
                     "oracle display identity/frame changed")
                 if occluded {
-                    guard let window = self.oracleOccluder, window.isVisible, window.windowNumber > 0,
-                          window.frame == CGRect(x: expected.frame.minX + 224, y: expected.frame.minY + 128, width: 64, height: 64),
-                          let records = captureCurrentWindows() else { throw NativeError("FIXTURE: owned oracle occluder changed") }
+                    guard let window = self.oracleOccluder else { throw NativeError("FIXTURE: owned oracle occluder changed") }
+                    let expectedFrame = CGRect(x: expected.frame.minX + 224, y: expected.frame.minY + 128, width: 64, height: 64)
+                    let observedRecords = captureCurrentWindows()
+                    self.recordOwnedOracleWindow(window, records: observedRecords, expectedFrame: expectedFrame)
+                    guard window.isVisible, window.windowNumber > 0, window.frame == expectedFrame,
+                          let records = observedRecords else { throw NativeError("FIXTURE: owned oracle occluder changed") }
                     let identity = CaptureWindowTarget(id: CGWindowID(window.windowNumber),
                         pid: ProcessInfo.processInfo.processIdentifier, frame: window.frame)
                     try fixtureNeed(captureWindowIsCurrent(identity, records: records,
@@ -501,7 +537,6 @@ private final class ScreenshotProbe {
             }
             try verifyOracleWindows()
             let token = UUID(); oracleToken = token
-            report["visibilityOracleStage"] = stage
             DispatchQueue.main.asyncAfter(deadline: .now() + max(0, deadline.timeIntervalSinceNow)) {
                 if !self.finished && self.oracleToken == token { self.finish("failed", reason: "visible-pixel-oracle-timeout") }
             }
