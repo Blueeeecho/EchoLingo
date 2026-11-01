@@ -572,20 +572,34 @@ if (desktop) {
 $('#zoom-menu').addEventListener('toggle', placeOverlayTools);
 document.addEventListener('pointerdown', event => { const menu = $<HTMLDetailsElement>('#zoom-menu'); if (menu.open && event.target instanceof Node && !menu.contains(event.target)) menu.open = false; });
 
-// An outside click commits plain text, but never accepts an active IME candidate.
+// Commit outside pointer interactions only once their click target is fixed.
+// Committing on pointerdown can move the toolbar before pointerup and lose the
+// intended Save/Close click. Keyboard-only focus changes still commit on blur.
+let outsideTextPointer = false;
+let outsideTextPoint: Point | null = null;
 document.addEventListener('pointerdown', event => {
+  outsideTextPointer = false; outsideTextPoint = null;
   if (!textOpen() || !(event.target instanceof Node) || textDialog.contains(event.target)) return;
   if (composing) { event.preventDefault(); event.stopImmediatePropagation(); textInput.focus(); return; }
-  // Style controls intentionally keep the same live text edit open.
+  if (event.target instanceof Element && event.target.closest('.tool-options')) return;
+  outsideTextPointer = true; outsideTextPoint = textPoint;
+}, true);
+document.addEventListener('click', event => {
+  const sameEdit = outsideTextPointer && outsideTextPoint === textPoint;
+  outsideTextPointer = false; outsideTextPoint = null;
+  if (!textOpen() || !(event.target instanceof Node) || textDialog.contains(event.target)) return;
+  if (composing) { event.preventDefault(); event.stopImmediatePropagation(); return; }
+  if (!sameEdit) return; // The initiating canvas click must not commit the edit it just opened.
   if (event.target instanceof Element && event.target.closest('.tool-options')) return;
   if (!commitText()) { event.preventDefault(); event.stopImmediatePropagation(); }
 }, true);
 textInput.addEventListener('blur', () => {
   queueMicrotask(() => {
-    if (!textOpen() || composing || document.activeElement === textInput || document.activeElement?.closest('.tool-options')) return;
+    if (!textOpen() || composing || outsideTextPointer || document.activeElement === textInput || document.activeElement?.closest('.tool-options')) return;
     commitText();
   });
 });
-document.addEventListener('click', event => {
-  if (textOpen() && composing && event.target instanceof Node && !textDialog.contains(event.target)) { event.preventDefault(); event.stopImmediatePropagation(); }
-}, true);
+document.addEventListener('pointercancel', () => {
+  outsideTextPointer = false; outsideTextPoint = null;
+  if (textOpen() && !composing && document.activeElement !== textInput) commitText();
+});

@@ -310,7 +310,11 @@ try {
     await page.locator('[data-tool="text"]').click(); await clickImage(100, 30);
     await page.locator('#annotation-text').fill('尚未提交的备注');
     assert.equal(await page.locator('#save-indicator').textContent(), '未保存');
-    await page.locator('#close-editor').click();
+    const closeBeforeCommit = await page.locator('#close-editor').boundingBox();
+    await page.mouse.move(closeBeforeCommit.x + closeBeforeCommit.width / 2, closeBeforeCommit.y + closeBeforeCommit.height / 2);
+    await page.mouse.down();
+    assert.deepEqual(await page.locator('#close-editor').boundingBox(), closeBeforeCommit, 'outside text commit cannot move the intended action before pointerup');
+    await page.mouse.up();
     assert.equal(await page.locator('#discard-dialog').isVisible(), true);
     await page.locator('#discard-cancel').click();
     assert.equal(await page.locator('#annotation-text').isVisible(), false);
