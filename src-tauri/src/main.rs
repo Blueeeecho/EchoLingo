@@ -272,6 +272,7 @@ fn capture_diagnostic_payload(diagnostics: serde_json::Value) -> serde_json::Val
     let mut safe = serde_json::Map::new();
     for field in [
         "nativeCaptureBackend",
+        "nativeDeferredCapture",
         "attemptId",
         "attemptStage",
         "resultOk",
@@ -3834,6 +3835,31 @@ mod tests {
             serde_json::json!({"attemptId": 7, "resultOk": 0, "hostOwnedButtons": 0, "nativeCaptureBackend": 1})
         );
         assert!(!payload.to_string().contains("private"));
+    }
+    #[test]
+    fn capture_export_preserves_deferred_route_without_fabricating_selector_health() {
+        let payload = super::capture_diagnostic_payload(serde_json::json!({
+            "nativeDeferredCapture": 1, "resultOk": 1, "helperResponseReceived": 1,
+            "hookRunningAfterStop": 0, "inputPlaneRemainingAfterCleanup": 0,
+            "sourceText": "private", "unknownMarker": 1,
+        }));
+        let expected = serde_json::json!({
+            "nativeDeferredCapture": 1, "resultOk": 1, "helperResponseReceived": 1,
+            "hookRunningAfterStop": 0, "inputPlaneRemainingAfterCleanup": 0,
+        });
+        assert_eq!(payload["diagnostics"], expected);
+        assert!(payload["diagnostics"].get("nativeCaptureBackend").is_none());
+        assert!(payload["diagnostics"].get("nativeHostStopped").is_none());
+        for invalid in [
+            serde_json::json!(true),
+            serde_json::json!("private"),
+            serde_json::json!(-1),
+        ] {
+            let rejected = super::capture_diagnostic_payload(serde_json::json!({
+                "nativeDeferredCapture": invalid,
+            }));
+            assert!(rejected["diagnostics"].get("nativeDeferredCapture").is_none());
+        }
     }
     use super::*;
     #[test]

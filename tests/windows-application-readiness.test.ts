@@ -74,7 +74,7 @@ describe('actual Windows app picker generation readiness', () => {
     expect(readiness).toContain('if(ready&&sinceHotkey!=null)');
     expect(readiness).toContain('Assert(probe.ContainsKey("hotkeyToFirstBorderObservedMilliseconds"),"Ready capture did not record its first-border timing.");');
     expect(readiness).toContain('!Double.IsNaN(firstBorder)&&!Double.IsInfinity(firstBorder)&&firstBorder>=0');
-    expect(source).toContain('probe,rejectedPid,time)&&Convert.ToUInt32(probe["helperProcessId"])!=rejectedPid;},25,');
+    expect(source).toContain('probe,rejectedPid,time,rejectedStart)&&Convert.ToUInt32(probe["helperProcessId"])!=rejectedPid;},25,');
     expect(source).toContain('Assert(Convert.ToUInt32(second["helperProcessId"])!=oldPid,');
     expect(source).toContain('return ProcessExited(oldPid);},5,');
   });
