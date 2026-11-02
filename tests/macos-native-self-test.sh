@@ -28,6 +28,13 @@ swiftc "$repo_root/src-tauri/native/macos.swift" "$repo_root/src-tauri/native/ma
   -target "${native_arch}-apple-macosx12.0" \
   -framework AppKit -framework Vision -framework ApplicationServices -framework CoreText \
   -o "$fixture_dir/echolingo-native-helper"
+"$fixture_dir/echolingo-native-helper" --selection-policy-self-test | tee "$fixture_dir/selection-policy.json"
+python3 - "$fixture_dir/selection-policy.json" <<'PY_SELECTION'
+import json, sys
+report = json.load(open(sys.argv[1], encoding="utf-8"))
+assert report.get("ok") is True
+assert report.get("diagnostics", {}).get("selectionPolicyFixturePassed") is True
+PY_SELECTION
 "$fixture_dir/echolingo-native-helper" --self-test | tee "$fixture_dir/report.json"
 python3 - "$fixture_dir/report.json" <<'PY_CHECK'
 import json

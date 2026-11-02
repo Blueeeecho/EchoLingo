@@ -187,6 +187,24 @@ func captureDisplay(at point: CGPoint, displays: [CaptureDisplayGeometry]) -> CG
     displays.first { $0.frame.contains(point) }?.id
 }
 
+// NSWindow's screen-specific initializer takes a screen-local origin, while
+// selector events and setFrame use global AppKit points. Never apply backing
+// scale here: it belongs only to the captured bitmap.
+func capturePanelContentRectangle(_ frame: CGRect, screenFrame: CGRect) -> CGRect {
+    frame.offsetBy(dx: -screenFrame.minX, dy: -screenFrame.minY)
+}
+
+func capturePanelDisplay(_ frame: CGRect, displays: [CaptureDisplayGeometry]) -> CGDirectDisplayID? {
+    var selected: CGDirectDisplayID?
+    var largest: CGFloat = 0
+    for display in displays {
+        let part = frame.intersection(display.frame)
+        let area = part.isNull || part.isEmpty ? 0 : part.width * part.height
+        if area > 0 && area >= largest { selected = display.id; largest = area }
+    }
+    return selected
+}
+
 func captureSourceRectangle(_ region: CGRect, display: CaptureDisplayGeometry) -> CGRect {
     let clipped = region.intersection(display.frame)
     guard !clipped.isNull, !clipped.isEmpty else { return .null }
@@ -540,14 +558,14 @@ private final class CaptureScreenshotEditorHost {
     let contentMask: NSView.AutoresizingMask
     var closeObserver: NSObjectProtocol?
 
-    init(owner: NSWindow, content: NSView, webView: WKWebView, frame: CGRect) {
+    init(owner: NSWindow, content: NSView, webView: WKWebView, frame: CGRect, screen: NSScreen) {
         self.owner = owner
         self.content = content
         self.webView = webView
         self.contentFrame = content.frame
         self.contentMask = content.autoresizingMask
-        panel = CaptureScreenshotEditorPanel(contentRect: frame,
-            styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
+        panel = CaptureScreenshotEditorPanel(contentRect: capturePanelContentRectangle(frame, screenFrame: screen.frame),
+            styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false, screen: screen)
         panel.isReleasedWhenClosed = false
         panel.isOpaque = false
         panel.backgroundColor = .clear
@@ -567,6 +585,7 @@ private final class CaptureScreenshotEditorHost {
         panel.level = .floating
         panel.collectionBehavior = popupCollectionBehavior([.stationary, .ignoresCycle])
         panel.sharingType = .none
+        panel.setFrame(frame, display: false)
         owner.orderOut(nil)
         owner.contentView = NSView(frame: content.frame)
         content.autoresizingMask = [.width, .height]
@@ -623,27 +642,42 @@ private func screenshotEditorFrame(_ x: Double, _ y: Double, _ width: Double, _ 
 
 @_cdecl("echolingo_prepare_screenshot_overlay")
 public func echoLingoPrepareScreenshotOverlay(_ pointer: UnsafeMutableRawPointer?,
-    _ x: Double, _ y: Double, _ width: Double, _ height: Double) -> Int32 {
+    _ x: Double, _ y: Double, _ width: Double, _ height: Double,
+    _ selectionX: Double, _ selectionY: Double, _ selectionWidth: Double, _ selectionHeight: Double) -> Int32 {
     guard Thread.isMainThread else { return -1 }
     guard let owner = screenshotEditorOwner(pointer) else { return -2 }
-    guard let frame = screenshotEditorFrame(x, y, width, height) else { return -3 }
+    guard let frame = screenshotEditorFrame(x, y, width, height),
+          [selectionX, selectionY, selectionWidth, selectionHeight].allSatisfy({ $0.isFinite }),
+          selectionWidth >= 2, selectionHeight >= 2 else { return -3 }
+    let selection = CGRect(x: selectionX, y: Double(CGDisplayBounds(CGMainDisplayID()).height) - selectionY - selectionHeight,
+                           width: selectionWidth, height: selectionHeight)
+    guard frame.contains(selection) else { return -3 }
     let key = ObjectIdentifier(owner)
     if let host = captureScreenshotEditorHosts[key] {
         guard host.owner === owner, host.panel.contentView === host.content else { return -4 }
         host.panel.setFrame(frame, display: false)
         host.content.setFrameSize(frame.size)
         host.content.layoutSubtreeIfNeeded()
-        return 0
+        return host.panel.frame == frame ? 0 : -3
     }
     guard let content = owner.contentView, content.window === owner,
           let webView = screenshotEditorWebView(content) else { return -4 }
-    let host = CaptureScreenshotEditorHost(owner: owner, content: content, webView: webView, frame: frame)
+    let screens = NSScreen.screens
+    let displays = screens.compactMap { screen -> CaptureDisplayGeometry? in
+        guard let number = screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber else { return nil }
+        return CaptureDisplayGeometry(id: number.uint32Value, frame: screen.frame, scale: screen.backingScaleFactor)
+    }
+    guard let displayID = capturePanelDisplay(selection, displays: displays),
+          let screen = screens.first(where: {
+              ($0.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber)?.uint32Value == displayID
+          }) else { return -3 }
+    let host = CaptureScreenshotEditorHost(owner: owner, content: content, webView: webView, frame: frame, screen: screen)
     captureScreenshotEditorHosts[key] = host
     host.closeObserver = NotificationCenter.default.addObserver(
         forName: NSWindow.willCloseNotification, object: owner, queue: .main) { _ in
             if let current = captureScreenshotEditorHosts.removeValue(forKey: key) { current.restore() }
         }
-    guard host.panel.contentView === content, content.window === host.panel else {
+    guard host.panel.frame == frame, host.panel.contentView === content, content.window === host.panel else {
         captureScreenshotEditorHosts.removeValue(forKey: key)?.restore()
         return -5
     }
@@ -652,8 +686,10 @@ public func echoLingoPrepareScreenshotOverlay(_ pointer: UnsafeMutableRawPointer
 
 @_cdecl("echolingo_show_screenshot_overlay")
 public func echoLingoShowScreenshotOverlay(_ pointer: UnsafeMutableRawPointer?,
-    _ x: Double, _ y: Double, _ width: Double, _ height: Double) -> Int32 {
-    let prepared = echoLingoPrepareScreenshotOverlay(pointer, x, y, width, height)
+    _ x: Double, _ y: Double, _ width: Double, _ height: Double,
+    _ selectionX: Double, _ selectionY: Double, _ selectionWidth: Double, _ selectionHeight: Double) -> Int32 {
+    let prepared = echoLingoPrepareScreenshotOverlay(pointer, x, y, width, height,
+        selectionX, selectionY, selectionWidth, selectionHeight)
     guard prepared == 0 else { return prepared }
     guard let owner = screenshotEditorOwner(pointer),
           let host = captureScreenshotEditorHosts[ObjectIdentifier(owner)] else { return -4 }
@@ -666,7 +702,8 @@ public func echoLingoShowScreenshotOverlay(_ pointer: UnsafeMutableRawPointer?,
         return -7
     }
     NSApp.updateWindows()
-    guard host.panel.isVisible, host.panel.isOnActiveSpace, !owner.isVisible else {
+    guard let frame = screenshotEditorFrame(x, y, width, height), host.panel.frame == frame,
+          host.panel.isVisible, host.panel.isOnActiveSpace, !owner.isVisible else {
         _ = echoLingoHideScreenshotOverlay(pointer)
         return -6
     }
@@ -891,9 +928,14 @@ final class CaptureSelectionSession {
         guard lifetime.canPresent(), operation?.isCancelled != true else { throw NativeError("CANCELLED: 截图操作超时或已取消。") }
         guard !state.displays.isEmpty else { throw NativeError("CAPTURE: 未找到可截图的屏幕。") }
         for geometry in state.displays {
-            let panel = CaptureSelectionPanel(contentRect: geometry.frame,
-                styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
+            guard let screen = NSScreen.screens.first(where: {
+                ($0.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber)?.uint32Value == geometry.id
+                    && $0.frame == geometry.frame && $0.backingScaleFactor == geometry.scale
+            }) else { throw NativeError("CAPTURE_GEOMETRY: 截图屏幕配置已变化，请重试。") }
+            let panel = CaptureSelectionPanel(contentRect: capturePanelContentRectangle(geometry.frame, screenFrame: screen.frame),
+                styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false, screen: screen)
             configureCaptureSelectionPanel(panel)
+            panel.setFrame(geometry.frame, display: false)
             let view = CaptureSelectionView(frame: NSRect(origin: .zero, size: geometry.frame.size))
             panel.contentView = view
             panels.append((geometry, panel, view))
@@ -946,11 +988,14 @@ final class CaptureSelectionSession {
         }
         guard monitor != nil else { throw NativeError("CAPTURE: 无法启动截图框选，请重试。") }
         receive(.move(NSEvent.mouseLocation))
-        for (_, panel, _) in panels {
+        for (geometry, panel, _) in panels {
             // Recheck immediately before each visible mutation; creating the
             // backing panels may itself have consumed the remaining budget.
             guard lifetime.canPresent(), operation?.isCancelled != true else { throw NativeError("CANCELLED: 截图操作超时或已取消。") }
             panel.orderFrontRegardless()
+            guard panel.frame == geometry.frame else {
+                throw NativeError("CAPTURE_GEOMETRY: 无法在目标屏幕显示截图选区，请重试。")
+            }
         }
         guard lifetime.canPresent(), operation?.isCancelled != true else { throw NativeError("CANCELLED: 截图操作超时或已取消。") }
         if let panel = panels.first(where: { $0.0.id == state.highlightedDisplay }) ?? panels.first {
@@ -1351,6 +1396,22 @@ func captureSelectionSelfTest() throws {
     func expect(_ value: Bool) throws {
         if !value { throw NativeError("SELF_TEST: Capture selector geometry/state fixture failed.") }
     }
+    // Screen-local construction must round-trip global AppKit points without
+    // applying Retina scale or substituting the primary screen's origin.
+    for display in displays {
+        let local = capturePanelContentRectangle(display.frame, screenFrame: display.frame)
+        try expect(local == CGRect(origin: .zero, size: display.frame.size))
+        try expect(local.offsetBy(dx: display.frame.minX, dy: display.frame.minY) == display.frame)
+        try expect(capturePanelDisplay(display.frame, displays: displays) == display.id)
+    }
+    let below = CaptureDisplayGeometry(id: 4, frame: CGRect(x: 1440, y: -1200, width: 1600, height: 1200), scale: 1.5)
+    let belowSelection = CGRect(x: 1500, y: -1100, width: 400, height: 200)
+    try expect(capturePanelContentRectangle(belowSelection, screenFrame: below.frame) == CGRect(x: 60, y: 100, width: 400, height: 200))
+    try expect(capturePanelDisplay(belowSelection, displays: displays + [below]) == 4)
+    try expect(capturePanelDisplay(CGRect(x: 5000, y: 5000, width: 20, height: 20), displays: displays) == nil)
+    try expect(capturePanelDisplay(CGRect(x: -300, y: 100, width: 400, height: 200), displays: displays) == 2)
+    // Match Rust Iterator::max_by: the last equal-area monitor wins.
+    try expect(capturePanelDisplay(CGRect(x: -100, y: 100, width: 200, height: 200), displays: displays) == 2)
     try expect(captureDisplay(at: CGPoint(x: -1, y: 0), displays: displays) == 2)
     try expect(captureDisplay(at: CGPoint(x: 10, y: 1000), displays: displays) == 3)
     try expect(captureDisplay(at: CGPoint(x: 1500, y: 1000), displays: displays) == nil)
@@ -1361,6 +1422,10 @@ func captureSelectionSelfTest() throws {
     let editor = try captureEditorGeometry(plan, primaryHeight: 900)
     try expect(editor["x"] == -100 && editor["y"] == 600 && editor["width"] == 300 && editor["height"] == 200)
     try expect(editor["screenX"] == -1920 && editor["screenY"] == 0 && editor["screenWidth"] == 3360 && editor["screenHeight"] == 1080 && editor["scale"] == 2)
+    let leftPlan = try capturePlan(CGRect(x: -1800, y: 720, width: 100, height: 80), displays: displays)
+    let leftEditor = try captureEditorGeometry(leftPlan, primaryHeight: 900)
+    try expect(leftEditor["x"] == -1800 && leftEditor["y"] == 100 && leftEditor["screenX"] == -1920 && leftEditor["scale"] == 1)
+    try expect(capturePanelDisplay(leftPlan.region, displays: displays) == 2)
     let abovePlan = try capturePlan(CGRect(x: 20, y: 920, width: 100, height: 80), displays: displays)
     try expect(abovePlan.pixelWidth == 100 && abovePlan.pixelHeight == 80)
     let aboveEditor = try captureEditorGeometry(abovePlan, primaryHeight: 900)

@@ -71,7 +71,7 @@ final class SelectionTrace {
         "requestSourceAnchored", "requestSourceMatches", "requestSourceReason", "secureInputEnabled", "accessibilityGranted", "clipboardChanged",
         "windowTicketSource", "windowTicketReason", "windowRecordsCount",
         "probeStep", "childrenStatus", "childrenCount", "selectedChildrenStatus", "selectedChildrenCount",
-        "optionalPluralRootFailure"
+        "optionalPluralRootFailure", "optionalPluralDescendantFailures", "optionalPluralAncestorsVerified"
     ]
     private let start = ProcessInfo.processInfo.systemUptime
     private let startedAtUnixMs = Date().timeIntervalSince1970 * 1000
@@ -82,6 +82,7 @@ final class SelectionTrace {
     private var truncated = false
     private var copyIssued = false
     private var optionalPluralRootFailure = false
+    private var optionalPluralDescendantFailures = 0
     var hasIssuedCopy: Bool { copyIssued }
     init(publish: Bool = true) {
         self.publish = publish
@@ -95,6 +96,9 @@ final class SelectionTrace {
         self.phase = String(phase.prefix(64))
         if fields["copyIssued"] as? Bool == true { copyIssued = true }
         if fields["optionalPluralRootFailure"] as? Bool == true { optionalPluralRootFailure = true }
+        if let count = fields["optionalPluralDescendantFailures"] as? Int {
+            optionalPluralDescendantFailures = max(optionalPluralDescendantFailures, min(64, max(0, count)))
+        }
         var event: [String: Any] = ["phase": self.phase, "mainThread": Thread.isMainThread,
                                     "elapsedMs": elapsedMilliseconds()]
         for (key, value) in fields where Self.allowedFields.contains(key) {
@@ -125,6 +129,7 @@ final class SelectionTrace {
                 "errorCategory": category as Any? ?? NSNull(), "copyIssued": copyIssued,
                 "optionalPluralRootFailure": optionalPluralRootFailure,
                 "optionalPluralRootFailureStatus": optionalPluralRootFailure ? Int(AXError.failure.rawValue) as Any : NSNull(),
+                "optionalPluralDescendantFailures": optionalPluralDescendantFailures,
                 "elapsedMs": elapsedMilliseconds(), "events": events, "eventsTruncated": truncated]
     }
     private func store(state: String, errorCategory: String?) {
@@ -623,8 +628,11 @@ func requireUnprotectedSelection(_ subrole: String?) throws {
 
 struct SelectionContainerEmpty: Error {}
 // A real failed optional read, not unsupported/noValue and never permission to
-// Copy. Only the bounded root observer may defer it to seek independent proof.
+// Copy. Only bounded recovery may defer it to seek independent proof. A
+// descendant additionally needs a verified ancestor relationship to the one
+// selected document; a failed sibling is never covered by that document.
 struct SelectionOptionalPluralRootFailure: Error {}
+struct SelectionOptionalPluralDescendantFailure: Error {}
 
 // AX failure is not evidence that an attribute is unsupported. Only the public
 // capability list may suppress this optional query, before it is issued, for
@@ -648,7 +656,8 @@ func accessibilitySelection(element: AXUIElement?, bundleIdentifier: String? = n
                             recoverContainerEmpty: Bool = false,
                             requireNonEditableCandidate: Bool = false,
                             requireTextTarget: Bool = false,
-                            allowOptionalPluralRootRecovery: Bool = false) throws -> String? {
+                            allowOptionalPluralRootRecovery: Bool = false,
+                            allowOptionalPluralDescendantRecovery: Bool = false) throws -> String? {
     guard let element = element else {
         trace?.record(phase, ["decision": "focusUnavailable"])
         return nil
@@ -695,7 +704,8 @@ func accessibilitySelection(element: AXUIElement?, bundleIdentifier: String? = n
     try requireSelectionQueryBudget(deadline)
     let rangeStatus = AXUIElementCopyAttributeValue(element, kAXSelectedTextRangeAttribute as CFString, &rangeValue)
     let rangeQuery = selectionRangeQuery(status: rangeStatus, value: rangeValue)
-    trace?.record(phase, ["rangeStatus": rangeStatus.rawValue, "rangeState": rangeQuery.state])
+    trace?.record(phase, ["rangeStatus": rangeStatus.rawValue, "rangeState": rangeQuery.state,
+        "rangeLength": rangeQuery.value?.range.length as Any? ?? NSNull()])
     try requireUsableSelectionQuery(rangeQuery)
     let selectedRange = rangeQuery.value?.range
     if let value = rangeQuery.value, value.range.length > 0 {
@@ -736,11 +746,15 @@ func accessibilitySelection(element: AXUIElement?, bundleIdentifier: String? = n
         let query = selectionRangesQuery(status: status, value: values)
         pluralUnavailable = query.state == "unavailable"
         trace?.record(phase, ["pluralStatus": status.rawValue, "pluralState": query.state])
-        if optionalPluralRootReadCanRecover(allowed: allowOptionalPluralRootRecovery,
+        if optionalPluralRootReadCanRecover(allowed: allowOptionalPluralRootRecovery || allowOptionalPluralDescendantRecovery,
             role: classification.role, bounded: deadline != nil, textStatus: textStatus,
             selectedRange: selectedRange, capabilityDeclared: pluralCapabilityDeclared, pluralStatus: status) {
-            trace?.record(phase, ["decision": "declaredPluralRootReadFailed", "optionalPluralRootFailure": true])
-            throw SelectionOptionalPluralRootFailure()
+            if allowOptionalPluralRootRecovery {
+                trace?.record(phase, ["decision": "declaredPluralRootReadFailed", "optionalPluralRootFailure": true])
+                throw SelectionOptionalPluralRootFailure()
+            }
+            trace?.record(phase, ["decision": "declaredPluralDescendantReadFailed"])
+            throw SelectionOptionalPluralDescendantFailure()
         }
         try requireUsableSelectionQuery(query)
         if let values = query.value {
@@ -1091,6 +1105,30 @@ func selectionMixedTextStillSelected(_ original: String, current: String?) -> Bo
     !original.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && current == original
 }
 
+// A document cannot cover an unknown sibling or an unknown branch inside
+// itself. Every deferred group must lie strictly above it on the current,
+// validated parent chain to the original root. Reads remain bounded and any
+// missing/changed/protected parent fails closed; this helper never copies.
+func selectionDeferredPluralAncestorsVerified<Node>(candidate: Node, root: Node, deferred: [Node],
+    maximumDepth: Int = 6, same: (Node, Node) -> Bool, withinBudget: () -> Bool,
+    validate: (Node) throws -> Bool, parent: (Node) throws -> Node?) rethrows -> Bool {
+    guard !deferred.isEmpty, deferred.count <= 64, maximumDepth > 0,
+          !deferred.contains(where: { same($0, candidate) }) else { return false }
+    var current = candidate
+    var ancestors = [Node]()
+    for _ in 0..<maximumDepth {
+        guard withinBudget(), try validate(current), withinBudget(), let next = try parent(current),
+              !same(next, candidate), !ancestors.contains(where: { same($0, next) }) else { return false }
+        ancestors.append(next)
+        if same(next, root) {
+            guard withinBudget(), try validate(root), withinBudget() else { return false }
+            return deferred.allSatisfy { item in ancestors.contains(where: { same(item, $0) }) }
+        }
+        current = next
+    }
+    return false
+}
+
 // QQ can select separate chat items while its focused AXGroup reports a
 // zero text range. A selected-children set is explicit selection evidence;
 // unrelated positive descendants must still be rejected as ambiguous.
@@ -1236,6 +1274,8 @@ func recoverySelection(originalFocus: AXUIElement?, source: SelectionApplication
     var knownBlockedTarget = false
     var knownEmptyEditor = false
     var optionalPluralRootFailure = false
+    var deferredPluralGroups = [AXUIElement]()
+    var probeParents = [(child: AXUIElement, parent: AXUIElement)]()
     var selectedCandidate: AXUIElement?
     var selectedCandidateRole: String?
     func contextIsCurrent() -> Bool {
@@ -1347,15 +1387,17 @@ func recoverySelection(originalFocus: AXUIElement?, source: SelectionApplication
             }
             var text: String?
             var confirmedEmpty = false
+            var deferredPluralFailure = false
             probeStep = "selectionAttributes"
             do { text = try accessibilitySelection(element: element, bundleIdentifier: source.bundleIdentifier,
                 trace: nodeTrace, phase: "selectionAttributes", deadline: deadline,
                 allowOptionalPluralRootRecovery: originalFocus != nil && CFEqual(element, root) &&
-                    sourceWindowTicket != nil && initialWindow.value != nil) }
+                    sourceWindowTicket != nil && initialWindow.value != nil,
+                allowOptionalPluralDescendantRecovery: optionalPluralRootFailure && !CFEqual(element, root)) }
             catch is SelectionOptionalPluralRootFailure {
                 optionalPluralRootFailure = true
                 // Preserve the failed API's status; this is not a successful or
-                // unavailable read. No other node receives this exception.
+                // unavailable read. Only the root can start this mode.
                 if let events = nodeTrace.snapshot()["events"] as? [[String: Any]] {
                     for event in events where (event["phase"] as? String) != "started" {
                         trace.record("selection-probe-ax", event)
@@ -1363,6 +1405,19 @@ func recoverySelection(originalFocus: AXUIElement?, source: SelectionApplication
                 }
                 trace.record("selection-plural-root-recovery", ["decision": "readOnlyDocumentSelection",
                     "optionalPluralRootFailure": true])
+            }
+            catch is SelectionOptionalPluralDescendantFailure {
+                probeStep = "optionalPluralDescendantWindow"
+                guard optionalPluralRootFailure, !CFEqual(element, root), !IsSecureEventInputEnabled(),
+                      let expectedWindow = initialWindow.value,
+                      let window = selectionOwningWindow(element, role: roleQuery.value, applicationPID: pid, deadline: deadline).value,
+                      CFEqual(expectedWindow, window) else { return invalid() }
+                deferredPluralFailure = true
+                deferredPluralGroups.append(element)
+                // The raw failure stays recorded. This is a pending coverage
+                // obligation, not empty/unsupported metadata or Copy authority.
+                trace.record("selection-plural-descendant-recovery", ["pluralStatus": AXError.failure.rawValue,
+                    "decision": "deferredGroupAncestorProof", "optionalPluralDescendantFailures": deferredPluralGroups.count])
             }
             catch let error as NativeError where error.message.hasPrefix("NO_SELECTION:") {
                 confirmedEmpty = true
@@ -1374,7 +1429,7 @@ func recoverySelection(originalFocus: AXUIElement?, source: SelectionApplication
                 selectedCandidateRole = roleQuery.value
             }
             return try selectionProbeObserveChildren(text: text, requireCompleteSubtree: optionalPluralRootFailure) {
-                if optionalPluralRootFailure && !CFEqual(element, root) && !confirmedEmpty && !hasPositiveSelection {
+                if optionalPluralRootFailure && !CFEqual(element, root) && !confirmedEmpty && !hasPositiveSelection && !deferredPluralFailure {
                     // nil requests Copy in the ordinary route. Here it means an
                     // unresolved branch, so a different message cannot masquerade
                     // as the entire selection. No partial traversal may succeed.
@@ -1415,6 +1470,9 @@ func recoverySelection(originalFocus: AXUIElement?, source: SelectionApplication
                     guard CFGetTypeID(child) == AXUIElementGetTypeID() else { return invalid() }
                     children.append(child as! AXUIElement)
                 }
+                if optionalPluralRootFailure {
+                    probeParents.append(contentsOf: children.map { (child: $0, parent: element) })
+                }
                 return SelectionProbeObservation(text: nil, children: children, protected: false)
             }
         } catch is SelectionProbeBudgetExpired { return limited() }
@@ -1445,6 +1503,33 @@ func recoverySelection(originalFocus: AXUIElement?, source: SelectionApplication
                 mixedWindowVerified = (try? selectionRecoveryRole(root, applicationPID: pid, deadline: deadline)) == rootRole
                     && (try? selectionRecoveryRole(candidate, applicationPID: pid, deadline: deadline)) == selectedCandidateRole
                     && readonlySelectionContainer(selectedCandidateRole)
+            }
+        }
+        if mixedWindowVerified {
+            if !deferredPluralGroups.isEmpty {
+                mixedWindowVerified = (try? selectionDeferredPluralAncestorsVerified(candidate: candidate, root: root,
+                    deferred: deferredPluralGroups, same: { CFEqual($0, $1) },
+                    withinBudget: { selectionQueryBudgetAvailable(deadline) && !IsSecureEventInputEnabled() },
+                    validate: { element in
+                        guard let role = try selectionRecoveryRole(element, applicationPID: pid, deadline: deadline),
+                              !deferredPluralGroups.contains(where: { CFEqual($0, element) }) || role == "AXGroup",
+                              !CFEqual(element, root) || role == rootRole,
+                              !CFEqual(element, candidate) || role == selectedCandidateRole,
+                              let expected = initialWindow.value,
+                              let window = selectionOwningWindow(element, role: role, applicationPID: pid, deadline: deadline).value else { return false }
+                        return CFEqual(window, expected)
+                    }, parent: { element in
+                        try requireSelectionQueryBudget(deadline)
+                        var value: CFTypeRef?
+                        let status = AXUIElementCopyAttributeValue(element, kAXParentAttribute as CFString, &value)
+                        guard status == .success, let value, CFGetTypeID(value) == AXUIElementGetTypeID() else { return nil }
+                        let parent = value as! AXUIElement
+                        let observed = probeParents.filter { CFEqual($0.child, element) }
+                        guard observed.count == 1, CFEqual(observed[0].parent, parent) else { return nil }
+                        return parent
+                    })) == true
+                trace.record("selection-plural-ancestor-proof", ["optionalPluralAncestorsVerified": mixedWindowVerified,
+                    "optionalPluralDescendantFailures": deferredPluralGroups.count])
             }
         }
         if mixedWindowVerified {
@@ -2752,6 +2837,7 @@ func selectionOptionalPluralRecoverySelfTest() throws {
     let encoded = String(decoding: try JSONSerialization.data(withJSONObject: snapshot), as: UTF8.self)
     try expect(!encoded.contains("private-selection-sentinel"))
     try selectionOptionalPluralSubtreeSelfTest()
+    try selectionOptionalPluralNestedGroupSelfTest()
 }
 
 func selectionOptionalPluralSubtreeSelfTest() throws {
@@ -2837,6 +2923,132 @@ func selectionOptionalPluralSubtreeSelfTest() throws {
         id == 0 ? Observation(text: whole, children: [1], protected: false) : nil
     }
     try expect(ordinaryWalker.0 == .text(whole) && ordinaryWalker.1 == 1)
+}
+
+func selectionOptionalPluralNestedGroupSelfTest() throws {
+    func expect(_ condition: Bool) throws {
+        if !condition { throw NativeError("SELF_TEST: Nested optional plural group recovery failed.") }
+    }
+    struct FixtureNode {
+        let role: String
+        var text: String? = nil
+        var children: [Int]? = []
+        var pluralStatus: AXError? = nil
+        var confirmedEmpty = true
+        var ownerMatches = true
+        var windowMatches = true
+        var secure = false
+    }
+    typealias Observation = SelectionProbeObservation<Int>
+    func probe(_ nodes: [Int: FixtureNode], maximumNodes: Int = 64, maximumDepth: Int = 6,
+               invalidOnRecheck: Set<Int> = [], changedParents: [Int: Int] = [:],
+               proofBudget: Bool = true) -> (result: SelectionProbeResult, disposition: SelectionRecoveryDisposition, observed: [Int], childrenRead: [Int]) {
+        var rootFailure = false
+        var deferred = [Int]()
+        var observed = [Int]()
+        var childrenRead = [Int]()
+        var edges = [(child: Int, parent: Int)]()
+        var candidate: Int?
+        let result = probeUniqueSelection(root: 0, maximumNodes: maximumNodes, maximumDepth: maximumDepth,
+            same: { $0 == $1 }, contextIsCurrent: { true }, requireCompleteSubtree: { rootFailure }) { id, remaining -> Observation? in
+            observed.append(id)
+            guard let node = nodes[id], node.ownerMatches, !node.secure else { return nil }
+            var deferredHere = false
+            if let status = node.pluralStatus {
+                // Actual 0.2.9 failure shape: the root succeeds in deferring,
+                // then its AXGroup child has the very same failed optional API.
+                guard optionalPluralRootReadCanRecover(allowed: id == 0 || rootFailure,
+                    role: node.role, bounded: true, textStatus: .noValue,
+                    selectedRange: CFRange(location: 0, length: 0), capabilityDeclared: true,
+                    pluralStatus: status) else { return nil }
+                if id == 0 { rootFailure = true }
+                else {
+                    guard node.windowMatches else { return nil }
+                    deferredHere = true
+                    deferred.append(id)
+                }
+            }
+            if node.text != nil { candidate = id }
+            return selectionProbeObserveChildren(text: node.text, requireCompleteSubtree: rootFailure) {
+                childrenRead.append(id)
+                if rootFailure && id != 0 && !node.confirmedEmpty && node.text == nil && !deferredHere { return nil }
+                guard let children = node.children else { return nil }
+                edges.append(contentsOf: children.map { (child: $0, parent: id) })
+                return Observation(text: nil, children: children, protected: false,
+                    resourceLimit: children.count > remaining)
+            }
+        }.0
+        var verified = false
+        if case .text = result, let candidate {
+            verified = selectionDeferredPluralAncestorsVerified(candidate: candidate, root: 0,
+                deferred: deferred, same: { $0 == $1 }, withinBudget: { proofBudget }, validate: { id in
+                    guard let node = nodes[id] else { return false }
+                    return node.ownerMatches && node.windowMatches && !node.secure && !invalidOnRecheck.contains(id)
+                        && selectionRecoveryContainer(node.role) && (!deferred.contains(id) || node.role == "AXGroup")
+                }, parent: { id in
+                    let original = edges.filter { $0.child == id }
+                    guard original.count == 1 else { return nil }
+                    let current = changedParents[id] ?? original[0].parent
+                    return current == original[0].parent ? current : nil
+                })
+        }
+        let disposition = selectionOptionalPluralRecoveryDisposition(result, contextVerified: true, blockedTarget: false,
+            candidateRole: candidate.flatMap { nodes[$0]?.role }, windowAndSelectionVerified: verified)
+        return (result, disposition, observed, childrenRead)
+    }
+    let whole = "first synthetic message\nsecond synthetic message"
+    let graph = [0: FixtureNode(role: "AXGroup", children: [1], pluralStatus: .failure, confirmedEmpty: false),
+                 1: FixtureNode(role: "AXGroup", children: [2], pluralStatus: .failure, confirmedEmpty: false),
+                 2: FixtureNode(role: "AXWebArea", text: whole, children: [3]),
+                 3: FixtureNode(role: "AXStaticText")]
+    let complete = probe(graph)
+    try expect(complete.result == .text(whole) && complete.disposition == .text(whole))
+    try expect(complete.observed == [0, 1, 2, 3] && complete.childrenRead == [0, 1, 2, 3])
+    var noRootFailure = graph; noRootFailure[0]?.pluralStatus = nil
+    try expect(probe(noRootFailure).result == .incomplete) // A descendant cannot initiate this mode.
+    var chain = graph
+    chain[1]?.children = [4]
+    chain[4] = FixtureNode(role: "AXGroup", children: [2], pluralStatus: .failure, confirmedEmpty: false)
+    try expect(probe(chain).disposition == .text(whole))
+    var sibling = graph
+    sibling[0]?.children = [1, 4]
+    sibling[4] = FixtureNode(role: "AXGroup", pluralStatus: .failure, confirmedEmpty: false)
+    var belowCandidate = graph
+    belowCandidate[3] = FixtureNode(role: "AXGroup", pluralStatus: .failure, confirmedEmpty: false)
+    var secure = graph; secure[1]?.secure = true
+    var wrongOwner = graph; wrongOwner[1]?.ownerMatches = false
+    var wrongWindow = graph; wrongWindow[1]?.windowMatches = false
+    var unknown = graph; unknown[3]?.confirmedEmpty = false
+    var unreadable = graph; unreadable[1]?.children = nil
+    var ambiguous = graph; ambiguous[3] = FixtureNode(role: "AXDocument", text: "separate selected fragment")
+    for nodes in [sibling, belowCandidate, secure, wrongOwner, wrongWindow, unknown, unreadable, ambiguous] {
+        let outcome = probe(nodes)
+        if case .text = outcome.disposition { throw NativeError("SELF_TEST: Unsafe nested recovery supplied text.") }
+        try expect(outcome.disposition != .compatibility)
+    }
+    try expect(probe(sibling).result == .text(whole)) // Rejected by ancestry, not by absence of candidate text.
+    try expect(probe(belowCandidate).result == .text(whole))
+    try expect(probe(secure).result == .incomplete && probe(wrongOwner).result == .incomplete)
+    try expect(probe(ambiguous).result == .ambiguous)
+    for status in [AXError.cannotComplete, .apiDisabled, .invalidUIElement, .illegalArgument] {
+        var differentFailure = graph; differentFailure[1]?.pluralStatus = status
+        try expect(probe(differentFailure).result == .incomplete)
+    }
+    for outcome in [probe(graph, maximumNodes: 2), probe(graph, maximumDepth: 1),
+                    probe(graph, invalidOnRecheck: [1]), probe(graph, changedParents: [2: 0]),
+                    probe(graph, proofBudget: false)] {
+        if case .text = outcome.disposition { throw NativeError("SELF_TEST: Changed or incomplete ancestry supplied text.") }
+        try expect(outcome.disposition != .compatibility)
+    }
+    let trace = SelectionTrace(publish: false)
+    trace.record("selection-plural-descendant-recovery", ["optionalPluralRootFailure": true,
+        "optionalPluralDescendantFailures": 2, "pluralStatus": AXError.failure.rawValue,
+        "selectedText": "private-nested-selection-sentinel"])
+    for _ in 0..<64 { trace.record("fixture-progress") }
+    let snapshot = trace.snapshot()
+    try expect(snapshot["optionalPluralDescendantFailures"] as? Int == 2 && snapshot["copyIssued"] as? Bool == false)
+    let encoded = String(decoding: try JSONSerialization.data(withJSONObject: snapshot), as: UTF8.self)
+    try expect(!encoded.contains("private-nested-selection-sentinel"))
 }
 
 func selectionMixedRecoverySelfTest() throws {

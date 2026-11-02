@@ -31,6 +31,8 @@ jobs:
         run: |
           if [ "$PR_HEAD" = feat/screenshot-pins ] && [ "$PR_BASE" = fix/025-macos-recovery-integration ]; then
             echo "mode=screenshot-pins" >> "$GITHUB_OUTPUT"
+          elif [ "$PR_HEAD" = fix/macos-screenshot-followup ] && [ "$PR_BASE" = main ]; then
+            echo "mode=macos-followup" >> "$GITHUB_OUTPUT"
           else
             python3 scripts/verify-language-patch.py --select
           fi
@@ -55,7 +57,7 @@ jobs:
         run: rustfmt --edition 2021 --check src-tauri/src/bilingual_input.rs
   screenshot-pin-native:
     needs: validation-mode
-    if: needs.validation-mode.outputs.mode == 'screenshot-pins' || (github.event_name == 'pull_request' && (github.head_ref == 'feat/screenshot-pins' || github.head_ref == 'feat/screenshot-028' || github.head_ref == 'fix/028-unified-editor' || github.head_ref == 'fix/029-persistent-capture-recovery') && github.base_ref == 'main')
+    if: needs.validation-mode.outputs.mode == 'macos-followup' || needs.validation-mode.outputs.mode == 'screenshot-pins' || (github.event_name == 'pull_request' && (github.head_ref == 'feat/screenshot-pins' || github.head_ref == 'feat/screenshot-028' || github.head_ref == 'fix/028-unified-editor' || github.head_ref == 'fix/029-persistent-capture-recovery') && github.base_ref == 'main')
     name: Screenshot pin native (${{ matrix.os }})
     permissions:
       contents: read
@@ -63,7 +65,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [macos-latest, windows-latest]
+        os: ${{ fromJSON(needs.validation-mode.outputs.mode == 'macos-followup' && '["macos-latest"]' || '["macos-latest","windows-latest"]') }}
     runs-on: ${{ matrix.os }}
     timeout-minutes: 30
     steps:
@@ -126,6 +128,9 @@ jobs:
           python scripts/audit-windows-resources.py --staged
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - run: npm ci
+      - name: Check and build the focused frontend candidate
+        if: needs.validation-mode.outputs.mode == 'macos-followup'
+        run: npm run check && npm test && npm run build
       - run: npm run build
       - name: Compile actual platform app and run all ten pin regressions
         shell: bash
@@ -138,6 +143,13 @@ jobs:
           cargo test --manifest-path src-tauri/Cargo.toml --locked screenshot_overlay -- --nocapture 2>&1 | tee "$RUNNER_TEMP/screenshot-pin/overlay.log"
           cargo test --manifest-path src-tauri/Cargo.toml --locked 2>&1 | tee "$RUNNER_TEMP/screenshot-pin/all-rust.log"
           cargo build --manifest-path src-tauri/Cargo.toml --locked 2>&1 | tee "$RUNNER_TEMP/screenshot-pin/build.log"
+      - name: Execute focused Mac selection and overlay host fixtures
+        if: needs.validation-mode.outputs.mode == 'macos-followup'
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash tests/macos-native-self-test.sh 2>&1 | tee "$RUNNER_TEMP/screenshot-pin/native-self-test.log"
+          bash tests/macos-screenshot-overlay-host-fixture.sh 2>&1 | tee "$RUNNER_TEMP/screenshot-pin/overlay-host.log"
       - name: Build isolated Mac debug and release binaries from this exact source
         if: runner.os == 'macOS'
         shell: bash
@@ -325,7 +337,7 @@ jobs:
         run: git diff --exit-code -- src-tauri
   windows-rust-capture-candidate:
     needs: validation-mode
-    if: needs.validation-mode.outputs.mode != 'language-routing-patch-v1' && needs.validation-mode.outputs.mode != 'screenshot-pins'
+    if: needs.validation-mode.outputs.mode != 'language-routing-patch-v1' && needs.validation-mode.outputs.mode != 'screenshot-pins' && needs.validation-mode.outputs.mode != 'macos-followup'
     name: Isolated Rust capture candidate (native Windows runtime)
     runs-on: windows-latest
     timeout-minutes: 10
@@ -402,7 +414,7 @@ jobs:
         run: echo 'Repeated A/B capture benchmark outcome ${{ steps.native_capture_paired_diagnostic.outcome }} is diagnostic only under core-functional-v1. Original raw failures remain failures; standalone capture/input/cleanup and installed editor acceptance are mandatory.' >> "$GITHUB_STEP_SUMMARY"
   macos-native-frame-probe:
     needs: validation-mode
-    if: needs.validation-mode.outputs.mode != 'language-routing-patch-v1' && needs.validation-mode.outputs.mode != 'screenshot-pins'
+    if: needs.validation-mode.outputs.mode != 'language-routing-patch-v1' && needs.validation-mode.outputs.mode != 'screenshot-pins' && needs.validation-mode.outputs.mode != 'macos-followup'
     name: Isolated macOS native frame geometry probe
     runs-on: macos-latest
     timeout-minutes: 5
@@ -431,7 +443,7 @@ jobs:
           if-no-files-found: warn
   macos-screenshot-native-probe:
     needs: validation-mode
-    if: needs.validation-mode.outputs.mode != 'language-routing-patch-v1' && needs.validation-mode.outputs.mode != 'screenshot-pins'
+    if: needs.validation-mode.outputs.mode != 'language-routing-patch-v1' && needs.validation-mode.outputs.mode != 'screenshot-pins' && needs.validation-mode.outputs.mode != 'macos-followup'
     name: macOS native screenshot capture (permission block is not a pass)
     runs-on: macos-latest
     timeout-minutes: 8
@@ -460,7 +472,7 @@ jobs:
           python3 scripts/verify-macos-screenshot-probe.py "$RUNNER_TEMP/macos-f1-native-probe/report.json" 2>&1 | tee -a "$GITHUB_STEP_SUMMARY"
   desktop:
     needs: validation-mode
-    if: needs.validation-mode.outputs.mode != 'language-routing-patch-v1' && needs.validation-mode.outputs.mode != 'screenshot-pins' && github.event.inputs.mode != 'windows-popup-diagnostics' && github.event.inputs.mode != 'windows-popup-current-diagnostics' && github.event.inputs.mode != 'windows-application-diagnostics' && github.event.inputs.mode != 'windows-input-plane-experiment' && github.event.inputs.mode != 'windows-native-diagnostics' && github.event.inputs.mode != 'windows-shortcuts-ui-diagnostics' && github.event.inputs.mode != 'windows-shortcuts-ui-medium-diagnostics' && github.event.inputs.mode != 'windows-shortcuts-current-diagnostics' && github.event.inputs.mode != 'windows-shortcuts-workflows-diagnostics' && github.event.inputs.mode != 'windows-delegated-diagnostics' && github.event.inputs.mode != 'windows-browser-diagnostics' && github.event.inputs.mode != 'windows-selection-same-page-diagnostics' && github.event.inputs.mode != 'windows-selection-browser-app-diagnostics' && github.event.inputs.mode != 'windows-browser-ocr-visibility-diagnostics' && github.event.inputs.mode != 'windows-selection-cold-edge-diagnostics' && github.event.inputs.mode != 'windows-selection-paced-edge-diagnostics' && github.event.inputs.mode != 'windows-selection-nonbrowser-app-diagnostics' && github.event.inputs.mode != 'windows-latest-intent-diagnostics' && github.event.inputs.mode != 'windows-selection-application-diagnostics' && github.event.inputs.mode != 'windows-selection-clipboard-diagnostics' && github.event.inputs.mode != 'windows-selection-notepad-diagnostics' && github.event.inputs.mode != 'windows-selection-budget-diagnostics' && github.event.inputs.mode != 'windows-selection-context-diagnostics' && github.event.inputs.mode != 'windows-wps-selection-diagnostics' && github.event.inputs.mode != 'windows-focus-resize-current-diagnostics' && github.event.inputs.mode != 'windows-priority-input-diagnostics' && github.event.inputs.mode != 'windows-priority-candidate-diagnostics'
+    if: needs.validation-mode.outputs.mode != 'language-routing-patch-v1' && needs.validation-mode.outputs.mode != 'screenshot-pins' && github.event.inputs.mode != 'windows-popup-diagnostics' && github.event.inputs.mode != 'windows-popup-current-diagnostics' && github.event.inputs.mode != 'windows-application-diagnostics' && github.event.inputs.mode != 'windows-input-plane-experiment' && github.event.inputs.mode != 'windows-native-diagnostics' && github.event.inputs.mode != 'windows-shortcuts-ui-diagnostics' && github.event.inputs.mode != 'windows-shortcuts-ui-medium-diagnostics' && github.event.inputs.mode != 'windows-shortcuts-current-diagnostics' && github.event.inputs.mode != 'windows-shortcuts-workflows-diagnostics' && github.event.inputs.mode != 'windows-delegated-diagnostics' && github.event.inputs.mode != 'windows-browser-diagnostics' && github.event.inputs.mode != 'windows-selection-same-page-diagnostics' && github.event.inputs.mode != 'windows-selection-browser-app-diagnostics' && github.event.inputs.mode != 'windows-browser-ocr-visibility-diagnostics' && github.event.inputs.mode != 'windows-selection-cold-edge-diagnostics' && github.event.inputs.mode != 'windows-selection-paced-edge-diagnostics' && github.event.inputs.mode != 'windows-selection-nonbrowser-app-diagnostics' && github.event.inputs.mode != 'windows-latest-intent-diagnostics' && github.event.inputs.mode != 'windows-selection-application-diagnostics' && github.event.inputs.mode != 'windows-selection-clipboard-diagnostics' && github.event.inputs.mode != 'windows-selection-notepad-diagnostics' && github.event.inputs.mode != 'windows-selection-budget-diagnostics' && github.event.inputs.mode != 'windows-selection-context-diagnostics' && github.event.inputs.mode != 'windows-wps-selection-diagnostics' && github.event.inputs.mode != 'windows-focus-resize-current-diagnostics' && github.event.inputs.mode != 'windows-priority-input-diagnostics' && github.event.inputs.mode != 'windows-priority-candidate-diagnostics' && needs.validation-mode.outputs.mode != 'macos-followup'
     strategy:
       fail-fast: false
       matrix:

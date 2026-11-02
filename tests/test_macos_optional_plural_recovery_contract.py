@@ -24,7 +24,7 @@ class OptionalPluralRecoveryContract(unittest.TestCase):
         self.assertIn('"pluralStatus": status.rawValue, "pluralState": query.state', selection)
         self.assertIn('try requireUsableSelectionQuery(query)', selection)
 
-    def test_deferred_recovery_is_root_only_and_requires_an_initial_window(self):
+    def test_recovery_still_starts_only_at_root_and_requires_an_initial_window(self):
         recovery = section('func recoverySelection(', 'struct SelectionCopyTicket:')
         self.assertIn('allowOptionalPluralRootRecovery: originalFocus != nil && CFEqual(element, root) &&', recovery)
         self.assertIn('sourceWindowTicket != nil && initialWindow.value != nil', recovery)
@@ -32,6 +32,45 @@ class OptionalPluralRecoveryContract(unittest.TestCase):
         self.assertIn('trace.record("selection-probe-ax", event)', recovery)
         self.assertIn('!knownEmptyEditor && !optionalPluralRootFailure', recovery)
         self.assertIn('if optionalPluralRootFailure && sensitive { return invalid() }', recovery)
+
+    def test_descendant_deferral_is_exact_failure_only_after_root_and_same_window(self):
+        selection = section('func accessibilitySelection(', 'func selectionRecoveryContainer(')
+        self.assertIn('allowOptionalPluralDescendantRecovery: Bool = false', selection)
+        self.assertIn('allowed: allowOptionalPluralRootRecovery || allowOptionalPluralDescendantRecovery', selection)
+        self.assertIn('throw SelectionOptionalPluralDescendantFailure()', selection)
+        recovery = section('func recoverySelection(', 'struct SelectionCopyTicket:')
+        self.assertIn('allowOptionalPluralDescendantRecovery: optionalPluralRootFailure && !CFEqual(element, root)', recovery)
+        descendant = recovery[recovery.index('catch is SelectionOptionalPluralDescendantFailure'):]
+        descendant = descendant[:descendant.index('catch let error as NativeError')]
+        for proof in ('guard optionalPluralRootFailure, !CFEqual(element, root), !IsSecureEventInputEnabled()',
+                      'selectionOwningWindow(element, role: roleQuery.value, applicationPID: pid, deadline: deadline)',
+                      'CFEqual(expectedWindow, window)', 'deferredPluralGroups.append(element)',
+                      '"pluralStatus": AXError.failure.rawValue'):
+            self.assertIn(proof, descendant)
+        self.assertNotIn('confirmedEmpty = true', descendant)
+        self.assertNotIn('.compatibility', descendant)
+        self.assertIn('!hasPositiveSelection && !deferredPluralFailure', recovery)
+
+    def test_every_deferred_group_must_be_a_revalidated_observed_document_ancestor(self):
+        helper = section('func selectionDeferredPluralAncestorsVerified<Node>(', '// QQ can select')
+        for condition in ('maximumDepth: Int = 6', '!deferred.isEmpty, deferred.count <= 64',
+                          '!deferred.contains(where: { same($0, candidate) })',
+                          'try validate(current)', 'let next = try parent(current)',
+                          '!same(next, candidate)', '!ancestors.contains(where: { same($0, next) })',
+                          'if same(next, root)', 'try validate(root)', 'deferred.allSatisfy'):
+            self.assertIn(condition, helper)
+        recovery = section('func recoverySelection(', 'struct SelectionCopyTicket:')
+        self.assertIn('probeParents.append(contentsOf: children.map { (child: $0, parent: element) })', recovery)
+        start = recovery.index('selectionDeferredPluralAncestorsVerified(candidate: candidate, root: root,')
+        proof = recovery[start:recovery.index('let currentText = try? accessibilitySelection', start)]
+        for condition in ('selectionQueryBudgetAvailable(deadline) && !IsSecureEventInputEnabled()',
+                          'selectionRecoveryRole(element, applicationPID: pid, deadline: deadline)',
+                          '!deferredPluralGroups.contains(where: { CFEqual($0, element) }) || role == "AXGroup"',
+                          'selectionOwningWindow(element, role: role, applicationPID: pid, deadline: deadline)',
+                          'CFEqual(window, expected)', 'kAXParentAttribute',
+                          'observed.count == 1, CFEqual(observed[0].parent, parent)'):
+            self.assertIn(condition, proof)
+        self.assertIn('mixedWindowVerified = (try? selectionDeferredPluralAncestorsVerified', recovery)
 
     def test_unknown_siblings_or_unenumerated_containers_cannot_look_complete(self):
         recovery = section('func recoverySelection(', 'struct SelectionCopyTicket:')
@@ -116,6 +155,24 @@ class OptionalPluralRecoveryContract(unittest.TestCase):
                        'disposition != .compatibility', 'ordinary.childrenRead == [0]',
                        'ordinary.observed == [0, 1]', 'ordinaryWalker.1 == 1'):
             self.assertIn(marker, fixture)
+
+    def test_nested_group_fixture_traverses_real_shape_then_checks_ancestry(self):
+        self.assertIn('try selectionOptionalPluralNestedGroupSelfTest()', SOURCE)
+        fixture = section('func selectionOptionalPluralNestedGroupSelfTest()', 'func selectionMixedRecoverySelfTest()')
+        for marker in ('probeUniqueSelection(root: 0', 'optionalPluralRootReadCanRecover(allowed: id == 0 || rootFailure',
+                       'selectionProbeObserveChildren(text: node.text, requireCompleteSubtree: rootFailure)',
+                       'selectionDeferredPluralAncestorsVerified(candidate: candidate, root: 0',
+                       '0: FixtureNode(role: "AXGroup", children: [1], pluralStatus: .failure',
+                       '1: FixtureNode(role: "AXGroup", children: [2], pluralStatus: .failure',
+                       '2: FixtureNode(role: "AXWebArea", text: whole, children: [3])',
+                       'complete.observed == [0, 1, 2, 3]', 'complete.childrenRead == [0, 1, 2, 3]',
+                       'probe(sibling).result == .text(whole)', 'probe(belowCandidate).result == .text(whole)',
+                       'probe(secure).result == .incomplete', 'probe(wrongOwner).result == .incomplete',
+                       'maximumNodes: 2', 'maximumDepth: 1', 'invalidOnRecheck: [1]',
+                       'changedParents: [2: 0]', 'proofBudget: false', 'outcome.disposition != .compatibility',
+                       'snapshot["optionalPluralDescendantFailures"] as? Int == 2'):
+            self.assertIn(marker, fixture)
+        self.assertIn('"rangeLength": rangeQuery.value?.range.length', SOURCE)
 
 
 if __name__ == '__main__':

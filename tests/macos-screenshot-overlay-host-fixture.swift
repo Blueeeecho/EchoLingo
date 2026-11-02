@@ -205,11 +205,12 @@ private final class OverlayHostFixture: NSObject, WKNavigationDelegate {
             let pointer = Unmanaged.passUnretained(owner).toOpaque()
             let original = content.frame
             let clipboard = NSPasteboard.general.changeCount
-            try need(echoLingoPrepareScreenshotOverlay(pointer, Double(frame.minX), Double(y), Double(frame.width), Double(frame.height)) == 0, "prepare")
+            try need(echoLingoPrepareScreenshotOverlay(pointer, Double(frame.minX), Double(y), Double(frame.width), Double(frame.height), Double(frame.minX), Double(y), Double(frame.width), Double(frame.height)) == 0, "prepare")
             guard let panel = content.window as? NSPanel else { throw NativeError("OVERLAY_HOST_FIXTURE: not a panel") }
             try need(panel.styleMask.contains(.nonactivatingPanel) && !panel.isVisible && !owner.isVisible, "prepare visibility")
             try need(abs(content.frame.width - frame.width) < 1 && abs(webView.frame.width - frame.width) < 1, "webview viewport")
-            try need(echoLingoShowScreenshotOverlay(pointer, Double(frame.minX), Double(y), Double(frame.width), Double(frame.height)) == 0, "show")
+            try need(echoLingoShowScreenshotOverlay(pointer, Double(frame.minX), Double(y), Double(frame.width), Double(frame.height), Double(frame.minX), Double(y), Double(frame.width), Double(frame.height)) == 0, "show")
+            try need(panel.frame == frame, "exact target display frame")
             try need(panel.firstResponder === webView, "webview first responder")
             awaitStacking(panel, phase: "initial") { [self] in
                 webView.evaluateJavaScript("document.getElementById('text').focus(); [innerWidth, innerHeight, document.activeElement.id]") { [weak self] result, error in
@@ -223,8 +224,8 @@ private final class OverlayHostFixture: NSObject, WKNavigationDelegate {
                         try need(echoLingoHideScreenshotOverlay(pointer) == 0, "hide")
                         try need(self.content.window === self.owner && self.content.frame == original && !panel.isVisible, "restore")
                         try need(echoLingoHideScreenshotOverlay(pointer) == 0, "idempotent hide")
-                        try need(echoLingoPrepareScreenshotOverlay(pointer, Double(frame.minX), Double(y), Double(frame.width), Double(frame.height)) == 0, "repeat prepare")
-                        try need(echoLingoShowScreenshotOverlay(pointer, Double(frame.minX), Double(y), Double(frame.width), Double(frame.height)) == 0, "repeat show")
+                        try need(echoLingoPrepareScreenshotOverlay(pointer, Double(frame.minX), Double(y), Double(frame.width), Double(frame.height), Double(frame.minX), Double(y), Double(frame.width), Double(frame.height)) == 0, "repeat prepare")
+                        try need(echoLingoShowScreenshotOverlay(pointer, Double(frame.minX), Double(y), Double(frame.width), Double(frame.height), Double(frame.minX), Double(y), Double(frame.width), Double(frame.height)) == 0, "repeat show")
                         guard let repeatedPanel = self.content.window as? NSPanel else { throw NativeError("OVERLAY_HOST_FIXTURE: repeated panel missing") }
                         self.awaitStacking(repeatedPanel, phase: "repeat") {
                             self.owner.close()
