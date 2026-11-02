@@ -142,6 +142,7 @@ private final class ScreenshotProbe {
     var finished = false
     var oracleAttempted = false
     var oracleToken: UUID?
+    var pinProofWindows: [NSWindow] = []
     var oracleOccluder: NSWindow?
     var owner: NSWindow?
     var savePanel: NSSavePanel?
@@ -154,6 +155,7 @@ private final class ScreenshotProbe {
     func finish(_ status: String, reason: String? = nil) {
         guard !finished else { return }; finished = true
         timer?.invalidate(); timer = nil
+        pinProofWindows.forEach { $0.close() }; pinProofWindows.removeAll()
         oracleToken = nil; oracleOccluder?.close(); oracleOccluder = nil
         if let operation = operation {
             _ = nativeResponse(mode: "--cancel-native-capture", input: Data(operation.utf8))
@@ -1067,13 +1069,70 @@ private final class ScreenshotProbe {
     func recordCompletedCase(_ record: [String: Any]) {
         guard !finished else { return }
         cases.append(record); index += 1; activeCase = nil; preCasePixelProof = nil
-        if index == modes.count { finish("passed") }
+        if index == modes.count { verifyReadyPinCapture() }
         else if modes[index] == "window-phase2" {
             do {
                 try sourceInput?.write(contentsOf: Data("phase2\n".utf8))
                 DispatchQueue.global(qos: .utility).async { self.readSource(phase: 2) }
             } catch { finish("failed", reason: "generated-source-phase-command-failed") }
         } else { beginCase() }
+    }
+
+    // Reuse the already verified generated external source. This is real
+    // production capture + Vision, not a user-desktop or packaged-pin claim.
+    func verifyReadyPinCapture() {
+        guard let target = target, let screen = NSScreen.screens.first(where: { $0.frame.contains(target.frame) }),
+              let number = screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber else {
+            finish("failed", reason: "pin-proof-generated-screen-missing"); return
+        }
+        let frame = CGRect(x: target.frame.minX + 20, y: target.frame.minY + 40, width: 460, height: 160)
+        let pin = NSWindow(contentRect: frame, styleMask: .borderless, backing: .buffered, defer: false)
+        let helper = NSWindow(contentRect: frame, styleMask: .borderless, backing: .buffered, defer: false)
+        for window in [pin, helper] {
+            window.isReleasedWhenClosed = false; window.hasShadow = false
+            window.sharingType = .readOnly; window.backgroundColor = .magenta
+        }
+        pinProofWindows = [pin, helper]
+        pin.contentView = GeneratedCapturePinView(frame: CGRect(origin: .zero, size: frame.size))
+        pin.level = .floating; pin.orderFrontRegardless(); pin.displayIfNeeded()
+        helper.level = .screenSaver; helper.orderFrontRegardless(); helper.displayIfNeeded()
+        let pointer = Unmanaged.passUnretained(pin).toOpaque()
+        guard echoLingoRegisterCapturePin(pointer) == 0 else {
+            finish("failed", reason: "pin-proof-registration-failed"); return
+        }
+        let snapshot = captureReadyPinSnapshot()
+        do {
+            try fixtureNeed(snapshot.ids.contains(CGWindowID(pin.windowNumber))
+                && !snapshot.ids.contains(CGWindowID(helper.windowNumber)), "only ready pin may be registered")
+            let display = CaptureDisplayGeometry(id: number.uint32Value, frame: screen.frame, scale: screen.backingScaleFactor)
+            let plan = try capturePlan(frame, displays: [display])
+            DispatchQueue.global(qos: .userInitiated).async {
+                do {
+                    let image = try captureNativePlannedImage(plan, purpose: .region)
+                    let text = try recognizeFixture(image)
+                    try fixtureNeed(text.trimmingCharacters(in: .whitespacesAndNewlines) == "EchoLingo pin 97531",
+                                    "ready pin text not captured or own helper was included")
+                    DispatchQueue.main.async {
+                        guard !self.finished else { return }
+                        do {
+                            guard self.pinProofWindows.count == 2 else { throw NativeError("FIXTURE: pin windows missing") }
+                            let pin = self.pinProofWindows[0], helper = self.pinProofWindows[1]
+                            pin.orderOut(nil)
+                            try fixtureNeed(!captureReadyPinSnapshot().ids.contains(CGWindowID(pin.windowNumber)), "hidden pin still eligible")
+                            var staleRejected = false
+                            do { try captureValidateReadyPins(snapshot) } catch { staleRejected = true }
+                            try fixtureNeed(staleRejected, "stale pin capture identity accepted")
+                            pin.close(); helper.close(); self.pinProofWindows.removeAll()
+                            try fixtureNeed(captureReadyPinSnapshot().windows.isEmpty, "closed pin registration remained")
+                            self.report["readyPinCaptureOCRPassed"] = true
+                            self.report["unregisteredOwnWindowExcludedPassed"] = true
+                            self.report["readyPinLifecycleCleanupPassed"] = true
+                            self.finish("passed")
+                        } catch { self.finish("failed", reason: "pin-proof-lifecycle-failed") }
+                    }
+                } catch { DispatchQueue.main.async { self.finish("failed", reason: "pin-proof-capture-ocr-failed") } }
+            }
+        } catch { finish("failed", reason: "pin-proof-plan-failed") }
     }
 
     func verifyPixels(_ image: CGImage, phase: Int, fullWindow: Bool = true, occluder: Bool = false) throws {
@@ -1105,6 +1164,15 @@ private final class ScreenshotProbe {
             try fixtureNeed((0..<3).allSatisfy { abs(Int(bytes[offset + $0]) - expected[$0]) <= 5 }
                             && bytes[offset + 3] >= 250, "captured image is not solely current generated visible pixels")
         }
+    }
+}
+
+private final class GeneratedCapturePinView: NSView {
+    override func draw(_ dirtyRect: NSRect) {
+        NSColor.white.setFill(); bounds.fill()
+        NSAttributedString(string: "EchoLingo pin 97531", attributes: [
+            .font: NSFont.systemFont(ofSize: 32), .foregroundColor: NSColor.black
+        ]).draw(at: CGPoint(x: 16, y: 60))
     }
 }
 

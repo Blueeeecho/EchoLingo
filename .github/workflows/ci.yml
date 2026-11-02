@@ -31,7 +31,7 @@ jobs:
         run: |
           if [ "$PR_HEAD" = feat/screenshot-pins ] && [ "$PR_BASE" = fix/025-macos-recovery-integration ]; then
             echo "mode=screenshot-pins" >> "$GITHUB_OUTPUT"
-          elif { [ "$PR_HEAD" = fix/macos-screenshot-followup ] || [ "$PR_HEAD" = fix/macos-secondary-screen-investigation ]; } && [ "$PR_BASE" = main ]; then
+          elif { [ "$PR_HEAD" = fix/macos-screenshot-followup ] || [ "$PR_HEAD" = fix/macos-secondary-screen-investigation ] || [ "$PR_HEAD" = fix/pin-ocr-capture ]; } && [ "$PR_BASE" = main ]; then
             echo "mode=macos-followup" >> "$GITHUB_OUTPUT"
           else
             python3 scripts/verify-language-patch.py --select
@@ -65,7 +65,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: ${{ fromJSON(needs.validation-mode.outputs.mode == 'macos-followup' && github.head_ref == 'fix/macos-screenshot-followup' && '["macos-latest"]' || '["macos-latest","windows-latest"]') }}
+        os: ${{ fromJSON(needs.validation-mode.outputs.mode == 'macos-followup' && (github.head_ref == 'fix/macos-screenshot-followup' || github.head_ref == 'fix/pin-ocr-capture') && '["macos-latest"]' || '["macos-latest","windows-latest"]') }}
     runs-on: ${{ matrix.os }}
     timeout-minutes: 30
     steps:
@@ -150,6 +150,13 @@ jobs:
           set -euo pipefail
           bash tests/macos-native-self-test.sh 2>&1 | tee "$RUNNER_TEMP/screenshot-pin/native-self-test.log"
           bash tests/macos-screenshot-overlay-host-fixture.sh 2>&1 | tee "$RUNNER_TEMP/screenshot-pin/overlay-host.log"
+      - name: Verify generated ready-pin capture and OCR without capturing private content
+        if: github.head_ref == 'fix/pin-ocr-capture' && runner.os == 'macOS'
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash tests/macos-screenshot-native-fixture.sh "$RUNNER_TEMP/screenshot-pin/pin-ocr-capture" --isolated-test-session
+          python3 scripts/verify-macos-screenshot-probe.py "$RUNNER_TEMP/screenshot-pin/pin-ocr-capture/report.json"
       - name: Build isolated Mac debug and release binaries from this exact source
         if: runner.os == 'macOS'
         shell: bash

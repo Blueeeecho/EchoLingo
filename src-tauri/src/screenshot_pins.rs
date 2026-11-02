@@ -456,7 +456,18 @@ pub async fn pinned_screenshot_ready(
         } else {
             state.screenshots.with_pin_source(source, || {
                 super::platform::ensure_popup_behavior(&window)?;
-                super::platform::show_without_activation(&window)
+                super::platform::show_without_activation(&window)?;
+                #[cfg(target_os = "macos")]
+                {
+                    unsafe extern "C" {
+                        fn echolingo_register_capture_pin(window: *mut std::ffi::c_void) -> i32;
+                    }
+                    let pointer = window.ns_window().map_err(|_| CLOSED.to_owned())?;
+                    if unsafe { echolingo_register_capture_pin(pointer) } != 0 {
+                        return Err("SCREENSHOT_PIN: 无法准备贴图截图权限".to_owned());
+                    }
+                }
+                Ok(())
             })
         };
         let mut entries = super::locked(&state.screenshot_pins.entries)?;

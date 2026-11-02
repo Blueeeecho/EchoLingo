@@ -1188,6 +1188,77 @@ func selectNativeCaptureRegion(purpose: CapturePurpose = .region, operation: Cap
     }
 }
 
+// Only the Rust ready-pin path registers real native objects. Never infer
+// capture eligibility from window titles, labels, or a numeric ID alone.
+private final class CaptureReadyPin {
+    weak var window: NSWindow?
+    let generation: UInt64
+    init(_ window: NSWindow, generation: UInt64) { self.window = window; self.generation = generation }
+}
+private var captureReadyPins: [ObjectIdentifier: CaptureReadyPin] = [:]
+private var captureReadyPinGeneration: UInt64 = 0
+private var captureReadyPinCloseObserver: NSObjectProtocol?
+
+@_cdecl("echolingo_register_capture_pin")
+public func echoLingoRegisterCapturePin(_ pointer: UnsafeMutableRawPointer?) -> Int32 {
+    guard Thread.isMainThread, let window = screenshotEditorOwner(pointer),
+          NSApp.windows.contains(where: { $0 === window }), window.isVisible,
+          !window.isMiniaturized, window.windowNumber > 0,
+          UInt64(window.windowNumber) <= UInt64(UInt32.max) else { return -1 }
+    captureReadyPins = captureReadyPins.filter { $0.value.window != nil }
+    let identity = ObjectIdentifier(window)
+    guard captureReadyPins[identity] != nil || captureReadyPins.count < 6,
+          captureReadyPinGeneration < UInt64.max else { return -1 }
+    if captureReadyPinCloseObserver == nil {
+        captureReadyPinCloseObserver = NotificationCenter.default.addObserver(
+            forName: NSWindow.willCloseNotification, object: nil, queue: .main) { notification in
+                if let closed = notification.object as? NSWindow { captureReadyPins.removeValue(forKey: ObjectIdentifier(closed)) }
+            }
+    }
+    window.sharingType = .readOnly
+    if captureReadyPins[identity] == nil {
+        captureReadyPinGeneration += 1
+        captureReadyPins[identity] = CaptureReadyPin(window, generation: captureReadyPinGeneration)
+    }
+    return 0
+}
+
+struct CaptureReadyPinSnapshot {
+    // Primitive generations only: no AppKit object is retained/released on a
+    // capture worker. Registration never reuses a generation, even if native
+    // addresses or WindowServer numbers are recycled after closing.
+    let windows: [(UInt64, CGWindowID)]
+    var ids: Set<CGWindowID> { Set(windows.map { $0.1 }) }
+}
+private func captureReadyPinWindows() -> [(UInt64, CGWindowID)] {
+    captureReadyPins.compactMap { identity, entry in
+        guard let window = entry.window, ObjectIdentifier(window) == identity, NSApp.windows.contains(where: { $0 === window }), window.isVisible,
+              !window.isMiniaturized, window.sharingType == .readOnly,
+              window.windowNumber > 0, UInt64(window.windowNumber) <= UInt64(UInt32.max) else { return nil }
+        return (entry.generation, CGWindowID(window.windowNumber))
+    }
+}
+func captureReadyPinSnapshot() -> CaptureReadyPinSnapshot {
+    onMainThread { CaptureReadyPinSnapshot(windows: captureReadyPinWindows()) }
+}
+func captureValidateReadyPins(_ snapshot: CaptureReadyPinSnapshot) throws {
+    try onMainThread {
+        let current = captureReadyPinWindows()
+        guard capturePinIdentitiesMatch(snapshot.windows, current) else {
+            throw NativeError("CAPTURE: 贴图窗口状态已改变，请重新截图。")
+        }
+    }
+}
+func capturePinIdentitiesMatch(_ expected: [(UInt64, CGWindowID)], _ current: [(UInt64, CGWindowID)]) -> Bool {
+    expected.count == current.count
+        && Set(expected.map { $0.0 }).count == expected.count
+        && Set(current.map { $0.0 }).count == current.count
+        && expected.allSatisfy { item in current.contains { $0.0 == item.0 && $0.1 == item.1 } }
+}
+func captureExcludesOwnWindow(pid: Int32, id: CGWindowID, ownPID: Int32, readyPins: Set<CGWindowID>) -> Bool {
+    pid == ownPID && !readyPins.contains(id)
+}
+
 @available(macOS 12.3, *)
 private func captureFailure(_ error: Error?) -> NativeError {
     if let error = error as NSError?, error.domain == SCStreamErrorDomain, error.code == -3801 {
@@ -1200,6 +1271,7 @@ private func captureFailure(_ error: Error?) -> NativeError {
 func captureScreenKitImage(_ plan: CaptureRegionPlan, operation: CaptureScreenshotOperation? = nil, trace: NativeCaptureTrace? = nil) throws -> CGImage {
     try captureValidateWindow(plan.window)
     let deadline = Date().addingTimeInterval(15)
+    let pins = captureReadyPinSnapshot()
     let contentWaiter = CaptureResultWaiter<SCShareableContent>()
     SCShareableContent.getExcludingDesktopWindows(false, onScreenWindowsOnly: true) { content, error in
         if let content = content { contentWaiter.finish(.success(content)) }
@@ -1207,7 +1279,14 @@ func captureScreenKitImage(_ plan: CaptureRegionPlan, operation: CaptureScreensh
     }
     let content = try contentWaiter.wait(until: deadline, cancelled: operation.map { operation in { operation.isCancelled } })
     trace?.record(.shareableContentReady)
-    let ownWindows = content.windows.filter { $0.owningApplication?.processID == ProcessInfo.processInfo.processIdentifier }
+    try captureValidateReadyPins(pins)
+    guard pins.ids.allSatisfy({ id in content.windows.contains {
+        $0.windowID == id && $0.owningApplication?.processID == ProcessInfo.processInfo.processIdentifier
+    } }) else { throw NativeError("CAPTURE: 贴图窗口未出现在截图列表中，请重试。") }
+    let ownWindows = content.windows.filter {
+        captureExcludesOwnWindow(pid: $0.owningApplication?.processID ?? -1, id: $0.windowID,
+            ownPID: ProcessInfo.processInfo.processIdentifier, readyPins: pins.ids)
+    }
     guard let context = CGContext(data: nil, width: plan.pixelWidth, height: plan.pixelHeight,
                                   bitsPerComponent: 8, bytesPerRow: plan.pixelWidth * 4,
                                   space: CGColorSpaceCreateDeviceRGB(),
@@ -1224,6 +1303,7 @@ func captureScreenKitImage(_ plan: CaptureRegionPlan, operation: CaptureScreensh
         }
         let part = plan.region.intersection(geometry.frame)
         let source = captureSourceRectangle(plan.region, display: geometry)
+        try captureValidateReadyPins(pins)
         let filter = SCContentFilter(display: display, excludingWindows: ownWindows)
         if #available(macOS 14.2, *) { filter.includeMenuBar = true }
         let configuration = SCStreamConfiguration()
@@ -1240,6 +1320,7 @@ func captureScreenKitImage(_ plan: CaptureRegionPlan, operation: CaptureScreensh
         }
         let image = try imageWaiter.wait(until: deadline, cancelled: operation.map { operation in { operation.isCancelled } })
         trace?.record(.pixelsReady)
+        try captureValidateReadyPins(pins)
         let destination = CGRect(x: (part.minX - plan.region.minX) * plan.scale,
                                  y: (part.minY - plan.region.minY) * plan.scale,
                                  width: part.width * plan.scale, height: part.height * plan.scale)
@@ -1250,11 +1331,10 @@ func captureScreenKitImage(_ plan: CaptureRegionPlan, operation: CaptureScreensh
     return image
 }
 
-// Legacy captures must compose only other processes' windows. Filtering the
-// small PID/ID projection keeps a pinned translator visible without recognizing
-// its own text. Preserve WindowServer's front-to-back ordering; do not inspect
+// Legacy captures compose external windows plus explicitly registered ready
+// image pins. Translator/editor/selector windows remain excluded. Preserve WindowServer's front-to-back ordering; do not inspect
 // titles or fall back to a full-desktop image when metadata is incomplete.
-func captureLegacyWindowIds(_ records: [[String: Any]], excludingPID: Int32) -> [CGWindowID] {
+func captureLegacyWindowIds(_ records: [[String: Any]], excludingPID: Int32, readyPins: Set<CGWindowID> = []) -> [CGWindowID] {
     var included: [CGWindowID] = []
     var seen = Set<CGWindowID>()
     for record in records {
@@ -1265,9 +1345,9 @@ func captureLegacyWindowIds(_ records: [[String: Any]], excludingPID: Int32) -> 
         let pid = owner.doubleValue
         let id = number.doubleValue
         guard pid.isFinite, pid.rounded(.towardZero) == pid, pid >= 0, pid <= Double(Int32.max),
-              Int32(pid) != excludingPID,
               id.isFinite, id.rounded(.towardZero) == id, id > 0, id <= Double(UInt32.max) else { continue }
         let window = CGWindowID(id)
+        guard !captureExcludesOwnWindow(pid: Int32(pid), id: window, ownPID: excludingPID, readyPins: readyPins) else { continue }
         if seen.insert(window).inserted { included.append(window) }
     }
     return included
@@ -1314,10 +1394,13 @@ func captureNativePlannedImage(_ plan: CaptureRegionPlan, purpose: CapturePurpos
     let primaryHeight = CGDisplayBounds(CGMainDisplayID()).height
     let rectangle = CGRect(x: plan.region.minX, y: primaryHeight - plan.region.maxY,
                            width: plan.region.width, height: plan.region.height)
+    let pins = captureReadyPinSnapshot()
     guard let records = CGWindowListCopyWindowInfo(.optionOnScreenOnly, kCGNullWindowID) as? [[String: Any]] else {
         throw NativeError("CAPTURE: 无法读取用于区域截图的窗口列表，请重试。")
     }
-    let ids = captureLegacyWindowIds(records, excludingPID: ProcessInfo.processInfo.processIdentifier)
+    try captureValidateReadyPins(pins)
+    let ids = captureLegacyWindowIds(records, excludingPID: ProcessInfo.processInfo.processIdentifier, readyPins: pins.ids)
+    guard pins.ids.isSubset(of: Set(ids)) else { throw NativeError("CAPTURE: 贴图窗口未出现在截图列表中，请重试。") }
     guard !ids.isEmpty else {
         throw NativeError("CAPTURE: 没有可用于区域截图的外部窗口，请重新框选。")
     }
@@ -1339,10 +1422,12 @@ func captureNativePlannedImage(_ plan: CaptureRegionPlan, purpose: CapturePurpos
             try captureValidateWindow(plan.window)
             let part = plan.region.intersection(geometry.frame)
             let source = CGRect(x: part.minX, y: primaryHeight - part.maxY, width: part.width, height: part.height)
+            try captureValidateReadyPins(pins)
             guard let image = CGImage(windowListFromArrayScreenBounds: source, windowArray: windows,
                                       imageOption: [.bestResolution, .boundsIgnoreFraming]) else {
                 throw NativeError("CAPTURE: macOS 未能完成可见区域截图。")
             }
+            try captureValidateReadyPins(pins)
             let destination = CGRect(x: (part.minX - plan.region.minX) * plan.scale,
                                      y: (part.minY - plan.region.minY) * plan.scale,
                                      width: part.width * plan.scale, height: part.height * plan.scale)
@@ -1352,11 +1437,13 @@ func captureNativePlannedImage(_ plan: CaptureRegionPlan, purpose: CapturePurpos
         guard let image = context.makeImage() else { throw NativeError("CAPTURE: 无法完成截图图像。") }
         return image
     }
+    try captureValidateReadyPins(pins)
     guard let image = CGImage(windowListFromArrayScreenBounds: rectangle, windowArray: windows,
                               imageOption: [.bestResolution, .boundsIgnoreFraming]) else {
         throw NativeError("CAPTURE: macOS 未能完成区域截图，请检查屏幕录制权限。")
     }
     try captureValidateWindow(plan.window)
+    try captureValidateReadyPins(pins)
     return image
 }
 
@@ -1490,6 +1577,14 @@ func captureOverlayBehaviorSelfTest() throws {
 }
 
 func captureLegacyExclusionSelfTest() throws {
+    guard capturePinIdentitiesMatch([(1, 10), (2, 20)], [(2, 20), (1, 10)]),
+          !capturePinIdentitiesMatch([(1, 10)], [(2, 10)]), // Reused WindowServer ID, different native generation.
+          !capturePinIdentitiesMatch([(1, 10)], [(1, 20)]), // Same object, different WindowServer ID.
+          !capturePinIdentitiesMatch([(1, 10)], []), // Closed, hidden, minimized, or no longer app-owned.
+          !capturePinIdentitiesMatch([], [(2, 20)]), // A newly ready pin cannot be omitted from content metadata.
+          !capturePinIdentitiesMatch([(1, 10), (1, 10)], [(1, 10), (2, 20)]) else {
+        throw NativeError("SELF_TEST: Stale or reused pin capture identity was accepted.")
+    }
     let ownPID: Int32 = 901
     let owner = kCGWindowOwnerPID as String
     let number = kCGWindowNumber as String
@@ -1509,6 +1604,14 @@ func captureLegacyExclusionSelfTest() throws {
         [owner: 905, number: 4_000_000_000],
     ]
     let expected: [CGWindowID] = [51, 7, 4_000_000_000]
+    let approved: Set<CGWindowID> = [101]
+    guard captureLegacyWindowIds(records, excludingPID: ownPID, readyPins: approved) == [51, 101, 7, 4_000_000_000],
+          captureExcludesOwnWindow(pid: ownPID, id: 100, ownPID: ownPID, readyPins: approved),
+          !captureExcludesOwnWindow(pid: ownPID, id: 101, ownPID: ownPID, readyPins: approved),
+          captureExcludesOwnWindow(pid: ownPID, id: 101, ownPID: ownPID, readyPins: []),
+          !captureExcludesOwnWindow(pid: 902, id: 51, ownPID: ownPID, readyPins: []) else {
+        throw NativeError("SELF_TEST: Only an explicitly ready image pin may bypass own-window exclusion.")
+    }
     let ids = captureLegacyWindowIds(records, excludingPID: ownPID)
     guard ids == expected else {
         throw NativeError("SELF_TEST: Legacy capture included own/unknown windows or changed stacking order.")
