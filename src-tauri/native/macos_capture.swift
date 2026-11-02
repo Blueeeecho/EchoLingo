@@ -1380,6 +1380,7 @@ func captureEditorGeometry(_ plan: CaptureRegionPlan, primaryHeight: CGFloat) th
 }
 
 func captureSelectionSelfTest() throws {
+    try deferredEditorGeometrySelfTest()
     let deferredDisplay = CaptureDisplayGeometry(id: 99, frame: CGRect(x: -1000, y: 0, width: 1000, height: 800), scale: 2)
     var deferred = CaptureSelectorState(displays: [deferredDisplay], purpose: .screenshotSelection)
     deferred.receive(.leftDown(CGPoint(x: -900, y: 100)))
@@ -1847,6 +1848,7 @@ struct DeferredCapturePlan: Codable {
     let ownerPID: Int32
     let primaryHeight: Double
     let displays: [DeferredCaptureDisplay]
+    let editorDisplayIDs: [UInt32]
     let window: DeferredCaptureWindow?
 }
 struct DeferredCaptureInput: Codable {
@@ -1871,6 +1873,7 @@ func validateDeferredCapturePlan(_ plan: DeferredCapturePlan) throws -> [Capture
           !plan.displays.isEmpty, plan.displays.count <= 64 else {
         throw NativeError("CAPTURE_GEOMETRY: 截图会话或显示器布局已失效。")
     }
+    _ = try deferredEditorDisplays(plan)
     let current = try deferredCaptureDisplays()
     guard current.count == plan.displays.count, Set(plan.displays.map(\.id)).count == plan.displays.count else {
         throw NativeError("CAPTURE_GEOMETRY: 显示器布局已改变。")
@@ -1887,13 +1890,31 @@ func validateDeferredCapturePlan(_ plan: DeferredCapturePlan) throws -> [Capture
     }
     return plan.displays.map { CaptureDisplayGeometry(id: $0.id, frame: $0.frame.frame, scale: $0.scale) }
 }
+// Freeze the host's displays at initial selection. Keeping every display in
+// the validation snapshot must not make the editor span the entire desktop.
+func deferredEditorDisplays(_ snapshot: DeferredCapturePlan) throws -> [DeferredCaptureDisplay] {
+    guard !snapshot.editorDisplayIDs.isEmpty,
+          Set(snapshot.editorDisplayIDs).count == snapshot.editorDisplayIDs.count,
+          snapshot.editorDisplayIDs.allSatisfy({ id in snapshot.displays.contains { $0.id == id } }) else {
+        throw NativeError("CAPTURE_GEOMETRY: 截图编辑屏幕已失效，请重新框选。")
+    }
+    return snapshot.displays.filter { snapshot.editorDisplayIDs.contains($0.id) }
+}
+func deferredEditorDisplayIDs(_ region: CaptureRegionPlan, separateSpaces: Bool) throws -> [UInt32] {
+    guard !region.displays.isEmpty else { throw NativeError("CAPTURE_GEOMETRY: 截图屏幕不可用。") }
+    guard !separateSpaces || region.displays.count == 1 else {
+        throw NativeError("CAPTURE_GEOMETRY: 显示器使用独立空间时，请在单个屏幕内框选截图。")
+    }
+    return region.displays.map(\.id)
+}
 func deferredCaptureGeometry(_ region: CaptureRegionPlan, snapshot: DeferredCapturePlan) throws -> [String: Any] {
-    let all = CaptureRegionPlan(region: region.region, scale: region.scale, pixelWidth: region.pixelWidth,
-        pixelHeight: region.pixelHeight, displays: snapshot.displays.map {
+    let editorDisplays = try deferredEditorDisplays(snapshot)
+    let viewport = CaptureRegionPlan(region: region.region, scale: region.scale, pixelWidth: region.pixelWidth,
+        pixelHeight: region.pixelHeight, displays: editorDisplays.map {
             CaptureDisplayGeometry(id: $0.id, frame: $0.frame.frame, scale: $0.scale)
         })
-    return ["captureGeometry": try captureEditorGeometry(all, primaryHeight: snapshot.primaryHeight),
-        "captureScreens": snapshot.displays.map { display in
+    return ["captureGeometry": try captureEditorGeometry(viewport, primaryHeight: snapshot.primaryHeight),
+        "captureScreens": editorDisplays.map { display in
             ["x": display.usable.x, "y": snapshot.primaryHeight - display.usable.y - display.usable.height,
              "width": display.usable.width, "height": display.usable.height]
         }]
@@ -1904,7 +1925,9 @@ func selectDeferredScreenshot(cancellation: CaptureScreenshotOperation) throws -
     let displays = try deferredCaptureDisplays()
     let selected = try selectNativeCaptureRegion(purpose: .screenshotSelection, operation: cancellation)
     let snapshot = DeferredCapturePlan(version: 1, ownerPID: ProcessInfo.processInfo.processIdentifier,
-        primaryHeight: selected.primaryHeight, displays: displays, window: selected.window.map {
+        primaryHeight: selected.primaryHeight, displays: displays,
+        editorDisplayIDs: try deferredEditorDisplayIDs(selected, separateSpaces: onMainThread { NSScreen.screensHaveSeparateSpaces }),
+        window: selected.window.map {
             DeferredCaptureWindow(id: $0.id, pid: $0.pid, frame: DeferredCaptureRect($0.frame))
         })
     _ = try validateDeferredCapturePlan(snapshot)
@@ -1923,7 +1946,9 @@ func captureDeferredScreenshot(_ input: Data) throws -> [String: Any] {
     let displays = try validateDeferredCapturePlan(request.plan)
     let r = request.rect
     let rectangle = CGRect(x: r.x, y: request.plan.primaryHeight - r.y - r.height, width: r.width, height: r.height)
-    guard let first = displays.first, displays.dropFirst().reduce(first.frame, { $0.union($1.frame) }).contains(rectangle) else {
+    let editorDisplays = try deferredEditorDisplays(request.plan)
+    guard let first = editorDisplays.first,
+          editorDisplays.dropFirst().reduce(first.frame.frame, { $0.union($1.frame.frame) }).contains(rectangle) else {
         throw NativeError("CAPTURE_GEOMETRY: 选区超出当前屏幕。")
     }
     var plan = try capturePlan(rectangle, displays: displays)
@@ -1941,4 +1966,50 @@ func captureDeferredScreenshot(_ input: Data) throws -> [String: Any] {
     result["imageBase64"] = try encodePNG(data as Data)
     result["ok"] = true
     return result
+}
+
+// Pure fixtures: no display hardware, screen recording, or app activation.
+func deferredEditorGeometrySelfTest() throws {
+    func expect(_ value: Bool) throws {
+        if !value { throw NativeError("SELF_TEST: Deferred editor viewport fixture failed.") }
+    }
+    let main = CaptureDisplayGeometry(id: 1, frame: CGRect(x: 0, y: 0, width: 2048, height: 1152), scale: 2)
+    for secondaryFrame in [CGRect(x: -1920, y: 0, width: 1920, height: 1080),
+                           CGRect(x: 2048, y: -180, width: 1920, height: 1080),
+                           CGRect(x: 0, y: 1152, width: 1920, height: 1080)] {
+        let secondary = CaptureDisplayGeometry(id: 2, frame: secondaryFrame, scale: 1)
+        let displays = [main, secondary]
+        let selected = try capturePlan(secondaryFrame.insetBy(dx: 100, dy: 100), displays: displays)
+        let ids = try deferredEditorDisplayIDs(selected, separateSpaces: true)
+        try expect(ids == [2])
+        let metadata = displays.map { DeferredCaptureDisplay(id: $0.id, frame: DeferredCaptureRect($0.frame),
+            scale: $0.scale, usable: DeferredCaptureRect($0.frame)) }
+        let snapshot = DeferredCapturePlan(version: 1, ownerPID: 1, primaryHeight: 1152,
+            displays: metadata, editorDisplayIDs: ids, window: nil)
+        let initial = try deferredCaptureGeometry(selected, snapshot: snapshot)
+        let smaller = try capturePlan(secondaryFrame.insetBy(dx: 200, dy: 200), displays: displays)
+        let final = try deferredCaptureGeometry(smaller, snapshot: snapshot)
+        guard let a = initial["captureGeometry"] as? [String: Double],
+              let b = final["captureGeometry"] as? [String: Double],
+              let screens = initial["captureScreens"] as? [[String: Double]] else {
+            throw NativeError("SELF_TEST: Missing deferred geometry.")
+        }
+        try expect(a["screenX"] == Double(secondaryFrame.minX) && a["screenWidth"] == 1920)
+        try expect(a["screenY"] == Double(1152 - secondaryFrame.maxY) && a["screenHeight"] == 1080)
+        for key in ["screenX", "screenY", "screenWidth", "screenHeight"] { try expect(a[key] == b[key]) }
+        try expect(a["scale"] == 1 && screens.count == 1 && snapshot.displays.count == 2)
+        for invalid in [[], [2, 2], [99]] as [[UInt32]] {
+            let bad = DeferredCapturePlan(version: 1, ownerPID: 1, primaryHeight: 1152,
+                displays: metadata, editorDisplayIDs: invalid, window: nil)
+            var rejected = false
+            do { _ = try deferredEditorDisplays(bad) } catch { rejected = true }
+            try expect(rejected)
+        }
+    }
+    let right = CaptureDisplayGeometry(id: 2, frame: CGRect(x: 2048, y: 0, width: 1920, height: 1080), scale: 1)
+    let crossing = try capturePlan(CGRect(x: 2000, y: 100, width: 100, height: 200), displays: [main, right])
+    try expect(try deferredEditorDisplayIDs(crossing, separateSpaces: false) == [1, 2])
+    var rejected = false
+    do { _ = try deferredEditorDisplayIDs(crossing, separateSpaces: true) } catch { rejected = true }
+    try expect(rejected && crossing.region == CGRect(x: 2000, y: 100, width: 100, height: 200))
 }

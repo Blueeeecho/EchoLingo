@@ -71,7 +71,9 @@ final class SelectionTrace {
         "requestSourceAnchored", "requestSourceMatches", "requestSourceReason", "secureInputEnabled", "accessibilityGranted", "clipboardChanged",
         "windowTicketSource", "windowTicketReason", "windowRecordsCount",
         "probeStep", "childrenStatus", "childrenCount", "selectedChildrenStatus", "selectedChildrenCount",
-        "optionalPluralRootFailure", "optionalPluralDescendantFailures", "optionalPluralAncestorsVerified"
+        "optionalPluralRootFailure", "optionalPluralDescendantFailures", "optionalPluralAncestorsVerified",
+        "probeNodeIndex", "probeParentIndex", "probeDepth", "probeRemaining", "probeRoleClass", "probeSubroleClass",
+        "probeSourceTarget", "probeDocumentNodes", "probeDuplicateNodes", "probePositiveNodes"
     ]
     private let start = ProcessInfo.processInfo.systemUptime
     private let startedAtUnixMs = Date().timeIntervalSince1970 * 1000
@@ -83,6 +85,7 @@ final class SelectionTrace {
     private var copyIssued = false
     private var optionalPluralRootFailure = false
     private var optionalPluralDescendantFailures = 0
+    private var probeTermination: [String: Any]?
     var hasIssuedCopy: Bool { copyIssued }
     init(publish: Bool = true) {
         self.publish = publish
@@ -117,6 +120,32 @@ final class SelectionTrace {
     func finish(errorCategory: String? = nil) {
         store(state: errorCategory == nil ? "completed" : "failed", errorCategory: errorCategory)
     }
+    // Independent of the bounded event ring. Only fixed classifications and
+    // scalar counters are retained: never a title, AX value, selection or text.
+    func recordProbeStop(_ stop: SelectionProbeStop, role: String?, subrole: String?,
+                         sourceTarget: Bool?, documentNodes: Int, observerStep: String?) {
+        let roles: Set<String> = ["AXWindow", "AXGroup", "AXSplitGroup", "AXScrollArea", "AXLayoutArea", "AXDocument", "AXWebArea",
+            "AXStaticText", "AXTextField", "AXTextArea", "AXSearchField", "AXComboBox", "AXSheet", "AXButton",
+            "AXPopUpButton", "AXMenuButton", "AXMenu", "AXMenuItem", "AXMenuBar", "AXMenuBarItem"]
+        let steps: Set<String> = ["owner", "role", "subrole", "focused", "copyTarget", "selectionAttributes",
+            "optionalPluralDescendantWindow", "optionalPluralUnknownSelection", "optionalPluralUnknownLeaf",
+            "childrenCount", "childrenValues", "childrenType"]
+        let roleClass = role.map { roles.contains($0) ? $0 : "unknown" } ?? "unavailable"
+        let subroleClass = subrole.map { value in
+            value == kAXSecureTextFieldSubrole as String ? "secure" :
+                (["AXDialog", "AXSystemDialog"].contains(value) ? "dialog" : "other")
+        } ?? "unavailable"
+        let fields: [String: Any] = ["decision": stop.reason.rawValue,
+            "probeNodeIndex": stop.visit.index, "probeParentIndex": stop.visit.parentIndex,
+            "probeDepth": stop.visit.depth, "probeRemaining": stop.visit.remaining,
+            "probeNodes": stop.visitedNodes, "probeDuplicateNodes": stop.duplicateNodes,
+            "probePositiveNodes": stop.positiveNodes, "probeDocumentNodes": min(64, max(0, documentNodes)),
+            "probeRoleClass": roleClass, "probeSubroleClass": subroleClass,
+            "probeSourceTarget": sourceTarget as Any? ?? NSNull(),
+            "probeStep": observerStep.map { steps.contains($0) ? $0 : "unknown" } ?? "notObserved"]
+        probeTermination = fields
+        record("selection-probe-termination", fields)
+    }
     private func elapsedMilliseconds() -> Double {
         (ProcessInfo.processInfo.systemUptime - start) * 1000
     }
@@ -130,6 +159,7 @@ final class SelectionTrace {
                 "optionalPluralRootFailure": optionalPluralRootFailure,
                 "optionalPluralRootFailureStatus": optionalPluralRootFailure ? Int(AXError.failure.rawValue) as Any : NSNull(),
                 "optionalPluralDescendantFailures": optionalPluralDescendantFailures,
+                "probeTermination": probeTermination as Any? ?? NSNull(),
                 "elapsedMs": elapsedMilliseconds(), "events": events, "eventsTruncated": truncated]
     }
     private func store(state: String, errorCategory: String?) {
@@ -862,6 +892,27 @@ enum SelectionProbeResult: Equatable {
     }
 }
 
+struct SelectionProbeVisit {
+    let index: Int
+    let parentIndex: Int
+    let depth: Int
+    let remaining: Int
+}
+
+enum SelectionProbeStopReason: String {
+    case invalidConfiguration, timeLimit, nodeLimit, depthLimit, childrenLimit
+    case contextChanged, observerInvalid, observerResourceLimit, protectedNode
+    case ambiguousSelection, noPositiveSelection, positiveSelection
+}
+
+struct SelectionProbeStop {
+    let reason: SelectionProbeStopReason
+    let visit: SelectionProbeVisit
+    let visitedNodes: Int
+    let duplicateNodes: Int
+    let positiveNodes: Int
+}
+
 // A partial traversal never supplies text. A resource limit is distinct from
 // invalid metadata: it may request an independent, guarded user-action copy,
 // but does not certify a selection or the safety of unvisited nodes.
@@ -869,37 +920,54 @@ func probeUniqueSelection<Node>(root: Node, maximumNodes: Int = 64, maximumDepth
                                same: (Node, Node) -> Bool, contextIsCurrent: () -> Bool,
                                withinBudget: () -> Bool = { true },
                                requireCompleteSubtree: () -> Bool = { false },
+                               onVisit: (SelectionProbeVisit) -> Void = { _ in },
+                               onStop: (SelectionProbeStop) -> Void = { _ in },
                                observe: (Node, Int) -> SelectionProbeObservation<Node>?) -> (SelectionProbeResult, Int) {
-    guard maximumNodes > 0, maximumDepth >= 0, withinBudget() else { return (.resourceLimit, 0) }
-    guard contextIsCurrent() else { return (withinBudget() ? .stale : .resourceLimit, 0) }
-    var pending: [(Node, Int)] = [(root, 0)]
     var visited = [Node]()
+    var lastVisit = SelectionProbeVisit(index: 0, parentIndex: 0, depth: 0, remaining: max(0, maximumNodes))
+    var duplicateNodes = 0
+    var positiveNodes = 0
+    func finish(_ result: SelectionProbeResult, _ reason: SelectionProbeStopReason) -> (SelectionProbeResult, Int) {
+        onStop(SelectionProbeStop(reason: reason, visit: lastVisit, visitedNodes: visited.count,
+            duplicateNodes: duplicateNodes, positiveNodes: positiveNodes))
+        return (result, visited.count)
+    }
+    guard maximumNodes > 0, maximumDepth >= 0 else { return finish(.resourceLimit, .invalidConfiguration) }
+    guard withinBudget() else { return finish(.resourceLimit, .timeLimit) }
+    guard contextIsCurrent() else { return withinBudget() ? finish(.stale, .contextChanged) : finish(.resourceLimit, .timeLimit) }
+    var pending: [(Node, Int, Int)] = [(root, 0, 0)]
     var selected: String?
     while !pending.isEmpty {
-        let (node, depth) = pending.removeFirst()
-        if visited.contains(where: { same($0, node) }) { continue }
-        guard withinBudget(), visited.count < maximumNodes, depth <= maximumDepth else { return (.resourceLimit, visited.count) }
+        let (node, depth, parentIndex) = pending.removeFirst()
+        if visited.contains(where: { same($0, node) }) { duplicateNodes += 1; continue }
+        lastVisit = SelectionProbeVisit(index: visited.count + 1, parentIndex: parentIndex, depth: depth,
+            remaining: max(0, maximumNodes - visited.count - 1))
+        onVisit(lastVisit)
+        guard withinBudget() else { return finish(.resourceLimit, .timeLimit) }
+        guard visited.count < maximumNodes else { return finish(.resourceLimit, .nodeLimit) }
+        guard depth <= maximumDepth else { return finish(.resourceLimit, .depthLimit) }
         visited.append(node)
         // A hard observer failure wins even if its AX call also used the budget.
-        guard let value = observe(node, maximumNodes - visited.count) else { return (.incomplete, visited.count) }
+        guard let value = observe(node, maximumNodes - visited.count) else { return finish(.incomplete, .observerInvalid) }
         if value.protected {
-            if requireCompleteSubtree() { return (.incomplete, visited.count) }
+            if requireCompleteSubtree() { return finish(.incomplete, .protectedNode) }
             continue
         }
-        if value.resourceLimit { return (.resourceLimit, visited.count) }
+        if value.resourceLimit { return finish(.resourceLimit, .observerResourceLimit) }
         if let text = value.text, !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            guard selected == nil else { return (.ambiguous, visited.count) }
+            positiveNodes += 1
+            guard selected == nil else { return finish(.ambiguous, .ambiguousSelection) }
             selected = text
             if !requireCompleteSubtree() { continue }
         }
-        guard value.children.count <= maximumNodes - visited.count,
-              depth < maximumDepth || value.children.isEmpty else { return (.resourceLimit, visited.count) }
-        pending.append(contentsOf: value.children.map { ($0, depth + 1) })
+        guard value.children.count <= maximumNodes - visited.count else { return finish(.resourceLimit, .childrenLimit) }
+        guard depth < maximumDepth || value.children.isEmpty else { return finish(.resourceLimit, .depthLimit) }
+        pending.append(contentsOf: value.children.map { ($0, depth + 1, visited.count) })
     }
-    guard withinBudget() else { return (.resourceLimit, visited.count) }
-    guard contextIsCurrent() else { return (withinBudget() ? .stale : .resourceLimit, visited.count) }
-    guard withinBudget() else { return (.resourceLimit, visited.count) }
-    return (selected.map(SelectionProbeResult.text) ?? .none, visited.count)
+    guard withinBudget() else { return finish(.resourceLimit, .timeLimit) }
+    guard contextIsCurrent() else { return withinBudget() ? finish(.stale, .contextChanged) : finish(.resourceLimit, .timeLimit) }
+    guard withinBudget() else { return finish(.resourceLimit, .timeLimit) }
+    return finish(selected.map(SelectionProbeResult.text) ?? .none, selected == nil ? .noPositiveSelection : .positiveSelection)
 }
 
 func selectionProbeAllowsCompatibility(_ result: SelectionProbeResult, knownUnsafeTarget: Bool) -> Bool {
@@ -1330,14 +1398,24 @@ func recoverySelection(originalFocus: AXUIElement?, source: SelectionApplication
             throw error
         }
     }
+    var probeRole: String?
+    var probeSubrole: String?
+    var probeSourceTarget: Bool?
+    var probeStep = "owner"
+    var probeDocumentNodes = 0
     let (result, count) = probeUniqueSelection(root: root, same: { CFEqual($0, $1) },
         contextIsCurrent: contextIsCurrent,
         withinBudget: { selectionQueryBudgetAvailable(deadline) },
-        requireCompleteSubtree: { optionalPluralRootFailure }) { element, remaining in
+        requireCompleteSubtree: { optionalPluralRootFailure },
+        onVisit: { _ in
+            probeRole = nil; probeSubrole = nil; probeSourceTarget = nil; probeStep = "owner"
+        }, onStop: { stop in
+            trace.recordProbeStop(stop, role: probeRole, subrole: probeSubrole,
+                sourceTarget: probeSourceTarget, documentNodes: probeDocumentNodes, observerStep: probeStep)
+        }) { element, remaining in
         // Keep per-node metadata private unless this node fails. This avoids
         // flooding the retained trace or discarding the initial source proof.
         let nodeTrace = SelectionTrace(publish: false)
-        var probeStep = "owner"
         var childFields = [String: Any]()
         func invalid() -> SelectionProbeObservation<AXUIElement>? {
             if let events = nodeTrace.snapshot()["events"] as? [[String: Any]] {
@@ -1364,21 +1442,27 @@ func recoverySelection(originalFocus: AXUIElement?, source: SelectionApplication
             let roleStatus = AXUIElementCopyAttributeValue(element, kAXRoleAttribute as CFString, &role)
             nodeTrace.record("role", ["roleStatus": roleStatus.rawValue, "role": role as? String as Any? ?? NSNull()])
             let roleQuery = selectionTextQuery(status: roleStatus, value: role)
+            probeRole = roleQuery.value
             try requireUsableSelectionQuery(roleQuery)
+            if readonlySelectionContainer(probeRole) { probeDocumentNodes += 1 }
             try requireSelectionQueryBudget(deadline)
             probeStep = "subrole"
             let subroleStatus = AXUIElementCopyAttributeValue(element, kAXSubroleAttribute as CFString, &subrole)
             nodeTrace.record("subrole", ["subroleStatus": subroleStatus.rawValue, "subrole": subrole as? String as Any? ?? NSNull()])
             let subroleQuery = selectionTextQuery(status: subroleStatus, value: subrole)
+            probeSubrole = subroleQuery.value
             try requireUsableSelectionQuery(subroleQuery)
             let sensitive = subroleQuery.value == kAXSecureTextFieldSubrole as String
             // A background empty search/password field is not the source
             // target. Only original or explicitly AXFocused nodes block copy.
             var sourceTarget = originalFocus.map { CFEqual($0, element) } ?? false
+            probeSourceTarget = sourceTarget
             if !sourceTarget && (sensitive || selectionEditableRole(roleQuery.value)) {
                 probeStep = "focused"
                 sourceTarget = try selectionNodeExplicitlyFocused(element, deadline: deadline)
+                probeSourceTarget = sourceTarget
             }
+            probeStep = "copyTarget"
             do { try requireSelectionCopyTarget(role: roleQuery.value, subrole: subroleQuery.value) }
             catch {
                 if selectionTargetBlocksCompatibility(isSourceTarget: sourceTarget, role: roleQuery.value, rejectedControl: true) { knownBlockedTarget = true }
@@ -2271,6 +2355,7 @@ func selectionPolicySelfTest() throws {
     try selectionCopyPolicySelfTest()
     try selectionRecoverySelfTest()
     try selectionOptionalPluralRecoverySelfTest()
+    try selectionProbeTerminationSelfTest()
     try selectionMixedRecoverySelfTest()
     try selectionChatMultiSelectionSelfTest()
     try selectionCompatibilitySelfTest()
@@ -2923,6 +3008,90 @@ func selectionOptionalPluralSubtreeSelfTest() throws {
         id == 0 ? Observation(text: whole, children: [1], protected: false) : nil
     }
     try expect(ordinaryWalker.0 == .text(whole) && ordinaryWalker.1 == 1)
+}
+
+func selectionProbeTerminationSelfTest() throws {
+    func expect(_ condition: Bool) throws {
+        if !condition { throw NativeError("SELF_TEST: Selection probe termination diagnostics failed.") }
+    }
+    typealias Observation = SelectionProbeObservation<Int>
+    let whole = "first generated message\nsecond generated message"
+    // Four deferred groups are BFS siblings here, NOT four levels. The next
+    // node is a button before a document. Reproduce the real policy's silent
+    // protected-node exit without claiming this is the user's unknown role.
+    let roles = ["AXGroup", "AXGroup", "AXGroup", "AXGroup", "AXGroup", "AXButton", "AXWebArea"]
+    var role: String?
+    var deferredGroups = 0
+    var stops = [SelectionProbeStop]()
+    let trace = SelectionTrace(publish: false)
+    let reproduced = probeUniqueSelection(root: 0, same: { $0 == $1 }, contextIsCurrent: { true },
+        requireCompleteSubtree: { true }, onStop: { stop in
+            stops.append(stop)
+            trace.recordProbeStop(stop, role: role, subrole: nil, sourceTarget: false,
+                documentNodes: 0, observerStep: "copyTarget")
+        }) { id, _ -> Observation? in
+            role = roles[id]
+            if role == "AXGroup" {
+                guard optionalPluralRootReadCanRecover(allowed: true, role: role, bounded: true,
+                    textStatus: .noValue, selectedRange: CFRange(location: 0, length: 0),
+                    capabilityDeclared: true, pluralStatus: .failure) else { return nil }
+                if id > 0 { deferredGroups += 1 }
+            }
+            do { try requireSelectionCopyTarget(role: role, subrole: nil) }
+            catch { return Observation(text: nil, children: [], protected: true) }
+            return Observation(text: id == 6 ? whole : nil, children: id == 0 ? [1, 2, 3, 4, 5, 6] : [], protected: false)
+        }
+    try expect(reproduced.0 == .incomplete && reproduced.1 == 6 && deferredGroups == 4 && stops.count == 1)
+    let stop = stops[0]
+    try expect(stop.reason == .protectedNode && stop.visit.index == 6 && stop.visit.parentIndex == 1)
+    try expect(stop.visit.depth == 1 && stop.visit.remaining == 58 && stop.positiveNodes == 0)
+    for _ in 0..<96 { trace.record("fixture-progress") }
+    let summary = trace.snapshot()["probeTermination"] as? [String: Any]
+    try expect(summary?["decision"] as? String == "protectedNode")
+    try expect(summary?["probeRoleClass"] as? String == "AXButton" && summary?["probeSourceTarget"] as? Bool == false)
+    try expect(summary?["probeDepth"] as? Int == 1 && summary?["probeDocumentNodes"] as? Int == 0)
+    try expect(trace.snapshot()["eventsTruncated"] as? Bool == true)
+    let privateTrace = SelectionTrace(publish: false)
+    privateTrace.recordProbeStop(stop, role: "private-termination-sentinel", subrole: "private-termination-sentinel",
+        sourceTarget: nil, documentNodes: 0, observerStep: "private-termination-sentinel")
+    let encoded = String(decoding: try JSONSerialization.data(withJSONObject: privateTrace.snapshot()), as: UTF8.self)
+    try expect(!encoded.contains("private-termination-sentinel"))
+
+    func run(_ nodes: [Int: Observation], maximumNodes: Int = 64, maximumDepth: Int = 6,
+             current: Bool = true, budget: Bool = true, strict: Bool = true) throws -> (SelectionProbeResult, SelectionProbeStop) {
+        var recorded = [SelectionProbeStop]()
+        let result = probeUniqueSelection(root: 0, maximumNodes: maximumNodes, maximumDepth: maximumDepth,
+            same: { $0 == $1 }, contextIsCurrent: { current }, withinBudget: { budget },
+            requireCompleteSubtree: { strict }, onStop: { recorded.append($0) }) { id, _ in nodes[id] }.0
+        try expect(recorded.count == 1)
+        return (result, recorded[0])
+    }
+    let empty = [0: Observation(text: nil, children: [], protected: false)]
+    try expect(try run(empty).1.reason == .noPositiveSelection)
+    try expect(try run(empty, maximumNodes: 0).1.reason == .invalidConfiguration)
+    try expect(try run(empty, budget: false).1.reason == .timeLimit)
+    try expect(try run(empty, current: false).1.reason == .contextChanged)
+    try expect(try run([:]).1.reason == .observerInvalid)
+    let positive = [0: Observation(text: whole, children: [], protected: false)]
+    try expect(try run(positive).1.reason == .positiveSelection)
+    let pair = [0: Observation(text: whole, children: [1], protected: false),
+                1: Observation(text: "other selected fragment", children: [], protected: false)]
+    try expect(try run(pair).1.reason == .ambiguousSelection)
+    try expect(try run(pair, maximumDepth: 0).1.reason == .depthLimit)
+    try expect(try run(pair, maximumNodes: 1).1.reason == .childrenLimit)
+    let sharedBudget = [0: Observation(text: nil, children: [1, 2], protected: false),
+                        1: Observation(text: nil, children: [3], protected: false),
+                        2: Observation(text: nil, children: [], protected: false),
+                        3: Observation(text: nil, children: [], protected: false)]
+    try expect(try run(sharedBudget, maximumNodes: 3).1.reason == .nodeLimit)
+    let limited = [0: Observation(text: nil, children: [], protected: false, resourceLimit: true)]
+    try expect(try run(limited).1.reason == .observerResourceLimit)
+    let cycle = [0: Observation(text: nil, children: [0], protected: false)]
+    let cycleResult = try run(cycle)
+    try expect(cycleResult.0 == .none && cycleResult.1.duplicateNodes == 1)
+    let protected = [0: Observation(text: nil, children: [], protected: true)]
+    try expect(try run(protected).1.reason == .protectedNode)
+    try expect(try run(protected, strict: false).0 == .none) // Preserve ordinary recovery semantics.
 }
 
 func selectionOptionalPluralNestedGroupSelfTest() throws {

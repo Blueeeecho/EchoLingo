@@ -147,3 +147,8 @@ body[data-compact-editor=true] #zoom-actual { width:auto; padding:6px 8px; }
 #canvas-frame[data-live-selection="true"] { background: transparent; box-shadow: none; }
 
 #canvas-frame[data-adjustable="true"] #image-canvas[data-tool="select"] { cursor: move; }
+
+#annotation-preview { position:absolute; inset:0; width:100%; height:100%; pointer-events:none; }
+
+#annotation-handles { position:absolute; inset:0; z-index:4; pointer-events:none; }
+#annotation-handles span { position:absolute; width:10px; height:10px; transform:translate(-50%,-50%); background:#fff; border:1px solid #4997ef; pointer-events:auto; cursor:crosshair; }

@@ -116,16 +116,28 @@ fn placement(
         f64::from(image.0) / pixel_scale * units,
         f64::from(image.1) / pixel_scale * units,
     );
-    let fit = (720.0 * units).min(max_width) / original.0;
-    let fit = fit
+    // For an exceptionally tiny image, use one uniform display scale so the
+    // two overlay controls fit; never add independent width/height padding.
+    // This changes only window presentation, not the stored bitmap.
+    let horizontal = (76.0 * units / original.0).max(40.0 * units / original.1);
+    let vertical = (40.0 * units / original.0).max(76.0 * units / original.1);
+    let readable = horizontal.min(vertical).max(1.0);
+    let fit = ((720.0 * units).min(max_width) / original.0)
         .min((520.0 * units).min(max_height) / original.1)
-        .min(1.0);
-    let width = (original.0 * fit)
-        .max((240.0 * units).min(max_width))
-        .min(max_width);
-    let height = (original.1 * fit)
-        .max((160.0 * units).min(max_height))
-        .min(max_height);
+        .min(readable);
+    // Keep the original aspect ratio, including the tiny-image display scale.
+    let image_width = original.0 * fit;
+    let image_height = original.1 * fit;
+    // Extreme aspect ratios cannot fit both image and usable controls by
+    // uniform scaling within the work area. Only then retain a small host
+    // margin; contain preserves every source pixel instead of cropping it.
+    let controls = if image_width >= 76.0 * units {
+        (76.0 * units, 40.0 * units)
+    } else {
+        (40.0 * units, 76.0 * units)
+    };
+    let width = image_width.max(controls.0).min(max_width);
+    let height = image_height.max(controls.1).min(max_height);
     let outer_width = width + decoration.0;
     let outer_height = height + decoration.1;
     let (x, y) = capture.map_or(
@@ -229,10 +241,17 @@ fn position_reference(
         pixel_scale,
         decoration,
     )?;
+    // Match the two existing overlay-control orientations. These bounds never
+    // enlarge the calculated frame, and prevent manual resize hiding controls.
+    let control_minimum = if frame.width / units >= 76.0 {
+        (76.0, 40.0)
+    } else {
+        (40.0, 76.0)
+    };
     window
         .set_min_size(Some(tauri::LogicalSize::new(
-            (frame.width / units).min(200.0),
-            (frame.height / units).min(120.0),
+            (frame.width / units).min(control_minimum.0),
+            (frame.height / units).min(control_minimum.1),
         )))
         .map_err(|_| "SCREENSHOT_PIN: 无法设置贴图最小尺寸")?;
     #[cfg(target_os = "macos")]
@@ -524,13 +543,53 @@ fn ready_pin(app: &tauri::AppHandle, window: &tauri::WebviewWindow) -> Result<()
 pub async fn start_pinned_screenshot_drag(
     window: tauri::WebviewWindow,
     app: tauri::AppHandle,
-) -> Result<(), String> {
+    prepare_only: Option<bool>,
+    press_identity: Option<String>,
+) -> Result<Option<String>, String> {
+    #[cfg(target_os = "macos")]
+    let prepared_identity = {
+        unsafe extern "C" {
+            fn echolingo_popup_drag_press_identity() -> u64;
+        }
+        // Snapshot before queueing AppKit work; a release/repress while the
+        // main thread is occupied must not bind preparation to the new press.
+        unsafe { echolingo_popup_drag_press_identity() }
+    };
     let handle = app.clone();
     super::screenshot::dialog(&app, move || {
         ready_pin(&handle, &window)?;
-        window
-            .start_dragging()
-            .map_err(|_| "SCREENSHOT_PIN: 无法拖动贴图窗口".to_owned())
+        #[cfg(target_os = "macos")]
+        {
+            unsafe extern "C" {
+                fn echolingo_drag_pinned_window(window: *mut std::ffi::c_void, press: u64) -> i32;
+            }
+            if prepare_only == Some(true) {
+                // Read-only physical event counters, never a JS timestamp.
+                return Ok(Some(prepared_identity.to_string()));
+            }
+            let press = press_identity
+                .and_then(|value| value.parse::<u64>().ok())
+                .ok_or_else(|| "SCREENSHOT_PIN: 拖动手势已失效".to_owned())?;
+            let pointer = window.ns_window().map_err(|_| CLOSED.to_owned())?;
+            // Registry identity stays server-side; no DOM coordinates or
+            // caller-selected native window are accepted by this bridge.
+            if unsafe { echolingo_drag_pinned_window(pointer, press) } == 0 {
+                Ok(None)
+            } else {
+                Err("SCREENSHOT_PIN: 无法拖动贴图窗口".to_owned())
+            }
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            let _ = press_identity;
+            if prepare_only == Some(true) {
+                return Ok(None);
+            }
+            window
+                .start_dragging()
+                .map(|_| None)
+                .map_err(|_| "SCREENSHOT_PIN: 无法拖动贴图窗口".to_owned())
+        }
     })
     .await?
 }
@@ -601,6 +660,31 @@ mod tests {
         };
         let frame = placement(area, None, (640, 480), 1.0, 1.0, (0.0, 0.0)).unwrap();
         assert_eq!((frame.width, frame.height), (640.0, 480.0));
+    }
+    #[test]
+    fn small_pins_keep_native_image_aspect_without_ui_size_floors() {
+        let area = Rect {
+            x: -1920.0,
+            y: 0.0,
+            width: 1920.0,
+            height: 1080.0,
+        };
+        for (image, units, scale, expected) in [
+            ((200, 40), 1.0, 1.0, (200.0, 40.0)),
+            ((400, 80), 1.0, 2.0, (200.0, 40.0)),
+            ((40, 200), 1.0, 1.0, (40.0, 200.0)),
+            // 100×20 logical points scale uniformly to 200×40 logical so
+            // controls fit: on a 2× Windows display this is 400×80 physical.
+            ((200, 40), 2.0, 2.0, (400.0, 80.0)),
+            ((10, 10), 1.0, 1.0, (76.0, 76.0)),
+            ((20, 20), 1.0, 2.0, (76.0, 76.0)),
+            ((1000, 10), 1.0, 1.0, (720.0, 40.0)),
+            ((10, 1000), 1.0, 1.0, (40.0, 520.0)),
+        ] {
+            let frame = placement(area, None, image, units, scale, (0.0, 0.0)).unwrap();
+            assert_eq!((frame.width, frame.height), expected);
+            assert_inside(frame, area, (0.0, 0.0));
+        }
     }
     #[test]
     fn resize_wire_accepts_only_eight_lowercase_directions() {

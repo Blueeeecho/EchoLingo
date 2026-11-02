@@ -1,4 +1,5 @@
 import './pinned-screenshot.css';
+import { PinnedDragIntent } from './pinned-drag';
 import { invoke, isTauri } from '@tauri-apps/api/core';
 import { validateSize, MAX_ENCODED_BYTES } from './screenshot-model';
 
@@ -58,11 +59,46 @@ void (async () => {
 
 // Only image/background drags move the frameless native window. The two
 // controls and resize edges have independent hit targets and never initiate drag.
-document.querySelector('main')!.addEventListener('pointerdown', event => {
-  if (!(event instanceof PointerEvent) || event.button !== 0 || closing || image.hidden || !isTauri()) return;
+const surface = document.querySelector('main')!;
+const dragIntent = new PinnedDragIntent();
+let dragPending = false;
+let dragPress: { id: number; cancelled: boolean; identity: Promise<string | null> } | null = null;
+const cancelDragPress = (id?: number) => {
+  if (id !== undefined && dragPress?.id !== id) return;
+  if (dragPress) dragPress.cancelled = true;
+  dragPress = null; dragIntent.end(id);
+};
+surface.addEventListener('pointerdown', event => {
+  if (!(event instanceof PointerEvent) || !event.isPrimary || event.button !== 0 || closing || dragPending || image.hidden || !isTauri()) return;
   event.preventDefault();
-  void invoke('start_pinned_screenshot_drag').catch(error => { status.hidden = false; status.textContent = `无法移动贴图：${errorText(error)}`; });
+  dragIntent.begin(event.pointerId, event.clientX, event.clientY, event.isPrimary, event.button);
+  if (dragIntent.owns(event.pointerId)) {
+    surface.setPointerCapture(event.pointerId);
+    // Read-only preparation binds the later drag to this physical press. A
+    // delayed reply after release/blur cannot become a different gesture.
+    const identity = invoke<string | null>('start_pinned_screenshot_drag', { prepareOnly: true });
+    void identity.catch(() => {});
+    dragPress = { id: event.pointerId, cancelled: false, identity };
+  }
 });
+surface.addEventListener('pointermove', event => {
+  if (!(event instanceof PointerEvent) || closing || dragPending || !dragIntent.move(event.pointerId, event.clientX, event.clientY, event.buttons)) return;
+  event.preventDefault();
+  const press = dragPress; if (!press || press.id !== event.pointerId) return;
+  dragPending = true;
+  void press.identity.then(identity => {
+    if (press.cancelled || dragPress !== press || closing || image.hidden) return;
+    if (surface.hasPointerCapture(event.pointerId)) surface.releasePointerCapture(event.pointerId);
+    return invoke('start_pinned_screenshot_drag', { pressIdentity: identity });
+  }).catch(error => {
+    if (!press.cancelled && !closing) { status.hidden = false; status.textContent = `无法移动贴图：${errorText(error)}`; }
+  }).finally(() => { dragPending = false; if (dragPress === press) cancelDragPress(); });
+});
+for (const type of ['pointerup', 'pointercancel', 'lostpointercapture']) {
+  surface.addEventListener(type, event => { if (event instanceof PointerEvent) cancelDragPress(event.pointerId); });
+}
+window.addEventListener('blur', () => cancelDragPress());
+window.addEventListener('pagehide', () => cancelDragPress());
 document.querySelector('#resize-edges')!.addEventListener('pointerdown', event => {
   if (!(event instanceof PointerEvent) || event.button !== 0 || closing || !isTauri()) return;
   const direction = (event.target as HTMLElement).dataset.direction;

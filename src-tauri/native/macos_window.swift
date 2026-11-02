@@ -435,3 +435,31 @@ public func echoLingoConfigureWindowFrame(_ pointer: UnsafeMutableRawPointer?, _
     }
     return 0
 }
+
+// The Rust caller first verifies this exact window is a ready registered pin.
+// AppKit expects mouse-event locations in WINDOW base coordinates, not the
+// global point returned by NSEvent.mouseLocation. Do not apply backing scale:
+// both AppKit inputs and convertPoint(fromScreen:) use logical points.
+@_cdecl("echolingo_drag_pinned_window")
+public func echoLingoDragPinnedWindow(_ pointer: UnsafeMutableRawPointer?, _ pressIdentity: UInt64) -> Int32 {
+    guard Thread.isMainThread else { return -1 }
+    guard let pointer = pointer,
+          let window = Unmanaged<AnyObject>.fromOpaque(pointer).takeUnretainedValue() as? NSWindow,
+          NSApp.windows.contains(where: { $0 === window }), window.isVisible,
+          !window.isMiniaturized else { return -2 }
+    // IPC can arrive after release. Never resurrect that finished gesture.
+    guard popupDragPressMatches(pressIdentity, popupDragPressIdentity(), NSEvent.pressedMouseButtons & 1 != 0) else { return 0 }
+    let screenPoint = NSEvent.mouseLocation
+    guard screenPoint.x.isFinite, screenPoint.y.isFinite,
+          window.frame.contains(screenPoint) else { return 0 }
+    let localPoint = window.convertPoint(fromScreen: screenPoint)
+    guard let event = NSEvent.mouseEvent(with: .leftMouseDown, location: localPoint,
+        modifierFlags: NSEvent.modifierFlags, timestamp: ProcessInfo.processInfo.systemUptime,
+        windowNumber: window.windowNumber, context: nil, eventNumber: 0,
+        clickCount: 1, pressure: 1) else { return -3 }
+    // Do not reuse NSApp.currentEvent: asynchronous IPC can run under another
+    // window's event or an ApplicationDefined wake-up. No activation/setFrame.
+    guard popupDragPressMatches(pressIdentity, popupDragPressIdentity(), NSEvent.pressedMouseButtons & 1 != 0) else { return 0 }
+    window.performDrag(with: event)
+    return 0
+}

@@ -31,7 +31,7 @@ jobs:
         run: |
           if [ "$PR_HEAD" = feat/screenshot-pins ] && [ "$PR_BASE" = fix/025-macos-recovery-integration ]; then
             echo "mode=screenshot-pins" >> "$GITHUB_OUTPUT"
-          elif [ "$PR_HEAD" = fix/macos-screenshot-followup ] && [ "$PR_BASE" = main ]; then
+          elif { [ "$PR_HEAD" = fix/macos-screenshot-followup ] || [ "$PR_HEAD" = fix/macos-secondary-screen-investigation ]; } && [ "$PR_BASE" = main ]; then
             echo "mode=macos-followup" >> "$GITHUB_OUTPUT"
           else
             python3 scripts/verify-language-patch.py --select
@@ -65,7 +65,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: ${{ fromJSON(needs.validation-mode.outputs.mode == 'macos-followup' && '["macos-latest"]' || '["macos-latest","windows-latest"]') }}
+        os: ${{ fromJSON(needs.validation-mode.outputs.mode == 'macos-followup' && github.head_ref == 'fix/macos-screenshot-followup' && '["macos-latest"]' || '["macos-latest","windows-latest"]') }}
     runs-on: ${{ matrix.os }}
     timeout-minutes: 30
     steps:
@@ -132,19 +132,19 @@ jobs:
         if: needs.validation-mode.outputs.mode == 'macos-followup'
         run: npm run check && npm test && npm run build
       - run: npm run build
-      - name: Compile actual platform app and run all ten pin regressions
+      - name: Compile actual platform app and run all eleven pin regressions
         shell: bash
         run: |
           set -euo pipefail
           mkdir -p "$RUNNER_TEMP/screenshot-pin"
           git rev-parse HEAD > "$RUNNER_TEMP/screenshot-pin/source.txt"
           cargo test --manifest-path src-tauri/Cargo.toml --locked screenshot_pins::tests -- --nocapture 2>&1 | tee "$RUNNER_TEMP/screenshot-pin/pins.log"
-          grep -q 'test result: ok. 10 passed; 0 failed' "$RUNNER_TEMP/screenshot-pin/pins.log"
+          grep -q 'test result: ok. 11 passed; 0 failed' "$RUNNER_TEMP/screenshot-pin/pins.log"
           cargo test --manifest-path src-tauri/Cargo.toml --locked screenshot_overlay -- --nocapture 2>&1 | tee "$RUNNER_TEMP/screenshot-pin/overlay.log"
           cargo test --manifest-path src-tauri/Cargo.toml --locked 2>&1 | tee "$RUNNER_TEMP/screenshot-pin/all-rust.log"
           cargo build --manifest-path src-tauri/Cargo.toml --locked 2>&1 | tee "$RUNNER_TEMP/screenshot-pin/build.log"
       - name: Execute focused Mac selection and overlay host fixtures
-        if: needs.validation-mode.outputs.mode == 'macos-followup'
+        if: needs.validation-mode.outputs.mode == 'macos-followup' && runner.os == 'macOS'
         shell: bash
         run: |
           set -euo pipefail
@@ -216,6 +216,21 @@ jobs:
           $output | Out-File $report -Encoding utf8
           $output | Write-Output
           python scripts/verify_screenshot_editor_report.py $report --application src-tauri/target/release/echolingo.exe --pin-only
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          if ($fixtureExit -ne 0) { exit $fixtureExit }
+      - name: Verify generated Windows screenshot save and clipboard effects
+        if: runner.os == 'Windows' && github.head_ref == 'fix/macos-secondary-screen-investigation'
+        timeout-minutes: 8
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Continue'
+          $global:LASTEXITCODE = 1
+          $output = @(& powershell.exe -NoProfile -STA -ExecutionPolicy Bypass -File tests/windows-application-smoke.ps1 -ApplicationPath src-tauri/target/release/echolingo.exe -DefaultCapture -NativeCapturePath '${{ steps.windows_native_candidate.outputs.capturePath }}' -ScreenshotEditorTests 2>&1)
+          $fixtureExit = $LASTEXITCODE
+          $report = "$env:RUNNER_TEMP/screenshot-pin/native-editor.log"
+          $output | Out-File $report -Encoding utf8
+          $output | Write-Output
+          python scripts/verify_screenshot_editor_report.py $report --application src-tauri/target/release/echolingo.exe
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           if ($fixtureExit -ne 0) { exit $fixtureExit }
       - name: Check committed Rust formatting
@@ -896,7 +911,7 @@ jobs:
         timeout-minutes: 5
         shell: powershell
         run: |
-          $installers = @(Get-ChildItem src-tauri/target/release/bundle/nsis -File -Filter 'EchoLingo_0.2.10_x64-setup.exe')
+          $installers = @(Get-ChildItem src-tauri/target/release/bundle/nsis -File -Filter 'EchoLingo_0.2.11_x64-setup.exe')
           if ($installers.Count -ne 1) { throw 'Expected exactly one own versioned NSIS installer.' }
           rustc --edition=2021 tests/windows-native-capture-harness.rs -O -o "$env:RUNNER_TEMP/echolingo-upper-capture-harness.exe"
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
