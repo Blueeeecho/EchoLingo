@@ -81,7 +81,7 @@ describe('actual Windows screenshot fixture source wiring (not native acceptance
     expect(fixture).toContain('finally{CloseClipboard();}');
   });
   it('claims only its immediate native seed publication after close and reports bounded phase evidence', () => {
-    for (const required of ['seed-publication-close', 'sequenceBeforeSet', 'sequenceAfterSet', 'sequenceBeforeClose', 'sequenceAfterClose', 'sequenceOnReopen', 'sequenceAfterRead', 'seedAttempt', 'copyAttempt', 'copyPhase', 'leaseFormat', 'Observations.Count<96', 'ownerIsGeneratedSource', 'formatsMatch', 'contentMatches', 'observed!=0&&observed==after&&own&&formats&&content', 'Never rebase a later changed generation', 'SeedUnchanged()', 'next!=1&&next!=7&&next!=13&&next!=16']) expect(fixture).toContain(required);
+    for (const required of ['seed-publication-close', 'sequenceBeforeSet', 'sequenceAfterSet', 'sequenceBeforeClose', 'sequenceAfterClose', 'sequenceOnReopen', 'sequenceAfterRead', 'seedAttempt', 'copyAttempt', 'copyPhase', 'leaseFormat', 'Observations.Count<ClipboardObservationLimit', 'ClipboardObservationLimit = 96 + 6 * 7', 'ownerIsGeneratedSource', 'formatsMatch', 'contentMatches', 'observed!=0&&observed==after&&own&&formats&&content', 'Never rebase a later changed generation', 'SeedUnchanged()', 'next!=1&&next!=7&&next!=13&&next!=16']) expect(fixture).toContain(required);
     expect(fixture).not.toContain('Clipboard.GetText()');
     expect(fixture).toContain('bool same=lockedRead&&digest!=null');
     expect(fixture).toContain('RecordState("seed-verified-close")');
