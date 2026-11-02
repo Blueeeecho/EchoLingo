@@ -43,6 +43,27 @@ class PersistentOverlayContract(unittest.TestCase):
         pin = read('src-tauri/src/screenshot_pins.rs')
         self.assertIn('check_image_revision(session_id, revision.unwrap_or(0))', pin)
 
+    def test_mac_deferred_viewport_is_frozen_to_selected_displays(self):
+        source = read('src-tauri/native/macos_capture.swift')
+        geometry = source.split('func deferredCaptureGeometry(', 1)[1].split('func selectDeferredScreenshot(', 1)[0]
+        self.assertIn('let editorDisplays = try deferredEditorDisplays(snapshot)', geometry)
+        self.assertIn('"captureScreens": editorDisplays.map', geometry)
+        self.assertNotIn('snapshot.displays.map', geometry)
+        validate = source.split('func validateDeferredCapturePlan(', 1)[1].split('// Freeze the host', 1)[0]
+        self.assertIn('current.count == plan.displays.count', validate)
+        self.assertIn('for display in plan.displays', validate)
+        self.assertIn('deferredEditorDisplays(plan)', validate)
+        capture = source.split('func captureDeferredScreenshot(', 1)[1].split('// Pure fixtures:', 1)[0]
+        self.assertIn('let editorDisplays = try deferredEditorDisplays(request.plan)', capture)
+        self.assertLess(capture.index('.contains(rectangle)'), capture.index('captureNativePlannedImage('))
+        policy = source.split('func deferredEditorDisplayIDs(', 1)[1].split('func deferredCaptureGeometry(', 1)[0]
+        self.assertIn('!separateSpaces || region.displays.count == 1', policy)
+        for marker in ('try deferredEditorGeometrySelfTest()', 'width: 2048, height: 1152',
+                       'width: 1920, height: 1080', 'for invalid in [[], [2, 2], [99]]',
+                       'deferredEditorDisplayIDs(crossing, separateSpaces: false)',
+                       'deferredEditorDisplayIDs(crossing, separateSpaces: true)'):
+            self.assertIn(marker, source)
+
     def test_mac_selection_retains_metadata_only_and_revalidates_final_capture(self):
         source = read('src-tauri/native/macos_capture.swift')
         select = source.split('func selectDeferredScreenshot(', 1)[1].split('func captureDeferredScreenshot(', 1)[0]

@@ -1,3 +1,5 @@
+import { resizeAnnotation, type ResizeHandle } from './screenshot-transform';
+import { draftAnnotation, type DraftStyle } from './screenshot-draft';
 import './screenshot-editor.css';
 import { adjustSelection, selectionCancelDisabled, type SelectionHandle } from './screenshot-selection';
 import { overlayToolBounds, clampOverlayBox, placeOverlayToolbar, type OverlayRect } from './screenshot-overlay-layout';
@@ -8,6 +10,7 @@ import { ScreenshotDocument, imagePoint, selectionRect, validateSize, MAX_ENCODE
 import { flattenedPng, renderScreenshot } from './screenshot-renderer';
 interface ScreenshotOverlay { x: number; y: number; width: number; height: number; viewportWidth: number; viewportHeight: number; toolbarBounds?: OverlayRect }
 interface ScreenshotSession { kind?: 'image'; revision?: number; id: number; pngBase64: string; width: number; height: number; capturedAt: number; sourceName?: string; overlay?: ScreenshotOverlay; initialAction?: InitialAction }
+interface SaveResult { path: string | null; clipboardCopied: boolean; clipboardError: string | null; saveError: string | null }
 interface SelectionSession { kind: 'selection'; id: number; revision: number; width: number; height: number; overlay: ScreenshotOverlay }
 type IncomingSession = ScreenshotSession | SelectionSession;
 type Tool = 'select' | 'rectangle' | 'arrow' | 'text' | 'mosaic' | 'solid' | 'crop' | 'number' | 'pen' | 'highlight' | 'eraser';
@@ -21,6 +24,8 @@ const desktop = isTauri(), windows = /Win/i.test(navigator.platform);
 let session: Omit<ScreenshotSession, 'pngBase64' | 'kind' | 'capturedAt'> & { kind?: 'image' | 'selection'; capturedAt?: number } | null = null, original: HTMLImageElement | null = null, model: ScreenshotDocument | null = null;
 let latestId = -1, generation = 0, savedState: number | null = null, busy = false, nativeDialog = false, loading = false, tool: Tool = 'rectangle';
 let rendered: { generation: number; stateId: number } | null = null;
+// A successful file write is durable even if its companion clipboard write fails.
+let partialSave: { generation: number; stateId: number; path: string } | null = null;
 let contextLost = false;
 let selectionSession: SelectionSession | null = null;
 let selectionDrag: { pointerId: number; start: Point; rect: OverlayRect; handle: SelectionHandle } | null = null;
@@ -34,7 +39,7 @@ const exportReady = () => !contextLost && !!model && rendered?.generation === ge
 let decoding: HTMLImageElement | null = null;
 let textFocusPending = false;
 let selectedIndex: number | null = null, editingIndex: number | null = null;
-let moveGesture: { index: number; start: Point; original: EditOperation; pointerId: number; moved: EditOperation } | null = null;
+let moveGesture: { index: number; start: Point; original: EditOperation; pointerId: number; moved: EditOperation; handle?: ResizeHandle } | null = null;
 const textOpen = () => !textDialog.hidden;
 let overlayFocus: { generation: number; promise: Promise<void> } | null = null;
 let zoom = 1, fit = true, composing = false, imeEscape = false, textPoint: Point | null = null;
@@ -137,7 +142,7 @@ function render(): boolean {
   }
 }
 function clearGesture(restorePreview = true): void {
-  const restore = restorePreview && !!gesture?.points;
+  const restore = restorePreview && !!gesture && rendered === null;
   if (gesture && canvas.hasPointerCapture(gesture.pointerId)) canvas.releasePointerCapture(gesture.pointerId);
   gesture = null; $('#gesture-rect').setAttribute('visibility', 'hidden'); $('#gesture-line').setAttribute('visibility', 'hidden');
   if (restore && model && original) render();
@@ -149,13 +154,35 @@ function annotationBounds(op: EditOperation): OverlayRect {
   const bounds = operationBounds(op, text => ctx.measureText(text).width); ctx.restore(); return bounds;
 }
 function selectionOutline(preview?: EditOperation): void {
+  const handles = $('#annotation-handles'); handles.replaceChildren();
   const outline = $('#object-selection'), op = preview ?? (selectedIndex === null ? undefined : model?.operations[selectedIndex]);
   $('#delete-edit').hidden = !op || op.kind === 'crop';
   if (!op || !model || op.kind === 'crop') { outline.setAttribute('visibility', 'hidden'); return; }
   const bounds = annotationBounds(op), offset = model.operationOffset(selectedIndex!);
   outline.setAttribute('visibility', 'visible');
   for (const [key, value] of Object.entries({ x: bounds.x - offset.x, y: bounds.y - offset.y, width: bounds.width, height: bounds.height })) outline.setAttribute(key, String(value));
+  if (tool !== 'select') return;
+  const positions: [ResizeHandle, number, number][] = op.kind === 'arrow' || op.kind === 'numbered-arrow'
+    ? [['start', op.start.x, op.start.y], ['end', op.end.x, op.end.y]]
+    : ['rectangle', 'ellipse', 'mosaic'].includes(op.kind)
+      ? ([['nw',0,0],['n',.5,0],['ne',1,0],['e',1,.5],['se',1,1],['s',.5,1],['sw',0,1],['w',0,.5]] as [ResizeHandle,number,number][])
+        .map(([h,x,y]) => [h, bounds.x + bounds.width*x, bounds.y + bounds.height*y])
+      : [];
+  for (const [handle, x, y] of positions) {
+    const node = document.createElement('span'); node.dataset.objectHandle = handle;
+    node.style.left = `${(x-offset.x)/model.size.width*100}%`; node.style.top = `${(y-offset.y)/model.size.height*100}%`;
+    node.title = handle === 'start' ? '调整起点' : handle === 'end' ? '调整终点' : '调整标注大小';
+    handles.append(node);
+  }
 }
+$('#annotation-handles').addEventListener('pointerdown', event => {
+  if (!(event instanceof PointerEvent) || !event.isPrimary || event.button !== 0 || tool !== 'select' || busy || loading || gesture || moveGesture || !model || selectedIndex === null) return;
+  const handle = (event.target as HTMLElement).dataset.objectHandle as ResizeHandle | undefined;
+  const original = model.operations[selectedIndex]; if (!handle || !original) return;
+  event.preventDefault(); event.stopPropagation();
+  moveGesture = { index: selectedIndex, start: point(event), original, moved: original, pointerId: event.pointerId, handle };
+  canvas.setPointerCapture(event.pointerId);
+});
 function hitAnnotation(p: Point): number | null {
   if (!model) return null;
   for (let i = model.operations.length - 1; i >= 0; i--) {
@@ -301,7 +328,7 @@ async function acceptSession(value: IncomingSession | null): Promise<void> {
 }
 function chooseTool(next: Tool): void {
   if (textOpen() && !commitText()) return;
-  cancelPointer(); tool = next;
+  cancelPointer(); tool = next; selectionOutline();
   $<HTMLDetailsElement>('#zoom-menu').open = false;
   for (const button of document.querySelectorAll<HTMLButtonElement>('.editor-toolbar button[data-tool]')) button.setAttribute('aria-pressed', String(button.dataset.tool === tool));
   $('.tool-options').hidden = next === 'select' || next === 'crop';
@@ -310,31 +337,41 @@ function chooseTool(next: Tool): void {
   $('#note-style-label').hidden = next !== 'text'; $('#step-style-label').hidden = next !== 'number';
   $('#line-width-label').hidden = !['rectangle', 'arrow', 'number', 'pen', 'highlight'].includes(next);
   $('#shape-style-label').hidden = next !== 'rectangle'; $('#eraser-size-label').hidden = next !== 'eraser'; $('#mosaic-size-label').hidden = next !== 'mosaic';
-  const hints: Record<Tool, string> = { select: '点击标注选择；拖动移动，双击文字修改，Delete 删除。', rectangle: '选择矩形或椭圆后拖动绘制。所有标注均以原图像素为准。', pen: '按住拖动自由绘制；松开后整笔可撤销。', highlight: '半透明高亮，不遮住原有文字；不要用于遮挡隐私。', eraser: '仅局部擦除画笔和高亮，不擦原图、马赛克或实心遮挡；其他标注用选择工具删除。', arrow: '从起点拖向终点，绘制箭头。', text: '点击原位添加文字；可选便签背景，双击已有文字修改。', number: '连续点击添加序号，或切换序号箭头后拖动；编号自动递增。', mosaic: '拖动选择马赛克区域。敏感文字建议使用实心遮挡。', solid: '拖动绘制不透明色块，彻底遮挡区域内的像素。', crop: '拖动选择保留范围；松开立即裁剪，可撤销。' };
+  const hints: Record<Tool, string> = { select: '点击标注选择；拖动移动，双击文字修改，Delete 删除。', rectangle: '选择矩形或椭圆后拖动绘制。所有标注均以原图像素为准。', pen: '按住拖动自由绘制；松开后整笔可撤销。', highlight: '半透明高亮，不遮住原有文字；不要用于遮挡隐私。', eraser: '仅局部擦除画笔和高亮，不擦原图、马赛克或实心遮挡；其他标注用选择工具删除。', arrow: '从起点拖向终点，绘制箭头。', text: '点击原位添加文字；可选便签背景，双击已有文字修改。', number: '点击添加序号；按住拖动添加序号箭头，松开后编号递增。', mosaic: '拖动选择马赛克区域。敏感文字建议使用实心遮挡。', solid: '拖动绘制不透明色块，彻底遮挡区域内的像素。', crop: '拖动选择保留范围；松开立即裁剪，可撤销。' };
   $('#tool-hint').textContent = hints[next]; canvas.dataset.tool = next; placeOverlayTools();
 }
 function clearPendingPreview(): void {
   $('#gesture-rect').setAttribute('visibility', 'hidden'); $('#gesture-line').setAttribute('visibility', 'hidden');
   $('#pending-ink').setAttribute('points', '');
+  const preview = $<HTMLCanvasElement>('#annotation-preview'); preview.hidden = true; preview.width = preview.height = 1;
 }
+function draftStyle(scale: number): DraftStyle {
+  return { color: $<HTMLInputElement>('#edit-color').value, width: Number($<HTMLSelectElement>('#edit-width').value),
+    fontSize: Number($<HTMLSelectElement>('#edit-font-size').value), blockSize: Number($<HTMLSelectElement>('#edit-block-size').value),
+    ellipse: $<HTMLSelectElement>('#shape-style').value === 'ellipse', numberThreshold: 4 * scale };
+}
+function previewRegion(start: Point, end: Point, size: { width: number; height: number }, color: string): void {
+  const preview = $('#gesture-rect'); preview.setAttribute('visibility', 'visible');
+  preview.style.stroke = color; preview.style.strokeWidth = '1'; preview.style.strokeDasharray = 'none'; preview.style.fill = 'none';
+  for (const [key, value] of Object.entries(selectionRect(start, end, size))) preview.setAttribute(key, String(value));
+}
+const blankPreviewSource = document.createElement('canvas');
 function previewPendingStroke(event: PointerEvent): void {
   const p = pendingStroke, selected = selectionSession; if (!p || !selected) return;
   const bounds = canvas.getBoundingClientRect();
   const at = (e: PointerEvent) => imagePoint({ x: e.clientX, y: e.clientY }, bounds, selected);
   const start = at(p.down), end = at(event);
   $('#gesture-preview').setAttribute('viewBox', `0 0 ${selected.width} ${selected.height}`);
-  if (p.tool === 'pen' || p.tool === 'highlight') {
-    const ink = $('#pending-ink'); ink.setAttribute('points', [p.down,...p.events].map(e=>{const q=at(e);return `${q.x},${q.y}`;}).join(' '));
-    ink.setAttribute('stroke', $<HTMLInputElement>('#edit-color').value);
-    ink.setAttribute('stroke-width', String(Number($<HTMLSelectElement>('#edit-width').value) * (p.tool === 'highlight' ? 4 : 1)));
-    ink.setAttribute('opacity', p.tool === 'highlight' ? '.35' : '1');
-  } else if (p.tool === 'arrow' || p.tool === 'number') {
-    const line = $('#gesture-line'); line.setAttribute('visibility','visible');
-    for (const [key,value] of Object.entries({x1:start.x,y1:start.y,x2:end.x,y2:end.y})) line.setAttribute(key,String(value));
-  } else if (p.tool !== 'text') {
-    const rect = $('#gesture-rect'); rect.setAttribute('visibility','visible');
-    for (const [key,value] of Object.entries(selectionRect(start,end,selected))) rect.setAttribute(key,String(value));
-  }
+  // No screen pixels exist before release. Crop/mosaic show only their exact
+  // region here; the privacy transform runs after safe deferred capture.
+  if (p.tool === 'crop' || p.tool === 'mosaic') { previewRegion(start, end, selected, '#4997ef'); return; }
+  const op = draftAnnotation(p.tool, start, end, selected, draftStyle(selected.width / bounds.width), 1, [p.down, ...p.events].map(at));
+  if (!op) return;
+  const preview = $<HTMLCanvasElement>('#annotation-preview');
+  // The transparent preview is rendered by the exact final annotation renderer.
+  // It is never exported or stored in the model/undo history.
+  blankPreviewSource.width = selected.width; blankPreviewSource.height = selected.height;
+  renderScreenshot(preview, blankPreviewSource, selected, [op]); preview.hidden = false;
 }
 function placeSelectionFrame(): void {
   const overlay = session?.overlay; if (!overlay) return;
@@ -430,7 +467,7 @@ canvas.addEventListener('pointerdown', event => {
   event.preventDefault();
   const pending = { generation, down: event, tool, style: annotationStyleKey(), events: [] as PointerEvent[], cancelled: false, released: false };
   pendingStroke = pending; canvas.setPointerCapture(event.pointerId);
-  controls();
+  previewPendingStroke(event); controls();
 
 });
 canvas.addEventListener('pointermove', event => {
@@ -513,18 +550,19 @@ async function beginCanvasPointer(event: PointerEvent): Promise<void> {
     const hit = hitAnnotation(start);
     beginText(start, hit !== null && model.operations[hit].kind === 'text' ? hit : null); return;
   }
-  if (tool === 'number' && $<HTMLSelectElement>('#step-style').value === 'number') {
-    append({ kind: 'number', point: start, number: model.nextNumber, size: Number($<HTMLSelectElement>('#edit-font-size').value), color: $<HTMLInputElement>('#edit-color').value }); return;
-  }
   gesture = { start, end: start, pointerId: event.pointerId, ...(['pen', 'highlight', 'eraser'].includes(tool) ? { points: [start] } : {}) }; if (event.buttons) { try { canvas.setPointerCapture(event.pointerId); } catch { /* Buffered pointer may already be released. */ } } event.preventDefault();
+  if (tool === 'number') moveCanvasPointer(event);
 }
 function moveCanvasPointer(event: PointerEvent): void {
   if (moveGesture && model && original && event.pointerId === moveGesture.pointerId) {
     const p = point(event), g = moveGesture;
     if (model.operations[g.index] !== g.original) { cancelPointer(); return; }
-    g.moved = translateOperation(g.original, { x: p.x - g.start.x, y: p.y - g.start.y }, model.operationSize(g.index));
+    const offset = model.operationOffset(g.index);
+    g.moved = g.handle
+      ? resizeAnnotation(g.original, g.handle, { x: p.x + offset.x, y: p.y + offset.y }, model.operationSize(g.index))
+      : translateOperation(g.original, { x: p.x - g.start.x, y: p.y - g.start.y }, model.operationSize(g.index));
     const preview = [...model.operations]; preview[g.index] = g.moved;
-    try { renderScreenshot(canvas, original, model.original, preview); selectionOutline(g.moved); rendered = null; controls(); }
+    try { rendered = null; controls(); renderScreenshot(canvas, original, model.original, preview); selectionOutline(g.moved); }
     catch (error) { status(readableError(error), true); clearGesture(); moveGesture = null; render(); }
     return;
   }
@@ -539,21 +577,25 @@ function moveCanvasPointer(event: PointerEvent): void {
     if (tool === 'pen' || tool === 'highlight') {
       try {
         const op: EditOperation = { kind: tool, points, color: $<HTMLInputElement>('#edit-color').value, width: Number($<HTMLSelectElement>('#edit-width').value) * (tool === 'highlight' ? 4 : 1) };
-        renderScreenshot(canvas, original!, model.original, [...model.operations, op]); rendered = null; controls();
+        rendered = null; controls(); renderScreenshot(canvas, original!, model.original, [...model.operations, op]);
       } catch (error) { cancelPointer(); status(readableError(error), true); }
     }
     return;
   }
-  if (tool === 'arrow' || tool === 'number') {
-    const line = $('#gesture-line'); line.setAttribute('visibility', 'visible');
-    for (const [key, value] of Object.entries({ x1: gesture.start.x, y1: gesture.start.y, x2: gesture.end.x, y2: gesture.end.y })) line.setAttribute(key, String(value));
-  } else {
-    const rect = selectionRect(gesture.start, gesture.end, model.size), preview = $('#gesture-rect'); preview.setAttribute('visibility', 'visible');
-    for (const [key, value] of Object.entries(rect)) preview.setAttribute(key, String(value));
-  }
+  if (tool === 'crop') { previewRegion(gesture.start, gesture.end, model.size, '#4997ef'); return; }
+  const op = draftAnnotation(tool, gesture.start, gesture.end, model.size,
+    draftStyle(model.size.width / canvas.getBoundingClientRect().width), model.nextNumber);
+  if (op) {
+    try { rendered = null; controls(); renderScreenshot(canvas, original!, model.original, [...model.operations, op]); }
+    catch (error) { cancelPointer(); status(readableError(error), true); }
+  } else if (rendered === null) render();
+
 }
 function endCanvasPointer(event: PointerEvent): void {
   if (moveGesture && model && event.pointerId === moveGesture.pointerId) {
+    // Apply the release endpoint even if the native WebView coalesced moves.
+    moveCanvasPointer(event);
+    if (!moveGesture) return;
     const g = moveGesture; moveGesture = null;
     if (canvas.hasPointerCapture(event.pointerId)) canvas.releasePointerCapture(event.pointerId);
     try { if (model.operations[g.index] === g.original && JSON.stringify(g.original) !== JSON.stringify(g.moved)) model.update(g.index, g.moved); }
@@ -570,16 +612,15 @@ function endCanvasPointer(event: PointerEvent): void {
     } catch (error) { render(); status(readableError(error), true); }
     return;
   }
-  if (Math.hypot(end.x - start.x, end.y - start.y) < 1) return;
-  const rect = selectionRect(start, end, model.size), color = $<HTMLInputElement>('#edit-color').value, width = Number($<HTMLSelectElement>('#edit-width').value);
-  if (tool === 'arrow') append({ kind: 'arrow', start, end, color, width });
-  else if (tool === 'number') append({ kind: 'numbered-arrow', start, end, color, width, number: model.nextNumber, size: Number($<HTMLSelectElement>('#edit-font-size').value) });
-  else if (rect.width && rect.height) {
-    if (tool === 'crop') append({ kind: 'crop', rect });
-    else if (tool === 'mosaic') append({ kind: 'mosaic', rect, blockSize: Number($<HTMLSelectElement>('#edit-block-size').value) });
-    else if (tool === 'rectangle' && $<HTMLSelectElement>('#shape-style').value === 'ellipse') append({ kind: 'ellipse', rect, color, width });
-    else append({ kind: 'rectangle', rect, color, width, solid: tool === 'solid' });
+  if (tool === 'crop') {
+    const rect = selectionRect(start, end, model.size);
+    if (rect.width && rect.height) append({ kind: 'crop', rect });
+    return;
   }
+  const op = draftAnnotation(tool, start, end, model.size,
+    draftStyle(model.size.width / canvas.getBoundingClientRect().width), model.nextNumber);
+  if (op) append(op);
+
 }
 canvas.addEventListener('contextlost', event => {
   event.preventDefault(); contextLost = true; moveGesture = null; clearGesture(false); rendered = null; frame.hidden = true; controls();
@@ -637,6 +678,9 @@ async function exportImage(action: 'copy' | 'save' | 'saveAs' | 'pin'): Promise<
   if (!model || !session) return;
   if (!exportReady()) { status('当前图片尚未完整绘制，不能贴图、复制或保存。请撤销或重新打开图片。', true); return; }
   if (!desktop) { status('请在桌面应用中贴图、复制或保存图片。'); return; }
+  if ((action === 'save' || action === 'saveAs') && partialSave?.generation === generation && partialSave.stateId === model.stateId) {
+    status(`文件已保存：${partialSave.path}；剪贴板未完成，请点击 ✓ 单独复制，无需再次保存。`, true); return;
+  }
   clearGesture(); const token = generation, sessionId = session.id, revision = session.revision ?? 0, state = model.stateId;
   busy = true; controls(); status(action === 'pin' ? '正在固定图片…' : action === 'copy' ? '正在复制图片…' : '正在准备保存…');
   try {
@@ -649,12 +693,23 @@ async function exportImage(action: 'copy' | 'save' | 'saveAs' | 'pin'): Promise<
         if (inplace()) await dismissAfterExport(sessionId, revision, token, '图片已固定到桌面');
       }
     }
-    else if (action === 'copy') { await invoke('copy_screenshot_image', { sessionId, revision, pngBase64 }); if (token === generation) { status('已复制合并后的图片。剪贴板不包含原图或编辑图层。'); if (inplace()) await dismissAfterExport(sessionId, revision, token, '图片已复制到剪贴板'); } }
+    else if (action === 'copy') { await invoke('copy_screenshot_image', { sessionId, revision, pngBase64 }); if (token === generation) { if (partialSave?.generation === token && partialSave.stateId === state) partialSave = null; status('已复制合并后的图片。剪贴板不包含原图或编辑图层。'); if (inplace()) await dismissAfterExport(sessionId, revision, token, '图片已复制到剪贴板'); } }
     else {
       nativeDialog = action === 'saveAs'; controls();
-      const result = await invoke<{ path: string; fileName?: string } | null>('save_screenshot_image', { sessionId, revision, pngBase64, saveAs: action === 'saveAs' });
+      const result = await invoke<SaveResult | null>('save_screenshot_image', { sessionId, revision, pngBase64, saveAs: action === 'saveAs' });
       if (token !== generation) return;
-      if (result) { savedState = state; status(`已保存：${result.path}`); if (inplace()) await dismissAfterExport(sessionId, revision, token, `图片已保存：${result.path}`); } else status('已取消保存，图片和编辑内容仍保留。');
+      if (!result) { status('已取消保存，图片和编辑内容仍保留。'); return; }
+      if (result.path) savedState = state;
+      if (result.path && result.clipboardCopied) {
+        partialSave = null;
+        const completed = `图片已保存：${result.path}；已复制到剪贴板`;
+        status(completed); if (inplace()) await dismissAfterExport(sessionId, revision, token, completed);
+      } else {
+        if (result.path) partialSave = { generation: token, stateId: state, path: result.path };
+        const file = result.path ? `文件已保存：${result.path}` : `保存失败：${result.saveError ?? '未写入文件'}`;
+        const clipboard = result.clipboardCopied ? '图片已复制到剪贴板' : `复制失败：${result.clipboardError ?? '未写入剪贴板'}`;
+        status(`${file}；${clipboard}${result.path ? '。请点击 ✓ 单独复制，无需再次保存。' : '。图片仍保留。'}`, true);
+      }
     }
   } catch (error) { if (token === generation) status(`未完成${action === 'pin' ? '贴图' : action === 'copy' ? '复制' : '保存'}：${readableError(error)}`, true); }
   finally { if (token === generation) { busy = false; nativeDialog = false; controls(); } }

@@ -89,7 +89,7 @@ class OptionalPluralRecoveryContract(unittest.TestCase):
         walker = section('func probeUniqueSelection<Node>(', 'func selectionProbeAllowsCompatibility(')
         self.assertIn('requireCompleteSubtree: () -> Bool = { false }', walker)
         self.assertIn('if !requireCompleteSubtree() { continue }', walker)
-        self.assertIn('if requireCompleteSubtree() { return (.incomplete, visited.count) }', walker)
+        self.assertIn('if requireCompleteSubtree() { return finish(.incomplete, .protectedNode) }', walker)
         self.assertLess(walker.index('if !requireCompleteSubtree() { continue }'),
                         walker.index('pending.append(contentsOf: value.children'))
         recovery = section('func recoverySelection(', 'struct SelectionCopyTicket:')

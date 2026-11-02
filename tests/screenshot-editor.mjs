@@ -39,6 +39,15 @@ try {
       const replayAction = new URL(location.href).searchParams.get('initialActionReload');
       if (new URL(location.href).searchParams.has('failInitialCopy')) q.copyError = true;
       if (replayAction) q.session = { ...q.session, initialAction: replayAction === 'copy-failure' ? 'copy' : replayAction, overlay: { x: 30, y: 100, width: 192, height: 128, viewportWidth: innerWidth, viewportHeight: innerHeight } };
+      const drawImage = CanvasRenderingContext2D.prototype.drawImage;
+      CanvasRenderingContext2D.prototype.drawImage = function(...args) {
+        const result = drawImage.apply(this, args);
+        if (this.canvas.id === 'image-canvas' && q.failAfterSourceDraw) {
+          if (q.failAfterSourceDraw > 0) q.failAfterSourceDraw--;
+          throw new Error('QA failure after original pixels were drawn');
+        }
+        return result;
+      };
       const getImageData = CanvasRenderingContext2D.prototype.getImageData;
       CanvasRenderingContext2D.prototype.getImageData = function(...args) {
         if (q.failPixelRead && this.canvas.id === 'image-canvas') throw new Error('QA simulated pixel allocation failure');
@@ -101,7 +110,7 @@ try {
           if (command === 'save_screenshot_image') {
             if (q.saveError) throw new Error('QA save failed');
             q.saves.push(structuredClone(args)); if (q.holdSave) await new Promise(resolve => { q.releaseSave = resolve; });
-            return q.saveCancel ? null : { path: '/fixture/Desktop/EchoLingo-2026-10-31-120000.png', fileName: 'EchoLingo-2026-10-31-120000.png' };
+            return q.saveCancel ? null : (q.saveResult ?? { path: '/fixture/Desktop/EchoLingo-2026-10-31-120000.png', clipboardCopied: true, clipboardError: null, saveError: null });
           }
           if (command === 'pin_screenshot_image') {
             if (q.pinError) throw new Error('QA pin failed');
@@ -381,6 +390,16 @@ try {
     assert.deepEqual(Object.keys(saved).sort(), ['pngBase64', 'revision', 'saveAs', 'sessionId']);
     assert.equal(saved.revision, 0, 'ordinary file export carries the initial revision without exposing source paths');
 
+    // A manual copy repairs the partial-save state in a standalone editor too.
+    await page.evaluate(() => { window.__screenshotQA.saveResult = { path: '/fixture/standalone.png', clipboardCopied: false, clipboardError: 'QA standalone clipboard busy', saveError: null }; });
+    await page.locator('#save-image').click();
+    await page.waitForFunction(() => document.querySelector('#editor-status').textContent.includes('QA standalone clipboard busy'));
+    await page.locator('#copy-image').click();
+    await page.waitForFunction(() => document.querySelector('#editor-status').textContent.includes('已复制合并后的图片'));
+    const repairedSaves = await page.evaluate(() => { delete window.__screenshotQA.saveResult; return window.__screenshotQA.saves.length; });
+    await page.locator('#save-image').click();
+    await page.waitForFunction(count => window.__screenshotQA.saves.length === count + 1 && document.querySelector('#editor-status').textContent.includes('已复制到剪贴板'), repairedSaves);
+
     // Backend-normalized local image delivery may arrive both as an event and
     // the Open return value; install only once, reset history, retain on failure.
     const importedId = await page.evaluate(() => { const q = window.__screenshotQA; q.nextOpen = { ...q.image(40, 30), sourceName: 'generated-local.jpg' }; return q.nextOpen.id; });
@@ -401,7 +420,14 @@ try {
     for (const tool of ['mosaic', 'crop']) {
       await fresh();
       const before = await page.evaluate(() => { const q = window.__screenshotQA; q.failPixelRead = true; return [q.saves.length, q.copies.length]; });
-      await drag(tool, [8, 8], [24, 24]);
+      // Exercise commit-time failure independently of the now-live mosaic
+      // preview: terminal up can arrive without intermediate pointermoves.
+      await page.locator(`[data-tool="${tool}"]`).click();
+      const failureBounds = await page.locator('#image-canvas').boundingBox();
+      await page.mouse.move(failureBounds.x+8*failureBounds.width/96, failureBounds.y+8*failureBounds.height/64); await page.mouse.down();
+      await page.locator('#image-canvas').dispatchEvent('pointerup', { pointerId:1, isPrimary:true, button:0,
+        clientX:failureBounds.x+24*failureBounds.width/96, clientY:failureBounds.y+24*failureBounds.height/64 });
+      await page.mouse.up();
       await page.waitForFunction(() => document.querySelector('#editor-status').dataset.error === 'true');
       assert.equal(await page.locator('#save-image').isDisabled(), true);
       assert.equal(await page.locator('#copy-image').isDisabled(), true);
@@ -417,6 +443,23 @@ try {
     assert.equal(await page.locator('#save-image').isDisabled(), true);
     await page.locator('#image-canvas').dispatchEvent('contextrestored');
     assert.equal(await page.locator('#save-image').isEnabled(), true);
+    // A preview failure AFTER drawing source pixels must either restore the
+    // committed privacy mask, or disable every export if restoration also fails.
+    for (const tool of ['pen','rectangle']) {
+      await fresh(); await drag('solid',[8,8],[50,40]); const protectedFrame = await pixels();
+      await page.locator(`[data-tool="${tool}"]`).click();
+      await page.evaluate(() => { window.__screenshotQA.failAfterSourceDraw = 1; });
+      await drag(tool,[15,15],[35,30]);
+      assert.deepEqual(await pixels(), protectedFrame, 'one-shot preview failure restores every committed redaction pixel');
+      assert.equal(await page.locator('#copy-image').isEnabled(), true, 'only the restored committed frame may export');
+      await page.evaluate(() => { window.__screenshotQA.failAfterSourceDraw = -1; });
+      await drag(tool,[15,15],[35,30]);
+      for (const action of ['copy-image','save-image','pin-image']) assert.equal(await page.locator('#'+action).isDisabled(), true);
+      assert.equal(await page.locator('#canvas-frame').isHidden(), true);
+      await page.evaluate(() => { window.__screenshotQA.failAfterSourceDraw = 0; });
+      await page.locator('#image-canvas').dispatchEvent('contextrestored');
+      assert.deepEqual(await pixels(), protectedFrame, 'recovery does not silently commit the interrupted draft');
+    }
     // Generation change cancels a pending canvas export before native side
     // effects. Delayed old session/clear events cannot overwrite a newer image.
     await fresh(); const beforeSaves = await page.evaluate(() => { const q = window.__screenshotQA; q.holdExport = true; return q.saves.length; });
@@ -580,6 +623,24 @@ try {
     await page.evaluate(() => { window.__screenshotQA.closeError = false; });
     await page.locator('#overlay-cancel').click(); await page.waitForFunction(id => window.__screenshotQA.closed.includes(id), overlayId);
     assert.equal(await page.evaluate(() => window.__screenshotQA.saves.length), savedOnce, 'retrying close never repeats the completed save');
+    // File success and clipboard failure are distinct: no dismissal or duplicate save.
+    overlayId = await overlayFresh();
+    await page.evaluate(() => { window.__screenshotQA.saveResult = { path: '/fixture/partial.png', clipboardCopied: false, clipboardError: 'QA clipboard busy', saveError: null }; });
+    await page.locator('#overlay-save').click();
+    await page.waitForFunction(() => document.querySelector('#editor-status').textContent.includes('QA clipboard busy'));
+    assert.equal(await page.locator('#save-indicator').textContent(), '已保存');
+    assert.equal(await page.evaluate(id => window.__screenshotQA.closed.includes(id), overlayId), false);
+    const partialSaves = await page.evaluate(() => window.__screenshotQA.saves.length);
+    await page.locator('#overlay-save').click();
+    assert.equal(await page.evaluate(() => window.__screenshotQA.saves.length), partialSaves, 'partial completion never creates another file or automatically recopies');
+    await page.locator('#overlay-copy').click();
+    await page.waitForFunction(id => window.__screenshotQA.closed.includes(id), overlayId);
+    await page.evaluate(() => { window.__screenshotQA.saveResult = { path: null, clipboardCopied: true, clipboardError: null, saveError: 'QA disk full' }; });
+    overlayId = await overlayFresh();
+    await page.locator('#overlay-save').click();
+    await page.waitForFunction(() => document.querySelector('#editor-status').textContent.includes('QA disk full') && document.querySelector('#editor-status').textContent.includes('图片已复制到剪贴板'));
+    assert.equal(await page.evaluate(id => window.__screenshotQA.closed.includes(id), overlayId), false);
+    await page.evaluate(() => { delete window.__screenshotQA.saveResult; });
     overlayId = await overlayFresh({ x: 398, y: 402, width: 192, height: 128, viewportWidth: 600, viewportHeight: 540 });
     const toolbarBox = await page.locator('.editor-toolbar').boundingBox();
     assert.ok(toolbarBox.x >= 0 && toolbarBox.y >= 0 && toolbarBox.x + toolbarBox.width <= 600 && toolbarBox.y + toolbarBox.height <= 540, JSON.stringify(toolbarBox));
@@ -741,6 +802,53 @@ try {
     await page.reload();
     await page.waitForFunction(() => window.__screenshotQA.calls.some(x => x.command === 'consume_screenshot_initial_action'));
     await page.waitForTimeout(30); assert.equal(await page.evaluate(() => window.__screenshotQA.copies.length), 0, 'backend consumed action is not repeated after WebView reload');
+    // Live drafts use the final renderer/styles, with no history until release.
+    await fresh(240, 180);
+    const emptyDraft = await pixels();
+    await page.locator('[data-tool="rectangle"]').click();
+    await page.locator('#edit-color').fill('#ff0000');
+    await page.locator('#edit-width').selectOption('8');
+    let liveBounds = await page.locator('#image-canvas').boundingBox();
+    const livePoint = (x,y) => [liveBounds.x+x*liveBounds.width/240,liveBounds.y+y*liveBounds.height/180];
+    await page.mouse.move(...livePoint(20,20)); await page.mouse.down(); await page.mouse.move(...livePoint(100,80), {steps:3});
+    const redDraft = await pixels();
+    assert.deepEqual(redDraft.data.slice((22*240+22)*4,(22*240+22)*4+4), [255,0,0,255], 'held rectangle already has final red stroke');
+    assert.equal(await page.locator('#undo-edit').isDisabled(), true, 'a held preview is not an undo operation');
+    await page.mouse.up(); assert.deepEqual(await pixels(), redDraft, 'release does not replace a purple placeholder with a different shape');
+    await page.locator('#undo-edit').click(); assert.deepEqual(await pixels(), emptyDraft);
+    await page.locator('#redo-edit').click();
+    await page.locator('[data-tool="select"]').click(); await clickImage(50,50);
+    let objectHandle = await page.locator('[data-object-handle="se"]').boundingBox();
+    await page.mouse.move(objectHandle.x+5,objectHandle.y+5); await page.mouse.down(); await page.mouse.move(...livePoint(130,100)); await page.mouse.up();
+    const resizedRectangle = await pixels(); assert.notDeepEqual(resizedRectangle, redDraft);
+    await page.locator('#undo-edit').click(); assert.deepEqual(await pixels(), redDraft, 'rectangle resize is one replace/undo');
+    await page.locator('#redo-edit').click(); assert.deepEqual(await pixels(), resizedRectangle);
+    await page.locator('[data-tool="select"]').click(); await clickImage(60,60);
+    objectHandle = await page.locator('[data-object-handle="se"]').boundingBox();
+    await page.mouse.move(objectHandle.x+5,objectHandle.y+5); await page.mouse.down(); await page.mouse.move(...livePoint(160,130)); await page.keyboard.press('Escape'); await page.mouse.up();
+    assert.deepEqual(await pixels(), resizedRectangle, 'cancelled resize restores committed pixels');
+    await page.keyboard.press('Delete');
+    await page.locator('#undo-edit').click(); assert.deepEqual(await pixels(), resizedRectangle, 'resized object remains individually deletable');
+    await fresh(240,180); liveBounds = await page.locator('#image-canvas').boundingBox();
+    await page.locator('[data-tool="number"]').click(); await page.locator('#step-style').selectOption('number');
+    await clickImage(35,35); const badgeOnly = await pixels();
+    await page.mouse.move(...livePoint(70,70)); await page.mouse.down(); await page.mouse.move(...livePoint(170,120), {steps:3});
+    const numberedDraft = await pixels(); await page.mouse.up();
+    assert.deepEqual(await pixels(), numberedDraft, 'default number tool drag previews and commits one badge plus arrow');
+    await page.locator('#undo-edit').click(); assert.deepEqual(await pixels(), badgeOnly, 'one undo removes the whole number-arrow group');
+    await page.locator('#redo-edit').click();
+    await page.locator('[data-tool="select"]').click(); await clickImage(120,95);
+    objectHandle = await page.locator('[data-object-handle="end"]').boundingBox();
+    await page.mouse.move(objectHandle.x+5,objectHandle.y+5); await page.mouse.down(); await page.mouse.move(...livePoint(200,150)); await page.mouse.up();
+    const endpointEdited = await pixels(); assert.notDeepEqual(endpointEdited, numberedDraft);
+    await page.locator('#undo-edit').click(); assert.deepEqual(await pixels(), numberedDraft, 'endpoint editing keeps badge and arrow one history object');
+    await fresh(240,180); await drag('mosaic',[20,20],[100,80]); const mosaicBeforeResize = await pixels();
+    await page.locator('[data-tool="select"]').click(); await clickImage(50,50);
+    objectHandle = await page.locator('[data-object-handle="se"]').boundingBox();
+    liveBounds = await page.locator('#image-canvas').boundingBox();
+    await page.mouse.move(objectHandle.x+5,objectHandle.y+5); await page.mouse.down(); await page.mouse.move(...livePoint(140,120)); await page.mouse.up();
+    await page.locator('#undo-edit').click(); assert.deepEqual(await pixels(), mosaicBeforeResize, 'mosaic bounds edit undoes without changing source or previous masks');
+
     // Geometry-only capture uses the exact same toolbar DOM before and after
     // first paint. Tool choice never captures or removes adjustment handles.
     await page.evaluate(() => {
@@ -834,13 +942,13 @@ try {
     box = await page.locator('#canvas-frame').boundingBox();
     await page.mouse.move(box.x + 25, box.y + 25); await page.mouse.down(); await page.mouse.move(box.x + 80, box.y + 40, { steps: 4 });
     assert.equal(await geometryCalls(), beforeGeometry, 'held first stroke previews without hiding the native host');
-    assert.notEqual(await page.locator('#pending-ink').getAttribute('points'), '', 'first ink has same-surface vector preview');
-    const heldPreview = await page.locator('#pending-ink').getAttribute('points');
+    assert.equal(await page.locator('#annotation-preview').isVisible(), true, 'first ink has same-surface final-renderer preview');
+    const heldPreview = await page.locator('#annotation-preview').evaluate(c => c.toDataURL());
     await page.evaluate(() => {
       const canvas = document.querySelector('#image-canvas');
       for (const type of ['pointerdown','pointercancel','lostpointercapture']) canvas.dispatchEvent(new PointerEvent(type, { pointerId: 991, isPrimary: false, pointerType: 'touch', button: 0, buttons: 1, clientX: 500, clientY: 400, bubbles: true }));
     });
-    assert.equal(await page.locator('#pending-ink').getAttribute('points'), heldPreview, 'foreign down/cancel cannot replace or cancel held first stroke');
+    assert.equal(await page.locator('#annotation-preview').evaluate(c => c.toDataURL()), heldPreview, 'foreign down/cancel cannot replace or cancel held first stroke');
     await page.mouse.up();
     await page.waitForFunction(() => !!window.__screenshotQA.releaseSelectionCapture);
     assert.equal(await geometryCalls(), beforeGeometry + 1);

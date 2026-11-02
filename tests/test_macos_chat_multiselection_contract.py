@@ -66,7 +66,7 @@ class MacChatMultiSelectionContract(unittest.TestCase):
 
     def test_general_ambiguity_and_invalid_metadata_still_reject_copy(self):
         probe = section("func probeUniqueSelection<", "struct SelectionCompatibilityRequired")
-        self.assertIn("guard selected == nil else { return (.ambiguous", probe)
+        self.assertIn("guard selected == nil else { return finish(.ambiguous, .ambiguousSelection)", probe)
         self.assertIn("return result == .none || result == .resourceLimit", probe)
         self.assertNotIn("com.tencent.qq", probe)
         range_policy = section("func selectionDecision(", "func opaqueSelectionContainer(")

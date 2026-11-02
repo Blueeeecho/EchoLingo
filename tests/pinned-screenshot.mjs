@@ -23,6 +23,10 @@ try {
           if (qa.failToggle) throw new Error('fixture toggle failure');
           return;
         }
+        if (command === 'start_pinned_screenshot_drag' && args.prepareOnly) {
+          if (qa.holdPrepare) await new Promise(resolve => { qa.releasePrepare = resolve; });
+          return '4294967296';
+        }
         if (['pinned_screenshot_ready', 'close_pinned_screenshot', 'start_pinned_screenshot_drag', 'resize_pinned_screenshot'].includes(command)) return;
         throw new Error('Unexpected IPC: ' + command);
       } };
@@ -40,8 +44,35 @@ try {
       assert.equal(await page.locator('button').count(), 2, 'only pin and close controls');
       assert.equal(await page.locator('.actions').textContent(), '', 'icons contain no persistent labels');
       assert.equal(await page.locator('#pinned-image').evaluate(image => getComputedStyle(image).objectFit), 'contain');
+      const dragCount = () => page.evaluate(() => window.__pinQA.calls.filter(c => c.command === 'start_pinned_screenshot_drag' && !c.prepareOnly).length);
       await page.mouse.move(100, 90); await page.mouse.down(); await page.mouse.up();
-      assert.equal(await page.evaluate(() => window.__pinQA.calls.filter(c => c.command === 'start_pinned_screenshot_drag').length), 1);
+      assert.equal(await dragCount(), 0, 'a stationary click never starts native dragging');
+      await page.mouse.down(); await page.mouse.move(102, 91); await page.mouse.up();
+      assert.equal(await dragCount(), 0, 'small click jitter does not move the window');
+      await page.mouse.move(100, 90); await page.mouse.down();
+      await page.locator('main').dispatchEvent('pointermove', { pointerId: 99, isPrimary: false, buttons: 1, clientX: 200, clientY: 140 });
+      await page.locator('main').dispatchEvent('pointercancel', { pointerId: 99 });
+      assert.equal(await dragCount(), 0, 'foreign pointers cannot start or cancel this drag');
+      await page.mouse.move(110, 95); await page.mouse.move(120, 100); await page.mouse.up();
+      assert.equal(await dragCount(), 1, 'a held movement starts native dragging once');
+      await page.mouse.down(); await page.evaluate(() => window.dispatchEvent(new Event('blur')));
+      await page.mouse.move(140, 110); await page.mouse.up();
+      assert.equal(await dragCount(), 1, 'blur cancels a pending movement intent');
+      await page.mouse.down();
+      await page.locator('main').dispatchEvent('pointercancel', { pointerId: 1 });
+      await page.mouse.move(160, 120); await page.mouse.up();
+      assert.equal(await dragCount(), 1, 'cancel cannot resume native dragging');
+      await page.evaluate(() => { window.__pinQA.holdPrepare = true; });
+      await page.mouse.move(100, 90); await page.mouse.down(); await page.mouse.move(110, 95);
+      await page.waitForFunction(() => !!window.__pinQA.releasePrepare);
+      await page.mouse.up();
+      await page.locator('#toggle-pin').click();
+      await page.waitForFunction(() => document.querySelector('#toggle-pin').getAttribute('aria-pressed') === 'false');
+      await page.locator('#toggle-pin').click();
+      await page.waitForFunction(() => document.querySelector('#toggle-pin').getAttribute('aria-pressed') === 'true');
+      await page.evaluate(() => { window.__pinQA.holdPrepare = false; window.__pinQA.releasePrepare(); });
+      await page.waitForTimeout(20);
+      assert.equal(await dragCount(), 1, 'late preparation after release and a new control press cannot drag');
       for (const direction of ['North','NorthEast','East','SouthEast','South','SouthWest','West','NorthWest']) {
         await page.locator(`[data-direction=${direction}]`).click();
         assert.equal(await page.evaluate(() => window.__pinQA.calls.filter(c => c.command === 'resize_pinned_screenshot').at(-1).direction), direction.toLowerCase());
@@ -59,12 +90,37 @@ try {
       await page.waitForFunction(() => document.querySelector('#toggle-pin').getAttribute('aria-pressed') === 'true');
       const imageBox = await page.locator('#pinned-image').boundingBox();
       assert.deepEqual(imageBox, { x: 0, y: 0, width: 240, height: 160 }, 'image area uses full window without header reservation');
-      assert.equal(await page.evaluate(() => window.__pinQA.calls.filter(c => c.command === 'start_pinned_screenshot_drag').length), 1, 'buttons and resize edges never drag');
+      assert.equal(await page.evaluate(() => window.__pinQA.calls.filter(c => c.command === 'start_pinned_screenshot_drag' && !c.prepareOnly).length), 1, 'buttons and resize edges never drag');
     }
     await page.locator('#close-pin').click();
     await page.waitForFunction(() => window.__pinQA.calls.some(call => call.command === 'close_pinned_screenshot'));
     assert.deepEqual(errors, []);
     await page.close();
   }
-  console.log('PASS: reference image decode readiness/failure, bounded layout, unpin/re-pin, errors and close; fake IPC only.');
+  // Small landscape/portrait pins use image-shaped native viewports, not a
+  // 240x160 canvas. Tiny images scale uniformly for controls without changing pixels.
+  for (const [width, height, imageWidth = width, imageHeight = height] of [[200, 40], [40, 200], [76, 76, 10, 10], [720, 40, 1000, 10], [40, 520, 10, 1000]]) {
+    const page = await browser.newPage({ viewport: { width, height } });
+    await page.addInitScript(({ width: imageWidth, height: imageHeight }) => {
+      window.isTauri = true;
+      window.__TAURI_INTERNALS__ = { invoke: async command => {
+        if (command === 'get_pinned_screenshot') {
+          const c = document.createElement('canvas'); c.width = imageWidth; c.height = imageHeight;
+          const ctx = c.getContext('2d'); ctx.fillStyle = '#123456'; ctx.fillRect(0, 0, imageWidth, imageHeight);
+          return { width: imageWidth, height: imageHeight, pngBase64: c.toDataURL().split(',')[1] };
+        }
+      } };
+    }, { width: imageWidth, height: imageHeight });
+    await page.goto(new URL('pinned-screenshot.html', base).href);
+    await page.locator('#pinned-image').waitFor({ state: 'visible' });
+    assert.deepEqual(await page.locator('#pinned-image').boundingBox(), { x: 0, y: 0, width, height });
+    assert.deepEqual(await page.locator('#pinned-image').evaluate(i => [i.naturalWidth, i.naturalHeight]), [imageWidth, imageHeight]);
+    for (const selector of ['#toggle-pin', '#close-pin']) {
+      const b = await page.locator(selector).boundingBox();
+      assert.ok(b.x >= 0 && b.y >= 0 && b.x + b.width <= width && b.y + b.height <= height, 'both icons stay inside small image viewport');
+    }
+    await page.close();
+  }
+
+  console.log('PASS: reference image decode, click/drag intent, small/tiny layouts, unpin/re-pin, errors and close; fake IPC only.');
 } finally { await browser.close(); }

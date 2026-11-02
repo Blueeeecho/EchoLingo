@@ -820,8 +820,26 @@ pub async fn restart_screenshot_capture(
 }
 
 #[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct SaveResult {
-    path: String,
+    path: Option<String>,
+    clipboard_copied: bool,
+    clipboard_error: Option<String>,
+    save_error: Option<String>,
+}
+impl SaveResult {
+    fn from_outcomes(clipboard: Result<(), String>, saved: Result<PathBuf, String>) -> Self {
+        let (path, save_error) = match saved {
+            Ok(path) => (Some(path.to_string_lossy().into_owned()), None),
+            Err(error) => (None, Some(error)),
+        };
+        Self {
+            path,
+            clipboard_copied: clipboard.is_ok(),
+            clipboard_error: clipboard.err(),
+            save_error,
+        }
+    }
 }
 #[tauri::command]
 pub async fn save_screenshot_image(
@@ -890,18 +908,22 @@ pub async fn save_screenshot_image(
     let worker_app = app.clone();
     tauri::async_runtime::spawn_blocking(move || {
         let pixels = from_base64(&png_base64, true)?;
-        let bytes = encode(&pixels)?;
-        // Linearization point: the explicit Save is committed while this ID
-        // is current. Disk I/O runs outside the state lock; a subsequent F1 may
-        // proceed immediately, but does not undo this already accepted Save.
-        worker_app
-            .state::<super::AppState>()
+        let state = worker_app.state::<super::AppState>();
+        let physical = state.native_tasks.enter_effect();
+        // Linearize both explicit effects against the same revision after
+        // waiting for prior native clipboard restoration. No retries occur.
+        state
             .screenshots
-            .with_image(session_id, |_| Ok(()))?;
-        let saved = save_new_png(&path, &bytes)?;
-        Ok(Some(SaveResult {
-            path: saved.to_string_lossy().into_owned(),
-        }))
+            .check_image_revision(session_id, revision.unwrap_or(0))?;
+        let clipboard = match physical {
+            Ok(_physical) => write_image_clipboard(&pixels),
+            Err(error) => Err(error),
+        };
+        // Copy happens first; slow disk work must not later overwrite a newer
+        // user clipboard. Each effect retains its own outcome, including a
+        // successfully saved path when the clipboard is unavailable.
+        let saved = encode(&pixels).and_then(|bytes| save_new_png(&path, &bytes));
+        Ok(Some(SaveResult::from_outcomes(clipboard, saved)))
     })
     .await
     .map_err(|_| "SCREENSHOT_SAVE: 图片保存被中断".to_owned())?
@@ -933,28 +955,32 @@ pub async fn copy_screenshot_image(
         // Commit only after prior native clipboard restoration has finished.
         // Keep the physical permit, but not the image state/UI lock, for I/O.
         state.screenshots.with_image(session_id, |_| Ok(()))?;
-        #[cfg(any(target_os = "macos", target_os = "windows"))]
-        {
-            let mut clipboard = arboard::Clipboard::new()
-                .map_err(|_| "SCREENSHOT_CLIPBOARD: 无法打开图片剪贴板，请稍后重试")?;
-            clipboard
-                .set_image(arboard::ImageData {
-                    width: pixels.width() as usize,
-                    height: pixels.height() as usize,
-                    bytes: std::borrow::Cow::Borrowed(pixels.as_raw()),
-                })
-                .map_err(|_| {
-                    "SCREENSHOT_CLIPBOARD: 无法复制图片，剪贴板可能正被其他应用使用".to_owned()
-                })
-        }
-        #[cfg(not(any(target_os = "macos", target_os = "windows")))]
-        {
-            let _ = pixels;
-            Err("图片剪贴板仅支持 Windows 和 macOS".into())
-        }
+        write_image_clipboard(&pixels)
     })
     .await
     .map_err(|_| "SCREENSHOT_CLIPBOARD: 图片复制被中断".to_owned())?
+}
+
+fn write_image_clipboard(pixels: &RgbaImage) -> Result<(), String> {
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    {
+        let mut clipboard = arboard::Clipboard::new()
+            .map_err(|_| "SCREENSHOT_CLIPBOARD: 无法打开图片剪贴板，请稍后重试")?;
+        clipboard
+            .set_image(arboard::ImageData {
+                width: pixels.width() as usize,
+                height: pixels.height() as usize,
+                bytes: std::borrow::Cow::Borrowed(pixels.as_raw()),
+            })
+            .map_err(|_| {
+                "SCREENSHOT_CLIPBOARD: 无法复制图片，剪贴板可能正被其他应用使用".to_owned()
+            })
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    {
+        let _ = pixels;
+        Err("图片剪贴板仅支持 Windows 和 macOS".into())
+    }
 }
 
 async fn ensure_editor_window(
@@ -1514,6 +1540,38 @@ fn app_emit_selection(app: &tauri::AppHandle, selection: &SelectionSession) -> R
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn save_result_preserves_independent_effect_outcomes() {
+        for copied in [false, true] {
+            for saved in [false, true] {
+                let clipboard = if copied {
+                    Ok(())
+                } else {
+                    Err("copy failed".to_owned())
+                };
+                let file = if saved {
+                    Ok(PathBuf::from("capture.png"))
+                } else {
+                    Err("save failed".to_owned())
+                };
+                let result = SaveResult::from_outcomes(clipboard, file);
+                assert_eq!(result.clipboard_copied, copied);
+                assert_eq!(result.path.as_deref(), saved.then_some("capture.png"));
+                assert_eq!(
+                    result.clipboard_error.as_deref(),
+                    (!copied).then_some("copy failed")
+                );
+                assert_eq!(result.save_error.as_deref(), (!saved).then_some("save failed"));
+                let json = serde_json::to_value(&result).unwrap();
+                assert_eq!(json["clipboardCopied"], copied);
+                assert_eq!(json["path"].is_null(), !saved);
+                assert_eq!(json["clipboardError"].is_null(), copied);
+                assert_eq!(json["saveError"].is_null(), saved);
+                assert_eq!(json.as_object().unwrap().len(), 4);
+            }
+        }
+    }
+
     fn pending_selection() -> (Controller, super::super::native_tasks::Request) {
         let tasks = super::super::native_tasks::Controller::default();
         let request = tasks.begin().unwrap();

@@ -22,3 +22,5 @@ button svg { width:18px; height:18px; fill:none; stroke:currentColor; stroke-wid
 [data-direction=NorthEast], [data-direction=NorthWest], [data-direction=SouthEast], [data-direction=SouthWest] { width:8px; height:8px; }
 [data-direction=NorthEast] { right:0; top:0; cursor:nesw-resize; } [data-direction=NorthWest] { left:0; top:0; cursor:nwse-resize; }
 [data-direction=SouthEast] { right:0; bottom:0; cursor:nwse-resize; } [data-direction=SouthWest] { left:0; bottom:0; cursor:nesw-resize; }
+/* Narrow portrait captures retain both existing controls without widening the image. */
+@media (max-width: 75px) { .actions { flex-direction:column; } }
