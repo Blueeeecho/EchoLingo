@@ -1,12 +1,13 @@
 name: Focused 0.2.4 immutable-artifact fixture diagnostics
 on:
   push:
-    branches: [diagnostics/024-f1-fixture-reuse]
+    branches: [diagnostics/024-f1-fixture-reuse, diagnostics/screenshot-save-copy-fixture]
 permissions:
   contents: read
   actions: read
 jobs:
   windows-f1-fixture-reuse:
+    if: github.ref == 'refs/heads/diagnostics/024-f1-fixture-reuse'
     name: Exact existing Windows bytes, fixture diagnostics only
     runs-on: windows-latest
     timeout-minutes: 20
@@ -88,7 +89,138 @@ jobs:
         run: |
           'This is fixture-only diagnosis against source-equal immutable existing bytes. It is not release acceptance. The final combined PR head still requires all normal native, browser, installed and release gates; this workflow does not rebuild, publish, merge or change repository settings.' | Add-Content "$env:GITHUB_STEP_SUMMARY"
 
+  windows-save-copy-fixture-reuse:
+    if: github.ref == 'refs/heads/diagnostics/screenshot-save-copy-fixture'
+    name: Exact reviewed Save and Copy bytes, F1 fixture only
+    runs-on: windows-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Require source-equal production and preserve provenance
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $base = '4941d285a06df2674bd36940da996a0f17367493'
+          git fetch --no-tags --depth=1 origin $base
+          if ($LASTEXITCODE -ne 0) { throw 'Immutable source commit is unavailable.' }
+          $changed = @(git diff --name-only $base HEAD)
+          if ($LASTEXITCODE -ne 0) { throw 'Exact source comparison failed.' }
+          $allowed = '^(tests/|\.github/workflows/f1-fixture-reuse\.yml$)'
+          foreach ($path in $changed) {
+            if ($path -notmatch $allowed) { throw ('Production/build input differs from immutable artifact: ' + $path) }
+          }
+          New-Item -ItemType Directory -Force "$env:RUNNER_TEMP/save-copy-results" | Out-Null
+          [ordered]@{ sourceCommit=$base; fixtureCommit=(git rev-parse HEAD); productionAndBuildInputsByteEqual=$true; allowedFixtureChanges=$changed; diagnosticOnly=$true; releaseAcceptance=$false } | ConvertTo-Json -Depth 4 | Set-Content "$env:RUNNER_TEMP/save-copy-results/source-equality.json" -Encoding utf8
+      - name: Download only the reviewed Windows native artifact
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs'), path = require('path'), crypto = require('crypto');
+            if (context.repo.owner !== 'Blueeeecho' || context.repo.repo !== 'EchoLingo') throw new Error('Unexpected repository.');
+            const runId = 41397150457, source = '4941d285a06df2674bd36940da996a0f17367493';
+            const expected = {id:13120925228, name:'screenshot-pin-Windows', size:4190464, digest:'4bce0c2ded82bb5862ee147759788284ac63d641eecf53ef9c0587050ee0cf11'};
+            const run = (await github.rest.actions.getWorkflowRun({...context.repo, run_id:runId})).data;
+            if (run.head_sha !== source || run.repository.id !== 1432139657) throw new Error('Immutable build provenance mismatch.');
+            const artifact = (await github.rest.actions.getArtifact({...context.repo, artifact_id:expected.id})).data;
+            if (artifact.expired || artifact.name !== expected.name || artifact.size_in_bytes !== expected.size || artifact.digest !== `sha256:${expected.digest}` || artifact.workflow_run?.id !== runId || artifact.workflow_run?.head_sha !== source) throw new Error('Artifact metadata mismatch.');
+            const download = await github.rest.actions.downloadArtifact({...context.repo, artifact_id:expected.id, archive_format:'zip'});
+            const bytes = Buffer.from(download.data);
+            if (bytes.length !== expected.size || crypto.createHash('sha256').update(bytes).digest('hex') !== expected.digest) throw new Error('Downloaded ZIP byte identity mismatch.');
+            fs.writeFileSync(path.join(process.env.RUNNER_TEMP, 'save-copy-native.zip'), bytes);
+            fs.writeFileSync(path.join(process.env.RUNNER_TEMP, 'save-copy-results', 'artifact.json'), JSON.stringify({...expected, sourceCommit:source, sourceRun:runId, actualZipDigestVerified:true},null,2));
+      - name: Extract only bounded exact regular app and helper members
+        id: save_copy_extract
+        shell: python
+        run: |
+          import hashlib, json, os, stat, zipfile
+          from pathlib import Path
+          root = Path(os.environ['RUNNER_TEMP'])
+          destination = root / 'save-copy-inputs'
+          destination.mkdir(exist_ok=False)
+          expected = [
+              ('EchoLingo/EchoLingo/src-tauri/target/release/echolingo.exe', 'echolingo.exe', 8430080, 'd154e5bc9888b5859317a2bd198a2859f7e39098f6d2ac5ca5ed1781d5ea1c3f'),
+              ('EchoLingo/EchoLingo/src-tauri/target/release/build/echolingo-0b4c25dc95e5384e/out/echolingo-native-capture.exe', 'echolingo-native-capture.exe', 472064, 'fee4dee2fd27e34ec7f63e3be0248625cfd04c391f466c56103b7014e3544c08'),
+          ]
+          payloads, evidence = [], []
+          with zipfile.ZipFile(root / 'save-copy-native.zip') as archive:
+              for member, name, size, digest in expected:
+                  matches = [item for item in archive.infolist() if item.filename == member]
+                  if len(matches) != 1:
+                      raise ValueError('Exact unique member required')
+                  item = matches[0]
+                  kind = stat.S_IFMT(item.external_attr >> 16)
+                  if item.is_dir() or kind not in (0, stat.S_IFREG) or item.flag_bits & 1 or item.file_size != size:
+                      raise ValueError('Bounded regular member required')
+                  with archive.open(item) as stream:
+                      data = stream.read(size + 1)
+                  if len(data) != size or hashlib.sha256(data).hexdigest() != digest:
+                      raise ValueError('Executable byte identity mismatch')
+                  payloads.append(data)
+                  evidence.append(dict(member=member, file=name, size=size, sha256=digest))
+          app, helper = payloads
+          if app.count(helper) != 1 or app.find(helper) != 5983805:
+              raise ValueError('Exact helper is not uniquely embedded at reviewed offset')
+          for record, data in zip(evidence, payloads):
+              with (destination / record['file']).open('xb') as output:
+                  output.write(data)
+          (root / 'save-copy-results' / 'executables.json').write_text(json.dumps(dict(executables=evidence, embeddedHelperOffset=5983805), indent=2))
+      - name: Parse unchanged scoped PowerShell harness before execution
+        shell: powershell
+        run: |
+          $tokens = $null
+          $parseErrors = $null
+          [Management.Automation.Language.Parser]::ParseFile((Resolve-Path 'tests/windows-application-smoke.ps1').Path, [ref]$tokens, [ref]$parseErrors) | Out-Null
+          if ($parseErrors.Count -ne 0) { $parseErrors | Format-List; throw 'F1 harness has PowerShell syntax errors.' }
+      - name: Run the original full F1 fixture once against exact existing bytes
+        timeout-minutes: 8
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Continue'
+          $global:LASTEXITCODE = 1
+          $app = "$env:RUNNER_TEMP/save-copy-inputs/echolingo.exe"
+          $helper = "$env:RUNNER_TEMP/save-copy-inputs/echolingo-native-capture.exe"
+          $output = @(& powershell.exe -NoProfile -STA -ExecutionPolicy Bypass -File tests/windows-application-smoke.ps1 -ApplicationPath $app -DefaultCapture -NativeCapturePath $helper -ScreenshotEditorTests 2>&1)
+          $fixtureExit = $LASTEXITCODE
+          $report = "$env:RUNNER_TEMP/save-copy-results/native-editor.log"
+          $output | Out-File $report -Encoding utf8
+          $output | Write-Output
+          python scripts/verify_screenshot_editor_report.py $report --application $app
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          if ($fixtureExit -ne 0) { exit $fixtureExit }
+      - name: Verify immutable executables after the fixture including failure
+        if: always() && steps.save_copy_extract.outcome == 'success'
+        shell: python
+        run: |
+          import hashlib, json, os
+          from pathlib import Path
+          root = Path(os.environ['RUNNER_TEMP'])
+          records = json.loads((root / 'save-copy-results' / 'executables.json').read_text())['executables']
+          for record in records:
+              data = (root / 'save-copy-inputs' / record['file']).read_bytes()
+              record['postRunByteIdentityVerified'] = len(data) == record['size'] and hashlib.sha256(data).hexdigest() == record['sha256']
+          (root / 'save-copy-results' / 'post-run-executables.json').write_text(json.dumps(records, indent=2))
+          if not all(record['postRunByteIdentityVerified'] for record in records):
+              raise ValueError('Executable identity changed during fixture')
+      - name: Preserve the first same-byte F1 result including failures
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: Windows-Save-Copy-same-byte-F1-diagnostics
+          path: ${{ runner.temp }}/save-copy-results
+          if-no-files-found: error
+      - name: State same-byte evidence boundaries
+        if: always()
+        shell: pwsh
+        run: |
+          'This is one F1 fixture run on reviewed unchanged app/helper bytes, not a new build, installer, Mac test or release acceptance. Original failures and strict verification remain authoritative.' | Add-Content "$env:GITHUB_STEP_SUMMARY"
+
   macos-screenshot-native-probe:
+    if: github.ref == 'refs/heads/diagnostics/024-f1-fixture-reuse'
     name: macOS native screenshot capture (permission block is not a pass)
     runs-on: macos-latest
     timeout-minutes: 8

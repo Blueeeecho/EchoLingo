@@ -9,7 +9,7 @@ SOURCE = (ROOT / '.github/workflows/f1-fixture-reuse.yml').read_text()
 
 class F1FixtureReuseWorkflowContract(unittest.TestCase):
     def test_exact_temporary_branch_and_read_only_permissions(self):
-        self.assertIn('branches: [diagnostics/024-f1-fixture-reuse]', SOURCE)
+        self.assertIn('branches: [diagnostics/024-f1-fixture-reuse, diagnostics/screenshot-save-copy-fixture]', SOURCE)
         self.assertNotIn('pull_request:', SOURCE)
         self.assertNotIn('workflow_run:', SOURCE)
         self.assertIn('contents: read', SOURCE)
@@ -21,6 +21,9 @@ class F1FixtureReuseWorkflowContract(unittest.TestCase):
         ci = (ROOT / '.github/workflows/ci.yml').read_text()
         expected = ci.split('  macos-screenshot-native-probe:\n', 1)[1].split('  desktop:\n', 1)[0].strip()
         actual = SOURCE.split('  macos-screenshot-native-probe:\n', 1)[1].strip()
+        route = "if: github.ref == 'refs/heads/diagnostics/024-f1-fixture-reuse'"
+        self.assertEqual(actual.count(route), 1)
+        actual = actual.replace(route + '\n', '', 1)
         self.assertEqual(executable_job(actual), executable_job(expected))
 
     def test_all_production_changes_fail_and_pins_are_not_inputs(self):

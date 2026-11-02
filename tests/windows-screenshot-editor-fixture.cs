@@ -84,8 +84,12 @@ public static partial class EchoLingoApplicationSmoke {
     }
     sealed class ScreenshotClipboardLease {
         readonly IntPtr source;uint generation,format;string digest;IntPtr owner;bool initialized;int seedAttempt,copyAttempt,readOnlyObservationRetries;string copyPhase="cancel-baseline";
+        // Six explicit Save cases now publish the same generated bitmap to the
+        // clipboard. Each adds four seed and three image-claim records; keep
+        // the previous cancellation/cleanup budget intact (96 + 6 * 7 = 138).
+        const int ClipboardObservationLimit = 96 + 6 * 7;
         public readonly List<Dictionary<string,object>> Observations=new List<Dictionary<string,object>>();
-        void Record(Dictionary<string,object> row){Assert(Observations.Count<96,"Screenshot clipboard diagnostic bound exceeded.");row["seedAttempt"]=seedAttempt;row["copyAttempt"]=copyAttempt;row["copyPhase"]=copyPhase;row["leaseFormat"]=format;row["readOnlyObservationRetries"]=readOnlyObservationRetries;Observations.Add(row);}
+        void Record(Dictionary<string,object> row){Assert(Observations.Count<ClipboardObservationLimit,"Screenshot clipboard diagnostic bound exceeded.");row["seedAttempt"]=seedAttempt;row["copyAttempt"]=copyAttempt;row["copyPhase"]=copyPhase;row["leaseFormat"]=format;row["readOnlyObservationRetries"]=readOnlyObservationRetries;Observations.Add(row);}
         public void BeginCopy(string phase){copyAttempt++;copyPhase=phase;readOnlyObservationRetries=0;}
         public bool StableImageRead(uint before,uint after){bool stable=before!=0&&before!=generation&&before==after;if(!stable)readOnlyObservationRetries++;return stable;}
         void RecordState(string phase,bool lockedRead=false){uint sequence=GetClipboardSequenceNumber();IntPtr currentOwner=GetClipboardOwner();bool same=lockedRead&&digest!=null&&generation!=0&&sequence==generation&&currentOwner==owner;
