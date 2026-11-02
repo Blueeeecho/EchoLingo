@@ -384,6 +384,10 @@ frame.addEventListener('pointermove', event => {
   const g = selectionDrag, overlay = session.overlay;
   const rect = adjustSelection(g.rect, g.handle, event.clientX - g.start.x, event.clientY - g.start.y,
     { x: 0, y: 0, width: overlay.viewportWidth, height: overlay.viewportHeight });
+  // A captured, unannotated selection remains a bitmap until its geometry
+  // actually changes. WebViews may emit same-position moves during a click;
+  // hiding the bitmap for those events produces a visible flash, not a drag.
+  if (rect.x === overlay.x && rect.y === overlay.y && rect.width === overlay.width && rect.height === overlay.height) return;
   session.overlay = { ...overlay, ...rect }; frame.dataset.liveSelection = 'true'; canvas.hidden = true; placeSelectionFrame();
 });
 async function endSelectionDrag(event: PointerEvent, cancelled = false): Promise<void> {

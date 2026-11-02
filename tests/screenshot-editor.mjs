@@ -755,6 +755,14 @@ try {
       q.publishSelection(); window.__sameToolbar = document.querySelector('.editor-toolbar');
     });
     await page.waitForFunction(() => !document.querySelector('#selection-handles').hidden);
+    // Live native selection has no opaque bitmap yet: neither the page nor
+    // the selected area may dim the source beneath this transparent host.
+    for (const colorScheme of ['light', 'dark']) {
+      await page.emulateMedia({ colorScheme });
+      assert.deepEqual(await page.evaluate(() => [document.documentElement, document.body, document.querySelector('#canvas-frame')]
+        .map(e => getComputedStyle(e).backgroundColor)), ['rgba(0, 0, 0, 0)', 'rgba(0, 0, 0, 0)', 'rgba(0, 0, 0, 0)']);
+    }
+    await page.emulateMedia({ colorScheme: 'light' });
     const geometryCalls = () => page.evaluate(() => window.__screenshotQA.calls.filter(x => x.command === 'capture_screenshot_selection').length);
     const beforeGeometry = await geometryCalls();
     await page.locator('[data-tool="pen"]').click();
@@ -846,10 +854,24 @@ try {
     });
     await page.waitForFunction(() => !document.querySelector('#undo-edit').disabled);
     assert.equal(await page.evaluate(() => window.__sameToolbar === document.querySelector('.editor-toolbar')), true, 'first annotation binds pixels without replacing toolbar');
+    assert.deepEqual(await page.locator('#canvas-frame').boundingBox(), box, 'first capture and replay retain selection origin and CSS dimensions at either DPR');
+    assert.equal(await page.locator('#image-canvas').evaluate(c => c.tagName === 'CANVAS' && !c.draggable), true, 'capture pixels are a non-draggable canvas, not a browser image drag preview');
     assert.deepEqual(await page.locator('#image-canvas').evaluate(c => [...c.getContext('2d').getImageData(400, 200, 1, 1).data]), [20,40,50,255], 'foreign pointer cannot extend buffered ink');
     assert.equal(await page.locator('#selection-handles').isVisible(), false, 'annotated pixels use safe crop/reselect rather than silent live recapture');
     await page.locator('#undo-edit').click();
     assert.equal(await page.locator('#selection-handles').isVisible(), true, 'undo to no annotations permits full adjustment again');
+    await page.locator('[data-tool="select"]').click();
+    const unchangedFrame = await page.locator('#canvas-frame').boundingBox();
+    const unchangedCanvas = await page.locator('#image-canvas').evaluate(c => c.toDataURL());
+    const unchangedRevision = await page.evaluate(() => window.__screenshotQA.session.revision);
+    await page.mouse.move(unchangedFrame.x + 30, unchangedFrame.y + 30); await page.mouse.down();
+    await page.locator('#canvas-frame').dispatchEvent('pointermove', { pointerId: 1, isPrimary: true, buttons: 1,
+      clientX: unchangedFrame.x + 30, clientY: unchangedFrame.y + 30 });
+    assert.equal(await page.locator('#image-canvas').isVisible(), true, 'same-position click move must not hide captured pixels');
+    assert.deepEqual(await page.locator('#canvas-frame').boundingBox(), unchangedFrame, 'click preserves the selection origin, not the pointer origin');
+    assert.equal(await page.locator('#image-canvas').evaluate(c => c.toDataURL()), unchangedCanvas);
+    await page.mouse.up();
+    assert.equal(await page.evaluate(() => window.__screenshotQA.session.revision), unchangedRevision, 'stationary click does not recapture or update geometry');
     await page.locator('#overlay-cancel').click();
     // A late capture must not annotate/export/reopen after cancellation.
     await page.evaluate(() => { window.__screenshotQA.releaseSelectionCapture = null; window.__screenshotQA.publishSelection(); });

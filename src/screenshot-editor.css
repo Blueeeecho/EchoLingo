@@ -17,7 +17,7 @@ dialog[data-dialog-fallback][open] { display:block; position:fixed; inset:50% au
    editable; the transparent exterior never becomes part of an export. */
 .inplace-only { display:none; }
 :root[data-inplace=true] { background:transparent; }
-body[data-compact-editor=true] { min-width:0; display:block; background:#10131a55; }
+body[data-compact-editor=true] { min-width:0; display:block; background:transparent; }
 body[data-compact-editor=true] .editor-header,
 body[data-compact-editor=true] .editor-note,
 body[data-compact-editor=true] .editor-footer { display:none; }

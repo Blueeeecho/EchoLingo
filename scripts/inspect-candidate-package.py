@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Statically inspect a fresh 0.2.9 installer; never run, install or re-sign it.
+"""Statically inspect a fresh 0.2.10 installer; never run, install or re-sign it.
 
 The two --*-passed flags are explicit workflow attestations, not substitutes
 for running a locked build and focused tests first. --output-dir must be new.
@@ -28,7 +28,7 @@ import threading
 import tempfile
 import tomllib
 
-VERSION = "0.2.9"
+VERSION = "0.2.10"
 ROOT = Path(__file__).resolve().parents[1]
 MAX_MEMBERS = 20000
 MAX_LISTING = 16 * 1024 * 1024
@@ -134,7 +134,7 @@ def source_identity(root=ROOT):
     versions = [json.loads((root / "package.json").read_text(encoding="utf-8"))["version"],
                 json.loads((root / "src-tauri/tauri.conf.json").read_text(encoding="utf-8"))["version"],
                 tomllib.loads((root / "src-tauri/Cargo.toml").read_text(encoding="utf-8"))["package"]["version"]]
-    require(versions == [VERSION] * 3, "Only the exact 0.2.9 candidate may be inspected")
+    require(versions == [VERSION] * 3, "Only the exact 0.2.10 candidate may be inspected")
     return commit, tree
 
 
@@ -254,10 +254,10 @@ def verify_windows_version(value):
     require(isinstance(value, dict) and set(value) == {"fileVersion", "productVersion", "fileParts", "productParts"},
             "Invalid Windows version metadata")
     for key in ("fileVersion", "productVersion"):
-        require(value[key] in (VERSION, VERSION + ".0"), "Windows file/product version is not 0.2.9")
+        require(value[key] in (VERSION, VERSION + ".0"), "Windows file/product version is not 0.2.10")
     for key in ("fileParts", "productParts"):
         require(isinstance(value[key], list) and all(type(n) is int for n in value[key])
-                and value[key] == [int(part) for part in VERSION.split(".")] + [0], "Windows numeric file/product version is not 0.2.9")
+                and value[key] == [int(part) for part in VERSION.split(".")] + [0], "Windows numeric file/product version is not 0.2.10")
 
 
 def inspect_windows(installer, output, expected_application_size):

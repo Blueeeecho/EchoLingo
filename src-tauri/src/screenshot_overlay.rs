@@ -133,6 +133,10 @@ unsafe extern "C" {
         y: f64,
         width: f64,
         height: f64,
+        selection_x: f64,
+        selection_y: f64,
+        selection_width: f64,
+        selection_height: f64,
     ) -> i32;
     fn echolingo_show_screenshot_overlay(
         window: *mut std::ffi::c_void,
@@ -140,6 +144,10 @@ unsafe extern "C" {
         y: f64,
         width: f64,
         height: f64,
+        selection_x: f64,
+        selection_y: f64,
+        selection_width: f64,
+        selection_height: f64,
     ) -> i32;
     fn echolingo_hide_screenshot_overlay(window: *mut std::ffi::c_void) -> i32;
 }
@@ -161,6 +169,10 @@ pub fn prepare(
             geometry.screen_y,
             geometry.screen_width,
             geometry.screen_height,
+            geometry.x,
+            geometry.y,
+            geometry.width,
+            geometry.height,
         )
     } != 0
     {
@@ -184,6 +196,10 @@ pub fn show(
             geometry.screen_y,
             geometry.screen_width,
             geometry.screen_height,
+            geometry.x,
+            geometry.y,
+            geometry.width,
+            geometry.height,
         )
     } == 0
     {

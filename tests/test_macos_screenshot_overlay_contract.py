@@ -56,6 +56,28 @@ class MacScreenshotOverlayContract(unittest.TestCase):
         self.assertIn('aboveEditor["screenY"] == -720', NATIVE)
         self.assertIn('aboveEditor["scale"] == 1', NATIVE)
 
+    def test_panels_bind_the_target_screen_and_verify_global_frame(self):
+        selector = NATIVE.split("func show() throws", 1)[1].split("func receive(_ event", 1)[0]
+        self.assertIn('== geometry.id', selector)
+        self.assertIn('$0.frame == geometry.frame && $0.backingScaleFactor == geometry.scale', selector)
+        self.assertIn('capturePanelContentRectangle(geometry.frame, screenFrame: screen.frame)', selector)
+        self.assertIn('defer: false, screen: screen)', selector)
+        self.assertLess(selector.index('panel.setFrame(geometry.frame'), selector.index('panel.orderFrontRegardless()'))
+        self.assertIn('panel.frame == geometry.frame', selector)
+        host = NATIVE.split('public func echoLingoPrepareScreenshotOverlay', 1)[1].split('@_cdecl("echolingo_resume', 1)[0]
+        self.assertIn('capturePanelDisplay(selection, displays: displays)', host)
+        self.assertIn('guard frame.contains(selection)', host)
+        self.assertIn('host.panel.frame == frame', host)
+        self.assertNotIn('NSScreen.main', host)
+        rust = (ROOT / 'src-tauri/src/screenshot_overlay.rs').read_text()
+        for call in ('echolingo_prepare_screenshot_overlay', 'echolingo_show_screenshot_overlay'):
+            self.assertEqual(rust.count('fn ' + call + '('), 1)
+        self.assertEqual(rust.count('selection_x: f64'), 2)
+        self.assertEqual(rust.count('            geometry.x,'), 2)
+        self.assertIn('local.offsetBy(dx: display.frame.minX, dy: display.frame.minY) == display.frame', NATIVE)
+        self.assertIn('scale: 1.5', NATIVE)
+        self.assertIn('area > 0 && area >= largest', NATIVE)
+
     def test_fullscreen_fixture_is_external_and_checks_native_window_order(self):
         fixture = (ROOT / "tests/macos-screenshot-overlay-host-fixture.swift").read_text()
         self.assertIn('private func emitOverlayFixture(', fixture)
