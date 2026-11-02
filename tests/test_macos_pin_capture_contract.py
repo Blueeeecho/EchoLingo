@@ -49,4 +49,17 @@ class PinCaptureContract(unittest.TestCase):
             self.assertIn(field, verifier)
             self.assertIn(field, fixture)
 
+    def test_pin_failure_observation_is_fixed_and_does_not_change_verdict(self):
+        fixture = (ROOT / 'tests/macos-screenshot-native-fixture.swift').read_text()
+        proof = fixture.split('func verifyReadyPinCapture()', 1)[1].split('func verifyPixels(', 1)[0]
+        for stage in ('"stage": "capture"', 'observation["stage"] = "recognize"', 'observation["stage"] = "expected-text"'):
+            self.assertIn(stage, proof)
+        self.assertIn('try fixtureNeed(normalized == "EchoLingo pin 97531"', proof)
+        self.assertIn('reason: "pin-proof-capture-ocr-failed"', proof)
+        self.assertNotIn('observation["text"]', proof)
+        self.assertNotIn('String(describing: error)', proof)
+        self.assertNotIn('sleep(', proof)
+        self.assertIn('image.width <= 4096, image.height <= 4096', fixture)
+        self.assertIn('["white": 0, "magenta": 0, "red": 0, "dark": 0, "other": 0]', fixture)
+
 if __name__ == '__main__': unittest.main()
