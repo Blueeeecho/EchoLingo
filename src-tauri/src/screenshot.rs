@@ -1561,7 +1561,10 @@ mod tests {
                     result.clipboard_error.as_deref(),
                     (!copied).then_some("copy failed")
                 );
-                assert_eq!(result.save_error.as_deref(), (!saved).then_some("save failed"));
+                assert_eq!(
+                    result.save_error.as_deref(),
+                    (!saved).then_some("save failed")
+                );
                 let json = serde_json::to_value(&result).unwrap();
                 assert_eq!(json["clipboardCopied"], copied);
                 assert_eq!(json["path"].is_null(), !saved);

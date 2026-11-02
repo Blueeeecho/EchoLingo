@@ -196,7 +196,7 @@ try {
 
     // Direct text lives at its image coordinate, without a separate form panel.
     await fresh(320, 240); const beforeDirectText = await pixels();
-    await page.locator('[data-tool=text]').click();
+    await page.locator('button[data-tool=text]').click();
     const directCanvas = await page.locator('#image-canvas').boundingBox();
     await page.locator('#image-canvas').click({ position: { x: 30, y: 40 } });
     const directInput = await page.locator('#annotation-text').boundingBox();
@@ -229,7 +229,7 @@ try {
     const firstRectangle = await pixels();
     await drag('rectangle', [150, 100], [200, 140]);
     const bothRectangles = await pixels();
-    await page.locator('[data-tool="select"]').click();
+    await page.locator('button[data-tool="select"]').click();
     const movingBounds = await page.locator('#image-canvas').boundingBox();
     const moveXY = (x, y) => [movingBounds.x + x * movingBounds.width / 320, movingBounds.y + y * movingBounds.height / 240];
     await page.mouse.move(...moveXY(25, 25)); await page.mouse.down(); await page.mouse.move(...moveXY(35, 35));
@@ -242,7 +242,7 @@ try {
     // Freehand/highlight and ellipse use source pixels; one eraser gesture
     // changes only ink. Existing masks remain opaque in the final raster.
     await fresh(320, 240); const unmarked = await pixels();
-    await page.locator('[data-tool=pen]').click(); await page.locator('#edit-color').fill('#dd2233');
+    await page.locator('button[data-tool=pen]').click(); await page.locator('#edit-color').fill('#dd2233');
     await drag('pen', [10, 40], [280, 40]); const painted = await pixels(); assert.notDeepEqual(painted, unmarked);
     await page.locator('#undo-edit').click(); assert.deepEqual(await pixels(), unmarked);
     await page.locator('#redo-edit').click(); assert.deepEqual(await pixels(), painted);
@@ -259,10 +259,10 @@ try {
     assert.deepEqual(await pixels(), unmarked, 'restoration replays committed history, never the interrupted ink');
     await page.locator('#redo-edit').click(); assert.deepEqual(await pixels(), painted);
     await drag('highlight', [10, 80], [280, 80]);
-    await page.locator('[data-tool="rectangle"]').click(); await page.locator('#shape-style').selectOption('ellipse');
+    await page.locator('button[data-tool="rectangle"]').click(); await page.locator('#shape-style').selectOption('ellipse');
     await drag('rectangle', [50, 130], [150, 190]);
     await page.locator('#shape-style').selectOption('rectangle');
-    await page.locator('[data-tool=solid]').click(); await page.locator('#edit-color').fill('#112233'); await drag('solid', [30, 20], [60, 100]);
+    await page.locator('button[data-tool=solid]').click(); await page.locator('#edit-color').fill('#112233'); await drag('solid', [30, 20], [60, 100]);
     const inkAndMask = await pixels();
     await drag('eraser', [100, 20], [100, 100]); const erasedInk = await pixels(); assert.notDeepEqual(erasedInk, inkAndMask);
     await page.locator('#undo-edit').click(); assert.deepEqual(await pixels(), inkAndMask);
@@ -279,7 +279,7 @@ try {
       const [w, h] = await page.locator('#image-canvas').evaluate(c => [c.width, c.height]);
       await page.mouse.click(b.x + x * b.width / w, b.y + y * b.height / h, { clickCount: count });
     };
-    await page.locator('[data-tool="text"]').click();
+    await page.locator('button[data-tool="text"]').click();
     await page.locator('#edit-font-size').selectOption('16');
     await page.locator('#note-style').selectOption('#fff3b0');
     await clickImage(20, 20); await page.locator('#annotation-text').fill('说明 A');
@@ -296,11 +296,11 @@ try {
     const editedNote = await pixels(); assert.notDeepEqual(editedNote, movedNote);
     await page.locator('#undo-edit').click(); assert.deepEqual(await pixels(), movedNote, 'text edit replaces instead of painting a second layer');
     await page.locator('#redo-edit').click(); assert.deepEqual(await pixels(), editedNote);
-    await page.locator('[data-tool="select"]').click(); await clickImage(75, 65);
+    await page.locator('button[data-tool="select"]').click(); await clickImage(75, 65);
     await page.keyboard.press('Delete'); assert.notDeepEqual(await pixels(), editedNote);
     await page.locator('#undo-edit').click(); assert.deepEqual(await pixels(), editedNote, 'delete is reversible');
 
-    await page.locator('[data-tool="number"]').click();
+    await page.locator('button[data-tool="number"]').click();
     await page.locator('#edit-font-size').selectOption('32');
     await clickImage(45, 150); const oneStep = await pixels();
     await clickImage(95, 150); const twoSteps = await pixels();
@@ -319,7 +319,7 @@ try {
     await drag('select', [160, 90], [170, 95]);
     assert.notDeepEqual(await pixels(), afterCrop, 'annotations remain selectable in crop-adjusted coordinates');
     await page.locator('#undo-edit').click(); assert.deepEqual(await pixels(), afterCrop);
-    await page.locator('[data-tool=solid]').click(); await page.locator('#edit-color').fill('#112233'); await drag('solid', [0, 0], [25, 25]);
+    await page.locator('button[data-tool=solid]').click(); await page.locator('#edit-color').fill('#112233'); await drag('solid', [0, 0], [25, 25]);
     const finalAnnotations = await pixels();
     for (const [button, collection] of [['#copy-image', 'copies'], ['#save-image', 'saves'], ['#pin-image', 'pins']]) {
       const before = await page.evaluate(collection => window.__screenshotQA[collection].length, collection);
@@ -334,7 +334,7 @@ try {
     }
 
     // Clicking outside text commits it; cancelling Close retains that unsaved annotation.
-    await page.locator('[data-tool="text"]').click(); await clickImage(100, 30);
+    await page.locator('button[data-tool="text"]').click(); await clickImage(100, 30);
     await page.locator('#annotation-text').fill('尚未提交的备注');
     assert.equal(await page.locator('#save-indicator').textContent(), '未保存');
     const closeBeforeCommit = await page.locator('#close-editor').boundingBox();
@@ -357,7 +357,7 @@ try {
     assert.deepEqual(at(mosaicked, 8, 8), at(mosaicked, 23, 23));
     assert.notDeepEqual(at(mosaicked, 8, 8), at(original, 8, 8));
     assert.deepEqual(at(mosaicked, 24, 24), at(original, 24, 24));
-    await page.locator('[data-tool=solid]').click(); await page.locator('#edit-color').fill('#112233'); await drag('solid', [0, 0], [8, 8]);
+    await page.locator('button[data-tool=solid]').click(); await page.locator('#edit-color').fill('#112233'); await drag('solid', [0, 0], [8, 8]);
     const masked = await pixels(); assert.deepEqual(at(masked, 1, 1), [17, 34, 51, 255]);
 
     // Crop after zoom uses image coordinates, reduces actual PNG dimensions and
@@ -422,7 +422,7 @@ try {
       const before = await page.evaluate(() => { const q = window.__screenshotQA; q.failPixelRead = true; return [q.saves.length, q.copies.length]; });
       // Exercise commit-time failure independently of the now-live mosaic
       // preview: terminal up can arrive without intermediate pointermoves.
-      await page.locator(`[data-tool="${tool}"]`).click();
+      await page.locator(`button[data-tool="${tool}"]`).click();
       const failureBounds = await page.locator('#image-canvas').boundingBox();
       await page.mouse.move(failureBounds.x+8*failureBounds.width/96, failureBounds.y+8*failureBounds.height/64); await page.mouse.down();
       await page.locator('#image-canvas').dispatchEvent('pointerup', { pointerId:1, isPrimary:true, button:0,
@@ -447,7 +447,7 @@ try {
     // committed privacy mask, or disable every export if restoration also fails.
     for (const tool of ['pen','rectangle']) {
       await fresh(); await drag('solid',[8,8],[50,40]); const protectedFrame = await pixels();
-      await page.locator(`[data-tool="${tool}"]`).click();
+      await page.locator(`button[data-tool="${tool}"]`).click();
       await page.evaluate(() => { window.__screenshotQA.failAfterSourceDraw = 1; });
       await drag(tool,[15,15],[35,30]);
       assert.deepEqual(await pixels(), protectedFrame, 'one-shot preview failure restores every committed redaction pixel');
@@ -670,7 +670,7 @@ try {
     // Pin exports only the rendered/redacted bitmap, never copies/saves, and
     // must not dismiss until the independent window has acknowledged readiness.
     overlayId = await overlayFresh();
-    await page.locator('[data-tool=solid]').click(); await page.locator('#edit-color').fill('#112233');
+    await page.locator('button[data-tool=solid]').click(); await page.locator('#edit-color').fill('#112233');
     await drag('solid', [0, 0], [32, 24]);
     const pinPixels = await pixels();
     const beforePin = await page.evaluate(() => [window.__screenshotQA.copies.length, window.__screenshotQA.saves.length]);
@@ -805,7 +805,7 @@ try {
     // Live drafts use the final renderer/styles, with no history until release.
     await fresh(240, 180);
     const emptyDraft = await pixels();
-    await page.locator('[data-tool="rectangle"]').click();
+    await page.locator('button[data-tool="rectangle"]').click();
     await page.locator('#edit-color').fill('#ff0000');
     await page.locator('#edit-width').selectOption('8');
     let liveBounds = await page.locator('#image-canvas').boundingBox();
@@ -817,33 +817,33 @@ try {
     await page.mouse.up(); assert.deepEqual(await pixels(), redDraft, 'release does not replace a purple placeholder with a different shape');
     await page.locator('#undo-edit').click(); assert.deepEqual(await pixels(), emptyDraft);
     await page.locator('#redo-edit').click();
-    await page.locator('[data-tool="select"]').click(); await clickImage(50,50);
+    await page.locator('button[data-tool="select"]').click(); await clickImage(50,50);
     let objectHandle = await page.locator('[data-object-handle="se"]').boundingBox();
     await page.mouse.move(objectHandle.x+5,objectHandle.y+5); await page.mouse.down(); await page.mouse.move(...livePoint(130,100)); await page.mouse.up();
     const resizedRectangle = await pixels(); assert.notDeepEqual(resizedRectangle, redDraft);
     await page.locator('#undo-edit').click(); assert.deepEqual(await pixels(), redDraft, 'rectangle resize is one replace/undo');
     await page.locator('#redo-edit').click(); assert.deepEqual(await pixels(), resizedRectangle);
-    await page.locator('[data-tool="select"]').click(); await clickImage(60,60);
+    await page.locator('button[data-tool="select"]').click(); await clickImage(60,60);
     objectHandle = await page.locator('[data-object-handle="se"]').boundingBox();
     await page.mouse.move(objectHandle.x+5,objectHandle.y+5); await page.mouse.down(); await page.mouse.move(...livePoint(160,130)); await page.keyboard.press('Escape'); await page.mouse.up();
     assert.deepEqual(await pixels(), resizedRectangle, 'cancelled resize restores committed pixels');
     await page.keyboard.press('Delete');
     await page.locator('#undo-edit').click(); assert.deepEqual(await pixels(), resizedRectangle, 'resized object remains individually deletable');
     await fresh(240,180); liveBounds = await page.locator('#image-canvas').boundingBox();
-    await page.locator('[data-tool="number"]').click(); await page.locator('#step-style').selectOption('number');
+    await page.locator('button[data-tool="number"]').click(); await page.locator('#step-style').selectOption('number');
     await clickImage(35,35); const badgeOnly = await pixels();
     await page.mouse.move(...livePoint(70,70)); await page.mouse.down(); await page.mouse.move(...livePoint(170,120), {steps:3});
     const numberedDraft = await pixels(); await page.mouse.up();
     assert.deepEqual(await pixels(), numberedDraft, 'default number tool drag previews and commits one badge plus arrow');
     await page.locator('#undo-edit').click(); assert.deepEqual(await pixels(), badgeOnly, 'one undo removes the whole number-arrow group');
     await page.locator('#redo-edit').click();
-    await page.locator('[data-tool="select"]').click(); await clickImage(120,95);
+    await page.locator('button[data-tool="select"]').click(); await clickImage(120,95);
     objectHandle = await page.locator('[data-object-handle="end"]').boundingBox();
     await page.mouse.move(objectHandle.x+5,objectHandle.y+5); await page.mouse.down(); await page.mouse.move(...livePoint(200,150)); await page.mouse.up();
     const endpointEdited = await pixels(); assert.notDeepEqual(endpointEdited, numberedDraft);
     await page.locator('#undo-edit').click(); assert.deepEqual(await pixels(), numberedDraft, 'endpoint editing keeps badge and arrow one history object');
     await fresh(240,180); await drag('mosaic',[20,20],[100,80]); const mosaicBeforeResize = await pixels();
-    await page.locator('[data-tool="select"]').click(); await clickImage(50,50);
+    await page.locator('button[data-tool="select"]').click(); await clickImage(50,50);
     objectHandle = await page.locator('[data-object-handle="se"]').boundingBox();
     liveBounds = await page.locator('#image-canvas').boundingBox();
     await page.mouse.move(objectHandle.x+5,objectHandle.y+5); await page.mouse.down(); await page.mouse.move(...livePoint(140,120)); await page.mouse.up();
@@ -873,7 +873,7 @@ try {
     await page.emulateMedia({ colorScheme: 'light' });
     const geometryCalls = () => page.evaluate(() => window.__screenshotQA.calls.filter(x => x.command === 'capture_screenshot_selection').length);
     const beforeGeometry = await geometryCalls();
-    await page.locator('[data-tool="pen"]').click();
+    await page.locator('button[data-tool="pen"]').click();
     assert.equal(await geometryCalls(), beforeGeometry, 'selecting a tool does not freeze/capture the selection');
     assert.equal(await page.locator('#selection-handles').isVisible(), true);
     let handle = await page.locator('[data-resize="se"]').boundingBox();
@@ -884,7 +884,7 @@ try {
     await page.mouse.up();
     await page.waitForFunction(() => window.__screenshotQA.session.revision === 1 && !document.querySelector('[data-tool="pen"]').disabled);
     assert.equal(await page.evaluate(() => window.__screenshotQA.session.overlay.width), 260);
-    await page.locator('[data-tool="select"]').click();
+    await page.locator('button[data-tool="select"]').click();
     let box = await page.locator('#canvas-frame').boundingBox();
     await page.mouse.move(box.x + 40, box.y + 40); await page.mouse.down(); await page.mouse.move(box.x + 20, box.y + 60); await page.mouse.up();
     await page.waitForFunction(() => window.__screenshotQA.session.revision === 2 && !document.querySelector('[data-tool="pen"]').disabled);
@@ -937,7 +937,7 @@ try {
     await page.mouse.up();
     await page.waitForFunction(r => window.__screenshotQA.session.revision === r + 2 && !document.querySelector('[data-tool="pen"]').disabled, preClamp.revision);
 
-    await page.locator('[data-tool="pen"]').click();
+    await page.locator('button[data-tool="pen"]').click();
     await page.evaluate(() => { window.__screenshotQA.holdSelectionCapture = true; });
     box = await page.locator('#canvas-frame').boundingBox();
     await page.mouse.move(box.x + 25, box.y + 25); await page.mouse.down(); await page.mouse.move(box.x + 80, box.y + 40, { steps: 4 });
@@ -968,7 +968,7 @@ try {
     assert.equal(await page.locator('#selection-handles').isVisible(), false, 'annotated pixels use safe crop/reselect rather than silent live recapture');
     await page.locator('#undo-edit').click();
     assert.equal(await page.locator('#selection-handles').isVisible(), true, 'undo to no annotations permits full adjustment again');
-    await page.locator('[data-tool="select"]').click();
+    await page.locator('button[data-tool="select"]').click();
     const unchangedFrame = await page.locator('#canvas-frame').boundingBox();
     const unchangedCanvas = await page.locator('#image-canvas').evaluate(c => c.toDataURL());
     const unchangedRevision = await page.evaluate(() => window.__screenshotQA.session.revision);
@@ -984,7 +984,7 @@ try {
     // A late capture must not annotate/export/reopen after cancellation.
     await page.evaluate(() => { window.__screenshotQA.releaseSelectionCapture = null; window.__screenshotQA.publishSelection(); });
     await page.waitForFunction(() => !document.querySelector('#selection-handles').hidden);
-    await page.locator('[data-tool="rectangle"]').click(); box = await page.locator('#canvas-frame').boundingBox();
+    await page.locator('button[data-tool="rectangle"]').click(); box = await page.locator('#canvas-frame').boundingBox();
     await page.mouse.move(box.x + 20, box.y + 20); await page.mouse.down(); await page.mouse.move(box.x + 80, box.y + 70); await page.mouse.up();
     await page.waitForFunction(() => !document.querySelector('#overlay-cancel').disabled && !!window.__screenshotQA.releaseSelectionCapture);
     const copiesBeforeCancel = await page.evaluate(() => window.__screenshotQA.copies.length);
