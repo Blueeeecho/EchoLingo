@@ -8,7 +8,8 @@ import sys
 MODES = ('window-phase1', 'rectangle-phase1', 'escape-cancel', 'request-cancel', 'window-phase2',
          'deferred-window-phase2', 'deferred-rectangle-phase2', 'deferred-escape-cancel', 'deferred-cancel-after-selection')
 INDEPENDENT = ('privatePasteboardImageRoundtripPassed', 'nativePNGJPEGFileRoundtripPassed',
-               'nativeSavePanelCancelPassed', 'nativeSavePanelHiddenBeforeCapture', 'authoritativeHitPolicyFixturePassed')
+               'nativeSavePanelCancelPassed', 'nativeSavePanelHiddenBeforeCapture', 'authoritativeHitPolicyFixturePassed',
+               'readyPinCaptureOCRPassed', 'unregisteredOwnWindowExcludedPassed', 'readyPinLifecycleCleanupPassed')
 SOURCES = {'src-tauri/native/macos.swift', 'src-tauri/native/macos_capture.swift', 'src-tauri/native/macos_ocr.swift', 'src-tauri/native/macos_window.swift'}
 
 

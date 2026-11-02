@@ -142,6 +142,7 @@ private final class ScreenshotProbe {
     var finished = false
     var oracleAttempted = false
     var oracleToken: UUID?
+    var pinProofWindows: [NSWindow] = []
     var oracleOccluder: NSWindow?
     var owner: NSWindow?
     var savePanel: NSSavePanel?
@@ -154,6 +155,7 @@ private final class ScreenshotProbe {
     func finish(_ status: String, reason: String? = nil) {
         guard !finished else { return }; finished = true
         timer?.invalidate(); timer = nil
+        pinProofWindows.forEach { $0.close() }; pinProofWindows.removeAll()
         oracleToken = nil; oracleOccluder?.close(); oracleOccluder = nil
         if let operation = operation {
             _ = nativeResponse(mode: "--cancel-native-capture", input: Data(operation.utf8))
@@ -1067,13 +1069,97 @@ private final class ScreenshotProbe {
     func recordCompletedCase(_ record: [String: Any]) {
         guard !finished else { return }
         cases.append(record); index += 1; activeCase = nil; preCasePixelProof = nil
-        if index == modes.count { finish("passed") }
+        if index == modes.count { verifyReadyPinCapture() }
         else if modes[index] == "window-phase2" {
             do {
                 try sourceInput?.write(contentsOf: Data("phase2\n".utf8))
                 DispatchQueue.global(qos: .utility).async { self.readSource(phase: 2) }
             } catch { finish("failed", reason: "generated-source-phase-command-failed") }
         } else { beginCase() }
+    }
+
+    // Reuse the already verified generated external source. This is real
+    // production capture + Vision, not a user-desktop or packaged-pin claim.
+    func verifyReadyPinCapture() {
+        guard let target = target, let screen = NSScreen.screens.first(where: { $0.frame.contains(target.frame) }),
+              let number = screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber else {
+            finish("failed", reason: "pin-proof-generated-screen-missing"); return
+        }
+        let frame = CGRect(x: target.frame.minX + 20, y: target.frame.minY + 40, width: 460, height: 160)
+        let pin = NSWindow(contentRect: frame, styleMask: .borderless, backing: .buffered, defer: false)
+        let helper = NSWindow(contentRect: frame, styleMask: .borderless, backing: .buffered, defer: false)
+        for window in [pin, helper] {
+            window.isReleasedWhenClosed = false; window.hasShadow = false
+            window.sharingType = .readOnly; window.backgroundColor = .magenta
+        }
+        pinProofWindows = [pin, helper]
+        pin.contentView = GeneratedCapturePinView(frame: CGRect(origin: .zero, size: frame.size))
+        pin.level = .floating; pin.orderFrontRegardless(); pin.displayIfNeeded()
+        helper.level = .screenSaver; helper.orderFrontRegardless(); helper.displayIfNeeded()
+        let pointer = Unmanaged.passUnretained(pin).toOpaque()
+        guard echoLingoRegisterCapturePin(pointer) == 0 else {
+            finish("failed", reason: "pin-proof-registration-failed"); return
+        }
+        let snapshot = captureReadyPinSnapshot()
+        do {
+            try fixtureNeed(snapshot.ids.contains(CGWindowID(pin.windowNumber))
+                && !snapshot.ids.contains(CGWindowID(helper.windowNumber)), "only ready pin may be registered")
+            let display = CaptureDisplayGeometry(id: number.uint32Value, frame: screen.frame, scale: screen.backingScaleFactor)
+            let plan = try capturePlan(frame, displays: [display])
+            report["pinProof"] = ["stage": "prepared", "registeredCount": snapshot.windows.count,
+                "pinFrameMatches": pin.frame == frame, "helperFrameMatches": helper.frame == frame,
+                "pinVisible": pin.isVisible, "helperVisible": helper.isVisible,
+                "plannedWidth": plan.pixelWidth, "plannedHeight": plan.pixelHeight]
+            DispatchQueue.global(qos: .userInitiated).async {
+                var observation: [String: Any] = ["stage": "capture"]
+                do {
+                    let image = try captureNativePlannedImage(plan, purpose: .region)
+                    // Production capture returns only after every registered
+                    // pin ID matched its capture metadata and post-pixel identity.
+                    observation["pinMetadataPresent"] = true
+                    observation["imageWidth"] = image.width; observation["imageHeight"] = image.height
+                    observation["pixelClasses"] = generatedPinPixelClasses(image)
+                    observation["stage"] = "recognize"
+                    let text = try recognizeFixture(image)
+                    observation["stage"] = "expected-text"
+                    let normalized = text.trimmingCharacters(in: .whitespacesAndNewlines)
+                    observation["textClass"] = normalized == "EchoLingo pin 97531" ? "expected" : (normalized.isEmpty ? "empty" : "other")
+                    observation["recognizedNonempty"] = !normalized.isEmpty
+                    observation["expectedTextMatches"] = normalized == "EchoLingo pin 97531"
+                    try fixtureNeed(normalized == "EchoLingo pin 97531",
+                                    "ready pin text not captured or own helper was included")
+                    let evidence = observation
+                    DispatchQueue.main.async {
+                        self.report["pinProofResult"] = evidence
+                        guard !self.finished else { return }
+                        do {
+                            guard self.pinProofWindows.count == 2 else { throw NativeError("FIXTURE: pin windows missing") }
+                            let pin = self.pinProofWindows[0], helper = self.pinProofWindows[1]
+                            pin.orderOut(nil)
+                            try fixtureNeed(!captureReadyPinSnapshot().ids.contains(CGWindowID(pin.windowNumber)), "hidden pin still eligible")
+                            var staleRejected = false
+                            do { try captureValidateReadyPins(snapshot) } catch { staleRejected = true }
+                            try fixtureNeed(staleRejected, "stale pin capture identity accepted")
+                            pin.close(); helper.close(); self.pinProofWindows.removeAll()
+                            try fixtureNeed(captureReadyPinSnapshot().windows.isEmpty, "closed pin registration remained")
+                            self.report["readyPinCaptureOCRPassed"] = true
+                            self.report["unregisteredOwnWindowExcludedPassed"] = true
+                            self.report["readyPinLifecycleCleanupPassed"] = true
+                            self.finish("passed")
+                        } catch { self.finish("failed", reason: "pin-proof-lifecycle-failed") }
+                    }
+                } catch {
+                    let category = generatedPinErrorCategory(error)
+                    observation["errorCategory"] = category
+                    if category == "pin-metadata-missing" { observation["pinMetadataPresent"] = false }
+                    let evidence = observation
+                    DispatchQueue.main.async {
+                        self.report["pinProofResult"] = evidence
+                        self.finish("failed", reason: "pin-proof-capture-ocr-failed")
+                    }
+                }
+            }
+        } catch { finish("failed", reason: "pin-proof-plan-failed") }
     }
 
     func verifyPixels(_ image: CGImage, phase: Int, fullWindow: Bool = true, occluder: Bool = false) throws {
@@ -1105,6 +1191,48 @@ private final class ScreenshotProbe {
             try fixtureNeed((0..<3).allSatisfy { abs(Int(bytes[offset + $0]) - expected[$0]) <= 5 }
                             && bytes[offset + 3] >= 250, "captured image is not solely current generated visible pixels")
         }
+    }
+}
+
+// Fixed categories only: no recognized text, arbitrary error descriptions,
+// image bytes, paths, titles, or external window identity enter this report.
+private func generatedPinErrorCategory(_ error: Error) -> String {
+    let message = (error as? NativeError)?.message ?? ""
+    if message == "CAPTURE: 贴图窗口未出现在截图列表中，请重试。" { return "pin-metadata-missing" }
+    if message == "CAPTURE: 贴图窗口状态已改变，请重新截图。" { return "pin-identity-changed" }
+    let category = message.split(separator: ":", maxSplits: 1).first.map(String.init) ?? ""
+    return ["CAPTURE", "CAPTURE_GEOMETRY", "PERMISSION", "NO_TEXT", "OCR_BUSY", "OCR_TIMEOUT", "CANCELLED", "FIXTURE"].contains(category) ? category : "other"
+}
+private func generatedPinPixelClasses(_ image: CGImage) -> [String: Int] {
+    guard image.width > 0, image.height > 0, image.width <= 4096, image.height <= 4096 else { return ["sizeRejected": 1] }
+    var bytes = [UInt8](repeating: 0, count: image.width * image.height * 4)
+    let drawn = bytes.withUnsafeMutableBytes { storage -> Bool in
+        guard let context = CGContext(data: storage.baseAddress, width: image.width, height: image.height,
+            bitsPerComponent: 8, bytesPerRow: image.width * 4,
+            space: CGColorSpace(name: CGColorSpace.sRGB)!,
+            bitmapInfo: CGBitmapInfo.byteOrder32Big.rawValue | CGImageAlphaInfo.premultipliedLast.rawValue) else { return false }
+        context.draw(image, in: CGRect(x: 0, y: 0, width: image.width, height: image.height))
+        return true
+    }
+    guard drawn else { return ["normalizationFailed": 1] }
+    var counts = ["white": 0, "magenta": 0, "red": 0, "dark": 0, "other": 0]
+    for offset in stride(from: 0, to: bytes.count, by: 4) {
+        let r = bytes[offset], g = bytes[offset + 1], b = bytes[offset + 2]
+        let kind = r >= 245 && g >= 245 && b >= 245 ? "white"
+            : (r >= 245 && g <= 10 && b >= 245 ? "magenta"
+            : (r >= 245 && g <= 10 && b <= 10 ? "red"
+            : (r <= 20 && g <= 20 && b <= 20 ? "dark" : "other")))
+        counts[kind, default: 0] += 1
+    }
+    return counts
+}
+
+private final class GeneratedCapturePinView: NSView {
+    override func draw(_ dirtyRect: NSRect) {
+        NSColor.white.setFill(); bounds.fill()
+        NSAttributedString(string: "EchoLingo pin 97531", attributes: [
+            .font: NSFont.systemFont(ofSize: 32), .foregroundColor: NSColor.black
+        ]).draw(at: CGPoint(x: 16, y: 60))
     }
 }
 

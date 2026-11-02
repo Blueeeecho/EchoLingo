@@ -21,7 +21,8 @@ class MacFollowupRouting(unittest.TestCase):
     def test_only_exact_candidate_uses_mac_followup(self):
         self.assertEqual(self.route('fix/macos-screenshot-followup', 'main'), 'mode=macos-followup')
         self.assertEqual(self.route('fix/macos-secondary-screen-investigation', 'main'), 'mode=macos-followup')
-        for head, base in [('fix/macos-screenshot-followup', 'other'), ('fix/macos-secondary-screen-investigation', 'other'), ('other', 'main'), ('', '')]:
+        self.assertEqual(self.route('fix/pin-ocr-capture', 'main'), 'mode=macos-followup')
+        for head, base in [('fix/pin-ocr-capture', 'other'), ('fix/macos-screenshot-followup', 'other'), ('fix/macos-secondary-screen-investigation', 'other'), ('other', 'main'), ('', '')]:
             self.assertEqual(self.route(head, base), 'mode=full')
 
     def test_original_pin_route_retained(self):
@@ -32,7 +33,7 @@ class MacFollowupRouting(unittest.TestCase):
         self.assertIn("fromJSON(needs.validation-mode.outputs.mode == 'macos-followup'", workflow)
         for command in ['bash tests/macos-native-self-test.sh', 'bash tests/macos-screenshot-overlay-host-fixture.sh', 'npm run check && npm test && npm run build', 'npm run test:ui']:
             self.assertIn(command, workflow)
-        self.assertIn("github.head_ref == 'fix/macos-screenshot-followup' && '[\"macos-latest\"]'", workflow)
+        self.assertIn("(github.head_ref == 'fix/macos-screenshot-followup' || github.head_ref == 'fix/pin-ocr-capture') && '[\"macos-latest\"]'", workflow)
         self.assertIn('Verify generated Windows screenshot save and clipboard effects', workflow)
         self.assertIn('test result: ok. 11 passed; 0 failed', workflow)
         self.assertIn('--selection-policy-self-test', (ROOT / 'tests/macos-native-self-test.sh').read_text())
