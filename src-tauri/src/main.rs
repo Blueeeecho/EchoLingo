@@ -1628,56 +1628,27 @@ async fn translate(
         if source_language.len() > 40 || target_language.len() > 40 || target_language.is_empty() {
             return Err("语言参数无效".into());
         }
-        let input_plan = bilingual_input::resolve(&text, &source_language, &target_language)?;
-        let _permit = if input_plan == Some(bilingual_input::Plan::Preserve) {
-            None
-        } else {
-            Some(
-                state
-                    .translation_busy
-                    .try_acquire()
-                    .map_err(|_| "翻译任务较多，请等待当前请求完成")?,
-            )
-        };
+        let _permit = state
+            .translation_busy
+            .try_acquire()
+            .map_err(|_| "翻译任务较多，请等待当前请求完成")?;
         let settings = locked(&state.settings)?.clone();
         let providers =
             translation_selection::request_providers(&settings.providers, provider_id.as_deref())?;
         let (resolved_source, resolved_target, results) = state
             .translation_requests
             .execute(request_id, async {
-                let detected =
-                    bilingual_input::detect_if_needed(input_plan, &source_language, || {
-                        platform::detect_language(&text)
-                    })
-                    .await;
-                let (resolved_source, resolved_target, source_resolution) = match input_plan {
-                    Some(bilingual_input::Plan::Preserve) => (
-                        "auto".to_string(),
-                        "auto".to_string(),
-                        translation_health::SourceResolution::PreservedStructure,
-                    ),
-                    Some(bilingual_input::Plan::Translate { source, target }) => (
-                        source.to_string(),
-                        target.to_string(),
-                        translation_health::SourceResolution::BilingualMode,
-                    ),
-                    None => {
-                        let (source, target) = language_detection::resolve_translation_languages(
-                            &text,
-                            &source_language,
-                            &target_language,
-                            detected.as_deref(),
-                        )?;
-                        (
-                            source,
-                            target,
-                            if source_language != "auto" {
-                                translation_health::SourceResolution::Explicit
-                            } else {
-                                translation_health::SourceResolution::StandardDetection
-                            },
-                        )
-                    }
+                let (resolved_source, resolved_target) = bilingual_input::resolve(
+                    &text,
+                    &source_language,
+                    &target_language,
+                    || platform::detect_language(&text),
+                )
+                .await?;
+                let source_resolution = if source_language != "auto" {
+                    translation_health::SourceResolution::Explicit
+                } else {
+                    translation_health::SourceResolution::StandardDetection
                 };
                 trace.languages(&resolved_source, &resolved_target);
                 trace.source_resolution(source_resolution);
@@ -1695,60 +1666,44 @@ async fn translate(
                         );
                         let sequence = std::sync::atomic::AtomicU64::new(0);
                         let started = std::time::Instant::now();
-                        let result = bilingual_input::dispatch(
-                            input_plan,
-                            text,
-                            |raw| translation::preserved_result(p, raw),
-                            || async {
-                                let key = load_translation_key_async(
-                                    app.clone(),
-                                    p.clone(),
-                                    Some(request_id),
-                                )
+                        let key =
+                            load_translation_key_async(app.clone(), p.clone(), Some(request_id))
                                 .await;
-                                if p.kind == "offline" {
-                                    state
-                                        .offline
-                                        .translate_result(p, text, resolved_source, resolved_target)
-                                        .await
-                                } else {
-                                    translation::translate_one_streaming(
-                                        &state.client,
-                                        p,
-                                        key,
-                                        &text,
-                                        &resolved_source,
-                                        &resolved_target,
-                                        |partial| {
-                                            publish_translation_progress(
-                                                &app,
-                                                &state,
-                                                request_id,
-                                                sequence.fetch_add(1, Ordering::SeqCst) + 1,
-                                                false,
-                                                TranslationResult {
-                                                    preserved: false,
-                                                    provider_id: p.id.clone(),
-                                                    provider_name: p.name.clone(),
-                                                    text: partial.to_owned(),
-                                                    error: None,
-                                                    elapsed_ms: started.elapsed().as_millis()
-                                                        as u64,
-                                                    resolved_languages: None,
-                                                },
-                                            );
-                                        },
-                                    )
-                                    .await
-                                }
-                            },
-                        )
-                        .await;
-                        if input_plan == Some(bilingual_input::Plan::Preserve) {
-                            provider_trace.preserved();
+                        let result = if p.kind == "offline" {
+                            state
+                                .offline
+                                .translate_result(p, text, resolved_source, resolved_target)
+                                .await
                         } else {
-                            provider_trace.finish(result.error.as_deref());
-                        }
+                            translation::translate_one_streaming(
+                                &state.client,
+                                p,
+                                key,
+                                text,
+                                resolved_source,
+                                resolved_target,
+                                |partial| {
+                                    publish_translation_progress(
+                                        app,
+                                        state,
+                                        request_id,
+                                        sequence.fetch_add(1, Ordering::SeqCst) + 1,
+                                        false,
+                                        TranslationResult {
+                                            preserved: false,
+                                            provider_id: p.id.clone(),
+                                            provider_name: p.name.clone(),
+                                            text: partial.to_owned(),
+                                            error: None,
+                                            elapsed_ms: started.elapsed().as_millis() as u64,
+                                            resolved_languages: None,
+                                        },
+                                    );
+                                },
+                            )
+                            .await
+                        };
+                        provider_trace.finish(result.error.as_deref());
                         publish_translation_progress(
                             &app,
                             &state,

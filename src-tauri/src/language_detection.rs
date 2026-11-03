@@ -196,6 +196,10 @@ pub fn resolve_translation_languages(
             }
             (Some(language), _) => language.into(),
             (None, Some(language)) => language,
+            // With both choices automatic, uncertain or symbolic input still
+            // gets one ordinary provider request. Manual targets retain the
+            // existing provider-side automatic source detection.
+            (None, None) if target == "auto" => "en".into(),
             (None, None) => "auto".into(),
         }
     };
@@ -225,7 +229,7 @@ mod tests {
             ("hello", None, ("en", "zh-Hans")),
             ("日本語です", Some("ja"), ("ja", "zh-Hans")),
             ("한국어", None, ("ko", "zh-Hans")),
-            ("12345?!", None, ("auto", "zh-Hans")),
+            ("12345?!", None, ("en", "zh-Hans")),
         ] {
             let (source, target) =
                 resolve_translation_languages(text, "auto", "auto", detected).unwrap();
@@ -401,7 +405,7 @@ mod tests {
     }
 
     #[test]
-    fn identifier_hint_does_not_override_natural_languages_or_invent_symbol_languages() {
+    fn identifier_hint_preserves_languages_and_symbols_get_the_default_direction() {
         for (text, detected, expected) in [
             ("bonjour", "fr", "fr"),
             ("Hola", "es", "es"),
@@ -433,7 +437,7 @@ mod tests {
                     resolve_translation_languages(text, "auto", "auto", detected)
                         .unwrap()
                         .0,
-                    "auto",
+                    "en",
                     "{text}"
                 );
             }
