@@ -64,13 +64,16 @@ jobs:
           if ($start -lt 0 -or $end -le $start) { throw 'Exact smoke helper block unavailable.' }
           & ([scriptblock]::Create($text.Substring($start, $end + 3 - $start)))
       - name: Test cold-start request ordering
-        shell: bash
+        shell: pwsh
         run: |
-          set -euo pipefail
           rustfmt --edition 2021 --check src-tauri/src/startup_launch.rs
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           rustfmt --edition 2021 --config skip_children=true --check src-tauri/src/main.rs
-          rustc --edition 2021 --test src-tauri/src/startup_launch.rs -o "$RUNNER_TEMP/startup-launch-tests.exe"
-          "$RUNNER_TEMP/startup-launch-tests.exe"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          rustc --edition 2021 --test src-tauri/src/startup_launch.rs -C "linker=$env:VCToolsInstallDir/bin/HostX64/x64/link.exe" -o "$env:RUNNER_TEMP/startup-launch-tests.exe"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & "$env:RUNNER_TEMP/startup-launch-tests.exe"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Focused package policy checks
         run: |
           python scripts/check-repository.py
