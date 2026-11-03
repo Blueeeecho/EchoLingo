@@ -2,6 +2,7 @@
 import copy
 import ast
 import subprocess
+import shutil
 import sys
 import importlib.util
 import json
@@ -148,7 +149,15 @@ class PreparationTests(unittest.TestCase):
                         "files=('installer with spaces')\nextracted='application with spaces'\n"
                         +block+"\nprintf '%s\\0' \"${verifier[@]}\"\n")
                 shell='/bin/bash' if sys.platform=='darwin' else 'bash'
-                result=subprocess.run([shell,'-c',script],check=True,stdout=subprocess.PIPE,stderr=subprocess.PIPE)
+                if sys.platform=='win32':
+                    git=shutil.which('git')
+                    self.assertIsNotNone(git,'Git for Windows is required by this fixture')
+                    # PATH may expose System32 WSL bash before Git Bash.
+                    candidates=[root/'bin'/'bash.exe' for root in Path(git).resolve().parents]
+                    shell=next((str(path) for path in candidates if path.is_file()),None)
+                    self.assertIsNotNone(shell,'Cannot find Git for Windows bin/bash.exe beside '+git)
+                result=subprocess.run([shell,'-c',script],check=False,stdout=subprocess.PIPE,stderr=subprocess.PIPE)
+                self.assertEqual(result.returncode,0,result.stderr.decode('utf-8',errors='replace'))
                 args=result.stdout.decode('utf-8').rstrip('\0').split('\0')
                 expected=['scripts/verify-candidate-package.py','--platform',platform,
                           '--installer','installer with spaces','--application','application with spaces',
