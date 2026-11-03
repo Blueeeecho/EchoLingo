@@ -54,7 +54,7 @@ try {
     Assert-Test ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT -and $env:GITHUB_ACTIONS -eq 'true' -and $env:RUNNER_ENVIRONMENT -eq 'github-hosted' -and [Environment]::UserInteractive) 'Disposable GitHub-hosted interactive Windows runner required.'
     Assert-Test ([Threading.Thread]::CurrentThread.ApartmentState -eq [Threading.ApartmentState]::STA) 'Windows PowerShell STA required.'
     Add-Type -AssemblyName UIAutomationClient, UIAutomationTypes, WindowsBase, System.IO.Compression.FileSystem
-    Add-Type -ReferencedAssemblies ([Windows.Automation.AutomationElement].Assembly.Location),([Windows.Automation.Condition].Assembly.Location),([Windows.DependencyObject].Assembly.Location) -TypeDefinition @'
+    Add-Type -ReferencedAssemblies ([Windows.Automation.AutomationElement].Assembly.Location),([Windows.Automation.ControlType].Assembly.Location),([Windows.DependencyObject].Assembly.Location) -TypeDefinition @'
 using System;
 using System.Runtime.InteropServices;
 using System.Windows.Automation;
@@ -206,6 +206,7 @@ output.write_bytes(matches[0])
     # Do not upload raw exceptions, user paths, app data, outputs or logs.
     $report.failure = if ($assertionFailure) { $assertionFailure } else { 'Windows unpack smoke operation failed.' }
     $report.failureLine = $_.InvocationInfo.ScriptLineNumber
+    $report.failureType = $_.Exception.GetType().Name
     Write-Warning ('Unpack smoke failed at script line ' + $_.InvocationInfo.ScriptLineNumber)
 } finally {
     foreach ($p in $processes) { try { if (-not $p.HasExited) { & taskkill.exe /PID $p.Id /T /F 2>$null | Out-Null; $null = $p.WaitForExit(10000) } } catch {} }

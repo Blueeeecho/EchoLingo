@@ -47,6 +47,18 @@ jobs:
         with:
           workspaces: src-tauri -> target
           key: windows-unpack-static-crt
+          cache-on-failure: true
+      - name: Compile Windows smoke helper before building application
+        shell: powershell
+        run: |
+          $text = Get-Content tests/windows-unpack-smoke.ps1 -Raw -Encoding UTF8
+          $tokens = $null; $errors = $null
+          $null = [Management.Automation.Language.Parser]::ParseInput($text, [ref]$tokens, [ref]$errors)
+          if ($errors.Count -ne 0) { throw 'Windows smoke PowerShell parsing failed.' }
+          $start = $text.IndexOf('    Add-Type -AssemblyName', [StringComparison]::Ordinal)
+          $end = $text.IndexOf("`n'@", $start, [StringComparison]::Ordinal)
+          if ($start -lt 0 -or $end -le $start) { throw 'Exact smoke helper block unavailable.' }
+          & ([scriptblock]::Create($text.Substring($start, $end + 3 - $start)))
       - name: Focused package policy checks
         run: |
           python scripts/check-repository.py
@@ -92,8 +104,10 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - run: npm ci
       - name: Build the real application and retain the normal NSIS installer
+        id: build
         run: npm run tauri build -- --bundles nsis -- --locked
       - name: Package only application and allowlisted offline runtime
+        id: package
         run: |
           python scripts/package-windows-unpack.py --application src-tauri/target/release/echolingo.exe --source-archive "$env:RUNNER_TEMP/candidate-offline-evidence/EchoLingo-offline-engine-source.zip" --output "$env:RUNNER_TEMP/windows-unpack-artifacts"
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
@@ -105,11 +119,13 @@ jobs:
           & powershell.exe -NoProfile -STA -ExecutionPolicy Bypass -File tests/windows-unpack-smoke.ps1 -ArchivePath $zip[0].FullName -ManifestPath "$env:RUNNER_TEMP/windows-unpack-artifacts/WINDOWS-ZIP-MANIFEST.json" -ReportPath "$env:RUNNER_TEMP/windows-unpack-smoke.json"
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - uses: actions/upload-artifact@v4
+        if: always() && steps.package.outcome == 'success'
         with:
           name: EchoLingo-Windows-unpack
           if-no-files-found: error
           path: ${{ runner.temp }}/windows-unpack-artifacts/*
       - uses: actions/upload-artifact@v4
+        if: always() && steps.build.outcome == 'success'
         with:
           name: EchoLingo-Windows-installer
           if-no-files-found: error
