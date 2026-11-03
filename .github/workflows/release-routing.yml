@@ -1,0 +1,176 @@
+name: Publish targeted 0.2.13 routing prerelease
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths: [package.json, .github/workflows/release-routing.yml]
+permissions:
+  contents: read
+  actions: read
+concurrency:
+  group: echolingo-prerelease-0.2.13
+  cancel-in-progress: false
+jobs:
+  build:
+    if: github.repository == 'Blueeeecho/EchoLingo' && github.ref == 'refs/heads/main'
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            src-tauri -> target
+            tests/language-routing-patch -> target
+      - name: Require reviewed source and exact release metadata
+        shell: bash
+        run: |
+          set -euo pipefail
+          python scripts/prepare-routing-release.py --check-source
+          python scripts/check-repository.py
+      - name: Verify release does not already exist and source is current main
+        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b
+        with:
+          script: |
+            const { owner, repo } = context.repo;
+            const { data: main } = await github.rest.git.getRef({owner,repo,ref:'heads/main'});
+            if (main.object.sha !== context.sha) throw new Error('Source is no longer main');
+            try { await github.rest.repos.getReleaseByTag({owner,repo,tag:'0.2.13'}); throw new Error('Release already exists'); }
+            catch (e) { if (e.status !== 404) throw e; }
+      - name: Verify only unchanged offline resource inputs may be reused
+        if: runner.os == 'Windows'
+        shell: bash
+        run: |
+          set -euo pipefail
+          git diff --exit-code 4b8c5f5ac67e07cc4005812963b2c02acdd14d5d HEAD -- \
+            scripts/offline-engine scripts/prepare-offline-models.py scripts/test_prepare_offline_models.py \
+            scripts/prepare-offline-notices.py scripts/package-offline-source.py \
+            scripts/audit-windows-resources.py \
+            resources/offline-translation src-tauri/tauri.windows.conf.json LICENSE LICENSING.md
+          git diff --exit-code da0b5d03060a62ea120d931cc6c9eede5af66a7f HEAD -- scripts/stage-language-patch-resources.py
+      - name: Download pinned offline resources and corresponding source without old app reuse
+        if: runner.os == 'Windows'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('node:fs');
+            const path = require('node:path');
+            const pins = [
+              [13034542412, 'windows.zip', 'da42d05739744f5eafa71f9758d6a045b42020403d4228f3007d9bbda92fbb25'],
+              [13034970610, 'evidence.zip', '2520b83f54d3774b75c0cc1c6fc3f3105f0c9fb380800d94ac73001e36295285']
+            ];
+            const directory = path.join(process.env.RUNNER_TEMP, 'candidate-offline-inputs');
+            fs.mkdirSync(directory);
+            const { data: run } = await github.rest.actions.getWorkflowRun({owner:'Blueeeecho',repo:'EchoLingo',run_id:41178655504});
+            if (run.conclusion !== 'success' || run.head_sha !== '4b8c5f5ac67e07cc4005812963b2c02acdd14d5d') throw new Error('Pinned resource run mismatch');
+            for (const [id,name,hash] of pins) {
+              const { data: artifact } = await github.rest.actions.getArtifact({owner:'Blueeeecho',repo:'EchoLingo',artifact_id:id});
+              if (artifact.expired || artifact.workflow_run.id !== 41178655504 || artifact.digest !== `sha256:${hash}`) throw new Error('Pinned resource artifact mismatch');
+              const { data } = await github.rest.actions.downloadArtifact({owner:'Blueeeecho',repo:'EchoLingo',artifact_id:id,archive_format:'zip'});
+              fs.writeFileSync(path.join(directory,name), Buffer.from(data));
+            }
+      - name: Extract only hash-verified offline engine models licenses and source
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          python scripts/stage-language-patch-resources.py --windows-zip "$env:RUNNER_TEMP/candidate-offline-inputs/windows.zip" --evidence-zip "$env:RUNNER_TEMP/candidate-offline-inputs/evidence.zip" --output-dir "$env:RUNNER_TEMP/candidate-offline-evidence"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          python scripts/audit-windows-resources.py --staged
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - run: npm ci
+      - run: npm run build
+      - name: Test routing and affected actual application request lifecycle
+        shell: bash
+        run: |
+          set -euo pipefail
+          python scripts/test_automatic_translation_contract.py
+          cargo test --manifest-path tests/language-routing-patch/Cargo.toml --locked
+          for filter in bilingual_input language_detection translation_selection translation_requests; do
+            cargo test --manifest-path src-tauri/Cargo.toml --locked "$filter"
+          done
+      - name: Build fresh native release installer with locked dependencies
+        run: npm run tauri build -- --bundles ${{ runner.os == 'Windows' && 'nsis' || 'app,dmg' }} -- --locked
+      - name: Inspect actual installer and bind fresh application identity
+        shell: bash
+        env:
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          if [ "$RUNNER_OS" = Windows ]; then
+            files=(src-tauri/target/release/bundle/nsis/*.exe)
+            built=src-tauri/target/release/echolingo.exe
+            extracted="$RUNNER_TEMP/routing-inspection/echolingo.exe"
+            offline=(--offline-staging-manifest "$RUNNER_TEMP/candidate-offline-evidence/baseline-reuse.json" --offline-source-archive "$RUNNER_TEMP/candidate-offline-evidence/EchoLingo-offline-engine-source.zip")
+          else
+            files=(src-tauri/target/release/bundle/dmg/*.dmg)
+            built=src-tauri/target/release/bundle/macos/EchoLingo.app
+            extracted="$RUNNER_TEMP/routing-inspection/echolingo"
+            offline=()
+          fi
+          test "${#files[@]}" -eq 1
+          python scripts/inspect-candidate-package.py --platform "$RUNNER_OS" --installer "${files[0]}" --built-application "$built" --output-dir "$RUNNER_TEMP/routing-inspection" --run-url "$RUN_URL" --locked-build-passed --focused-tests-passed
+          mkdir "$RUNNER_TEMP/routing-package"
+          python scripts/verify-candidate-package.py --platform "$RUNNER_OS" --installer "${files[0]}" --application "$extracted" --checks-json "$RUNNER_TEMP/routing-inspection/checks.json" --output "$RUNNER_TEMP/routing-package/candidate.json" --run-url "$RUN_URL" "${offline[@]}"
+          cp "${files[0]}" "$RUNNER_TEMP/routing-package/"
+          if [ "$RUNNER_OS" = Windows ]; then cp "$RUNNER_TEMP/candidate-offline-evidence/EchoLingo-offline-engine-source.zip" "$RUNNER_TEMP/routing-package/"; fi
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Routing-package-${{ runner.os }}
+          if-no-files-found: error
+          path: ${{ runner.temp }}/routing-package/*
+      - name: State exact validation scope
+        shell: bash
+        run: echo 'Fresh native installers, focused routing/request tests and static package inspection only. No new installed runtime, screenshot, OCR or visual acceptance is claimed. Offline resources alone reuse pinned historical bytes.' >> "$GITHUB_STEP_SUMMARY"
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      actions: read
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/download-artifact@v4
+        with:
+          name: Routing-package-Windows
+          path: routing-inputs/Windows
+      - uses: actions/download-artifact@v4
+        with:
+          name: Routing-package-macOS
+          path: routing-inputs/macOS
+      - name: Validate preparation and publisher policy
+        run: |
+          python3 -m unittest discover -s scripts -p 'test_prepare_routing_release.py' -v
+          node --test scripts/test-routing-release.cjs
+      - name: Prepare exact inspected release bytes
+        env:
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: python3 scripts/prepare-routing-release.py --artifacts routing-inputs --output release-assets --run-url "$RUN_URL"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: EchoLingo-0.2.13-publication
+          if-no-files-found: error
+          path: release-assets/*
+      - name: Publish a new prerelease without replacing old assets
+        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b
+        with:
+          script: |
+            const { publish } = require('./scripts/publish-routing-release.cjs');
+            await publish({ github, context, core });
