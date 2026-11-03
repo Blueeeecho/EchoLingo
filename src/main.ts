@@ -26,6 +26,7 @@ import { defaultSettings, errorMessage, userFacingError, filterHistory, LANGUAGE
 import { coreGuidanceMessage, coreShortcutProblems, emptyPopupPlaceholder, type CoreShortcutProblem } from './shortcut-guidance';
 import { engineLimitCopy, isWeakEngineSignal, shouldShowFirstRun, shouldShowSoftHint, type EngineHintState } from './engine-hint';
 import type { Action, CredentialState, HistoryEntry, PermissionKind, Provider, ProviderKind, Settings, ShortcutAction, SourceTextEvent, SystemTranslationStatus, TranslationProgress, TranslationResult } from './types';
+import './settings-readability.css';
 
 const desktop = isTauri();
 const $ = <T extends HTMLElement = HTMLElement>(selector: string): T => {
