@@ -64,3 +64,7 @@ Windows 与 macOS 现统一提供 0.2.13 测试版。翻译与 OCR 服务独立�
 第三方组件与模型保留各自许可。已按 MIT 发布的旧版本继续适用其原有授权。
 
 <sub>感谢 Bob 在桌面翻译体验上的探索与启发。</sub>
+
+## Acknowledgments
+
+- [Linux.do](https://linux.do/)

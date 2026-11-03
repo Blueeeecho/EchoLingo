@@ -62,3 +62,7 @@ The project’s own code uses **MIT + Commons Clause v1.0**. You can read, study
 Third-party components and models keep their own licenses. Older versions already released under MIT stay under that original license.
 
 <sub>Thanks to Bob for the exploration and inspiration around desktop translation.</sub>
+
+## Acknowledgments
+
+- [Linux.do](https://linux.do/)
