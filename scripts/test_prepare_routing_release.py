@@ -2,6 +2,7 @@
 import copy
 import ast
 import subprocess
+import sys
 import importlib.util
 import json
 from pathlib import Path
@@ -123,7 +124,7 @@ class PreparationTests(unittest.TestCase):
     def test_release_policy_runs_failed_source_guard_on_windows(self):
         ci=(R.ROOT/'.github/workflows/ci.yml').read_text(encoding='utf-8')
         block=ci.split('  routing-release-policy:',1)[1].split('  language-patch-targeted:',1)[0]
-        self.assertIn('os: [ubuntu-latest, windows-latest]',block)
+        self.assertIn('os: [ubuntu-latest, windows-latest, macos-latest]',block)
         self.assertIn("PYTHONUTF8: '1'",block)
         self.assertIn('shell: bash',block)
         self.assertIn('set -euo pipefail',block)
@@ -134,6 +135,29 @@ class PreparationTests(unittest.TestCase):
         routing=ci.split('  automatic-direction-routing:',1)[1].split('  routing-release-policy:',1)[0]
         self.assertIn("if: needs.validation-mode.outputs.mode == 'automatic-direction'\n",routing)
         self.assertNotIn("mode == 'routing-release'",routing)
+    def test_verifier_arguments_keep_common_and_platform_options_under_nounset(self):
+        workflow=(R.ROOT/'.github/workflows/release-routing.yml').read_text(encoding='utf-8')
+        self.assertNotIn('offline=()',workflow)
+        self.assertNotIn('${offline[@]}',workflow)
+        block=workflow.split('          verifier=(',1)[1].split('          python "${verifier[@]}"',1)[0]
+        block='verifier=('+block
+        for platform in ('macOS','Windows'):
+            with self.subTest(platform=platform):
+                script=('set -euo pipefail\nRUNNER_OS='+platform+'\n'
+                        "RUNNER_TEMP='/generated temp'\nRUN_URL='https://github.com/Blueeeecho/EchoLingo/actions/runs/123'\n"
+                        "files=('installer with spaces')\nextracted='application with spaces'\n"
+                        +block+"\nprintf '%s\\0' \"${verifier[@]}\"\n")
+                shell='/bin/bash' if sys.platform=='darwin' else 'bash'
+                result=subprocess.run([shell,'-c',script],check=True,stdout=subprocess.PIPE,stderr=subprocess.PIPE)
+                args=result.stdout.decode('utf-8').rstrip('\0').split('\0')
+                expected=['scripts/verify-candidate-package.py','--platform',platform,
+                          '--installer','installer with spaces','--application','application with spaces',
+                          '--checks-json','/generated temp/routing-inspection/checks.json',
+                          '--output','/generated temp/routing-package/candidate.json','--run-url',RUN]
+                if platform=='Windows':
+                    expected += ['--offline-staging-manifest','/generated temp/candidate-offline-evidence/baseline-reuse.json',
+                                 '--offline-source-archive','/generated temp/candidate-offline-evidence/EchoLingo-offline-engine-source.zip']
+                self.assertEqual(args,expected)
     def test_all_eight_versions(self):
         self.assertEqual(len(R.module().check_versions(R.ROOT)),7)
 
