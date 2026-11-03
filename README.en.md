@@ -3,24 +3,26 @@
 <h1 align="center">EchoLingo · 回声译</h1>
 <p align="center"><strong>A familiar echo for unfamiliar words.</strong></p>
 <p align="center">A lightweight desktop app for selection translation and seamless OCR, so understanding can keep up with your reading.</p>
-<p align="center"><a href="https://blueeeecho.github.io/EchoLingo/">Website</a> · <a href="https://github.com/Blueeeecho/EchoLingo/releases/tag/0.2.12">Windows 0.2.12 test prerelease</a> · <a href="https://github.com/Blueeeecho/EchoLingo/releases/tag/0.2.12">macOS 0.2.12 test prerelease</a> · <a href="https://github.com/Blueeeecho/EchoLingo/issues">Feedback</a></p>
+<p align="center"><a href="https://blueeeecho.github.io/EchoLingo/">Website</a> · <a href="https://github.com/Blueeeecho/EchoLingo/releases/tag/0.2.13">Windows 0.2.13 test prerelease</a> · <a href="https://github.com/Blueeeecho/EchoLingo/releases/tag/0.2.13">macOS 0.2.13 test prerelease</a> · <a href="https://github.com/Blueeeecho/EchoLingo/issues">Feedback</a></p>
 
 ## Download and install
 
-**[Download Windows 0.2.12 test prerelease (x64)](https://github.com/Blueeeecho/EchoLingo/releases/download/0.2.12/EchoLingo_0.2.12_windows_x64-setup.exe)** · **[Download macOS 0.2.12 test prerelease (Apple silicon)](https://github.com/Blueeeecho/EchoLingo/releases/download/0.2.12/EchoLingo_0.2.12_macos_arm64.dmg)**
+**[Download Windows 0.2.13 test prerelease (x64)](https://github.com/Blueeeecho/EchoLingo/releases/download/0.2.13/EchoLingo_0.2.13_windows_x64-setup.exe)** · **[Download macOS 0.2.13 test prerelease (Apple silicon)](https://github.com/Blueeeecho/EchoLingo/releases/download/0.2.13/EchoLingo_0.2.13_macos_arm64.dmg)**
 
 Windows supports Windows 10 1809+ and Windows 11. The macOS package is for Apple silicon Macs on macOS 12 or later. Apple system translation needs macOS 26 or later. After installation, EchoLingo stays in the tray or menu bar. Quit the previous version completely before you upgrade.
 
-Windows and macOS now both offer the 0.2.12 test prerelease. Translation and OCR services are managed separately, with collapsible free-service recommendations. The defaults are `Alt+D`, `Alt+S`, and a separate `F1` screenshot and local editor action; shortcuts can be changed, cleared, or customized.
+Windows and macOS now both offer the 0.2.13 test prerelease. Translation and OCR services are managed separately, with collapsible free-service recommendations. The defaults are `Alt+D`, `Alt+S`, and a separate `F1` screenshot and local editor action; shortcuts can be changed, cleared, or customized.
 
-This version allows macOS pinned-image windows to be captured for OCR; capture helper windows remain excluded. Intermittent selection failures are not fixed. Real-application selection, Chinese IME candidate windows, physical multi-monitor setups and mixed DPI still need hands-on acceptance. See the release notes for limitations.
+This version simplifies automatic translation direction: EchoLingo’s own content checks no longer block requests early because of filenames, mixed languages, short text or uncertain detection. A manually selected target uses a concrete fallback source when detection is unresolved. Apple system translation no longer bypasses the service by returning the original text directly. Service refusals or failures are still reported.
+
+Validation covers focused routing and request tests on both platforms, fresh installer builds and static package inspection. Full regression, installed runtime, screenshot, OCR and visual acceptance were not repeated. Other selection, screenshot and multi-display issues are outside this fix. Real applications, services, Chinese IME candidate windows, physical multi-monitor setups and mixed DPI still need hands-on acceptance. See the release notes for limitations.
 
 This is an internal prerelease, not a stable release. Windows has no commercial code signature; macOS uses ad hoc signing and is not notarized by Apple. Your system may show warnings or request permissions again. Install only files from this repository’s release page with matching checksums.
 
-- **Windows 0.2.12**: [Release notes](https://github.com/Blueeeecho/EchoLingo/releases/tag/0.2.12) · [SHA-256 checksums](https://github.com/Blueeeecho/EchoLingo/releases/download/0.2.12/SHA256SUMS.txt) · [Release manifest](https://github.com/Blueeeecho/EchoLingo/releases/download/0.2.12/RELEASE-MANIFEST.json)
-- **macOS 0.2.12**: [Release notes](https://github.com/Blueeeecho/EchoLingo/releases/tag/0.2.12) · [SHA-256 checksums](https://github.com/Blueeeecho/EchoLingo/releases/download/0.2.12/SHA256SUMS.txt) · [Release manifest](https://github.com/Blueeeecho/EchoLingo/releases/download/0.2.12/RELEASE-MANIFEST.json)
+- **Windows 0.2.13**: [Release notes](https://github.com/Blueeeecho/EchoLingo/releases/tag/0.2.13) · [SHA-256 checksums](https://github.com/Blueeeecho/EchoLingo/releases/download/0.2.13/SHA256SUMS.txt) · [Release manifest](https://github.com/Blueeeecho/EchoLingo/releases/download/0.2.13/RELEASE-MANIFEST.json)
+- **macOS 0.2.13**: [Release notes](https://github.com/Blueeeecho/EchoLingo/releases/tag/0.2.13) · [SHA-256 checksums](https://github.com/Blueeeecho/EchoLingo/releases/download/0.2.13/SHA256SUMS.txt) · [Release manifest](https://github.com/Blueeeecho/EchoLingo/releases/download/0.2.13/RELEASE-MANIFEST.json)
 
-0.2.12 is a test prerelease, not a stable GitHub `Latest` release. See [all releases](https://github.com/Blueeeecho/EchoLingo/releases) for earlier versions. The installers correspond to the [0.2.12 source tag](https://github.com/Blueeeecho/EchoLingo/tree/0.2.12), not the default branch; See the release manifest for the relationship between source and installer bytes. The previous [0.2.11 preview](https://github.com/Blueeeecho/EchoLingo/releases/tag/0.2.11) remains available.
+0.2.13 is a test prerelease, not a stable GitHub `Latest` release. See [all releases](https://github.com/Blueeeecho/EchoLingo/releases) for earlier versions. The installers correspond to the [0.2.13 source tag](https://github.com/Blueeeecho/EchoLingo/tree/0.2.13), not the default branch; See the release manifest for the relationship between source and installer bytes. The previous [0.2.12 preview](https://github.com/Blueeeecho/EchoLingo/releases/tag/0.2.12) remains available.
 
 [First-launch notes for macOS](docs/macos-install.zh-CN.md) (Chinese) · [Build from source](docs/build.md) (Chinese)
 
