@@ -231,3 +231,13 @@ class PreparationTests(unittest.TestCase):
         del self.smoke['engineSha256'];self.reject_zip()
 
 if __name__=='__main__': unittest.main()
+
+
+class WorkflowBuildToolTests(unittest.TestCase):
+    def test_cargo_has_exact_msvc_linker_even_in_git_bash(self):
+        workflow=(R.ROOT/'.github/workflows/release-desktop.yml').read_text(encoding='utf-8')
+        self.assertIn("Join-Path $env:VCToolsInstallDir 'bin/HostX64/x64/link.exe'",workflow)
+        self.assertIn('Test-Path -LiteralPath $linker -PathType Leaf',workflow)
+        self.assertIn('CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_LINKER=$linker',workflow)
+        self.assertIn('Out-File -FilePath $env:GITHUB_ENV',workflow)
+        self.assertLess(workflow.index('Pin the MSVC linker'),workflow.index('Test frontend, actual Rust sources'))

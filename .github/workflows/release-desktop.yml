@@ -43,6 +43,13 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: ilammy/msvc-dev-cmd@v1
         if: runner.os == 'Windows'
+      - name: Pin the MSVC linker for Cargo in every shell
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $linker = Join-Path $env:VCToolsInstallDir 'bin/HostX64/x64/link.exe'
+          if (-not (Test-Path -LiteralPath $linker -PathType Leaf)) { throw 'MSVC linker not found' }
+          "CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_LINKER=$linker" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
       - uses: swatinem/rust-cache@v2
         with:
           key: desktop-release-0214-static-crt
