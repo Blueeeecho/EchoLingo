@@ -20,7 +20,7 @@ SHA='a'*40;TREE='b'*40;RUN='https://github.com/Blueeeecho/EchoLingo/actions/runs
 class PreparationTests(unittest.TestCase):
     def setUp(self):
         self.tmp=tempfile.TemporaryDirectory();self.addCleanup(self.tmp.cleanup)
-        self.root=Path(self.tmp.name);self.inputs=self.root/'inputs';self.output=self.root/'out'
+        self.root=Path(self.tmp.name).resolve(strict=True);self.inputs=self.root/'inputs';self.output=self.root/'out'
         self.reports={}
         for platform,name in [('Windows','EchoLingo_0.2.14_x64-setup.exe'),('macOS','EchoLingo_0.2.14_aarch64.dmg')]:
             directory=self.inputs/platform;directory.mkdir(parents=True)

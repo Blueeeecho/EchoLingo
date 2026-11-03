@@ -15,7 +15,8 @@ permissions:
   actions: read
 concurrency:
   group: echolingo-prerelease-0.2.14-${{ github.event.pull_request.number || github.ref }}
-  cancel-in-progress: false
+  # Only superseded PR validation is canceled; a main publication is never canceled.
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 jobs:
   build:
     if: github.repository == 'Blueeeecho/EchoLingo'
