@@ -4,9 +4,9 @@
   const root = document.querySelector("#download-stats");
   if (!root) return;
 
-  // Public metadata only: never download an installer or count page visits/clicks.
+  // Public metadata only: never download an application package or count page visits/clicks.
   const endpoint = "https://api.github.com/repos/Blueeeecho/EchoLingo/releases";
-  const cacheKey = "echolingo-installer-downloads-v1";
+  const cacheKey = "echolingo-app-downloads-v2";
   const freshFor = 15 * 60 * 1000;
   const retainFor = 7 * 24 * 60 * 60 * 1000;
   const validCount = (value) => Number.isSafeInteger(value) && value >= 0;
@@ -80,13 +80,14 @@
           if (release.draft || !release.published_at) continue;
           if (!Array.isArray(release.assets)) throw new Error("Missing release assets");
           for (const asset of release.assets) {
-            // Only EchoLingo installers: source ZIPs, manifests, checksums, etc. never match.
+            // Count installers and the Windows unpack ZIP only; source ZIPs never match.
             const name = typeof asset.name === "string" ? asset.name : "";
-            const platform = /^EchoLingo_.+\.(exe|msi)$/i.test(name) ? "windows"
+            const platform = (/^EchoLingo_.+\.(exe|msi)$/i.test(name) ||
+              /^EchoLingo_\d+\.\d+\.\d+(?:-[\w.-]+)?_windows_x64-unpack\.zip$/i.test(name)) ? "windows"
               : /^EchoLingo_.+\.(dmg|pkg)$/i.test(name) ? "macos" : null;
             if (!platform || asset.state !== "uploaded") continue;
             if (!validCount(asset.download_count) || !Number.isSafeInteger(asset.id)) {
-              throw new Error("Invalid installer count");
+              throw new Error("Invalid package count");
             }
             if (seenAssets.has(asset.id)) continue;
             seenAssets.add(asset.id);
@@ -107,7 +108,7 @@
     } catch {
       if (cached) showUpdated(cached, true);
       else setStatus(
-        "下载量暂不可用（网络或 GitHub 限流），不影响下载安装。",
+        "下载量暂不可用（网络或 GitHub 限流），不影响下载。",
         "Counts temporarily unavailable (network or GitHub rate limit). Downloads still work.",
       );
     } finally {
