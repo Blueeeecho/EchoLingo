@@ -18,6 +18,7 @@ SCOPE_FILES = {
     'packaging/windows/Start-EchoLingo.cmd', 'packaging/windows/README-Windows.txt',
     'scripts/package-windows-unpack.py', 'scripts/test_package_windows_unpack.py',
     'tests/windows-unpack-smoke.ps1', 'docs/windows-unpack.zh-CN.md', 'docs/build.md',
+    'src-tauri/src/main.rs', 'src-tauri/src/startup_launch.rs',
 }
 
 
