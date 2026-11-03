@@ -1,10 +1,6 @@
 name: Publish preview release
 on:
   workflow_dispatch:
-  push:
-    branches: [main]
-    paths: [package.json, scripts/inspect-candidate-package.py, scripts/verify-candidate-package.py, scripts/prepare-release-assets.py, .github/workflows/release.yml, .github/workflows/release-checks.yml]
-    tags: ['0.2.12']
 # Build jobs retain read-only repository access. Only the final publish job writes.
 permissions:
   contents: read

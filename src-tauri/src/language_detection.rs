@@ -196,7 +196,20 @@ pub fn resolve_translation_languages(
             }
             (Some(language), _) => language.into(),
             (None, Some(language)) => language,
-            (None, None) => "auto".into(),
+            // An unknown source must not trigger another detector failure in
+            // the selected provider. Keep the requested target and choose the
+            // opposite starter source for English; otherwise try English.
+            (None, None) => {
+                if target
+                    .split('-')
+                    .next()
+                    .is_some_and(|language| language.eq_ignore_ascii_case("en"))
+                {
+                    "zh-Hans".into()
+                } else {
+                    "en".into()
+                }
+            }
         }
     };
     let target = if target == "auto" {
@@ -225,7 +238,7 @@ mod tests {
             ("hello", None, ("en", "zh-Hans")),
             ("日本語です", Some("ja"), ("ja", "zh-Hans")),
             ("한국어", None, ("ko", "zh-Hans")),
-            ("12345?!", None, ("auto", "zh-Hans")),
+            ("12345?!", None, ("en", "zh-Hans")),
         ] {
             let (source, target) =
                 resolve_translation_languages(text, "auto", "auto", detected).unwrap();
@@ -401,7 +414,7 @@ mod tests {
     }
 
     #[test]
-    fn identifier_hint_does_not_override_natural_languages_or_invent_symbol_languages() {
+    fn identifier_hint_preserves_languages_and_symbols_get_the_default_direction() {
         for (text, detected, expected) in [
             ("bonjour", "fr", "fr"),
             ("Hola", "es", "es"),
@@ -433,7 +446,7 @@ mod tests {
                     resolve_translation_languages(text, "auto", "auto", detected)
                         .unwrap()
                         .0,
-                    "auto",
+                    "en",
                     "{text}"
                 );
             }

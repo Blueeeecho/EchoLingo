@@ -4776,8 +4776,8 @@ func systemTargetLanguageMatches(_ requested: String, _ returned: Locale.Languag
 
 @available(macOS 13.0, *)
 func systemLanguagesEquivalent(_ source: String, _ target: String) -> Bool {
-    // en-US and en are the same language for a no-op translation. Chinese
-    // variants remain distinct; a Traditional target is never replaced by Hans.
+    // Availability can treat en-US and en as equivalent. Translation requests
+    // still reach the service, and Chinese script variants remain distinct.
     return systemTargetLanguageMatches(target, Locale.Language(identifier: source))
 }
 
@@ -4788,9 +4788,8 @@ func translateWithSystem(_ request: SystemTranslationInput, trace: SystemTransla
     trace.languages(source: source, target: request.target)
     // Preserve the requested Chinese script. Do not substitute generic zh or
     // another target if Apple's availability/session rejects the exact pair.
-    if systemLanguagesEquivalent(source, request.target) {
-        return ["text": text, "sourceLanguage": source, "targetLanguage": request.target]
-    }
+    // Even an equivalent source/target pair must reach the chosen service.
+    // Do not manufacture a successful original-text result here.
     // Availability is advisory in Settings and can be transient. This session
     // cannot request downloads; translate reports the actual installed state.
     let recoveryTicket = try systemTranslationRecovery.begin(source: source, target: request.target)
