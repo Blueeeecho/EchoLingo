@@ -1,6 +1,7 @@
 """Exact candidate routing; all other refs retain their previous selection."""
 import os
 from pathlib import Path
+import re
 import subprocess
 import tempfile
 import unittest
@@ -11,10 +12,11 @@ ROOT = Path(__file__).resolve().parents[1]
 class MacFollowupRouting(unittest.TestCase):
     def route(self, head, base):
         workflow = (ROOT / '.github/workflows/ci.yml').read_text()
-        scope = workflow.split('        run: |\n', 1)[1].split('\n  language-patch-targeted:', 1)[0]
+        # Stop at the next job, regardless of later additions/reordering.
+        scope = re.split(r'\n  [\w-]+:\n', workflow.split('        run: |\n', 1)[1], maxsplit=1)[0]
         script = '\n'.join(line[10:] for line in scope.splitlines())
         with tempfile.NamedTemporaryFile() as output:
-            env = dict(os.environ, PR_HEAD=head, PR_BASE=base, GITHUB_OUTPUT=output.name)
+            env = dict(os.environ, PR_HEAD=head, PR_BASE=base, CI_EVENT='pull_request', CI_REF='refs/pull/1/merge', GITHUB_OUTPUT=output.name)
             subprocess.run(['bash', '-eu', '-c', script], cwd=ROOT, env=env, check=True, capture_output=True)
             return Path(output.name).read_text().strip()
 
