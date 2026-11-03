@@ -60,7 +60,15 @@ public static class WindowsSelectionNativeFocusFixture {
         Ui(source,delegate{try{bool text=Clipboard.ContainsText();string copied=text?Clipboard.GetText(TextDataFormat.UnicodeText):null;observation["clipboardTextAvailable"]=text;observation["clipboardTextLength"]=copied==null?0:copied.Length;observation["clipboardExactlyExpected"]=copied==WindowsSelectionNativeFocusChild.Selected;observation["clipboardTextReadSucceeded"]=true;}catch{observation["clipboardTextReadSucceeded"]=false;}});return observation;
     }
     sealed class ClipboardSeed {public DataObject Declared;public string[] PublishedFormats;}
-    static ClipboardSeed Seed(){DataObject data=new DataObject();data.SetData(DataFormats.UnicodeText,false,"Generated native focus original 16273");data.SetData(DataFormats.Html,false,"<p>Generated native focus original 16273</p>");data.SetData(DataFormats.Rtf,false,"{\\rtf1 Generated native focus original 16273}");Clipboard.SetDataObject(data,true,0,0);IDataObject published=Clipboard.GetDataObject();Need(published!=null,"GENERATED_SEED_NOT_PUBLISHED");string[] formats=published.GetFormats(false);Array.Sort(formats,StringComparer.Ordinal);return new ClipboardSeed {Declared=data,PublishedFormats=formats};}
+    static ClipboardSeed Seed(){
+        DataObject data=new DataObject();data.SetData(DataFormats.UnicodeText,false,"Generated native focus original 16273");data.SetData(DataFormats.Html,false,"<p>Generated native focus original 16273</p>");data.SetData(DataFormats.Rtf,false,"{\\rtf1 Generated native focus original 16273}");
+        // The manual-copy baseline can still briefly own the OS clipboard.
+        // Retry only publishing this generated setup, never input or the helper.
+        // Exhaustion still fails, and exact formats/values must be readable.
+        Clipboard.SetDataObject(data,true,5,20);
+        IDataObject published=Clipboard.GetDataObject();Need(published!=null,"GENERATED_SEED_NOT_PUBLISHED");string[] formats=published.GetFormats(false);Array.Sort(formats,StringComparer.Ordinal);
+        ClipboardSeed seed=new ClipboardSeed {Declared=data,PublishedFormats=formats};CheckSeed(seed);return seed;
+    }
     static void CheckSeed(ClipboardSeed seed){IDataObject current=Clipboard.GetDataObject();Need(current!=null,"GENERATED_CLIPBOARD_MISSING");string[] expected=seed.PublishedFormats,actual=current.GetFormats(false);Array.Sort(actual,StringComparer.Ordinal);Need(expected.Length==actual.Length,"GENERATED_CLIPBOARD_FORMAT_SET_CHANGED");for(int i=0;i<expected.Length;i++)Need(expected[i]==actual[i],"GENERATED_CLIPBOARD_FORMAT_SET_CHANGED");foreach(string format in seed.Declared.GetFormats(false))Need(Object.Equals(current.GetData(format,false),seed.Declared.GetData(format,false)),"GENERATED_RICH_CLIPBOARD_CHANGED");}
     static Dictionary<string,object> Call(string helper,string assembly){
         string name="Local\\EchoLingo-cancel-"+Guid.NewGuid().ToString("N");

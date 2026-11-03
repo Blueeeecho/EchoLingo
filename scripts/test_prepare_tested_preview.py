@@ -76,6 +76,16 @@ class TestedPreviewTests(unittest.TestCase):
     def test_historical_publisher_rejects_current_release_without_extracting(self):
         self.assertNotEqual(M.RELEASE.VERSION, M.VERSION)
         with patch.object(M, "extract_pinned") as extract:
+            # The current checkout is rejected by the imported historical
+            # publisher's version guard before the 0.2.2-only check is reached.
+            with self.assertRaisesRegex(ValueError, "must be exactly 0.2.12"):
+                M.prepare(self.archives, self.output, "a" * 40)
+            extract.assert_not_called()
+        self.assertFalse(self.output.exists())
+
+    def test_historical_publisher_version_guard_rejects_other_authorized_version(self):
+        with patch.object(M.RELEASE, "check_version", return_value=None), \
+                patch.object(M, "extract_pinned") as extract:
             with self.assertRaisesRegex(ValueError, "Only the authorized 0.2.2"):
                 M.prepare(self.archives, self.output, "a" * 40)
             extract.assert_not_called()

@@ -96,6 +96,17 @@ export function installFreeSetup(context: SetupContext): { refresh: () => void; 
     if (context.desktop) void invoke('open_service_link', { url }).catch(context.reportError);
     else window.open(url, '_blank', 'noopener');
   };
+  const serviceLink = (label: string, url: string): HTMLAnchorElement => {
+    const link = document.createElement('a');
+    link.className = 'text-button'; link.textContent = `${label} ↗`;
+    link.href = url; link.target = '_blank'; link.rel = 'noopener noreferrer';
+    // Desktop URLs still use the existing validated native opener. Browser
+    // previews retain ordinary links, including copy-link and keyboard use.
+    link.addEventListener('click', (event) => {
+      if (context.desktop) { event.preventDefault(); openLink(url); }
+    });
+    return link;
+  };
   const renderCards = (): void => {
     document.querySelector<HTMLButtonElement>('#free-region-cn')?.setAttribute('aria-pressed', String(region === 'cn'));
     document.querySelector<HTMLButtonElement>('#free-region-overseas')?.setAttribute('aria-pressed', String(region === 'overseas'));
@@ -127,9 +138,8 @@ export function installFreeSetup(context: SetupContext): { refresh: () => void; 
         button.addEventListener('click', () => openWizard(item.id));
         actions.append(button);
         for (const [label, url] of item.allowance.links.slice(0, 1)) {
-          const source = document.createElement('button'); source.type = 'button'; source.className = 'text-button';
-          source.textContent = tx(label, 'Official quota'); source.setAttribute('data-free-source', item.id);
-          source.addEventListener('click', () => openLink(url)); actions.append(source);
+          const source = serviceLink(tx(label, 'Official quota'), url);
+          source.setAttribute('data-free-source', item.id); actions.append(source);
         }
         row.append(title, quota, detail, date, actions, cost); list.append(row);
       }
@@ -178,11 +188,7 @@ export function installFreeSetup(context: SetupContext): { refresh: () => void; 
       : tx('测试会发送内置短句；启用后的翻译会把原文发给这个服务商。密钥只写入系统凭据库。启用会保留现有翻译服务；如不需要并行翻译，请在设置中关闭其他服务。', 'The test sends a built-in short sentence; later translation sends your source text to this provider. The key stays in the system credential store. Existing translation services remain enabled; disable others in Settings if you do not want parallel translation.');
     const warning = document.createElement('p'); warning.className = 'free-service-warning';
     warning.textContent = piece.credential === 'localOllama' ? tx('本机模型需要硬件、存储和电力；云模型不属于本机免费处理。', 'Local models use hardware, storage and electricity; cloud models are not local free inference.') : tx('费用提醒：免费额度用完后可能继续计费，请先确认控制台的计费与停止使用方式；应用不会保证自动停用。', 'Billing notice: usage above the free allowance may be billed. Check the vendor billing and stop-usage controls; this app does not guarantee an automatic stop.');
-    const open = document.createElement('button'); open.type = 'button'; open.className = 'text-button'; open.textContent = tx('打开申请页', 'Open signup page');
-    open.addEventListener('click', () => {
-      if (context.desktop) void invoke('open_service_link', { url: piece.signupUrl }).catch(context.reportError);
-      else window.open(piece.signupUrl, '_blank', 'noopener');
-    });
+    const open = serviceLink(tx('打开申请页', 'Open signup page'), piece.signupUrl);
     if (piece.credential === 'localOllama') {
       const modelField = field(tx('已下载的本机模型名', 'Downloaded local model name'), 'free-field-model', false);
       fields.append(modelField);

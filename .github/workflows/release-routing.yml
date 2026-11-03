@@ -1,9 +1,6 @@
 name: Publish targeted 0.2.13 routing prerelease
 on:
   workflow_dispatch:
-  push:
-    branches: [main]
-    paths: [package.json, .github/workflows/release-routing.yml]
 # Windows runner locale must not reinterpret UTF-8 source or helper output.
 env:
   PYTHONUTF8: '1'

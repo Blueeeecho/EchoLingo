@@ -1,0 +1,134 @@
+/* Management surfaces have their own reading scale. Do not enlarge the
+   translation popup, history, or screenshot editor along with settings. */
+:is(#view-settings, #view-services, .provider-dialog) {
+  --muted: #62667b;
+  --secondary: #62667b;
+  --settings-link: #185abc;
+  --settings-link-hover: #10458f;
+  font-size: 14px;
+  line-height: 1.6;
+}
+[data-theme="dark"] :is(#view-settings, #view-services, .provider-dialog) {
+  --muted: #b0b2c5;
+  --secondary: #b0b2c5;
+  --settings-link: #8ab4ff;
+  --settings-link-hover: #b4cfff;
+}
+:is(#view-settings, #view-services) .section-heading { gap: 16px; flex-wrap: wrap; }
+body:is([data-view="settings"], [data-view="services"]) .management-header { font-size: 14px; }
+:is(#view-settings, #view-services) .section-heading h1 { font-size: 24px; }
+#view-settings .settings-card { padding: 22px; margin-bottom: 20px; }
+#view-settings .settings-card-heading { align-items: flex-start; flex-wrap: wrap; gap: 12px 20px; margin-bottom: 18px; }
+#view-settings .settings-card-heading > div { flex: 1 1 240px; min-width: 0; }
+#view-settings .settings-card-heading h2 { font-size: 17px; line-height: 1.5; margin-bottom: 8px; }
+#view-settings .settings-card-heading p { font-size: 13px; line-height: 1.7; }
+:is(#view-settings, #view-services, .provider-dialog) :is(.field-help, .settings-note, .privacy-copy p,
+  .form-grid small, .preference-row small, .permission-row small, .shortcut-binding small,
+  .shortcut-feedback, .provider-details, .provider-key-badge, .managed-service-name small,
+  .managed-service-state, .managed-service-status, .service-quota-details, .service-quota-date,
+  .service-quota-badge, .free-service small, .ocr-privacy-notice, .ocr-cloud-warning, .about-line) {
+  font-size: 13px;
+  line-height: 1.7;
+}
+:is(#view-settings, #view-services, .provider-dialog) :is(.preference-row, .permission-row,
+  .provider-title, .provider-empty, .form-grid label, .free-setup-fields label, .checkbox-label,
+  .shortcut-binding > label, .shortcut-advanced summary, .permission-setup-steps,
+  .service-guide, .free-service p, .free-service-warning, .service-quota-summary,
+  .service-quota-model-note, .managed-service-facts, .service-manager-nav button,
+  .service-manager-list-heading, .managed-service-name strong, .dialog-error) {
+  font-size: 14px;
+  line-height: 1.65;
+}
+:is(#view-settings, #view-services, .provider-dialog) :is(.primary-button, .secondary-button,
+  .text-button, .free-region button, .shortcut-record) {
+  min-height: 36px;
+  font-size: 14px;
+  line-height: 1.5;
+  white-space: normal;
+}
+:is(#view-settings, #view-services, .provider-dialog) :is(input:not([type="checkbox"]):not([type="radio"]), select, textarea) {
+  min-height: 40px;
+  font-size: 14px;
+  line-height: 1.5;
+  min-width: 0;
+  max-width: 100%;
+}
+#view-settings .provider-row { gap: 12px; padding: 16px; flex-wrap: wrap; }
+#view-settings .provider-info { flex: 1 1 180px; }
+#view-settings .provider-title { flex-wrap: wrap; }
+#view-settings .provider-details { white-space: normal; overflow-wrap: anywhere; }
+#view-settings .provider-controls { flex-wrap: wrap; gap: 12px; }
+#view-settings .preference-row { gap: 16px; margin-bottom: 22px; }
+#view-settings .preference-row > span { min-width: 0; }
+#view-settings .preference-row select { flex: 0 1 210px; }
+#view-settings .ocr-active-row select { max-width: 70%; }
+#view-settings .permission-actions { flex-wrap: wrap; gap: 10px 16px; margin-bottom: 12px; }
+#view-settings .permission-row { flex-wrap: wrap; gap: 12px; }
+#view-settings .permission-row > div:first-child { flex-wrap: wrap; }
+#view-settings .permission-row .permission-actions { margin-bottom: 0; }
+#view-settings .shortcut-form { gap: 18px; }
+#view-settings .shortcut-binding { grid-template-columns: minmax(0, 1fr); gap: 8px; }
+#view-settings .shortcut-record { flex-basis: 92px; }
+#view-settings .diagnostics-details > summary { font-size: 15px; }
+#view-settings .diagnostics-output { font-size: 13px; line-height: 1.7; }
+#view-settings .mini-brand { font-size: 15px; }
+#view-settings .mini-brand span { font-size: 13px; }
+#view-settings .free-service-section > summary { font-size: 15px; padding: 12px 0; }
+#view-settings .free-service { padding: 18px 0; }
+#view-settings .free-service h4 { font-size: 15px; margin-bottom: 8px; }
+#view-settings .free-service p { margin-bottom: 10px; }
+#view-settings .free-service-actions { gap: 8px 20px; margin: 8px 0 12px; }
+#view-settings .free-region { flex-wrap: wrap; }
+#view-settings .free-region button { padding: 6px 14px; }
+
+/* Links remain recognizable without hover or color perception. The setup
+   action uses the same treatment but retains its native button semantics. */
+:is(#view-settings, #view-services, .provider-dialog) a,
+#view-settings .free-service-actions .text-button {
+  color: var(--settings-link);
+  text-decoration: underline;
+  text-decoration-thickness: 1px;
+  text-underline-offset: 3px;
+  overflow-wrap: anywhere;
+  cursor: pointer;
+}
+:is(#view-settings, #view-services, .provider-dialog) a:hover,
+#view-settings .free-service-actions .text-button:hover { color: var(--settings-link-hover); text-decoration-thickness: 2px; }
+:is(#view-settings, #view-services, .provider-dialog) a:focus-visible,
+#view-settings .free-service-actions .text-button:focus-visible { outline: 2px solid var(--settings-link); outline-offset: 3px; border-radius: 3px; }
+:is(#view-settings, #view-services, .provider-dialog) .service-guide-links { gap: 8px 18px; }
+:is(#view-settings, #view-services, .provider-dialog) .service-guide-links a { display: inline-flex; align-items: center; min-height: 36px; }
+
+.provider-dialog { width: min(640px, calc(100vw - 40px)); padding: 24px; }
+.provider-dialog .dialog-heading h2 { font-size: 22px; line-height: 1.4; }
+.provider-dialog .dialog-heading .eyebrow { font-size: 11px; }
+.provider-dialog :is(.form-grid, .free-setup-fields) { gap: 18px; }
+.provider-dialog :is(.form-grid label, .free-setup-fields label) { min-width: 0; overflow-wrap: anywhere; }
+.provider-dialog .dialog-footer { flex-wrap: wrap; gap: 10px 14px; }
+.provider-dialog .dialog-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 10px 14px; margin-top: 24px; }
+.provider-dialog .service-guide { padding: 14px; }
+#free-setup-body > a { display: inline-flex; align-items: center; min-height: 36px; margin-bottom: 12px; }
+#view-services .service-manager { grid-template-columns: 140px minmax(240px, .9fr) minmax(280px, 1.2fr); gap: 16px; }
+#view-services .service-manager-detail h2 { font-size: 20px; }
+#view-services .service-manager-nav button { min-height: 40px; }
+
+/* Reflow instead of shrinking text when the native window is narrow. */
+@media (max-width: 900px) {
+  #view-settings .settings-grid { grid-template-columns: minmax(0, 1fr); gap: 0; }
+  #view-services .service-manager { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); }
+  #view-services .service-manager-nav { grid-column: 1 / -1; flex-direction: row; flex-wrap: wrap; }
+}
+@media (max-width: 640px) {
+  #view-settings .settings-card { padding: 18px; }
+  #view-settings .provider-controls { width: 100%; margin-left: 0; justify-content: flex-end; }
+  #view-settings .provider-controls > .switch { margin-right: auto; }
+  #view-settings .ocr-active-row { flex-wrap: wrap; }
+  #view-settings .ocr-active-row select { flex-basis: 100%; width: 100%; max-width: 100%; }
+  .provider-dialog { padding: 20px; }
+  .provider-dialog .form-grid { grid-template-columns: minmax(0, 1fr); }
+  #view-services .service-manager { display: flex; flex-direction: column; min-height: 0; }
+  #view-services .service-manager > * { width: 100%; }
+  #view-services .service-manager[data-detail="false"] .service-manager-detail { display: none; }
+  #view-services .service-manager[data-detail="true"] .service-manager-master { display: none; }
+  #view-services .managed-service-back { display: inline-flex; }
+}

@@ -74,6 +74,22 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn automatic_target_reverses_direction_but_fixed_target_is_never_rewritten() {
+        for (text, detected, target, expected) in [
+            ("中文测试", "zh-Hans", "auto", ("zh-Hans", "en")),
+            ("中文测试", "zh-Hans", "zh-Hans", ("zh-Hans", "zh-Hans")),
+            ("中文测试", "zh-Hans", "en", ("zh-Hans", "en")),
+            ("Hello world", "en", "auto", ("en", "zh-Hans")),
+            ("Hello world", "en", "zh-Hans", ("en", "zh-Hans")),
+        ] {
+            let pair = resolve(text, "auto", target, || async { Ok(detected.into()) })
+                .await
+                .unwrap();
+            assert_eq!((&*pair.0, &*pair.1), expected);
+        }
+    }
+
+    #[tokio::test]
     async fn uncertain_source_keeps_manual_target_and_never_forwards_auto() {
         for (target, expected_source) in [
             ("en", "zh-Hans"),

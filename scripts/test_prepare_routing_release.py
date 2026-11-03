@@ -98,17 +98,25 @@ class PreparationTests(unittest.TestCase):
         self.assertIn('workflow_dispatch:',old)
         self.assertNotIn('  push:',old)
         new=(R.ROOT/'.github/workflows/release-routing.yml').read_text()
-        self.assertIn('branches: [main]',new)
-        self.assertIn('paths: [package.json, .github/workflows/release-routing.yml]',new)
+        self.assertIn('workflow_dispatch:',new.split('permissions:')[0])
+        self.assertNotIn('  push:',new.split('permissions:')[0])
         ci=(R.ROOT/'.github/workflows/ci.yml').read_text()
         self.assertIn('scripts/prepare-routing-release.py --select-ci',ci)
         self.assertIn('[ "$CI_EVENT" = push ]',ci)
         self.assertIn('[ "$CI_EVENT" = pull_request ]',ci)
-        self.assertEqual(ci.count("if: needs.validation-mode.outputs.mode != 'language-routing-patch-v1'"),6)
-        self.assertEqual(ci.count("&& needs.validation-mode.outputs.mode != 'routing-release'"),6)
+        from test_language_patch_contract import assert_language_job_gates
+        assert_language_job_gates(self,ci)
     def test_git_manifest_decodes_utf8_even_with_windows_legacy_default(self):
-        with patch.object(subprocess,'_text_encoding',return_value='cp1252'):
-            manifest=R.git('show',R.REVIEWED_SOURCE+':package.json')
+        # A real local Git object exercises decoding without requiring a
+        # historical commit that normal shallow CI checkouts do not contain.
+        with tempfile.TemporaryDirectory() as directory:
+            subprocess.run(['git','init','--quiet',directory],check=True)
+            source=json.dumps({'version':'0.2.12','description':'EchoLingo · 回声译'},ensure_ascii=False)
+            blob=subprocess.check_output(['git','hash-object','-w','--stdin'],
+                cwd=directory,input=source.encode('utf-8')).decode('ascii').strip()
+            with patch.object(R,'ROOT',Path(directory)), \
+                    patch.object(subprocess,'_text_encoding',return_value='cp1252'):
+                manifest=R.git('show',blob)
         self.assertIn('回声译',manifest)
         self.assertEqual(json.loads(manifest)['version'],'0.2.12')
     def test_preparer_text_io_and_workflow_pin_utf8(self):
@@ -168,6 +176,10 @@ class PreparationTests(unittest.TestCase):
                                  '--offline-source-archive','/generated temp/candidate-offline-evidence/EchoLingo-offline-engine-source.zip']
                 self.assertEqual(args,expected)
     def test_all_eight_versions(self):
-        self.assertEqual(len(R.module().check_versions(R.ROOT)),7)
+        # Legacy release remains fixed to 0.2.13; current source metadata must
+        # still agree across all eight values without enabling its publisher.
+        value=R.module()
+        value.VERSION=json.loads((R.ROOT/'package.json').read_text(encoding='utf-8'))['version']
+        self.assertEqual(len(value.check_versions(R.ROOT)),7)
 
 if __name__=='__main__':unittest.main()

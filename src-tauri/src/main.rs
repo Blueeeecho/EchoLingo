@@ -1619,6 +1619,7 @@ async fn translate(
     provider_id: Option<String>,
 ) -> Result<Vec<TranslationResult>, String> {
     let mut trace = translation_health::RequestTrace::start(request_id);
+    trace.requested_languages(&source_language, &target_language);
     let outcome = async {
         if text.trim().is_empty() {
             return Err("请输入需要翻译的文本".into());

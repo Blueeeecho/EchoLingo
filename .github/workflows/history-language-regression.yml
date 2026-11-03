@@ -1,0 +1,68 @@
+name: History language regression
+
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/history-language-regression.yml'
+      - 'package.json'
+      - 'package-lock.json'
+      - 'index.html'
+      - 'src/*.css'
+      - 'src/main.ts'
+      - 'src/history-language-selection.ts'
+      - 'src/history-language-selection.test.ts'
+      - 'tests/frontend-interactions.mjs'
+      - 'tests/language-routing-patch/**'
+      - 'src-tauri/src/main.rs'
+      - 'src-tauri/src/bilingual_input.rs'
+      - 'src-tauri/src/language_detection.rs'
+      - 'src-tauri/src/translation_health.rs'
+
+permissions:
+  contents: read
+
+jobs:
+  history-language-ui:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+      - run: python3 scripts/check-repository.py
+      - run: npm ci
+      - run: npm run check && npm test && npm run build
+      - name: Install the same fonts as the full UI workflow
+        run: sudo apt-get update && sudo apt-get install -y fonts-noto-cjk fonts-symbola
+      - name: Prepare the browser for synthetic UI and IPC fixtures
+        run: |
+          browser=$(command -v google-chrome || command -v chromium || true)
+          if [ -n "$browser" ]; then
+            echo "ECHOLINGO_TEST_CHROMIUM=$browser" >> "$GITHUB_ENV"
+          else
+            npx playwright install --with-deps chromium
+          fi
+      - name: Run the complete frontend interaction fixture
+        run: |
+          npm run dev > "$RUNNER_TEMP/echolingo-vite.log" 2>&1 &
+          curl --retry 20 --retry-connrefused --retry-delay 1 -fsS http://127.0.0.1:1420/ > /dev/null
+          node tests/frontend-interactions.mjs
+      - name: State the scope of this regression
+        if: always()
+        run: echo 'Synthetic UI and IPC coverage only. This supplements, and never replaces, the existing full workflow or actual macOS translation acceptance.' >> "$GITHUB_STEP_SUMMARY"
+
+  automatic-manual-routing:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo test --manifest-path tests/language-routing-patch/Cargo.toml --locked
