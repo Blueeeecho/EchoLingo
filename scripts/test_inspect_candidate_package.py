@@ -3,7 +3,7 @@ import importlib.util
 import hashlib
 import io
 import json
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 import plistlib
 import struct
 import subprocess
@@ -177,7 +177,7 @@ class CandidateInspectionTests(unittest.TestCase):
                 MODULE.owned_bundle_file(bundle, "Contents/MacOS/echolingo")
 
     def test_attachment_requires_one_owned_mount_and_device(self):
-        mount = Path("/tmp/generated-owned-mount")
+        mount = PurePosixPath("/tmp/generated-owned-mount")
         valid = {"system-entities": [{"dev-entry": "/dev/disk9"}, {"dev-entry": "/dev/disk9s1", "mount-point": str(mount)}]}
         self.assertEqual(MODULE.validate_attach_result(plistlib.dumps(valid), mount), "/dev/disk9")
         for entities in ([{"dev-entry": "/dev/disk9", "mount-point": "/tmp/other"}],
@@ -189,13 +189,13 @@ class CandidateInspectionTests(unittest.TestCase):
 
     def test_actual_own_license_response_keeps_strict_device_and_mount_checks(self):
         data = canonical_fixture('scripts/fixtures/028-own-license-attach.stdout')
-        self.assertEqual(MODULE.validate_attach_result(data, Path('/owned/mount')), '/dev/disk7')
+        self.assertEqual(MODULE.validate_attach_result(data, PurePosixPath('/owned/mount')), '/dev/disk7')
         with self.assertRaises(MODULE.InspectionError):
-            MODULE.validate_attach_result(data, Path('/another/mount'))
+            MODULE.validate_attach_result(data, PurePosixPath('/another/mount'))
         for altered in (data.replace(b'/dev/disk7s1', b'/dev/disk8s1'),
                         data.replace(b'/dev/disk7</string>', b'/dev/disk8</string>')):
             with self.assertRaises(MODULE.InspectionError):
-                MODULE.validate_attach_result(altered, Path('/owned/mount'))
+                MODULE.validate_attach_result(altered, PurePosixPath('/owned/mount'))
 
     def test_reviewed_prefix_does_not_hide_nonzero_attach_or_skip_detach(self):
         fixture = canonical_fixture('scripts/fixtures/028-own-license-attach.stdout')
@@ -229,7 +229,7 @@ class CandidateInspectionTests(unittest.TestCase):
                         data + xml, prefix + xml + b'error', prefix + prefix + xml,
                         data.replace(b'\n', b'\r\n')):
             with self.subTest(size=len(altered)), self.assertRaises((ValueError, plistlib.InvalidFileException)):
-                MODULE.validate_attach_result(altered, Path('/owned/mount'))
+                MODULE.validate_attach_result(altered, PurePosixPath('/owned/mount'))
 
     def test_detach_finally_on_inspection_error_and_attach_failure(self):
         for failed_attach in (False, True):
