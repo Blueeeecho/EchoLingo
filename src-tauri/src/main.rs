@@ -24,6 +24,7 @@ mod shortcut_bindings;
 mod shortcut_control;
 mod shortcut_probe;
 mod source_delivery;
+mod startup_launch;
 #[cfg(test)]
 mod storage_tests;
 #[cfg(any(target_os = "macos", test))]
@@ -3499,8 +3500,16 @@ fn main() {
     #[cfg(target_os = "macos")]
     let builder = builder.activate_ignoring_other_apps(false);
     let mut app = builder
+        .manage(Mutex::new(startup_launch::Requests::default()))
         .plugin(tauri_plugin_single_instance::init(|app, args, _| {
-            explicit_launch(app, &args)
+            let request = app
+                .state::<Mutex<startup_launch::Requests>>()
+                .lock()
+                .ok()
+                .and_then(|mut requests| requests.submit(args));
+            if let Some(args) = request {
+                explicit_launch(app, &args);
+            }
         }))
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
         .setup(|app| {
@@ -3634,40 +3643,57 @@ fn main() {
             }
             #[cfg(not(target_os = "windows"))]
             outside_click_watcher(app.handle().clone());
+            let pending_launch = app
+                .state::<Mutex<startup_launch::Requests>>()
+                .lock()
+                .ok()
+                .and_then(|mut requests| requests.mark_ready());
+            if let Some(args) = pending_launch {
+                explicit_launch(app.handle(), &args);
+            }
             Ok(())
         })
-        .on_window_event(|window, event| match event {
-            tauri::WindowEvent::Focused(focused) if window.label() == "main" => {
-                if !*focused {
-                    cancel_shortcut_recording(window.app_handle());
+        .on_window_event(|window, event| {
+            // Tauri can deliver focus/close events while creating the initial
+            // WebView, before setup has registered these application states.
+            if window.try_state::<AppState>().is_none()
+                || window.try_state::<window_layout::LayoutState>().is_none()
+            {
+                return;
+            }
+            match event {
+                tauri::WindowEvent::Focused(focused) if window.label() == "main" => {
+                    if !*focused {
+                        cancel_shortcut_recording(window.app_handle());
+                    }
+                    #[cfg(target_os = "windows")]
+                    windows_popup_focus_changed(window.app_handle(), *focused);
                 }
-                #[cfg(target_os = "windows")]
-                windows_popup_focus_changed(window.app_handle(), *focused);
+                tauri::WindowEvent::CloseRequested { api, .. }
+                    if window.label() == "screenshot-editor" =>
+                {
+                    api.prevent_close();
+                    let _ = window.emit("screenshot-close-requested", ());
+                }
+                tauri::WindowEvent::CloseRequested { .. }
+                    if screenshot_pins::is_pin(window.label()) =>
+                {
+                    // Reference windows close independently; never hide/cancel the translator.
+                }
+                tauri::WindowEvent::Destroyed if screenshot_pins::is_pin(window.label()) => {
+                    screenshot_pins::destroyed(window.app_handle(), window.label());
+                }
+                tauri::WindowEvent::CloseRequested { api, .. } => {
+                    api.prevent_close();
+                    cancel_shortcut_recording(window.app_handle());
+                    cancel_active_translation_with_reason(
+                        window.app_handle(),
+                        popup_health::CancellationReason::WindowClose,
+                    );
+                    let _ = platform::hide_window(window);
+                }
+                _ => {}
             }
-            tauri::WindowEvent::CloseRequested { api, .. }
-                if window.label() == "screenshot-editor" =>
-            {
-                api.prevent_close();
-                let _ = window.emit("screenshot-close-requested", ());
-            }
-            tauri::WindowEvent::CloseRequested { .. }
-                if screenshot_pins::is_pin(window.label()) =>
-            {
-                // Reference windows close independently; never hide/cancel the translator.
-            }
-            tauri::WindowEvent::Destroyed if screenshot_pins::is_pin(window.label()) => {
-                screenshot_pins::destroyed(window.app_handle(), window.label());
-            }
-            tauri::WindowEvent::CloseRequested { api, .. } => {
-                api.prevent_close();
-                cancel_shortcut_recording(window.app_handle());
-                cancel_active_translation_with_reason(
-                    window.app_handle(),
-                    popup_health::CancellationReason::WindowClose,
-                );
-                let _ = platform::hide_window(window);
-            }
-            _ => {}
         })
         .invoke_handler(tauri::generate_handler![
             fit_window_with_visibility,

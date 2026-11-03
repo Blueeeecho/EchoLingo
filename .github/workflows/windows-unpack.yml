@@ -1,0 +1,155 @@
+name: Build Windows unpack-and-run ZIP
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/windows-unpack.yml'
+      - 'packaging/windows/**'
+      - 'scripts/package-windows-unpack.py'
+      - 'scripts/test_package_windows_unpack.py'
+      - 'tests/windows-unpack-smoke.ps1'
+      - 'src-tauri/src/startup_launch.rs'
+      - 'src-tauri/src/main.rs'
+      - 'docs/windows-unpack.zh-CN.md'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/windows-unpack.yml'
+      - 'packaging/windows/**'
+      - 'scripts/package-windows-unpack.py'
+      - 'scripts/test_package_windows_unpack.py'
+      - 'tests/windows-unpack-smoke.ps1'
+      - 'src-tauri/src/startup_launch.rs'
+      - 'src-tauri/src/main.rs'
+  workflow_dispatch:
+permissions:
+  contents: read
+  actions: read
+jobs:
+  windows-unpack:
+    runs-on: windows-latest
+    timeout-minutes: 35
+    env:
+      PYTHONUTF8: '1'
+      # Includes the separately compiled embedded capture child, not only Tauri.
+      RUSTFLAGS: '-C target-feature=+crt-static'
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: ilammy/msvc-dev-cmd@v1
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri -> target
+          key: windows-unpack-static-crt
+          cache-on-failure: true
+      - name: Compile Windows smoke helper before building application
+        shell: powershell
+        run: |
+          $text = Get-Content tests/windows-unpack-smoke.ps1 -Raw -Encoding UTF8
+          $tokens = $null; $errors = $null
+          $null = [Management.Automation.Language.Parser]::ParseInput($text, [ref]$tokens, [ref]$errors)
+          if ($errors.Count -ne 0) { throw 'Windows smoke PowerShell parsing failed.' }
+          $start = $text.IndexOf('    Add-Type -AssemblyName', [StringComparison]::Ordinal)
+          $end = $text.IndexOf("`n'@", $start, [StringComparison]::Ordinal)
+          if ($start -lt 0 -or $end -le $start) { throw 'Exact smoke helper block unavailable.' }
+          & ([scriptblock]::Create($text.Substring($start, $end + 3 - $start)))
+      - name: Test cold-start request ordering
+        shell: pwsh
+        run: |
+          rustfmt --edition 2021 --check src-tauri/src/startup_launch.rs
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          rustfmt --edition 2021 --config skip_children=true --check src-tauri/src/main.rs
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          rustc --edition 2021 --test src-tauri/src/startup_launch.rs -C "linker=$env:VCToolsInstallDir/bin/HostX64/x64/link.exe" -o "$env:RUNNER_TEMP/startup-launch-tests.exe"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & "$env:RUNNER_TEMP/startup-launch-tests.exe"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Focused package policy checks
+        run: |
+          python scripts/check-repository.py
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          python -m unittest discover -s scripts -p test_package_windows_unpack.py -v
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Verify only unchanged offline resource inputs may be reused
+        shell: bash
+        run: |
+          set -euo pipefail
+          git diff --exit-code 4b8c5f5ac67e07cc4005812963b2c02acdd14d5d HEAD -- \
+            scripts/offline-engine scripts/prepare-offline-models.py scripts/test_prepare_offline_models.py \
+            scripts/prepare-offline-notices.py scripts/package-offline-source.py \
+            scripts/audit-windows-resources.py \
+            resources/offline-translation src-tauri/tauri.windows.conf.json LICENSE LICENSING.md
+          git diff --exit-code da0b5d03060a62ea120d931cc6c9eede5af66a7f HEAD -- scripts/stage-language-patch-resources.py
+      - name: Download pinned offline resources and corresponding source without old app reuse
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('node:fs');
+            const path = require('node:path');
+            const pins = [
+              [13034542412, 'windows.zip', 'da42d05739744f5eafa71f9758d6a045b42020403d4228f3007d9bbda92fbb25'],
+              [13034970610, 'evidence.zip', '2520b83f54d3774b75c0cc1c6fc3f3105f0c9fb380800d94ac73001e36295285']
+            ];
+            const directory = path.join(process.env.RUNNER_TEMP, 'candidate-offline-inputs');
+            fs.mkdirSync(directory);
+            const { data: run } = await github.rest.actions.getWorkflowRun({owner:'Blueeeecho',repo:'EchoLingo',run_id:41178655504});
+            if (run.conclusion !== 'success' || run.head_sha !== '4b8c5f5ac67e07cc4005812963b2c02acdd14d5d') throw new Error('Pinned resource run mismatch');
+            for (const [id,name,hash] of pins) {
+              const { data: artifact } = await github.rest.actions.getArtifact({owner:'Blueeeecho',repo:'EchoLingo',artifact_id:id});
+              if (artifact.expired || artifact.workflow_run.id !== 41178655504 || artifact.digest !== `sha256:${hash}`) throw new Error('Pinned resource artifact mismatch');
+              const { data } = await github.rest.actions.downloadArtifact({owner:'Blueeeecho',repo:'EchoLingo',artifact_id:id,archive_format:'zip'});
+              fs.writeFileSync(path.join(directory,name), Buffer.from(data));
+            }
+      - name: Extract only hash-verified offline engine models licenses and source
+        shell: pwsh
+        run: |
+          python scripts/stage-language-patch-resources.py --windows-zip "$env:RUNNER_TEMP/candidate-offline-inputs/windows.zip" --evidence-zip "$env:RUNNER_TEMP/candidate-offline-inputs/evidence.zip" --output-dir "$env:RUNNER_TEMP/candidate-offline-evidence"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          python scripts/audit-windows-resources.py --staged
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - run: npm ci
+      - name: Build the real application and retain the normal NSIS installer
+        id: build
+        run: npm run tauri build -- --bundles nsis -- --locked
+      - name: Package only application and allowlisted offline runtime
+        id: package
+        run: |
+          python scripts/package-windows-unpack.py --application src-tauri/target/release/echolingo.exe --source-archive "$env:RUNNER_TEMP/candidate-offline-evidence/EchoLingo-offline-engine-source.zip" --output "$env:RUNNER_TEMP/windows-unpack-artifacts"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Extract and run exact ZIP on Windows
+        shell: powershell
+        run: |
+          $zip = @(Get-ChildItem "$env:RUNNER_TEMP/windows-unpack-artifacts" -Filter '*-unpack.zip')
+          if ($zip.Count -ne 1) { throw 'Expected exactly one unpack ZIP.' }
+          & powershell.exe -NoProfile -STA -ExecutionPolicy Bypass -File tests/windows-unpack-smoke.ps1 -ArchivePath $zip[0].FullName -ManifestPath "$env:RUNNER_TEMP/windows-unpack-artifacts/WINDOWS-ZIP-MANIFEST.json" -ReportPath "$env:RUNNER_TEMP/windows-unpack-smoke.json"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - uses: actions/upload-artifact@v4
+        if: always() && steps.package.outcome == 'success'
+        with:
+          name: EchoLingo-Windows-unpack
+          if-no-files-found: error
+          path: ${{ runner.temp }}/windows-unpack-artifacts/*
+      - uses: actions/upload-artifact@v4
+        if: always() && steps.build.outcome == 'success'
+        with:
+          name: EchoLingo-Windows-installer
+          if-no-files-found: error
+          path: src-tauri/target/release/bundle/nsis/*.exe
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: EchoLingo-Windows-unpack-evidence
+          if-no-files-found: warn
+          path: ${{ runner.temp }}/windows-unpack-smoke.json
+      - name: State validation and publication scope
+        run: echo 'Built NSIS plus an unpack-and-run ZIP. Focused actual ZIP extraction, runtime and model checks only; not full screenshot/OCR/multi-display regression. This workflow does not create a tag or release, or modify existing release assets.' >> $env:GITHUB_STEP_SUMMARY
