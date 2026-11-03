@@ -4,6 +4,9 @@ on:
   push:
     branches: [main]
     paths: [package.json, .github/workflows/release-routing.yml]
+# Windows runner locale must not reinterpret UTF-8 source or helper output.
+env:
+  PYTHONUTF8: '1'
 permissions:
   contents: read
   actions: read
@@ -115,17 +118,20 @@ jobs:
             files=(src-tauri/target/release/bundle/nsis/*.exe)
             built=src-tauri/target/release/echolingo.exe
             extracted="$RUNNER_TEMP/routing-inspection/echolingo.exe"
-            offline=(--offline-staging-manifest "$RUNNER_TEMP/candidate-offline-evidence/baseline-reuse.json" --offline-source-archive "$RUNNER_TEMP/candidate-offline-evidence/EchoLingo-offline-engine-source.zip")
           else
             files=(src-tauri/target/release/bundle/dmg/*.dmg)
             built=src-tauri/target/release/bundle/macos/EchoLingo.app
             extracted="$RUNNER_TEMP/routing-inspection/echolingo"
-            offline=()
           fi
           test "${#files[@]}" -eq 1
           python scripts/inspect-candidate-package.py --platform "$RUNNER_OS" --installer "${files[0]}" --built-application "$built" --output-dir "$RUNNER_TEMP/routing-inspection" --run-url "$RUN_URL" --locked-build-passed --focused-tests-passed
           mkdir "$RUNNER_TEMP/routing-package"
-          python scripts/verify-candidate-package.py --platform "$RUNNER_OS" --installer "${files[0]}" --application "$extracted" --checks-json "$RUNNER_TEMP/routing-inspection/checks.json" --output "$RUNNER_TEMP/routing-package/candidate.json" --run-url "$RUN_URL" "${offline[@]}"
+          # Bash 3 with nounset rejects expansion of an empty optional array.
+          verifier=(scripts/verify-candidate-package.py --platform "$RUNNER_OS" --installer "${files[0]}" --application "$extracted" --checks-json "$RUNNER_TEMP/routing-inspection/checks.json" --output "$RUNNER_TEMP/routing-package/candidate.json" --run-url "$RUN_URL")
+          if [ "$RUNNER_OS" = Windows ]; then
+            verifier+=(--offline-staging-manifest "$RUNNER_TEMP/candidate-offline-evidence/baseline-reuse.json" --offline-source-archive "$RUNNER_TEMP/candidate-offline-evidence/EchoLingo-offline-engine-source.zip")
+          fi
+          python "${verifier[@]}"
           cp "${files[0]}" "$RUNNER_TEMP/routing-package/"
           if [ "$RUNNER_OS" = Windows ]; then cp "$RUNNER_TEMP/candidate-offline-evidence/EchoLingo-offline-engine-source.zip" "$RUNNER_TEMP/routing-package/"; fi
       - uses: actions/upload-artifact@v4

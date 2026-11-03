@@ -3,7 +3,7 @@ import importlib.util
 import hashlib
 import io
 import json
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 import plistlib
 import struct
 import subprocess
@@ -15,6 +15,12 @@ from unittest import mock
 SPEC = importlib.util.spec_from_file_location("inspect_candidate", Path(__file__).with_name("inspect-candidate-package.py"))
 MODULE = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(MODULE)
+
+
+def canonical_fixture(path):
+    # These are macOS byte fixtures: bypass Windows checkout CRLF conversion.
+    # Production inspector hashes/parsers still receive and enforce exact bytes.
+    return subprocess.check_output(['git', 'show', 'HEAD:' + path], cwd=MODULE.ROOT)
 
 
 def listing(*records):
@@ -171,7 +177,7 @@ class CandidateInspectionTests(unittest.TestCase):
                 MODULE.owned_bundle_file(bundle, "Contents/MacOS/echolingo")
 
     def test_attachment_requires_one_owned_mount_and_device(self):
-        mount = Path("/tmp/generated-owned-mount")
+        mount = PurePosixPath("/tmp/generated-owned-mount")
         valid = {"system-entities": [{"dev-entry": "/dev/disk9"}, {"dev-entry": "/dev/disk9s1", "mount-point": str(mount)}]}
         self.assertEqual(MODULE.validate_attach_result(plistlib.dumps(valid), mount), "/dev/disk9")
         for entities in ([{"dev-entry": "/dev/disk9", "mount-point": "/tmp/other"}],
@@ -182,17 +188,17 @@ class CandidateInspectionTests(unittest.TestCase):
                 MODULE.validate_attach_result(plistlib.dumps({"system-entities": entities}), mount)
 
     def test_actual_own_license_response_keeps_strict_device_and_mount_checks(self):
-        data = (Path(__file__).parent / 'fixtures/028-own-license-attach.stdout').read_bytes()
-        self.assertEqual(MODULE.validate_attach_result(data, Path('/owned/mount')), '/dev/disk7')
+        data = canonical_fixture('scripts/fixtures/028-own-license-attach.stdout')
+        self.assertEqual(MODULE.validate_attach_result(data, PurePosixPath('/owned/mount')), '/dev/disk7')
         with self.assertRaises(MODULE.InspectionError):
-            MODULE.validate_attach_result(data, Path('/another/mount'))
+            MODULE.validate_attach_result(data, PurePosixPath('/another/mount'))
         for altered in (data.replace(b'/dev/disk7s1', b'/dev/disk8s1'),
                         data.replace(b'/dev/disk7</string>', b'/dev/disk8</string>')):
             with self.assertRaises(MODULE.InspectionError):
-                MODULE.validate_attach_result(altered, Path('/owned/mount'))
+                MODULE.validate_attach_result(altered, PurePosixPath('/owned/mount'))
 
     def test_reviewed_prefix_does_not_hide_nonzero_attach_or_skip_detach(self):
-        fixture = (Path(__file__).parent / 'fixtures/028-own-license-attach.stdout').read_bytes()
+        fixture = canonical_fixture('scripts/fixtures/028-own-license-attach.stdout')
         for code in (0, 1):
             with tempfile.TemporaryDirectory() as folder:
                 mount = Path(folder) / 'mount'
@@ -216,13 +222,14 @@ class CandidateInspectionTests(unittest.TestCase):
                 self.assertEqual(calls[-1][2], '/dev/disk7')
 
     def test_unknown_license_output_or_extra_xml_is_never_discarded(self):
-        data = (Path(__file__).parent / 'fixtures/028-own-license-attach.stdout').read_bytes()
+        data = canonical_fixture('scripts/fixtures/028-own-license-attach.stdout')
         prefix, xml = data[:2007], data[2007:]
         for altered in (b'unknown license\n' + xml, b'error\n' + data,
                         prefix[:-1] + b'!' + xml, prefix + b'error\n' + xml,
-                        data + xml, prefix + xml + b'error', prefix + prefix + xml):
+                        data + xml, prefix + xml + b'error', prefix + prefix + xml,
+                        data.replace(b'\n', b'\r\n')):
             with self.subTest(size=len(altered)), self.assertRaises((ValueError, plistlib.InvalidFileException)):
-                MODULE.validate_attach_result(altered, Path('/owned/mount'))
+                MODULE.validate_attach_result(altered, PurePosixPath('/owned/mount'))
 
     def test_detach_finally_on_inspection_error_and_attach_failure(self):
         for failed_attach in (False, True):
@@ -250,7 +257,7 @@ class CandidateInspectionTests(unittest.TestCase):
                 self.assertIn("-noautoopen", calls[1])
 
     def test_only_exact_reviewed_own_dmg_license_can_supply_confirmation(self):
-        license_bytes = (Path(MODULE.ROOT) / "LICENSE").read_bytes()
+        license_bytes = canonical_fixture('LICENSE')
         self.assertEqual(hashlib.sha256(license_bytes).hexdigest(), MODULE.OWN_LICENSE_SHA256)
         def dmg(resources):
             xml = plistlib.dumps({"resource-fork": resources})
@@ -305,7 +312,7 @@ class CandidateInspectionTests(unittest.TestCase):
                 with self.assertRaisesRegex(MODULE.InspectionError, 'Exactly one'): MODULE.expected_nsis_application_sha256(path)
 
     def test_bounded_capture_rejects_stdout_before_unbounded_allocation(self):
-        result = MODULE.checked_command([sys.executable, "-c", "print('generated')"], maximum_bytes=32)
+        result = MODULE.checked_command([sys.executable, "-c", "import sys; sys.stdout.buffer.write(b'generated\\n')"], maximum_bytes=32)
         self.assertEqual(result.stdout, b"generated\n")
         with self.assertRaisesRegex(MODULE.InspectionError, "output exceeds limit"):
             MODULE.checked_command([sys.executable, "-c", "print('x' * 2048)"], maximum_bytes=32)

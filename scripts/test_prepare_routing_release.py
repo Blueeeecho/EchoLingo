@@ -1,5 +1,9 @@
 """Synthetic preparer checks; no native execution or release acceptance is implied."""
 import copy
+import ast
+import subprocess
+import shutil
+import sys
 import importlib.util
 import json
 from pathlib import Path
@@ -102,6 +106,67 @@ class PreparationTests(unittest.TestCase):
         self.assertIn('[ "$CI_EVENT" = pull_request ]',ci)
         self.assertEqual(ci.count("if: needs.validation-mode.outputs.mode != 'language-routing-patch-v1'"),6)
         self.assertEqual(ci.count("&& needs.validation-mode.outputs.mode != 'routing-release'"),6)
+    def test_git_manifest_decodes_utf8_even_with_windows_legacy_default(self):
+        with patch.object(subprocess,'_text_encoding',return_value='cp1252'):
+            manifest=R.git('show',R.REVIEWED_SOURCE+':package.json')
+        self.assertIn('回声译',manifest)
+        self.assertEqual(json.loads(manifest)['version'],'0.2.12')
+    def test_preparer_text_io_and_workflow_pin_utf8(self):
+        source=Path(R.__file__).read_text(encoding='utf-8')
+        calls=[node for node in ast.walk(ast.parse(source)) if isinstance(node,ast.Call)
+               and isinstance(node.func,ast.Attribute) and node.func.attr in ('read_text','write_text','check_output')]
+        self.assertGreaterEqual(len(calls),5)
+        for call in calls:
+            keywords={item.arg:item.value for item in call.keywords}
+            self.assertIn('encoding',keywords)
+            self.assertEqual(ast.literal_eval(keywords['encoding']),'utf-8')
+        workflow=(R.ROOT/'.github/workflows/release-routing.yml').read_text(encoding='utf-8')
+        self.assertIn("env:\n  PYTHONUTF8: '1'\npermissions:",workflow)
+    def test_release_policy_runs_failed_source_guard_on_windows(self):
+        ci=(R.ROOT/'.github/workflows/ci.yml').read_text(encoding='utf-8')
+        block=ci.split('  routing-release-policy:',1)[1].split('  language-patch-targeted:',1)[0]
+        self.assertIn('os: [ubuntu-latest, windows-latest, macos-latest]',block)
+        self.assertIn("PYTHONUTF8: '1'",block)
+        self.assertIn('shell: bash',block)
+        self.assertIn('set -euo pipefail',block)
+        self.assertIn('fetch-depth: 0',block)
+        self.assertIn('python scripts/prepare-routing-release.py --check-source',block)
+        self.assertIn("python -m unittest discover -s scripts -p 'test_prepare_routing_release.py'",block)
+        self.assertNotIn('python3 ',block)
+        routing=ci.split('  automatic-direction-routing:',1)[1].split('  routing-release-policy:',1)[0]
+        self.assertIn("if: needs.validation-mode.outputs.mode == 'automatic-direction'\n",routing)
+        self.assertNotIn("mode == 'routing-release'",routing)
+    def test_verifier_arguments_keep_common_and_platform_options_under_nounset(self):
+        workflow=(R.ROOT/'.github/workflows/release-routing.yml').read_text(encoding='utf-8')
+        self.assertNotIn('offline=()',workflow)
+        self.assertNotIn('${offline[@]}',workflow)
+        block=workflow.split('          verifier=(',1)[1].split('          python "${verifier[@]}"',1)[0]
+        block='verifier=('+block
+        for platform in ('macOS','Windows'):
+            with self.subTest(platform=platform):
+                script=('set -euo pipefail\nRUNNER_OS='+platform+'\n'
+                        "RUNNER_TEMP='/generated temp'\nRUN_URL='https://github.com/Blueeeecho/EchoLingo/actions/runs/123'\n"
+                        "files=('installer with spaces')\nextracted='application with spaces'\n"
+                        +block+"\nprintf '%s\\0' \"${verifier[@]}\"\n")
+                shell='/bin/bash' if sys.platform=='darwin' else 'bash'
+                if sys.platform=='win32':
+                    git=shutil.which('git')
+                    self.assertIsNotNone(git,'Git for Windows is required by this fixture')
+                    # PATH may expose System32 WSL bash before Git Bash.
+                    candidates=[root/'bin'/'bash.exe' for root in Path(git).resolve().parents]
+                    shell=next((str(path) for path in candidates if path.is_file()),None)
+                    self.assertIsNotNone(shell,'Cannot find Git for Windows bin/bash.exe beside '+git)
+                result=subprocess.run([shell,'-c',script],check=False,stdout=subprocess.PIPE,stderr=subprocess.PIPE)
+                self.assertEqual(result.returncode,0,result.stderr.decode('utf-8',errors='replace'))
+                args=result.stdout.decode('utf-8').rstrip('\0').split('\0')
+                expected=['scripts/verify-candidate-package.py','--platform',platform,
+                          '--installer','installer with spaces','--application','application with spaces',
+                          '--checks-json','/generated temp/routing-inspection/checks.json',
+                          '--output','/generated temp/routing-package/candidate.json','--run-url',RUN]
+                if platform=='Windows':
+                    expected += ['--offline-staging-manifest','/generated temp/candidate-offline-evidence/baseline-reuse.json',
+                                 '--offline-source-archive','/generated temp/candidate-offline-evidence/EchoLingo-offline-engine-source.zip']
+                self.assertEqual(args,expected)
     def test_all_eight_versions(self):
         self.assertEqual(len(R.module().check_versions(R.ROOT)),7)
 

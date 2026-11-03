@@ -65,7 +65,7 @@ jobs:
           fi
   automatic-direction-routing:
     needs: validation-mode
-    if: needs.validation-mode.outputs.mode == 'automatic-direction' || (needs.validation-mode.outputs.mode == 'routing-release' && github.event_name == 'pull_request')
+    if: needs.validation-mode.outputs.mode == 'automatic-direction'
     name: Automatic direction routing (${{ matrix.os }})
     strategy:
       fail-fast: false
@@ -121,7 +121,16 @@ jobs:
   routing-release-policy:
     needs: validation-mode
     if: needs.validation-mode.outputs.mode == 'routing-release'
-    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    env:
+      PYTHONUTF8: '1'
+    defaults:
+      run:
+        shell: bash
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
@@ -136,12 +145,13 @@ jobs:
           node-version: '24'
       - name: Verify exact release source and package policy
         run: |
-          python3 scripts/prepare-routing-release.py --check-source
-          python3 scripts/check-repository.py
-          python3 -m unittest discover -s scripts -p 'test_prepare_routing_release.py' -v
-          python3 -m unittest discover -s scripts -p 'test_candidate_package.py' -v
-          python3 -m unittest discover -s scripts -p 'test_inspect_candidate_package.py' -v
-          python3 -m unittest discover -s scripts -p 'test_language_patch_contract.py' -v
+          set -euo pipefail
+          python scripts/prepare-routing-release.py --check-source
+          python scripts/check-repository.py
+          python -m unittest discover -s scripts -p 'test_prepare_routing_release.py' -v
+          python -m unittest discover -s scripts -p 'test_candidate_package.py' -v
+          python -m unittest discover -s scripts -p 'test_inspect_candidate_package.py' -v
+          python -m unittest discover -s scripts -p 'test_language_patch_contract.py' -v
           node --test scripts/test-routing-release.cjs
       - name: State main release validation ownership
         if: github.event_name == 'push'

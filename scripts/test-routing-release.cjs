@@ -2,6 +2,7 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const crypto = require('node:crypto');
+const path = require('node:path');
 const {publish, validateInputs, NAMES, PAYLOADS, MODE} = require('./publish-routing-release.cjs');
 const sha = 'a'.repeat(40), pin = 'b'.repeat(40);
 const hash = value => crypto.createHash('sha256').update(value).digest('hex');
@@ -13,7 +14,7 @@ function fixture(change = {}) {
   data.set('RELEASE-MANIFEST.json', Buffer.from(JSON.stringify(manifest)));
   data.set('SHA256SUMS.txt', Buffer.from([...data].map(([name, bytes]) => `${hash(bytes)}  ${name}\n`).sort().join('')));
   change.data?.(data);
-  const io = {fs:{readdirSync:() => [...data.keys()], lstatSync:filename => ({isFile:()=>true,isSymbolicLink:()=>false,size:data.get(filename.split('/').at(-1)).length}), readFileSync:(filename, encoding) => filename.startsWith('docs/') ? 'Public release notes' : encoding ? data.get(filename.split('/').at(-1)).toString(encoding) : data.get(filename.split('/').at(-1))}, execFileSync:(cmd,args) => {if(cmd==='python3') return pin+'\n'; if(change.ancestorFails) throw new Error('Not ancestor'); return '';}};
+  const io = {fs:{readdirSync:() => [...data.keys()], lstatSync:filename => ({isFile:()=>true,isSymbolicLink:()=>false,size:data.get(path.basename(filename)).length}), readFileSync:(filename, encoding) => filename.replaceAll('\\', '/').startsWith('docs/') ? 'Public release notes' : encoding ? data.get(path.basename(filename)).toString(encoding) : data.get(path.basename(filename))}, execFileSync:(cmd,args) => {if(cmd==='python3') return pin+'\n'; if(change.ancestorFails) throw new Error('Not ancestor'); return '';}};
   let mainCalls = 0, tagExists = false;
   const writes = [], uploaded = [];
   const missing = () => {throw Object.assign(new Error('Missing'), {status:404});};
