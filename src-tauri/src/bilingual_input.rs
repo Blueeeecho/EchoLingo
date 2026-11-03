@@ -16,7 +16,12 @@ where
     } else {
         None
     };
-    crate::language_detection::resolve_translation_languages(text, source, target, detected.as_deref())
+    crate::language_detection::resolve_translation_languages(
+        text,
+        source,
+        target,
+        detected.as_deref(),
+    )
 }
 
 #[cfg(test)]
