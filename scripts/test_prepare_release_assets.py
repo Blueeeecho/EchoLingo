@@ -41,6 +41,12 @@ class ReleaseAssetsTests(unittest.TestCase):
             archive.writestr("SOURCE-MANIFEST.json", json.dumps(inventory))
 
         if RELEASE.VERSION == "0.2.12":
+            # Exercise the retired publisher with synthetic historical evidence.
+            # Its imported verifier now targets 0.2.13; do not retarget either
+            # production publisher just to make these old fixture bytes pass.
+            self.current_verifier_version = RELEASE.package_verifier.VERSION
+            version = patch.object(RELEASE.package_verifier, "VERSION", RELEASE.VERSION)
+            version.start(); self.addCleanup(version.stop)
             provenance = {"commit": "a" * 40, "tree": "b" * 40, "trackedWorktreeClean": True}
             mock = patch.object(RELEASE.package_verifier, "source_provenance", return_value=provenance)
             mock.start(); self.addCleanup(mock.stop)
@@ -106,14 +112,14 @@ class ReleaseAssetsTests(unittest.TestCase):
             RELEASE.prepare(self.artifacts, self.output, 'a' * 40,
                             'https://github.com/Blueeeecho/EchoLingo/actions/runs/123', language_patch=True)
 
-    def test_current_release_routes_never_reuse_old_package_diagnosis(self):
+    def test_retired_release_is_manual_and_never_reuses_old_package_diagnosis(self):
         root = Path(__file__).resolve().parents[1]
         workflow = (root / '.github/workflows/release.yml').read_text()
-        self.assertIn('paths: [package.json, scripts/inspect-candidate-package.py, scripts/verify-candidate-package.py, scripts/prepare-release-assets.py, .github/workflows/release.yml, .github/workflows/release-checks.yml]', workflow)
-        self.assertIn("tags: ['0.2.12']", workflow)
+        trigger = workflow.split('permissions:', 1)[0]
+        self.assertIn('  workflow_dispatch:', trigger)
+        self.assertNotIn('  push:', trigger)
+        self.assertNotIn('  pull_request:', trigger)
         checks = (root / '.github/workflows/release-checks.yml').read_text()
-        for path in ('.github/workflows/ci.yml', '.github/workflows/release-checks.yml'):
-            self.assertIn("-Filter 'EchoLingo_0.2.12_x64-setup.exe'", (root / path).read_text())
         self.assertIn("docs/releases/0.2.12.zh-CN.md", workflow)
         self.assertTrue((root / 'docs/releases/0.2.12.zh-CN.md').is_file())
         for historical in ('41271318023', '13069451922', 'release-10-diagnostic', '0.2.7'):
@@ -203,7 +209,11 @@ class ReleaseAssetsTests(unittest.TestCase):
         for name in ('ci.yml', 'release-checks.yml'):
             source = (root / '.github/workflows' / name).read_text()
             step = source.split('        id: windows_capture_upper_windows', 1)[1].split('      - name:', 1)[0]
-            self.assertIn(f"-Filter 'EchoLingo_{RELEASE.VERSION}_x64-setup.exe'", step)
+            self.assertIn('$version = (Get-Content package.json -Raw | ConvertFrom-Json).version', step)
+            self.assertIn('$tauriVersion = (Get-Content src-tauri/tauri.conf.json -Raw | ConvertFrom-Json).version', step)
+            self.assertIn("if ($version -notmatch '^\\d+\\.\\d+\\.\\d+$' -or $version -cne $tauriVersion) { throw", step)
+            self.assertIn("$expectedInstaller = 'EchoLingo_{0}_x64-setup.exe' -f $version", step)
+            self.assertIn('-Filter $expectedInstaller', step)
             self.assertIn("if ($installers.Count -ne 1) { throw", step)
             self.assertIn('-InstallerPath $installers[0].FullName -IsolatedTestSession', step)
             self.assertNotIn("-Filter '*", step)
@@ -212,9 +222,9 @@ class ReleaseAssetsTests(unittest.TestCase):
         root = Path(__file__).resolve().parents[1]
         workflow = (root / ".github/workflows/release.yml").read_text()
         self.assertNotIn("pull_request:", workflow)
-        self.assertIn(f"tags: ['{RELEASE.VERSION}']", workflow)
+        self.assertIn('  workflow_dispatch:', workflow)
+        self.assertIn("github.ref == 'refs/heads/main'", workflow)
         self.assertIn(f"refs/tags/{RELEASE.VERSION}", workflow)
-        self.assertIn("branches: [main]", workflow)
         self.assertIn("needs: [release-inputs, verify]", workflow)
         self.assertIn("draft: true, prerelease: true", workflow)
         self.assertIn("main.object.sha !== context.sha", workflow)
@@ -238,17 +248,26 @@ class ReleaseAssetsTests(unittest.TestCase):
             self.assertLess(desktop.index("completeNativeCaptureEmbedded = $true"), desktop.index("id: windows_native_capture_continuity"))
 
     def test_version_guard_includes_native_capture_package_and_lock(self):
-        root = Path(__file__).resolve().parents[1]
-        import shutil
         files = ("package.json", "package-lock.json", "src-tauri/tauri.conf.json",
                  "src-tauri/Cargo.toml", "src-tauri/Cargo.lock",
                  "src-tauri/native-capture/Cargo.toml", "src-tauri/native-capture/Cargo.lock")
         with tempfile.TemporaryDirectory() as directory:
             copy = Path(directory)
-            for name in files:
+            # Test the historical version contract independently of the live
+            # checkout, which correctly belongs to a different release now.
+            fixtures = (
+                json.dumps({'version': RELEASE.VERSION}),
+                json.dumps({'version': RELEASE.VERSION, 'packages': {'': {'version': RELEASE.VERSION}}}),
+                json.dumps({'version': RELEASE.VERSION}),
+                f'[package]\nname = "echolingo"\nversion = "{RELEASE.VERSION}"\n',
+                f'[[package]]\nname = "echolingo"\nversion = "{RELEASE.VERSION}"\n',
+                f'[package]\nname = "echolingo-native-capture"\nversion = "{RELEASE.VERSION}"\n',
+                f'[[package]]\nname = "echolingo-native-capture"\nversion = "{RELEASE.VERSION}"\n',
+            )
+            for name, content in zip(files, fixtures):
                 destination = copy / name
                 destination.parent.mkdir(parents=True, exist_ok=True)
-                shutil.copyfile(root / name, destination)
+                destination.write_text(content, encoding='utf-8')
             RELEASE.check_version(copy)
             for name in files[-2:]:
                 path = copy / name
@@ -258,8 +277,23 @@ class ReleaseAssetsTests(unittest.TestCase):
                     RELEASE.check_version(copy)
                 path.write_text(original)
 
-    def test_versions_are_consistent(self):
-        RELEASE.check_version()
+    def test_current_checkout_versions_are_consistent(self):
+        root = Path(__file__).resolve().parents[1]
+        with patch.object(RELEASE.package_verifier, 'VERSION', self.current_verifier_version):
+            RELEASE.package_verifier.check_versions(root)
+
+    def test_retired_release_rejects_current_checkout(self):
+        root = Path(__file__).resolve().parents[1]
+        current = json.loads((root / 'package.json').read_text(encoding='utf-8'))['version']
+        self.assertNotEqual(current, RELEASE.VERSION)
+        with self.assertRaisesRegex(ValueError, 'must be exactly 0.2.12'):
+            RELEASE.check_version()
+
+    def test_mismatched_verifier_version_still_rejects_historical_evidence(self):
+        with patch.object(RELEASE.package_verifier, 'VERSION', '0.0.0'):
+            with self.assertRaisesRegex(ValueError, 'source/run/package'):
+                self.prepare()
+        self.assertFalse(self.output.exists())
 
     def test_new_release_does_not_retarget_historical_macos_only_publication(self):
         root = Path(__file__).resolve().parents[1]

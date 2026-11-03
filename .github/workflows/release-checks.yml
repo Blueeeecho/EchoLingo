@@ -501,7 +501,11 @@ jobs:
         timeout-minutes: 5
         shell: powershell
         run: |
-          $installers = @(Get-ChildItem src-tauri/target/release/bundle/nsis -File -Filter 'EchoLingo_0.2.12_x64-setup.exe')
+          $version = (Get-Content package.json -Raw | ConvertFrom-Json).version
+          $tauriVersion = (Get-Content src-tauri/tauri.conf.json -Raw | ConvertFrom-Json).version
+          if ($version -notmatch '^\d+\.\d+\.\d+$' -or $version -cne $tauriVersion) { throw 'Package and Tauri versions must match exactly.' }
+          $expectedInstaller = 'EchoLingo_{0}_x64-setup.exe' -f $version
+          $installers = @(Get-ChildItem src-tauri/target/release/bundle/nsis -File -Filter $expectedInstaller)
           if ($installers.Count -ne 1) { throw 'Expected exactly one own versioned NSIS installer.' }
           rustc --edition=2021 tests/windows-native-capture-harness.rs -O -o "$env:RUNNER_TEMP/echolingo-upper-capture-harness.exe"
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }

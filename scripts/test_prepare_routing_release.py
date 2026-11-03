@@ -107,8 +107,16 @@ class PreparationTests(unittest.TestCase):
         self.assertEqual(ci.count("if: needs.validation-mode.outputs.mode != 'language-routing-patch-v1'"),6)
         self.assertEqual(ci.count("&& needs.validation-mode.outputs.mode != 'routing-release'"),6)
     def test_git_manifest_decodes_utf8_even_with_windows_legacy_default(self):
-        with patch.object(subprocess,'_text_encoding',return_value='cp1252'):
-            manifest=R.git('show',R.REVIEWED_SOURCE+':package.json')
+        # A real local Git object exercises decoding without requiring a
+        # historical commit that normal shallow CI checkouts do not contain.
+        with tempfile.TemporaryDirectory() as directory:
+            subprocess.run(['git','init','--quiet',directory],check=True)
+            source=json.dumps({'version':'0.2.12','description':'EchoLingo · 回声译'},ensure_ascii=False)
+            blob=subprocess.check_output(['git','hash-object','-w','--stdin'],
+                cwd=directory,input=source.encode('utf-8')).decode('ascii').strip()
+            with patch.object(R,'ROOT',Path(directory)), \
+                    patch.object(subprocess,'_text_encoding',return_value='cp1252'):
+                manifest=R.git('show',blob)
         self.assertIn('回声译',manifest)
         self.assertEqual(json.loads(manifest)['version'],'0.2.12')
     def test_preparer_text_io_and_workflow_pin_utf8(self):
