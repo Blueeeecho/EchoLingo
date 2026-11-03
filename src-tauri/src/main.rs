@@ -1638,13 +1638,11 @@ async fn translate(
         let (resolved_source, resolved_target, results) = state
             .translation_requests
             .execute(request_id, async {
-                let (resolved_source, resolved_target) = bilingual_input::resolve(
-                    &text,
-                    &source_language,
-                    &target_language,
-                    || platform::detect_language(&text),
-                )
-                .await?;
+                let (resolved_source, resolved_target) =
+                    bilingual_input::resolve(&text, &source_language, &target_language, || {
+                        platform::detect_language(&text)
+                    })
+                    .await?;
                 let source_resolution = if source_language != "auto" {
                     translation_health::SourceResolution::Explicit
                 } else {
