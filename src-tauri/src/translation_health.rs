@@ -42,6 +42,8 @@ struct Snapshot {
     elapsed_ms: u64,
     error_category: Option<&'static str>,
     providers: Vec<ProviderHealth>,
+    requested_source: Option<&'static str>,
+    requested_target: Option<&'static str>,
     resolved_source: Option<&'static str>,
     resolved_target: Option<&'static str>,
     source_resolution: &'static str,
@@ -112,6 +114,8 @@ impl Health {
             elapsed_ms: 0,
             error_category: None,
             providers: Vec::new(),
+            requested_source: None,
+            requested_target: None,
             resolved_source: None,
             resolved_target: None,
             source_resolution: "unresolved",
@@ -140,6 +144,18 @@ impl RequestTrace {
             active,
             started: Instant::now(),
             finished: false,
+        }
+    }
+    // Preserve the request's picker values separately from its resolved pair.
+    // The closed language vocabulary never retains arbitrary input or text.
+    pub fn requested_languages(&self, source: &str, target: &str) {
+        if self.active {
+            if let Ok(mut h) = health().lock() {
+                h.update(self.id, |s| {
+                    s.requested_source = Some(language(source));
+                    s.requested_target = Some(language(target));
+                });
+            }
         }
     }
     pub fn languages(&self, source: &str, target: &str) {
@@ -272,6 +288,7 @@ mod tests {
             .as_ref()
             .map_or(1, |s| s.request_id + 1);
         let mut request = RequestTrace::start(id);
+        request.requested_languages("auto", "auto");
         request.languages("ca", "zh-Hans");
         request.source_resolution(SourceResolution::BilingualMode);
         let mut providers: Vec<_> = (0..30)
@@ -286,15 +303,21 @@ mod tests {
         assert_eq!(value["phase"], "providerFailed");
         assert_eq!(value["providers"].as_array().unwrap().len(), 16);
         assert_eq!(value["resolvedSource"], "ca");
+        assert_eq!(value["requestedSource"], "auto");
+        assert_eq!(value["requestedTarget"], "auto");
+        assert_eq!(value["resolvedTarget"], "zh-Hans");
         assert_eq!(value["sourceResolution"], "bilingualMode");
         assert!(!value.to_string().contains("private"));
         let newer = RequestTrace::start(id + 1);
         request.finish(Some("private old failure"));
+        request.requested_languages("fr", "en");
         request.source_resolution(SourceResolution::PreservedStructure);
         providers[0].finish(None);
         assert_eq!(snapshot()["requestId"], id + 1);
         assert_eq!(snapshot()["phase"], "started");
         assert_eq!(snapshot()["sourceResolution"], "unresolved");
+        assert_eq!(snapshot()["requestedSource"], serde_json::Value::Null);
+        assert_eq!(snapshot()["requestedTarget"], serde_json::Value::Null);
         drop(newer);
         assert_eq!(snapshot()["phase"], "cancelled");
         let mut duplicate = RequestTrace::start(id + 1);
@@ -326,6 +349,7 @@ mod tests {
     fn metadata_never_retains_untrusted_error_or_provider_values() {
         let secret = "private source https://secret.example/key";
         assert_eq!(kind(secret), "other");
+        assert_eq!(language(secret), "other");
         assert_eq!(category(secret), "other");
         assert_eq!(
             category(&format!("SYSTEM_TRANSLATION_FAILED: {secret}")),

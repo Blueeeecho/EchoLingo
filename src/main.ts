@@ -10,6 +10,7 @@ import { normalizeCapturedText, normalizeOcrCapturedText } from './text-normaliz
 import { createShortcutEditor, type NativeRecordedShortcut } from './shortcut-editor';
 import { SourceDeliveryInbox, hasCurrentPresentationIntent, type SourceDeliveryIdentity } from './source-delivery';
 import { HistoryCache } from './history-cache';
+import { HistoryLanguageSelection, type LanguagePair } from './history-language-selection';
 import { mergeProviderRetry, sameTranslationSnapshot, type TranslationSnapshot } from './translation-retry';
 import { credentialScope } from './credential-scope';
 import { credentialMayExist, credentialStateOf, credentialStatusLabel } from './credential-state';
@@ -36,6 +37,7 @@ const $ = <T extends HTMLElement = HTMLElement>(selector: string): T => {
 const source = $<HTMLTextAreaElement>('#source-text');
 const sourceLanguage = $<HTMLSelectElement>('#source-language');
 const targetLanguage = $<HTMLSelectElement>('#target-language');
+const historyLanguages = new HistoryLanguageSelection();
 const translateButton = $<HTMLButtonElement>('#translate-button');
 const resultsContainer = $('#results');
 const providerDialog = $('#provider-dialog');
@@ -238,6 +240,17 @@ function renderLanguages(): void {
     if (!select.value) { const option = node('option', '', value); option.value = value; select.append(option); select.value = value; }
   }
 }
+function selectedLanguagePair(): LanguagePair {
+  return { sourceLanguage: sourceLanguage.value, targetLanguage: targetLanguage.value };
+}
+function applyLanguagePair(pair: LanguagePair): void {
+  for (const [select, value] of [[sourceLanguage, pair.sourceLanguage], [targetLanguage, pair.targetLanguage]] as const) {
+    if (![...select.options].some((option) => option.value === value)) {
+      const option = node('option', '', languageName(value)); option.value = value; select.append(option);
+    }
+    select.value = value;
+  }
+}
 function resizeSourceEditor(): void {
   if (currentView === 'translate') {
     source.style.height = '0px';
@@ -401,6 +414,7 @@ async function receiveCapturedText(payload: SourceTextEvent): Promise<void> {
   suspendConfigurationDialogs();
   pendingTranslate = false; clearToast();
   setView('translate');
+  applyLanguagePair(historyLanguages.newInput(selectedLanguagePair()));
   const normalized = payload.mode === 'input' ? payload.text
     : payload.captureOrigin === 'ocr' || payload.mode === 'ocr' ? normalizeOcrCapturedText(payload.text) : normalizeCapturedText(payload.text);
   setSourceText(normalized);
@@ -734,12 +748,7 @@ function renderResults(results: TranslationResult[]): void {
 }
 function restoreHistoryResults(entry: HistoryEntry): void {
   setSourceText(entry.text);
-  for (const [select, value] of [[sourceLanguage, entry.sourceLanguage], [targetLanguage, entry.targetLanguage]] as const) {
-    if (![...select.options].some((option) => option.value === value)) {
-      const option = node('option', '', languageName(value)); option.value = value; select.append(option);
-    }
-    select.value = value;
-  }
+  applyLanguagePair(historyLanguages.replay(selectedLanguagePair(), entry));
   currentResults = entry.results; resultSource = entry.text;
   resultSnapshot = { text: resultSource, sourceLanguage: entry.sourceLanguage, targetLanguage: entry.targetLanguage };
   renderResults(entry.results);
@@ -977,7 +986,6 @@ function renderHistory(): void {
     }
     const reopen = node('button', 'text-button accent history-open', '在翻译窗口打开 ↗');
     reopen.addEventListener('click', () => {
-      sourceLanguage.value = entry.sourceLanguage; targetLanguage.value = entry.targetLanguage;
       restoreHistoryResults(entry); setView('translate');
     });
     item.append(reopen); list.append(item);
@@ -1645,18 +1653,25 @@ $('#restore-original-breaks').addEventListener('click', () => {
   closeMoreMenu(); setSourceText(original.text);
   if (original.mode === 'translate') run(translate);
 });
-$('#clear-source').addEventListener('click', () => { setSourceText(''); });
+$('#clear-source').addEventListener('click', () => {
+  applyLanguagePair(historyLanguages.newInput(selectedLanguagePair()));
+  setSourceText('');
+});
 for (const select of [sourceLanguage, targetLanguage]) select.addEventListener('change', () => {
+  historyLanguages.choose();
+  const pair = selectedLanguagePair();
   invalidateResults();
-  run(() => updateSettings((next) => { next.sourceLanguage = sourceLanguage.value; next.targetLanguage = targetLanguage.value; }));
+  run(() => updateSettings((next) => { next.sourceLanguage = pair.sourceLanguage; next.targetLanguage = pair.targetLanguage; }));
 });
 $('#swap-language').addEventListener('click', () => {
   if (sourceLanguage.value === 'auto' || targetLanguage.value === 'auto') { toast('自动模式会按原文决定翻译方向；需要交换时，请先选择具体语言。'); return; }
   const previousSource = sourceLanguage.value;
   sourceLanguage.value = targetLanguage.value; targetLanguage.value = previousSource;
+  historyLanguages.choose();
+  const pair = selectedLanguagePair();
   if (currentResults.find((result) => !result.error)?.text && resultSource === source.value) setSourceText(currentResults.find((result) => !result.error)!.text);
   else invalidateResults();
-  run(() => updateSettings((next) => { next.sourceLanguage = sourceLanguage.value; next.targetLanguage = targetLanguage.value; }));
+  run(() => updateSettings((next) => { next.sourceLanguage = pair.sourceLanguage; next.targetLanguage = pair.targetLanguage; }));
 });
 $('#more-toggle').addEventListener('click', (event) => {
   if ($('#popup-more-menu').hidden) openMoreMenu(event.detail === 0); else closeMoreMenu();
