@@ -4,6 +4,9 @@ on:
   push:
     branches: [main]
     paths: [package.json, .github/workflows/release-routing.yml]
+# Windows runner locale must not reinterpret UTF-8 source or helper output.
+env:
+  PYTHONUTF8: '1'
 permissions:
   contents: read
   actions: read

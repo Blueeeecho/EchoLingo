@@ -33,7 +33,7 @@ def module():
     return value
 
 def git(*args):
-    return subprocess.check_output(['git', *args], cwd=ROOT, text=True).strip()
+    return subprocess.check_output(['git', *args], cwd=ROOT, text=True, encoding='utf-8', errors='strict').strip()
 
 def check_source():
     if not re.fullmatch('[0-9a-f]{40}', REVIEWED_SOURCE):
@@ -45,7 +45,7 @@ def check_source():
     # Metadata changes must not silently change dependencies, resources or app configuration.
     for path in module().VERSION_PATHS:
         before=git('show',REVIEWED_SOURCE+':'+path).replace('"0.2.12"','"0.2.13"').strip()
-        after=(ROOT/path).read_text().strip()
+        after=(ROOT/path).read_text(encoding='utf-8').strip()
         if before != after:
             raise ValueError('Unexpected non-version manifest changes: '+path)
     module().check_versions(ROOT)
@@ -97,7 +97,7 @@ def prepare(artifacts, output, run_url):
     inputs=[]; reports={}
     for platform, suffix in [('Windows','windows_x64-setup.exe'),('macOS','macos_arm64.dmg')]:
         directory=artifacts/platform
-        report=json.loads((directory/'candidate.json').read_text())
+        report=json.loads((directory/'candidate.json').read_text(encoding='utf-8'))
         allowed = {f'EchoLingo_{VERSION}_x64-setup.exe'} if platform == 'Windows' else {f'EchoLingo_{VERSION}_aarch64.dmg', f'EchoLingo_{VERSION}_arm64.dmg'}
         if report['installer']['name'] not in allowed:
             raise ValueError('Unexpected platform installer filename')
@@ -120,8 +120,8 @@ def prepare(artifacts, output, run_url):
         'rebuiltAfterValidation':False,'scope':{'fullRegression':False,'installerExecuted':False,
         'visualAcceptance':False,'focusedTests':True,'staticPackageInspection':True},
         'targetedValidation':reports,'files':files}
-    (output/'RELEASE-MANIFEST.json').write_text(json.dumps(manifest,indent=2)+'\n')
-    (output/'SHA256SUMS.txt').write_text(''.join(f'{digest(p)}  {p.name}\n' for p in sorted(output.iterdir())))
+    (output/'RELEASE-MANIFEST.json').write_text(json.dumps(manifest,indent=2)+'\n', encoding='utf-8')
+    (output/'SHA256SUMS.txt').write_text(''.join(f'{digest(p)}  {p.name}\n' for p in sorted(output.iterdir())), encoding='utf-8')
     return manifest
 
 if __name__=='__main__':

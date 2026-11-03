@@ -1,5 +1,7 @@
 """Synthetic preparer checks; no native execution or release acceptance is implied."""
 import copy
+import ast
+import subprocess
 import importlib.util
 import json
 from pathlib import Path
@@ -102,6 +104,22 @@ class PreparationTests(unittest.TestCase):
         self.assertIn('[ "$CI_EVENT" = pull_request ]',ci)
         self.assertEqual(ci.count("if: needs.validation-mode.outputs.mode != 'language-routing-patch-v1'"),6)
         self.assertEqual(ci.count("&& needs.validation-mode.outputs.mode != 'routing-release'"),6)
+    def test_git_manifest_decodes_utf8_even_with_windows_legacy_default(self):
+        with patch.object(subprocess,'_text_encoding',return_value='cp1252'):
+            manifest=R.git('show',R.REVIEWED_SOURCE+':package.json')
+        self.assertIn('回声译',manifest)
+        self.assertEqual(json.loads(manifest)['version'],'0.2.12')
+    def test_preparer_text_io_and_workflow_pin_utf8(self):
+        source=Path(R.__file__).read_text(encoding='utf-8')
+        calls=[node for node in ast.walk(ast.parse(source)) if isinstance(node,ast.Call)
+               and isinstance(node.func,ast.Attribute) and node.func.attr in ('read_text','write_text','check_output')]
+        self.assertGreaterEqual(len(calls),5)
+        for call in calls:
+            keywords={item.arg:item.value for item in call.keywords}
+            self.assertIn('encoding',keywords)
+            self.assertEqual(ast.literal_eval(keywords['encoding']),'utf-8')
+        workflow=(R.ROOT/'.github/workflows/release-routing.yml').read_text(encoding='utf-8')
+        self.assertIn("env:\n  PYTHONUTF8: '1'\npermissions:",workflow)
     def test_all_eight_versions(self):
         self.assertEqual(len(R.module().check_versions(R.ROOT)),7)
 
