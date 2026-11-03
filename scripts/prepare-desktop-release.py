@@ -23,8 +23,11 @@ SUPPORT = {
     'scripts/prepare-desktop-release.py', 'scripts/test_prepare_desktop_release.py',
     'scripts/publish-desktop-release.cjs', 'scripts/test-desktop-release.cjs',
     '.github/workflows/release-desktop.yml', '.github/workflows/release-routing.yml',
+    '.github/workflows/ci.yml',
     'scripts/test_prepare_routing_release.py', 'scripts/test_prepare_release_assets.py',
     'docs/releases/0.2.14.zh-CN.md',
+    'tests/macos-screenshot-native-fixture.swift',
+    'tests/test_macos_pin_readiness_fixture_contract.py',
 }
 
 
