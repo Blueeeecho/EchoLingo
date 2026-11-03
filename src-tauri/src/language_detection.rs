@@ -196,11 +196,20 @@ pub fn resolve_translation_languages(
             }
             (Some(language), _) => language.into(),
             (None, Some(language)) => language,
-            // With both choices automatic, uncertain or symbolic input still
-            // gets one ordinary provider request. Manual targets retain the
-            // existing provider-side automatic source detection.
-            (None, None) if target == "auto" => "en".into(),
-            (None, None) => "auto".into(),
+            // An unknown source must not trigger another detector failure in
+            // the selected provider. Keep the requested target and choose the
+            // opposite starter source for English; otherwise try English.
+            (None, None) => {
+                if target
+                    .split('-')
+                    .next()
+                    .is_some_and(|language| language.eq_ignore_ascii_case("en"))
+                {
+                    "zh-Hans".into()
+                } else {
+                    "en".into()
+                }
+            }
         }
     };
     let target = if target == "auto" {

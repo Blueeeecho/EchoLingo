@@ -45,6 +45,8 @@ jobs:
               'src-tauri/src/bilingual_input.rs',
               'src-tauri/src/language_detection.rs',
               'src-tauri/src/main.rs',
+              'src-tauri/native/macos.swift',
+              'scripts/test_automatic_translation_contract.py',
           }
           changed = set(subprocess.check_output([
               'git', 'diff', '--name-only',
@@ -85,6 +87,7 @@ jobs:
         run: |
           set -euo pipefail
           python scripts/check-repository.py
+          python scripts/test_automatic_translation_contract.py
           git diff --check
           rustfmt --edition 2021 --check src-tauri/src/bilingual_input.rs src-tauri/src/language_detection.rs
       - name: Run exact shared routing sources on both platforms

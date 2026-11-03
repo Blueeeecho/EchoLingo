@@ -74,6 +74,26 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn uncertain_source_keeps_manual_target_and_never_forwards_auto() {
+        for (target, expected_source) in [
+            ("en", "zh-Hans"),
+            ("en-US", "zh-Hans"),
+            ("zh-Hans", "en"),
+            ("zh-Hant", "en"),
+            ("fr", "en"),
+        ] {
+            for text in ["12345?!", "\u{0105}\u{03b1}"] {
+                let pair = resolve(text, "auto", target, || async {
+                    Err("uncertain detection".into())
+                })
+                .await
+                .unwrap();
+                assert_eq!(pair, (expected_source.into(), target.into()));
+            }
+        }
+    }
+
+    #[tokio::test]
     async fn explicit_source_skips_detection_and_manual_target_is_preserved() {
         assert_eq!(
             resolve("报告.txt", "fr", "de", || async {
