@@ -142,6 +142,7 @@ private final class ScreenshotProbe {
     var finished = false
     var oracleAttempted = false
     var oracleToken: UUID?
+    var pinReadinessToken: UUID?
     var pinProofWindows: [NSWindow] = []
     var oracleOccluder: NSWindow?
     var owner: NSWindow?
@@ -155,6 +156,7 @@ private final class ScreenshotProbe {
     func finish(_ status: String, reason: String? = nil) {
         guard !finished else { return }; finished = true
         timer?.invalidate(); timer = nil
+        pinReadinessToken = nil
         pinProofWindows.forEach { $0.close() }; pinProofWindows.removeAll()
         oracleToken = nil; oracleOccluder?.close(); oracleOccluder = nil
         if let operation = operation {
@@ -1110,7 +1112,8 @@ private final class ScreenshotProbe {
                 "pinFrameMatches": pin.frame == frame, "helperFrameMatches": helper.frame == frame,
                 "pinVisible": pin.isVisible, "helperVisible": helper.isVisible,
                 "plannedWidth": plan.pixelWidth, "plannedHeight": plan.pixelHeight]
-            DispatchQueue.global(qos: .userInitiated).async {
+            awaitReadyPinMetadata(pin: pin, helper: helper, frame: frame, snapshot: snapshot) {
+              DispatchQueue.global(qos: .userInitiated).async {
                 var observation: [String: Any] = ["stage": "capture"]
                 do {
                     let image = try captureNativePlannedImage(plan, purpose: .region)
@@ -1158,8 +1161,101 @@ private final class ScreenshotProbe {
                         self.finish("failed", reason: "pin-proof-capture-ocr-failed")
                     }
                 }
+              }
             }
         } catch { finish("failed", reason: "pin-proof-plan-failed") }
+    }
+
+    // AppKit visibility is not a WindowServer/ScreenCaptureKit handshake.
+    // Wait only for our two newly generated windows, before the single real
+    // capture. Missing metadata may settle; changed identity or API errors fail.
+    func awaitReadyPinMetadata(pin: NSWindow, helper: NSWindow, frame: CGRect,
+                              snapshot: CaptureReadyPinSnapshot, completion: @escaping () -> Void) {
+        let token = UUID(), deadline = Date().addingTimeInterval(3)
+        pinReadinessToken = token
+        let ownPID = ProcessInfo.processInfo.processIdentifier
+        let ids = [CGWindowID(pin.windowNumber), CGWindowID(helper.windowNumber)]
+        let primary = CGDisplayBounds(CGMainDisplayID()).height
+        let quartzFrame = CGRect(x: frame.minX, y: primary - frame.maxY, width: frame.width, height: frame.height)
+        var observations = 0
+        func active() -> Bool { !self.finished && self.pinReadinessToken == token }
+        func fail(_ reason: String) {
+            guard active() else { return }
+            self.pinReadinessToken = nil; self.finish("failed", reason: reason)
+        }
+        func ownedMetadataReady() throws -> Bool {
+            try fixtureNeed(Thread.isMainThread && self.pinProofWindows.count == 2
+                && self.pinProofWindows[0] === pin && self.pinProofWindows[1] === helper
+                && ids[0] != ids[1], "pin readiness object identity changed")
+            try captureValidateReadyPins(snapshot)
+            try fixtureNeed(snapshot.ids == Set([ids[0]]), "pin readiness registry changed")
+            guard let records = captureCurrentWindows() else { throw NativeError("FIXTURE: pin metadata unavailable") }
+            var ready = true
+            for (window, id) in zip([pin, helper], ids) {
+                try fixtureNeed(NSApp.windows.contains(where: { $0 === window }) && window.isVisible
+                    && !window.isMiniaturized && window.sharingType == .readOnly
+                    && window.windowNumber == Int(id) && window.frame == frame,
+                    "pin readiness owned window changed")
+                let matches = records.filter { captureWindowNumber($0[kCGWindowNumber as String]) == Double(id) }
+                try fixtureNeed(matches.count <= 1, "pin readiness metadata is ambiguous")
+                guard let record = matches.first else { ready = false; continue }
+                guard let bounds = record[kCGWindowBounds as String] as? [String: Any],
+                      let rectangle = CGRect(dictionaryRepresentation: bounds as CFDictionary) else {
+                    throw NativeError("FIXTURE: pin readiness frame unavailable")
+                }
+                try fixtureNeed(captureWindowNumber(record[kCGWindowOwnerPID as String]) == Double(ownPID)
+                    && captureWindowNumber(record[kCGWindowSharingState as String]) == 1
+                    && captureWindowNumber(record[kCGWindowLayer as String]) == Double(window.level.rawValue)
+                    && captureWindowNumber(record[kCGWindowAlpha as String]) == 1
+                    && record[kCGWindowIsOnscreen as String] as? Bool == true && rectangle == quartzFrame,
+                    "pin readiness public identity/frame/sharing changed")
+            }
+            return ready
+        }
+        func observe() {
+            guard active() else { return }
+            guard Date() < deadline else { fail("pin-proof-metadata-readiness-timeout"); return }
+            observations += 1
+            self.report["pinReadiness"] = ["observations": observations, "deadlineMilliseconds": 3000,
+                "ownedWindowCount": 2, "metadataReady": false, "productionCaptureAttempts": 0]
+            func completeOrRetry(_ shareableReady: Bool) {
+                guard active() else { return }
+                guard Date() < deadline else { fail("pin-proof-metadata-readiness-timeout"); return }
+                do {
+                    let publicReady = try ownedMetadataReady()
+                    if publicReady && shareableReady {
+                        self.report["pinReadiness"] = ["observations": observations, "deadlineMilliseconds": 3000,
+                            "ownedWindowCount": 2, "metadataReady": true, "productionCaptureAttempts": 1]
+                        self.pinReadinessToken = nil; completion()
+                    } else {
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.025) { observe() }
+                    }
+                } catch { fail("pin-proof-metadata-identity-failed") }
+            }
+            do {
+                guard try ownedMetadataReady() else { completeOrRetry(false); return }
+                if #available(macOS 14.0, *) {
+                    SCShareableContent.getExcludingDesktopWindows(false, onScreenWindowsOnly: true) { content, error in
+                        DispatchQueue.main.async {
+                            guard active() else { return }
+                            guard error == nil, let content = content else { fail("pin-proof-metadata-query-failed"); return }
+                            var ready = true
+                            for id in ids {
+                                let matches = content.windows.filter { $0.windowID == id }
+                                guard matches.count <= 1 else { fail("pin-proof-metadata-identity-failed"); return }
+                                guard let window = matches.first else { ready = false; continue }
+                                guard window.owningApplication?.processID == ownPID, window.frame == quartzFrame else {
+                                    fail("pin-proof-metadata-identity-failed"); return
+                                }
+                            }
+                            completeOrRetry(ready)
+                        }
+                    }
+                } else { completeOrRetry(true) }
+            } catch { fail("pin-proof-metadata-identity-failed") }
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 3) { fail("pin-proof-metadata-readiness-timeout") }
+        observe()
     }
 
     func verifyPixels(_ image: CGImage, phase: Int, fullWindow: Bool = true, occluder: Bool = false) throws {

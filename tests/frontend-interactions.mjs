@@ -515,6 +515,89 @@ try {
   await page.getByRole('button', { name: '删除记录', exact: true }).click();
   await page.getByText('暂无翻译记录', { exact: true }).waitFor();
   console.log('PASS: history never fetches/renders during startup or hidden translation; clean visits reuse data; delayed reads do not render hidden cards or erase newer mutations; concurrent mutations coalesce; failures retry and deletion refreshes.');
+
+  // Replaying a resolved historical direction must not become the next capture's
+  // language preference. Only an explicit picker change is a new preference.
+  for (const preferred of [['auto', 'auto'], ['auto', 'zh-Hans'], ['en', 'zh-Hant']]) {
+    await page.goto(process.env.ECHOLINGO_TEST_URL ?? 'http://127.0.0.1:1420/');
+    await page.waitForFunction(() => document.querySelector('#theme-select')?.value === 'light');
+    await page.locator('#source-language').selectOption(preferred[0]);
+    await page.locator('#target-language').selectOption(preferred[1]);
+    await page.waitForFunction(([from, to]) => window.__qa.settings.sourceLanguage === from && window.__qa.settings.targetLanguage === to, preferred);
+    await page.evaluate(() => { window.__qa.history = [{
+      id: 'language-replay', createdAt: Date.now(), text: 'Generated historical language fixture',
+      sourceLanguage: 'en', targetLanguage: 'zh-Hans', results: [], favorite: false,
+    }]; });
+    await goView('history');
+    await page.locator('.history-open').click();
+    assert.equal(await page.locator('#source-language').inputValue(), 'en');
+    assert.equal(await page.locator('#target-language').inputValue(), 'zh-Hans');
+    // Multiple replays retain the original preference, not the first replay.
+    await goView('history');
+    await page.locator('.history-open').click();
+    await page.evaluate(() => window.__qa.emit('source-text', {
+      text: 'Generated next capture', mode: 'translate', presentationEpoch: window.__qa.presentation.epoch,
+    }));
+    await page.waitForFunction(() => window.__qa.translationRequests.length === 1);
+    assert.deepEqual(await page.evaluate(() => {
+      const request = window.__qa.translationRequests.at(-1);
+      return [request.sourceLanguage, request.targetLanguage];
+    }), preferred, 'new capture must use the preference from before history replay');
+    assert.deepEqual(await page.evaluate(() => [window.__qa.settings.sourceLanguage, window.__qa.settings.targetLanguage]), preferred);
+
+    await goView('history');
+    await page.locator('.history-open').click();
+    await page.locator('#source-text').fill('Manually revised historical text');
+    assert.equal(await page.locator('#source-language').inputValue(), 'en');
+    assert.equal(await page.locator('#target-language').inputValue(), 'zh-Hans');
+    await page.locator('#more-toggle').click();
+    await page.locator('#clear-source').click();
+    assert.equal(await page.locator('#source-text').inputValue(), '');
+    assert.deepEqual(await page.evaluate(() => [document.querySelector('#source-language').value, document.querySelector('#target-language').value]), preferred);
+    await goView('history');
+    await page.locator('.history-open').click();
+    await page.locator('#source-language').selectOption('auto');
+    await page.locator('#target-language').selectOption('en');
+    await page.waitForFunction(() => window.__qa.settings.sourceLanguage === 'auto' && window.__qa.settings.targetLanguage === 'en');
+    await page.evaluate(() => window.__qa.emit('source-text', {
+      text: 'Generated capture after explicit choice', mode: 'translate', presentationEpoch: window.__qa.presentation.epoch,
+    }));
+    await page.waitForFunction(() => window.__qa.translationRequests.length === 2);
+    assert.deepEqual(await page.evaluate(() => {
+      const request = window.__qa.translationRequests.at(-1);
+      return [request.sourceLanguage, request.targetLanguage];
+    }), ['auto', 'en'], 'explicit picker choices during replay must win over remembered preferences');
+    await goView('history');
+    await page.locator('.history-open').click();
+    await page.locator('#swap-language').click();
+    await page.waitForFunction(() => window.__qa.settings.sourceLanguage === 'zh-Hans' && window.__qa.settings.targetLanguage === 'en');
+    await page.evaluate(() => window.__qa.emit('source-text', {
+      text: 'Generated capture after explicit swap', mode: 'translate', presentationEpoch: window.__qa.presentation.epoch,
+    }));
+    await page.waitForFunction(() => window.__qa.translationRequests.length === 3);
+    assert.deepEqual(await page.evaluate(() => {
+      const request = window.__qa.translationRequests.at(-1);
+      return [request.sourceLanguage, request.targetLanguage];
+    }), ['zh-Hans', 'en'], 'explicit swaps during replay must remain the new preference');
+  }
+  await page.goto(process.env.ECHOLINGO_TEST_URL ?? 'http://127.0.0.1:1420/');
+  await page.waitForFunction(() => document.querySelector('#theme-select')?.value === 'light');
+  await page.evaluate(() => {
+    window.__qa.history = [{ id: 'queued-language-history', createdAt: Date.now(), text: 'Generated queue fixture',
+      sourceLanguage: 'en', targetLanguage: 'zh-Hans', results: [], favorite: false }];
+    window.__qa.holdSave = true;
+  });
+  await page.locator('#target-language').selectOption('auto');
+  await page.waitForFunction(() => window.__qa.saveCalls === 1);
+  await page.locator('#source-language').selectOption('ja');
+  await goView('history');
+  await page.locator('.history-open').click();
+  await page.evaluate(() => { window.__qa.holdSave = false; window.__qa.releaseSave(); });
+  await page.waitForFunction(() => window.__qa.saveCalls === 2);
+  await page.waitForFunction(() => window.__qa.settings.sourceLanguage === 'ja' && window.__qa.settings.targetLanguage === 'auto');
+  assert.deepEqual(await page.evaluate(() => window.__qa.settingsWrites.map(item => [item.sourceLanguage, item.targetLanguage])), [['auto', 'auto'], ['ja', 'auto']]);
+  console.log('PASS: history replay keeps manual edits scoped; capture/Clear restore preferences; picker/swap and queued saves retain explicit choices. Mock IPC only.');
+
   await page.goto(process.env.ECHOLINGO_TEST_URL ?? 'http://127.0.0.1:1420/');
   await page.waitForFunction(() => document.querySelector('#footer-status')?.textContent === '准备就绪');
   // A blank popup has no app chrome, tutorial, counters, or result placeholder.

@@ -6,7 +6,7 @@ conditions, failure policy, commands and artifact preservation stay byte-exact.
 import re
 
 
-_ROUTE = r"needs\.validation-mode\.outputs\.mode != '(?:language-routing-patch-v1|screenshot-pins|macos-followup)'"
+_ROUTE = r"needs\.validation-mode\.outputs\.mode != '(?:language-routing-patch-v1|screenshot-pins|macos-followup|automatic-direction|routing-release|windows-unpack)'"
 
 
 def executable_job(job):

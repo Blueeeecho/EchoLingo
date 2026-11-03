@@ -48,6 +48,11 @@ export function createShortcutEditor(context: Context) {
   document.querySelector('#view-settings .section-heading')?.append(jump);
   const feedback = document.createElement('p'); feedback.className = 'shortcut-feedback'; feedback.id = 'shortcut-feedback';
   feedback.setAttribute('role', 'status'); feedback.setAttribute('aria-live', 'polite');
+  let feedbackAction: ShortcutAction | null = null;
+  const placeFeedback = () => {
+    const row = feedbackAction ? inputs.get(feedbackAction)?.closest('.shortcut-binding') : null;
+    (row ?? form).append(feedback);
+  };
   saveButton.textContent = '保存并立即生效';
   const help = form.nextElementSibling;
   if (help instanceof HTMLElement) help.textContent = '录制后松开按键即保存。Esc 取消。未生效的组合会自动重试，也可一键更换。' + (windows
@@ -121,6 +126,7 @@ export function createShortcutEditor(context: Context) {
   const start = async (action: ShortcutAction) => {
     if (!ready || saving || starting || ending) return;
     if (session) { await finish(true); return; }
+    feedbackAction = action; placeFeedback();
     const intent = ++revision; starting = true; updateControls(); status('正在准备录制，请稍候…');
     const requestedAt = performance.now();
     try {
@@ -131,6 +137,9 @@ export function createShortcutEditor(context: Context) {
       session = { id, action, held: new Set(), modifiers: false, modifierEvidence: false, releasedEvidence: false, candidate: null, cancelled: false };
       inputs.get(action)?.focus({ preventScroll: true });
       status('请按快捷键并松开所有按键；Esc 取消。15 秒后自动结束。');
+      // Keep the instruction beside the active field, including short windows.
+      // Scrolling the row must not move keyboard focus away from recording.
+      feedback.closest('.shortcut-binding')?.scrollIntoView({ block: 'nearest', inline: 'nearest' });
       timer = setTimeout(() => { void finish(true); }, remaining);
     } catch (error) { status(`无法开始录制：${context.error(error)}`, true); }
     finally { starting = false; updateControls(); }
@@ -231,6 +240,7 @@ export function createShortcutEditor(context: Context) {
   document.addEventListener('visibilitychange', visibility);
   const save = async () => {
     if (!ready || saving || starting || ending || session) return;
+    feedbackAction = null; placeFeedback();
     try {
       await persist(normalizeShortcuts(draftValues(), mac));
     } catch (error) { status(`未完成保存：${context.error(error)}`, true); }
@@ -278,7 +288,7 @@ export function createShortcutEditor(context: Context) {
         const details = document.createElement('details'); details.id = 'shortcut-advanced'; details.className = 'shortcut-advanced'; details.open = open;
         const summary = document.createElement('summary'); summary.textContent = '其他快捷键'; details.append(summary);
         for (const [action, label] of extra) details.append(row(action, label));
-        details.addEventListener('toggle', context.changed); form.append(details, feedback);
+        details.addEventListener('toggle', context.changed); form.append(details); placeFeedback();
         for (const [action, input] of inputs) input.value = drafts.get(action) ?? displayShortcut(values[action], mac);
         base = key;
       }

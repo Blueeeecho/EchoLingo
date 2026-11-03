@@ -134,7 +134,7 @@ def source_identity(root=ROOT):
     versions = [json.loads((root / "package.json").read_text(encoding="utf-8"))["version"],
                 json.loads((root / "src-tauri/tauri.conf.json").read_text(encoding="utf-8"))["version"],
                 tomllib.loads((root / "src-tauri/Cargo.toml").read_text(encoding="utf-8"))["package"]["version"]]
-    require(versions == [VERSION] * 3, "Only the exact 0.2.13 candidate may be inspected")
+    require(versions == [VERSION] * 3, f"Only the exact {VERSION} candidate may be inspected")
     return commit, tree
 
 
@@ -254,10 +254,10 @@ def verify_windows_version(value):
     require(isinstance(value, dict) and set(value) == {"fileVersion", "productVersion", "fileParts", "productParts"},
             "Invalid Windows version metadata")
     for key in ("fileVersion", "productVersion"):
-        require(value[key] in (VERSION, VERSION + ".0"), "Windows file/product version is not 0.2.13")
+        require(value[key] in (VERSION, VERSION + ".0"), f"Windows file/product version is not {VERSION}")
     for key in ("fileParts", "productParts"):
         require(isinstance(value[key], list) and all(type(n) is int for n in value[key])
-                and value[key] == [int(part) for part in VERSION.split(".")] + [0], "Windows numeric file/product version is not 0.2.13")
+                and value[key] == [int(part) for part in VERSION.split(".")] + [0], f"Windows numeric file/product version is not {VERSION}")
 
 
 def inspect_windows(installer, output, expected_application_size):
@@ -496,6 +496,7 @@ def inspect(platform, installer, built_application, output, run_url, *, locked_b
 
 
 def main():
+    global VERSION
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--platform", choices=("Windows", "macOS"), required=True)
     parser.add_argument("--installer", type=Path, required=True)
@@ -504,7 +505,9 @@ def main():
     parser.add_argument("--run-url", required=True)
     parser.add_argument("--locked-build-passed", action="store_true")
     parser.add_argument("--focused-tests-passed", action="store_true")
+    parser.add_argument("--expected-version", choices=("0.2.13", "0.2.14"), default=VERSION)
     args = parser.parse_args()
+    VERSION = args.expected_version
     try:
         report = inspect(args.platform, args.installer, args.built_application, args.output_dir, args.run_url,
                          locked_build_passed=args.locked_build_passed, focused_tests_passed=args.focused_tests_passed)

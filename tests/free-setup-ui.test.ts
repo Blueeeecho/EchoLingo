@@ -12,6 +12,8 @@ vi.mock('@tauri-apps/api/core', () => ({ invoke: vi.fn() }));
 // browser process, real account, credential store, or installed app is involved.
 class Element {
   id = ''; open = false; hidden = false; disabled = false; value = ''; textContent = '';
+  href = ''; target = ''; rel = '';
+  constructor(readonly tagName = '') {}
   children: Element[] = [];
   attributes = new Map<string, string>();
   listeners = new Map<string, ((event: { target: Element; key?: string; preventDefault: () => void; stopPropagation: () => void }) => void)[]>();
@@ -21,7 +23,11 @@ class Element {
   addEventListener(name: string, listener: (event: { target: Element; key?: string; preventDefault: () => void; stopPropagation: () => void }) => void) {
     this.listeners.set(name, [...this.listeners.get(name) ?? [], listener]);
   }
-  emit(name = 'click', key?: string) { for (const listener of this.listeners.get(name) ?? []) listener({ target: this, key, preventDefault() {}, stopPropagation() {} }); }
+  emit(name = 'click', key?: string) {
+    const preventDefault = vi.fn();
+    for (const listener of this.listeners.get(name) ?? []) listener({ target: this, key, preventDefault, stopPropagation() {} });
+    return { preventDefault };
+  }
   focus() {}
   find(id: string): Element | undefined { return this.id === id ? this : this.children.map((child) => child.find(id)).find(Boolean); }
 }
@@ -36,7 +42,7 @@ function fixture(desktop = true, blockingHint?: 'engine-hint' | 'core-guidance')
   const roots = ids.map((id) => { const node = new Element(); node.id = id; node.hidden = id === 'free-setup-hint' || id === 'free-setup-dialog' || ((id === 'core-guidance' || id === 'engine-hint') && id !== blockingHint); return node; });
   const find = (id: string) => roots.map((root) => root.find(id)).find(Boolean) ?? null;
   const node = (id: string) => { const result = find(id); if (!result) throw new Error(`Missing fixture node: ${id}`); return result; };
-  vi.stubGlobal('document', { querySelector: (selector: string) => find(selector.slice(1)), getElementById: find, createElement: () => new Element(), createTextNode: () => new Element() });
+  vi.stubGlobal('document', { querySelector: (selector: string) => find(selector.slice(1)), getElementById: find, createElement: (tag: string) => new Element(tag), createTextNode: () => new Element() });
   vi.stubGlobal('window', blockingHint ? {} : { __qa: true });
   vi.stubGlobal('navigator', { language: 'en-US' });
   vi.stubGlobal('localStorage', { getItem: () => null, setItem: vi.fn() });
@@ -88,6 +94,37 @@ function fixture(desktop = true, blockingHint?: 'engine-hint' | 'core-guidance')
 
 beforeEach(() => vi.clearAllMocks());
 afterEach(() => { vi.useRealTimers(); vi.unstubAllGlobals(); });
+
+describe('service source and signup links', () => {
+  it.each([true, false])('keeps link semantics and uses the native opener only on desktop=%s', async (desktop) => {
+    const f = fixture(desktop); f.node('free-region-cn').emit();
+    const service = servicesFor('cn', 'translation')[0]!;
+    const source = f.node('free-translation-list').children[0]!.children[4]!.children[1]!;
+    f.open();
+    const signup = f.node('free-setup-body').children[3]!;
+    for (const [link, url] of [[source, service.allowance.links[0]![1]], [signup, service.signupUrl]] as const) {
+      expect(link.tagName).toBe('a'); expect(link.href).toBe(url);
+      expect(link.target).toBe('_blank'); expect(link.rel).toBe('noopener noreferrer');
+      expect(link.textContent).toContain('↗');
+      vi.mocked(invoke).mockClear();
+      const event = link.emit(); await settle();
+      if (desktop) {
+        expect(event.preventDefault).toHaveBeenCalledOnce();
+        expect(invoke).toHaveBeenCalledExactlyOnceWith('open_service_link', { url });
+      } else {
+        expect(event.preventDefault).not.toHaveBeenCalled();
+        expect(invoke).not.toHaveBeenCalled();
+      }
+    }
+    expect(f.calls()).toBe(0); expect(f.fresh()).toEqual([]);
+  });
+  it('reports native opening errors without changing settings or hiding the wizard', async () => {
+    const f = fixture(); f.open(); f.invokeFailures.add('open_service_link');
+    f.node('free-setup-body').children[3]!.emit(); await settle();
+    expect(f.reportError).toHaveBeenCalledOnce(); expect(f.calls()).toBe(0);
+    expect(f.node('free-setup-dialog').hidden).toBe(false);
+  });
+});
 
 describe('combined engine and signup guidance', () => {
   it.each(['engine-hint', 'core-guidance'] as const)('defers signup behind %s and reveals it only after the blocker is gone', (blocker) => {

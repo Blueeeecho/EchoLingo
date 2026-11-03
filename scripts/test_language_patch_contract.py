@@ -1,5 +1,6 @@
 import importlib.util
 import json
+import re
 import tempfile
 from pathlib import Path
 import unittest
@@ -9,6 +10,49 @@ ROOT = Path(__file__).resolve().parents[1]
 spec = importlib.util.spec_from_file_location('language_patch', ROOT/'scripts/verify-language-patch.py')
 MODULE = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(MODULE)
+
+FULL_JOBS = {
+    'rust-input-preparation', 'windows-rust-capture-candidate',
+    'macos-native-frame-probe', 'macos-screenshot-native-probe',
+    'desktop', 'frontend-interactions',
+}
+
+
+def assert_language_job_gates(test, source):
+    parts = re.split(r'^  ([\w-]+):\n', source.split('jobs:\n', 1)[1], flags=re.MULTILINE)
+    jobs = dict(zip(parts[1::2], parts[2::2]))
+    exclusion = "needs.validation-mode.outputs.mode != 'language-routing-patch-v1'"
+    scoped_jobs = {
+        name for name, body in jobs.items()
+        if any(exclusion in gate for gate in re.findall(r'^    if: (.+)$', body, re.MULTILINE))
+    }
+    test.assertEqual(scoped_jobs, FULL_JOBS)
+    options = re.search(r'^        options: \[(.+)\]$', source, re.MULTILINE).group(1).split(', ')
+    diagnostic_clauses = {f"github.event.inputs.mode != '{mode}'" for mode in options
+                          if mode not in {'full', 'macos-preview', 'windows-preview'}}
+    base_modes = {'windows-unpack', 'language-routing-patch-v1', 'automatic-direction', 'routing-release'}
+    for name in FULL_JOBS:
+        with test.subTest(job=name):
+            body = jobs[name]
+            test.assertEqual(re.findall(r'^    needs: (.+)$', body, re.MULTILINE), ['validation-mode'])
+            gates = re.findall(r'^    if: (.+)$', body, re.MULTILINE)
+            test.assertEqual(len(gates), 1)
+            clauses = gates[0].split(' && ')
+            expected_modes = base_modes.copy()
+            if name != 'rust-input-preparation':
+                expected_modes.add('screenshot-pins')
+            if name not in {'rust-input-preparation', 'frontend-interactions'}:
+                expected_modes.add('macos-followup')
+            expected = {f"needs.validation-mode.outputs.mode != '{mode}'" for mode in expected_modes}
+            if name == 'rust-input-preparation':
+                expected.add("github.event_name == 'pull_request'")
+            if name in {'desktop', 'frontend-interactions'}:
+                expected |= diagnostic_clauses
+            # Exact conjuncts, regardless of order. Missing/inverted guards,
+            # unknown scope exclusions, OR/always()/false and duplicates fail.
+            test.assertEqual(set(clauses), expected)
+            test.assertEqual(len(clauses), len(expected))
+
 
 class LanguagePatchContract(unittest.TestCase):
     def test_exact_reviewed_source_and_no_existing_dependency_upgrade(self):
@@ -79,8 +123,21 @@ class LanguagePatchContract(unittest.TestCase):
         self.assertIn('release remains a draft.',source)
     def test_ci_only_skips_full_jobs_after_successful_source_guard(self):
         source=(ROOT/'.github/workflows/ci.yml').read_text()
-        self.assertEqual(source.count("if: needs.validation-mode.outputs.mode != 'language-routing-patch-v1'"),6)
+        assert_language_job_gates(self, source)
         self.assertIn('cargo test --manifest-path tests/language-routing-patch/Cargo.toml --locked',source)
         self.assertIn("ref: ${{ github.event.pull_request.head.sha || github.sha }}",source)
+
+    def test_ci_job_gate_contract_rejects_weakened_or_unreviewed_conditions(self):
+        source = (ROOT/'.github/workflows/ci.yml').read_text()
+        exclusion = "needs.validation-mode.outputs.mode != 'language-routing-patch-v1'"
+        for replacement in ['', exclusion.replace('!=', '=='), exclusion + ' || true',
+                            exclusion + ' && false', exclusion + ' && ' + exclusion,
+                            exclusion + " && needs.validation-mode.outputs.mode != 'unreviewed-mode'"]:
+            with self.subTest(replacement=replacement), self.assertRaises(AssertionError):
+                # A plain TestCase keeps expected failures out of this test's
+                # own subtest outcome bookkeeping.
+                assert_language_job_gates(unittest.TestCase(), source.replace(exclusion, replacement, 1))
+        with self.assertRaises(AssertionError):
+            assert_language_job_gates(unittest.TestCase(), source.replace('  desktop:\n', '  renamed-desktop:\n', 1))
 
 if __name__ == '__main__': unittest.main()

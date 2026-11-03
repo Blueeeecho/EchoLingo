@@ -13,7 +13,7 @@ class LanguagePatchAssetsTests(unittest.TestCase):
         # Historical tests retain the original authorized version and pins.
         version = patch.object(RELEASE, 'VERSION', '0.2.4')
         version.start(); self.addCleanup(version.stop)
-        fixture = full_fixtures.ReleaseAssetsTests('test_versions_are_consistent')
+        fixture = full_fixtures.ReleaseAssetsTests('test_retired_release_rejects_current_checkout')
         fixture.setUp()
         self.addCleanup(fixture.doCleanups)
         self.fixture = fixture
