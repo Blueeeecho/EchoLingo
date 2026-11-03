@@ -16,3 +16,6 @@ AGENTS.md export-ignore
 PROJECT.md export-ignore
 docs/validation export-ignore
 docs/validation/** export-ignore
+
+# Windows launcher uses native line endings in downloads.
+packaging/windows/*.cmd text eol=crlf

@@ -43,3 +43,15 @@ npm run tauri build -- --bundles app,dmg
 ```
 
 产物位于 `src-tauri/target/release/bundle/`。对外分发的签名和 Apple 公证由发布者配置；开发构建不能代替公证。更多原生检查见[原生功能测试](native-testing.md)。
+
+## Windows 免安装 ZIP
+
+在上述离线资源、对应源码准备完成后，用 Windows PowerShell 构建：
+
+```powershell
+$env:RUSTFLAGS = '-C target-feature=+crt-static'
+npm run tauri build -- --bundles nsis -- --locked
+python scripts/package-windows-unpack.py --application src-tauri/target/release/echolingo.exe --source-archive ../EchoLingo-offline-engine-source.zip --output ../EchoLingo-Windows-unpack
+```
+
+此方式同时保留 NSIS，并为主程序与内嵌捕获程序静态链接 MSVC CRT。打包脚本只读取程序、明确列出的离线资源及分发说明；不会复制用户配置或构建目录中的其他文件。ZIP 与引擎源码、清单和校验值一同分发。WebView2 仍为系统前置条件，见 [Windows 免安装说明](windows-unpack.zh-CN.md)。
