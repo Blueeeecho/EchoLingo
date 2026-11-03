@@ -279,7 +279,8 @@ class ReleaseAssetsTests(unittest.TestCase):
 
     def test_current_checkout_versions_are_consistent(self):
         root = Path(__file__).resolve().parents[1]
-        with patch.object(RELEASE.package_verifier, 'VERSION', self.current_verifier_version):
+        current = json.loads((root / 'package.json').read_text(encoding='utf-8'))['version']
+        with patch.object(RELEASE.package_verifier, 'VERSION', current):
             RELEASE.package_verifier.check_versions(root)
 
     def test_retired_release_rejects_current_checkout(self):

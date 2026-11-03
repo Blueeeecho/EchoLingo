@@ -114,7 +114,7 @@ def check_versions(root):
             raise ValueError("Exactly one own-package lock entry is required: " + name)
         versions.append(entries[0]["version"])
     if len(versions) != 8 or any(version != VERSION for version in versions):
-        raise ValueError("All eight version values in seven manifests must equal 0.2.13")
+        raise ValueError(f"All eight version values in seven manifests must equal {VERSION}")
     return [{"path": name, "sha256": sha256(root / name)} for name in VERSION_PATHS]
 
 
@@ -157,10 +157,10 @@ def check_pe(path, expected_machine=None):
 
 def check_headers(platform, installer, application):
     if platform == "Windows":
-        if installer.name != "EchoLingo_0.2.13_x64-setup.exe" or application.name.lower() != "echolingo.exe":
+        if installer.name != f"EchoLingo_{VERSION}_x64-setup.exe" or application.name.lower() != "echolingo.exe":
             raise ValueError("Unexpected Windows candidate filename/version/architecture")
         return {"installer": check_pe(installer), "application": check_pe(application, 0x8664)}
-    if installer.name not in {"EchoLingo_0.2.13_aarch64.dmg", "EchoLingo_0.2.13_arm64.dmg"} or application.name != "echolingo":
+    if installer.name not in {f"EchoLingo_{VERSION}_aarch64.dmg", f"EchoLingo_{VERSION}_arm64.dmg"} or application.name != "echolingo":
         raise ValueError("Unexpected macOS candidate filename/version/architecture")
     if installer.stat().st_size <= 512:
         raise ValueError("Truncated UDIF disk image")
@@ -293,6 +293,7 @@ def run(args, root=ROOT):
 
 
 def main():
+    global VERSION
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--platform", choices=["Windows", "macOS"], required=True)
     for name in ("installer", "application", "checks-json", "output"):
@@ -300,7 +301,10 @@ def main():
     parser.add_argument("--run-url", required=True)
     parser.add_argument("--offline-staging-manifest", type=Path)
     parser.add_argument("--offline-source-archive", type=Path)
-    print(json.dumps(run(parser.parse_args()), sort_keys=True))
+    parser.add_argument("--expected-version", choices=("0.2.13", "0.2.14"), default=VERSION)
+    args = parser.parse_args()
+    VERSION = args.expected_version
+    print(json.dumps(run(args), sort_keys=True))
 
 
 if __name__ == "__main__":

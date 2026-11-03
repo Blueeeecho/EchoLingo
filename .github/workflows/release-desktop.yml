@@ -1,0 +1,277 @@
+name: Validate and publish desktop 0.2.14
+on:
+  workflow_dispatch:
+  pull_request:
+    branches: [main]
+    paths: [package.json, .github/workflows/release-desktop.yml, 'scripts/*desktop-release*']
+  push:
+    branches: [main]
+    paths: [package.json, .github/workflows/release-desktop.yml, 'scripts/*desktop-release*']
+# Windows runner locale must not reinterpret UTF-8 source or helper output.
+env:
+  PYTHONUTF8: '1'
+permissions:
+  contents: read
+  actions: read
+concurrency:
+  group: echolingo-prerelease-0.2.14-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: false
+jobs:
+  build:
+    if: github.repository == 'Blueeeecho/EchoLingo'
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    env:
+      RUSTFLAGS: ${{ matrix.os == 'windows-latest' && '-C target-feature=+crt-static' || '' }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: ilammy/msvc-dev-cmd@v1
+        if: runner.os == 'Windows'
+      - uses: swatinem/rust-cache@v2
+        with:
+          key: desktop-release-0214-static-crt
+          workspaces: |
+            src-tauri -> target
+            tests/language-routing-patch -> target
+      - name: Require reviewed source and exact release metadata
+        shell: bash
+        run: |
+          set -euo pipefail
+          python scripts/prepare-desktop-release.py --check-source
+          python scripts/check-repository.py
+      - name: Verify release does not already exist and source is current main
+        if: github.event_name != 'pull_request'
+        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b
+        with:
+          script: |
+            const { owner, repo } = context.repo;
+            const { data: main } = await github.rest.git.getRef({owner,repo,ref:'heads/main'});
+            if (main.object.sha !== context.sha) throw new Error('Source is no longer main');
+            try { await github.rest.repos.getReleaseByTag({owner,repo,tag:'0.2.14'}); throw new Error('Release already exists'); }
+            catch (e) { if (e.status !== 404) throw e; }
+      - name: Verify only unchanged offline resource inputs may be reused
+        if: runner.os == 'Windows'
+        shell: bash
+        run: |
+          set -euo pipefail
+          git diff --exit-code 4b8c5f5ac67e07cc4005812963b2c02acdd14d5d HEAD -- \
+            scripts/offline-engine scripts/prepare-offline-models.py scripts/test_prepare_offline_models.py \
+            scripts/prepare-offline-notices.py scripts/package-offline-source.py \
+            scripts/audit-windows-resources.py \
+            resources/offline-translation src-tauri/tauri.windows.conf.json LICENSE LICENSING.md
+          git diff --exit-code da0b5d03060a62ea120d931cc6c9eede5af66a7f HEAD -- scripts/stage-language-patch-resources.py
+      - name: Download pinned offline resources and corresponding source without old app reuse
+        if: runner.os == 'Windows'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('node:fs');
+            const path = require('node:path');
+            const pins = [
+              [13034542412, 'windows.zip', 'da42d05739744f5eafa71f9758d6a045b42020403d4228f3007d9bbda92fbb25'],
+              [13034970610, 'evidence.zip', '2520b83f54d3774b75c0cc1c6fc3f3105f0c9fb380800d94ac73001e36295285']
+            ];
+            const directory = path.join(process.env.RUNNER_TEMP, 'candidate-offline-inputs');
+            fs.mkdirSync(directory);
+            const { data: run } = await github.rest.actions.getWorkflowRun({owner:'Blueeeecho',repo:'EchoLingo',run_id:41178655504});
+            if (run.conclusion !== 'success' || run.head_sha !== '4b8c5f5ac67e07cc4005812963b2c02acdd14d5d') throw new Error('Pinned resource run mismatch');
+            for (const [id,name,hash] of pins) {
+              const { data: artifact } = await github.rest.actions.getArtifact({owner:'Blueeeecho',repo:'EchoLingo',artifact_id:id});
+              if (artifact.expired || artifact.workflow_run.id !== 41178655504 || artifact.digest !== `sha256:${hash}`) throw new Error('Pinned resource artifact mismatch');
+              const { data } = await github.rest.actions.downloadArtifact({owner:'Blueeeecho',repo:'EchoLingo',artifact_id:id,archive_format:'zip'});
+              fs.writeFileSync(path.join(directory,name), Buffer.from(data));
+            }
+      - name: Extract only hash-verified offline engine models licenses and source
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          python scripts/stage-language-patch-resources.py --windows-zip "$env:RUNNER_TEMP/candidate-offline-inputs/windows.zip" --evidence-zip "$env:RUNNER_TEMP/candidate-offline-inputs/evidence.zip" --output-dir "$env:RUNNER_TEMP/candidate-offline-evidence"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          python scripts/audit-windows-resources.py --staged
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - run: npm ci
+      - run: npm run check
+      - run: npm test
+      - run: npm run build
+      - name: Test frontend, actual Rust sources, routing and release boundaries
+        shell: bash
+        run: |
+          set -euo pipefail
+          python scripts/test_automatic_translation_contract.py
+          cargo test --manifest-path tests/language-routing-patch/Cargo.toml --locked
+          cargo test --manifest-path src-tauri/Cargo.toml --locked
+          if [ "$RUNNER_OS" = Windows ]; then cargo test --manifest-path src-tauri/native-capture/Cargo.toml --locked; fi
+          python -m unittest discover -s scripts -p 'test_package_windows_unpack.py' -v
+          python -m unittest discover -s scripts -p 'test_prepare_desktop_release.py' -v
+          node --test scripts/test-desktop-release.cjs
+      - name: Build fresh native release installer with locked dependencies
+        run: npm run tauri build -- --bundles ${{ runner.os == 'Windows' && 'nsis' || 'app,dmg' }} -- --locked
+      - name: Inspect actual installer and bind fresh application identity
+        shell: bash
+        env:
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          if [ "$RUNNER_OS" = Windows ]; then
+            files=(src-tauri/target/release/bundle/nsis/*.exe)
+            built=src-tauri/target/release/echolingo.exe
+            extracted="$RUNNER_TEMP/desktop-inspection/echolingo.exe"
+          else
+            files=(src-tauri/target/release/bundle/dmg/*.dmg)
+            built=src-tauri/target/release/bundle/macos/EchoLingo.app
+            extracted="$RUNNER_TEMP/desktop-inspection/echolingo"
+          fi
+          test "${#files[@]}" -eq 1
+          python scripts/inspect-candidate-package.py --expected-version 0.2.14 --platform "$RUNNER_OS" --installer "${files[0]}" --built-application "$built" --output-dir "$RUNNER_TEMP/desktop-inspection" --run-url "$RUN_URL" --locked-build-passed --focused-tests-passed
+          mkdir "$RUNNER_TEMP/desktop-package"
+          # Bash 3 with nounset rejects expansion of an empty optional array.
+          verifier=(scripts/verify-candidate-package.py --expected-version 0.2.14 --platform "$RUNNER_OS" --installer "${files[0]}" --application "$extracted" --checks-json "$RUNNER_TEMP/desktop-inspection/checks.json" --output "$RUNNER_TEMP/desktop-package/candidate.json" --run-url "$RUN_URL")
+          if [ "$RUNNER_OS" = Windows ]; then
+            verifier+=(--offline-staging-manifest "$RUNNER_TEMP/candidate-offline-evidence/baseline-reuse.json" --offline-source-archive "$RUNNER_TEMP/candidate-offline-evidence/EchoLingo-offline-engine-source.zip")
+          fi
+          python "${verifier[@]}"
+          cp "${files[0]}" "$RUNNER_TEMP/desktop-package/"
+          if [ "$RUNNER_OS" = Windows ]; then cp "$RUNNER_TEMP/candidate-offline-evidence/EchoLingo-offline-engine-source.zip" "$RUNNER_TEMP/desktop-package/"; fi
+      - name: Build and accept exact Windows unpack ZIP
+        if: runner.os == 'Windows'
+        shell: powershell
+        run: |
+          & python scripts/package-windows-unpack.py --application src-tauri/target/release/echolingo.exe --source-archive "$env:RUNNER_TEMP/candidate-offline-evidence/EchoLingo-offline-engine-source.zip" --output "$env:RUNNER_TEMP/desktop-unpack"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & powershell.exe -NoProfile -STA -ExecutionPolicy Bypass -File tests/windows-unpack-smoke.ps1 -ArchivePath "$env:RUNNER_TEMP/desktop-unpack/EchoLingo_0.2.14_windows_x64-unpack.zip" -ManifestPath "$env:RUNNER_TEMP/desktop-unpack/WINDOWS-ZIP-MANIFEST.json" -ReportPath "$env:RUNNER_TEMP/desktop-unpack/windows-unpack-smoke.json"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          foreach ($name in @('EchoLingo_0.2.14_windows_x64-unpack.zip','WINDOWS-ZIP-MANIFEST.json','windows-unpack-smoke.json')) {
+            Copy-Item -LiteralPath (Join-Path "$env:RUNNER_TEMP/desktop-unpack" $name) -Destination "$env:RUNNER_TEMP/desktop-package/"
+          }
+      - name: Accept real Windows settings and generated native focus behavior
+        if: runner.os == 'Windows'
+        shell: powershell
+        run: |
+          $app = (Resolve-Path src-tauri/target/release/echolingo.exe).Path
+          $hash = (Get-FileHash -LiteralPath $app -Algorithm SHA256).Hash.ToLowerInvariant()
+          $bytes = (Get-Item -LiteralPath $app).Length
+          $result = @(& powershell.exe -NoProfile -STA -ExecutionPolicy Bypass -File tests/windows-shortcuts-uia-smoke.ps1 -ApplicationPath $app -ExpectedApplicationSha256 $hash -ExpectedApplicationBytes $bytes -IsolatedTestSession)
+          if ($LASTEXITCODE -ne 0) { $result | Write-Output; exit 1 }
+          $report = ($result | Where-Object { $_ -match '^\{' } | Select-Object -Last 1) | ConvertFrom-Json
+          if (-not $report.ok -or -not $report.actualSettingsUiTested -or $report.fakeIpcUsed -or $report.applicationSha256 -ne $hash) { throw 'Actual settings acceptance failed' }
+          $report | ConvertTo-Json -Depth 16 | Set-Content "$env:RUNNER_TEMP/desktop-package/windows-settings.json" -Encoding UTF8
+          @'
+          import pathlib, sys
+          app, build, target = map(pathlib.Path, sys.argv[1:])
+          binary = app.read_bytes()
+          matches = {p.read_bytes() for p in build.rglob('echolingo-windows-native.dll') if p.is_file()}
+          matches = [value for value in matches if value and value in binary]
+          if len(matches) != 1: raise SystemExit('Exact embedded native DLL not uniquely identified')
+          target.write_bytes(matches[0])
+          '@ | python - $app src-tauri/target/release/build "$env:RUNNER_TEMP/desktop-native.dll"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $result = @(& powershell.exe -NoProfile -STA -ExecutionPolicy Bypass -File tests/windows-selection-native-focus-smoke.ps1 -NativeAssemblyPath "$env:RUNNER_TEMP/desktop-native.dll" -OutputDirectory "$env:RUNNER_TEMP/desktop-focus" -ExpectCrossProcessSuccess -IsolatedTestSession)
+          if ($LASTEXITCODE -ne 0) { $result | Write-Output; exit 1 }
+          $report = ($result | Where-Object { $_ -match '^\{' } | Select-Object -Last 1) | ConvertFrom-Json
+          if (-not $report.ok -or $report.passedCases -ne 2 -or -not $report.generatedSourceOnly -or -not $report.expectCrossProcessSuccess) { throw 'Generated native focus acceptance failed' }
+          $report | ConvertTo-Json -Depth 16 | Set-Content "$env:RUNNER_TEMP/desktop-package/windows-native-focus.json" -Encoding UTF8
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Desktop-package-${{ runner.os }}
+          if-no-files-found: error
+          path: ${{ runner.temp }}/desktop-package/*
+      - name: State exact validation scope
+        shell: bash
+        run: |
+          if [ "$RUNNER_OS" = Windows ]; then
+            echo 'Fresh NSIS and ZIP. ZIP runtime, actual Windows settings and generated native focus passed; NSIS structure/identity inspected. No physical multi-display or user-field root cause is claimed. Offline resources alone reuse pinned historical bytes.' >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo 'Fresh macOS app/DMG, Rust/frontend unit tests and static package inspection passed. No installed macOS runtime or field-root-cause acceptance is claimed.' >> "$GITHUB_STEP_SUMMARY"
+          fi
+  prepare:
+    needs: build
+    timeout-minutes: 10
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/download-artifact@v4
+        with:
+          name: Desktop-package-Windows
+          path: desktop-inputs/Windows
+      - uses: actions/download-artifact@v4
+        with:
+          name: Desktop-package-macOS
+          path: desktop-inputs/macOS
+      - name: Validate preparation and publisher policy
+        run: |
+          python3 -m unittest discover -s scripts -p 'test_prepare_desktop_release.py' -v
+          node --test scripts/test-desktop-release.cjs
+      - name: Prepare exact inspected release bytes
+        env:
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: python3 scripts/prepare-desktop-release.py --artifacts desktop-inputs --output release-assets --run-url "$RUN_URL"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: EchoLingo-0.2.14-publication
+          if-no-files-found: error
+          path: release-assets/*
+  publish:
+    needs: prepare
+    if: github.repository == 'Blueeeecho/EchoLingo' && github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+    timeout-minutes: 50
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      actions: read
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/download-artifact@v4
+        with:
+          name: EchoLingo-0.2.14-publication
+          path: release-assets
+      - name: Require successful exact-source main CI before publishing
+        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b
+        timeout-minutes: 45
+        with:
+          script: |
+            const {owner, repo} = context.repo;
+            const deadline = Date.now() + 40 * 60 * 1000;
+            while (Date.now() < deadline) {
+              const {data: main} = await github.rest.git.getRef({owner,repo,ref:'heads/main'});
+              if (main.object.sha !== context.sha) throw new Error('Main moved during CI wait');
+              const {data} = await github.rest.actions.listWorkflowRuns({owner,repo,workflow_id:'ci.yml',head_sha:context.sha,event:'push',per_page:100});
+              const runs = data.workflow_runs.filter(run => run.head_sha === context.sha && run.event === 'push' && run.path === '.github/workflows/ci.yml').sort((a,b) => b.id-a.id);
+              if (runs.length && runs[0].status === 'completed') {
+                if (runs[0].conclusion !== 'success') throw new Error('Exact-source CI did not pass: '+runs[0].html_url);
+                return;
+              }
+              await new Promise(resolve => setTimeout(resolve, 30000));
+            }
+            throw new Error('Exact-source CI remains pending; no release was published');
+      - name: Publish a new prerelease without replacing old assets
+        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b
+        with:
+          script: |
+            const { publish } = require('./scripts/publish-desktop-release.cjs');
+            await publish({ github, context, core });
