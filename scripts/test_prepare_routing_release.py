@@ -120,6 +120,20 @@ class PreparationTests(unittest.TestCase):
             self.assertEqual(ast.literal_eval(keywords['encoding']),'utf-8')
         workflow=(R.ROOT/'.github/workflows/release-routing.yml').read_text(encoding='utf-8')
         self.assertIn("env:\n  PYTHONUTF8: '1'\npermissions:",workflow)
+    def test_release_policy_runs_failed_source_guard_on_windows(self):
+        ci=(R.ROOT/'.github/workflows/ci.yml').read_text(encoding='utf-8')
+        block=ci.split('  routing-release-policy:',1)[1].split('  language-patch-targeted:',1)[0]
+        self.assertIn('os: [ubuntu-latest, windows-latest]',block)
+        self.assertIn("PYTHONUTF8: '1'",block)
+        self.assertIn('shell: bash',block)
+        self.assertIn('set -euo pipefail',block)
+        self.assertIn('fetch-depth: 0',block)
+        self.assertIn('python scripts/prepare-routing-release.py --check-source',block)
+        self.assertIn("python -m unittest discover -s scripts -p 'test_prepare_routing_release.py'",block)
+        self.assertNotIn('python3 ',block)
+        routing=ci.split('  automatic-direction-routing:',1)[1].split('  routing-release-policy:',1)[0]
+        self.assertIn("if: needs.validation-mode.outputs.mode == 'automatic-direction'\n",routing)
+        self.assertNotIn("mode == 'routing-release'",routing)
     def test_all_eight_versions(self):
         self.assertEqual(len(R.module().check_versions(R.ROOT)),7)
 
