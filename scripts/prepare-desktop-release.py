@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Prepare 0.2.15 using current-run Mac runtime and accepted Windows ZIP bytes."""
 import argparse
+import copy
 import hashlib
 import importlib.util
 import json
@@ -9,10 +10,13 @@ import re
 import shutil
 import subprocess
 import zipfile
+import tomllib
 
 ROOT = Path(__file__).resolve().parents[1]
 VERSION = '0.2.15'
 REVIEWED_SOURCE = '7afe3e2ea2b8618c3a92a7a5d69058bdd57898e1'
+MANIFEST_BASELINE = '2c8d81f45d81517afbc86daa446dd10353c6db73'
+BASELINE_VERSION = '0.2.14'
 MODE = 'desktop-macos-runtime-unpack-v2'
 SUPPORT = {
     'package.json', 'package-lock.json', 'src-tauri/tauri.conf.json',
@@ -46,18 +50,51 @@ def git(*args):
     return subprocess.check_output(['git', *args], cwd=ROOT, text=True, encoding='utf-8').strip()
 
 
+
+def expected_version_manifest(name, source):
+    """Change only this project's version fields, never a dependency version."""
+    parsed = json.loads(source) if name.endswith('.json') else tomllib.loads(source)
+    expected = copy.deepcopy(parsed)
+    package_name = 'echolingo-native-capture' if '/native-capture/' in name else 'echolingo'
+    if name.endswith('Cargo.lock'):
+        owners = [entry for entry in expected.get('package', [])
+                  if entry.get('name') == package_name and 'source' not in entry]
+        if len(owners) != 1:
+            raise ValueError('Expected exactly one local package: '+name)
+    elif name.endswith('Cargo.toml'):
+        owners = [expected['package']]
+    elif name == 'package-lock.json':
+        owners = [expected, expected['packages']['']]
+    else:
+        owners = [expected]
+    for owner in owners:
+        if owner.get('version') != BASELINE_VERSION:
+            raise ValueError('Unexpected released baseline version: '+name)
+        if name != 'src-tauri/tauri.conf.json' and owner.get('name') != package_name:
+            raise ValueError('Unexpected project package identity: '+name)
+        owner['version'] = VERSION
+    return expected
+
+
+def check_version_only_manifest(name, baseline, current):
+    expected = expected_version_manifest(name, baseline)
+    actual = json.loads(current) if name.endswith('.json') else tomllib.loads(current)
+    if actual != expected:
+        raise ValueError('Non-version manifest change: '+name)
+
+
 def check_source():
     if re.fullmatch('[0-9a-f]{40}', REVIEWED_SOURCE) is None:
         raise ValueError('Final verified integration commit must be pinned before release')
     subprocess.run(['git', 'merge-base', '--is-ancestor', REVIEWED_SOURCE, 'HEAD'], cwd=ROOT, check=True)
+    subprocess.run(['git', 'merge-base', '--is-ancestor', MANIFEST_BASELINE, 'HEAD'], cwd=ROOT, check=True)
     changed = set(git('diff', '--name-only', REVIEWED_SOURCE, 'HEAD').splitlines())
     if changed-SUPPORT:
         raise ValueError('Unexpected post-review changes: '+str(sorted(changed-SUPPORT)))
     value = verifier()
     for name in value.VERSION_PATHS:
-        before = git('show', REVIEWED_SOURCE+':'+name).replace('"0.2.14"', '"0.2.15"').strip()
-        if before != (ROOT/name).read_text(encoding='utf-8').strip():
-            raise ValueError('Non-version manifest change: '+name)
+        check_version_only_manifest(name, git('show', MANIFEST_BASELINE+':'+name),
+                                    (ROOT/name).read_text(encoding='utf-8'))
     value.check_versions(ROOT)
     return value.source_provenance(ROOT)
 
