@@ -12,7 +12,7 @@ import zipfile
 
 ROOT = Path(__file__).resolve().parents[1]
 VERSION = '0.2.15'
-REVIEWED_SOURCE = 'e4876f24691f7318d076a45248e9f1436b8dae32'
+REVIEWED_SOURCE = '7afe3e2ea2b8618c3a92a7a5d69058bdd57898e1'
 MODE = 'desktop-macos-runtime-unpack-v2'
 SUPPORT = {
     'package.json', 'package-lock.json', 'src-tauri/tauri.conf.json',
