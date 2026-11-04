@@ -209,6 +209,7 @@ def run(args):
                   restartPassed=False, secondInstancePassed=False)
     owned_paths, children, temporary = [], [], None
     mount_clean = True
+    stage = "runner_preflight"
     try:
         home = require_runner()
         require(RUN_URL.fullmatch(args.run_url) is not None, "invalid_run_url")
@@ -219,34 +220,47 @@ def run(args):
         require_absent_state(paths)
         # No cleanup authority is acquired until every preflight guard passes.
         owned_paths = paths
+        stage = "source_identity"
         report["commit"], report["tree"] = command(
             ["git", "-C", ROOT, "rev-parse", "HEAD", "HEAD^{tree}"]).decode().splitlines()
         require(all(re.fullmatch(r"[0-9a-f]{40}", report[key]) for key in ("commit", "tree")),
                 "invalid_source_identity")
         require(not command(["git", "-C", ROOT, "status", "--porcelain=v1", "--untracked-files=no"]),
                 "tracked_source_not_clean")
+        stage = "built_bundle_identity"
         installer = args.installer.resolve(strict=True)
         built = args.built_application.resolve(strict=True)
         require(installer.is_file() and installer.suffix.lower() == ".dmg", "invalid_installer")
         validate_bundle(built)
         built_manifest = bundle_manifest(built)
         report["installerSha256"] = sha256(installer)
+        stage = "temporary_directory"
         temporary = Path(tempfile.mkdtemp(prefix="echolingo-runtime-", suffix=".noindex"))
+        # hdiutil reports canonical /private/var paths on macOS even when
+        # tempfile used /var. Keep strict mount identity checks unchanged.
+        temporary = temporary.resolve(strict=True)
+        stage = "window_probe_build"
         probe = temporary / "window-probe"
         command(["xcrun", "swiftc", ROOT / "tests/macos-window-probe.swift", "-o", probe], timeout=120)
+        stage = "package_inspector_load"
         spec = importlib.util.spec_from_file_location("candidate_inspection", ROOT / "scripts/inspect-candidate-package.py")
         inspection = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(inspection)
         installed = temporary / "EchoLingo.app"
         mount_clean = False
+        stage = "dmg_mount"
         with inspection.readonly_dmg(installer, temporary / "mount") as volume:
+            stage = "packaged_bundle_identity"
             applications = [p for p in volume.iterdir() if p.name.casefold().endswith(".app")]
             require(len(applications) == 1 and applications[0].name == "EchoLingo.app", "unexpected_dmg_apps")
             packaged = applications[0]
             validate_bundle(packaged)
             require(bundle_manifest(packaged) == built_manifest, "package_differs_from_fresh_build")
+            stage = "packaged_bundle_copy"
             command(["ditto", "--rsrc", "--extattr", packaged, installed], timeout=120)
+            stage = "dmg_detach"
         mount_clean = True
+        stage = "installed_bundle_verification"
         require(bundle_manifest(installed) == built_manifest, "copied_bundle_changed")
         binary = validate_bundle(installed)
         report["applicationSha256"] = sha256(binary)
@@ -265,21 +279,29 @@ def run(args):
                                      stderr=subprocess.DEVNULL, cwd=temporary)
             children.append(child)
             return child
+        stage = "first_launch"
         first = launch()
+        stage = "first_webview_and_window"
         await_ready(first, diagnostic, probe)
         report.update(extractedBundleLaunched=True, frontendWebViewReady=True, settingsWindowShown=True)
+        stage = "second_instance"
         second = launch()
         require(second.wait(timeout=20) == 0, "second_instance_failed")
         require(first.poll() is None and app_pids() == {first.pid}, "single_instance_invariant_failed")
         require(window_shown(probe, first.pid), "second_instance_window_missing")
         report["secondInstancePassed"] = True
+        stage = "first_termination"
         stop(first)
         require(not app_pids(), "first_process_did_not_stop")
+        stage = "restart_launch"
         restarted = launch()
+        stage = "restart_webview_and_window"
         await_ready(restarted, diagnostic, probe)
         require(restarted.pid != first.pid, "restart_pid_reused")
         report["restartPassed"] = True
+        stage = "restart_termination"
         stop(restarted)
+        stage = "post_run_package_verification"
         report["packageUnchangedAfterRun"] = (
             sha256(installer) == report["installerSha256"]
             and bundle_manifest(installed) == built_manifest
@@ -288,6 +310,7 @@ def run(args):
         command(["codesign", "--verify", "--deep", "--strict", installed])
         report["ok"] = True
     except Exception as error:
+        report["failureStage"] = stage
         report["failureCode"] = str(error) if isinstance(error, SmokeError) else type(error).__name__
     finally:
         cleanup_ok = mount_clean
@@ -306,6 +329,9 @@ def run(args):
                 cleanup_ok = not temporary.exists() and cleanup_ok
         except Exception:
             cleanup_ok = False
+        if not cleanup_ok and "failureStage" not in report:
+            report["failureStage"] = "cleanup"
+            report["failureCode"] = "cleanup_incomplete"
         report["cleanupComplete"] = cleanup_ok
         report["ok"] = report["ok"] and cleanup_ok
     return report
@@ -323,7 +349,7 @@ def main():
     report = run(args)
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(json.dumps(report, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-    print(json.dumps({key: report[key] for key in ("ok", "cleanupComplete", "failureCode") if key in report}))
+    print(json.dumps({key: report[key] for key in ("ok", "cleanupComplete", "failureCode", "failureStage") if key in report}))
     return 0 if report["ok"] else 1
 
 
