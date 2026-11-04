@@ -350,3 +350,41 @@ class FixedDesktopRecoveryModeTests(unittest.TestCase):
         self.assertNotIn('continue-on-error',job)
         self.assertNotIn('contents: write',job)
         self.assertIn('This job alone is not native acceptance.',job)
+
+
+class PackageAwareVersionTests(unittest.TestCase):
+    def test_released_baseline_is_immutable_and_separate_from_source_pin(self):
+        self.assertEqual(R.MANIFEST_BASELINE, '2c8d81f45d81517afbc86daa446dd10353c6db73')
+        self.assertNotEqual(R.MANIFEST_BASELINE, R.REVIEWED_SOURCE)
+    def test_same_version_third_party_cargo_entry_is_unchanged(self):
+        baseline = 'version = 4\n[[package]]\nname = "echolingo"\nversion = "0.2.14"\n[[package]]\nname = "async-signal"\nversion = "0.2.14"\nsource = "registry+https://github.com/rust-lang/crates.io-index"\nchecksum = "unchanged-checksum"\n'
+        current = baseline.replace('name = "echolingo"\nversion = "0.2.14"', 'name = "echolingo"\nversion = "0.2.15"')
+        dependency=baseline.split('[[package]]')[2]
+        self.assertEqual(current.split('[[package]]')[2], dependency)
+        expected=R.expected_version_manifest('src-tauri/Cargo.lock', baseline)
+        self.assertEqual(expected['package'][1], R.tomllib.loads(baseline)['package'][1])
+        R.check_version_only_manifest('src-tauri/Cargo.lock', baseline, current)
+        for modified in (current.replace('name = "async-signal"\nversion = "0.2.14"', 'name = "async-signal"\nversion = "0.2.15"'),
+                         current.replace('unchanged-checksum', 'different-checksum'),
+                         current.replace('crates.io-index', 'other-index')):
+            with self.assertRaisesRegex(ValueError, 'Non-version manifest change'):
+                R.check_version_only_manifest('src-tauri/Cargo.lock', baseline, modified)
+    def test_npm_dependency_and_unknown_fields_are_not_rewritten(self):
+        baseline={'name':'echolingo','version':'0.2.14','custom':'0.2.14','packages':{
+            '':{'name':'echolingo','version':'0.2.14'},
+            'node_modules/example':{'version':'0.2.14','integrity':'original'}}}
+        current=copy.deepcopy(baseline)
+        current['version']=current['packages']['']['version']='0.2.15'
+        R.check_version_only_manifest('package-lock.json', json.dumps(baseline), json.dumps(current))
+        for change in ('dependency','integrity','unknown'):
+            bad=copy.deepcopy(current)
+            if change=='dependency': bad['packages']['node_modules/example']['version']='0.2.15'
+            elif change=='integrity': bad['packages']['node_modules/example']['integrity']='different'
+            else: bad['custom']='0.2.15'
+            with self.assertRaisesRegex(ValueError, 'Non-version manifest change'):
+                R.check_version_only_manifest('package-lock.json', json.dumps(baseline), json.dumps(bad))
+    def test_real_baseline_allows_only_project_versions(self):
+        for name in R.verifier().VERSION_PATHS:
+            with self.subTest(name=name):
+                baseline=R.git('show', R.MANIFEST_BASELINE+':'+name)
+                R.check_version_only_manifest(name, baseline, (R.ROOT/name).read_text())
