@@ -505,7 +505,7 @@ def main():
     parser.add_argument("--run-url", required=True)
     parser.add_argument("--locked-build-passed", action="store_true")
     parser.add_argument("--focused-tests-passed", action="store_true")
-    parser.add_argument("--expected-version", choices=("0.2.13", "0.2.14"), default=VERSION)
+    parser.add_argument("--expected-version", choices=("0.2.13", "0.2.14", "0.2.15"), default=VERSION)
     args = parser.parse_args()
     VERSION = args.expected_version
     try:
