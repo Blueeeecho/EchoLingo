@@ -2626,13 +2626,7 @@ mod tests {
         };
         popup.applied(680.0, 2.0, work);
         manual.begin(shown.epoch, 240.0);
-        assert!(manual.finish_native_popup(
-            &mut popup,
-            shown,
-            true,
-            (850.0, 400.0),
-            (2.0, work),
-        ));
+        assert!(manual.finish_native_popup(&mut popup, shown, true, (850.0, 400.0), (2.0, work),));
         assert_eq!(popup.preferred, 850.0);
         assert_eq!(manual.height(12, 300.0), 400.0);
         assert_eq!(manual.height(13, 300.0), 300.0);
