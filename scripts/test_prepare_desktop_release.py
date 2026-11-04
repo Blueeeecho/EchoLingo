@@ -343,7 +343,7 @@ class FixedDesktopRecoveryModeTests(unittest.TestCase):
             return process.returncode, out.read_text() if out.exists() else '', calls.read_text() if calls.exists() else ''
     def test_git_distribution_ancestor_search_covers_native_and_bash_paths(self):
         with tempfile.TemporaryDirectory() as directory:
-            root=Path(directory)/'Git'
+            root=Path(directory).resolve(strict=True)/'Git'
             shell=root/'bin/bash.exe';shell.parent.mkdir(parents=True);shell.touch()
             for relative in ('cmd/git.exe', 'bin/git.exe', 'mingw64/bin/git.exe'):
                 git=root/relative;git.parent.mkdir(parents=True, exist_ok=True);git.touch()
