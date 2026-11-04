@@ -272,6 +272,9 @@ class WorkflowBuildToolTests(unittest.TestCase):
         self.assertIn('CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_LINKER=$linker',workflow)
         self.assertIn('Out-File -FilePath $env:GITHUB_ENV',workflow)
         self.assertLess(workflow.index('Pin the MSVC linker'),workflow.index('Test frontend, actual Rust sources'))
+        export='export ECHOLINGO_WORKFLOW_BASH="$(cygpath -w "$BASH")"'
+        self.assertIn(export, workflow)
+        self.assertLess(workflow.index(export), workflow.index("python -m unittest discover -s scripts -p 'test_prepare_desktop_release.py'"))
 
 
 class MacRuntimeWorkflowTests(unittest.TestCase):
@@ -321,15 +324,33 @@ class FixedDesktopRecoveryModeTests(unittest.TestCase):
                 # installed Git distribution that also runs Actions bash steps.
                 git=shutil.which('git')
                 self.assertIsNotNone(git, 'Git for Windows is required by the workflow')
-                candidates=[Path(git).resolve().parent.parent/'bin'/'bash.exe',
-                            Path(git).resolve().parent/'bash.exe']
-                bash=next((str(path) for path in candidates if path.is_file()), None)
+                # Git Bash exposes git.exe under mingw64/bin; ordinary cmd
+                # exposes it under cmd or bin. Check the same distribution's
+                # ancestors, never System32's unrelated WSL launcher.
+                candidates=[parent/relative for parent in list(Path(git).resolve().parents)[:3]
+                            for relative in ('bin/bash.exe', 'usr/bin/bash.exe')]
+                configured=os.environ.get('ECHOLINGO_WORKFLOW_BASH')
+                if configured:
+                    self.assertTrue(Path(configured).is_file(), 'Configured workflow Bash must exist')
+                    bash=configured
+                else:
+                    bash=next((str(path) for path in candidates if path.is_file()), None)
             self.assertIsNotNone(bash, 'The workflow Bash executable is required')
             process=subprocess.run([bash,'-e','-c',standins+selector], cwd=directory,
                                    env=environment, capture_output=True, text=True)
             self.assertIn(process.returncode, (0, check_exit),
                           f'Selector shell failed: {process.stderr}')
             return process.returncode, out.read_text() if out.exists() else '', calls.read_text() if calls.exists() else ''
+    def test_git_distribution_ancestor_search_covers_native_and_bash_paths(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root=Path(directory)/'Git'
+            shell=root/'bin/bash.exe';shell.parent.mkdir(parents=True);shell.touch()
+            for relative in ('cmd/git.exe', 'bin/git.exe', 'mingw64/bin/git.exe'):
+                git=root/relative;git.parent.mkdir(parents=True, exist_ok=True);git.touch()
+                candidates=[parent/path for parent in list(git.resolve().parents)[:3]
+                            for path in ('bin/bash.exe', 'usr/bin/bash.exe')]
+                found=next((path for path in candidates if path.is_file()), None)
+                self.assertEqual(found, shell)
     def test_only_fixed_version_branch_or_main_push_selects_mode(self):
         for arguments in ({}, {'event':'push','head':'','base':'','ref':'refs/heads/main'}):
             with self.subTest(arguments=arguments):
