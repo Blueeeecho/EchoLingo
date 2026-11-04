@@ -127,12 +127,12 @@ jobs:
           if [ "$RUNNER_OS" = Windows ]; then export ECHOLINGO_WORKFLOW_BASH="$(cygpath -w "$BASH")"; fi
           rustfmt --edition 2021 --check src-tauri/src/window_layout.rs src-tauri/src/translation_health.rs
           python scripts/test_automatic_translation_contract.py
-          cargo test --manifest-path tests/language-routing-patch/Cargo.toml --locked
-          cargo test --manifest-path src-tauri/Cargo.toml --locked
-          if [ "$RUNNER_OS" = Windows ]; then cargo test --manifest-path src-tauri/native-capture/Cargo.toml --locked; fi
           python -m unittest discover -s scripts -p 'test_package_windows_unpack.py' -v
           python -m unittest discover -s scripts -p 'test_prepare_desktop_release.py' -v
           node --test scripts/test-desktop-release.cjs
+          cargo test --manifest-path tests/language-routing-patch/Cargo.toml --locked
+          cargo test --manifest-path src-tauri/Cargo.toml --locked
+          if [ "$RUNNER_OS" = Windows ]; then cargo test --manifest-path src-tauri/native-capture/Cargo.toml --locked; fi
       - name: Build fresh native release installer with locked dependencies
         run: npm run tauri build -- --bundles ${{ runner.os == 'Windows' && 'nsis' || 'app,dmg' }} -- --locked
       - name: Inspect actual installer and bind fresh application identity
