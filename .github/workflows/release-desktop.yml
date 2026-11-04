@@ -124,6 +124,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          if [ "$RUNNER_OS" = Windows ]; then export ECHOLINGO_WORKFLOW_BASH="$(cygpath -w "$BASH")"; fi
           rustfmt --edition 2021 --check src-tauri/src/window_layout.rs src-tauri/src/translation_health.rs
           python scripts/test_automatic_translation_contract.py
           cargo test --manifest-path tests/language-routing-patch/Cargo.toml --locked
