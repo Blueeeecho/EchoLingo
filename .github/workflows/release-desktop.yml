@@ -56,6 +56,7 @@ jobs:
       - uses: swatinem/rust-cache@v2
         with:
           key: desktop-release-0215-static-crt
+          cache-on-failure: true
           workspaces: |
             src-tauri -> target
             tests/language-routing-patch -> target
