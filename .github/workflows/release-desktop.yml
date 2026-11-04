@@ -1,4 +1,4 @@
-name: Validate and publish desktop 0.2.14
+name: Validate and publish desktop 0.2.15
 on:
   workflow_dispatch:
   pull_request:
@@ -14,7 +14,7 @@ permissions:
   contents: read
   actions: read
 concurrency:
-  group: echolingo-prerelease-0.2.14-${{ github.event.pull_request.number || github.ref }}
+  group: echolingo-prerelease-0.2.15-${{ github.event.pull_request.number || github.ref }}
   # Only superseded PR validation is canceled; a main publication is never canceled.
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 jobs:
@@ -42,6 +42,8 @@ jobs:
         with:
           python-version: '3.12'
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
       - uses: ilammy/msvc-dev-cmd@v1
         if: runner.os == 'Windows'
       - name: Pin the MSVC linker for Cargo in every shell
@@ -53,7 +55,7 @@ jobs:
           "CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_LINKER=$linker" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
       - uses: swatinem/rust-cache@v2
         with:
-          key: desktop-release-0214-static-crt
+          key: desktop-release-0215-static-crt
           workspaces: |
             src-tauri -> target
             tests/language-routing-patch -> target
@@ -71,7 +73,7 @@ jobs:
             const { owner, repo } = context.repo;
             const { data: main } = await github.rest.git.getRef({owner,repo,ref:'heads/main'});
             if (main.object.sha !== context.sha) throw new Error('Source is no longer main');
-            try { await github.rest.repos.getReleaseByTag({owner,repo,tag:'0.2.14'}); throw new Error('Release already exists'); }
+            try { await github.rest.repos.getReleaseByTag({owner,repo,tag:'0.2.15'}); throw new Error('Release already exists'); }
             catch (e) { if (e.status !== 404) throw e; }
       - name: Verify only unchanged offline resource inputs may be reused
         if: runner.os == 'Windows'
@@ -121,6 +123,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          rustfmt --edition 2021 --check src-tauri/src/window_layout.rs src-tauri/src/translation_health.rs
           python scripts/test_automatic_translation_contract.py
           cargo test --manifest-path tests/language-routing-patch/Cargo.toml --locked
           cargo test --manifest-path src-tauri/Cargo.toml --locked
@@ -146,25 +149,46 @@ jobs:
             extracted="$RUNNER_TEMP/desktop-inspection/echolingo"
           fi
           test "${#files[@]}" -eq 1
-          python scripts/inspect-candidate-package.py --expected-version 0.2.14 --platform "$RUNNER_OS" --installer "${files[0]}" --built-application "$built" --output-dir "$RUNNER_TEMP/desktop-inspection" --run-url "$RUN_URL" --locked-build-passed --focused-tests-passed
+          python scripts/inspect-candidate-package.py --expected-version 0.2.15 --platform "$RUNNER_OS" --installer "${files[0]}" --built-application "$built" --output-dir "$RUNNER_TEMP/desktop-inspection" --run-url "$RUN_URL" --locked-build-passed --focused-tests-passed
           mkdir "$RUNNER_TEMP/desktop-package"
           # Bash 3 with nounset rejects expansion of an empty optional array.
-          verifier=(scripts/verify-candidate-package.py --expected-version 0.2.14 --platform "$RUNNER_OS" --installer "${files[0]}" --application "$extracted" --checks-json "$RUNNER_TEMP/desktop-inspection/checks.json" --output "$RUNNER_TEMP/desktop-package/candidate.json" --run-url "$RUN_URL")
+          verifier=(scripts/verify-candidate-package.py --expected-version 0.2.15 --platform "$RUNNER_OS" --installer "${files[0]}" --application "$extracted" --checks-json "$RUNNER_TEMP/desktop-inspection/checks.json" --output "$RUNNER_TEMP/desktop-package/candidate.json" --run-url "$RUN_URL")
           if [ "$RUNNER_OS" = Windows ]; then
             verifier+=(--offline-staging-manifest "$RUNNER_TEMP/candidate-offline-evidence/baseline-reuse.json" --offline-source-archive "$RUNNER_TEMP/candidate-offline-evidence/EchoLingo-offline-engine-source.zip")
           fi
           python "${verifier[@]}"
           cp "${files[0]}" "$RUNNER_TEMP/desktop-package/"
           if [ "$RUNNER_OS" = Windows ]; then cp "$RUNNER_TEMP/candidate-offline-evidence/EchoLingo-offline-engine-source.zip" "$RUNNER_TEMP/desktop-package/"; fi
+      - name: Accept extracted Mac bundle and native regression fixtures
+        if: runner.os == 'macOS'
+        timeout-minutes: 12
+        shell: bash
+        env:
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          bash tests/macos-native-self-test.sh
+          swiftc src-tauri/native/macos_window.swift tests/macos-window-size.swift -parse-as-library -O -framework AppKit -o "$RUNNER_TEMP/desktop-window-size"
+          "$RUNNER_TEMP/desktop-window-size"
+          files=(src-tauri/target/release/bundle/dmg/*.dmg)
+          test "${#files[@]}" -eq 1
+          python3 tests/macos-installed-runtime-smoke.py --installer "${files[0]}" --built-application src-tauri/target/release/bundle/macos/EchoLingo.app --output "$RUNNER_TEMP/desktop-package/macos-runtime.json" --run-url "$RUN_URL" --native-self-tests-passed --native-window-resize-fixture-passed
+      - name: Preserve bounded Mac runtime acceptance report
+        if: always() && runner.os == 'macOS'
+        uses: actions/upload-artifact@v4
+        with:
+          name: Mac-runtime-acceptance
+          if-no-files-found: warn
+          path: ${{ runner.temp }}/desktop-package/macos-runtime.json
       - name: Build and accept exact Windows unpack ZIP
         if: runner.os == 'Windows'
         shell: powershell
         run: |
           & python scripts/package-windows-unpack.py --application src-tauri/target/release/echolingo.exe --source-archive "$env:RUNNER_TEMP/candidate-offline-evidence/EchoLingo-offline-engine-source.zip" --output "$env:RUNNER_TEMP/desktop-unpack"
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          & powershell.exe -NoProfile -STA -ExecutionPolicy Bypass -File tests/windows-unpack-smoke.ps1 -ArchivePath "$env:RUNNER_TEMP/desktop-unpack/EchoLingo_0.2.14_windows_x64-unpack.zip" -ManifestPath "$env:RUNNER_TEMP/desktop-unpack/WINDOWS-ZIP-MANIFEST.json" -ReportPath "$env:RUNNER_TEMP/desktop-unpack/windows-unpack-smoke.json"
+          & powershell.exe -NoProfile -STA -ExecutionPolicy Bypass -File tests/windows-unpack-smoke.ps1 -ArchivePath "$env:RUNNER_TEMP/desktop-unpack/EchoLingo_0.2.15_windows_x64-unpack.zip" -ManifestPath "$env:RUNNER_TEMP/desktop-unpack/WINDOWS-ZIP-MANIFEST.json" -ReportPath "$env:RUNNER_TEMP/desktop-unpack/windows-unpack-smoke.json"
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          foreach ($name in @('EchoLingo_0.2.14_windows_x64-unpack.zip','WINDOWS-ZIP-MANIFEST.json','windows-unpack-smoke.json')) {
+          foreach ($name in @('EchoLingo_0.2.15_windows_x64-unpack.zip','WINDOWS-ZIP-MANIFEST.json','windows-unpack-smoke.json')) {
             Copy-Item -LiteralPath (Join-Path "$env:RUNNER_TEMP/desktop-unpack" $name) -Destination "$env:RUNNER_TEMP/desktop-package/"
           }
       - name: Accept real Windows settings and generated native focus behavior
@@ -205,7 +229,7 @@ jobs:
           if [ "$RUNNER_OS" = Windows ]; then
             echo 'Fresh NSIS and ZIP. ZIP runtime, actual Windows settings and generated native focus passed; NSIS structure/identity inspected. No physical multi-display or user-field root cause is claimed. Offline resources alone reuse pinned historical bytes.' >> "$GITHUB_STEP_SUMMARY"
           else
-            echo 'Fresh macOS app/DMG, Rust/frontend unit tests and static package inspection passed. No installed macOS runtime or field-root-cause acceptance is claimed.' >> "$GITHUB_STEP_SUMMARY"
+            echo 'Fresh macOS app/DMG, extracted-bundle launch and settings WebView, native Swift policy self-tests and window-resize fixtures passed. No real Codex selection, physical-device full regression, or field-root-cause acceptance is claimed.' >> "$GITHUB_STEP_SUMMARY"
           fi
   prepare:
     needs: build
@@ -238,7 +262,7 @@ jobs:
         run: python3 scripts/prepare-desktop-release.py --artifacts desktop-inputs --output release-assets --run-url "$RUN_URL"
       - uses: actions/upload-artifact@v4
         with:
-          name: EchoLingo-0.2.14-publication
+          name: EchoLingo-0.2.15-publication
           if-no-files-found: error
           path: release-assets/*
   publish:
@@ -256,7 +280,7 @@ jobs:
           persist-credentials: false
       - uses: actions/download-artifact@v4
         with:
-          name: EchoLingo-0.2.14-publication
+          name: EchoLingo-0.2.15-publication
           path: release-assets
       - name: Require successful exact-source main CI before publishing
         uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b
