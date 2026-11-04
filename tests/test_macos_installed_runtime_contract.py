@@ -1,4 +1,5 @@
 """Linux-safe contract tests. These do not run or accept the macOS app."""
+from contextlib import contextmanager
 import importlib.util
 import json
 from pathlib import Path
@@ -209,10 +210,58 @@ class RuntimeContract(unittest.TestCase):
         with self.assertRaisesRegex(smoke.SmokeError, "cleanup_symlink_parent"):
             smoke.remove_owned_state([parent / "app"])
 
+    def test_symlink_temp_root_is_canonical_before_probe_and_dmg_mount(self):
+        # Model macOS /var -> /private/var without requiring macOS or hdiutil.
+        real = self.root / "real"
+        real.mkdir()
+        alias = self.root / "alias"
+        alias.symlink_to(real, target_is_directory=True)
+        owned = real / "owned.noindex"
+        owned.mkdir()
+        self.bundle()
+        args = self.args()
+        args.installer.write_bytes(b"contract fixture only")
+        observed = []
+
+        @contextmanager
+        def readonly_dmg(installer, mountpoint):
+            observed.append(mountpoint)
+            raise RuntimeError("private mount diagnostic must not leak")
+            yield  # This injected failure is before a mount is confirmed.
+
+        inspection = SimpleNamespace(readonly_dmg=readonly_dmg)
+        spec = SimpleNamespace(loader=SimpleNamespace(exec_module=lambda module: None))
+        calls = []
+
+        def command(arguments, timeout=30):
+            calls.append(arguments)
+            if "rev-parse" in arguments:
+                return (("a" * 40) + "\n" + ("b" * 40) + "\n").encode()
+            return b""
+
+        with mock.patch.object(smoke, "require_runner", return_value=self.root), \
+                mock.patch.object(smoke, "app_pids", return_value=set()), \
+                mock.patch.object(smoke, "command", side_effect=command), \
+                mock.patch.object(smoke.tempfile, "mkdtemp", return_value=str(alias / owned.name)), \
+                mock.patch.object(smoke.importlib.util, "spec_from_file_location", return_value=spec), \
+                mock.patch.object(smoke.importlib.util, "module_from_spec", return_value=inspection):
+            report = smoke.run(args)
+        self.assertEqual(observed, [owned.resolve(strict=True) / "mount"])
+        probe_command = next(call for call in calls if call[0] == "xcrun")
+        self.assertEqual(probe_command[-1], owned.resolve(strict=True) / "window-probe")
+        self.assertFalse(report["ok"])
+        self.assertEqual(report["failureStage"], "dmg_mount")
+        self.assertEqual(report["failureCode"], "RuntimeError")
+        self.assertNotIn("private mount diagnostic", json.dumps(report))
+        # An uncertain mount must still prohibit deleting its enclosing root.
+        self.assertFalse(report["cleanupComplete"])
+        self.assertTrue(owned.exists())
+
     def test_unexpected_error_never_leaks_exception_message(self):
         with mock.patch.object(smoke, "require_runner", side_effect=ValueError("private sentinel")):
             report = smoke.run(self.args())
         self.assertEqual(report["failureCode"], "ValueError")
+        self.assertEqual(report["failureStage"], "runner_preflight")
         self.assertNotIn("private sentinel", json.dumps(report))
 
 
