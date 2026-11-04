@@ -1,4 +1,4 @@
-//! One bounded, in-memory translation snapshot. Never stores text, provider
+//! Bounded, in-memory current and last-failure snapshots. Never store text, provider
 //! names/IDs, endpoints, credentials or upstream error messages.
 use serde::Serialize;
 use std::{
@@ -39,6 +39,7 @@ struct Snapshot {
     request_id: u64,
     started_at_unix_ms: u64,
     phase: &'static str,
+    failure_phase: Option<&'static str>,
     elapsed_ms: u64,
     error_category: Option<&'static str>,
     providers: Vec<ProviderHealth>,
@@ -51,6 +52,7 @@ struct Snapshot {
 #[derive(Default)]
 struct Health {
     latest: Option<Snapshot>,
+    last_failure: Option<Snapshot>,
 }
 static HEALTH: OnceLock<Mutex<Health>> = OnceLock::new();
 fn health() -> &'static Mutex<Health> {
@@ -94,11 +96,38 @@ fn category(value: &str) -> &'static str {
     }
     "other"
 }
+fn is_failure(error: Option<&str>) -> bool {
+    error.is_some_and(|error| !matches!(error, "CANCELLED" | "SYSTEM_TRANSLATION_CANCELLED"))
+}
 impl Health {
     fn update(&mut self, id: u64, f: impl FnOnce(&mut Snapshot)) {
         if let Some(s) = self.latest.as_mut().filter(|s| s.request_id == id) {
             f(s);
+            // Capture a provider failure immediately, even when a slow sibling
+            // is later cancelled. Success and cancellation cannot erase it.
+            let request_failed = is_failure(s.error_category);
+            let provider_failed = s.error_category.is_none()
+                && s.providers.iter().any(|p| is_failure(p.error_category));
+            if request_failed || provider_failed {
+                let mut failure = s.clone();
+                failure.phase = if request_failed {
+                    "failed"
+                } else {
+                    "providerFailed"
+                };
+                self.last_failure = Some(failure);
+            }
         }
+    }
+    fn snapshot(&self) -> serde_json::Value {
+        let mut value = serde_json::to_value(&self.latest).unwrap_or(serde_json::Value::Null);
+        if let Some(object) = value.as_object_mut() {
+            object.insert(
+                "lastFailure".into(),
+                serde_json::to_value(&self.last_failure).unwrap_or(serde_json::Value::Null),
+            );
+        }
+        value
     }
     fn start(&mut self, id: u64) -> bool {
         if self.latest.as_ref().is_some_and(|s| s.request_id >= id) {
@@ -111,6 +140,7 @@ impl Health {
                 .unwrap_or_default()
                 .as_millis() as u64,
             phase: "started",
+            failure_phase: None,
             elapsed_ms: 0,
             error_category: None,
             providers: Vec::new(),
@@ -127,7 +157,7 @@ pub fn snapshot() -> serde_json::Value {
     health()
         .lock()
         .ok()
-        .and_then(|h| serde_json::to_value(&h.latest).ok())
+        .map(|h| h.snapshot())
         .unwrap_or(serde_json::Value::Null)
 }
 pub struct RequestTrace {
@@ -184,6 +214,9 @@ impl RequestTrace {
         self.finished = true;
         if let Ok(mut h) = health().lock() {
             h.update(self.id, |s| {
+                if is_failure(error.map(category)) && s.failure_phase.is_none() {
+                    s.failure_phase = Some(s.phase);
+                }
                 s.phase = if error.is_some() {
                     "failed"
                 } else if s.providers.iter().any(|p| p.error_category.is_some()) {
@@ -264,6 +297,9 @@ impl ProviderTrace {
                     p.phase = phase;
                     p.elapsed_ms = self.started.elapsed().as_millis() as u64;
                     p.error_category = error;
+                    if is_failure(error) && s.failure_phase.is_none() {
+                        s.failure_phase = Some("providers");
+                    }
                 }
             });
         }
@@ -307,8 +343,12 @@ mod tests {
         assert_eq!(value["requestedTarget"], "auto");
         assert_eq!(value["resolvedTarget"], "zh-Hans");
         assert_eq!(value["sourceResolution"], "bilingualMode");
+        assert_eq!(value["failurePhase"], "providers");
+        assert_eq!(value["lastFailure"]["requestId"], id);
+        assert_eq!(value["lastFailure"]["failurePhase"], "providers");
         assert!(!value.to_string().contains("private"));
-        let newer = RequestTrace::start(id + 1);
+        let retained = value["lastFailure"].clone();
+        let mut newer = RequestTrace::start(id + 1);
         request.finish(Some("private old failure"));
         request.requested_languages("fr", "en");
         request.source_resolution(SourceResolution::PreservedStructure);
@@ -318,11 +358,54 @@ mod tests {
         assert_eq!(snapshot()["sourceResolution"], "unresolved");
         assert_eq!(snapshot()["requestedSource"], serde_json::Value::Null);
         assert_eq!(snapshot()["requestedTarget"], serde_json::Value::Null);
+        assert_eq!(snapshot()["lastFailure"], retained);
+        newer.finish(None);
+        assert_eq!(snapshot()["phase"], "completed");
+        assert_eq!(snapshot()["lastFailure"], retained);
         drop(newer);
+        let cancelled = RequestTrace::start(id + 2);
+        drop(cancelled);
         assert_eq!(snapshot()["phase"], "cancelled");
-        let mut duplicate = RequestTrace::start(id + 1);
+        assert_eq!(snapshot()["lastFailure"], retained);
+        let mut duplicate = RequestTrace::start(id + 2);
         duplicate.finish(None);
         assert_eq!(snapshot()["phase"], "cancelled");
+        assert_eq!(snapshot()["lastFailure"], retained);
+
+        let mut native_cancelled = RequestTrace::start(id + 3);
+        native_cancelled.finish(Some("SYSTEM_TRANSLATION_CANCELLED: private cancellation"));
+        assert_eq!(snapshot()["lastFailure"], retained);
+        let mut early = RequestTrace::start(id + 4);
+        early.requested_languages("auto", "en");
+        early.finish(Some("private early error"));
+        let early_failure = snapshot()["lastFailure"].clone();
+        assert_eq!(early_failure["requestId"], id + 4);
+        assert_eq!(early_failure["failurePhase"], "started");
+        assert_eq!(early_failure["errorCategory"], "other");
+        assert_eq!(early_failure["requestedSource"], "auto");
+        assert!(!early_failure.to_string().contains("private"));
+
+        let interrupted = RequestTrace::start(id + 5);
+        interrupted.languages("en", "zh-Hans");
+        let mut failed = ProviderTrace::start(id + 5, 0, "system");
+        let slow = ProviderTrace::start(id + 5, 1, "openai");
+        failed.finish(Some("SYSTEM_TRANSLATION_BUSY: private provider error"));
+        assert_eq!(snapshot()["lastFailure"]["requestId"], id + 5);
+        assert_eq!(
+            snapshot()["lastFailure"]["providers"][0]["errorCategory"],
+            "SYSTEM_TRANSLATION_BUSY"
+        );
+        drop(slow);
+        drop(interrupted);
+        assert_eq!(snapshot()["lastFailure"]["requestId"], id + 5);
+        assert_eq!(snapshot()["lastFailure"]["phase"], "providerFailed");
+        assert_eq!(snapshot()["lastFailure"]["failurePhase"], "providers");
+        assert_eq!(
+            snapshot()["lastFailure"]["errorCategory"],
+            serde_json::Value::Null
+        );
+        assert!(snapshot()["lastFailure"].get("lastFailure").is_none());
+        assert!(!snapshot().to_string().contains("private"));
     }
     #[test]
     fn source_resolution_is_a_fixed_enum_not_untrusted_detector_data() {
@@ -336,6 +419,18 @@ mod tests {
             "preservedStructure"
         );
         assert_eq!(SourceResolution::BilingualMode.label(), "bilingualMode");
+    }
+    #[test]
+    fn empty_and_success_only_snapshots_keep_the_existing_shape() {
+        let mut h = Health::default();
+        assert_eq!(h.snapshot(), serde_json::Value::Null);
+        h.start(1);
+        h.update(1, |s| s.phase = "completed");
+        let value = h.snapshot();
+        assert_eq!(value["requestId"], 1);
+        assert_eq!(value["phase"], "completed");
+        assert_eq!(value["lastFailure"], serde_json::Value::Null);
+        assert_eq!(value["failurePhase"], serde_json::Value::Null);
     }
     #[test]
     fn older_completion_and_start_cannot_replace_newer_request() {
