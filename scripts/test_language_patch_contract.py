@@ -30,7 +30,7 @@ def assert_language_job_gates(test, source):
     options = re.search(r'^        options: \[(.+)\]$', source, re.MULTILINE).group(1).split(', ')
     diagnostic_clauses = {f"github.event.inputs.mode != '{mode}'" for mode in options
                           if mode not in {'full', 'macos-preview', 'windows-preview'}}
-    base_modes = {'windows-unpack', 'language-routing-patch-v1', 'automatic-direction', 'routing-release'}
+    base_modes = {'desktop-recovery', 'windows-unpack', 'language-routing-patch-v1', 'automatic-direction', 'routing-release'}
     for name in FULL_JOBS:
         with test.subTest(job=name):
             body = jobs[name]

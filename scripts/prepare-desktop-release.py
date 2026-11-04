@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
-"""Prepare 0.2.14 using current-run native packages and accepted Windows ZIP bytes."""
+"""Prepare 0.2.15 using current-run Mac runtime and accepted Windows ZIP bytes."""
 import argparse
+import copy
 import hashlib
 import importlib.util
 import json
@@ -9,11 +10,14 @@ import re
 import shutil
 import subprocess
 import zipfile
+import tomllib
 
 ROOT = Path(__file__).resolve().parents[1]
-VERSION = '0.2.14'
-REVIEWED_SOURCE = '22e0267a7f333b84a73b596940ff7452a0e9f755'
-MODE = 'desktop-settings-routing-unpack-v1'
+VERSION = '0.2.15'
+REVIEWED_SOURCE = '7afe3e2ea2b8618c3a92a7a5d69058bdd57898e1'
+MANIFEST_BASELINE = '2c8d81f45d81517afbc86daa446dd10353c6db73'
+BASELINE_VERSION = '0.2.14'
+MODE = 'desktop-macos-runtime-unpack-v2'
 SUPPORT = {
     'package.json', 'package-lock.json', 'src-tauri/tauri.conf.json',
     'src-tauri/Cargo.toml', 'src-tauri/Cargo.lock',
@@ -24,9 +28,12 @@ SUPPORT = {
     'scripts/publish-desktop-release.cjs', 'scripts/test-desktop-release.cjs',
     '.github/workflows/release-desktop.yml', '.github/workflows/release-routing.yml',
     '.github/workflows/ci.yml',
+    'tests/workflow_contract_helpers.py', 'scripts/test_language_patch_contract.py',
     'scripts/test_prepare_routing_release.py', 'scripts/test_prepare_release_assets.py',
-    'docs/releases/0.2.14.zh-CN.md',
+    'docs/releases/0.2.15.zh-CN.md',
     'tests/macos-screenshot-native-fixture.swift',
+    'tests/macos-installed-runtime-smoke.py',
+    'tests/test_macos_installed_runtime_contract.py',
     'tests/test_macos_pin_readiness_fixture_contract.py',
 }
 
@@ -43,18 +50,51 @@ def git(*args):
     return subprocess.check_output(['git', *args], cwd=ROOT, text=True, encoding='utf-8').strip()
 
 
+
+def expected_version_manifest(name, source):
+    """Change only this project's version fields, never a dependency version."""
+    parsed = json.loads(source) if name.endswith('.json') else tomllib.loads(source)
+    expected = copy.deepcopy(parsed)
+    package_name = 'echolingo-native-capture' if '/native-capture/' in name else 'echolingo'
+    if name.endswith('Cargo.lock'):
+        owners = [entry for entry in expected.get('package', [])
+                  if entry.get('name') == package_name and 'source' not in entry]
+        if len(owners) != 1:
+            raise ValueError('Expected exactly one local package: '+name)
+    elif name.endswith('Cargo.toml'):
+        owners = [expected['package']]
+    elif name == 'package-lock.json':
+        owners = [expected, expected['packages']['']]
+    else:
+        owners = [expected]
+    for owner in owners:
+        if owner.get('version') != BASELINE_VERSION:
+            raise ValueError('Unexpected released baseline version: '+name)
+        if name != 'src-tauri/tauri.conf.json' and owner.get('name') != package_name:
+            raise ValueError('Unexpected project package identity: '+name)
+        owner['version'] = VERSION
+    return expected
+
+
+def check_version_only_manifest(name, baseline, current):
+    expected = expected_version_manifest(name, baseline)
+    actual = json.loads(current) if name.endswith('.json') else tomllib.loads(current)
+    if actual != expected:
+        raise ValueError('Non-version manifest change: '+name)
+
+
 def check_source():
     if re.fullmatch('[0-9a-f]{40}', REVIEWED_SOURCE) is None:
         raise ValueError('Final verified integration commit must be pinned before release')
     subprocess.run(['git', 'merge-base', '--is-ancestor', REVIEWED_SOURCE, 'HEAD'], cwd=ROOT, check=True)
+    subprocess.run(['git', 'merge-base', '--is-ancestor', MANIFEST_BASELINE, 'HEAD'], cwd=ROOT, check=True)
     changed = set(git('diff', '--name-only', REVIEWED_SOURCE, 'HEAD').splitlines())
     if changed-SUPPORT:
         raise ValueError('Unexpected post-review changes: '+str(sorted(changed-SUPPORT)))
     value = verifier()
     for name in value.VERSION_PATHS:
-        before = git('show', REVIEWED_SOURCE+':'+name).replace('"0.2.13"', '"0.2.14"').strip()
-        if before != (ROOT/name).read_text(encoding='utf-8').strip():
-            raise ValueError('Non-version manifest change: '+name)
+        check_version_only_manifest(name, git('show', MANIFEST_BASELINE+':'+name),
+                                    (ROOT/name).read_text(encoding='utf-8'))
     value.check_versions(ROOT)
     return value.source_provenance(ROOT)
 
@@ -146,6 +186,22 @@ def validate_zip(directory, provenance, source, windows_candidate):
     return archive, manifest, smoke
 
 
+REQUIRED_MACOS_SMOKE = ('ok', 'extractedBundleLaunched', 'restartPassed', 'secondInstancePassed', 'frontendWebViewReady', 'settingsWindowShown',
+    'nativeSelfTestsPassed', 'nativeWindowResizeFixturePassed',
+    'packageUnchangedAfterRun', 'cleanupComplete')
+
+
+def validate_macos_runtime(report, candidate, provenance, run_url):
+    if (report.get('version') != VERSION or report.get('commit') != provenance['commit']
+            or report.get('tree') != provenance['tree'] or report.get('runUrl') != run_url
+            or report.get('installerSha256') != candidate['installer']['sha256']
+            or report.get('applicationSha256') != candidate['application']['sha256']
+            or any(report.get(flag) is not True for flag in REQUIRED_MACOS_SMOKE)
+            or any(report.get(flag) is not False for flag in (
+                'fakeIpcUsed', 'userContentRead', 'codexInteractiveSelectionTested'))):
+        raise ValueError('Required bounded macOS runtime evidence missing or mismatched')
+
+
 def prepare(artifacts, output, run_url):
     provenance = check_source()
     if re.fullmatch(r'https://github\.com/Blueeeecho/EchoLingo/actions/runs/[1-9][0-9]*', run_url) is None:
@@ -165,6 +221,8 @@ def prepare(artifacts, output, run_url):
         validate_candidate(report, platform, provenance, run_url, installer)
         reports[platform] = report
         inputs.append((installer, f'EchoLingo_{VERSION}_{suffix}'))
+    macos_runtime = value.read_json(artifacts/'macOS'/'macos-runtime.json')
+    validate_macos_runtime(macos_runtime, reports['macOS'], provenance, run_url)
     source = artifacts/'Windows'/'EchoLingo-offline-engine-source.zip'
     if identity(source) != reports['Windows']['offlineResourceReuse']['sourceArchive']:
         raise ValueError('Corresponding source mismatch')
@@ -189,8 +247,9 @@ def prepare(artifacts, output, run_url):
     manifest = {'version': VERSION, 'commit': provenance['commit'], 'tree': provenance['tree'],
                 'reviewedSourceCommit': REVIEWED_SOURCE, 'validationRun': run_url, 'validationMode': MODE,
                 'rebuiltAfterValidation': False, 'scope': {'fullRegression': False, 'installerExecuted': False,
-                'macOSRuntimeAcceptance': False, 'windowsZipRuntimeAcceptance': True,
+                'macOSRuntimeAcceptance': True, 'windowsZipRuntimeAcceptance': True,
                 'interactiveCaptureAcceptance': False, 'networkIsolationAcceptance': False},
+                'macOSRuntimeAcceptance': macos_runtime,
                 'nativePackageInspection': reports, 'windowsZipRuntime': smoke,
                 'windowsSettingsAcceptance': {'actualSettingsUiTested': True, 'fakeIpcUsed': False,
                     'applicationSha256': settings['applicationSha256'],

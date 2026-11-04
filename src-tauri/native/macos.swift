@@ -86,6 +86,7 @@ final class SelectionTrace {
     private var optionalPluralRootFailure = false
     private var optionalPluralDescendantFailures = 0
     private var probeTermination: [String: Any]?
+    private var clipboardTermination: SelectionCopyTermination?
     var hasIssuedCopy: Bool { copyIssued }
     init(publish: Bool = true) {
         self.publish = publish
@@ -128,6 +129,7 @@ final class SelectionTrace {
             "AXStaticText", "AXTextField", "AXTextArea", "AXSearchField", "AXComboBox", "AXSheet", "AXButton",
             "AXPopUpButton", "AXMenuButton", "AXMenu", "AXMenuItem", "AXMenuBar", "AXMenuBarItem"]
         let steps: Set<String> = ["owner", "role", "subrole", "focused", "copyTarget", "selectionAttributes",
+            "passiveButtonContext",
             "optionalPluralDescendantWindow", "optionalPluralUnknownSelection", "optionalPluralUnknownLeaf",
             "childrenCount", "childrenValues", "childrenType"]
         let roleClass = role.map { roles.contains($0) ? $0 : "unknown" } ?? "unavailable"
@@ -146,6 +148,10 @@ final class SelectionTrace {
         probeTermination = fields
         record("selection-probe-termination", fields)
     }
+    func recordClipboardStop(_ stop: SelectionCopyTermination) {
+        clipboardTermination = stop
+        store(state: "running", errorCategory: nil)
+    }
     private func elapsedMilliseconds() -> Double {
         (ProcessInfo.processInfo.systemUptime - start) * 1000
     }
@@ -160,6 +166,7 @@ final class SelectionTrace {
                 "optionalPluralRootFailureStatus": optionalPluralRootFailure ? Int(AXError.failure.rawValue) as Any : NSNull(),
                 "optionalPluralDescendantFailures": optionalPluralDescendantFailures,
                 "probeTermination": probeTermination as Any? ?? NSNull(),
+                "clipboardTermination": clipboardTermination?.snapshot as Any? ?? NSNull(),
                 "elapsedMs": elapsedMilliseconds(), "events": events, "eventsTruncated": truncated]
     }
     private func store(state: String, errorCategory: String?) {
@@ -1108,6 +1115,81 @@ func selectionNodeExplicitlyFocused(_ element: AXUIElement, deadline: TimeInterv
     return CFBooleanGetValue((value as! CFBoolean))
 }
 
+// Copy-target rejection is not a sensitivity classification. A passive button
+// cannot supply selection text, but its children must still be inspected when
+// proving a complete document subtree. Unknown focus is not proof of passivity.
+func selectionPassiveButtonAllowed(role: String?, subrole: String?, isSourceTarget: Bool,
+                                   focus: SelectionQuery<Bool>, windowVerified: Bool,
+                                   parentVerified: Bool) -> Bool {
+    guard role == "AXButton", subrole == nil, !isSourceTarget,
+          case .value(false) = focus else { return false }
+    return windowVerified && parentVerified
+}
+
+func selectionBooleanQuery(status: AXError, value: CFTypeRef?) -> SelectionQuery<Bool> {
+    guard status == .success else { return unavailableSelectionRange(status) ? .unavailable : .invalid }
+    guard let value, CFGetTypeID(value) == CFBooleanGetTypeID() else { return .invalid }
+    return .value(CFBooleanGetValue((value as! CFBoolean)))
+}
+
+func selectionPassiveButtonContextVerified(_ element: AXUIElement, root: AXUIElement,
+    applicationPID: pid_t, window: AXUIElement?, parent: AXUIElement?, deadline: TimeInterval) throws -> Bool {
+    try requireSelectionQueryBudget(deadline)
+    guard let window, let parent, !CFEqual(element, root), !IsSecureEventInputEnabled(),
+          AXUIElementSetMessagingTimeout(element, 0.03) == .success,
+          selectionElementOwnerMatches(element, applicationPID) else { return false }
+    var role: CFTypeRef?, subrole: CFTypeRef?, focused: CFTypeRef?, currentParent: CFTypeRef?
+    let roleStatus = AXUIElementCopyAttributeValue(element, kAXRoleAttribute as CFString, &role)
+    let roleQuery = selectionTextQuery(status: roleStatus, value: role)
+    try requireUsableSelectionQuery(roleQuery)
+    try requireSelectionQueryBudget(deadline)
+    let subroleStatus = AXUIElementCopyAttributeValue(element, kAXSubroleAttribute as CFString, &subrole)
+    let subroleQuery = selectionTextQuery(status: subroleStatus, value: subrole)
+    try requireUsableSelectionQuery(subroleQuery)
+    try requireSelectionQueryBudget(deadline)
+    let focusStatus = AXUIElementCopyAttributeValue(element, kAXFocusedAttribute as CFString, &focused)
+    let focusQuery = selectionBooleanQuery(status: focusStatus, value: focused)
+    try requireUsableSelectionQuery(focusQuery)
+    try requireSelectionQueryBudget(deadline)
+    let parentStatus = AXUIElementCopyAttributeValue(element, kAXParentAttribute as CFString, &currentParent)
+    let parentVerified = parentStatus == .success && currentParent.map {
+        CFGetTypeID($0) == AXUIElementGetTypeID() && CFEqual(parent, $0)
+    } == true
+    let currentWindow = selectionOwningWindow(element, role: roleQuery.value,
+        applicationPID: applicationPID, deadline: deadline).value
+    return selectionPassiveButtonAllowed(role: roleQuery.value, subrole: subroleQuery.value,
+        isSourceTarget: CFEqual(element, root), focus: focusQuery,
+        windowVerified: currentWindow.map { CFEqual(window, $0) } == true, parentVerified: parentVerified)
+        && selectionQueryBudgetAvailable(deadline)
+}
+
+// Recheck every child identity too: a button must not hide a replacement
+// subtree after the strict traversal inspected its original children.
+func selectionPassiveButtonChildrenMatch(_ element: AXUIElement, children: [AXUIElement],
+                                         deadline: TimeInterval) throws -> Bool {
+    try requireSelectionQueryBudget(deadline)
+    var count: CFIndex = 0
+    guard AXUIElementGetAttributeValueCount(element, kAXChildrenAttribute as CFString, &count) == .success,
+          count == children.count else { return false }
+    if count == 0 { return selectionQueryBudgetAvailable(deadline) }
+    try requireSelectionQueryBudget(deadline)
+    var values: CFArray?
+    guard AXUIElementCopyAttributeValues(element, kAXChildrenAttribute as CFString, 0, count, &values) == .success,
+          let values, CFArrayGetCount(values) == count else { return false }
+    for index in 0..<count {
+        guard let pointer = CFArrayGetValueAtIndex(values, index) else { return false }
+        let child = Unmanaged<CFTypeRef>.fromOpaque(pointer).takeUnretainedValue()
+        guard CFGetTypeID(child) == AXUIElementGetTypeID(), CFEqual(children[index], child) else { return false }
+    }
+    return selectionQueryBudgetAvailable(deadline)
+}
+
+func selectionPassiveButtonFinalProof<Node>(parent: Node, observedParents: [Node], same: (Node, Node) -> Bool,
+                                           contextVerified: () -> Bool, childrenVerified: () -> Bool) -> Bool {
+    guard observedParents.count == 1, same(observedParents[0], parent) else { return false }
+    return contextVerified() && childrenVerified()
+}
+
 // Empty input focus forbids synthetic Copy (which can copy the whole line),
 // not an independently verified public selection in the same source window.
 // Protected/non-text targets and uncertain context still reject every route.
@@ -1344,6 +1426,7 @@ func recoverySelection(originalFocus: AXUIElement?, source: SelectionApplication
     var optionalPluralRootFailure = false
     var deferredPluralGroups = [AXUIElement]()
     var probeParents = [(child: AXUIElement, parent: AXUIElement)]()
+    var passiveButtons = [(element: AXUIElement, parent: AXUIElement, children: [AXUIElement])]()
     var selectedCandidate: AXUIElement?
     var selectedCandidateRole: String?
     func contextIsCurrent() -> Bool {
@@ -1463,21 +1546,37 @@ func recoverySelection(originalFocus: AXUIElement?, source: SelectionApplication
                 probeSourceTarget = sourceTarget
             }
             probeStep = "copyTarget"
+            var passiveButton = false
+            var passiveButtonParent: AXUIElement?
             do { try requireSelectionCopyTarget(role: roleQuery.value, subrole: subroleQuery.value) }
             catch {
                 if selectionTargetBlocksCompatibility(isSourceTarget: sourceTarget, role: roleQuery.value, rejectedControl: true) { knownBlockedTarget = true }
                 if optionalPluralRootFailure && sensitive { return invalid() }
-                return SelectionProbeObservation(text: nil, children: [], protected: true)
+                if optionalPluralRootFailure && roleQuery.value == "AXButton" && !sourceTarget {
+                    probeStep = "passiveButtonContext"
+                    let parents = probeParents.filter { CFEqual($0.child, element) }
+                    guard parents.count == 1,
+                          try selectionPassiveButtonContextVerified(element, root: root, applicationPID: pid,
+                            window: initialWindow.value, parent: parents[0].parent, deadline: deadline) else { return invalid() }
+                    passiveButton = true
+                    passiveButtonParent = parents[0].parent
+                } else {
+                    return SelectionProbeObservation(text: nil, children: [], protected: true)
+                }
             }
             var text: String?
             var confirmedEmpty = false
             var deferredPluralFailure = false
             probeStep = "selectionAttributes"
-            do { text = try accessibilitySelection(element: element, bundleIdentifier: source.bundleIdentifier,
-                trace: nodeTrace, phase: "selectionAttributes", deadline: deadline,
-                allowOptionalPluralRootRecovery: originalFocus != nil && CFEqual(element, root) &&
-                    sourceWindowTicket != nil && initialWindow.value != nil,
-                allowOptionalPluralDescendantRecovery: optionalPluralRootFailure && !CFEqual(element, root)) }
+            do {
+                if !passiveButton {
+                    text = try accessibilitySelection(element: element, bundleIdentifier: source.bundleIdentifier,
+                        trace: nodeTrace, phase: "selectionAttributes", deadline: deadline,
+                        allowOptionalPluralRootRecovery: originalFocus != nil && CFEqual(element, root) &&
+                            sourceWindowTicket != nil && initialWindow.value != nil,
+                        allowOptionalPluralDescendantRecovery: optionalPluralRootFailure && !CFEqual(element, root))
+                }
+            }
             catch is SelectionOptionalPluralRootFailure {
                 optionalPluralRootFailure = true
                 // Preserve the failed API's status; this is not a successful or
@@ -1513,14 +1612,14 @@ func recoverySelection(originalFocus: AXUIElement?, source: SelectionApplication
                 selectedCandidateRole = roleQuery.value
             }
             return try selectionProbeObserveChildren(text: text, requireCompleteSubtree: optionalPluralRootFailure) {
-                if optionalPluralRootFailure && !CFEqual(element, root) && !confirmedEmpty && !hasPositiveSelection && !deferredPluralFailure {
+                if optionalPluralRootFailure && !CFEqual(element, root) && !confirmedEmpty && !hasPositiveSelection && !deferredPluralFailure && !passiveButton {
                     // nil requests Copy in the ordinary route. Here it means an
                     // unresolved branch, so a different message cannot masquerade
                     // as the entire selection. No partial traversal may succeed.
                     probeStep = "optionalPluralUnknownSelection"
                     return invalid()
                 }
-                guard selectionRecoveryContainer(roleQuery.value) else {
+                guard selectionRecoveryContainer(roleQuery.value) || passiveButton else {
                     if optionalPluralRootFailure && roleQuery.value != "AXStaticText" && !selectionEditableRole(roleQuery.value) {
                         probeStep = "optionalPluralUnknownLeaf"
                         return invalid()
@@ -1538,7 +1637,10 @@ func recoverySelection(originalFocus: AXUIElement?, source: SelectionApplication
                 }
                 guard countStatus == .success, childCount >= 0 else { return invalid() }
                 guard childCount <= remaining else { return limited() }
-                guard childCount > 0 else { return SelectionProbeObservation(text: nil, children: [], protected: false) }
+                guard childCount > 0 else {
+                    if let parent = passiveButtonParent { passiveButtons.append((element, parent, [])) }
+                    return SelectionProbeObservation(text: nil, children: [], protected: false)
+                }
                 var values: CFArray?
                 try requireSelectionQueryBudget(deadline)
                 probeStep = "childrenValues"
@@ -1557,6 +1659,7 @@ func recoverySelection(originalFocus: AXUIElement?, source: SelectionApplication
                 if optionalPluralRootFailure {
                     probeParents.append(contentsOf: children.map { (child: $0, parent: element) })
                 }
+                if let parent = passiveButtonParent { passiveButtons.append((element, parent, children)) }
                 return SelectionProbeObservation(text: nil, children: children, protected: false)
             }
         } catch is SelectionProbeBudgetExpired { return limited() }
@@ -1617,6 +1720,18 @@ func recoverySelection(originalFocus: AXUIElement?, source: SelectionApplication
             }
         }
         if mixedWindowVerified {
+            for button in passiveButtons {
+                let parents = probeParents.filter { CFEqual($0.child, button.element) }.map(\.parent)
+                guard selectionPassiveButtonFinalProof(parent: button.parent, observedParents: parents,
+                    same: { CFEqual($0, $1) }, contextVerified: {
+                        (try? selectionPassiveButtonContextVerified(button.element, root: root, applicationPID: pid,
+                            window: initialWindow.value, parent: button.parent, deadline: deadline)) == true
+                    }, childrenVerified: {
+                        (try? selectionPassiveButtonChildrenMatch(button.element, children: button.children, deadline: deadline)) == true
+                    }) else {
+                    throw unavailableSelectionError(trace: trace, reason: "passiveButtonChanged")
+                }
+            }
             let currentText = try? accessibilitySelection(element: candidate, bundleIdentifier: source.bundleIdentifier,
                 deadline: deadline, requireNonEditableCandidate: true)
             mixedWindowVerified = selectionMixedTextStillSelected(selectedText, current: currentText)
@@ -1892,6 +2007,32 @@ enum SelectionCopyObservation: Equatable {
     case superseded
 }
 
+// Observations, not attribution: a generation change cannot identify its writer.
+// Keep only fixed reasons and bounded relative counters, never clipboard data.
+enum SelectionCopyStopReason: String {
+    case readGenerationChanged, candidateGenerationChanged, candidateCleared
+    case unchangedTimeout, unfinishedTimeout, stableText, stableEmpty
+}
+
+struct SelectionCopyTermination {
+    let reason: SelectionCopyStopReason
+    let beforeDelta: Int
+    let afterDelta: Int
+    let hadCandidate: Bool
+    let sampleHasText: Bool
+    let expired: Bool
+
+    static func relativeCount(_ count: Int, initial: Int) -> Int {
+        let delta = count.subtractingReportingOverflow(initial)
+        if delta.overflow { return count < initial ? -64 : 64 }
+        return min(64, max(-64, delta.partialValue))
+    }
+    var snapshot: [String: Any] {
+        ["reason": reason.rawValue, "beforeDelta": beforeDelta, "afterDelta": afterDelta,
+         "hadCandidate": hadCandidate, "sampleHasText": sampleHasText, "expired": expired]
+    }
+}
+
 // Pure production state machine: a clear/change notification alone is not a
 // completed copy. Wait for stable text, but never follow another generation
 // after accepting a text candidate; it may belong to a newer user operation.
@@ -1902,6 +2043,7 @@ struct SelectionCopyCompletion {
     private var stableSince: TimeInterval?
     private var observedCount: Int?
     private var observedSince: TimeInterval?
+    private(set) var termination: SelectionCopyTermination?
     static let settleInterval: TimeInterval = 0.02
 
     init(initialCount: Int) {
@@ -1910,6 +2052,30 @@ struct SelectionCopyCompletion {
 
     mutating func observe(countBefore: Int, text: String?, countAfter: Int,
                           now: TimeInterval, expired: Bool) -> SelectionCopyObservation {
+        let hadCandidate = candidateCount != nil
+        let result = evaluate(countBefore: countBefore, text: text, countAfter: countAfter, now: now, expired: expired)
+        let reason: SelectionCopyStopReason
+        switch result {
+        case .waiting: return result
+        case .superseded:
+            if countBefore != countAfter { reason = .readGenerationChanged }
+            else if let candidateCount, candidateCount != countAfter { reason = .candidateGenerationChanged }
+            else { reason = .candidateCleared }
+        case .unchangedTimeout: reason = .unchangedTimeout
+        case .unfinishedTimeout: reason = .unfinishedTimeout
+        case .completed(_, let copied): reason = copied == nil ? .stableEmpty : .stableText
+        }
+        termination = SelectionCopyTermination(reason: reason,
+            beforeDelta: SelectionCopyTermination.relativeCount(countBefore, initial: initialCount),
+            afterDelta: SelectionCopyTermination.relativeCount(countAfter, initial: initialCount),
+            hadCandidate: hadCandidate,
+            sampleHasText: text.map { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty } ?? false,
+            expired: expired)
+        return result
+    }
+
+    private mutating func evaluate(countBefore: Int, text: String?, countAfter: Int,
+                                  now: TimeInterval, expired: Bool) -> SelectionCopyObservation {
         guard countBefore == countAfter else { return .superseded }
         if let candidateCount, candidateCount != countAfter { return .superseded }
         guard countAfter != initialCount else { return expired ? .unchangedTimeout : .waiting }
@@ -1982,8 +2148,9 @@ func requireSelectionModifiersReleased() throws {
     }
 }
 
-func copiedSelection(_ pasteboard: NSPasteboard, initialCount: Int) throws -> (changeCount: Int, text: String?) {
+func copiedSelection(_ pasteboard: NSPasteboard, initialCount: Int, trace: SelectionTrace? = nil) throws -> (changeCount: Int, text: String?) {
     var completion = SelectionCopyCompletion(initialCount: initialCount)
+    defer { if let stop = completion.termination { trace?.recordClipboardStop(stop) } }
     let deadline = ProcessInfo.processInfo.systemUptime + 1.2
     while true {
         let before = pasteboard.changeCount
@@ -2139,7 +2306,7 @@ func captureSelectedTextInSource(source: SelectionApplicationSnapshot, originalF
     }
     trace.record("copy-wait", ["copyIssued": true, "copyStrategy": compatibilityTicket == nil ? "verifiedFocus" : "windowTicket"])
     let copied: (changeCount: Int, text: String?)
-    do { copied = try copiedSelection(pasteboard, initialCount: initialCount) }
+    do { copied = try copiedSelection(pasteboard, initialCount: initialCount, trace: trace) }
     catch let error as NativeError where compatibilityTicket != nil && error.message.hasPrefix("NO_SELECTION:") {
         // An ignored PID-directed command is not evidence of an empty selection.
         // Keep this failure visible, and never retry via a second event route.
@@ -2356,6 +2523,7 @@ func selectionPolicySelfTest() throws {
     try selectionRecoverySelfTest()
     try selectionOptionalPluralRecoverySelfTest()
     try selectionProbeTerminationSelfTest()
+    try selectionPassiveButtonSelfTest()
     try selectionMixedRecoverySelfTest()
     try selectionChatMultiSelectionSelfTest()
     try selectionCompatibilitySelfTest()
@@ -3017,8 +3185,9 @@ func selectionProbeTerminationSelfTest() throws {
     typealias Observation = SelectionProbeObservation<Int>
     let whole = "first generated message\nsecond generated message"
     // Four deferred groups are BFS siblings here, NOT four levels. The next
-    // node is a button before a document. Reproduce the real policy's silent
-    // protected-node exit without claiming this is the user's unknown role.
+    // node is a button before a document. The generic walker must still reject
+    // a protected observation. The production passive-button proof is tested
+    // separately; the walker must not silently skip genuinely protected nodes.
     let roles = ["AXGroup", "AXGroup", "AXGroup", "AXGroup", "AXGroup", "AXButton", "AXWebArea"]
     var role: String?
     var deferredGroups = 0
@@ -3092,6 +3261,112 @@ func selectionProbeTerminationSelfTest() throws {
     let protected = [0: Observation(text: nil, children: [], protected: true)]
     try expect(try run(protected).1.reason == .protectedNode)
     try expect(try run(protected, strict: false).0 == .none) // Preserve ordinary recovery semantics.
+}
+
+func selectionPassiveButtonSelfTest() throws {
+    func expect(_ condition: Bool) throws {
+        if !condition { throw NativeError("SELF_TEST: Passive button subtree recovery failed.") }
+    }
+    func allowed(role: String? = "AXButton", subrole: String? = nil, source: Bool = false,
+                 focus: SelectionQuery<Bool> = .value(false), window: Bool = true, parent: Bool = true) -> Bool {
+        selectionPassiveButtonAllowed(role: role, subrole: subrole, isSourceTarget: source,
+            focus: focus, windowVerified: window, parentVerified: parent)
+    }
+    try expect(allowed())
+    for role in [nil, "AXMenu", "AXTextField", "AXWindow", "AXPopUpButton", "unknown"] as [String?] {
+        try expect(!allowed(role: role))
+    }
+    for focus in [SelectionQuery<Bool>.value(true), .unavailable, .invalid, .limited] {
+        try expect(!allowed(focus: focus))
+    }
+    try expect(!allowed(source: true) && !allowed(window: false) && !allowed(parent: false))
+    try expect(!allowed(subrole: kAXSecureTextFieldSubrole as String) && !allowed(subrole: "unknown"))
+    try expect(selectionBooleanQuery(status: .success, value: kCFBooleanFalse).value == false)
+    try expect(selectionBooleanQuery(status: .success, value: "false" as CFString).state == "invalid")
+    try expect(selectionBooleanQuery(status: .success, value: nil).state == "invalid")
+    try expect(selectionBooleanQuery(status: .noValue, value: kCFBooleanFalse).state == "unavailable")
+    try expect(selectionBooleanQuery(status: .failure, value: kCFBooleanFalse).state == "invalid")
+    struct Node {
+        let role: String
+        var text: String? = nil
+        var children: [Int]? = []
+        var focus: SelectionQuery<Bool> = .value(false)
+        var subrole: String? = nil
+        var source = false
+        var window = true
+        var parent = true
+    }
+    typealias Observation = SelectionProbeObservation<Int>
+    func probe(_ nodes: [Int: Node], strict: Bool = true, maximumNodes: Int = 64,
+               maximumDepth: Int = 6, context: Bool = true) -> (SelectionProbeResult, [Int]) {
+        var observed = [Int]()
+        let result = probeUniqueSelection(root: 0, maximumNodes: maximumNodes, maximumDepth: maximumDepth,
+            same: { $0 == $1 }, contextIsCurrent: { context }, requireCompleteSubtree: { strict }) { id, remaining -> Observation? in
+            observed.append(id)
+            guard let node = nodes[id] else { return nil }
+            var passive = false
+            do { try requireSelectionCopyTarget(role: node.role, subrole: node.subrole) }
+            catch {
+                guard strict && allowed(role: node.role, subrole: node.subrole, source: node.source,
+                    focus: node.focus, window: node.window, parent: node.parent) else {
+                    return Observation(text: nil, children: [], protected: true)
+                }
+                passive = true
+            }
+            return selectionProbeObserveChildren(text: passive ? nil : node.text, requireCompleteSubtree: strict) {
+                guard let children = node.children else { return nil }
+                return Observation(text: nil, children: children, protected: false,
+                    resourceLimit: children.count > remaining)
+            }
+        }.0
+        return (result, observed)
+    }
+    let whole = "first generated paragraph\nsecond generated paragraph"
+    let graph = [0: Node(role: "AXGroup", children: [1]),
+                 1: Node(role: "AXGroup", children: [2, 3]),
+                 2: Node(role: "AXButton", text: "not selected button content", children: [4]),
+                 3: Node(role: "AXWebArea", text: whole),
+                 4: Node(role: "AXStaticText")]
+    let complete = probe(graph)
+    try expect(complete.0 == .text(whole) && complete.1 == [0, 1, 2, 3, 4])
+    var unknown = graph; unknown.removeValue(forKey: 4)
+    var secure = graph; secure[4] = Node(role: "AXTextField", subrole: kAXSecureTextFieldSubrole as String)
+    var ambiguous = graph; ambiguous[4] = Node(role: "AXDocument", text: "another selected fragment")
+    var missingChildren = graph; missingChildren[2]?.children = nil
+    try expect(probe(unknown).0 == .incomplete && probe(secure).0 == .incomplete)
+    try expect(probe(ambiguous).0 == .ambiguous && probe(missingChildren).0 == .incomplete)
+    for focus in [SelectionQuery<Bool>.value(true), .unavailable, .invalid, .limited] {
+        var changed = graph; changed[2]?.focus = focus
+        try expect(probe(changed).0 == .incomplete)
+    }
+    var wrongWindow = graph; wrongWindow[2]?.window = false
+    var wrongParent = graph; wrongParent[2]?.parent = false
+    var sourceButton = graph; sourceButton[2]?.source = true
+    for nodes in [wrongWindow, wrongParent, sourceButton] { try expect(probe(nodes).0 == .incomplete) }
+    try expect(probe(graph, maximumNodes: 3).0 == .resourceLimit)
+    try expect(probe(graph, maximumDepth: 2).0 == .resourceLimit)
+    try expect(probe(graph, context: false).0 == .stale)
+    let ordinary = probe(secure, strict: false)
+    try expect(ordinary.0 == .text(whole) && !ordinary.1.contains(4))
+    // Even admitted passive chrome is not Copy permission or a selected text
+    // candidate. All existing document/ancestor/window proofs still apply.
+    let rejected = selectionOptionalPluralRecoveryDisposition(.text(whole), contextVerified: true,
+        blockedTarget: false, candidateRole: "AXButton", windowAndSelectionVerified: true)
+    try expect(rejected != .text(whole) && rejected != .compatibility)
+    func finalProof(parents: [Int] = [1], role: String? = "AXButton", subrole: String? = nil,
+                    focus: SelectionQuery<Bool> = .value(false), window: Bool = true,
+                    parent: Bool = true, children: [Int]? = [4]) -> Bool {
+        selectionPassiveButtonFinalProof(parent: 1, observedParents: parents,
+            same: { (left: Int, right: Int) in left == right }, contextVerified: {
+                allowed(role: role, subrole: subrole, focus: focus, window: window, parent: parent)
+            }, childrenVerified: { children == [4] })
+    }
+    try expect(finalProof())
+    for parents in [[], [2], [1, 1], [1, 2]] { try expect(!finalProof(parents: parents)) }
+    try expect(!finalProof(role: "AXTextField") && !finalProof(subrole: kAXSecureTextFieldSubrole as String))
+    try expect(!finalProof(focus: .value(true)) && !finalProof(focus: .unavailable) && !finalProof(focus: .invalid))
+    try expect(!finalProof(window: false) && !finalProof(parent: false))
+    for children in [nil, [], [5], [4, 5]] as [[Int]?] { try expect(!finalProof(children: children)) }
 }
 
 func selectionOptionalPluralNestedGroupSelfTest() throws {
@@ -3778,6 +4053,46 @@ func selectionCopyPolicySelfTest() throws {
     guard lateClear.observe(countBefore: 11, text: nil, countAfter: 11, now: 1.2, expired: true) == .unfinishedTimeout else {
         throw NativeError("SELF_TEST: A new clipboard generation at the deadline was restored too early.")
     }
+    // These are synthetic observations, not a reproduction or diagnosis of QQ.
+    let expected: [(SelectionCopyCompletion, SelectionCopyStopReason)] = [
+        (unchanged, .unchangedTimeout), (deferred, .stableText),
+        (newer, .candidateGenerationChanged), (duringRead, .readGenerationChanged),
+        (empty, .stableEmpty), (lazy, .stableText), (clearedCandidate, .candidateCleared),
+        (late, .unfinishedTimeout), (lateClear, .unfinishedTimeout)
+    ]
+    for (completion, reason) in expected {
+        guard completion.termination?.reason == reason else {
+            throw NativeError("SELF_TEST: Clipboard termination reason was missing or incorrect.")
+        }
+    }
+    guard newer.termination?.hadCandidate == true, duringRead.termination?.hadCandidate == false,
+          clearedCandidate.termination?.sampleHasText == false,
+          deferred.termination?.afterDelta == 2, late.termination?.expired == true,
+          SelectionCopyTermination.relativeCount(Int.max, initial: Int.min) == 64,
+          SelectionCopyTermination.relativeCount(Int.min, initial: Int.max) == -64 else {
+        throw NativeError("SELF_TEST: Clipboard termination scalars were incorrect or unbounded.")
+    }
+    var privateCompletion = SelectionCopyCompletion(initialCount: 987654321)
+    guard privateCompletion.observe(countBefore: 987654322, text: "private-clipboard-sentinel",
+        countAfter: 987654323, now: 0, expired: false) == .superseded,
+        let stop = privateCompletion.termination else {
+        throw NativeError("SELF_TEST: Clipboard privacy fixture did not terminate.")
+    }
+    let trace = SelectionTrace(publish: false)
+    trace.recordClipboardStop(stop)
+    for _ in 0..<96 { trace.record("fixture-progress") }
+    let snapshot = trace.snapshot()
+    let summary = snapshot["clipboardTermination"] as? [String: Any]
+    let expectedKeys: Set<String> = ["reason", "beforeDelta", "afterDelta", "hadCandidate", "sampleHasText", "expired"]
+    let encoded = String(decoding: try JSONSerialization.data(withJSONObject: snapshot), as: UTF8.self)
+    guard let summary, Set(summary.keys) == expectedKeys,
+          summary["reason"] as? String == "readGenerationChanged",
+          summary["beforeDelta"] as? Int == 1, summary["afterDelta"] as? Int == 2,
+          snapshot["eventsTruncated"] as? Bool == true,
+          !encoded.contains("private-clipboard-sentinel"), !encoded.contains("98765432") else {
+        throw NativeError("SELF_TEST: Clipboard termination leaked content/generation or was lost to truncation.")
+    }
+
 }
 
 // Exercise the same snapshot/restore used by selection fallback, on an isolated
@@ -4823,9 +5138,9 @@ func translateWithSystem(_ request: SystemTranslationInput, trace: SystemTransla
         // Keep the actual translation error even when advisory availability
         // disagrees. Never retry translation, query advisory state or start a
         // download here: diagnostics must not delay the known original error.
-        trace.failure(error)
         let kind = systemTranslationErrorKind(error)
         trace.translationFailureKind(kind)
+        trace.failure(error)
         systemTranslationRecovery.finish(recoveryTicket, outcome: kind == "notInstalled" ? .notInstalled : .unchanged)
         throw systemTranslationFailure(error)
     }
@@ -5087,6 +5402,9 @@ final class SystemTranslationTrace: @unchecked Sendable {
     private static let lock = NSLock()
     private static var next: UInt64 = 0
     private static var latest: [String: Any] = [:]
+    // One content-free failure survives a later success or user cancellation.
+    // Keep it separate so snapshots never recursively retain prior snapshots.
+    private static var lastFailure: [String: Any] = [:]
     private static var lastAvailability: [String: Any] = [:]
     private static var lastPreparation: [String: Any] = [:]
     private let id: UInt64
@@ -5107,6 +5425,8 @@ final class SystemTranslationTrace: @unchecked Sendable {
     }
     func failure(_ error: Error) {
         let native = error as NSError
+        let cancelled = error is CancellationError
+            || (error as? NativeError)?.message.hasPrefix("SYSTEM_TRANSLATION_CANCELLED:") == true
         let domain: String
         switch native.domain {
         case NSCocoaErrorDomain: domain = "cocoa"
@@ -5126,6 +5446,9 @@ final class SystemTranslationTrace: @unchecked Sendable {
         if Self.latest["failurePhase"] == nil { Self.latest["failurePhase"] = Self.latest["phase"] }
         Self.latest["phase"] = "failed"
         Self.latest["elapsedMs"] = (ProcessInfo.processInfo.systemUptime - started) * 1000
+        if !cancelled && Self.latest["translationErrorKind"] as? String != "cancelled" {
+            Self.lastFailure = Self.latest
+        }
     }
     func languages(source: String, target: String) {
         Self.lock.lock(); defer { Self.lock.unlock() }
@@ -5165,16 +5488,23 @@ final class SystemTranslationTrace: @unchecked Sendable {
     func translationFailureKind(_ kind: String) {
         Self.lock.lock(); defer { Self.lock.unlock() }
         guard Self.latest["attemptId"] as? UInt64 == id else { return }
-        Self.latest["translationErrorKind"] = kind
+        // Only the classification is retained, never error descriptions.
+        Self.latest["translationErrorKind"] = ["notInstalled", "unsupportedSourceLanguage", "unsupportedTargetLanguage",
+            "unsupportedLanguagePairing", "unableToIdentifyLanguage", "cancelled", "other"].contains(kind) ? kind : "other"
     }
     static func snapshot() -> [String: Any] {
-        lock.lock(); defer { lock.unlock() }; return latest
+        lock.lock(); defer { lock.unlock() }
+        var snapshot = latest
+        if !snapshot.isEmpty { snapshot["lastFailure"] = lastFailure }
+        return snapshot
     }
 }
 
 func systemTranslationTraceSelfTest() throws {
     let old = SystemTranslationTrace()
+    old.languages(source: "zh-Hans", target: "en")
     old.phase("translate")
+    old.translationFailureKind("notInstalled")
     old.failure(NSError(domain: "secret-user-data", code: 71, userInfo: [NSLocalizedDescriptionKey: "private source text"]))
     old.phase("completed")
     let failed = SystemTranslationTrace.snapshot()
@@ -5192,6 +5522,48 @@ func systemTranslationTraceSelfTest() throws {
         throw NativeError("SELF_TEST: Old translation overwrote newer diagnostics.")
     }
     current.phase("completed")
+    let retained = SystemTranslationTrace.snapshot()["lastFailure"] as? [String: Any]
+    guard retained?["attemptId"] as? UInt64 == failed["attemptId"] as? UInt64,
+          retained?["translationErrorKind"] as? String == "notInstalled",
+          retained?["failurePhase"] as? String == "translate",
+          retained?["sourceLanguage"] as? String == "zh-Hans",
+          retained?["targetLanguage"] as? String == "en",
+          retained?["lastFailure"] == nil else {
+        throw NativeError("SELF_TEST: Success or stale failure erased retained translation failure.")
+    }
+    let cancelled = SystemTranslationTrace()
+    cancelled.phase("translate")
+    cancelled.translationFailureKind("cancelled")
+    cancelled.failure(NSError(domain: "synthetic-framework", code: 12))
+    cancelled.failure(NativeError("SYSTEM_TRANSLATION_CANCELLED: synthetic cancellation"))
+    let cancelledRetained = SystemTranslationTrace.snapshot()["lastFailure"] as? [String: Any]
+    guard cancelledRetained?["attemptId"] as? UInt64 == retained?["attemptId"] as? UInt64 else {
+        throw NativeError("SELF_TEST: User cancellation erased retained translation failure.")
+    }
+    let cancellations: [Error] = [CancellationError(), NativeError("SYSTEM_TRANSLATION_CANCELLED: synthetic cancellation")]
+    for error in cancellations {
+        let beforeTranslation = SystemTranslationTrace()
+        beforeTranslation.failure(error)
+        let kept = SystemTranslationTrace.snapshot()["lastFailure"] as? [String: Any]
+        guard kept?["attemptId"] as? UInt64 == retained?["attemptId"] as? UInt64 else {
+            throw NativeError("SELF_TEST: Early cancellation erased retained translation failure.")
+        }
+    }
+    let recentFailure = SystemTranslationTrace()
+    recentFailure.phase("createSession")
+    recentFailure.translationFailureKind("private untrusted classification")
+    recentFailure.failure(NSError(domain: "private error domain", code: 72,
+                                 userInfo: [NSLocalizedDescriptionKey: "private text"]))
+    let replaced = SystemTranslationTrace.snapshot()["lastFailure"] as? [String: Any]
+    let replacedJSON = String(data: try JSONSerialization.data(withJSONObject: replaced ?? [:]), encoding: .utf8) ?? ""
+    guard replaced?["attemptId"] as? UInt64 != retained?["attemptId"] as? UInt64,
+          replaced?["failurePhase"] as? String == "createSession",
+          replaced?["translationErrorKind"] as? String == "other",
+          replaced?["nativeErrorDomain"] as? String == "other",
+          replaced?["nativeErrorCode"] as? Int == 72,
+          !replacedJSON.contains("private") else {
+        throw NativeError("SELF_TEST: New translation failure was not retained safely.")
+    }
     try systemTranslationRecoverySelfTest()
     let reset = SystemTranslationTrace()
     reset.languages(source: "private source text", target: "en")

@@ -3,8 +3,8 @@ const fs = require('node:fs');
 const path = require('node:path');
 const crypto = require('node:crypto');
 const { execFileSync } = require('node:child_process');
-const VERSION = '0.2.14';
-const MODE = 'desktop-settings-routing-unpack-v1';
+const VERSION = '0.2.15';
+const MODE = 'desktop-macos-runtime-unpack-v2';
 const PAYLOADS = [`EchoLingo_${VERSION}_windows_x64-setup.exe`, `EchoLingo_${VERSION}_macos_arm64.dmg`, 'EchoLingo-offline-engine-source.zip', `EchoLingo_${VERSION}_windows_x64-unpack.zip`, 'WINDOWS-ZIP-MANIFEST.json'].sort();
 const NAMES = [...PAYLOADS, 'RELEASE-MANIFEST.json', 'SHA256SUMS.txt'].sort();
 const hash = bytes => crypto.createHash('sha256').update(bytes).digest('hex');
@@ -28,7 +28,7 @@ function validateInputs(context, io) {
   const pin = io.execFileSync('python3', ['-c', 'import runpy, sys; sys.path.insert(0, "scripts"); print(runpy.run_path("scripts/prepare-desktop-release.py")["REVIEWED_SOURCE"])'], {encoding:'utf8'}).trim();
   requireThat(pin === manifest.reviewedSourceCommit, 'Reviewed source pin mismatch');
   io.execFileSync('git', ['merge-base', '--is-ancestor', pin, context.sha]);
-  requireThat(manifest.scope?.fullRegression === false && manifest.scope?.installerExecuted === false && manifest.scope?.windowsZipRuntimeAcceptance === true && manifest.scope?.macOSRuntimeAcceptance === false && manifest.scope?.interactiveCaptureAcceptance === false && manifest.scope?.networkIsolationAcceptance === false, 'Bounded evidence scope is invalid');
+  requireThat(manifest.scope?.fullRegression === false && manifest.scope?.installerExecuted === false && manifest.scope?.windowsZipRuntimeAcceptance === true && manifest.scope?.macOSRuntimeAcceptance === true && manifest.scope?.interactiveCaptureAcceptance === false && manifest.scope?.networkIsolationAcceptance === false, 'Bounded evidence scope is invalid');
   requireThat(Array.isArray(manifest.files) && equal(manifest.files.map(f => f.name).sort(), PAYLOADS), 'Manifest payload inventory mismatch');
   for (const entry of manifest.files) {
     const data = bytes.get(entry.name);
@@ -48,6 +48,10 @@ function validateInputs(context, io) {
   const settings = manifest.windowsSettingsAcceptance, focus = manifest.windowsGeneratedFocusAcceptance;
   requireThat(settings?.actualSettingsUiTested === true && settings.fakeIpcUsed === false && /^[a-f0-9]{64}$/.test(settings.applicationSha256) && settings.applicationSha256 === runtime.applicationSha256 && /^[a-f0-9]{64}$/.test(settings.evidence?.sha256) && settings.evidence.name === 'windows-settings.json', 'Windows settings acceptance missing or mismatched');
   requireThat(focus?.generatedSourceOnly === true && focus.actualApplicationTested === false && focus.passedCases === 2 && /^[a-f0-9]{64}$/.test(focus.nativeAssemblySha256) && /^[a-f0-9]{64}$/.test(focus.evidence?.sha256) && focus.evidence.name === 'windows-native-focus.json', 'Generated native focus acceptance missing or overstated');
+  const mac = manifest.macOSRuntimeAcceptance, candidate = manifest.nativePackageInspection?.macOS;
+  const macFlags = ['ok','extractedBundleLaunched','restartPassed','secondInstancePassed','frontendWebViewReady','settingsWindowShown','nativeSelfTestsPassed','nativeWindowResizeFixturePassed','packageUnchangedAfterRun','cleanupComplete'];
+  requireThat(mac?.version === VERSION && mac.commit === context.sha && /^[a-f0-9]{40}$/.test(mac.tree) && mac.tree === manifest.tree && mac.runUrl === runUrl && macFlags.every(flag => mac[flag] === true) && ['fakeIpcUsed','userContentRead','codexInteractiveSelectionTested'].every(flag => mac[flag] === false), 'macOS runtime evidence missing or invalid');
+  requireThat(mac.installerSha256 === hash(bytes.get(`EchoLingo_${VERSION}_macos_arm64.dmg`)) && /^[a-f0-9]{64}$/.test(mac.applicationSha256) && mac.applicationSha256 === candidate?.application?.sha256 && mac.installerSha256 === candidate?.installer?.sha256 && candidate?.source?.commit === context.sha && candidate?.source?.tree === mac.tree && candidate?.runUrl === runUrl, 'macOS runtime identity mismatch');
   const notes = io.fs.readFileSync(`docs/releases/${VERSION}.zh-CN.md`, 'utf8');
   requireThat(notes.trim().length > 0, 'Release notes missing');
   return {manifest, bytes, notes, runUrl};
@@ -81,7 +85,7 @@ async function publish({github, context, core}, io = {fs, execFileSync}) {
   await github.rest.git.createRef({owner, repo, ref:`refs/tags/${VERSION}`, sha:context.sha});
   await ensureMain();
   await noExistingRelease();
-  const body = notes + `\n\n源码提交：\`${context.sha}\`\n\n已验证的整合基线：\`${manifest.reviewedSourceCommit}\`\n\n[双端构建、安装包静态检查与 Windows ZIP 运行验收](${runUrl})\n`;
+  const body = notes + `\n\n源码提交：\`${context.sha}\`\n\n已验证的整合基线：\`${manifest.reviewedSourceCommit}\`\n\n[双端构建、安装包静态检查与 Mac / Windows ZIP 运行验收](${runUrl})\n`;
   const {data: release} = await github.rest.repos.createRelease({owner, repo, tag_name:VERSION, target_commitish:context.sha, name:`${VERSION} 内测版`, body, draft:true, prerelease:true, make_latest:'false'});
   for (const [name, data] of bytes) {
     const {data: asset} = await github.rest.repos.uploadReleaseAsset({owner, repo, release_id:release.id, name, data});

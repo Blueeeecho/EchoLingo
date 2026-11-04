@@ -49,6 +49,35 @@ impl ManualPopupHeight {
             self.saved = Some((epoch, height));
         }
     }
+    #[cfg(any(target_os = "macos", test))]
+    fn finish_native_popup(
+        &mut self,
+        popup: &mut PopupWidth,
+        presentation: crate::translation_requests::Presentation,
+        visible_popup: bool,
+        size: (f64, f64),
+        geometry: (f64, Bounds),
+    ) -> bool {
+        if !visible_popup
+            || !presentation.presented
+            || !self
+                .active
+                .is_some_and(|(epoch, _)| epoch == presentation.epoch)
+        {
+            self.active = None;
+            return false;
+        }
+        self.finish(presentation.epoch, size.1);
+        // The queued fit may still contain a pre-drag WebView width. Commit
+        // the authoritative native width before releasing that fit, just as
+        // the Windows sizing completion does. Keep the scale/work-area guard:
+        // a monitor clamp must not overwrite a wider saved preference.
+        let (scale, area) = geometry;
+        let changed = popup.observe_user_width(true, size.0, Some(size.0), scale, area);
+        popup.applied(size.0, scale, area);
+        changed
+    }
+
     fn height(&self, epoch: u64, automatic: f64) -> f64 {
         self.saved
             .filter(|(saved_epoch, _)| *saved_epoch == epoch)
@@ -1206,7 +1235,7 @@ pub async fn fit(
                         // token blocking future layouts. The native idle gate has
                         // already read inLiveResize=false on this UI thread.
                         if let Err(error) =
-                            finish_manual_resize_at_idle(&native, &state, gate_epoch)
+                            finish_native_resize_at_idle(&native, &state, gate_epoch)
                         {
                             let _ = reply.send(Err(error));
                             return;
@@ -1272,7 +1301,7 @@ pub async fn fit(
                                 }
                                 let state = app.state::<LayoutState>();
                                 let value =
-                                    finish_manual_resize_at_idle(&native, &state, gate_epoch)
+                                    finish_native_resize_at_idle(&native, &state, gate_epoch)
                                         .and_then(|_| {
                                             configure_mac_window_frame(&native, management)
                                         })
@@ -1302,16 +1331,54 @@ pub async fn fit(
 }
 
 #[cfg(target_os = "macos")]
-fn finish_manual_resize_at_idle(
+fn finish_native_resize_at_idle(
     window: &WebviewWindow,
     state: &LayoutState,
     epoch: u64,
 ) -> Result<(), String> {
+    let presentation = window
+        .state::<crate::AppState>()
+        .translation_requests
+        .presentation()?;
+    if presentation.epoch != epoch {
+        return Err(crate::translation_requests::CANCELLED.into());
+    }
     let mut manual = state.manual_height.lock().map_err(|_| "窗口布局状态异常")?;
-    if manual.active.is_some() {
-        let scale = window.scale_factor().map_err(|_| "无法读取窗口比例")?;
-        let size = window.inner_size().map_err(|_| "无法读取窗口大小")?;
-        manual.finish(epoch, size.to_logical::<f64>(scale).height);
+    if manual.active.is_none() {
+        return Ok(());
+    }
+    let geometry = window_geometry(window)?;
+    let size = window
+        .inner_size()
+        .map_err(|_| "无法读取窗口大小")?
+        .to_logical::<f64>(geometry.0);
+    let mut popup = state.popup.lock().map_err(|_| "窗口布局状态异常")?;
+    // Geometry queries and lock contention can outlive the presentation that
+    // started this completion. Recheck before persisting the native width.
+    let presentation = window
+        .state::<crate::AppState>()
+        .translation_requests
+        .presentation()?;
+    if presentation.epoch != epoch {
+        if manual
+            .active
+            .is_some_and(|(active_epoch, _)| active_epoch == epoch)
+        {
+            manual.active = None;
+        }
+        return Err(crate::translation_requests::CANCELLED.into());
+    }
+    let changed = manual.finish_native_popup(
+        &mut popup,
+        presentation,
+        state.is_popup() && window.is_visible().unwrap_or(false),
+        (size.width, size.height),
+        geometry,
+    );
+    drop(popup);
+    drop(manual);
+    if changed {
+        state.schedule_save();
     }
     Ok(())
 }
@@ -1343,20 +1410,18 @@ fn install_mac_resize_observer(window: &WebviewWindow) -> Result<(), String> {
         else {
             return;
         };
-        let Ok(mut manual) = state.manual_height.lock() else {
-            return;
-        };
         if phase == 0 {
-            if state.is_popup() && presentation.presented {
-                manual.begin(presentation.epoch, height);
+            if let Ok(mut manual) = state.manual_height.lock() {
+                if state.is_popup() && presentation.presented {
+                    manual.begin(presentation.epoch, height);
+                }
             }
-        } else if state.is_popup() && presentation.presented {
-            manual.finish(presentation.epoch, height);
-        } else {
-            manual.active = None;
-        }
-        drop(manual);
-        if phase == 1 {
+        } else if phase == 1 {
+            if let Some(window) = app.get_webview_window("main") {
+                // Commit native width before notifying the WebView or letting
+                // a queued fit resume with its stale pre-drag measurement.
+                let _ = finish_native_resize_at_idle(&window, &state, presentation.epoch);
+            }
             use tauri::Emitter;
             // Remeasure after native resizing: fit calls during the gesture
             // were intentionally skipped, so their frontend cache is stale.
@@ -2499,6 +2564,148 @@ mod tests {
             content_size(false, 240.0, popup.preferred, (1484.0, 900.0)).0,
             720.0
         );
+    }
+
+    #[test]
+    fn mac_native_completion_keeps_width_with_a_stale_queued_fit() {
+        let mut popup = PopupWidth::new(None);
+        let mut manual = ManualPopupHeight::default();
+        let work = area(3000.0);
+        let shown = crate::translation_requests::Presentation {
+            epoch: 12,
+            presented: true,
+        };
+        popup.applied(680.0, 2.0, work);
+        for width in [850.0, 520.0, 920.0, 420.0] {
+            let queued_width = popup.preferred;
+            manual.begin(shown.epoch, 240.0);
+            // Normal didEnd and missed-notification idle recovery share this
+            // completion. Both must run before a deferred fit can set size.
+            assert!(manual.finish_native_popup(
+                &mut popup,
+                shown,
+                true,
+                (width, 240.0),
+                (2.0, work),
+            ));
+            assert!(manual.active.is_none());
+            assert!(manual.saved.is_none()); // Width-only drag is not manual height.
+            assert!(!popup.observe_user_width(true, width, Some(queued_width), 2.0, work));
+            assert_eq!(
+                presentation_size(
+                    false,
+                    false,
+                    300.0,
+                    (width, 240.0),
+                    popup.preferred,
+                    available_size(work, 2.0, false),
+                ),
+                (width, 300.0)
+            );
+            let revision = popup.revision;
+            // Observer order or a late didEnd after idle recovery is harmless.
+            assert!(!manual.finish_native_popup(
+                &mut popup,
+                shown,
+                true,
+                (width, 240.0),
+                (2.0, work),
+            ));
+            assert_eq!(popup.revision, revision);
+        }
+    }
+
+    #[test]
+    fn mac_native_completion_preserves_corner_height_and_width_together() {
+        let mut popup = PopupWidth::new(None);
+        let mut manual = ManualPopupHeight::default();
+        let work = area(3000.0);
+        let shown = crate::translation_requests::Presentation {
+            epoch: 12,
+            presented: true,
+        };
+        popup.applied(680.0, 2.0, work);
+        manual.begin(shown.epoch, 240.0);
+        assert!(manual.finish_native_popup(&mut popup, shown, true, (850.0, 400.0), (2.0, work),));
+        assert_eq!(popup.preferred, 850.0);
+        assert_eq!(manual.height(12, 300.0), 400.0);
+        assert_eq!(manual.height(13, 300.0), 300.0);
+    }
+
+    #[test]
+    fn mac_native_completion_rejects_hidden_management_and_superseded_gestures() {
+        let work = area(3000.0);
+        for (active_epoch, current_epoch, presented, visible_popup) in [
+            (12, 13, true, true),
+            (12, 12, false, true),
+            (12, 12, true, false),
+        ] {
+            let mut popup = PopupWidth::new(None);
+            popup.applied(680.0, 2.0, work);
+            let mut manual = ManualPopupHeight::default();
+            manual.begin(active_epoch, 240.0);
+            assert!(!manual.finish_native_popup(
+                &mut popup,
+                crate::translation_requests::Presentation {
+                    epoch: current_epoch,
+                    presented,
+                },
+                visible_popup,
+                (850.0, 400.0),
+                (2.0, work),
+            ));
+            assert_eq!(popup.preferred, 680.0);
+            assert_eq!(popup.applied.unwrap().width, 680.0);
+            assert!(manual.active.is_none());
+            assert!(manual.saved.is_none());
+        }
+    }
+
+    #[test]
+    fn mac_native_completion_rechecks_a_presentation_invalidated_while_waiting() {
+        let requests = crate::translation_requests::TranslationRequests::default();
+        let observed = requests.resume(None).unwrap();
+        let work = area(3000.0);
+        let mut popup = PopupWidth::new(None);
+        popup.applied(680.0, 2.0, work);
+        let mut manual = ManualPopupHeight::default();
+        manual.begin(observed.epoch, 240.0);
+        requests.suspend().unwrap();
+        let current = requests.presentation().unwrap();
+        assert_ne!(observed.epoch, current.epoch);
+        assert!(!manual.finish_native_popup(
+            &mut popup,
+            current,
+            true,
+            (850.0, 400.0),
+            (2.0, work),
+        ));
+        assert_eq!(popup.preferred, 680.0);
+        assert!(manual.active.is_none());
+        assert!(manual.saved.is_none());
+    }
+
+    #[test]
+    fn mac_native_completion_does_not_persist_dpi_or_monitor_clamps() {
+        let work = area(3000.0);
+        for geometry in [(1.0, work), (2.0, area(1600.0))] {
+            let mut popup = PopupWidth::new(Some(1400.0));
+            popup.applied(1400.0, 2.0, work);
+            let mut manual = ManualPopupHeight::default();
+            manual.begin(12, 240.0);
+            assert!(!manual.finish_native_popup(
+                &mut popup,
+                crate::translation_requests::Presentation {
+                    epoch: 12,
+                    presented: true,
+                },
+                true,
+                (784.0, 240.0),
+                geometry,
+            ));
+            assert_eq!(popup.preferred, 1400.0);
+            assert!(!popup.observe_user_width(true, 784.0, Some(784.0), geometry.0, geometry.1));
+        }
     }
 
     #[test]

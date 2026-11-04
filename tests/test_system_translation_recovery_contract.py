@@ -87,5 +87,25 @@ class SystemTranslationRecoveryContract(unittest.TestCase):
         self.assertNotIn('"availabilityAfterFailure"', body)
         self.assertIn('"translationErrorKind"', body)
 
+    def test_last_failure_is_separate_bounded_and_excludes_cancellation(self):
+        trace = SOURCE.split('final class SystemTranslationTrace:', 1)[1].split('func systemTranslationTraceSelfTest()', 1)[0]
+        start = trace.split('init() {', 1)[1].split('func phase(', 1)[0]
+        phase = trace.split('func phase(', 1)[1].split('func failure(', 1)[0]
+        self.assertIn('private static var lastFailure: [String: Any] = [:]', trace)
+        self.assertNotIn('lastFailure', start)
+        self.assertNotIn('lastFailure', phase)
+        self.assertEqual(trace.count('Self.lastFailure = Self.latest'), 1)
+        self.assertIn('if !cancelled && Self.latest["translationErrorKind"] as? String != "cancelled"', trace)
+        self.assertIn('snapshot["lastFailure"] = lastFailure', trace)
+        self.assertNotIn('latest["lastFailure"]', trace)
+        self.assertIn('Success or stale failure erased retained translation failure.', SOURCE)
+        self.assertIn('User cancellation erased retained translation failure.', SOURCE)
+        self.assertIn('New translation failure was not retained safely.', SOURCE)
+
+    def test_framework_cancellation_is_classified_before_failure_is_retained(self):
+        translate = SOURCE.split('func translateWithSystem(', 1)[1].split('struct SystemTranslationPreparationView', 1)[0]
+        failure = translate.split('} catch {', 1)[1]
+        self.assertLess(failure.index('trace.translationFailureKind(kind)'), failure.index('trace.failure(error)'))
+
 if __name__ == '__main__':
     unittest.main()
