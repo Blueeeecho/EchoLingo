@@ -36,7 +36,12 @@ jobs:
           CI_EVENT: ${{ github.event_name }}
           CI_REF: ${{ github.ref }}
         run: |
-          if { { [ "$CI_EVENT" = pull_request ] && [ "$PR_HEAD" = feat/windows-unpack-run ] && [ "$PR_BASE" = main ]; } || { [ "$CI_EVENT" = push ] && [ "$CI_REF" = refs/heads/main ]; }; } && [ -f scripts/package-windows-unpack.py ] && python3 scripts/package-windows-unpack.py --check-scope; then
+          if { { [ "$CI_EVENT" = pull_request ] && [ "$PR_HEAD" = release/0215-macos-recovery ] && [ "$PR_BASE" = main ]; } || { [ "$CI_EVENT" = push ] && [ "$CI_REF" = refs/heads/main ]; }; } && [ "$(node -p 'require("./package.json").version')" = 0.2.15 ]; then
+            # This fixed integration has its native builds/runtime gates in
+            # release-desktop.yml. Reject unexpected post-review source changes.
+            python3 scripts/prepare-desktop-release.py --check-source
+            echo "mode=desktop-recovery" >> "$GITHUB_OUTPUT"
+          elif { { [ "$CI_EVENT" = pull_request ] && [ "$PR_HEAD" = feat/windows-unpack-run ] && [ "$PR_BASE" = main ]; } || { [ "$CI_EVENT" = push ] && [ "$CI_REF" = refs/heads/main ]; }; } && [ -f scripts/package-windows-unpack.py ] && python3 scripts/package-windows-unpack.py --check-scope; then
             echo "mode=windows-unpack" >> "$GITHUB_OUTPUT"
           elif { { [ "$CI_EVENT" = push ] && [ "$CI_REF" = refs/heads/main ]; } || { [ "$CI_EVENT" = pull_request ] && [ "$PR_HEAD" = fix/automatic-direction-no-block ] && [ "$PR_BASE" = main ]; }; } && [ -f scripts/prepare-routing-release.py ] && [ "$(python3 scripts/prepare-routing-release.py --select-ci)" = routing-release ]; then
             echo "mode=routing-release" >> "$GITHUB_OUTPUT"
@@ -70,6 +75,39 @@ jobs:
           else
             python3 scripts/verify-language-patch.py --select
           fi
+  desktop-recovery-policy:
+    needs: validation-mode
+    if: needs.validation-mode.outputs.mode == 'desktop-recovery'
+    name: Reviewed 0.2.15 source and regression policy
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Require pinned source and all Python regression contracts
+        run: |
+          python3 scripts/prepare-desktop-release.py --check-source
+          python3 scripts/check-repository.py
+          python3 -m unittest discover -s tests -p 'test_*.py' -v
+          python3 -m unittest discover -s scripts -p 'test_*.py' -v
+          node --test scripts/test-desktop-release.cjs
+          git diff --check
+      - run: npm ci
+      - run: npm run check
+      - run: npm test
+      - run: npm run build
+      - name: State native acceptance ownership
+        run: echo 'Exact reviewed 0.2.15 source only. The paired desktop release workflow owns fresh native builds, Rust tests, Swift fixtures, extracted-DMG launch and Windows ZIP runtime. This job alone is not native acceptance.' >> "$GITHUB_STEP_SUMMARY"
   automatic-direction-routing:
     needs: validation-mode
     if: needs.validation-mode.outputs.mode == 'automatic-direction'
@@ -441,7 +479,7 @@ jobs:
   rust-input-preparation:
     needs: validation-mode
     name: Reviewable Rust lock and formatting inputs (not runtime acceptance)
-    if: needs.validation-mode.outputs.mode != 'windows-unpack' && needs.validation-mode.outputs.mode != 'language-routing-patch-v1' && needs.validation-mode.outputs.mode != 'automatic-direction' && needs.validation-mode.outputs.mode != 'routing-release' && github.event_name == 'pull_request'
+    if: needs.validation-mode.outputs.mode != 'desktop-recovery' && needs.validation-mode.outputs.mode != 'windows-unpack' && needs.validation-mode.outputs.mode != 'language-routing-patch-v1' && needs.validation-mode.outputs.mode != 'automatic-direction' && needs.validation-mode.outputs.mode != 'routing-release' && github.event_name == 'pull_request'
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -486,7 +524,7 @@ jobs:
         run: git diff --exit-code -- src-tauri
   windows-rust-capture-candidate:
     needs: validation-mode
-    if: needs.validation-mode.outputs.mode != 'windows-unpack' && needs.validation-mode.outputs.mode != 'language-routing-patch-v1' && needs.validation-mode.outputs.mode != 'automatic-direction' && needs.validation-mode.outputs.mode != 'routing-release' && needs.validation-mode.outputs.mode != 'screenshot-pins' && needs.validation-mode.outputs.mode != 'macos-followup'
+    if: needs.validation-mode.outputs.mode != 'desktop-recovery' && needs.validation-mode.outputs.mode != 'windows-unpack' && needs.validation-mode.outputs.mode != 'language-routing-patch-v1' && needs.validation-mode.outputs.mode != 'automatic-direction' && needs.validation-mode.outputs.mode != 'routing-release' && needs.validation-mode.outputs.mode != 'screenshot-pins' && needs.validation-mode.outputs.mode != 'macos-followup'
     name: Isolated Rust capture candidate (native Windows runtime)
     runs-on: windows-latest
     timeout-minutes: 10
@@ -563,7 +601,7 @@ jobs:
         run: echo 'Repeated A/B capture benchmark outcome ${{ steps.native_capture_paired_diagnostic.outcome }} is diagnostic only under core-functional-v1. Original raw failures remain failures; standalone capture/input/cleanup and installed editor acceptance are mandatory.' >> "$GITHUB_STEP_SUMMARY"
   macos-native-frame-probe:
     needs: validation-mode
-    if: needs.validation-mode.outputs.mode != 'windows-unpack' && needs.validation-mode.outputs.mode != 'language-routing-patch-v1' && needs.validation-mode.outputs.mode != 'automatic-direction' && needs.validation-mode.outputs.mode != 'routing-release' && needs.validation-mode.outputs.mode != 'screenshot-pins' && needs.validation-mode.outputs.mode != 'macos-followup'
+    if: needs.validation-mode.outputs.mode != 'desktop-recovery' && needs.validation-mode.outputs.mode != 'windows-unpack' && needs.validation-mode.outputs.mode != 'language-routing-patch-v1' && needs.validation-mode.outputs.mode != 'automatic-direction' && needs.validation-mode.outputs.mode != 'routing-release' && needs.validation-mode.outputs.mode != 'screenshot-pins' && needs.validation-mode.outputs.mode != 'macos-followup'
     name: Isolated macOS native frame geometry probe
     runs-on: macos-latest
     timeout-minutes: 5
@@ -592,7 +630,7 @@ jobs:
           if-no-files-found: warn
   macos-screenshot-native-probe:
     needs: validation-mode
-    if: needs.validation-mode.outputs.mode != 'windows-unpack' && needs.validation-mode.outputs.mode != 'language-routing-patch-v1' && needs.validation-mode.outputs.mode != 'automatic-direction' && needs.validation-mode.outputs.mode != 'routing-release' && needs.validation-mode.outputs.mode != 'screenshot-pins' && needs.validation-mode.outputs.mode != 'macos-followup'
+    if: needs.validation-mode.outputs.mode != 'desktop-recovery' && needs.validation-mode.outputs.mode != 'windows-unpack' && needs.validation-mode.outputs.mode != 'language-routing-patch-v1' && needs.validation-mode.outputs.mode != 'automatic-direction' && needs.validation-mode.outputs.mode != 'routing-release' && needs.validation-mode.outputs.mode != 'screenshot-pins' && needs.validation-mode.outputs.mode != 'macos-followup'
     name: macOS native screenshot capture (permission block is not a pass)
     runs-on: macos-latest
     timeout-minutes: 8
@@ -621,7 +659,7 @@ jobs:
           python3 scripts/verify-macos-screenshot-probe.py "$RUNNER_TEMP/macos-f1-native-probe/report.json" 2>&1 | tee -a "$GITHUB_STEP_SUMMARY"
   desktop:
     needs: validation-mode
-    if: needs.validation-mode.outputs.mode != 'windows-unpack' && needs.validation-mode.outputs.mode != 'language-routing-patch-v1' && needs.validation-mode.outputs.mode != 'automatic-direction' && needs.validation-mode.outputs.mode != 'routing-release' && needs.validation-mode.outputs.mode != 'screenshot-pins' && github.event.inputs.mode != 'windows-popup-diagnostics' && github.event.inputs.mode != 'windows-popup-current-diagnostics' && github.event.inputs.mode != 'windows-application-diagnostics' && github.event.inputs.mode != 'windows-input-plane-experiment' && github.event.inputs.mode != 'windows-native-diagnostics' && github.event.inputs.mode != 'windows-shortcuts-ui-diagnostics' && github.event.inputs.mode != 'windows-shortcuts-ui-medium-diagnostics' && github.event.inputs.mode != 'windows-shortcuts-current-diagnostics' && github.event.inputs.mode != 'windows-shortcuts-workflows-diagnostics' && github.event.inputs.mode != 'windows-delegated-diagnostics' && github.event.inputs.mode != 'windows-browser-diagnostics' && github.event.inputs.mode != 'windows-selection-same-page-diagnostics' && github.event.inputs.mode != 'windows-selection-browser-app-diagnostics' && github.event.inputs.mode != 'windows-browser-ocr-visibility-diagnostics' && github.event.inputs.mode != 'windows-selection-cold-edge-diagnostics' && github.event.inputs.mode != 'windows-selection-paced-edge-diagnostics' && github.event.inputs.mode != 'windows-selection-nonbrowser-app-diagnostics' && github.event.inputs.mode != 'windows-latest-intent-diagnostics' && github.event.inputs.mode != 'windows-selection-application-diagnostics' && github.event.inputs.mode != 'windows-selection-clipboard-diagnostics' && github.event.inputs.mode != 'windows-selection-notepad-diagnostics' && github.event.inputs.mode != 'windows-selection-budget-diagnostics' && github.event.inputs.mode != 'windows-selection-context-diagnostics' && github.event.inputs.mode != 'windows-wps-selection-diagnostics' && github.event.inputs.mode != 'windows-focus-resize-current-diagnostics' && github.event.inputs.mode != 'windows-priority-input-diagnostics' && github.event.inputs.mode != 'windows-priority-candidate-diagnostics' && needs.validation-mode.outputs.mode != 'macos-followup'
+    if: needs.validation-mode.outputs.mode != 'desktop-recovery' && needs.validation-mode.outputs.mode != 'windows-unpack' && needs.validation-mode.outputs.mode != 'language-routing-patch-v1' && needs.validation-mode.outputs.mode != 'automatic-direction' && needs.validation-mode.outputs.mode != 'routing-release' && needs.validation-mode.outputs.mode != 'screenshot-pins' && github.event.inputs.mode != 'windows-popup-diagnostics' && github.event.inputs.mode != 'windows-popup-current-diagnostics' && github.event.inputs.mode != 'windows-application-diagnostics' && github.event.inputs.mode != 'windows-input-plane-experiment' && github.event.inputs.mode != 'windows-native-diagnostics' && github.event.inputs.mode != 'windows-shortcuts-ui-diagnostics' && github.event.inputs.mode != 'windows-shortcuts-ui-medium-diagnostics' && github.event.inputs.mode != 'windows-shortcuts-current-diagnostics' && github.event.inputs.mode != 'windows-shortcuts-workflows-diagnostics' && github.event.inputs.mode != 'windows-delegated-diagnostics' && github.event.inputs.mode != 'windows-browser-diagnostics' && github.event.inputs.mode != 'windows-selection-same-page-diagnostics' && github.event.inputs.mode != 'windows-selection-browser-app-diagnostics' && github.event.inputs.mode != 'windows-browser-ocr-visibility-diagnostics' && github.event.inputs.mode != 'windows-selection-cold-edge-diagnostics' && github.event.inputs.mode != 'windows-selection-paced-edge-diagnostics' && github.event.inputs.mode != 'windows-selection-nonbrowser-app-diagnostics' && github.event.inputs.mode != 'windows-latest-intent-diagnostics' && github.event.inputs.mode != 'windows-selection-application-diagnostics' && github.event.inputs.mode != 'windows-selection-clipboard-diagnostics' && github.event.inputs.mode != 'windows-selection-notepad-diagnostics' && github.event.inputs.mode != 'windows-selection-budget-diagnostics' && github.event.inputs.mode != 'windows-selection-context-diagnostics' && github.event.inputs.mode != 'windows-wps-selection-diagnostics' && github.event.inputs.mode != 'windows-focus-resize-current-diagnostics' && github.event.inputs.mode != 'windows-priority-input-diagnostics' && github.event.inputs.mode != 'windows-priority-candidate-diagnostics' && needs.validation-mode.outputs.mode != 'macos-followup'
     strategy:
       fail-fast: false
       matrix:
@@ -1305,7 +1343,7 @@ jobs:
 
   frontend-interactions:
     needs: validation-mode
-    if: needs.validation-mode.outputs.mode != 'windows-unpack' && needs.validation-mode.outputs.mode != 'language-routing-patch-v1' && needs.validation-mode.outputs.mode != 'automatic-direction' && needs.validation-mode.outputs.mode != 'routing-release' && needs.validation-mode.outputs.mode != 'screenshot-pins' && github.event.inputs.mode != 'windows-popup-diagnostics' && github.event.inputs.mode != 'windows-popup-current-diagnostics' && github.event.inputs.mode != 'windows-application-diagnostics' && github.event.inputs.mode != 'windows-input-plane-experiment' && github.event.inputs.mode != 'windows-native-diagnostics' && github.event.inputs.mode != 'windows-shortcuts-ui-diagnostics' && github.event.inputs.mode != 'windows-shortcuts-ui-medium-diagnostics' && github.event.inputs.mode != 'windows-shortcuts-current-diagnostics' && github.event.inputs.mode != 'windows-shortcuts-workflows-diagnostics' && github.event.inputs.mode != 'windows-delegated-diagnostics' && github.event.inputs.mode != 'windows-browser-diagnostics' && github.event.inputs.mode != 'windows-selection-same-page-diagnostics' && github.event.inputs.mode != 'windows-selection-browser-app-diagnostics' && github.event.inputs.mode != 'windows-browser-ocr-visibility-diagnostics' && github.event.inputs.mode != 'windows-selection-cold-edge-diagnostics' && github.event.inputs.mode != 'windows-selection-paced-edge-diagnostics' && github.event.inputs.mode != 'windows-selection-nonbrowser-app-diagnostics' && github.event.inputs.mode != 'windows-latest-intent-diagnostics' && github.event.inputs.mode != 'windows-selection-application-diagnostics' && github.event.inputs.mode != 'windows-selection-clipboard-diagnostics' && github.event.inputs.mode != 'windows-selection-notepad-diagnostics' && github.event.inputs.mode != 'windows-selection-budget-diagnostics' && github.event.inputs.mode != 'windows-selection-context-diagnostics' && github.event.inputs.mode != 'windows-wps-selection-diagnostics' && github.event.inputs.mode != 'windows-focus-resize-current-diagnostics' && github.event.inputs.mode != 'windows-priority-input-diagnostics' && github.event.inputs.mode != 'windows-priority-candidate-diagnostics'
+    if: needs.validation-mode.outputs.mode != 'desktop-recovery' && needs.validation-mode.outputs.mode != 'windows-unpack' && needs.validation-mode.outputs.mode != 'language-routing-patch-v1' && needs.validation-mode.outputs.mode != 'automatic-direction' && needs.validation-mode.outputs.mode != 'routing-release' && needs.validation-mode.outputs.mode != 'screenshot-pins' && github.event.inputs.mode != 'windows-popup-diagnostics' && github.event.inputs.mode != 'windows-popup-current-diagnostics' && github.event.inputs.mode != 'windows-application-diagnostics' && github.event.inputs.mode != 'windows-input-plane-experiment' && github.event.inputs.mode != 'windows-native-diagnostics' && github.event.inputs.mode != 'windows-shortcuts-ui-diagnostics' && github.event.inputs.mode != 'windows-shortcuts-ui-medium-diagnostics' && github.event.inputs.mode != 'windows-shortcuts-current-diagnostics' && github.event.inputs.mode != 'windows-shortcuts-workflows-diagnostics' && github.event.inputs.mode != 'windows-delegated-diagnostics' && github.event.inputs.mode != 'windows-browser-diagnostics' && github.event.inputs.mode != 'windows-selection-same-page-diagnostics' && github.event.inputs.mode != 'windows-selection-browser-app-diagnostics' && github.event.inputs.mode != 'windows-browser-ocr-visibility-diagnostics' && github.event.inputs.mode != 'windows-selection-cold-edge-diagnostics' && github.event.inputs.mode != 'windows-selection-paced-edge-diagnostics' && github.event.inputs.mode != 'windows-selection-nonbrowser-app-diagnostics' && github.event.inputs.mode != 'windows-latest-intent-diagnostics' && github.event.inputs.mode != 'windows-selection-application-diagnostics' && github.event.inputs.mode != 'windows-selection-clipboard-diagnostics' && github.event.inputs.mode != 'windows-selection-notepad-diagnostics' && github.event.inputs.mode != 'windows-selection-budget-diagnostics' && github.event.inputs.mode != 'windows-selection-context-diagnostics' && github.event.inputs.mode != 'windows-wps-selection-diagnostics' && github.event.inputs.mode != 'windows-focus-resize-current-diagnostics' && github.event.inputs.mode != 'windows-priority-input-diagnostics' && github.event.inputs.mode != 'windows-priority-candidate-diagnostics'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
