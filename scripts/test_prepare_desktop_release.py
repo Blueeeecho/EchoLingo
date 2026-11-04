@@ -313,9 +313,22 @@ class FixedDesktopRecoveryModeTests(unittest.TestCase):
             out=Path(directory)/'output'; calls=Path(directory)/'calls'
             environment={**os.environ, 'CI_EVENT':event, 'PR_HEAD':head, 'PR_BASE':base,
                 'CI_REF':ref, 'FIXTURE_VERSION':version, 'CHECK_EXIT':str(check_exit),
-                'GITHUB_OUTPUT':str(out), 'FIXTURE_CALLS':str(calls)}
+                'GITHUB_OUTPUT':'output', 'FIXTURE_CALLS':'calls'}
             standins='node() { printf "%s\n" "$FIXTURE_VERSION"; }; python3() { printf "%s\n" "$*" >> "$FIXTURE_CALLS"; return "$CHECK_EXIT"; };\n'
-            process=subprocess.run(['bash','-e','-c',standins+selector], env=environment, capture_output=True, text=True)
+            bash=shutil.which('bash')
+            if os.name == 'nt':
+                # Windows PATH can resolve System32's WSL launcher. Use the
+                # installed Git distribution that also runs Actions bash steps.
+                git=shutil.which('git')
+                self.assertIsNotNone(git, 'Git for Windows is required by the workflow')
+                candidates=[Path(git).resolve().parent.parent/'bin'/'bash.exe',
+                            Path(git).resolve().parent/'bash.exe']
+                bash=next((str(path) for path in candidates if path.is_file()), None)
+            self.assertIsNotNone(bash, 'The workflow Bash executable is required')
+            process=subprocess.run([bash,'-e','-c',standins+selector], cwd=directory,
+                                   env=environment, capture_output=True, text=True)
+            self.assertIn(process.returncode, (0, check_exit),
+                          f'Selector shell failed: {process.stderr}')
             return process.returncode, out.read_text() if out.exists() else '', calls.read_text() if calls.exists() else ''
     def test_only_fixed_version_branch_or_main_push_selects_mode(self):
         for arguments in ({}, {'event':'push','head':'','base':'','ref':'refs/heads/main'}):
@@ -388,3 +401,13 @@ class PackageAwareVersionTests(unittest.TestCase):
             with self.subTest(name=name):
                 baseline=R.git('show', R.MANIFEST_BASELINE+':'+name)
                 R.check_version_only_manifest(name, baseline, (R.ROOT/name).read_text())
+
+
+class CandidateCliVersionTests(unittest.TestCase):
+    def test_both_native_package_clis_accept_release_version_and_reject_unknown(self):
+        for name in ('inspect-candidate-package.py', 'verify-candidate-package.py'):
+            for version, expected in ((R.VERSION, 0), ('9.9.99', 2)):
+                with self.subTest(name=name, version=version):
+                    result = subprocess.run([sys.executable, str(R.ROOT/'scripts'/name),
+                        '--expected-version', version, '--help'], capture_output=True, text=True)
+                    self.assertEqual(result.returncode, expected, result.stderr)
