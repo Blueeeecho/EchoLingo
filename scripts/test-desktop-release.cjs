@@ -153,8 +153,8 @@ test('release-state errors and unknown repository fail closed', async () => {
   await assert.rejects(publicationRequired({github:{},context:{repo:{owner:'other',repo:'EchoLingo'}}}), /Unexpected release repository/);
 });
 
-test('release scheduling never skips native build or preparation for public releases', () => {
-  const workflow = require('node:fs').readFileSync(path.join(__dirname,'../.github/workflows/release-desktop.yml'),'utf8');
+function assertReleaseScheduling(source) {
+  const workflow = source.replace(/\r\n/g, '\n');
   const preflight = workflow.split('  release-state:\n')[1].split('  build:\n')[0];
   assert.ok(preflight.indexOf('--check-source') < preflight.indexOf('await publicationRequired'));
   assert.ok(preflight.includes("core.setOutput('publishRequired', String(required))"));
@@ -171,4 +171,10 @@ test('release scheduling never skips native build or preparation for public rele
   assert.ok(publishJob.includes("if: github.repository == 'Blueeeecho/EchoLingo' && github.ref == 'refs/heads/main' && github.event_name != 'pull_request' && needs.release-state.outputs.publishRequired == 'true'"));
   assert.ok(publishJob.includes('Exact-source CI did not pass'));
   assert.ok(publishJob.includes('await publish({ github, context, core })'));
+}
+
+test('release scheduling never skips native build or preparation for public releases with LF or CRLF', () => {
+  const source = require('node:fs').readFileSync(path.join(__dirname,'../.github/workflows/release-desktop.yml'),'utf8').replace(/\r\n/g, '\n');
+  assertReleaseScheduling(source);
+  assertReleaseScheduling(source.replace(/\n/g, '\r\n'));
 });
