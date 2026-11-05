@@ -16,5 +16,11 @@ export class HistoryLanguageSelection {
     return { ...preferred };
   }
 
+  // Dismissal ends both explicit choices and a history replay's remembered pair.
+  reset(): LanguagePair {
+    this.beforeReplay = null;
+    return { sourceLanguage: 'auto', targetLanguage: 'auto' };
+  }
+
   choose(): void { this.beforeReplay = null; }
 }

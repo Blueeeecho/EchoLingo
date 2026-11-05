@@ -36,7 +36,7 @@ jobs:
           CI_EVENT: ${{ github.event_name }}
           CI_REF: ${{ github.ref }}
         run: |
-          if { { [ "$CI_EVENT" = pull_request ] && [ "$PR_HEAD" = release/0215-macos-recovery ] && [ "$PR_BASE" = main ]; } || { [ "$CI_EVENT" = push ] && [ "$CI_REF" = refs/heads/main ]; }; } && [ "$(node -p 'require("./package.json").version')" = 0.2.15 ]; then
+          if { { [ "$CI_EVENT" = pull_request ] && [ "$PR_HEAD" = fix/residual-translation-failures ] && [ "$PR_BASE" = main ]; } || { [ "$CI_EVENT" = push ] && [ "$CI_REF" = refs/heads/main ]; }; } && [ "$(node -p 'require("./package.json").version')" = 0.2.16 ]; then
             # This fixed integration has its native builds/runtime gates in
             # release-desktop.yml. Reject unexpected post-review source changes.
             python3 scripts/prepare-desktop-release.py --check-source
@@ -78,9 +78,9 @@ jobs:
   desktop-recovery-policy:
     needs: validation-mode
     if: needs.validation-mode.outputs.mode == 'desktop-recovery'
-    name: Reviewed 0.2.15 source and regression policy
+    name: Reviewed 0.2.16 source and regression policy
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
@@ -106,8 +106,17 @@ jobs:
       - run: npm run check
       - run: npm test
       - run: npm run build
+      - name: Prepare the browser for synthetic UI and IPC fixtures
+        run: |
+          sudo apt-get update && sudo apt-get install -y fonts-noto-cjk fonts-symbola
+          npx playwright install --with-deps chromium
+      - name: Run the complete frontend interaction fixture on the exact source
+        run: |
+          npm run dev > "$RUNNER_TEMP/echolingo-vite.log" 2>&1 &
+          curl --retry 20 --retry-connrefused --retry-delay 1 -fsS http://127.0.0.1:1420/ > /dev/null
+          node tests/frontend-interactions.mjs
       - name: State native acceptance ownership
-        run: echo 'Exact reviewed 0.2.15 source only. The paired desktop release workflow owns fresh native builds, Rust tests, Swift fixtures, extracted-DMG launch and Windows ZIP runtime. This job alone is not native acceptance.' >> "$GITHUB_STEP_SUMMARY"
+        run: echo 'Exact reviewed 0.2.16 source only. The paired desktop release workflow owns fresh native builds, Rust tests, Swift fixtures, extracted-DMG launch and Windows ZIP runtime. This job alone is not native acceptance.' >> "$GITHUB_STEP_SUMMARY"
   automatic-direction-routing:
     needs: validation-mode
     if: needs.validation-mode.outputs.mode == 'automatic-direction'

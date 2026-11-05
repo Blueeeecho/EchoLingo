@@ -16,12 +16,13 @@ try {
       appVersion: '9.8.7-beta.6',
       automaticUpdateChecks: false, includePrereleaseUpdates: true,
       providers: [{ id: 'qa-service', name: 'QA IPC fixture', kind: 'openai', baseUrl: 'https://example.invalid/v1', model: 'test-model', enabled: true, prompt: '', hasKey: true }],
-      sourceLanguage: 'auto', targetLanguage: 'zh-Hans',
+      sourceLanguage: 'auto', targetLanguage: 'auto',
       // Explicit custom bindings test every entry point; these are not product defaults.
       shortcutDefaultsVersion: 2,
       shortcuts: { selection: 'Alt+D', capture: 'Alt+S', ocr: 'Alt+Shift+S', silentOcr: 'Alt+C', input: 'Alt+A', screenshot: 'F1' },
       saveHistory: true, theme: 'light', maxHistory: 20, autoHideSeconds: 0, ocrProviders: [], activeOcrProviderId: null,
     };
+    if (new URL(location.href).searchParams.has('persistedLanguageFixture')) { state.sourceLanguage = 'fr'; state.targetLanguage = 'zh-Hans'; }
     if (new URL(location.href).searchParams.has('twoShortcutDefaultsFixture')) state.shortcuts = { selection: 'Alt+D', capture: '', ocr: '', silentOcr: 'Alt+S', input: '', screenshot: 'F1' };
     if (new URL(location.href).searchParams.has('serviceManagerFixture')) {
       state.providers.push({ id: 'qa-local', name: 'QA built-in translation', kind: new URL(location.href).searchParams.has('windowsSelectionFixture') ? 'offline' : 'system', baseUrl: '', model: '', enabled: true, prompt: '' });
@@ -38,7 +39,7 @@ try {
     const scope = (provider) => ['system', 'offline'].includes(provider.kind) ? `${provider.id}:${provider.kind}` : `${provider.id}:${provider.kind}:${new URL(provider.baseUrl).origin}`;
     translationKeys.set(scope(state.providers[0]), 'qa-original-translation-key');
     const fixture = window.__qa = { permissionState: { platform: 'macos', supported: true, identity: 'application-process', runningBundledApp: true, bundleIdentifier: 'io.github.qa.echolingo', processId: 1, accessibilityGranted: false, screenCaptureGranted: false }, permissionReads: 0, permissionRequests: [], permissionSettings: [], holdTranslation: false, releaseTranslation: () => {}, translationError: null, settings: state, saveCalls: 0, keyCalls: 0, ocrKeyCalls: 0, ocrTestCalls: 0, ocrDeleteCalls: 0, credentialWrites: [], settingsWrites: [], hideCalls: 0, layoutCalls: [], showCalls: [], translationRequests: [], dragCalls: 0, holdSave: false, failSave: false, releaseSave: () => {}, emit: (name, payload) => listeners.get(name)?.({ event: name, payload, id: 1 }) };
-    Object.assign(fixture, { nextTranslationId: 0, cancellationRequests: [], holdBegin: false, holdBeginBeforeAllocate: false, beginAttempts: [], releaseBegin: () => {}, presentation: { epoch: 0, presented: true }, holdFit: false, fitWaits: 0, releaseFit: () => {}, showPopupAttempts: [], permissionAtShow: [], failPermissionSettings: false, holdPermissionSettings: false, releasePermissionSettings: () => {} });
+    Object.assign(fixture, { nextTranslationId: 0, cancellationRequests: [], holdBegin: false, holdBeginBeforeAllocate: false, beginAttempts: [], releaseBegin: () => {}, presentation: { epoch: 0, presented: true, languageSession: 0 }, holdFit: false, fitWaits: 0, releaseFit: () => {}, showPopupAttempts: [], permissionAtShow: [], failPermissionSettings: false, holdPermissionSettings: false, releasePermissionSettings: () => {} });
     Object.assign(fixture, { systemStatus: { platform: 'macos', supported: true, ready: false, requiresSetup: true, status: 'downloadRequired', message: 'QA 语言包尚未准备', minimumVersion: '26.0' }, systemStatusCalls: [], systemPrepareCalls: [], keyDeleteCalls: 0 });
     Object.assign(fixture, { shortcutLeases: [], nextShortcutLease: 0, holdShortcutBegin: false, releaseShortcutBegin: () => {}, holdShortcutEnd: false, shortcutEndWaits: 0, releaseShortcutEnd: () => {} });
     Object.assign(fixture, { copies: [], spoken: [], permissionOverride: null, managementShows: [] });
@@ -89,7 +90,7 @@ try {
     fixture.nativeHide = (announce = true) => {
       if (fixture.nativeVisible) fixture.nativeHideTransitions++;
       fixture.nativeVisible = false;
-      fixture.presentation = { epoch: fixture.presentation.epoch + 1, presented: false };
+      fixture.presentation = { ...fixture.presentation, epoch: fixture.presentation.epoch + 1, presented: false, languageSession: (fixture.presentation.languageSession ?? 0) + 1 };
       if (activeTranslationId !== null) cancelTranslation(activeTranslationId);
       if (announce) announcePresentation();
       return structuredClone(fixture.presentation);
@@ -97,7 +98,7 @@ try {
     fixture.nativeShow = (announce = true) => {
       if (!fixture.nativeVisible) fixture.popupReveals++;
       fixture.nativeVisible = true;
-      if (!fixture.presentation.presented) fixture.presentation = { epoch: fixture.presentation.epoch + 1, presented: true };
+      if (!fixture.presentation.presented) fixture.presentation = { ...fixture.presentation, epoch: fixture.presentation.epoch + 1, presented: true };
       if (announce) announcePresentation();
       return structuredClone(fixture.presentation);
     };
@@ -110,7 +111,7 @@ try {
     // Invalidate old translation work while keeping the presentation visible.
     fixture.nativePinnedCaptureStart = () => {
       if (!fixture.pinned || !fixture.nativeVisible || !fixture.presentation.presented || document.body.dataset.view !== 'translate') throw new Error('QA pinned popup must already be visible');
-      fixture.presentation = { epoch: fixture.presentation.epoch + 1, presented: true };
+      fixture.presentation = { ...fixture.presentation, epoch: fixture.presentation.epoch + 1, presented: true };
       if (activeTranslationId !== null) cancelTranslation(activeTranslationId);
       announcePresentation();
       return structuredClone(fixture.presentation);
@@ -406,7 +407,7 @@ try {
   await page.waitForFunction(() => window.__qa.oldSourceAckWaits === 1 && window.__qa.translationRequests.length === 1);
   await page.evaluate(() => {
     const fixture = window.__qa;
-    fixture.presentation = { epoch: fixture.presentation.epoch + 1, presented: false };
+    fixture.presentation = { ...fixture.presentation, epoch: fixture.presentation.epoch + 1, presented: false, languageSession: (fixture.presentation.languageSession ?? 0) + 1 };
     fixture.pendingSource = { deliveryId: 2, presentationEpoch: fixture.presentation.epoch, text: 'New live source during old ACK', mode: 'translate' };
     fixture.emit('translation-presentation', structuredClone(fixture.presentation));
     fixture.emit('source-text', structuredClone(fixture.pendingSource));
@@ -515,6 +516,125 @@ try {
   await page.getByRole('button', { name: '删除记录', exact: true }).click();
   await page.getByText('暂无翻译记录', { exact: true }).waitFor();
   console.log('PASS: history never fetches/renders during startup or hidden translation; clean visits reuse data; delayed reads do not render hidden cards or erase newer mutations; concurrent mutations coalesce; failures retry and deletion refreshes.');
+
+  // Session boundaries are native metadata, not heuristics about input text.
+  // Both platform DOM branches use generated content and fake IPC only.
+  const languagePair = () => page.evaluate(() => [document.querySelector('#source-language').value, document.querySelector('#target-language').value]);
+  for (const windows of [false, true]) {
+    const sessionUrl = new URL(process.env.ECHOLINGO_TEST_URL ?? 'http://127.0.0.1:1420/');
+    if (windows) sessionUrl.searchParams.set('windowsSelectionFixture', '1');
+    sessionUrl.searchParams.set('persistedLanguageFixture', '1');
+    await page.goto(sessionUrl.href);
+    await page.waitForFunction(() => document.querySelector('#footer-status')?.textContent === '准备就绪');
+    assert.deepEqual(await languagePair(), ['auto', 'auto'], 'a launch must not restore an older saved manual pair');
+    await page.waitForFunction(() => window.__qa.settings.sourceLanguage === 'auto' && window.__qa.settings.targetLanguage === 'auto');
+    const chooseFixedChinese = async () => {
+      await page.locator('#source-language').selectOption('auto');
+      await page.locator('#target-language').selectOption('zh-Hans');
+      await page.waitForFunction(() => window.__qa.settings.sourceLanguage === 'auto' && window.__qa.settings.targetLanguage === 'zh-Hans');
+    };
+    const capture = async (text, extra = {}) => {
+      const count = await page.evaluate(() => window.__qa.translationRequests.length);
+      await page.evaluate(({ text, extra }) => window.__qa.emit('source-text', {
+        text, mode: 'translate', presentationEpoch: window.__qa.presentation.epoch, ...extra,
+      }), { text, extra });
+      await page.waitForFunction((count) => window.__qa.translationRequests.length === count + 1, count);
+      await page.getByText('Isolated test translation fixture', { exact: true }).waitFor();
+      return page.evaluate(() => {
+        const request = window.__qa.translationRequests.at(-1);
+        return [request.sourceLanguage, request.targetLanguage];
+      });
+    };
+    // The same visible session still honors fixed target and source choices.
+    await chooseFixedChinese();
+    assert.deepEqual(await capture('生成的中文测试'), ['auto', 'zh-Hans']);
+    await goView('settings'); await goView('translate');
+    assert.deepEqual(await languagePair(), ['auto', 'zh-Hans']);
+    await page.evaluate(() => window.__qa.nativeInputShow());
+    assert.deepEqual(await languagePair(), ['auto', 'zh-Hans'], 'visible input activation must not reset languages');
+    await page.evaluate(() => {
+      const fixture = window.__qa;
+      fixture.presentation = { ...fixture.presentation, epoch: fixture.presentation.epoch + 1, presented: false };
+      fixture.emit('translation-presentation', structuredClone(fixture.presentation));
+      fixture.emit('open-settings', { presentationEpoch: fixture.presentation.epoch });
+    });
+    await page.waitForFunction(() => document.body.dataset.view === 'settings' && window.__qa.presentation.presented);
+    await goView('translate');
+    assert.deepEqual(await languagePair(), ['auto', 'zh-Hans'], 'native management navigation preserves the popup session');
+    await page.evaluate(() => { window.__qa.pinned = true; window.__qa.nativePinnedCaptureStart(); });
+    assert.deepEqual(await capture('Generated pinned capture', { updateVisiblePopup: true, reuseVisiblePopup: true }), ['auto', 'zh-Hans']);
+    await page.evaluate(() => { window.__qa.pinned = false; });
+
+    for (const dismiss of ['close', 'escape', 'outside']) {
+      await chooseFixedChinese();
+      if (dismiss === 'close') await page.locator('#close-popup').click();
+      else if (dismiss === 'escape') await page.keyboard.press('Escape');
+      else await page.evaluate(() => window.__qa.nativeHide());
+      await page.waitForFunction(() => !window.__qa.presentation.presented);
+      await page.evaluate(() => window.__qa.nativeShow());
+      assert.deepEqual(await languagePair(), ['auto', 'auto'], `${dismiss} must reset both selectors on reopening`);
+      assert.deepEqual(await capture('生成的中文测试'), ['auto', 'auto'], 'the next capture must dispatch automatic bilingual mode');
+    }
+
+    // Durable source delivery also validates a missed hide before applying text.
+    await chooseFixedChinese();
+    const durableCount = await page.evaluate(() => window.__qa.translationRequests.length);
+    await page.evaluate(() => {
+      const fixture = window.__qa;
+      fixture.nativeHide(false);
+      fixture.pendingSource = { deliveryId: 101, presentationEpoch: fixture.presentation.epoch,
+        text: 'Generated durable capture after missed hide', mode: 'translate' };
+      fixture.emit('source-text', structuredClone(fixture.pendingSource));
+    });
+    await page.waitForFunction((count) => window.__qa.translationRequests.length === count + 1 && window.__qa.sourceAcks.includes(101), durableCount);
+    await page.getByText('Isolated test translation fixture', { exact: true }).waitFor();
+    assert.deepEqual(await languagePair(), ['auto', 'auto']);
+    assert.deepEqual(await page.evaluate(() => {
+      const request = window.__qa.translationRequests.at(-1);
+      return [request.sourceLanguage, request.targetLanguage];
+    }), ['auto', 'auto']);
+
+    // A reopen snapshot may arrive before its hidden event. Reset once only;
+    // neither the old hide nor a duplicate reopen can clear a newer choice.
+    await chooseFixedChinese();
+    const reordered = await page.evaluate(() => {
+      const hidden = window.__qa.nativeHide(false);
+      const reopened = window.__qa.nativeShow();
+      return { hidden, reopened };
+    });
+    assert.deepEqual(await languagePair(), ['auto', 'auto']);
+    await page.locator('#source-language').selectOption('ja');
+    await page.locator('#target-language').selectOption('en');
+    await page.evaluate(({ hidden, reopened }) => {
+      window.__qa.emit('translation-presentation', hidden);
+      window.__qa.emit('translation-presentation', reopened);
+    }, reordered);
+    assert.deepEqual(await languagePair(), ['ja', 'en']);
+    assert.deepEqual(await capture('Generated explicit language selection'), ['ja', 'en']);
+
+    // A remembered pre-history manual choice must not return after dismissal.
+    await page.evaluate(() => { window.__qa.history = [{ id: 'session-history', createdAt: Date.now(),
+      text: 'Generated history session fixture', sourceLanguage: 'en', targetLanguage: 'zh-Hans', results: [], favorite: false }]; });
+    await goView('history'); await page.locator('.history-open').click();
+    await page.evaluate(() => { window.__qa.nativeHide(); window.__qa.nativeShow(); });
+    assert.deepEqual(await capture('Generated input after history dismissal'), ['auto', 'auto']);
+
+    // A delayed settings write cannot resurrect the prior session. A new
+    // manual choice made after reset remains authoritative when the queue drains.
+    await page.evaluate(() => { window.__qa.holdSave = true; });
+    const saves = await page.evaluate(() => window.__qa.saveCalls);
+    await page.locator('#target-language').selectOption('zh-Hans');
+    await page.waitForFunction((count) => window.__qa.saveCalls > count, saves);
+    await page.evaluate(() => { window.__qa.nativeHide(); window.__qa.nativeShow(); });
+    assert.deepEqual(await languagePair(), ['auto', 'auto']);
+    await page.locator('#source-language').selectOption('fr');
+    await page.locator('#target-language').selectOption('de');
+    await page.evaluate(() => { window.__qa.holdSave = false; window.__qa.releaseSave(); });
+    await page.waitForFunction(() => window.__qa.settings.sourceLanguage === 'fr' && window.__qa.settings.targetLanguage === 'de');
+    assert.deepEqual(await languagePair(), ['fr', 'de']);
+    assert.deepEqual(await capture('Generated latest manual choice'), ['fr', 'de']);
+  }
+  console.log('PASS: startup/close/Escape/outside/reordered hide reset automatic languages; same-session manual, settings and pinned capture choices survive; history and queued saves cannot restore old sessions. Synthetic IPC only.');
 
   // Replaying a resolved historical direction must not become the next capture's
   // language preference. Only an explicit picker change is a new preference.
@@ -3519,10 +3639,11 @@ try {
   await retryCard.getByText('Retry transport failed', { exact: true }).waitFor();
   assert.equal(await successCard.locator('.result-text').textContent(), 'Keep successful result');
   // Protect against an out-of-band language change without trusting stale cards.
+  const retryTargetLanguage = await page.locator('#target-language').inputValue();
   await page.evaluate(() => { document.querySelector('#target-language').value = 'ja'; });
   await retryCard.locator('.result-retry').click();
   assert.equal(await page.evaluate(() => window.__qa.translationRequests.length), 3);
-  await page.evaluate(() => { document.querySelector('#target-language').value = 'zh-Hans'; window.__qa.translationError = null; window.__qa.holdTranslation = true; });
+  await page.evaluate((targetLanguage) => { document.querySelector('#target-language').value = targetLanguage; window.__qa.translationError = null; window.__qa.holdTranslation = true; }, retryTargetLanguage);
   await retryCard.locator('.result-retry').click();
   await page.waitForFunction(() => window.__qa.translationRequests.length === 4);
   const cancelledRetry = await page.evaluate(() => structuredClone(window.__qa.translationRequests.at(-1)));

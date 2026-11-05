@@ -301,7 +301,7 @@ def main():
     parser.add_argument("--run-url", required=True)
     parser.add_argument("--offline-staging-manifest", type=Path)
     parser.add_argument("--offline-source-archive", type=Path)
-    parser.add_argument("--expected-version", choices=("0.2.13", "0.2.14", "0.2.15"), default=VERSION)
+    parser.add_argument("--expected-version", choices=("0.2.13", "0.2.14", "0.2.15", "0.2.16"), default=VERSION)
     args = parser.parse_args()
     VERSION = args.expected_version
     print(json.dumps(run(args), sort_keys=True))

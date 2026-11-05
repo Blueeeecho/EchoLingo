@@ -2523,6 +2523,7 @@ mod tests {
         let shown = crate::translation_requests::Presentation {
             epoch: 12,
             presented: true,
+            language_session: 0,
         };
         assert!(may_remember_native_resize(token, shown, true, true));
         assert!(!may_remember_native_resize(token, shown, false, true));
@@ -2574,6 +2575,7 @@ mod tests {
         let shown = crate::translation_requests::Presentation {
             epoch: 12,
             presented: true,
+            language_session: 0,
         };
         popup.applied(680.0, 2.0, work);
         for width in [850.0, 520.0, 920.0, 420.0] {
@@ -2623,6 +2625,7 @@ mod tests {
         let shown = crate::translation_requests::Presentation {
             epoch: 12,
             presented: true,
+            language_session: 0,
         };
         popup.applied(680.0, 2.0, work);
         manual.begin(shown.epoch, 240.0);
@@ -2649,6 +2652,7 @@ mod tests {
                 crate::translation_requests::Presentation {
                     epoch: current_epoch,
                     presented,
+                    language_session: 0,
                 },
                 visible_popup,
                 (850.0, 400.0),
@@ -2698,6 +2702,7 @@ mod tests {
                 crate::translation_requests::Presentation {
                     epoch: 12,
                     presented: true,
+                    language_session: 0,
                 },
                 true,
                 (784.0, 240.0),
@@ -2735,6 +2740,7 @@ mod tests {
         let visible = crate::translation_requests::Presentation {
             epoch: 7,
             presented: true,
+            language_session: 0,
         };
         assert!(resize_allowed(7, visible, true, true));
         assert!(!resize_allowed(6, visible, true, true));
@@ -2759,6 +2765,7 @@ mod tests {
         let shown = crate::translation_requests::Presentation {
             epoch: 9,
             presented: true,
+            language_session: 0,
         };
         assert!(resize_presentation_allowed(9, shown, false, true, true));
         assert!(!resize_presentation_allowed(9, shown, true, true, true));

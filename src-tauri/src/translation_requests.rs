@@ -14,9 +14,13 @@ struct Requests {
     active: Option<Request>,
 }
 #[derive(Clone, Copy, Default, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct Presentation {
     pub epoch: u64,
     pub presented: bool,
+    // Unlike epoch, this changes only when a popup language session ends.
+    // Carry it in snapshots so missed or reordered hide events remain safe.
+    pub language_session: u64,
 }
 struct Request {
     id: u64,
@@ -41,20 +45,41 @@ impl TranslationRequests {
     // yet. Request IDs alone cannot cover that interval. Reopening advances the
     // epoch again, so a delayed old hide event cannot cancel the new popup.
     pub fn suspend(&self) -> Result<Presentation, String> {
-        self.invalidate_presentation(Some(false))
+        self.invalidate_presentation(Some(false), true)
+    }
+
+    // Settings navigation hides the shared window only to change its layout;
+    // it must not discard the user's current popup language choice.
+    pub fn suspend_preserving_language_session(&self) -> Result<Presentation, String> {
+        self.invalidate_presentation(Some(false), false)
     }
 
     pub fn invalidate(&self) -> Result<Presentation, String> {
-        self.invalidate_presentation(None)
+        self.invalidate_presentation(None, false)
     }
 
-    fn invalidate_presentation(&self, presented: Option<bool>) -> Result<Presentation, String> {
+    fn invalidate_presentation(
+        &self,
+        presented: Option<bool>,
+        end_language_session: bool,
+    ) -> Result<Presentation, String> {
         let mut requests = self.0.lock().map_err(|_| "翻译状态异常")?;
-        requests.presentation.epoch = requests
+        let next_epoch = requests
             .presentation
             .epoch
             .checked_add(1)
             .ok_or("请重新启动应用")?;
+        let next_language_session = if end_language_session {
+            requests
+                .presentation
+                .language_session
+                .checked_add(1)
+                .ok_or("请重新启动应用")?
+        } else {
+            requests.presentation.language_session
+        };
+        requests.presentation.epoch = next_epoch;
+        requests.presentation.language_session = next_language_session;
         if let Some(presented) = presented {
             requests.presentation.presented = presented;
         }
@@ -175,6 +200,65 @@ mod tests {
         Arc,
     };
     use std::time::Duration;
+
+    #[test]
+    fn resumed_snapshot_retains_language_boundary_even_if_hide_event_is_missed() {
+        let requests = TranslationRequests::default();
+        let original = requests.resume(None).unwrap();
+        let hidden = requests.suspend().unwrap();
+        let reopened = requests.resume(Some(hidden.epoch)).unwrap();
+        assert!(reopened.language_session > original.language_session);
+        assert_eq!(reopened.language_session, hidden.language_session);
+        assert_eq!(requests.resume(None).unwrap(), reopened);
+        let json = serde_json::to_value(reopened).unwrap();
+        assert_eq!(json["languageSession"], reopened.language_session);
+        assert!(json.get("language_session").is_none());
+    }
+
+    #[test]
+    fn visible_invalidation_and_settings_navigation_preserve_language_session() {
+        let requests = TranslationRequests::default();
+        // Use a nonzero session so accidentally returning a default is caught.
+        let hidden = requests.suspend().unwrap();
+        let visible = requests.resume(Some(hidden.epoch)).unwrap();
+        let invalidated = requests.invalidate().unwrap();
+        assert!(invalidated.presented);
+        assert!(invalidated.epoch > visible.epoch);
+        assert_eq!(invalidated.language_session, visible.language_session);
+        let ticket = requests.begin(invalidated.epoch).unwrap();
+        let settings = requests.suspend_preserving_language_session().unwrap();
+        assert!(!settings.presented);
+        assert!(!requests.is_current(ticket).unwrap());
+        assert_eq!(settings.language_session, visible.language_session);
+        let management = requests.resume(Some(settings.epoch)).unwrap();
+        assert_eq!(management.language_session, visible.language_session);
+        assert_eq!(
+            requests.invalidate().unwrap().language_session,
+            visible.language_session
+        );
+    }
+
+    #[test]
+    fn repeated_hides_advance_language_session_and_obsolete_resume_cannot_change_it() {
+        let requests = TranslationRequests::default();
+        let original = requests.resume(None).unwrap();
+        let first_hide = requests.suspend().unwrap();
+        let second_hide = requests.suspend().unwrap();
+        assert!(first_hide.language_session > original.language_session);
+        assert!(second_hide.language_session > first_hide.language_session);
+        assert_eq!(
+            requests.resume(Some(first_hide.epoch)).unwrap_err(),
+            CANCELLED
+        );
+        assert_eq!(requests.presentation().unwrap(), second_hide);
+        let reopened = requests.resume(Some(second_hide.epoch)).unwrap();
+        assert_eq!(reopened.language_session, second_hide.language_session);
+        assert_eq!(
+            requests.resume(Some(original.epoch)).unwrap_err(),
+            CANCELLED
+        );
+        assert_eq!(requests.presentation().unwrap(), reopened);
+    }
 
     #[test]
     fn progress_only_publishes_for_the_current_visible_request() {

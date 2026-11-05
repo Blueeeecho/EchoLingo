@@ -26,7 +26,7 @@ import time
 
 ROOT = Path(__file__).resolve().parents[1]
 BUNDLE_ID = "io.github.blueeeecho.echolingo"
-VERSION = "0.2.15"
+VERSION = "0.2.16"
 RUN_URL = re.compile(r"https://github\.com/Blueeeecho/EchoLingo/actions/runs/[1-9][0-9]*")
 MAX_DIAGNOSTIC_BYTES = 128 * 1024
 

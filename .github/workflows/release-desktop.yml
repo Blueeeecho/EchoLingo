@@ -1,4 +1,4 @@
-name: Validate and publish desktop 0.2.15
+name: Validate and publish desktop 0.2.16
 on:
   workflow_dispatch:
   pull_request:
@@ -14,7 +14,7 @@ permissions:
   contents: read
   actions: read
 concurrency:
-  group: echolingo-prerelease-0.2.15-${{ github.event.pull_request.number || github.ref }}
+  group: echolingo-prerelease-0.2.16-${{ github.event.pull_request.number || github.ref }}
   # Only superseded PR validation is canceled; a main publication is never canceled.
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 jobs:
@@ -55,7 +55,7 @@ jobs:
           "CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_LINKER=$linker" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
       - uses: swatinem/rust-cache@v2
         with:
-          key: desktop-release-0215-static-crt
+          key: desktop-release-0216-static-crt
           cache-on-failure: true
           workspaces: |
             src-tauri -> target
@@ -74,7 +74,7 @@ jobs:
             const { owner, repo } = context.repo;
             const { data: main } = await github.rest.git.getRef({owner,repo,ref:'heads/main'});
             if (main.object.sha !== context.sha) throw new Error('Source is no longer main');
-            try { await github.rest.repos.getReleaseByTag({owner,repo,tag:'0.2.15'}); throw new Error('Release already exists'); }
+            try { await github.rest.repos.getReleaseByTag({owner,repo,tag:'0.2.16'}); throw new Error('Release already exists'); }
             catch (e) { if (e.status !== 404) throw e; }
       - name: Verify only unchanged offline resource inputs may be reused
         if: runner.os == 'Windows'
@@ -151,10 +151,10 @@ jobs:
             extracted="$RUNNER_TEMP/desktop-inspection/echolingo"
           fi
           test "${#files[@]}" -eq 1
-          python scripts/inspect-candidate-package.py --expected-version 0.2.15 --platform "$RUNNER_OS" --installer "${files[0]}" --built-application "$built" --output-dir "$RUNNER_TEMP/desktop-inspection" --run-url "$RUN_URL" --locked-build-passed --focused-tests-passed
+          python scripts/inspect-candidate-package.py --expected-version 0.2.16 --platform "$RUNNER_OS" --installer "${files[0]}" --built-application "$built" --output-dir "$RUNNER_TEMP/desktop-inspection" --run-url "$RUN_URL" --locked-build-passed --focused-tests-passed
           mkdir "$RUNNER_TEMP/desktop-package"
           # Bash 3 with nounset rejects expansion of an empty optional array.
-          verifier=(scripts/verify-candidate-package.py --expected-version 0.2.15 --platform "$RUNNER_OS" --installer "${files[0]}" --application "$extracted" --checks-json "$RUNNER_TEMP/desktop-inspection/checks.json" --output "$RUNNER_TEMP/desktop-package/candidate.json" --run-url "$RUN_URL")
+          verifier=(scripts/verify-candidate-package.py --expected-version 0.2.16 --platform "$RUNNER_OS" --installer "${files[0]}" --application "$extracted" --checks-json "$RUNNER_TEMP/desktop-inspection/checks.json" --output "$RUNNER_TEMP/desktop-package/candidate.json" --run-url "$RUN_URL")
           if [ "$RUNNER_OS" = Windows ]; then
             verifier+=(--offline-staging-manifest "$RUNNER_TEMP/candidate-offline-evidence/baseline-reuse.json" --offline-source-archive "$RUNNER_TEMP/candidate-offline-evidence/EchoLingo-offline-engine-source.zip")
           fi
@@ -188,9 +188,9 @@ jobs:
         run: |
           & python scripts/package-windows-unpack.py --application src-tauri/target/release/echolingo.exe --source-archive "$env:RUNNER_TEMP/candidate-offline-evidence/EchoLingo-offline-engine-source.zip" --output "$env:RUNNER_TEMP/desktop-unpack"
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          & powershell.exe -NoProfile -STA -ExecutionPolicy Bypass -File tests/windows-unpack-smoke.ps1 -ArchivePath "$env:RUNNER_TEMP/desktop-unpack/EchoLingo_0.2.15_windows_x64-unpack.zip" -ManifestPath "$env:RUNNER_TEMP/desktop-unpack/WINDOWS-ZIP-MANIFEST.json" -ReportPath "$env:RUNNER_TEMP/desktop-unpack/windows-unpack-smoke.json"
+          & powershell.exe -NoProfile -STA -ExecutionPolicy Bypass -File tests/windows-unpack-smoke.ps1 -ArchivePath "$env:RUNNER_TEMP/desktop-unpack/EchoLingo_0.2.16_windows_x64-unpack.zip" -ManifestPath "$env:RUNNER_TEMP/desktop-unpack/WINDOWS-ZIP-MANIFEST.json" -ReportPath "$env:RUNNER_TEMP/desktop-unpack/windows-unpack-smoke.json"
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          foreach ($name in @('EchoLingo_0.2.15_windows_x64-unpack.zip','WINDOWS-ZIP-MANIFEST.json','windows-unpack-smoke.json')) {
+          foreach ($name in @('EchoLingo_0.2.16_windows_x64-unpack.zip','WINDOWS-ZIP-MANIFEST.json','windows-unpack-smoke.json')) {
             Copy-Item -LiteralPath (Join-Path "$env:RUNNER_TEMP/desktop-unpack" $name) -Destination "$env:RUNNER_TEMP/desktop-package/"
           }
       - name: Accept real Windows settings and generated native focus behavior
@@ -264,7 +264,7 @@ jobs:
         run: python3 scripts/prepare-desktop-release.py --artifacts desktop-inputs --output release-assets --run-url "$RUN_URL"
       - uses: actions/upload-artifact@v4
         with:
-          name: EchoLingo-0.2.15-publication
+          name: EchoLingo-0.2.16-publication
           if-no-files-found: error
           path: release-assets/*
   publish:
@@ -282,7 +282,7 @@ jobs:
           persist-credentials: false
       - uses: actions/download-artifact@v4
         with:
-          name: EchoLingo-0.2.15-publication
+          name: EchoLingo-0.2.16-publication
           path: release-assets
       - name: Require successful exact-source main CI before publishing
         uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b

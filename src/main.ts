@@ -75,6 +75,7 @@ let sourceDeliveryIntent: { epoch: number; intentRevision: number } | null = nul
 let translating = false;
 let activeTranslationId: number | null = null;
 let translationPresentation: TranslationPresentation = { epoch: 0, presented: false };
+let languageSession = 0;
 let presentationFocusIntent: { epoch: number; intentRevision: number } | null = null;
 let visiblePopupUpdateBaseline: { epoch: number; generation: number } | null = null;
 let translationStartQueue: Promise<void> = Promise.resolve();
@@ -234,12 +235,15 @@ function renderLanguages(): void {
       const option = node('option', '', name); option.value = value; select.append(option);
     }
   }
-  sourceLanguage.value = settings.sourceLanguage;
-  targetLanguage.value = settings.targetLanguage;
-  // Keep custom language codes supplied by a future backend visible rather than silently changing them.
-  for (const [select, value] of [[sourceLanguage, settings.sourceLanguage], [targetLanguage, settings.targetLanguage]] as const) {
-    if (!select.value) { const option = node('option', '', value); option.value = value; select.append(option); select.value = value; }
-  }
+  // A launch is a new popup session, even if an older version saved a fixed pair.
+  sourceLanguage.value = 'auto';
+  targetLanguage.value = 'auto';
+}
+function persistAutomaticLanguages(): void {
+  // Serialize behind any already queued picker save. Later explicit choices
+  // queue after this reset and remain valid for the current visible session.
+  run(() => updateSettings((next) => { next.sourceLanguage = 'auto'; next.targetLanguage = 'auto'; },
+    () => settings.sourceLanguage !== 'auto' || settings.targetLanguage !== 'auto'));
 }
 function selectedLanguagePair(): LanguagePair {
   return { sourceLanguage: sourceLanguage.value, targetLanguage: targetLanguage.value };
@@ -316,6 +320,15 @@ function applyTranslationPresentation(presentation: TranslationPresentation, sou
   // presentation epochs may invalidate an in-progress UI generation.
   if (presentation.epoch < translationPresentation.epoch) return;
   const changed = presentation.epoch > translationPresentation.epoch;
+  // A native session revision survives missed or reordered hide notifications.
+  // Epoch alone also changes for pinned captures, navigation and history clear.
+  const nextSession = presentation.languageSession;
+  if (typeof nextSession === 'number' && Number.isSafeInteger(nextSession) && nextSession > languageSession) {
+    languageSession = nextSession;
+    applyLanguagePair(historyLanguages.reset());
+    if (currentResults.length) invalidateResults(true);
+    if (settingsReady) persistAutomaticLanguages();
+  }
   translationPresentation = presentation;
   if (changed || sourceDeliveryIntent === null) sourceDeliveryIntent = { epoch: presentation.epoch, intentRevision: sourceIntent };
   if (changed) {
@@ -1902,6 +1915,7 @@ async function initialize(): Promise<void> {
     settings = await invoke<Settings>('get_settings');
     settingsReady = true;
     applyTheme(); renderLanguages(); renderSettings(); renderShortcutHints();
+    if (settings.sourceLanguage !== 'auto' || settings.targetLanguage !== 'auto') persistAutomaticLanguages();
     if (!translating) emptyResults();
     status('准备就绪');
     if (pendingSettingsOpen) { const request = pendingSettingsOpen; pendingSettingsOpen = null; await openSettingsFromNative(request); }
