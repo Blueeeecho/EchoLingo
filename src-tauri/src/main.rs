@@ -4187,7 +4187,10 @@ mod tests {
             old_popup, old_popup, false, true, false
         ));
         let settings_request = requests.suspend_preserving_language_session().unwrap();
-        assert_eq!(settings_request.language_session, old_popup.language_session);
+        assert_eq!(
+            settings_request.language_session,
+            old_popup.language_session
+        );
         let management =
             prepare_management_presentation(&requests, settings_request.epoch, true).unwrap();
         assert!(!should_hide_observed_popup(
@@ -4206,7 +4209,11 @@ mod tests {
             language_session: next_popup.language_session,
         };
         assert!(should_hide_observed_popup(
-            current_observation, next_popup, true, true, false
+            current_observation,
+            next_popup,
+            true,
+            true,
+            false
         ));
         assert!(!should_hide_observed_popup(
             old_popup, next_popup, true, true, false

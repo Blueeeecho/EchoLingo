@@ -3639,10 +3639,11 @@ try {
   await retryCard.getByText('Retry transport failed', { exact: true }).waitFor();
   assert.equal(await successCard.locator('.result-text').textContent(), 'Keep successful result');
   // Protect against an out-of-band language change without trusting stale cards.
+  const retryTargetLanguage = await page.locator('#target-language').inputValue();
   await page.evaluate(() => { document.querySelector('#target-language').value = 'ja'; });
   await retryCard.locator('.result-retry').click();
   assert.equal(await page.evaluate(() => window.__qa.translationRequests.length), 3);
-  await page.evaluate(() => { document.querySelector('#target-language').value = 'zh-Hans'; window.__qa.translationError = null; window.__qa.holdTranslation = true; });
+  await page.evaluate((targetLanguage) => { document.querySelector('#target-language').value = targetLanguage; window.__qa.translationError = null; window.__qa.holdTranslation = true; }, retryTargetLanguage);
   await retryCard.locator('.result-retry').click();
   await page.waitForFunction(() => window.__qa.translationRequests.length === 4);
   const cancelledRetry = await page.evaluate(() => structuredClone(window.__qa.translationRequests.at(-1)));
