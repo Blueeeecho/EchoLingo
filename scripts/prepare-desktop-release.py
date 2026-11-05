@@ -14,7 +14,7 @@ import tomllib
 
 ROOT = Path(__file__).resolve().parents[1]
 VERSION = '0.2.16'
-REVIEWED_SOURCE = 'f4a85094aa70123dd3c0fb217f42565060185b19'
+REVIEWED_SOURCE = '3053b28e265925c1ce51f1c4ae9860a3d4e535be'
 MANIFEST_BASELINE = 'bd2a42659ad91bb2d3d0792c4650669db336a046'
 BASELINE_VERSION = '0.2.15'
 MODE = 'desktop-macos-runtime-unpack-v2'
