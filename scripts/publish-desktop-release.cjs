@@ -56,6 +56,25 @@ function validateInputs(context, io) {
   requireThat(notes.trim().length > 0, 'Release notes missing');
   return {manifest, bytes, notes, runUrl};
 }
+// Read-only scheduling decision. This does not authorize or perform publication;
+// publish() independently retains every exact-source and no-overwrite guard.
+async function publicationRequired({github, context}) {
+  const {owner, repo} = context.repo;
+  requireThat(owner === 'Blueeeecho' && repo === 'EchoLingo', 'Unexpected release repository');
+  let release;
+  try {
+    ({data: release} = await github.rest.repos.getReleaseByTag({owner, repo, tag: VERSION}));
+  } catch (error) {
+    if (error.status === 404) return true;
+    throw error;
+  }
+  requireThat(release && Number.isSafeInteger(release.id) && release.id > 0
+    && release.tag_name === VERSION && release.draft === false
+    && typeof release.published_at === 'string' && Number.isFinite(Date.parse(release.published_at))
+    && release.html_url === `https://github.com/${owner}/${repo}/releases/tag/${VERSION}`,
+    'Release state is draft or unrecognized; publication scheduling refused');
+  return false;
+}
 async function publish({github, context, core}, io = {fs, execFileSync}) {
   const {manifest, bytes, notes, runUrl} = validateInputs(context, io);
   const {owner, repo} = context.repo;
@@ -104,4 +123,4 @@ async function publish({github, context, core}, io = {fs, execFileSync}) {
   await core.summary.addLink(`${VERSION} 内测版`, result.html_url).write();
   return result;
 }
-module.exports = {publish, validateInputs, VERSION, MODE, NAMES, PAYLOADS};
+module.exports = {publicationRequired, publish, validateInputs, VERSION, MODE, NAMES, PAYLOADS};

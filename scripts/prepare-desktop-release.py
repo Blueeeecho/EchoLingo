@@ -14,10 +14,12 @@ import tomllib
 
 ROOT = Path(__file__).resolve().parents[1]
 VERSION = '0.2.16'
-REVIEWED_SOURCE = '5d9e883cd292e0722c265155590630f056d09b20'
+REVIEWED_SOURCE = 'bd620bf76b426d0bea88ce62af6be3604f01413b'
 MANIFEST_BASELINE = 'bd2a42659ad91bb2d3d0792c4650669db336a046'
 BASELINE_VERSION = '0.2.15'
 MODE = 'desktop-macos-runtime-unpack-v2'
+# These exact reader-facing files are not application or release build inputs.
+NON_BUILD_DOCS = {'README.md', 'README.en.md'}
 # Production and behavioral fixtures are fixed at REVIEWED_SOURCE. Only these
 # release/version inputs may change afterward; never widen this to app sources.
 SUPPORT = {
@@ -84,8 +86,8 @@ def check_source():
     subprocess.run(['git', 'merge-base', '--is-ancestor', REVIEWED_SOURCE, 'HEAD'], cwd=ROOT, check=True)
     subprocess.run(['git', 'merge-base', '--is-ancestor', MANIFEST_BASELINE, 'HEAD'], cwd=ROOT, check=True)
     changed = set(git('diff', '--name-only', REVIEWED_SOURCE, 'HEAD').splitlines())
-    if changed-SUPPORT:
-        raise ValueError('Unexpected post-review changes: '+str(sorted(changed-SUPPORT)))
+    if changed-SUPPORT-NON_BUILD_DOCS:
+        raise ValueError('Unexpected post-review changes: '+str(sorted(changed-SUPPORT-NON_BUILD_DOCS)))
     value = verifier()
     for name in value.VERSION_PATHS:
         check_version_only_manifest(name, git('show', MANIFEST_BASELINE+':'+name),

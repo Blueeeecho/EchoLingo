@@ -113,3 +113,68 @@ for(const field of ['version','commit','tree','runUrl','installerSha256','applic
   });
 }
 test('refuses missing macOS runtime report',async()=>{const f=fixture({manifest:m=>delete m.macOSRuntimeAcceptance});await assert.rejects(publish(f,f.io),/macOS runtime/);assert.equal(f.writes.length,0);});
+
+test('release-state scheduling allows only explicit 404 to request publication', async () => {
+  const {publicationRequired, VERSION} = require('./publish-desktop-release.cjs');
+  const context = {repo:{owner:'Blueeeecho', repo:'EchoLingo'}};
+  const calls = [];
+  const github = {rest:{repos:{getReleaseByTag:async args => {
+    calls.push(args); throw Object.assign(new Error('absent'), {status:404});
+  }}}};
+  assert.equal(await publicationRequired({github, context}), true);
+  assert.deepEqual(calls, [{owner:'Blueeeecho',repo:'EchoLingo',tag:VERSION}]);
+});
+
+test('existing public release is validation only', async () => {
+  const {publicationRequired, VERSION} = require('./publish-desktop-release.cjs');
+  const context = {repo:{owner:'Blueeeecho', repo:'EchoLingo'}};
+  const release = {id:123, tag_name:VERSION, draft:false, published_at:'2026-11-05T06:00:00Z',
+    html_url:`https://github.com/Blueeeecho/EchoLingo/releases/tag/${VERSION}`};
+  const github = {rest:{repos:{getReleaseByTag:async () => ({data:release})}}};
+  assert.equal(await publicationRequired({github, context}), false);
+  for (const change of [{draft:true},{draft:undefined},{id:undefined},{tag_name:'0.2.15'},
+    {published_at:null},{published_at:'invalid'},{html_url:'https://example.invalid'}]) {
+    const invalid = {rest:{repos:{getReleaseByTag:async () => ({data:{...release,...change}})}}};
+    await assert.rejects(publicationRequired({github:invalid, context}), /draft or unrecognized/);
+  }
+  for (const data of [null,undefined,{}]) {
+    await assert.rejects(publicationRequired({github:{rest:{repos:{getReleaseByTag:async()=>({data})}}},context}));
+  }
+});
+
+test('release-state errors and unknown repository fail closed', async () => {
+  const {publicationRequired} = require('./publish-desktop-release.cjs');
+  const context = {repo:{owner:'Blueeeecho', repo:'EchoLingo'}};
+  for (const status of [undefined,401,403,429,500,'404']) {
+    const error = Object.assign(new Error('read failed'),{status});
+    const github = {rest:{repos:{getReleaseByTag:async()=>{throw error;}}}};
+    await assert.rejects(publicationRequired({github,context}), value=>value===error);
+  }
+  await assert.rejects(publicationRequired({github:{},context:{repo:{owner:'other',repo:'EchoLingo'}}}), /Unexpected release repository/);
+});
+
+function assertReleaseScheduling(source) {
+  const workflow = source.replace(/\r\n/g, '\n');
+  const preflight = workflow.split('  release-state:\n')[1].split('  build:\n')[0];
+  assert.ok(preflight.indexOf('--check-source') < preflight.indexOf('await publicationRequired'));
+  assert.ok(preflight.includes("core.setOutput('publishRequired', String(required))"));
+  const build = workflow.split('  build:\n')[1].split('  prepare:\n')[0];
+  assert.ok(build.startsWith('    needs: release-state\n'));
+  assert.equal((build.match(/publishRequired/g)||[]).length,1);
+  assert.ok(build.includes("if: github.event_name != 'pull_request' && needs.release-state.outputs.publishRequired == 'true'"));
+  for (const command of ['npm run tauri build','tests/macos-installed-runtime-smoke.py','tests/windows-unpack-smoke.ps1']) assert.ok(build.includes(command));
+  const prepare = workflow.split('  prepare:\n')[1].split('  publish:\n')[0];
+  assert.ok(prepare.includes('needs: build'));
+  assert.ok(!prepare.includes('publishRequired'));
+  const publishJob = workflow.split('  publish:\n')[1];
+  assert.ok(publishJob.includes('needs: [release-state, prepare]'));
+  assert.ok(publishJob.includes("if: github.repository == 'Blueeeecho/EchoLingo' && github.ref == 'refs/heads/main' && github.event_name != 'pull_request' && needs.release-state.outputs.publishRequired == 'true'"));
+  assert.ok(publishJob.includes('Exact-source CI did not pass'));
+  assert.ok(publishJob.includes('await publish({ github, context, core })'));
+}
+
+test('release scheduling never skips native build or preparation for public releases with LF or CRLF', () => {
+  const source = require('node:fs').readFileSync(path.join(__dirname,'../.github/workflows/release-desktop.yml'),'utf8').replace(/\r\n/g, '\n');
+  assertReleaseScheduling(source);
+  assertReleaseScheduling(source.replace(/\n/g, '\r\n'));
+});

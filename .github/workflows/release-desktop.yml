@@ -18,7 +18,34 @@ concurrency:
   # Only superseded PR validation is canceled; a main publication is never canceled.
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 jobs:
+  release-state:
+    if: github.repository == 'Blueeeecho/EchoLingo'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      publishRequired: ${{ steps.release.outputs.publishRequired }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Require reviewed source before release-state selection
+        run: python3 scripts/prepare-desktop-release.py --check-source
+      - name: Select first publication or validation only
+        id: release
+        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b
+        with:
+          script: |
+            const { publicationRequired } = require('./scripts/publish-desktop-release.cjs');
+            const required = await publicationRequired({ github, context });
+            core.setOutput('publishRequired', String(required));
+            await core.summary.addRaw(required ? 'Release absent: publication still requires all checks.' : 'Release already public: validation only; no assets or tags will be changed.').write();
   build:
+    needs: release-state
     if: github.repository == 'Blueeeecho/EchoLingo'
     strategy:
       fail-fast: false
@@ -67,7 +94,7 @@ jobs:
           python scripts/prepare-desktop-release.py --check-source
           python scripts/check-repository.py
       - name: Verify release does not already exist and source is current main
-        if: github.event_name != 'pull_request'
+        if: github.event_name != 'pull_request' && needs.release-state.outputs.publishRequired == 'true'
         uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b
         with:
           script: |
@@ -268,8 +295,8 @@ jobs:
           if-no-files-found: error
           path: release-assets/*
   publish:
-    needs: prepare
-    if: github.repository == 'Blueeeecho/EchoLingo' && github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+    needs: [release-state, prepare]
+    if: github.repository == 'Blueeeecho/EchoLingo' && github.ref == 'refs/heads/main' && github.event_name != 'pull_request' && needs.release-state.outputs.publishRequired == 'true'
     timeout-minutes: 50
     runs-on: ubuntu-latest
     permissions:

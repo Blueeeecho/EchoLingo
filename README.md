@@ -3,28 +3,28 @@
 <h1 align="center">EchoLingo · 回声译</h1>
 <p align="center"><strong>让陌生的语言，有熟悉的回声。</strong></p>
 <p align="center">轻量的桌面选词翻译与无感 OCR 工具，让理解跟上思路。</p>
-<p align="center"><a href="https://blueeeecho.github.io/EchoLingo/">官方网站</a> · <a href="https://github.com/Blueeeecho/EchoLingo/releases/tag/0.2.14">Windows 0.2.14 测试版</a> · <a href="https://github.com/Blueeeecho/EchoLingo/releases/tag/0.2.14">macOS 0.2.14 测试版</a> · <a href="https://github.com/Blueeeecho/EchoLingo/issues">反馈与建议</a></p>
+<p align="center"><a href="https://blueeeecho.github.io/EchoLingo/">官方网站</a> · <a href="https://github.com/Blueeeecho/EchoLingo/releases/tag/0.2.16">Windows 0.2.16 测试版</a> · <a href="https://github.com/Blueeeecho/EchoLingo/releases/tag/0.2.16">macOS 0.2.16 测试版</a> · <a href="https://github.com/Blueeeecho/EchoLingo/issues">反馈与建议</a></p>
 
 ## 下载与安装
 
-**[推荐：Windows 0.2.14 免安装 ZIP（x64）](https://github.com/Blueeeecho/EchoLingo/releases/download/0.2.14/EchoLingo_0.2.14_windows_x64-unpack.zip)** · **[下载 macOS 0.2.14 测试版（Apple 芯片）](https://github.com/Blueeeecho/EchoLingo/releases/download/0.2.14/EchoLingo_0.2.14_macos_arm64.dmg)**
+**[推荐：Windows 0.2.16 免安装 ZIP（x64）](https://github.com/Blueeeecho/EchoLingo/releases/download/0.2.16/EchoLingo_0.2.16_windows_x64-unpack.zip)** · **[下载 macOS 0.2.16 测试版（Apple 芯片）](https://github.com/Blueeeecho/EchoLingo/releases/download/0.2.16/EchoLingo_0.2.16_macos_arm64.dmg)**
 
-Windows ZIP 请完整解压后打开 `Start-EchoLingo.cmd`。也可选择 [Windows NSIS 安装版](https://github.com/Blueeeecho/EchoLingo/releases/download/0.2.14/EchoLingo_0.2.14_windows_x64-setup.exe)。仍需 Microsoft Edge WebView2 Runtime，启动器不自动下载或安装运行环境。免安装仅指程序文件无需安装向导，配置、历史与 WebView 数据仍保存在当前用户的 AppData，密钥仍在 Windows 凭据库中，不会随 ZIP 搬走。
+Windows ZIP 请完整解压后打开 `Start-EchoLingo.cmd`。也可选择 [Windows NSIS 安装版](https://github.com/Blueeeecho/EchoLingo/releases/download/0.2.16/EchoLingo_0.2.16_windows_x64-setup.exe)。仍需 Microsoft Edge WebView2 Runtime，启动器不自动下载或安装运行环境。免安装仅指程序文件无需安装向导，配置、历史与 WebView 数据仍保存在当前用户的 AppData，密钥仍在 Windows 凭据库中，不会随 ZIP 搬走。
 
 Windows 适用于 Windows 10 1809+ / Windows 11；macOS 安装包适用于 Apple 芯片 Mac、macOS 12+，Apple 系统翻译需要 macOS 26+。打开回声译后，应用会驻留托盘或菜单栏；升级前先完整退出旧版。
 
-Windows 与 macOS 现统一提供 0.2.14 测试版。翻译与 OCR 服务独立管理，免费推荐列表可折叠；默认启用 `Alt+D`、`Alt+S`，另提供独立的 `F1` 截图与本地编辑；快捷键可修改、清空或自定义。
+Windows 与 macOS 现统一提供 0.2.16 测试版。翻译与 OCR 服务独立管理，免费推荐列表可折叠；默认启用 `Alt+D`、`Alt+S`，另提供独立的 `F1` 截图与本地编辑；快捷键可修改、清空或自定义。
 
-0.2.14 改善设置页与服务管理的文字、链接和窄窗口排版，保持快捷键录制反馈可见；修复历史翻译的语言选择影响后续捕获或清空的问题，并区分请求语言与解析语言的无内容诊断。Windows 增加包含离线引擎、双向模型和许可的完整 ZIP，并修复冷启动时第二次启动请求的状态访问。
+0.2.16 修复翻译浮窗关闭或隐藏后仍沿用上次临时语言选择的问题，下次打开恢复默认自动中英互译。同一次可见会话中仍保留手动选择；重放历史后关闭浮窗同样恢复默认，并处理迟到的隐藏通知，避免旧会话覆盖新会话的选择。
 
-发布前执行同一提交的完整 CI 门槛、双端新构建与包结构检查；Windows 最终 ZIP 还验证解压启动、设置 WebView、第二次启动转发、双向离线翻译、内嵌捕获自检和实际设置快捷键。安装包静态检查不等同于安装后完整运行；真实应用与服务、缺少 WebView2 的机器、中文输入法、物理多屏、混合 DPI 和断网场景仍需现场验收。用户报告的现场翻译问题仍按具体复现结果判断，详见版本说明。
+验证涵盖同一提交的双端全新构建、安装包结构与版本检查，最终 Mac DMG 内完整应用的启动、设置 WebView、重复启动与重新打开、原生自检及窗口缩放夹具，以及最终 Windows ZIP 的解压启动、设置 WebView、第二次启动转发、双向离线模型、内嵌捕获自检、实际设置快捷键和原生焦点回归。前端合成 UI/IPC 回归覆盖关闭后重开、手动语言选择、历史重放和迟到事件。这些有界检查不等于真实桌面翻译引擎或用户电脑验收；Apple 翻译策略自检不调用真实引擎，真实 Codex 选区、权限、多屏／混合 DPI、截图／OCR 和断网等现场场景仍需验证。详见版本说明。
 
 这是内测预发布版本，不是稳定版。Windows 未商业签名；macOS 使用 ad hoc 签名，未经 Apple 公证。系统可能提示风险或要求重新授权，请仅安装来自本仓库发布页且校验值相符的文件。
 
-- **Windows 0.2.14**：[版本说明](https://github.com/Blueeeecho/EchoLingo/releases/tag/0.2.14) · [SHA-256 校验值](https://github.com/Blueeeecho/EchoLingo/releases/download/0.2.14/SHA256SUMS.txt) · [发布清单](https://github.com/Blueeeecho/EchoLingo/releases/download/0.2.14/RELEASE-MANIFEST.json)
-- **macOS 0.2.14**：[版本说明](https://github.com/Blueeeecho/EchoLingo/releases/tag/0.2.14) · [SHA-256 校验值](https://github.com/Blueeeecho/EchoLingo/releases/download/0.2.14/SHA256SUMS.txt) · [发布清单](https://github.com/Blueeeecho/EchoLingo/releases/download/0.2.14/RELEASE-MANIFEST.json)
+- **Windows 0.2.16**：[版本说明](https://github.com/Blueeeecho/EchoLingo/releases/tag/0.2.16) · [SHA-256 校验值](https://github.com/Blueeeecho/EchoLingo/releases/download/0.2.16/SHA256SUMS.txt) · [发布清单](https://github.com/Blueeeecho/EchoLingo/releases/download/0.2.16/RELEASE-MANIFEST.json)
+- **macOS 0.2.16**：[版本说明](https://github.com/Blueeeecho/EchoLingo/releases/tag/0.2.16) · [SHA-256 校验值](https://github.com/Blueeeecho/EchoLingo/releases/download/0.2.16/SHA256SUMS.txt) · [发布清单](https://github.com/Blueeeecho/EchoLingo/releases/download/0.2.16/RELEASE-MANIFEST.json)
 
-0.2.14 是测试预发布版，不使用 GitHub 的稳定版 `Latest` 标记。历史版本见[全部发布](https://github.com/Blueeeecho/EchoLingo/releases)。程序包对应 [0.2.14 标签源码](https://github.com/Blueeeecho/EchoLingo/tree/0.2.14)，不等同于默认分支源码；程序包源码与实际文件对应关系请查看发布清单。上一内测版 [0.2.13](https://github.com/Blueeeecho/EchoLingo/releases/tag/0.2.13) 仍可下载。
+0.2.16 是测试预发布版，不使用 GitHub 的稳定版 `Latest` 标记。历史版本见[全部发布](https://github.com/Blueeeecho/EchoLingo/releases)。程序包对应 [0.2.16 标签源码](https://github.com/Blueeeecho/EchoLingo/tree/0.2.16)，不等同于默认分支源码；程序包源码与实际文件对应关系请查看发布清单。上一内测版 [0.2.15](https://github.com/Blueeeecho/EchoLingo/releases/tag/0.2.15) 仍可下载。
 
 [macOS 首次安装说明](docs/macos-install.zh-CN.md) · [源码构建](docs/build.md)
 
