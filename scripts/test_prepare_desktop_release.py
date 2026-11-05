@@ -22,7 +22,7 @@ class PreparationTests(unittest.TestCase):
         self.tmp=tempfile.TemporaryDirectory();self.addCleanup(self.tmp.cleanup)
         self.root=Path(self.tmp.name).resolve(strict=True);self.inputs=self.root/'inputs';self.output=self.root/'out'
         self.reports={}
-        for platform,name in [('Windows','EchoLingo_0.2.15_x64-setup.exe'),('macOS','EchoLingo_0.2.15_aarch64.dmg')]:
+        for platform,name in [('Windows','EchoLingo_0.2.16_x64-setup.exe'),('macOS','EchoLingo_0.2.16_aarch64.dmg')]:
             directory=self.inputs/platform;directory.mkdir(parents=True)
             installer=directory/name;installer.write_bytes(b'not-a-native-installer-'+platform.encode())
             app={'name':'echolingo','size':len(b'synthetic-application__TAURI_BUNDLE_TYPE_VAR_NSS'),'sha256':hashlib.sha256(b'synthetic-application__TAURI_BUNDLE_TYPE_VAR_NSS').hexdigest()}
@@ -236,7 +236,7 @@ class PreparationTests(unittest.TestCase):
         self.payload['empty']=b'';self.rebuild_zip();self.reject_zip()
     def test_duplicate_json_field(self):
         path=self.directory/'WINDOWS-ZIP-MANIFEST.json'
-        path.write_text('{"version":"0.2.15","version":"0.2.15"}')
+        path.write_text('{"version":"0.2.16","version":"0.2.16"}')
         with self.assertRaises(ValueError): self.prepare()
     def test_candidate_tree_and_assertion_provenance(self):
         self.reports['Windows']['workflowInspection']['assertions']['tree']='f'*40;self.save('Windows')
@@ -301,8 +301,8 @@ class MacRuntimeWorkflowTests(unittest.TestCase):
 class FixedDesktopRecoveryModeTests(unittest.TestCase):
     def workflow(self):
         return (R.ROOT/'.github/workflows/ci.yml').read_text(encoding='utf-8')
-    def run_selector(self, event='pull_request', head='release/0215-macos-recovery',
-                     base='main', ref='refs/pull/1/merge', version='0.2.15', check_exit=0):
+    def run_selector(self, event='pull_request', head='fix/residual-translation-failures',
+                     base='main', ref='refs/pull/1/merge', version='0.2.16', check_exit=0):
         import os
         import textwrap
         source=self.workflow()
@@ -361,7 +361,7 @@ class FixedDesktopRecoveryModeTests(unittest.TestCase):
     def test_other_events_versions_and_branches_do_not_skip_full_suite(self):
         for arguments in ({'event':'workflow_dispatch','ref':'refs/heads/main'},
                 {'event':'pull_request_target'}, {'head':'other-branch'}, {'base':'other-base'},
-                {'version':'0.2.14'}, {'version':'0.2.16'}, {'version':'0.2.15-beta'},
+                {'version':'0.2.15'}, {'version':'0.2.17'}, {'version':'0.2.16-beta'},
                 {'event':'push','ref':'refs/heads/other'}):
             with self.subTest(arguments=arguments):
                 code, output, calls=self.run_selector(**arguments)
@@ -379,7 +379,8 @@ class FixedDesktopRecoveryModeTests(unittest.TestCase):
         for command in ('python3 scripts/prepare-desktop-release.py --check-source',
             "python3 -m unittest discover -s tests -p 'test_*.py' -v",
             "python3 -m unittest discover -s scripts -p 'test_*.py' -v",
-            'node --test scripts/test-desktop-release.cjs', 'npm run check', 'npm test', 'npm run build'):
+            'node --test scripts/test-desktop-release.cjs', 'npm run check', 'npm test', 'npm run build',
+            'npx playwright install --with-deps chromium', 'node tests/frontend-interactions.mjs'):
             self.assertIn(command,job)
         self.assertNotIn('continue-on-error',job)
         self.assertNotIn('contents: write',job)
@@ -387,34 +388,41 @@ class FixedDesktopRecoveryModeTests(unittest.TestCase):
 
 
 class PackageAwareVersionTests(unittest.TestCase):
+    def test_production_and_behavioral_fixtures_require_a_new_review_pin(self):
+        self.assertEqual(R.REVIEWED_SOURCE, 'f4a85094aa70123dd3c0fb217f42565060185b19')
+        for name in ('src/main.ts', 'src-tauri/src/translation_requests.rs',
+                     'src-tauri/src/window_layout.rs', 'tests/frontend-interactions.mjs',
+                     'tests/test_popup_language_session_contract.py'):
+            self.assertNotIn(name, R.SUPPORT)
+
     def test_released_baseline_is_immutable_and_separate_from_source_pin(self):
-        self.assertEqual(R.MANIFEST_BASELINE, '2c8d81f45d81517afbc86daa446dd10353c6db73')
+        self.assertEqual(R.MANIFEST_BASELINE, 'bd2a42659ad91bb2d3d0792c4650669db336a046')
         self.assertNotEqual(R.MANIFEST_BASELINE, R.REVIEWED_SOURCE)
     def test_same_version_third_party_cargo_entry_is_unchanged(self):
-        baseline = 'version = 4\n[[package]]\nname = "echolingo"\nversion = "0.2.14"\n[[package]]\nname = "async-signal"\nversion = "0.2.14"\nsource = "registry+https://github.com/rust-lang/crates.io-index"\nchecksum = "unchanged-checksum"\n'
-        current = baseline.replace('name = "echolingo"\nversion = "0.2.14"', 'name = "echolingo"\nversion = "0.2.15"')
+        baseline = 'version = 4\n[[package]]\nname = "echolingo"\nversion = "0.2.15"\n[[package]]\nname = "async-signal"\nversion = "0.2.15"\nsource = "registry+https://github.com/rust-lang/crates.io-index"\nchecksum = "unchanged-checksum"\n'
+        current = baseline.replace('name = "echolingo"\nversion = "0.2.15"', 'name = "echolingo"\nversion = "0.2.16"')
         dependency=baseline.split('[[package]]')[2]
         self.assertEqual(current.split('[[package]]')[2], dependency)
         expected=R.expected_version_manifest('src-tauri/Cargo.lock', baseline)
         self.assertEqual(expected['package'][1], R.tomllib.loads(baseline)['package'][1])
         R.check_version_only_manifest('src-tauri/Cargo.lock', baseline, current)
-        for modified in (current.replace('name = "async-signal"\nversion = "0.2.14"', 'name = "async-signal"\nversion = "0.2.15"'),
+        for modified in (current.replace('name = "async-signal"\nversion = "0.2.15"', 'name = "async-signal"\nversion = "0.2.16"'),
                          current.replace('unchanged-checksum', 'different-checksum'),
                          current.replace('crates.io-index', 'other-index')):
             with self.assertRaisesRegex(ValueError, 'Non-version manifest change'):
                 R.check_version_only_manifest('src-tauri/Cargo.lock', baseline, modified)
     def test_npm_dependency_and_unknown_fields_are_not_rewritten(self):
-        baseline={'name':'echolingo','version':'0.2.14','custom':'0.2.14','packages':{
-            '':{'name':'echolingo','version':'0.2.14'},
-            'node_modules/example':{'version':'0.2.14','integrity':'original'}}}
+        baseline={'name':'echolingo','version':'0.2.15','custom':'0.2.15','packages':{
+            '':{'name':'echolingo','version':'0.2.15'},
+            'node_modules/example':{'version':'0.2.15','integrity':'original'}}}
         current=copy.deepcopy(baseline)
-        current['version']=current['packages']['']['version']='0.2.15'
+        current['version']=current['packages']['']['version']='0.2.16'
         R.check_version_only_manifest('package-lock.json', json.dumps(baseline), json.dumps(current))
         for change in ('dependency','integrity','unknown'):
             bad=copy.deepcopy(current)
-            if change=='dependency': bad['packages']['node_modules/example']['version']='0.2.15'
+            if change=='dependency': bad['packages']['node_modules/example']['version']='0.2.16'
             elif change=='integrity': bad['packages']['node_modules/example']['integrity']='different'
-            else: bad['custom']='0.2.15'
+            else: bad['custom']='0.2.16'
             with self.assertRaisesRegex(ValueError, 'Non-version manifest change'):
                 R.check_version_only_manifest('package-lock.json', json.dumps(baseline), json.dumps(bad))
     def test_real_baseline_allows_only_project_versions(self):

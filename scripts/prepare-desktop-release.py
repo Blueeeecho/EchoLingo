@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Prepare 0.2.15 using current-run Mac runtime and accepted Windows ZIP bytes."""
+"""Prepare 0.2.16 using current-run Mac runtime and accepted Windows ZIP bytes."""
 import argparse
 import copy
 import hashlib
@@ -13,28 +13,23 @@ import zipfile
 import tomllib
 
 ROOT = Path(__file__).resolve().parents[1]
-VERSION = '0.2.15'
-REVIEWED_SOURCE = '7afe3e2ea2b8618c3a92a7a5d69058bdd57898e1'
-MANIFEST_BASELINE = '2c8d81f45d81517afbc86daa446dd10353c6db73'
-BASELINE_VERSION = '0.2.14'
+VERSION = '0.2.16'
+REVIEWED_SOURCE = 'f4a85094aa70123dd3c0fb217f42565060185b19'
+MANIFEST_BASELINE = 'bd2a42659ad91bb2d3d0792c4650669db336a046'
+BASELINE_VERSION = '0.2.15'
 MODE = 'desktop-macos-runtime-unpack-v2'
+# Production and behavioral fixtures are fixed at REVIEWED_SOURCE. Only these
+# release/version inputs may change afterward; never widen this to app sources.
 SUPPORT = {
     'package.json', 'package-lock.json', 'src-tauri/tauri.conf.json',
     'src-tauri/Cargo.toml', 'src-tauri/Cargo.lock',
     'src-tauri/native-capture/Cargo.toml', 'src-tauri/native-capture/Cargo.lock',
     'scripts/inspect-candidate-package.py', 'scripts/verify-candidate-package.py',
-    'scripts/test_inspect_candidate_package.py', 'scripts/test_candidate_package.py',
     'scripts/prepare-desktop-release.py', 'scripts/test_prepare_desktop_release.py',
     'scripts/publish-desktop-release.cjs', 'scripts/test-desktop-release.cjs',
-    '.github/workflows/release-desktop.yml', '.github/workflows/release-routing.yml',
-    '.github/workflows/ci.yml',
-    'tests/workflow_contract_helpers.py', 'scripts/test_language_patch_contract.py',
-    'scripts/test_prepare_routing_release.py', 'scripts/test_prepare_release_assets.py',
-    'docs/releases/0.2.15.zh-CN.md',
-    'tests/macos-screenshot-native-fixture.swift',
-    'tests/macos-installed-runtime-smoke.py',
-    'tests/test_macos_installed_runtime_contract.py',
-    'tests/test_macos_pin_readiness_fixture_contract.py',
+    '.github/workflows/release-desktop.yml', '.github/workflows/ci.yml',
+    '.github/workflows/history-language-regression.yml',
+    'docs/releases/0.2.16.zh-CN.md',
 }
 
 

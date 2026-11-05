@@ -17,6 +17,10 @@ on:
       - 'src-tauri/src/bilingual_input.rs'
       - 'src-tauri/src/language_detection.rs'
       - 'src-tauri/src/translation_health.rs'
+      - 'src-tauri/src/translation_requests.rs'
+      - 'src-tauri/src/window_layout.rs'
+      - 'src/panel-layout.ts'
+      - 'tests/test_popup_language_session_contract.py'
 
 permissions:
   contents: read
