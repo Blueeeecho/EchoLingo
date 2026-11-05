@@ -132,6 +132,39 @@ class RuntimeContract(unittest.TestCase):
         with self.assertRaisesRegex(smoke.SmokeError, "external_bundle_symlink"):
             smoke.bundle_manifest(app)
 
+    def test_runtime_version_matches_current_release_manifests(self):
+        # Do not derive expected metadata only from smoke.VERSION: that lets a
+        # stale runtime gate and its synthetic fixtures agree on the old release.
+        root = Path(__file__).resolve().parents[1]
+        package = json.loads((root / "package.json").read_text(encoding="utf-8"))
+        tauri = json.loads((root / "src-tauri/tauri.conf.json").read_text(encoding="utf-8"))
+        spec = importlib.util.spec_from_file_location(
+            "desktop_release_contract", root / "scripts/prepare-desktop-release.py")
+        release = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(release)
+        self.assertEqual(smoke.VERSION, package["version"])
+        self.assertEqual(smoke.VERSION, tauri["version"])
+        self.assertEqual(smoke.VERSION, release.VERSION)
+        app = self.bundle()
+        info = app / "Contents/Info.plist"
+        values = plistlib.loads(info.read_bytes())
+        values["CFBundleVersion"] = tauri["version"]
+        values["CFBundleShortVersionString"] = tauri["version"]
+        info.write_bytes(plistlib.dumps(values))
+        self.assertEqual(smoke.validate_bundle(app), app / "Contents/MacOS/echolingo")
+
+    def test_identity_rejects_previous_release_in_either_version_field(self):
+        app = self.bundle()
+        info = app / "Contents/Info.plist"
+        baseline = plistlib.loads(info.read_bytes())
+        for fields in (("CFBundleVersion",), ("CFBundleShortVersionString",),
+                       ("CFBundleVersion", "CFBundleShortVersionString")):
+            with self.subTest(fields=fields):
+                values = {**baseline, **{field: "0.2.15" for field in fields}}
+                info.write_bytes(plistlib.dumps(values))
+                with self.assertRaisesRegex(smoke.SmokeError, "bundle_identity_mismatch"):
+                    smoke.validate_bundle(app)
+
     def test_identity_rejects_other_version(self):
         app = self.bundle()
         info = app / "Contents/Info.plist"
