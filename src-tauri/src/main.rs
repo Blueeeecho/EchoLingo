@@ -1600,11 +1600,15 @@ fn cancel_active_translation_with_reason(
     screenshot::cancel_pending(app);
     record_native_cancellation(app, reason);
     app.state::<AppState>().native_tasks.cancel();
-    let presentation = app
-        .state::<AppState>()
-        .translation_requests
-        .suspend()
-        .ok()?;
+    let state = app.state::<AppState>();
+    let presentation = if matches!(reason, popup_health::CancellationReason::SettingsAction) {
+        state
+            .translation_requests
+            .suspend_preserving_language_session()
+    } else {
+        state.translation_requests.suspend()
+    }
+    .ok()?;
     announce_presentation(app, presentation);
     Some(presentation)
 }
@@ -3027,6 +3031,7 @@ fn outside_click_watcher(app: tauri::AppHandle) {
                         translation_requests::Presentation {
                             epoch: click.token.epoch,
                             presented: true,
+                            language_session: current.language_session,
                         },
                         current,
                         handle.state::<window_layout::LayoutState>().is_popup(),
@@ -3172,6 +3177,7 @@ fn windows_popup_focus_changed(app: &tauri::AppHandle, focused: bool) {
         translation_requests::Presentation {
             epoch: token.epoch,
             presented: true,
+            language_session: current.language_session,
         },
         current,
         app.state::<window_layout::LayoutState>().is_popup(),
@@ -4180,7 +4186,8 @@ mod tests {
         assert!(!should_hide_observed_popup(
             old_popup, old_popup, false, true, false
         ));
-        let settings_request = requests.suspend().unwrap();
+        let settings_request = requests.suspend_preserving_language_session().unwrap();
+        assert_eq!(settings_request.language_session, old_popup.language_session);
         let management =
             prepare_management_presentation(&requests, settings_request.epoch, true).unwrap();
         assert!(!should_hide_observed_popup(
@@ -4190,6 +4197,17 @@ mod tests {
         // newer presentation than the click the watcher originally observed.
         let hidden = requests.suspend().unwrap();
         let next_popup = requests.resume(Some(hidden.epoch)).unwrap();
+        assert!(next_popup.language_session > old_popup.language_session);
+        // Windows watcher tokens carry epoch only; reconstruct the session
+        // from the current snapshot, never from the default (zero) session.
+        let current_observation = translation_requests::Presentation {
+            epoch: next_popup.epoch,
+            presented: true,
+            language_session: next_popup.language_session,
+        };
+        assert!(should_hide_observed_popup(
+            current_observation, next_popup, true, true, false
+        ));
         assert!(!should_hide_observed_popup(
             old_popup, next_popup, true, true, false
         ));
@@ -4209,6 +4227,7 @@ mod tests {
                 "{action} must keep the pinned popup presented"
             );
             assert!(next.epoch > popup.epoch);
+            assert_eq!(next.language_session, popup.language_session);
             assert_eq!(
                 requests.begin(popup.epoch).unwrap_err(),
                 translation_requests::CANCELLED

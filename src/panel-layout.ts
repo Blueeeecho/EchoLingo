@@ -5,7 +5,7 @@ import { PopupDragController } from './popup-drag';
 import { installPopupFocusRing } from './popup-focus';
 import { layoutViewport, viewportMatches, waitForViewport, type LayoutViewport } from './popup-viewport';
 
-export interface TranslationPresentation { epoch: number; presented: boolean }
+export interface TranslationPresentation { epoch: number; presented: boolean; languageSession?: number }
 
 // Read intrinsic content rather than viewport height, so a short translation
 // can shrink again after a long result. Requests are coalesced and serialized.

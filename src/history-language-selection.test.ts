@@ -35,6 +35,13 @@ describe('history language selection', () => {
     expect(selection.newInput(chosen)).toEqual(chosen);
   });
 
+  it('dismissal clears a manual preference hidden behind history replay', () => {
+    const selection = new HistoryLanguageSelection();
+    selection.replay({ sourceLanguage: 'auto', targetLanguage: 'zh-Hans' }, historical);
+    expect(selection.reset()).toEqual(automatic);
+    expect(selection.newInput(automatic)).toEqual(automatic);
+  });
+
   it('copies the preference so queued updates cannot mutate it', () => {
     const selection = new HistoryLanguageSelection();
     const preferred = { ...automatic };
