@@ -201,6 +201,13 @@ class ReleaseAssetsTests(unittest.TestCase):
         expected = expected[:start] + expected[end:]
         normalized = normalized.replace('        id: package_build\n', '')
         normalized = normalized.replace('        run: |\n          cargo fmt --manifest-path src-tauri/Cargo.toml --check\n          cargo fmt --manifest-path src-tauri/native-capture/Cargo.toml --check', '        run: cargo fmt --manifest-path src-tauri/Cargo.toml --check')
+        # Current frontend regression tests read immutable release history. The
+        # historical 0.2.12 snapshot has no such dependency; normalize only this
+        # exact stronger checkout setting, never test commands or job guards.
+        checkout = '  frontend-interactions:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: actions/checkout@v4\n'
+        complete_history = checkout + '        with:\n          fetch-depth: 0\n'
+        self.assertEqual(expected.count(complete_history), 1)
+        expected = expected.replace(complete_history, checkout)
         self.assertEqual(normalized.strip(), expected.strip())
         self.assertNotIn("actions: read", release)
 

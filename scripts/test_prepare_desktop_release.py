@@ -8,6 +8,7 @@ import shutil
 import sys
 import importlib.util
 import json
+import re
 from pathlib import Path
 import tempfile
 import unittest
@@ -261,7 +262,6 @@ class PreparationTests(unittest.TestCase):
     def test_missing_required_engine_hash(self):
         del self.smoke['engineSha256'];self.reject_zip()
 
-if __name__=='__main__': unittest.main()
 
 
 class WorkflowBuildToolTests(unittest.TestCase):
@@ -440,3 +440,106 @@ class CandidateCliVersionTests(unittest.TestCase):
                     result = subprocess.run([sys.executable, str(R.ROOT/'scripts'/name),
                         '--expected-version', version, '--help'], capture_output=True, text=True)
                     self.assertEqual(result.returncode, expected, result.stderr)
+
+
+REPOSITORY = "https://github.com/Blueeeecho/EchoLingo"
+
+
+def current_version():
+    return json.loads((R.ROOT / "package.json").read_text(encoding="utf-8"))["version"]
+
+
+def validate_document(text, version):
+    prefix = f"{REPOSITORY}/releases/download/{version}/"
+    expected = {prefix + name for name in (
+        f"EchoLingo_{version}_windows_x64-unpack.zip",
+        f"EchoLingo_{version}_windows_x64-setup.exe",
+        f"EchoLingo_{version}_macos_arm64.dmg",
+        "SHA256SUMS.txt", "RELEASE-MANIFEST.json",
+    )}
+    expected |= {f"{REPOSITORY}/releases/tag/{version}", f"{REPOSITORY}/tree/{version}"}
+    urls = set(re.findall(r"https://github\.com/Blueeeecho/EchoLingo/[^\s\"'<>)]*", text))
+    missing = expected - urls
+    if missing:
+        raise ValueError("Missing current release links: " + ", ".join(sorted(missing)))
+    stale = {url for url in urls if "/releases/download/" in url and not url.startswith(prefix)}
+    if stale:
+        raise ValueError("Outdated download links: " + ", ".join(sorted(stale)))
+    if any("/releases/latest" in url for url in urls):
+        raise ValueError("Prerelease downloads must not use the stable Latest endpoint")
+    if not any(word in text.lower() for word in ("预发布", "prerelease", "pre-release")):
+        raise ValueError("The public download documentation must disclose prerelease status")
+
+
+
+class PublicReleaseDocs(unittest.TestCase):
+    def document(self):
+        version = "0.2.16"
+        base = REPOSITORY
+        return "Prerelease\n" + "\n".join([
+            f"{base}/releases/tag/{version}", f"{base}/tree/{version}",
+            *(f"{base}/releases/download/{version}/{name}" for name in (
+                f"EchoLingo_{version}_windows_x64-unpack.zip",
+                f"EchoLingo_{version}_windows_x64-setup.exe",
+                f"EchoLingo_{version}_macos_arm64.dmg",
+                "SHA256SUMS.txt", "RELEASE-MANIFEST.json")),
+        ])
+
+    def test_current_readmes_match_project_version(self):
+        for name in ("README.md", "README.en.md"):
+            with self.subTest(name=name):
+                validate_document((R.ROOT / name).read_text(encoding="utf-8"), current_version())
+
+    def test_current_links_and_previous_release_notes_are_valid(self):
+        validate_document(self.document() + f"\n{REPOSITORY}/releases/tag/0.2.15", "0.2.16")
+
+    def test_a_version_bump_requires_download_documentation_update(self):
+        with self.assertRaisesRegex(ValueError, "Missing current release links"):
+            validate_document(self.document(), "0.2.17")
+
+    def test_stale_download_is_rejected_even_if_current_download_is_present(self):
+        with self.assertRaisesRegex(ValueError, "Outdated download links"):
+            validate_document(self.document() + f"\n{REPOSITORY}/releases/download/0.2.15/old.zip", "0.2.16")
+
+    def test_stable_latest_link_cannot_hide_the_prerelease(self):
+        with self.assertRaisesRegex(ValueError, "stable Latest"):
+            validate_document(self.document() + f"\n{REPOSITORY}/releases/latest", "0.2.16")
+
+    def test_prerelease_label_is_required(self):
+        with self.assertRaisesRegex(ValueError, "disclose prerelease"):
+            validate_document(self.document().replace("Prerelease", ""), "0.2.16")
+
+
+class NonBuildDocumentationScopeTests(unittest.TestCase):
+    def check_paths(self, names):
+        # Execute the real source guard; isolate only Git and manifest I/O.
+        def git(*args):
+            if args[0] == 'diff': return '\n'.join(names)
+            if args[0] == 'show': return 'baseline'
+            raise AssertionError(args)
+        with patch.object(R, 'git', side_effect=git), \
+                patch.object(R.subprocess, 'run'), \
+                patch.object(R, 'check_version_only_manifest') as manifests, \
+                patch.object(R, 'verifier') as factory:
+            factory.return_value.VERSION_PATHS = ['package.json']
+            factory.return_value.source_provenance.return_value = {'checked': True}
+            result = R.check_source()
+            manifests.assert_called_once()
+            factory.return_value.check_versions.assert_called_once_with(R.ROOT)
+            factory.return_value.source_provenance.assert_called_once_with(R.ROOT)
+            return result
+
+    def test_only_exact_readmes_are_non_build_documents(self):
+        self.assertEqual(R.NON_BUILD_DOCS, {'README.md', 'README.en.md'})
+        self.assertEqual(self.check_paths(['README.md', 'README.en.md']), {'checked': True})
+
+    def test_readme_never_allows_unreviewed_source_or_other_documents(self):
+        for name in ('src/main.ts', 'src-tauri/src/main.rs',
+                     'src-tauri/src/translation_requests.rs', 'src-tauri/native/macos.swift',
+                     'scripts/unknown.py', 'docs/unknown.md', 'README.other.md'):
+            with self.subTest(name=name), self.assertRaisesRegex(ValueError, 'Unexpected post-review changes'):
+                self.check_paths(['README.md', name])
+
+
+if __name__ == '__main__':
+    unittest.main()
