@@ -36,7 +36,7 @@ jobs:
           CI_EVENT: ${{ github.event_name }}
           CI_REF: ${{ github.ref }}
         run: |
-          if { { [ "$CI_EVENT" = pull_request ] && [ "$PR_HEAD" = fix/residual-translation-failures ] && [ "$PR_BASE" = main ]; } || { [ "$CI_EVENT" = push ] && [ "$CI_REF" = refs/heads/main ]; }; } && [ "$(node -p 'require("./package.json").version')" = 0.2.16 ]; then
+          if { { [ "$CI_EVENT" = pull_request ] && [ "$PR_HEAD" = fix/system-translation-first-attempt ] && [ "$PR_BASE" = main ]; } || { [ "$CI_EVENT" = push ] && [ "$CI_REF" = refs/heads/main ]; }; } && [ "$(node -p 'require("./package.json").version')" = 0.2.17 ]; then
             # This fixed integration has its native builds/runtime gates in
             # release-desktop.yml. Reject unexpected post-review source changes.
             python3 scripts/prepare-desktop-release.py --check-source
@@ -78,7 +78,7 @@ jobs:
   desktop-recovery-policy:
     needs: validation-mode
     if: needs.validation-mode.outputs.mode == 'desktop-recovery'
-    name: Reviewed 0.2.16 source and regression policy
+    name: Reviewed 0.2.17 source and regression policy
     runs-on: ubuntu-latest
     timeout-minutes: 25
     steps:
@@ -116,7 +116,7 @@ jobs:
           curl --retry 20 --retry-connrefused --retry-delay 1 -fsS http://127.0.0.1:1420/ > /dev/null
           node tests/frontend-interactions.mjs
       - name: State native acceptance ownership
-        run: echo 'Exact reviewed 0.2.16 source only. The paired desktop release workflow owns fresh native builds, Rust tests, Swift fixtures, extracted-DMG launch and Windows ZIP runtime. This job alone is not native acceptance.' >> "$GITHUB_STEP_SUMMARY"
+        run: echo 'Exact reviewed 0.2.17 source only. The paired desktop release workflow owns fresh native builds, Rust tests, Swift fixtures, extracted-DMG launch and Windows ZIP runtime. This job alone is not native acceptance.' >> "$GITHUB_STEP_SUMMARY"
   automatic-direction-routing:
     needs: validation-mode
     if: needs.validation-mode.outputs.mode == 'automatic-direction'
@@ -1356,6 +1356,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
       - name: Check public repository inputs
         run: |
           python3 scripts/check-repository.py

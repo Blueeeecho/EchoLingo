@@ -54,6 +54,9 @@ try {
     Object.assign(fixture, { holdPopupAck: false, popupAckWaits: 0, releasePopupAck: () => {}, sourceFocusCalls: 0 });
     Object.assign(fixture, { holdPresentationRead: false, presentationReadWaits: 0, releasePresentationRead: () => {} });
     Object.assign(fixture, { historyReads: 0, holdHistory: false, failHistory: false, releaseHistory: () => {} });
+    // Deliberately allow selected mock replies to arrive after cancellation.
+    // This exercises the frontend guard, not a native Translation session.
+    Object.assign(fixture, { deferTranslationReply: false, translationReplies: new Map() });
     const sourceBoot = new URL(location.href).searchParams.get('sourceDeliveryFixture');
     Object.assign(fixture, { pendingSource: null, sourceAcks: [], sourceAckResults: [], pendingSourceReads: 0, bootSettingsWaits: 0, releaseBootSettings: () => {}, oldSourceAckWaits: 0, newSourceAckWaits: 0, releaseOldSourceAck: () => {}, releaseNewSourceAck: () => {} });
     if (sourceBoot) {
@@ -258,6 +261,12 @@ try {
         if (command === 'translate') {
           if (cancelledTranslations.has(args.requestId) || activeTranslationId !== args.requestId) throw new Error('CANCELLED: fixture translation cancelled');
           fixture.translationRequests.push(structuredClone(args));
+          if (fixture.deferTranslationReply) {
+            const results = await new Promise(resolve => { fixture.translationReplies.set(args.requestId, resolve); });
+            fixture.translationReplies.delete(args.requestId);
+            if (activeTranslationId === args.requestId) activeTranslationId = null;
+            return structuredClone(results);
+          }
           if (fixture.holdTranslation) await new Promise((resolve, reject) => {
             pendingTranslations.set(args.requestId, { resolve, reject });
             fixture.releaseTranslation = () => { pendingTranslations.delete(args.requestId); resolve(); };
@@ -2958,6 +2967,100 @@ try {
     assert.deepEqual(await page.evaluate(() => window.__qa.systemPrepareCalls), []);
   }
   await page.setViewportSize({ width: 800, height: 820 });
+  // An automatic source delivery and unchanged Enter use the same language
+  // and provider request. Native installed-session recovery is intentionally
+  // opaque here: exhausting it must not trigger frontend retries/downloads.
+  const systemRecoveryUrl = new URL(process.env.ECHOLINGO_TEST_URL ?? 'http://127.0.0.1:1420/');
+  systemRecoveryUrl.searchParams.set('translationSetupFixture', 'system');
+  for (const captureOrigin of ['selection', 'ocr']) {
+    await page.goto(systemRecoveryUrl.href);
+    await page.waitForFunction(() => document.querySelector('#footer-status')?.textContent === '准备就绪');
+    await page.evaluate((captureOrigin) => {
+      const fixture = window.__qa;
+      fixture.translationResultError = 'SYSTEM_TRANSLATION_DOWNLOAD_REQUIRED: Synthetic notInstalled';
+      fixture.translationResultLanguages = { sourceLanguage: 'en', targetLanguage: 'zh-Hans' };
+      fixture.emit('source-text', { text: 'Automatic system translation first attempt', mode: 'translate',
+        presentationEpoch: fixture.presentation.epoch, ...(captureOrigin === 'ocr' ? { captureOrigin } : {}) });
+    }, captureOrigin);
+    await page.locator('.result-setup').waitFor({ state: 'visible' });
+    await page.waitForFunction(() => document.querySelector('#results').getAttribute('aria-busy') === 'false');
+    assert.equal(await page.evaluate(() => window.__qa.translationRequests.length), 1);
+    assert.equal(await page.locator('#source-text').inputValue(), 'Automatic system translation first attempt');
+    assert.deepEqual(await page.evaluate(() => window.__qa.systemPrepareCalls), []);
+    await page.evaluate(() => {
+      window.__qa.translationResultError = null;
+      window.__qa.translationResultText = 'Unchanged Enter system translation succeeded';
+    });
+    await page.locator('#source-text').press('Enter');
+    await page.getByText('Unchanged Enter system translation succeeded', { exact: true }).waitFor();
+    const requests = await page.evaluate(() => window.__qa.translationRequests);
+    assert.equal(requests.length, 2, 'only automatic delivery and explicit Enter dispatch translation');
+    const { requestId: automaticId, ...automaticRequest } = requests[0];
+    const { requestId: enterId, ...enterRequest } = requests[1];
+    assert.notEqual(automaticId, enterId, 'explicit Enter gets a fresh backend ticket');
+    assert.deepEqual(enterRequest, automaticRequest, 'unchanged Enter preserves source, language, and provider scope');
+    assert.deepEqual(automaticRequest, { text: 'Automatic system translation first attempt', sourceLanguage: 'auto', targetLanguage: 'auto' });
+    assert.equal(await page.locator('.result-error').count(), 0);
+    assert.equal(await page.locator('.result-setup').isVisible(), false);
+    assert.deepEqual(await page.evaluate(() => ({ preparation: window.__qa.systemPrepareCalls,
+      credentialReads: window.__qa.credentialReadCalls, settingsWrites: window.__qa.saveCalls })),
+    { preparation: [], credentialReads: 0, settingsWrites: 0 });
+    assert.equal(await page.evaluate(() => document.body.dataset.view), 'translate');
+  }
+  // A recovery still in flight is one frontend request. Even a backend reply
+  // that ignores cancellation cannot paint old text, report an old setup
+  // error, or clear the loading state of the replacement request.
+  for (const action of ['edit', 'stop', 'hide', 'new-source']) {
+    await page.goto(systemRecoveryUrl.href);
+    await page.waitForFunction(() => document.querySelector('#footer-status')?.textContent === '准备就绪');
+    await page.evaluate(() => {
+      const fixture = window.__qa;
+      fixture.deferTranslationReply = true;
+      fixture.emit('source-text', { text: 'Old automatic system source', mode: 'translate', presentationEpoch: fixture.presentation.epoch });
+    });
+    await page.waitForFunction(() => window.__qa.translationReplies.size === 1);
+    const oldRequest = await page.evaluate(() => ({ ...window.__qa.translationRequests[0], presentationEpoch: window.__qa.presentation.epoch }));
+    if (action === 'edit') await page.locator('#source-text').fill('New system source wins');
+    else if (action === 'stop') await page.locator('#translate-button').click();
+    else if (action === 'hide') await page.evaluate(() => { window.__qa.nativeHide(); window.__qa.nativeShow(); });
+    else await page.evaluate(() => {
+      const fixture = window.__qa;
+      const presentation = fixture.nativeInputShow();
+      fixture.emit('source-text', { text: 'New system source wins', mode: 'translate', presentationEpoch: presentation.epoch });
+    });
+    await page.waitForFunction((id) => window.__qa.cancellationRequests.includes(id), oldRequest.requestId);
+    if (action !== 'new-source') {
+      await page.locator('#source-text').fill('New system source wins');
+      await page.locator('#source-text').press('Enter');
+    }
+    await page.waitForFunction(() => window.__qa.translationRequests.length === 2 && window.__qa.translationReplies.size === 2);
+    await page.evaluate((old) => {
+      const fixture = window.__qa, provider = fixture.settings.providers[0];
+      const result = { providerId: provider.id, providerName: provider.name, text: 'Stale recovered system result', elapsedMs: 50 };
+      fixture.translationReplies.get(old.requestId)([result]);
+      fixture.emit('translation-progress', { requestId: old.requestId, presentationEpoch: old.presentationEpoch,
+        sequence: 1, done: true, result: { ...result, text: '', error: 'SYSTEM_TRANSLATION_DOWNLOAD_REQUIRED: Stale notInstalled' } });
+    }, oldRequest);
+    await page.waitForFunction((id) => !window.__qa.translationReplies.has(id), oldRequest.requestId);
+    assert.equal(await page.locator('#source-text').inputValue(), 'New system source wins');
+    assert.equal(await page.locator('#results').getAttribute('aria-busy'), 'true');
+    assert.equal(await page.locator('#translate-button').getAttribute('aria-label'), '停止翻译');
+    assert.equal(await page.locator('.result-error, .result-text').count(), 0);
+    await page.evaluate(() => {
+      const fixture = window.__qa, provider = fixture.settings.providers[0];
+      fixture.translationReplies.get(fixture.translationRequests[1].requestId)([
+        { providerId: provider.id, providerName: provider.name, text: 'Latest system translation result', elapsedMs: 50 },
+      ]);
+    });
+    await page.getByText('Latest system translation result', { exact: true }).waitFor();
+    assert.equal(await page.locator('#results').getAttribute('aria-busy'), 'false');
+    assert.equal(await page.locator('.result-error').count(), 0);
+    assert.equal(await page.getByText('Stale recovered system result', { exact: true }).count(), 0);
+    assert.equal(await page.evaluate(() => window.__qa.translationRequests.length), 2);
+    assert.deepEqual(await page.evaluate(() => window.__qa.systemPrepareCalls), []);
+  }
+  assert.deepEqual(errors, []);
+  console.log('PASS: automatic system failure and unchanged Enter keep identical request inputs without preparation or frontend retries; edit/stop/hide/new-source reject late mock replies and preserve the newer request. Mock IPC only, not Apple session recovery verification.');
   // Result setup actions only navigate. They never authorize, download, read
   // credentials or silently retry; preparation remains a separate explicit act.
   for (const [platform, kind, appleAction] of [

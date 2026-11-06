@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Prepare 0.2.16 using current-run Mac runtime and accepted Windows ZIP bytes."""
+"""Prepare 0.2.17 using current-run Mac runtime and accepted Windows ZIP bytes."""
 import argparse
 import copy
 import hashlib
@@ -13,10 +13,10 @@ import zipfile
 import tomllib
 
 ROOT = Path(__file__).resolve().parents[1]
-VERSION = '0.2.16'
-REVIEWED_SOURCE = '5d9e883cd292e0722c265155590630f056d09b20'
-MANIFEST_BASELINE = 'bd2a42659ad91bb2d3d0792c4650669db336a046'
-BASELINE_VERSION = '0.2.15'
+VERSION = '0.2.17'
+REVIEWED_SOURCE = 'PENDING_FINAL_VERIFIED_SYSTEM_TRANSLATION_COMMIT'
+MANIFEST_BASELINE = '207982231449c78e5efd726ba4ba1c42d8561e93'
+BASELINE_VERSION = '0.2.16'
 MODE = 'desktop-macos-runtime-unpack-v2'
 # Production and behavioral fixtures are fixed at REVIEWED_SOURCE. Only these
 # release/version inputs may change afterward; never widen this to app sources.
@@ -29,7 +29,7 @@ SUPPORT = {
     'scripts/publish-desktop-release.cjs', 'scripts/test-desktop-release.cjs',
     '.github/workflows/release-desktop.yml', '.github/workflows/ci.yml',
     '.github/workflows/history-language-regression.yml',
-    'docs/releases/0.2.16.zh-CN.md',
+    'docs/releases/0.2.17.zh-CN.md',
 }
 
 

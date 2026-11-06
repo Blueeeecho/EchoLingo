@@ -4985,6 +4985,40 @@ func systemTranslationErrorKind(_ error: Error) -> String {
     }
 }
 
+// A defensive retry for a transient installed-resource lookup failure, not a
+// claim about Apple's cause. This helper never prepares, polls availability,
+// downloads, activates a window, or changes the requested text/language pair.
+// The caller supplies a fresh installed-only session for each attempt. All
+// attempts and waits remain inside the same cancellable job and 45s timeout.
+@available(macOS 26.0, *)
+func withInstalledSystemTranslationRecovery<T>(
+    trace: SystemTranslationTrace,
+    wait: (UInt64) async throws -> Void = { try await Task.sleep(nanoseconds: $0) },
+    attempt: () async throws -> T
+) async throws -> T {
+    let retryDelays: [UInt64] = [1_000_000_000, 4_000_000_000]
+    for index in 0...retryDelays.count {
+        try Task.checkCancellation()
+        trace.translationAttempt(index + 1)
+        do {
+            let result = try await attempt()
+            // Reject a late framework success after the request was cancelled.
+            try Task.checkCancellation()
+            return result
+        } catch {
+            try Task.checkCancellation()
+            let kind = systemTranslationErrorKind(error)
+            trace.translationAttemptFailed(error, kind: kind, attempt: index + 1)
+            guard kind == "notInstalled", index < retryDelays.count else { throw error }
+            let delay = retryDelays[index]
+            trace.translationRetryWait(milliseconds: Int(delay / 1_000_000))
+            try await wait(delay)
+            try Task.checkCancellation()
+        }
+    }
+    throw NativeError("SYSTEM_TRANSLATION_FAILED: 系统翻译未能完成，请重试。")
+}
+
 @available(macOS 26.0, *)
 func systemInstalledTranslationContractSelfTest() throws {
     let session = TranslationSession(installedSource: Locale.Language(identifier: "zh-Hans"),
@@ -5000,6 +5034,158 @@ func systemInstalledTranslationContractSelfTest() throws {
         throw NativeError("SELF_TEST: Installed-only translation contract failed.")
     }
     try systemTranslationStatusPolicySelfTest()
+}
+
+// Controlled fixture state only. No TranslationSession, language query or
+// download is invoked by the retry behavioral tests below.
+private actor SystemTranslationRetryFixtureProbe {
+    private var attempts = 0
+    private var waits: [UInt64] = []
+    private var entered = false
+    private var entryWaiter: CheckedContinuation<Void, Never>?
+    private var responseWaiter: CheckedContinuation<String, Never>?
+    func recordAttempt() { attempts += 1 }
+    func recordWait(_ delay: UInt64) { waits.append(delay); signalEntry() }
+    private func signalEntry() { entered = true; entryWaiter?.resume(); entryWaiter = nil }
+    func waitUntilEntered() async {
+        if entered { return }
+        await withCheckedContinuation { entryWaiter = $0 }
+    }
+    func suspendedResponse() async -> String {
+        await withCheckedContinuation { responseWaiter = $0; signalEntry() }
+    }
+    func releaseResponse() { responseWaiter?.resume(returning: "late fixture"); responseWaiter = nil }
+    func snapshot() -> (attempts: Int, waits: [UInt64]) { (attempts, waits) }
+}
+
+@available(macOS 26.0, *)
+func systemInstalledTranslationRetrySelfTest() async throws {
+    func expect(_ condition: Bool, _ message: String) throws {
+        if !condition { throw NativeError("SELF_TEST: \(message)") }
+    }
+    func scenario(_ failures: [Error], attempts expectedAttempts: Int, waits expectedWaits: [UInt64],
+                  finalKind: String? = nil) async throws {
+        let trace = SystemTranslationTrace()
+        let previousFailure = SystemTranslationTrace.snapshot()["lastFailure"] as? [String: Any]
+        var attempts = 0
+        var waits: [UInt64] = []
+        var receivedError: Error?
+        var result: String?
+        do {
+            result = try await withInstalledSystemTranslationRecovery(trace: trace, wait: { delay in
+                waits.append(delay)
+            }, attempt: {
+                attempts += 1
+                trace.phase("translate")
+                if attempts <= failures.count { throw failures[attempts - 1] }
+                return "synthetic result"
+            })
+            trace.phase("completed")
+        } catch {
+            receivedError = error
+            trace.translationFailureKind(systemTranslationErrorKind(error))
+            trace.failure(error)
+        }
+        let state = SystemTranslationTrace.snapshot()
+        let firstFailure = state["firstAttemptFailure"] as? [String: Any]
+        let retained = state["lastFailure"] as? [String: Any]
+        try expect(attempts == expectedAttempts && waits == expectedWaits,
+                   "Installed-only retries exceeded their attempt or delay budget.")
+        try expect(state["translationAttemptCount"] as? Int == expectedAttempts &&
+                   state["retryCount"] as? Int == expectedWaits.count &&
+                   state["scheduledRetryWaitMs"] as? Int == expectedWaits.reduce(0) { $0 + Int($1 / 1_000_000) },
+                   "Installed-only retry diagnostics lost attempt or scheduled wait counts.")
+        if let finalKind {
+            try expect(receivedError.map(systemTranslationErrorKind) == finalKind && state["phase"] as? String == "failed",
+                       "Installed-only retries changed the final error.")
+        } else {
+            try expect(receivedError == nil && result == "synthetic result" && state["phase"] as? String == "completed" &&
+                       state["translationErrorKind"] == nil && state["nativeErrorCode"] == nil &&
+                       retained?["attemptId"] as? UInt64 == previousFailure?["attemptId"] as? UInt64,
+                       "Recovered translation was marked failed or erased a prior operation failure.")
+        }
+        if let first = failures.first {
+            try expect(firstFailure?["attempt"] as? Int == 1 &&
+                       firstFailure?["translationErrorKind"] as? String == systemTranslationErrorKind(first),
+                       "Retry diagnostics lost the first attempt failure.")
+        } else {
+            try expect(firstFailure == nil, "A new request inherited previous attempt failure diagnostics.")
+        }
+    }
+    let notInstalled = TranslationError.notInstalled
+    try await scenario([], attempts: 1, waits: [])
+    try await scenario([notInstalled], attempts: 2, waits: [1_000_000_000])
+    try await scenario([notInstalled, notInstalled], attempts: 3, waits: [1_000_000_000, 4_000_000_000])
+    try await scenario([notInstalled, notInstalled, notInstalled, notInstalled], attempts: 3,
+                       waits: [1_000_000_000, 4_000_000_000], finalKind: "notInstalled")
+    let nonretryable: [Error] = [TranslationError.unsupportedSourceLanguage, TranslationError.unsupportedTargetLanguage,
+        TranslationError.unsupportedLanguagePairing, TranslationError.unableToIdentifyLanguage,
+        TranslationError.alreadyCancelled, CancellationError(),
+        NativeError("SYSTEM_TRANSLATION_FAILED: fixture"),
+        NSError(domain: "private fixture", code: 17, userInfo: [NSLocalizedDescriptionKey: "private text"])]
+    for error in nonretryable {
+        try await scenario([error], attempts: 1, waits: [], finalKind: systemTranslationErrorKind(error))
+        try await scenario([notInstalled, error], attempts: 2, waits: [1_000_000_000], finalKind: systemTranslationErrorKind(error))
+    }
+    // Fresh request and successful recovery must reset local counters, not the
+    // retained failure of the previous logical operation.
+    try await scenario([notInstalled], attempts: 2, waits: [1_000_000_000])
+    try await scenario([], attempts: 1, waits: [])
+
+    let waiting = SystemTranslationRetryFixtureProbe()
+    let waitingTrace = SystemTranslationTrace()
+    let waitingTask = Task<String, Error> {
+        try await withInstalledSystemTranslationRecovery(trace: waitingTrace, wait: { delay in
+            await waiting.recordWait(delay)
+            try await Task.sleep(nanoseconds: delay)
+        }, attempt: {
+            await waiting.recordAttempt()
+            throw TranslationError.notInstalled
+        })
+    }
+    await waiting.waitUntilEntered()
+    waitingTask.cancel()
+    do {
+        _ = try await waitingTask.value
+        throw NativeError("SELF_TEST: Cancellation during retry wait returned success.")
+    } catch is CancellationError { }
+    let waited = await waiting.snapshot()
+    try expect(waited.attempts == 1 && waited.waits == [1_000_000_000],
+               "Cancellation during retry wait started another session.")
+
+    // A noncooperative attempt returns success only after it is cancelled.
+    // The shared helper must reject it, preserving prior preparation state.
+    let late = SystemTranslationRetryFixtureProbe()
+    let lateTrace = SystemTranslationTrace()
+    let recovery = SystemTranslationRecovery()
+    let previous = try recovery.begin(source: "en", target: "zh-Hans")
+    recovery.finish(previous, outcome: .notInstalled)
+    let ticket = try recovery.begin(source: "en", target: "zh-Hans")
+    let lateTask = Task<String, Error> {
+        do {
+            let result = try await withInstalledSystemTranslationRecovery(trace: lateTrace, wait: { delay in
+                await late.recordWait(delay)
+            }, attempt: {
+                await late.recordAttempt()
+                return await late.suspendedResponse()
+            })
+            recovery.finish(ticket, outcome: .succeeded)
+            return result
+        } catch {
+            recovery.finish(ticket, outcome: .unchanged)
+            throw error
+        }
+    }
+    await late.waitUntilEntered()
+    lateTask.cancel()
+    await late.releaseResponse()
+    do {
+        _ = try await lateTask.value
+        throw NativeError("SELF_TEST: Cancelled translation accepted a stale success.")
+    } catch is CancellationError { }
+    let stale = await late.snapshot()
+    try expect(stale.attempts == 1 && stale.waits.isEmpty && recovery.needsPreparation(source: "en", target: "zh-Hans"),
+               "Cancelled stale result retried or cleared preparation state.")
 }
 
 @available(macOS 26.0, *)
@@ -5105,44 +5291,47 @@ func translateWithSystem(_ request: SystemTranslationInput, trace: SystemTransla
     // another target if Apple's availability/session rejects the exact pair.
     // Even an equivalent source/target pair must reach the chosen service.
     // Do not manufacture a successful original-text result here.
-    // Availability is advisory in Settings and can be transient. This session
-    // cannot request downloads; translate reports the actual installed state.
+    // Availability is advisory in Settings. Each attempt uses only installed
+    // resources; only notInstalled is eligible for bounded session recreation.
     let recoveryTicket = try systemTranslationRecovery.begin(source: source, target: request.target)
-    trace.phase("createSession")
-    let session = TranslationSession(installedSource: Locale.Language(identifier: source), target: Locale.Language(identifier: request.target))
-    trace.sessionLanguages(source: session.sourceLanguage?.minimalIdentifier,
-                           target: session.targetLanguage?.minimalIdentifier,
-                           sourceMaximal: session.sourceLanguage?.maximalIdentifier,
-                           targetMaximal: session.targetLanguage?.maximalIdentifier)
-    guard !session.canRequestDownloads else {
-        systemTranslationRecovery.finish(recoveryTicket, outcome: .unchanged)
-        throw NativeError("SYSTEM_TRANSLATION_FAILED: 系统翻译未能进入本机语言模式。")
-    }
     do {
-        return try await withTaskCancellationHandler(operation: {
-            try Task.checkCancellation()
-            trace.phase("translate")
-            let response = try await session.translate(text)
-            try Task.checkCancellation()
-            guard !response.targetText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
-                throw NativeError("SYSTEM_TRANSLATION_FAILED: 系统翻译返回了空结果，请重试。")
+        let result: [String: Any] = try await withInstalledSystemTranslationRecovery(trace: trace) {
+            trace.phase("createSession")
+            let session = TranslationSession(installedSource: Locale.Language(identifier: source), target: Locale.Language(identifier: request.target))
+            trace.sessionLanguages(source: session.sourceLanguage?.minimalIdentifier,
+                                   target: session.targetLanguage?.minimalIdentifier,
+                                   sourceMaximal: session.sourceLanguage?.maximalIdentifier,
+                                   targetMaximal: session.targetLanguage?.maximalIdentifier)
+            guard !session.canRequestDownloads else {
+                throw NativeError("SYSTEM_TRANSLATION_FAILED: 系统翻译未能进入本机语言模式。")
             }
-            guard systemTargetLanguageMatches(request.target, response.targetLanguage) else {
-                throw NativeError("SYSTEM_TRANSLATION_UNSUPPORTED: Apple 系统翻译未保留所选目标语言，请选择其他翻译服务。")
-            }
-            systemTranslationRecovery.finish(recoveryTicket, outcome: .succeeded)
-            return ["text": normalizeSystemTranslationOutput(source: text, translated: response.targetText),
-                    "sourceLanguage": source, "targetLanguage": request.target]
-        }, onCancel: { session.cancel() })
+            return try await withTaskCancellationHandler(operation: {
+                try Task.checkCancellation()
+                trace.phase("translate")
+                let response = try await session.translate(text)
+                try Task.checkCancellation()
+                guard !response.targetText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+                    throw NativeError("SYSTEM_TRANSLATION_FAILED: 系统翻译返回了空结果，请重试。")
+                }
+                guard systemTargetLanguageMatches(request.target, response.targetLanguage) else {
+                    throw NativeError("SYSTEM_TRANSLATION_UNSUPPORTED: Apple 系统翻译未保留所选目标语言，请选择其他翻译服务。")
+                }
+                return ["text": normalizeSystemTranslationOutput(source: text, translated: response.targetText),
+                        "sourceLanguage": source, "targetLanguage": request.target]
+            }, onCancel: { session.cancel() })
+        }
+        try Task.checkCancellation()
+        systemTranslationRecovery.finish(recoveryTicket, outcome: .succeeded)
+        return result
     } catch {
-        // Keep the actual translation error even when advisory availability
-        // disagrees. Never retry translation, query advisory state or start a
-        // download here: diagnostics must not delay the known original error.
-        let kind = systemTranslationErrorKind(error)
+        // Only the final outcome completes the ticket or marks the operation
+        // failed. Intermediate errors stay in bounded attempt diagnostics.
+        let finalError: Error = Task.isCancelled ? CancellationError() : error
+        let kind = systemTranslationErrorKind(finalError)
         trace.translationFailureKind(kind)
-        trace.failure(error)
+        trace.failure(finalError)
         systemTranslationRecovery.finish(recoveryTicket, outcome: kind == "notInstalled" ? .notInstalled : .unchanged)
-        throw systemTranslationFailure(error)
+        throw systemTranslationFailure(finalError)
     }
 }
 
@@ -5413,6 +5602,7 @@ final class SystemTranslationTrace: @unchecked Sendable {
         Self.lock.lock()
         Self.next &+= 1; id = Self.next
         Self.latest = ["attemptId": id, "phase": "started", "elapsedMs": 0,
+                       "translationAttemptCount": 0, "retryCount": 0, "scheduledRetryWaitMs": 0,
                        "startedAtUnixMs": Int64(Date().timeIntervalSince1970 * 1000)]
         Self.lock.unlock()
     }
@@ -5421,6 +5611,45 @@ final class SystemTranslationTrace: @unchecked Sendable {
         guard Self.latest["attemptId"] as? UInt64 == id,
               !["failed", "completed"].contains(Self.latest["phase"] as? String ?? "") else { return }
         Self.latest["phase"] = phase
+        Self.latest["elapsedMs"] = (ProcessInfo.processInfo.systemUptime - started) * 1000
+    }
+    func translationAttempt(_ count: Int) {
+        Self.lock.lock(); defer { Self.lock.unlock() }
+        guard Self.latest["attemptId"] as? UInt64 == id, (1...3).contains(count),
+              !["failed", "completed"].contains(Self.latest["phase"] as? String ?? "") else { return }
+        Self.latest["translationAttemptCount"] = count
+    }
+    func translationAttemptFailed(_ error: Error, kind: String, attempt: Int) {
+        let native = error as NSError
+        let domain: String
+        switch native.domain {
+        case NSCocoaErrorDomain: domain = "cocoa"
+        case NSURLErrorDomain: domain = "url"
+        case NSPOSIXErrorDomain: domain = "posix"
+        default: domain = "other"
+        }
+        Self.lock.lock(); defer { Self.lock.unlock() }
+        guard Self.latest["attemptId"] as? UInt64 == id, (1...3).contains(attempt),
+              Self.latest["firstAttemptFailure"] == nil,
+              !["failed", "completed"].contains(Self.latest["phase"] as? String ?? "") else { return }
+        let safeKind = ["notInstalled", "unsupportedSourceLanguage", "unsupportedTargetLanguage",
+            "unsupportedLanguagePairing", "unableToIdentifyLanguage", "cancelled", "other"].contains(kind) ? kind : "other"
+        // Keep the first attempt failure without marking the logical operation
+        // failed or replacing a previous operation's retained final failure.
+        Self.latest["firstAttemptFailure"] = ["attempt": attempt, "translationErrorKind": safeKind,
+            "failurePhase": Self.latest["phase"] ?? "started", "nativeErrorDomain": domain,
+            "nativeErrorCode": native.code, "elapsedMs": (ProcessInfo.processInfo.systemUptime - started) * 1000]
+    }
+    func translationRetryWait(milliseconds: Int) {
+        Self.lock.lock(); defer { Self.lock.unlock() }
+        guard Self.latest["attemptId"] as? UInt64 == id,
+              !["failed", "completed"].contains(Self.latest["phase"] as? String ?? "") else { return }
+        let count = Self.latest["retryCount"] as? Int ?? 0
+        guard (count == 0 && milliseconds == 1000) || (count == 1 && milliseconds == 4000) else { return }
+        Self.latest["retryCount"] = count + 1
+        // Scheduled, not elapsed: a cancelled sleep may use less than this.
+        Self.latest["scheduledRetryWaitMs"] = (Self.latest["scheduledRetryWaitMs"] as? Int ?? 0) + milliseconds
+        Self.latest["phase"] = "retryWait"
         Self.latest["elapsedMs"] = (ProcessInfo.processInfo.systemUptime - started) * 1000
     }
     func failure(_ error: Error) {
@@ -5435,7 +5664,8 @@ final class SystemTranslationTrace: @unchecked Sendable {
         default: domain = "other"
         }
         Self.lock.lock(); defer { Self.lock.unlock() }
-        guard Self.latest["attemptId"] as? UInt64 == id else { return }
+        guard Self.latest["attemptId"] as? UInt64 == id,
+              !["failed", "completed"].contains(Self.latest["phase"] as? String ?? "") else { return }
         // Keep the first underlying error instead of overwriting it with our
         // user-facing NativeError wrapper after it crosses the C ABI boundary.
         if Self.latest["nativeErrorCode"] == nil {
@@ -5487,7 +5717,8 @@ final class SystemTranslationTrace: @unchecked Sendable {
     }
     func translationFailureKind(_ kind: String) {
         Self.lock.lock(); defer { Self.lock.unlock() }
-        guard Self.latest["attemptId"] as? UInt64 == id else { return }
+        guard Self.latest["attemptId"] as? UInt64 == id,
+              !["failed", "completed"].contains(Self.latest["phase"] as? String ?? "") else { return }
         // Only the classification is retained, never error descriptions.
         Self.latest["translationErrorKind"] = ["notInstalled", "unsupportedSourceLanguage", "unsupportedTargetLanguage",
             "unsupportedLanguagePairing", "unableToIdentifyLanguage", "cancelled", "other"].contains(kind) ? kind : "other"
@@ -5564,10 +5795,56 @@ func systemTranslationTraceSelfTest() throws {
           !replacedJSON.contains("private") else {
         throw NativeError("SELF_TEST: New translation failure was not retained safely.")
     }
+    let retry = SystemTranslationTrace()
+    retry.translationAttempt(1)
+    retry.phase("translate")
+    retry.translationAttemptFailed(NSError(domain: "private attempt domain", code: 73,
+        userInfo: [NSLocalizedDescriptionKey: "private source text"]), kind: "notInstalled", attempt: 1)
+    retry.translationRetryWait(milliseconds: 1000)
+    retry.translationAttempt(2)
+    retry.translationAttemptFailed(NSError(domain: "other", code: 74), kind: "other", attempt: 2)
+    retry.translationRetryWait(milliseconds: 4000)
+    retry.translationAttempt(3)
+    retry.translationRetryWait(milliseconds: 4000) // Cannot exceed the budget.
+    retry.translationAttempt(4)
+    retry.phase("completed")
+    let recovered = SystemTranslationTrace.snapshot()
+    let firstAttempt = recovered["firstAttemptFailure"] as? [String: Any]
+    let recoveredRetained = recovered["lastFailure"] as? [String: Any]
+    let recoveredJSON = String(data: try JSONSerialization.data(withJSONObject: recovered), encoding: .utf8) ?? ""
+    guard recovered["phase"] as? String == "completed", recovered["translationAttemptCount"] as? Int == 3,
+          recovered["retryCount"] as? Int == 2, recovered["scheduledRetryWaitMs"] as? Int == 5000,
+          firstAttempt?["attempt"] as? Int == 1, firstAttempt?["translationErrorKind"] as? String == "notInstalled",
+          firstAttempt?["nativeErrorDomain"] as? String == "other", firstAttempt?["nativeErrorCode"] as? Int == 73,
+          recovered["translationErrorKind"] == nil, recovered["nativeErrorCode"] == nil,
+          recoveredRetained?["attemptId"] as? UInt64 == replaced?["attemptId"] as? UInt64,
+          !recoveredJSON.contains("private") else {
+        throw NativeError("SELF_TEST: Bounded retry diagnostics lost first failure, leaked content or marked recovery failed.")
+    }
+    let timedOut = SystemTranslationTrace()
+    timedOut.phase("retryWait")
+    timedOut.failure(NativeError("SYSTEM_TRANSLATION_TIMEOUT: fixture"))
+    timedOut.translationFailureKind("cancelled")
+    timedOut.failure(CancellationError())
+    timedOut.translationAttempt(2)
+    timedOut.translationRetryWait(milliseconds: 1000)
+    timedOut.phase("completed")
+    guard SystemTranslationTrace.snapshot()["phase"] as? String == "failed",
+          SystemTranslationTrace.snapshot()["failurePhase"] as? String == "retryWait",
+          SystemTranslationTrace.snapshot()["errorType"] as? String == "native",
+          SystemTranslationTrace.snapshot()["translationErrorKind"] == nil,
+          SystemTranslationTrace.snapshot()["translationAttemptCount"] as? Int == 0,
+          SystemTranslationTrace.snapshot()["scheduledRetryWaitMs"] as? Int == 0 else {
+        throw NativeError("SELF_TEST: Late cancellation or retry changed terminal timeout diagnostics.")
+    }
     try systemTranslationRecoverySelfTest()
     let reset = SystemTranslationTrace()
     reset.languages(source: "private source text", target: "en")
-    guard SystemTranslationTrace.snapshot()["sourceLanguage"] == nil else {
+    guard SystemTranslationTrace.snapshot()["sourceLanguage"] == nil,
+          SystemTranslationTrace.snapshot()["firstAttemptFailure"] == nil,
+          SystemTranslationTrace.snapshot()["translationAttemptCount"] as? Int == 0,
+          SystemTranslationTrace.snapshot()["retryCount"] as? Int == 0,
+          SystemTranslationTrace.snapshot()["scheduledRetryWaitMs"] as? Int == 0 else {
         throw NativeError("SELF_TEST: Translation diagnostics accepted unvalidated language content.")
     }
     reset.sessionLanguages(source: "zh", target: "en", sourceMaximal: "zh-Hans-CN", targetMaximal: "en-Latn-US")
@@ -5812,12 +6089,18 @@ func nativeResponse(mode: String, input: Data = Data()) -> [String: Any] {
             try systemTranslationTraceSelfTest()
             var cancellationTested = false
             var installedOnlyContractTested = false
+            var installedRetryTested = false
             #if canImport(Translation) && compiler(>=6.2)
             try systemTranslationCancellationSelfTest()
             cancellationTested = true
             if #available(macOS 26.0, *) {
                 try systemInstalledTranslationContractSelfTest()
                 installedOnlyContractTested = true
+                _ = try awaitSystemTranslation(seconds: 10) {
+                    try await systemInstalledTranslationRetrySelfTest()
+                    return ["passed": true]
+                }
+                installedRetryTested = true
             }
             #endif
             if #available(macOS 13.0, *) {
@@ -5833,7 +6116,7 @@ func nativeResponse(mode: String, input: Data = Data()) -> [String: Any] {
                 }
                 #endif
             }
-            return ["ok": true, "diagnostics": ["systemTranslationPolicyFixturePassed": true, "systemTranslationTraceRecoveryFixturePassed": true, "systemTranslationOutputFixturePassed": true, "systemTranslationOutputFixtureCount": 19, "systemTranslationCancellationFixturePassed": cancellationTested, "systemTranslationCancellationFixtureSkipped": !cancellationTested, "systemTranslationInstalledOnlyFixturePassed": installedOnlyContractTested, "translationEngineCalled": false, "languageDownloadRequested": false]]
+            return ["ok": true, "diagnostics": ["systemTranslationPolicyFixturePassed": true, "systemTranslationTraceRecoveryFixturePassed": true, "systemTranslationOutputFixturePassed": true, "systemTranslationOutputFixtureCount": 19, "systemTranslationCancellationFixturePassed": cancellationTested, "systemTranslationCancellationFixtureSkipped": !cancellationTested, "systemTranslationInstalledOnlyFixturePassed": installedOnlyContractTested, "systemTranslationInstalledRetryFixturePassed": installedRetryTested, "systemTranslationInstalledRetryFixtureSkipped": !installedRetryTested, "translationEngineCalled": false, "languageDownloadRequested": false]]
         case "--detect-language":
             guard input.count <= 2 * 1024 * 1024, let text = String(data: input, encoding: .utf8) else {
                 throw NativeError("SYSTEM_TRANSLATION_LANGUAGE: 无法检测原文语言，请手动选择源语言。")
