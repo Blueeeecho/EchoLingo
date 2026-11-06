@@ -432,7 +432,7 @@ class FixedDesktopRecoveryModeTests(unittest.TestCase):
 
 class PackageAwareVersionTests(unittest.TestCase):
     def test_production_and_behavioral_fixtures_require_a_new_review_pin(self):
-        self.assertEqual(R.REVIEWED_SOURCE, 'PENDING_FINAL_VERIFIED_SYSTEM_TRANSLATION_COMMIT')
+        self.assertEqual(R.REVIEWED_SOURCE, '6d33403c37711116919175239ca686d14b7512d6')
         for name in ('src/main.ts', 'src-tauri/src/translation_requests.rs',
                      'src-tauri/src/window_layout.rs', 'tests/frontend-interactions.mjs',
                      'tests/test_popup_language_session_contract.py',
