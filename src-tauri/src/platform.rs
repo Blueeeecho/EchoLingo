@@ -2953,6 +2953,14 @@ mod tests {
         assert_eq!(diagnostic["systemTranslationOutputFixtureCount"], 19);
         assert_eq!(diagnostic["translationEngineCalled"], false);
         assert_eq!(diagnostic["languageDownloadRequested"], false);
+        assert_eq!(
+            diagnostic["systemTranslationInstalledRetryFixturePassed"],
+            diagnostic["systemTranslationInstalledOnlyFixturePassed"]
+        );
+        assert!(
+            diagnostic["systemTranslationInstalledRetryFixturePassed"] == true
+                || diagnostic["systemTranslationInstalledRetryFixtureSkipped"] == true
+        );
         assert!(
             diagnostic["systemTranslationCancellationFixturePassed"] == true
                 || diagnostic["systemTranslationCancellationFixtureSkipped"] == true

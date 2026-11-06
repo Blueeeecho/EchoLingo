@@ -73,6 +73,7 @@ swiftc --version > "$fixture_dir/swift-version.txt"
 sw_vers -productVersion > "$fixture_dir/macos-version.txt"
 python3 - "$fixture_dir/system-translation.json" "$fixture_dir/swift-version.txt" "$fixture_dir/macos-version.txt" <<'PY_SYSTEM'
 import json
+import os
 import re
 import sys
 from pathlib import Path
@@ -93,11 +94,19 @@ assert version, "Cannot establish Swift compiler capability"
 compiler = tuple(map(int, version.groups()))
 macos_major = int(Path(sys.argv[3]).read_text().strip().split(".")[0])
 capable = compiler >= (6, 2) and macos_major >= 26
+if os.environ.get("ECHOLINGO_REQUIRE_SYSTEM_TRANSLATION_RECOVERY") == "1":
+    assert capable, "Release acceptance requires macOS 26 and Swift 6.2 installed-only recovery coverage"
+    assert checks.get("systemTranslationInstalledRetryFixturePassed") is True, "Release acceptance requires executed installed-only retry tests"
+    assert checks.get("systemTranslationInstalledRetryFixtureSkipped") is False, "Release acceptance cannot use skipped installed-only retry tests"
 if capable:
     assert checks.get("systemTranslationInstalledOnlyFixturePassed") is True, "Capable runner skipped installed-only/recovery policy tests"
+    assert checks.get("systemTranslationInstalledRetryFixturePassed") is True, "Capable runner skipped bounded installed-only retry tests"
+    assert checks.get("systemTranslationInstalledRetryFixtureSkipped") is False, "Capable runner reported retry tests skipped"
     assert checks.get("systemTranslationCancellationFixturePassed") is True, "Capable runner skipped cancellation policy tests"
 else:
     assert checks.get("systemTranslationInstalledOnlyFixturePassed") is False, "Unsupported runner claimed macOS 26 policy coverage"
+    assert checks.get("systemTranslationInstalledRetryFixturePassed") is False, "Unsupported runner claimed installed-only retry coverage"
+    assert checks.get("systemTranslationInstalledRetryFixtureSkipped") is True, "Unsupported runner did not report retry coverage skipped"
     print("Installed-only/recovery Translation API policy checks skipped: macOS 26 and Swift 6.2 required.")
 print("Synthetic system translation policy/recovery checks passed; no engine/download or real-device acceptance claimed.")
 PY_SYSTEM

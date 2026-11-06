@@ -22,7 +22,7 @@ class PreparationTests(unittest.TestCase):
         self.tmp=tempfile.TemporaryDirectory();self.addCleanup(self.tmp.cleanup)
         self.root=Path(self.tmp.name).resolve(strict=True);self.inputs=self.root/'inputs';self.output=self.root/'out'
         self.reports={}
-        for platform,name in [('Windows','EchoLingo_0.2.16_x64-setup.exe'),('macOS','EchoLingo_0.2.16_aarch64.dmg')]:
+        for platform,name in [('Windows','EchoLingo_0.2.17_x64-setup.exe'),('macOS','EchoLingo_0.2.17_aarch64.dmg')]:
             directory=self.inputs/platform;directory.mkdir(parents=True)
             installer=directory/name;installer.write_bytes(b'not-a-native-installer-'+platform.encode())
             app={'name':'echolingo','size':len(b'synthetic-application__TAURI_BUNDLE_TYPE_VAR_NSS'),'sha256':hashlib.sha256(b'synthetic-application__TAURI_BUNDLE_TYPE_VAR_NSS').hexdigest()}
@@ -236,7 +236,7 @@ class PreparationTests(unittest.TestCase):
         self.payload['empty']=b'';self.rebuild_zip();self.reject_zip()
     def test_duplicate_json_field(self):
         path=self.directory/'WINDOWS-ZIP-MANIFEST.json'
-        path.write_text('{"version":"0.2.16","version":"0.2.16"}')
+        path.write_text('{"version":"0.2.17","version":"0.2.17"}')
         with self.assertRaises(ValueError): self.prepare()
     def test_candidate_tree_and_assertion_provenance(self):
         self.reports['Windows']['workflowInspection']['assertions']['tree']='f'*40;self.save('Windows')
@@ -278,6 +278,26 @@ class WorkflowBuildToolTests(unittest.TestCase):
 
 
 class MacRuntimeWorkflowTests(unittest.TestCase):
+    def test_release_preserves_existing_checks_and_adds_only_strict_retry_gate(self):
+        baseline=R.git('show', R.MANIFEST_BASELINE+':.github/workflows/release-desktop.yml')
+        expected=baseline.replace('0.2.16', '0.2.17').replace(
+            'desktop-release-0216-', 'desktop-release-0217-').replace(
+            'os: [windows-latest, macos-latest]', 'os: [windows-latest, macos-26]')
+        before, acceptance=expected.split('      - name: Accept extracted Mac bundle and native regression fixtures\n', 1)
+        acceptance=acceptance.replace('        env:\n          RUN_URL:',
+            "        env:\n          ECHOLINGO_REQUIRE_SYSTEM_TRANSLATION_RECOVERY: '1'\n          RUN_URL:", 1)
+        expected=before+'      - name: Accept extracted Mac bundle and native regression fixtures\n'+acceptance
+        current=(R.ROOT/'.github/workflows/release-desktop.yml').read_text(encoding='utf-8')
+        self.assertEqual(current.rstrip(), expected.rstrip())
+    def test_release_requires_capable_runner_and_actual_installed_retry_fixture(self):
+        workflow=(R.ROOT/'.github/workflows/release-desktop.yml').read_text(encoding='utf-8')
+        self.assertIn('os: [windows-latest, macos-26]', workflow)
+        step=workflow.split('      - name: Accept extracted Mac bundle and native regression fixtures\n', 1)[1].split('      - name:', 1)[0]
+        self.assertIn("ECHOLINGO_REQUIRE_SYSTEM_TRANSLATION_RECOVERY: '1'", step)
+        self.assertIn('set -euo pipefail', step)
+        self.assertIn('bash tests/macos-native-self-test.sh', step)
+        self.assertNotIn('continue-on-error', step)
+        self.assertNotIn('|| true', step)
     def test_native_fixtures_precede_exact_bundle_runtime_gate(self):
         workflow=(R.ROOT/'.github/workflows/release-desktop.yml').read_text(encoding='utf-8')
         start=workflow.index('      - name: Accept extracted Mac bundle')
@@ -301,8 +321,8 @@ class MacRuntimeWorkflowTests(unittest.TestCase):
 class FixedDesktopRecoveryModeTests(unittest.TestCase):
     def workflow(self):
         return (R.ROOT/'.github/workflows/ci.yml').read_text(encoding='utf-8')
-    def run_selector(self, event='pull_request', head='fix/residual-translation-failures',
-                     base='main', ref='refs/pull/1/merge', version='0.2.16', check_exit=0):
+    def run_selector(self, event='pull_request', head='fix/system-translation-first-attempt',
+                     base='main', ref='refs/pull/1/merge', version='0.2.17', check_exit=0):
         import os
         import textwrap
         source=self.workflow()
@@ -361,7 +381,7 @@ class FixedDesktopRecoveryModeTests(unittest.TestCase):
     def test_other_events_versions_and_branches_do_not_skip_full_suite(self):
         for arguments in ({'event':'workflow_dispatch','ref':'refs/heads/main'},
                 {'event':'pull_request_target'}, {'head':'other-branch'}, {'base':'other-base'},
-                {'version':'0.2.15'}, {'version':'0.2.17'}, {'version':'0.2.16-beta'},
+                {'version':'0.2.16'}, {'version':'0.2.18'}, {'version':'0.2.17-beta'},
                 {'event':'push','ref':'refs/heads/other'}):
             with self.subTest(arguments=arguments):
                 code, output, calls=self.run_selector(**arguments)
@@ -371,6 +391,29 @@ class FixedDesktopRecoveryModeTests(unittest.TestCase):
         self.assertEqual(code, 17)
         self.assertEqual(output, '')
         self.assertEqual(calls, 'scripts/prepare-desktop-release.py --check-source\n')
+    def test_existing_ci_jobs_and_checks_remain_unchanged(self):
+        baseline=R.git('show', R.MANIFEST_BASELINE+':.github/workflows/ci.yml')
+        expected=baseline.replace('0.2.16', '0.2.17').replace(
+            'fix/residual-translation-failures', 'fix/system-translation-first-attempt')
+        expected=expected.replace(
+            '      - uses: actions/checkout@v4\n      - name: Check public repository inputs',
+            '      - uses: actions/checkout@v4\n        with:\n          fetch-depth: 0\n'
+            '          persist-credentials: false\n      - name: Check public repository inputs')
+        self.assertEqual(self.workflow().rstrip(), expected.rstrip())
+    def test_full_release_checks_change_only_checkout_history(self):
+        baseline=R.git('show', R.MANIFEST_BASELINE+':.github/workflows/release-checks.yml')
+        expected=baseline.replace(
+            '      - uses: actions/checkout@v4\n      - name: Check public repository inputs',
+            '      - uses: actions/checkout@v4\n        with:\n          fetch-depth: 0\n'
+            '          persist-credentials: false\n      - name: Check public repository inputs')
+        current=(R.ROOT/'.github/workflows/release-checks.yml').read_text(encoding='utf-8')
+        self.assertEqual(current.rstrip(), expected.rstrip())
+    def test_full_frontend_checkout_retains_baseline_for_release_contracts(self):
+        job=self.workflow().split('  frontend-interactions:\n', 1)[1].split('  windows-popup-diagnostics:', 1)[0]
+        checkout=job.split('      - name: Check public repository inputs', 1)[0]
+        self.assertIn('fetch-depth: 0', checkout)
+        self.assertIn('persist-credentials: false', checkout)
+        self.assertIn("python -m unittest discover -s scripts -p 'test_*.py' -v", job)
     def test_policy_job_preserves_contracts_and_native_ownership(self):
         source=self.workflow()
         job=source.split('  desktop-recovery-policy:\n',1)[1].split('  automatic-direction-routing:',1)[0]
@@ -389,40 +432,64 @@ class FixedDesktopRecoveryModeTests(unittest.TestCase):
 
 class PackageAwareVersionTests(unittest.TestCase):
     def test_production_and_behavioral_fixtures_require_a_new_review_pin(self):
-        self.assertEqual(R.REVIEWED_SOURCE, '5d9e883cd292e0722c265155590630f056d09b20')
+        self.assertEqual(R.REVIEWED_SOURCE, '6d33403c37711116919175239ca686d14b7512d6')
         for name in ('src/main.ts', 'src-tauri/src/translation_requests.rs',
                      'src-tauri/src/window_layout.rs', 'tests/frontend-interactions.mjs',
-                     'tests/test_popup_language_session_contract.py'):
+                     'tests/test_popup_language_session_contract.py',
+                     'src-tauri/native/macos.swift', 'tests/macos-installed-runtime-smoke.py',
+                     'scripts/test_automatic_translation_contract.py'):
             self.assertNotIn(name, R.SUPPORT)
 
+    def test_source_guard_rejects_post_review_production_and_fixture_changes(self):
+        for name in ('src/main.ts', 'src-tauri/native/macos.swift',
+                     'src-tauri/src/main.rs', 'tests/frontend-interactions.mjs',
+                     'tests/macos-installed-runtime-smoke.py',
+                     'scripts/test_automatic_translation_contract.py'):
+            with self.subTest(name=name), patch.object(R, 'REVIEWED_SOURCE', SHA), \
+                    patch.object(R.subprocess, 'run') as ancestor, \
+                    patch.object(R, 'git', return_value=name):
+                with self.assertRaisesRegex(ValueError, 'Unexpected post-review changes'):
+                    R.check_source()
+                self.assertEqual(ancestor.call_count, 2)
+    def test_source_guard_does_not_accept_missing_review_or_baseline_ancestry(self):
+        for missing in (SHA, R.MANIFEST_BASELINE):
+            def ancestry(arguments, **kwargs):
+                if arguments[3] == missing:
+                    raise subprocess.CalledProcessError(1, arguments)
+            with self.subTest(missing=missing), patch.object(R, 'REVIEWED_SOURCE', SHA), \
+                    patch.object(R.subprocess, 'run', side_effect=ancestry), \
+                    patch.object(R, 'git') as diff:
+                with self.assertRaises(subprocess.CalledProcessError):
+                    R.check_source()
+                diff.assert_not_called()
     def test_released_baseline_is_immutable_and_separate_from_source_pin(self):
-        self.assertEqual(R.MANIFEST_BASELINE, 'bd2a42659ad91bb2d3d0792c4650669db336a046')
+        self.assertEqual(R.MANIFEST_BASELINE, '207982231449c78e5efd726ba4ba1c42d8561e93')
         self.assertNotEqual(R.MANIFEST_BASELINE, R.REVIEWED_SOURCE)
     def test_same_version_third_party_cargo_entry_is_unchanged(self):
-        baseline = 'version = 4\n[[package]]\nname = "echolingo"\nversion = "0.2.15"\n[[package]]\nname = "async-signal"\nversion = "0.2.15"\nsource = "registry+https://github.com/rust-lang/crates.io-index"\nchecksum = "unchanged-checksum"\n'
-        current = baseline.replace('name = "echolingo"\nversion = "0.2.15"', 'name = "echolingo"\nversion = "0.2.16"')
+        baseline = 'version = 4\n[[package]]\nname = "echolingo"\nversion = "0.2.16"\n[[package]]\nname = "async-signal"\nversion = "0.2.16"\nsource = "registry+https://github.com/rust-lang/crates.io-index"\nchecksum = "unchanged-checksum"\n'
+        current = baseline.replace('name = "echolingo"\nversion = "0.2.16"', 'name = "echolingo"\nversion = "0.2.17"')
         dependency=baseline.split('[[package]]')[2]
         self.assertEqual(current.split('[[package]]')[2], dependency)
         expected=R.expected_version_manifest('src-tauri/Cargo.lock', baseline)
         self.assertEqual(expected['package'][1], R.tomllib.loads(baseline)['package'][1])
         R.check_version_only_manifest('src-tauri/Cargo.lock', baseline, current)
-        for modified in (current.replace('name = "async-signal"\nversion = "0.2.15"', 'name = "async-signal"\nversion = "0.2.16"'),
+        for modified in (current.replace('name = "async-signal"\nversion = "0.2.16"', 'name = "async-signal"\nversion = "0.2.17"'),
                          current.replace('unchanged-checksum', 'different-checksum'),
                          current.replace('crates.io-index', 'other-index')):
             with self.assertRaisesRegex(ValueError, 'Non-version manifest change'):
                 R.check_version_only_manifest('src-tauri/Cargo.lock', baseline, modified)
     def test_npm_dependency_and_unknown_fields_are_not_rewritten(self):
-        baseline={'name':'echolingo','version':'0.2.15','custom':'0.2.15','packages':{
-            '':{'name':'echolingo','version':'0.2.15'},
-            'node_modules/example':{'version':'0.2.15','integrity':'original'}}}
+        baseline={'name':'echolingo','version':'0.2.16','custom':'0.2.16','packages':{
+            '':{'name':'echolingo','version':'0.2.16'},
+            'node_modules/example':{'version':'0.2.16','integrity':'original'}}}
         current=copy.deepcopy(baseline)
-        current['version']=current['packages']['']['version']='0.2.16'
+        current['version']=current['packages']['']['version']='0.2.17'
         R.check_version_only_manifest('package-lock.json', json.dumps(baseline), json.dumps(current))
         for change in ('dependency','integrity','unknown'):
             bad=copy.deepcopy(current)
-            if change=='dependency': bad['packages']['node_modules/example']['version']='0.2.16'
+            if change=='dependency': bad['packages']['node_modules/example']['version']='0.2.17'
             elif change=='integrity': bad['packages']['node_modules/example']['integrity']='different'
-            else: bad['custom']='0.2.16'
+            else: bad['custom']='0.2.17'
             with self.assertRaisesRegex(ValueError, 'Non-version manifest change'):
                 R.check_version_only_manifest('package-lock.json', json.dumps(baseline), json.dumps(bad))
     def test_real_baseline_allows_only_project_versions(self):
