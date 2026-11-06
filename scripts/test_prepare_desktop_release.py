@@ -17,6 +17,54 @@ SPEC=importlib.util.spec_from_file_location('desktop_release',Path(__file__).wit
 R=importlib.util.module_from_spec(SPEC);SPEC.loader.exec_module(R)
 SHA='a'*40;TREE='b'*40;RUN='https://github.com/Blueeeecho/EchoLingo/actions/runs/123'
 
+# Exact permitted CI addition; the existing jobs and guards still compare in full.
+POST_RELEASE_DOCS_SELECTOR = r'''          # This fixed post-release documentation patch runs the existing full suite.
+          # It never changes release eligibility or accepts new application inputs.
+          if { [ "$CI_EVENT" = pull_request ] && [ "$PR_HEAD" = docs/downloads-0217 ] && [ "$PR_BASE" = main ]; } || { [ "$CI_EVENT" = push ] && [ "$CI_REF" = refs/heads/main ]; }; then
+            if python3 - <<'PY_DOCS'
+          import json
+          from pathlib import Path
+          import subprocess
+
+          baseline = 'dcde0c1d40530eb0c9c64da5f9bbd7cdc4081234'
+          baseline_tree = '086f87bb4cdfe7fd2d7ac1d4b87e77ffa83f0294'
+          allowed = {'README.md', 'README.en.md', '.github/workflows/ci.yml',
+                     'scripts/test_prepare_desktop_release.py'}
+          readmes = {'README.md', 'README.en.md'}
+          def git(*args):
+              return subprocess.check_output(['git', *args], stderr=subprocess.DEVNULL)
+          try:
+              if json.loads(Path('package.json').read_text(encoding='utf-8'))['version'] != '0.2.17':
+                  raise ValueError('Not the fixed documentation release')
+              subprocess.run(['git', 'merge-base', '--is-ancestor', baseline, 'HEAD'],
+                             check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+              if git('rev-parse', baseline + '^{tree}').decode().strip() != baseline_tree:
+                  raise ValueError('Unexpected documentation baseline')
+              if git('status', '--porcelain=v1', '--untracked-files=all'):
+                  raise ValueError('Documentation checkout must be clean')
+              fields = git('diff', '--no-renames', '--name-status', '-z', baseline, 'HEAD').split(b'\0')
+              if fields[-1] != b'' or len(fields) % 2 != 1:
+                  raise ValueError('Malformed documentation diff')
+              changes = [(fields[i].decode(), fields[i + 1].decode()) for i in range(0, len(fields) - 1, 2)]
+              names = {name for status, name in changes}
+              if not readmes <= names or not names <= allowed or any(status != 'M' for status, name in changes):
+                  raise ValueError('Not the exact post-release documentation scope')
+              entries = git('ls-tree', '-z', 'HEAD', '--', *sorted(names)).split(b'\0')[:-1]
+              if len(entries) != len(names) or any(not entry.startswith(b'100644 blob ') for entry in entries):
+                  raise ValueError('Documentation inputs must remain regular non-executable files')
+          except (KeyError, ValueError, OSError, subprocess.CalledProcessError):
+              raise SystemExit(1)
+          PY_DOCS
+            then
+              echo "mode=full" >> "$GITHUB_OUTPUT"
+              exit 0
+            elif [ "$CI_EVENT" = pull_request ]; then
+              echo 'The fixed documentation PR contains ineligible changes.' >&2
+              exit 1
+            fi
+          fi
+'''
+
 class PreparationTests(unittest.TestCase):
     def setUp(self):
         self.tmp=tempfile.TemporaryDirectory();self.addCleanup(self.tmp.cleanup)
@@ -326,6 +374,8 @@ class FixedDesktopRecoveryModeTests(unittest.TestCase):
         import os
         import textwrap
         source=self.workflow()
+        self.assertEqual(source.count(POST_RELEASE_DOCS_SELECTOR), 1)
+        source=source.replace(POST_RELEASE_DOCS_SELECTOR, '', 1)
         selector=source.split('        run: |\n', 1)[1].split('          elif ', 1)[0]
         selector=textwrap.dedent(selector)
         # Execute the exact new branch, replacing only external tools with
@@ -399,6 +449,9 @@ class FixedDesktopRecoveryModeTests(unittest.TestCase):
             '      - uses: actions/checkout@v4\n      - name: Check public repository inputs',
             '      - uses: actions/checkout@v4\n        with:\n          fetch-depth: 0\n'
             '          persist-credentials: false\n      - name: Check public repository inputs')
+        marker='        run: |\n'
+        self.assertIn(marker, expected)
+        expected=expected.replace(marker, marker+POST_RELEASE_DOCS_SELECTOR, 1)
         self.assertEqual(self.workflow().rstrip(), expected.rstrip())
     def test_full_release_checks_change_only_checkout_history(self):
         baseline=R.git('show', R.MANIFEST_BASELINE+':.github/workflows/release-checks.yml')
@@ -507,3 +560,230 @@ class CandidateCliVersionTests(unittest.TestCase):
                     result = subprocess.run([sys.executable, str(R.ROOT/'scripts'/name),
                         '--expected-version', version, '--help'], capture_output=True, text=True)
                     self.assertEqual(result.returncode, expected, result.stderr)
+
+
+class PostReleaseDocumentationSelectorTests(unittest.TestCase):
+    BASELINE = 'dcde0c1d40530eb0c9c64da5f9bbd7cdc4081234'
+    TREE = '086f87bb4cdfe7fd2d7ac1d4b87e77ffa83f0294'
+    ALLOWED = {'README.md', 'README.en.md', '.github/workflows/ci.yml',
+               'scripts/test_prepare_desktop_release.py'}
+
+    def workflow(self):
+        return (R.ROOT/'.github/workflows/ci.yml').read_text(encoding='utf-8')
+
+    def guard(self):
+        import textwrap
+        source = self.workflow()
+        self.assertEqual(source.count(POST_RELEASE_DOCS_SELECTOR), 1)
+        block = source.split("            if python3 - <<'PY_DOCS'\n", 1)[1].split('          PY_DOCS\n', 1)[0]
+        return textwrap.dedent(block)
+
+    def git(self, directory, *args):
+        return subprocess.check_output(['git', '-c', 'user.name=Documentation fixture',
+            '-c', 'user.email=fixture@example.invalid', '-c', 'commit.gpgsign=false',
+            *args], cwd=directory, stderr=subprocess.DEVNULL, text=True).strip()
+
+    def repository(self):
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        directory = Path(temporary.name)
+        self.git(directory, 'init', '-q')
+        self.git(directory, 'config', 'core.autocrlf', 'false')
+        self.git(directory, 'config', 'core.filemode', 'false')
+        self.git(directory, 'config', 'core.symlinks', 'false')
+        for name in self.ALLOWED | {'src/main.ts', 'src-tauri/native/macos.swift',
+                'src-tauri/src/main.rs', 'resources/input.txt', 'package-lock.json',
+                'src-tauri/Cargo.toml', 'src-tauri/tauri.conf.json', 'vite.config.ts',
+                '.github/workflows/release-desktop.yml', 'scripts/prepare-desktop-release.py',
+                'scripts/publish-desktop-release.cjs', 'tests/frontend-interactions.mjs'}:
+            path = directory/name
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text('baseline\n', encoding='utf-8')
+        (directory/'package.json').write_text('{"version":"0.2.17"}\n', encoding='utf-8')
+        self.git(directory, 'add', '.')
+        self.git(directory, 'commit', '-qm', 'Generated baseline')
+        baseline = self.git(directory, 'rev-parse', 'HEAD')
+        tree = self.git(directory, 'rev-parse', 'HEAD^{tree}')
+        return directory, baseline, tree
+
+    def change_readmes(self, directory):
+        for name in ('README.md', 'README.en.md'):
+            (directory/name).write_text('0.2.17 prerelease downloads\n', encoding='utf-8')
+
+    def commit(self, directory):
+        self.git(directory, 'add', '-A')
+        self.git(directory, 'commit', '-qm', 'Generated documentation delta')
+
+    def check(self, directory, baseline, tree):
+        source = self.guard()
+        self.assertEqual(source.count(self.BASELINE), 1)
+        self.assertEqual(source.count(self.TREE), 1)
+        source = source.replace(self.BASELINE, baseline).replace(self.TREE, tree)
+        return subprocess.run([sys.executable, '-c', source], cwd=directory,
+            capture_output=True, text=True).returncode
+
+    def test_both_readmes_link_to_the_fixed_prerelease_and_previous_preview(self):
+        import re
+        base = 'https://github.com/Blueeeecho/EchoLingo'
+        prefix = base+'/releases/download/0.2.17/'
+        expected = {prefix+name for name in (
+            'EchoLingo_0.2.17_windows_x64-unpack.zip', 'EchoLingo_0.2.17_windows_x64-setup.exe',
+            'EchoLingo_0.2.17_macos_arm64.dmg', 'SHA256SUMS.txt', 'RELEASE-MANIFEST.json')}
+        expected |= {base+'/releases/tag/0.2.17', base+'/tree/0.2.17', base+'/releases/tag/0.2.16'}
+        for name in ('README.md', 'README.en.md'):
+            with self.subTest(document=name):
+                text = (R.ROOT/name).read_text(encoding='utf-8')
+                urls = set(re.findall(r'https://github\.com/Blueeeecho/EchoLingo/[^\s"<>)]*', text))
+                self.assertTrue(expected <= urls)
+                self.assertFalse(any('/releases/download/' in url and not url.startswith(prefix) for url in urls))
+                self.assertNotIn('/releases/latest', text)
+                self.assertTrue('预发布' in text or 'prerelease' in text)
+
+    def test_fixed_baseline_and_current_version_are_literal(self):
+        source = self.guard()
+        self.assertIn("baseline = '"+self.BASELINE+"'", source)
+        self.assertIn("baseline_tree = '"+self.TREE+"'", source)
+        self.assertIn("['version'] != '0.2.17'", source)
+
+    def test_only_reviewed_readmes_and_ci_contract_select_full(self):
+        for also_change_policy in (False, True):
+            with self.subTest(policy=also_change_policy):
+                directory, baseline, tree = self.repository()
+                self.change_readmes(directory)
+                if also_change_policy:
+                    for name in self.ALLOWED-{'README.md', 'README.en.md'}:
+                        (directory/name).write_text('reviewed documentation policy\n', encoding='utf-8')
+                self.commit(directory)
+                self.assertEqual(self.check(directory, baseline, tree), 0)
+
+    def test_every_product_configuration_and_release_change_is_rejected(self):
+        for name in ('src/main.ts', 'src-tauri/native/macos.swift', 'src-tauri/src/main.rs',
+                'resources/input.txt', 'package-lock.json', 'src-tauri/Cargo.toml',
+                'src-tauri/tauri.conf.json', 'vite.config.ts',
+                '.github/workflows/release-desktop.yml', 'scripts/prepare-desktop-release.py',
+                'scripts/publish-desktop-release.cjs', 'tests/frontend-interactions.mjs'):
+            with self.subTest(path=name):
+                directory, baseline, tree = self.repository()
+                self.change_readmes(directory)
+                (directory/name).write_text('unreviewed change\n', encoding='utf-8')
+                self.commit(directory)
+                self.assertEqual(self.check(directory, baseline, tree), 1)
+
+    def test_wrong_version_missing_baseline_wrong_tree_and_nonancestor_fail(self):
+        for version in ('0.2.16', '0.2.18', '0.2.17-beta'):
+            with self.subTest(version=version):
+                directory, baseline, tree = self.repository()
+                self.change_readmes(directory)
+                (directory/'package.json').write_text(json.dumps({'version':version}), encoding='utf-8')
+                self.commit(directory)
+                self.assertEqual(self.check(directory, baseline, tree), 1)
+        directory, baseline, tree = self.repository()
+        self.change_readmes(directory); self.commit(directory)
+        self.assertEqual(self.check(directory, 'f'*40, tree), 1)
+        self.assertEqual(self.check(directory, baseline, 'f'*40), 1)
+        self.git(directory, 'checkout', '--orphan', 'unrelated')
+        self.git(directory, 'commit', '-qm', 'Unrelated root')
+        self.assertEqual(self.check(directory, baseline, tree), 1)
+
+    def test_docs_are_required_and_add_delete_rename_and_modes_are_rejected(self):
+        for variant in ('empty', 'policy-only', 'single-readme', 'add', 'delete', 'rename', 'executable', 'symlink'):
+            with self.subTest(variant=variant):
+                directory, baseline, tree = self.repository()
+                if variant not in ('empty', 'policy-only', 'single-readme'):
+                    self.change_readmes(directory)
+                if variant == 'empty':
+                    self.assertEqual(self.check(directory, baseline, tree), 1)
+                    continue
+                if variant == 'policy-only':
+                    (directory/'.github/workflows/ci.yml').write_text('policy only\n', encoding='utf-8')
+                elif variant == 'single-readme':
+                    (directory/'README.md').write_text('only one language\n', encoding='utf-8')
+                elif variant == 'add':
+                    (directory/'README.other.md').write_text('new document\n', encoding='utf-8')
+                elif variant == 'delete':
+                    (directory/'README.en.md').unlink()
+                elif variant == 'rename':
+                    (directory/'README.en.md').rename(directory/'README.other.md')
+                self.commit(directory)
+                if variant == 'executable':
+                    self.git(directory, 'update-index', '--chmod=+x', 'README.md')
+                    self.git(directory, 'commit', '-qm', 'Executable mode')
+                elif variant == 'symlink':
+                    blob = subprocess.check_output(['git', 'hash-object', '-w', '--stdin'],
+                        input='README.en.md', cwd=directory, text=True).strip()
+                    self.git(directory, 'update-index', '--cacheinfo', '120000,'+blob+',README.md')
+                    self.git(directory, 'commit', '-qm', 'Symlink mode')
+                    self.git(directory, 'reset', '--hard', 'HEAD')
+                self.assertEqual(self.check(directory, baseline, tree), 1)
+
+    def test_staged_unstaged_and_untracked_changes_are_rejected(self):
+        for variant in ('staged', 'unstaged', 'untracked'):
+            with self.subTest(variant=variant):
+                directory, baseline, tree = self.repository()
+                self.change_readmes(directory); self.commit(directory)
+                name = 'new.txt' if variant == 'untracked' else 'README.md'
+                (directory/name).write_text('dirty\n', encoding='utf-8')
+                if variant == 'staged': self.git(directory, 'add', name)
+                self.assertEqual(self.check(directory, baseline, tree), 1)
+
+    def selector(self, event='pull_request', head='docs/downloads-0217', base='main',
+                 ref='refs/pull/1/merge', docs_exit=0, source_exit=0):
+        import os
+        import textwrap
+        source = self.workflow()
+        original = source.replace(POST_RELEASE_DOCS_SELECTOR, '', 1)
+        native = original.split('        run: |\n', 1)[1].split('          elif ', 1)[0]
+        selector = textwrap.dedent(POST_RELEASE_DOCS_SELECTOR+native)
+        selector += 'else\n  echo "mode=normal" >> "$GITHUB_OUTPUT"\nfi\n'
+        bash = shutil.which('bash')
+        if os.name == 'nt':
+            git = shutil.which('git')
+            self.assertIsNotNone(git)
+            candidates = [parent/relative for parent in list(Path(git).resolve().parents)[:3]
+                          for relative in ('bin/bash.exe', 'usr/bin/bash.exe')]
+            bash = os.environ.get('ECHOLINGO_WORKFLOW_BASH') or next(
+                (str(path) for path in candidates if path.is_file()), None)
+        self.assertIsNotNone(bash)
+        standins = '''node() { printf '0.2.17\\n'; };
+python3() { if [ "$1" = '-' ]; then printf 'docs\\n' >> calls; return "$DOCS_EXIT"; fi; printf 'source\\n' >> calls; return "$SOURCE_EXIT"; };
+'''
+        with tempfile.TemporaryDirectory() as directory:
+            environment = {**os.environ, 'CI_EVENT':event, 'PR_HEAD':head, 'PR_BASE':base,
+                'CI_REF':ref, 'DOCS_EXIT':str(docs_exit), 'SOURCE_EXIT':str(source_exit),
+                'GITHUB_OUTPUT':'output'}
+            result = subprocess.run([bash, '-e', '-c', standins+selector], cwd=directory,
+                env=environment, capture_output=True, text=True)
+            output, calls = Path(directory)/'output', Path(directory)/'calls'
+            return result.returncode, output.read_text() if output.exists() else '', calls.read_text() if calls.exists() else ''
+
+    def test_only_new_docs_pr_and_main_push_can_choose_docs_full_suite(self):
+        for args in ({}, {'event':'push', 'head':'', 'base':'', 'ref':'refs/heads/main'}):
+            with self.subTest(args=args):
+                self.assertEqual(self.selector(**args), (0, 'mode=full\n', 'docs\n'))
+        for args in ({'event':'workflow_dispatch','ref':'refs/heads/main'}, {'event':'pull_request_target'},
+                {'head':'other'}, {'base':'other'}, {'event':'push','ref':'refs/heads/other'}):
+            with self.subTest(args=args):
+                self.assertEqual(self.selector(**args), (0, 'mode=normal\n', ''))
+        self.assertEqual(self.selector(head='fix/system-translation-first-attempt'),
+                         (0, 'mode=desktop-recovery\n', 'source\n'))
+
+    def test_ineligible_docs_pr_fails_and_main_retains_original_source_guard(self):
+        self.assertEqual(self.selector(docs_exit=1), (1, '', 'docs\n'))
+        self.assertEqual(self.selector(event='push', head='', base='', ref='refs/heads/main',
+            docs_exit=1, source_exit=17), (17, '', 'docs\nsource\n'))
+        self.assertEqual(self.selector(event='push', head='', base='', ref='refs/heads/main',
+            docs_exit=1), (0, 'mode=desktop-recovery\n', 'docs\nsource\n'))
+
+    def test_release_freeze_and_release_workflow_paths_remain_unchanged(self):
+        import fnmatch
+        for name in ('README.md', 'README.en.md'):
+            self.assertNotIn(name, R.SUPPORT)
+            with patch.object(R.subprocess, 'run'), patch.object(R, 'git', return_value=name):
+                with self.assertRaisesRegex(ValueError, 'Unexpected post-review changes'):
+                    R.check_source()
+        patterns = ('package.json', '.github/workflows/release-desktop.yml', 'scripts/*desktop-release*')
+        self.assertFalse(any(fnmatch.fnmatch(name, pattern) for name in self.ALLOWED for pattern in patterns))
+        for name in ('scripts/prepare-desktop-release.py', 'scripts/publish-desktop-release.cjs',
+                     '.github/workflows/release-desktop.yml'):
+            self.assertEqual((R.ROOT/name).read_text(encoding='utf-8').replace('\r\n', '\n').rstrip(),
+                             R.git('show', self.BASELINE+':'+name).rstrip())
