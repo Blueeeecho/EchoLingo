@@ -11,7 +11,7 @@ using System.Windows.Automation;
 
 public static class EchoLingoShortcutsUiaFixture {
     const string Identifier = "io.github.blueeeecho.echolingo", Marker = ".shortcut-uia-owned";
-    const string Selection = "选词翻译快捷键", Ocr = "无感 OCR快捷键", Record = "录制选词翻译快捷键", Save = "保存并立即生效";
+    const string Selection = "选词翻译快捷键", Ocr = "无感 OCR快捷键", Record = "录制选词翻译快捷键", Save = "保存手动修改";
     const int TotalMilliseconds = 180000, UiaCallMilliseconds = 5000;
     delegate bool EnumProc(IntPtr window, IntPtr unused);
     [DllImport("user32.dll")] static extern bool EnumWindows(EnumProc callback, IntPtr unused);
