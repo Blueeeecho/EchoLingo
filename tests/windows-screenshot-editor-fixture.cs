@@ -686,11 +686,11 @@ public static partial class EchoLingoApplicationSmoke {
         RequireForeground(form);evidence["copySourceForegroundAfterClick"]=true;
     }
     static void ScreenshotRecordCaptureCounts(Dictionary<string,object> report,Dictionary<string,object> after,int selections,int deferred) {
-        Assert(VerifiedNativeChildren.Count==selections,"F1 picker identity count differs from exact selection cycles.");
+        Assert(VerifiedNativeGenerations.Count==selections,"F1 picker identity count differs from exact selection cycles.");
         long attempts=CaptureNumber(after,"attemptId")-ScreenshotInitialAttempt;
         Assert(ScreenshotFirstStrokeReleaseChecks==(ScreenshotPinOnly?1:4),"Exact first-stroke release checks required.");report["verifiedFirstStrokeReleaseChecks"]=ScreenshotFirstStrokeReleaseChecks;
         Assert(attempts==selections+deferred,"Unexpected selected-region capture attempt count.");
-        report["verifiedF1SelectionGenerations"]=VerifiedNativeChildren.Count;report["verifiedDeferredPixelCaptures"]=deferred;report["verifiedNativeCaptureAttempts"]=attempts;
+        report["verifiedF1SelectionGenerations"]=VerifiedNativeGenerations.Count;report["verifiedDeferredPixelCaptures"]=deferred;report["verifiedNativeCaptureAttempts"]=attempts;
     }
     static void ScreenshotRequireDeferredReleased(Dictionary<string,object> health) {
         Assert(CaptureNumber(health,"nativeDeferredCapture")==1&&CaptureNumber(health,"attemptStage")==4&&CaptureNumber(health,"helperResponseReceived")==1&&CaptureNumber(health,"resultOk")==1,"Deferred pixels did not complete successfully.");
@@ -919,7 +919,7 @@ public static partial class EchoLingoApplicationSmoke {
         Assert(sourceEvents()==0,"Native F1 click/drag leaked mouse input to generated source controls.");
         report["screenshotOcrInvocationCount"]=CaptureNumber(after,"ocrInvocationCount");report["screenshotHttpConnections"]=server.Connections;report["screenshotNetworkEvidenceScope"]="configured-loopback-provider-trap; no global packet capture";report["screenshotTranslationHistoryCount"]=0;
         report["screenshotRequiredCases"]=3;report["screenshotPassedCases"]=cases.Count;ScreenshotRecordCaptureCounts(report,after,8,6);report["screenshotNativeCompletion"]=after;
-        Assert(cases.Count==3&&VerifiedNativeChildren.Count==8,"Screenshot fixture missed a required real native generation.");
+        Assert(cases.Count==3&&VerifiedNativeGenerations.Count==8,"Screenshot fixture missed a required real native generation.");
         passed.Add("Actual F1 cancel, annotated pin, in-place copy/save dismissal with two fresh save captures, then actual settings local Open and native dialog cancellation; window-click copy plus new capture cancellation; zero OCR/configured-provider HTTP/history (loopback trap, not global packet capture)");
     }
 }

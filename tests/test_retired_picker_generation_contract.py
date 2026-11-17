@@ -15,6 +15,19 @@ def reject(verified, owner, started, rejected, rejected_start):
 
 
 class RetiredPickerGenerationContract(unittest.TestCase):
+    def test_picker_ledger_counts_distinct_verified_process_generations(self):
+        self.assertIn('HashSet<Tuple<uint,long>> VerifiedNativeGenerations', APP)
+        child = APP.split('static bool RequireNativeChild(', 1)[1].split('static readonly Dictionary<string, object>', 1)[0]
+        steps = ['known==started', 'NativeHash(actual)==NativeCaptureHash',
+                 'VerifiedNativeChildren[pid]=started', 'VerifiedNativeGenerations.Add(Tuple.Create(pid,started))']
+        self.assertEqual([child.index(step) for step in steps], sorted(child.index(step) for step in steps))
+        self.assertIn('VerifiedNativeChildren.Clear();VerifiedNativeGenerations.Clear();', APP)
+        screenshot = (Path(__file__).resolve().parent / 'windows-screenshot-editor-fixture.cs').read_text()
+        self.assertIn('VerifiedNativeGenerations.Count==selections', screenshot)
+        self.assertIn('VerifiedNativeGenerations.Count==8', screenshot)
+        self.assertIn('attempts==selections+deferred', screenshot)
+        self.assertNotIn('VerifiedNativeChildren.Count', screenshot)
+
     def test_only_verified_exact_previous_generation_is_excluded(self):
         self.assertTrue(reject(True, 4056, 100, 4056, 100))
         for args in [(False, 4056, 100, 4056, 100), (True, 4057, 101, 4056, 100),

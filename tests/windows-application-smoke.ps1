@@ -68,6 +68,8 @@ public static partial class EchoLingoApplicationSmoke {
     }
     static string NativeCaptureHash,NativeCaptureCache;
     static readonly Dictionary<uint,long> VerifiedNativeChildren=new Dictionary<uint,long>();
+    // The PID lookup addresses the current child; the ledger retains every verified generation, including PID reuse.
+    static readonly HashSet<Tuple<uint,long>> VerifiedNativeGenerations=new HashSet<Tuple<uint,long>>();
     static string NativeHash(string path) {
         FileInfo info=new FileInfo(path);Assert(info.Exists&&(info.Attributes&FileAttributes.ReparsePoint)==0&&info.Length>0&&info.Length<=32L*1024*1024,"Native capture executable is missing, redirected or oversized.");
         using(FileStream stream=new FileStream(path,FileMode.Open,FileAccess.Read,FileShare.ReadWrite|FileShare.Delete))
@@ -95,7 +97,7 @@ public static partial class EchoLingoApplicationSmoke {
             string actual;
             try {actual=Path.GetFullPath(child.MainModule.FileName);}catch(InvalidOperationException){if(NativeWindowDisappeared(pid,window,child))return false;throw;}catch(System.ComponentModel.Win32Exception){if(NativeWindowDisappeared(pid,window,child))return false;throw;}
             Assert(String.Equals(actual,expected,StringComparison.OrdinalIgnoreCase)&&NativeHash(actual)==NativeCaptureHash,"Capture child is not the exact built Rust executable in the owned application's native cache.");
-            VerifiedNativeChildren[pid]=started;return true;
+            VerifiedNativeChildren[pid]=started;VerifiedNativeGenerations.Add(Tuple.Create(pid,started));return true;
         }
     }
     static readonly Dictionary<string, object> ActualTranslations = new Dictionary<string, object>();
@@ -1066,7 +1068,7 @@ public static partial class EchoLingoApplicationSmoke {
         ScreenshotPinOnly=screenshotPinOnly;
         SourceTopmostModal=sourceTopmostModal;SourceModalOwner=IntPtr.Zero;SourceModalChecks=0;
         Assert(!sourceTopmostModal||(rustCapture&&latest),"Modal run must explicitly select native capture.");
-        RustCapture=rustCapture;VerifiedNativeChildren.Clear();NativeCaptureHash=rustCapture?NativeHash(nativeCapturePath):null;
+        RustCapture=rustCapture;VerifiedNativeChildren.Clear();VerifiedNativeGenerations.Clear();NativeCaptureHash=rustCapture?NativeHash(nativeCapturePath):null;
         Assert(!rustCapture||defaultCapture||(latest&&!offline&&!customBindings),"Rust candidate requires the complete mock latest-intent workflows.");
         Assert(!latest||!offline,"Latest-intent extra tests are mock-only.");
         Assert(!customBindings||(!offline&&!latest),"Loaded-custom-bindings workflows require their own mock-only run.");
@@ -1281,7 +1283,7 @@ public static partial class EchoLingoApplicationSmoke {
                                     Assert(ActualTranslations.Count == 3 && new JavaScriptSerializer().Deserialize<object[]>(File.ReadAllText(history)).Length == 3, "Offline flows did not produce exactly three successful synthetic histories.");
                                 }
                                 if(!offline&&!customBindings) Assert(report.ContainsKey("displayChangeCancellation")&&report.ContainsKey("displayChangeRecovery"),"Required same-application display cancellation/recovery evidence is missing.");
-                                if(RustCapture){Assert(VerifiedNativeChildren.Count>=(latest?5:1),"Candidate did not exercise all required verified native child generations.");report["verifiedNativeCaptureGenerations"]=VerifiedNativeChildren.Count;}
+                                if(RustCapture){Assert(VerifiedNativeGenerations.Count>=(latest?5:1),"Candidate did not exercise all required verified native child generations.");report["verifiedNativeCaptureGenerations"]=VerifiedNativeGenerations.Count;}
                                 if(SourceTopmostModal){RequireSourceModal(form.Handle);Assert(SourceModalChecks>0,"Topmost modal precondition was never verified.");report["sourceTopmostModalChecks"]=SourceModalChecks;report["sourceModalOwnerDisabledUntilCompletion"]=true;}
                                 report["actualOfflineTranslations"] = ActualTranslations; report["ok"] = true;
                             } catch (Exception error) { report["failedStage"]=stage;report["error"] = error.Message;ObserveFailedCoreHistory(report,server,history,roaming,token,providerId);InputPlaneStyleException planeError=error as InputPlaneStyleException;if(planeError!=null)report["inputPlaneStyleFailure"]=planeError.ScalarMetadata;if(app!=null&&!app.HasExited){try{report["ownMainFailureMetadata"]=MainMetadata(app);}catch(Exception diagnostic){report["mainMetadataErrorType"]=diagnostic.GetType().Name;}ObserveFailedWorkflow(report,app,start,executable,roaming,token,form,server);} }
