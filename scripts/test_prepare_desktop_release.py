@@ -625,11 +625,11 @@ class PostReleaseDocumentationSelectorTests(unittest.TestCase):
     def test_both_readmes_link_to_the_fixed_prerelease_and_previous_preview(self):
         import re
         base = 'https://github.com/Blueeeecho/EchoLingo'
-        prefix = base+'/releases/download/0.2.17/'
+        prefix = base+'/releases/download/0.2.18/'
         expected = {prefix+name for name in (
-            'EchoLingo_0.2.17_windows_x64-unpack.zip', 'EchoLingo_0.2.17_windows_x64-setup.exe',
-            'EchoLingo_0.2.17_macos_arm64.dmg', 'SHA256SUMS.txt', 'RELEASE-MANIFEST.json')}
-        expected |= {base+'/releases/tag/0.2.17', base+'/tree/0.2.17', base+'/releases/tag/0.2.16'}
+            'EchoLingo_0.2.18_windows_x64-unpack.zip', 'EchoLingo_0.2.18_windows_x64-setup.exe',
+            'EchoLingo_0.2.18_macos_arm64.dmg', 'SHA256SUMS.txt', 'RELEASE-MANIFEST.json')}
+        expected |= {base+'/releases/tag/0.2.18', base+'/tree/0.2.18', base+'/releases/tag/0.2.17'}
         for name in ('README.md', 'README.en.md'):
             with self.subTest(document=name):
                 text = (R.ROOT/name).read_text(encoding='utf-8')
