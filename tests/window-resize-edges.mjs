@@ -154,6 +154,7 @@ try {
   // form controls, overlay, scrollbars and hit testing use production markup.
   await page.goto(origin);
   await page.locator('#more-toggle').click(); await page.locator('#popup-more-menu button[data-view="settings"]').click();
+  await page.locator('[data-settings-tab="translation"]').click();
   await page.evaluate(async () => { const {installPanelLayout}=await import('/src/panel-layout.ts'); window.__resizeQA.presentation={epoch:30,presented:true}; window.__resizeQA.layout=installPanelLayout(true,()=>window.__resizeQA.presentation); });
   await page.locator('#add-provider').click();
   assert.equal(await page.locator('body').evaluate(element=>element.classList.contains('modal-open')),true);

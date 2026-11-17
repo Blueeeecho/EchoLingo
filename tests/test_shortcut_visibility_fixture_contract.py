@@ -1,5 +1,6 @@
 """The actual shortcut fixture may scroll only its exact owned UI target."""
 from pathlib import Path
+import re
 import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -7,6 +8,22 @@ SOURCE = (ROOT / 'tests/windows-shortcuts-uia-fixture.cs').read_text()
 
 
 class ShortcutVisibilityFixtureContract(unittest.TestCase):
+    def test_exact_uia_names_match_current_production_controls(self):
+        editor = (ROOT / 'src/shortcut-editor.ts').read_text()
+        html = (ROOT / 'index.html').read_text()
+        save = re.search(r'Save = "([^"]+)"', SOURCE).group(1)
+        self.assertIn(f"saveButton.textContent = '{save}'", editor)
+        self.assertIn(f'id="save-shortcuts">{save}</button>', html)
+        for constant, action in [('Selection', 'selection'), ('Ocr', 'silentOcr')]:
+            label = re.search(r"\['" + action + r"', '([^']+)'", editor).group(1)
+            self.assertIn(f'{constant} = "{label}快捷键"', SOURCE)
+        self.assertIn('Record = "录制选词翻译快捷键"', SOURCE)
+        self.assertIn("button.setAttribute('aria-label', `录制${label}快捷键`)", editor)
+        # Button wording changes must not alter the success/conflict signals.
+        for status in ['快捷键已保存并立即生效', '未完成保存：']:
+            self.assertIn(f'Status("{status}")', SOURCE)
+            self.assertIn(status, editor)
+
     def test_scrolling_is_allowlisted_bounded_and_has_no_input_or_focus_fallback(self):
         body = SOURCE.split('void RevealActionTarget(', 1)[1].split('static double CenteredScrollPercent(', 1)[0]
         for expected in ('name==Save||name==Record', 'name==Selection||name==Ocr',

@@ -473,6 +473,13 @@ try {
     await page.locator('#more-toggle').click();
     await page.locator(`button[data-view="${view}"]`).click();
   };
+  // Settings controls now live in separate panels. Navigate by the real tabs,
+  // and do not reclick the selected tab: focus/recording tests rely on it staying put.
+  const selectSettingsCategory = async (category) => {
+    const tab = page.locator(`[data-settings-tab="${category}"]`);
+    if (await tab.getAttribute('aria-selected') !== 'true') await tab.click();
+    assert.equal(await page.locator(`[data-settings-panel="${category}"]`).isVisible(), true);
+  };
   // History is not on the startup/capture/translation critical path. A read
   // already in flight may finish after navigation, but must not build hidden
   // cards or clear a newer translation's dirty revision.
@@ -745,6 +752,7 @@ try {
   await goView('settings');
   const historyBeforeGuidance = await page.locator('#save-history').isChecked();
   const readsBeforeGuidance = await page.evaluate(() => window.__qa.settingsReads);
+  await selectSettingsCategory('general');
   await page.locator('#save-history').click();
   await page.waitForFunction((reads) => window.__qa.settingsReads > reads, readsBeforeGuidance);
   await goView('translate');
@@ -754,6 +762,7 @@ try {
   assert.equal((await page.locator('#core-guidance-apply').textContent()).trim(), '改用 Ctrl+Alt+D');
   await page.evaluate(() => { window.__qa.registrationOverride = null; });
   await goView('settings');
+  await selectSettingsCategory('general');
   if ((await page.locator('#save-history').isChecked()) !== historyBeforeGuidance) await page.locator('#save-history').click();
   await goView('translate');
   await page.waitForFunction(() => document.querySelector('#core-guidance').hidden);
@@ -1263,6 +1272,7 @@ try {
   await page.waitForFunction(() => window.__qa.permissionSettings.length === 2);
   assert.equal(await page.locator('#permission-guidance-open').isDisabled(), true);
   await page.locator('#permission-guidance-help').click();
+  // Permission help must reveal its own category; do not fix it up in the test.
   await page.locator('#mac-permission-card').waitFor({ state: 'visible' });
 
   await page.waitForFunction(() => document.activeElement.id === 'mac-permission-card');
@@ -1320,34 +1330,45 @@ try {
 
   // Permission reads are passive, and only explicit management actions request
   // authorization or open a system pane. Unsupported platforms show no Mac UI.
+  await selectSettingsCategory('permissions');
   await page.locator('#accessibility-permission-state').getByText('待授权').waitFor();
   assert.deepEqual(await page.evaluate(() => window.__qa.permissionRequests), []);
   const readsBeforeRefresh = await page.evaluate(() => window.__qa.permissionReads);
+  await selectSettingsCategory('permissions');
   await page.locator('#refresh-permissions').click();
   await page.waitForFunction((reads) => window.__qa.permissionReads > reads, readsBeforeRefresh);
   assert.deepEqual(await page.evaluate(() => window.__qa.permissionRequests), []);
+  await selectSettingsCategory('permissions');
   await page.locator('[data-request-permission="accessibility"]').click();
+  await selectSettingsCategory('permissions');
   await page.locator('#accessibility-permission-state').getByText('已授权').waitFor();
   assert.deepEqual(await page.evaluate(() => window.__qa.permissionRequests), ['accessibility']);
   const settingsBeforeExplicitOpen = await page.evaluate(() => window.__qa.permissionSettings.length);
+  await selectSettingsCategory('permissions');
   await page.locator('[data-open-permission="screenCapture"]').click();
   assert.equal(await page.evaluate(() => window.__qa.permissionSettings.length), settingsBeforeExplicitOpen + 1);
   assert.equal(await page.evaluate(() => window.__qa.permissionSettings.at(-1)), 'screenCapture');
   assert.deepEqual(await page.evaluate(() => window.__qa.permissionRequests), ['accessibility']);
   await page.evaluate(() => { window.__qa.permissionState.platform = 'windows'; window.__qa.permissionState.supported = false; });
+  await selectSettingsCategory('permissions');
   await page.locator('#refresh-permissions').click();
+  await selectSettingsCategory('permissions');
   await page.locator('#mac-permission-card').waitFor({ state: 'hidden' });
   await page.evaluate(() => { window.__qa.permissionState.platform = 'macos'; window.__qa.permissionState.supported = true; });
   await goView('translate'); await goView('settings');
+  // Permission help must reveal its own category; do not fix it up in the test.
   await page.locator('#mac-permission-card').waitFor({ state: 'visible' });
 
   // A verified modern request may contradict the old passive preflight. Do
   // not incorrectly tell the owner the system switch was never enabled.
   await page.evaluate(() => { window.__qa.permissionOverride = { ...window.__qa.permissionState, screenCaptureGranted: false, screenCaptureState: 'inconsistent', screenCaptureRequestState: 'available', screenCaptureAuthorizationConsistent: false }; });
+  await selectSettingsCategory('permissions');
   await page.locator('[data-request-permission="screenCapture"]').click();
+  await selectSettingsCategory('permissions');
   await page.locator('#screen-capture-permission-state').getByText('授权状态不一致').waitFor();
   assert.match(await page.locator('#permission-context').textContent(), /不一致.*重新打开/);
   await page.evaluate(() => { window.__qa.permissionOverride = null; });
+  await selectSettingsCategory('permissions');
   await page.locator('#refresh-permissions').click();
 
   // Missing selection permission is distinct from an ordinary empty selection.
@@ -1408,7 +1429,9 @@ try {
   assert.equal(await page.locator('#permission-setup-steps').getAttribute('open'), '');
   assert.equal(await page.evaluate(() => window.__qa.permissionSettings.length), selectionPermissionBaseline.opens + 1);
   await page.evaluate(() => { window.__qa.permissionState.accessibilityGranted = true; });
+  await selectSettingsCategory('permissions');
   await page.locator('#refresh-permissions').click();
+  await selectSettingsCategory('permissions');
   await page.locator('#accessibility-permission-state').getByText('已授权').waitFor();
   assert.equal(await page.locator('#permission-guidance').evaluate(element => element.hidden), true);
   assert.equal(await page.evaluate(() => window.__qa.permissionRequests.length), selectionPermissionBaseline.authorizations);
@@ -1465,6 +1488,7 @@ try {
 
   // Saving is atomic from the form's perspective: closing or submitting again
   // while the backend is pending cannot replace or close a different editor.
+  await selectSettingsCategory('translation');
   await page.getByRole('button', { name: '编辑', exact: true }).click();
   await page.locator('#provider-name').fill('QA edited fixture');
   await page.evaluate(() => { window.__qa.holdSave = true; });
@@ -1490,6 +1514,7 @@ try {
   assert.equal(await page.evaluate(() => window.__qa.saveCalls), 1);
   await page.evaluate(() => { window.__qa.holdSave = false; window.__qa.releaseSave(); });
   await page.locator('#provider-dialog').waitFor({ state: 'hidden' });
+  await selectSettingsCategory('translation');
   await page.getByRole('button', { name: '编辑', exact: true }).click();
   assert.equal(await page.locator('#provider-name').inputValue(), 'QA edited fixture');
   await page.evaluate(() => { window.__qa.failSave = true; });
@@ -1504,8 +1529,10 @@ try {
   // the frontend/fake IPC only, not OS-wide shortcut registration.
   assert.equal(await page.locator('[data-shortcut-record]').count(), 3);
   const beforeRecordedSave = await page.evaluate(() => window.__qa.saveCalls);
+  await selectSettingsCategory('shortcuts');
   await page.locator('[data-shortcut-record="selection"]').click();
   await page.waitForFunction(() => window.__qa.shortcutLeases.at(-1)?.active === true);
+  await selectSettingsCategory('shortcuts');
   await page.locator('#shortcut-feedback').getByText('请按快捷键', { exact: false }).waitFor();
   await page.keyboard.down('Control'); await page.keyboard.down('Shift'); await page.keyboard.down('t');
   assert.equal(await page.locator('input[name="selection"]').inputValue(), 'Alt+D');
@@ -1514,6 +1541,7 @@ try {
   await page.waitForFunction(() => document.querySelector('input[name="selection"]').value === 'Ctrl+Shift+T');
   assert.equal(await page.evaluate(() => window.__qa.shortcutLeases.at(-1).active), false);
   await page.waitForFunction(() => window.__qa.settings.shortcuts.selection === 'Ctrl+Shift+T');
+  await selectSettingsCategory('shortcuts');
   await page.locator('#shortcut-feedback').getByText('快捷键已保存并立即生效', { exact: false }).waitFor();
   assert.equal(await page.evaluate(() => window.__qa.saveCalls), beforeRecordedSave + 1);
   assert.deepEqual(await page.evaluate(() => window.__qa.shortcutRetryActions.at(-1)), ['selection']);
@@ -1523,41 +1551,56 @@ try {
     window.__qa.unavailableShortcutActions = ['input'];
     return { saves: window.__qa.saveCalls, shortcuts: structuredClone(window.__qa.settings.shortcuts) };
   });
+  await selectSettingsCategory('shortcuts');
   await page.locator('#shortcut-selection').fill('Ctrl+Shift+K');
+  await selectSettingsCategory('shortcuts');
   await page.locator('#save-shortcuts').click();
   await page.waitForFunction((count) => window.__qa.saveCalls === count + 1 && !document.querySelector('#save-shortcuts').disabled, beforeManualRows.saves);
   assert.equal(await page.evaluate(() => window.__qa.settings.shortcuts.selection), 'Ctrl+Shift+K');
   assert.equal(await page.evaluate(() => window.__qa.settings.shortcuts.input), beforeManualRows.shortcuts.input);
   assert.deepEqual(await page.evaluate(() => window.__qa.shortcutRetryActions.at(-1)), ['selection']);
+  await selectSettingsCategory('shortcuts');
   await page.locator('#shortcut-selection').fill('Ctrl+Shift+J');
+  await selectSettingsCategory('shortcuts');
   await page.locator('#shortcut-silentOcr').fill('Ctrl+Shift+P');
+  await selectSettingsCategory('shortcuts');
   await page.locator('#save-shortcuts').click();
   await page.waitForFunction((count) => window.__qa.saveCalls === count + 2 && !document.querySelector('#save-shortcuts').disabled, beforeManualRows.saves);
   assert.equal(await page.evaluate(() => window.__qa.settings.shortcuts.selection), 'Ctrl+Shift+J');
   assert.equal(await page.evaluate(() => window.__qa.settings.shortcuts.silentOcr), 'Ctrl+Shift+P');
   assert.deepEqual(await page.evaluate(() => window.__qa.shortcutRetryActions.at(-1)), ['selection', 'silentOcr']);
+  await selectSettingsCategory('shortcuts');
   await page.locator('#shortcut-selection').fill(beforeManualRows.shortcuts.selection);
+  await selectSettingsCategory('shortcuts');
   await page.locator('#shortcut-silentOcr').fill(beforeManualRows.shortcuts.silentOcr);
+  await selectSettingsCategory('shortcuts');
   await page.locator('#save-shortcuts').click();
   await page.waitForFunction((count) => window.__qa.saveCalls === count + 3 && !document.querySelector('#save-shortcuts').disabled, beforeManualRows.saves);
   assert.deepEqual(await page.evaluate(() => window.__qa.settings.shortcuts), beforeManualRows.shortcuts);
   assert.deepEqual(await page.evaluate(() => window.__qa.shortcutRetryActions.at(-1)), ['selection', 'silentOcr']);
+  await selectSettingsCategory('shortcuts');
   await page.locator('#save-shortcuts').click();
+  await selectSettingsCategory('shortcuts');
   await page.locator('#shortcut-feedback').getByText('QA unavailable shortcut: input', { exact: false }).waitFor();
   assert.equal(await page.evaluate(() => window.__qa.saveCalls), beforeManualRows.saves + 4);
   assert.deepEqual(await page.evaluate(() => window.__qa.settings.shortcuts), beforeManualRows.shortcuts);
   assert.deepEqual(await page.evaluate(() => window.__qa.shortcutRetryActions.at(-1)), ['selection', 'silentOcr', 'screenshot', 'capture', 'ocr', 'input']);
   await page.evaluate(() => { window.__qa.unavailableShortcutActions = []; });
+  await selectSettingsCategory('shortcuts');
   await page.locator('#shortcut-selection').fill('Control+Shift+t');
+  await selectSettingsCategory('shortcuts');
   await page.locator('#save-shortcuts').click();
   await page.waitForFunction((count) => window.__qa.saveCalls === count + 5 && !document.querySelector('#save-shortcuts').disabled, beforeManualRows.saves);
   assert.deepEqual(await page.evaluate(() => window.__qa.settings.shortcuts), beforeManualRows.shortcuts);
   assert.deepEqual(await page.evaluate(() => window.__qa.shortcutRetryActions.at(-1)), ['selection', 'silentOcr', 'screenshot', 'capture', 'ocr', 'input']);
   // A backend registration/save rejection must retain both the committed
   // binding and the editable candidate; it must not claim success.
+  await selectSettingsCategory('shortcuts');
   await page.locator('input[name="selection"]').fill('Ctrl+Shift+K');
   await page.evaluate(() => { window.__qa.failSave = true; });
+  await selectSettingsCategory('shortcuts');
   await page.locator('#save-shortcuts').click();
+  await selectSettingsCategory('shortcuts');
   await page.locator('#shortcut-feedback').getByText('QA save failure', { exact: false }).waitFor();
   assert.equal(await page.evaluate(() => window.__qa.settings.shortcuts.selection), 'Ctrl+Shift+T');
   assert.equal(await page.locator('input[name="selection"]').inputValue(), 'Ctrl+Shift+K');
@@ -1565,14 +1608,19 @@ try {
   await page.evaluate(() => { window.__qa.failSave = false; });
   // A recorded field saves automatically once, without committing unrelated
   // manual drafts or requiring them to be syntactically valid.
+  await selectSettingsCategory('shortcuts');
   await page.locator('#shortcut-advanced > summary').click();
   const savedOcr = await page.evaluate(() => window.__qa.settings.shortcuts.silentOcr);
   const savedCapture = await page.evaluate(() => window.__qa.settings.shortcuts.capture);
+  await selectSettingsCategory('shortcuts');
   await page.locator('#shortcut-silentOcr').fill('Ctrl+Shift+L');
+  await selectSettingsCategory('shortcuts');
   await page.locator('#shortcut-capture').fill('Unfinished manual draft');
   const beforeFieldOnlySave = await page.evaluate(() => window.__qa.saveCalls);
   await page.evaluate(() => { window.__qa.holdSave = true; });
+  await selectSettingsCategory('shortcuts');
   await page.locator('[data-shortcut-record="selection"]').click();
+  await selectSettingsCategory('shortcuts');
   await page.locator('#shortcut-feedback').getByText('请按快捷键', { exact: false }).waitFor();
   await page.keyboard.press('Control+Shift+j');
   await page.waitForFunction((count) => window.__qa.saveCalls === count + 1, beforeFieldOnlySave);
@@ -1582,16 +1630,22 @@ try {
   await page.evaluate(() => window.__qa.emit('shortcut-recorded', { leaseId: window.__qa.shortcutLeases.at(-1).id, shortcut: 'Ctrl+Shift+J', modifiersDown: 0 }));
   await page.evaluate(() => { window.__qa.holdSave = false; window.__qa.releaseSave(); });
   await page.waitForFunction(() => window.__qa.settings.shortcuts.selection === 'Ctrl+Shift+J');
+  await selectSettingsCategory('shortcuts');
   await page.locator('#shortcut-feedback').getByText('其他手动修改仍待保存', { exact: false }).waitFor();
   assert.equal(await page.evaluate(() => window.__qa.saveCalls), beforeFieldOnlySave + 1);
   assert.equal(await page.evaluate(() => window.__qa.settings.shortcuts.silentOcr), savedOcr);
   assert.equal(await page.evaluate(() => window.__qa.settings.shortcuts.capture), savedCapture);
   assert.equal(await page.locator('#shortcut-silentOcr').inputValue(), 'Ctrl+Shift+L');
   assert.equal(await page.locator('#shortcut-capture').inputValue(), 'Unfinished manual draft');
+  await selectSettingsCategory('shortcuts');
   await page.locator('#shortcut-silentOcr').fill(savedOcr);
+  await selectSettingsCategory('shortcuts');
   await page.locator('#shortcut-capture').fill(savedCapture);
+  await selectSettingsCategory('shortcuts');
   await page.locator('#shortcut-advanced > summary').click();
+  await selectSettingsCategory('shortcuts');
   await page.locator('[data-shortcut-record="selection"]').click();
+  await selectSettingsCategory('shortcuts');
   await page.locator('#shortcut-feedback').getByText('请按快捷键', { exact: false }).waitFor();
   await page.keyboard.press('Control+Shift+t');
   await page.waitForFunction(() => window.__qa.settings.shortcuts.selection === 'Ctrl+Shift+T');
@@ -1599,9 +1653,12 @@ try {
   // new editable recorded candidate; no second attempt occurs automatically.
   const beforeAutomaticFailure = await page.evaluate(() => window.__qa.saveCalls);
   await page.evaluate(() => { window.__qa.failSave = true; });
+  await selectSettingsCategory('shortcuts');
   await page.locator('[data-shortcut-record="selection"]').click();
+  await selectSettingsCategory('shortcuts');
   await page.locator('#shortcut-feedback').getByText('请按快捷键', { exact: false }).waitFor();
   await page.keyboard.press('Control+Shift+k');
+  await selectSettingsCategory('shortcuts');
   await page.locator('#shortcut-feedback').getByText('QA save failure', { exact: false }).waitFor();
   assert.equal(await page.evaluate(() => window.__qa.settings.shortcuts.selection), 'Ctrl+Shift+T');
   assert.equal(await page.locator('#shortcut-selection').inputValue(), 'Ctrl+Shift+K');
@@ -1609,20 +1666,27 @@ try {
   assert.equal(await page.locator('#save-shortcuts').isEnabled(), true);
   await page.evaluate(() => { window.__qa.failSave = false; });
   // A preference save must not erase a shortcut draft.
+  await selectSettingsCategory('shortcuts');
   await page.locator('input[name="selection"]').fill('Ctrl+Shift+Y');
+  await selectSettingsCategory('general');
   await page.locator('#theme-select').selectOption('dark');
   await page.waitForFunction(() => window.__qa.settings.theme === 'dark');
   assert.equal(await page.locator('input[name="selection"]').inputValue(), 'Ctrl+Shift+Y');
   const hideBeforeCancel = await page.evaluate(() => window.__qa.hideCalls);
+  await selectSettingsCategory('shortcuts');
   await page.locator('[data-shortcut-record="selection"]').click();
+  await selectSettingsCategory('shortcuts');
   await page.locator('#shortcut-feedback').getByText('请按快捷键', { exact: false }).waitFor();
   await page.keyboard.press('Escape');
   await page.waitForFunction(() => window.__qa.shortcutLeases.at(-1)?.active === false);
   assert.equal(await page.evaluate(() => window.__qa.hideCalls), hideBeforeCancel);
   assert.equal(await page.locator('input[name="selection"]').inputValue(), 'Ctrl+Shift+Y');
+  await selectSettingsCategory('shortcuts');
   await page.locator('[data-shortcut-record="silentOcr"]').click();
+  await selectSettingsCategory('shortcuts');
   await page.locator('#shortcut-feedback').getByText('请按快捷键', { exact: false }).waitFor();
   await page.locator('input[name="silentOcr"]').dispatchEvent('keydown', { key: 'Process', code: 'KeyS', keyCode: 229, isComposing: true });
+  await selectSettingsCategory('shortcuts');
   await page.locator('#shortcut-feedback').getByText('请先结束输入法组合', { exact: false }).waitFor();
   await page.locator('input[name="silentOcr"]').dispatchEvent('keyup', { key: 'Process', code: 'KeyS', keyCode: 229, isComposing: true });
   assert.equal(await page.locator('input[name="silentOcr"]').inputValue(), 'Alt+C');
@@ -1631,7 +1695,9 @@ try {
   // A delayed end ACK cannot commit a candidate after navigation cancels it.
   const beforeCancelledEnd = await page.evaluate(() => window.__qa.saveCalls);
   await page.evaluate(() => { window.__qa.holdShortcutEnd = true; });
+  await selectSettingsCategory('shortcuts');
   await page.locator('[data-shortcut-record="silentOcr"]').click();
+  await selectSettingsCategory('shortcuts');
   await page.locator('#shortcut-feedback').getByText('请按快捷键', { exact: false }).waitFor();
   await page.keyboard.press('Control+Shift+r');
   await page.waitForFunction(() => window.__qa.shortcutEndWaits === 1);
@@ -1644,9 +1710,12 @@ try {
   // its IPC call when settings closes; it must not overwrite newer state.
   const beforeQueuedRecording = await page.evaluate(() => window.__qa.saveCalls);
   await page.evaluate(() => { window.__qa.holdSave = true; });
+  await selectSettingsCategory('general');
   await page.locator('#theme-select').selectOption('light');
   await page.waitForFunction((count) => window.__qa.saveCalls === count + 1, beforeQueuedRecording);
+  await selectSettingsCategory('shortcuts');
   await page.locator('[data-shortcut-record="selection"]').click();
+  await selectSettingsCategory('shortcuts');
   await page.locator('#shortcut-feedback').getByText('请按快捷键', { exact: false }).waitFor();
   await page.keyboard.press('Control+Shift+n');
   await page.waitForFunction(() => window.__qa.shortcutLeases.at(-1)?.active === false && document.querySelector('#shortcut-feedback').textContent.startsWith('正在自动保存'));
@@ -1664,9 +1733,12 @@ try {
   // the backend. The queued recording cannot overwrite that newer snapshot.
   const beforeChangedBindings = await page.evaluate(() => window.__qa.saveCalls);
   await page.evaluate(() => { window.__qa.holdSave = true; });
+  await selectSettingsCategory('general');
   await page.locator('#theme-select').selectOption('dark');
   await page.waitForFunction((count) => window.__qa.saveCalls === count + 1, beforeChangedBindings);
+  await selectSettingsCategory('shortcuts');
   await page.locator('[data-shortcut-record="selection"]').click();
+  await selectSettingsCategory('shortcuts');
   await page.locator('#shortcut-feedback').getByText('请按快捷键', { exact: false }).waitFor();
   await page.keyboard.press('Control+Shift+m');
   await page.waitForFunction(() => document.querySelector('#shortcut-feedback').textContent.startsWith('正在自动保存'));
@@ -1679,15 +1751,21 @@ try {
   await page.waitForFunction(() => !document.querySelector('#save-shortcuts').disabled && window.__qa.settings.shortcuts.selection === 'Ctrl+Shift+U');
   assert.equal(await page.evaluate(() => window.__qa.saveCalls), beforeChangedBindings + 1);
   assert.equal(await page.locator('#shortcut-selection').inputValue(), 'Ctrl+Shift+M');
+  await selectSettingsCategory('shortcuts');
   await page.locator('#shortcut-feedback').getByText('录制的输入尚未保存', { exact: false }).waitFor();
+  await selectSettingsCategory('shortcuts');
   await page.locator('[data-shortcut-record="selection"]').click();
+  await selectSettingsCategory('shortcuts');
   await page.locator('#shortcut-feedback').getByText('请按快捷键', { exact: false }).waitFor();
   await page.keyboard.press('Control+Shift+t');
   await page.waitForFunction(() => window.__qa.settings.shortcuts.selection === 'Ctrl+Shift+T');
+  await selectSettingsCategory('shortcuts');
   await page.locator('#shortcut-feedback').getByText('快捷键已保存并立即生效', { exact: false }).waitFor();
+  await selectSettingsCategory('shortcuts');
   await page.locator('#shortcut-selection').fill('Ctrl+Shift+Y');
   // Leaving settings before the begin reply still ends exactly that lease.
   await page.evaluate(() => { window.__qa.holdShortcutBegin = true; });
+  await selectSettingsCategory('shortcuts');
   await page.locator('[data-shortcut-record="silentOcr"]').click();
   await page.getByRole('button', { name: '返回翻译', exact: true }).click();
   await page.evaluate(() => { window.__qa.holdShortcutBegin = false; window.__qa.releaseShortcutBegin(); });
@@ -1699,19 +1777,24 @@ try {
   // The OS can consume the registered main key, so no DOM D/S event is
   // invented here. A matching native release supplies only that configured
   // combo; a held modifier still prevents completion.
+  await selectSettingsCategory('shortcuts');
   await page.locator('[data-shortcut-record="selection"]').click();
+  await selectSettingsCategory('shortcuts');
   await page.locator('#shortcut-feedback').getByText('请按快捷键', { exact: false }).waitFor();
   await page.locator('#shortcut-selection').dispatchEvent('keydown', { key: 'Alt', code: 'AltLeft', altKey: true });
   await page.evaluate(() => { const id = window.__qa.shortcutLeases.at(-1).id; window.__qa.emit('shortcut-recorded', { leaseId: id - 1, shortcut: 'Alt+X', modifiersDown: 0 }); });
   assert.equal(await page.locator('#shortcut-selection').inputValue(), 'Ctrl+Shift+Y');
   await page.evaluate(() => { const id = window.__qa.shortcutLeases.at(-1).id; window.__qa.emit('shortcut-recorded', { leaseId: id, shortcut: 'Alt+D', modifiersDown: 2 }); });
+  await selectSettingsCategory('shortcuts');
   await page.locator('#shortcut-feedback').getByText('已记录 Alt+D', { exact: false }).waitFor();
   assert.equal(await page.locator('#shortcut-selection').inputValue(), 'Ctrl+Shift+Y');
   await page.locator('#shortcut-selection').dispatchEvent('keyup', { key: 'Alt', code: 'AltLeft', altKey: false });
   await page.waitForFunction(() => document.querySelector('#shortcut-selection').value === 'Alt+D');
   // A native release whose IPC arrives after the DOM modifier release can
   // complete immediately, despite the older native snapshot saying held.
+  await selectSettingsCategory('shortcuts');
   await page.locator('[data-shortcut-record="silentOcr"]').click();
+  await selectSettingsCategory('shortcuts');
   await page.locator('#shortcut-feedback').getByText('请按快捷键', { exact: false }).waitFor();
   await page.locator('#shortcut-silentOcr').dispatchEvent('keydown', { key: 'Alt', code: 'AltLeft', altKey: true });
   await page.locator('#shortcut-silentOcr').dispatchEvent('keyup', { key: 'Alt', code: 'AltLeft', altKey: false });
@@ -1719,9 +1802,12 @@ try {
   await page.waitForFunction(() => document.querySelector('#shortcut-silentOcr').value === 'Alt+S');
   // A modifier held before the recorder's DOM listeners saw a down is still
   // held. Native main-key release alone must not finish such a recording.
+  await selectSettingsCategory('shortcuts');
   await page.locator('[data-shortcut-record="selection"]').click();
+  await selectSettingsCategory('shortcuts');
   await page.locator('#shortcut-feedback').getByText('请按快捷键', { exact: false }).waitFor();
   await page.evaluate(() => { const id = window.__qa.shortcutLeases.at(-1).id; window.__qa.emit('shortcut-recorded', { leaseId: id, shortcut: 'Ctrl+Shift+T', modifiersDown: 16 }); });
+  await selectSettingsCategory('shortcuts');
   await page.locator('#shortcut-feedback').getByText('请按快捷键', { exact: false }).waitFor();
   await page.evaluate(() => { const id = window.__qa.shortcutLeases.at(-1).id; window.__qa.emit('shortcut-recorded', { leaseId: id, shortcut: 'Ctrl+Shift+T', modifiersDown: 5 }); });
   assert.equal(await page.locator('#shortcut-selection').inputValue(), 'Alt+D');
@@ -1732,7 +1818,9 @@ try {
   await page.waitForFunction(() => document.querySelector('#shortcut-selection').value === 'Ctrl+Shift+T');
   // A platform without native modifier evidence waits for an actual DOM up;
   // it cannot assume that missing DOM downs meant all modifiers were released.
+  await selectSettingsCategory('shortcuts');
   await page.locator('[data-shortcut-record="selection"]').click();
+  await selectSettingsCategory('shortcuts');
   await page.locator('#shortcut-feedback').getByText('请按快捷键', { exact: false }).waitFor();
   await page.evaluate(() => { const id = window.__qa.shortcutLeases.at(-1).id; window.__qa.emit('shortcut-recorded', { leaseId: id, shortcut: 'Alt+D', modifiersDown: null }); });
   assert.equal(await page.locator('#shortcut-selection').inputValue(), 'Ctrl+Shift+T');
@@ -1741,12 +1829,16 @@ try {
   await page.waitForFunction(() => document.querySelector('#shortcut-selection').value === 'Alt+D');
   // A Windows snapshot can establish that pre-held modifiers are all released
   // even if the main key and modifier events never reached the DOM.
+  await selectSettingsCategory('shortcuts');
   await page.locator('[data-shortcut-record="selection"]').click();
+  await selectSettingsCategory('shortcuts');
   await page.locator('#shortcut-feedback').getByText('请按快捷键', { exact: false }).waitFor();
   await page.evaluate(() => { const id = window.__qa.shortcutLeases.at(-1).id; window.__qa.emit('shortcut-recorded', { leaseId: id, shortcut: 'Ctrl+Shift+T', modifiersDown: 0 }); });
   await page.waitForFunction(() => document.querySelector('#shortcut-selection').value === 'Ctrl+Shift+T');
   // Esc after a candidate, while its modifiers are still held, cancels too.
+  await selectSettingsCategory('shortcuts');
   await page.locator('[data-shortcut-record="selection"]').click();
+  await selectSettingsCategory('shortcuts');
   await page.locator('#shortcut-feedback').getByText('请按快捷键', { exact: false }).waitFor();
   for (const event of [
     ['keydown', { key: 'Control', code: 'ControlLeft', ctrlKey: true }],
@@ -1761,6 +1853,7 @@ try {
   // The frontend's deadline starts before begin IPC, so a >14s late ACK cannot
   // expose an apparently active recorder after its native protection expired.
   await page.evaluate(() => { window.__qa.holdShortcutBegin = true; });
+  await selectSettingsCategory('shortcuts');
   await page.locator('[data-shortcut-record="selection"]').click();
   await page.evaluate(() => {
     // Playwright's installed clock may own this property. Deleting our override
@@ -1778,6 +1871,7 @@ try {
     window.__qa.holdShortcutBegin = false; window.__qa.releaseShortcutBegin();
   });
   try {
+    await selectSettingsCategory('shortcuts');
     await page.locator('#shortcut-feedback').getByText('录制准备已超时', { exact: false }).waitFor();
   } finally {
     assert.deepEqual(await page.evaluate(() => window.__qa.restorePerformanceNow()),
@@ -1785,20 +1879,29 @@ try {
   }
   assert.equal(await page.evaluate(() => window.__qa.shortcutLeases.at(-1).active), false);
   assert.equal(await page.locator('#shortcut-selection').inputValue(), 'Ctrl+Shift+T');
+  await selectSettingsCategory('shortcuts');
   await page.locator('#shortcut-advanced > summary').click();
   // Multiple blanks disable those shortcuts; only nonempty values are compared.
+  await selectSettingsCategory('shortcuts');
   await page.locator('input[name="selection"]').fill('');
+  await selectSettingsCategory('shortcuts');
   await page.locator('input[name="capture"]').fill('');
+  await selectSettingsCategory('shortcuts');
   await page.locator('#save-shortcuts').click();
   await page.waitForFunction(() => window.__qa.settings.shortcuts.selection === '' && window.__qa.settings.shortcuts.capture === '');
   const savesBeforeDuplicate = await page.evaluate(() => window.__qa.saveCalls);
+  await selectSettingsCategory('shortcuts');
   await page.locator('input[name="selection"]').fill('Ctrl+P');
+  await selectSettingsCategory('shortcuts');
   await page.locator('input[name="capture"]').fill('ctrl+p');
+  await selectSettingsCategory('shortcuts');
   await page.locator('#save-shortcuts').click();
+  await selectSettingsCategory('shortcuts');
   await page.locator('#shortcut-feedback').getByText('不同操作不能使用相同的快捷键。', { exact: false }).waitFor();
   assert.equal(await page.evaluate(() => window.__qa.saveCalls), savesBeforeDuplicate);
 
   // Presets populate the documented protocol/base while model names remain editable.
+  await selectSettingsCategory('translation');
   await page.locator('#add-provider').click();
   assert.equal(await page.locator('#provider-preset').inputValue(), 'baidu');
   assert.equal(await page.locator('#provider-baidu-credentials').isVisible(), true);
@@ -1822,6 +1925,7 @@ try {
     ['youdao', [['provider-youdao-app-key', 'qa-mt-youdao-app'], ['provider-youdao-app-secret', 'qa-mt-youdao-secret']], { appKey: 'qa-mt-youdao-app', appSecret: 'qa-mt-youdao-secret' }],
     ['microsoft', [['provider-microsoft-subscription-key', 'qa-mt-microsoft-secret']], { subscriptionKey: 'qa-mt-microsoft-secret' }],
   ]) {
+    await selectSettingsCategory('translation');
     await page.locator('#add-provider').click();
     await page.locator('#provider-preset').selectOption(kind);
     assert.equal(await page.locator(`#provider-preset option[value="${kind}"]`).evaluate(element => element.parentElement.label), ['baidu', 'microsoft'].includes(kind) ? '推荐 · 从这些服务开始' : '官方机器翻译');
@@ -1857,6 +1961,7 @@ try {
     await page.locator('#provider-dialog').waitFor({ state: 'hidden' });
     assert.deepEqual(JSON.parse(await page.evaluate(() => window.__qa.translationCredentialWrites.at(-1).key)), expected);
     const nativeRow = page.locator('#provider-list .provider-row').filter({ hasText: `QA MT ${kind}` });
+    await selectSettingsCategory('translation');
     await nativeRow.getByRole('button', { name: '编辑', exact: true }).click();
     for (const [field] of fields) assert.equal(await page.locator(`#${field}`).inputValue(), '');
     const writes = await page.evaluate(() => window.__qa.translationCredentialWrites.length);
@@ -1864,6 +1969,7 @@ try {
     await page.locator('#provider-dialog').waitFor({ state: 'hidden' });
     assert.equal(await page.evaluate(() => window.__qa.translationCredentialWrites.length), writes);
     if (kind === 'microsoft') assert.equal(await page.evaluate(() => window.__qa.settings.providers.find(item => item.kind === 'microsoft').region), 'eastasia');
+    await selectSettingsCategory('translation');
     await nativeRow.getByRole('button', { name: '编辑', exact: true }).click();
     await page.locator(`#${fields[0][0]}`).fill('qa-discard-mt-scope');
     await page.locator('#provider-preset').selectOption('openai');
@@ -1879,6 +1985,7 @@ try {
 
   // Same-origin edits preserve the saved-key indication; a cross-vendor preset
   // clears typed secrets and cannot claim that the original origin's key is valid.
+  await selectSettingsCategory('translation');
   await page.getByRole('button', { name: '编辑', exact: true }).click();
   await page.locator('#provider-url').fill('https://example.invalid/another/path');
   await page.locator('#provider-model').fill('qa-other-model');
@@ -1891,11 +1998,13 @@ try {
   await page.locator('#provider-dialog').waitFor({ state: 'hidden' });
   assert.equal(await page.evaluate(() => window.__qa.settings.providers[0].hasKey), false);
   assert.doesNotMatch(await page.locator('#provider-list').textContent(), /密钥已保存/);
+  await selectSettingsCategory('translation');
   await page.getByRole('button', { name: '编辑', exact: true }).click();
   assert.doesNotMatch(await page.locator('#provider-key').getAttribute('placeholder'), /已保存/);
   await page.locator('#cancel-provider-dialog').click();
 
   // Native OCR uses complete vendor bundles only in the credential command.
+  await selectSettingsCategory('capture');
   await page.locator('#add-ocr-provider').click();
   assert.equal(await page.locator('#ocr-provider-kind').inputValue(), 'baidu');
   assert.equal(await page.locator('#ocr-provider-url-field').isHidden(), true);
@@ -1912,12 +2021,14 @@ try {
   assert.deepEqual(JSON.parse(await page.evaluate(() => window.__qa.credentialWrites.at(-1).key)), { apiKey: 'qa-baidu-api', secretKey: 'qa-baidu-secret' });
   assert.equal(await page.evaluate(() => window.__qa.settings.activeOcrProviderId), null);
   const afterBaidu = await page.evaluate(() => window.__qa.credentialWrites.length);
+  await selectSettingsCategory('capture');
   await page.getByRole('button', { name: '编辑 OCR QA Baidu', exact: true }).click();
   assert.equal(await page.locator('#ocr-baidu-api-key').inputValue(), '');
   assert.equal(await page.locator('#ocr-baidu-secret-key').inputValue(), '');
   await page.locator('#save-ocr-provider').click();
   await page.locator('#ocr-provider-dialog').waitFor({ state: 'hidden' });
   assert.equal(await page.evaluate(() => window.__qa.credentialWrites.length), afterBaidu);
+  await selectSettingsCategory('capture');
   await page.getByRole('button', { name: '编辑 OCR QA Baidu', exact: true }).click();
   await page.locator('#ocr-baidu-api-key').fill('discard-on-protocol-change');
   await page.locator('#ocr-provider-kind').selectOption('tencent');
@@ -1940,22 +2051,27 @@ try {
   assert.equal(await page.evaluate(() => window.__qa.settings.ocrProviders[0].region), 'ap-shanghai');
   const settingsJson = await page.evaluate(() => JSON.stringify(window.__qa.settingsWrites));
   for (const secret of ['qa-baidu-api', 'qa-baidu-secret', 'qa-tencent-id', 'qa-tencent-secret', 'qa-tencent-session', 'discard-on-protocol-change', 'qa-original-translation-key', 'qa-discard-on-vendor-change']) assert.equal(settingsJson.includes(secret), false);
+  await selectSettingsCategory('capture');
   await page.getByRole('button', { name: '删除 OCR QA Tencent', exact: true }).click();
   await page.locator('#confirm-accept').click();
   await page.waitForFunction(() => window.__qa.settings.ocrProviders.length === 0);
+  await selectSettingsCategory('capture');
   await page.locator('#add-ocr-provider').click();
   await page.locator('#ocr-provider-name').fill('QA unconfigured');
   await page.locator('#save-ocr-provider').click();
   await page.locator('#ocr-provider-dialog').waitFor({ state: 'hidden' });
   const unconfiguredId = await page.evaluate(() => window.__qa.settings.ocrProviders[0].id);
+  await selectSettingsCategory('capture');
   await page.locator('#active-ocr-provider').selectOption(unconfiguredId);
   await page.getByText('此 OCR 服务尚未配置完整凭据，请先编辑并保存密钥。').waitFor();
   assert.equal(await page.evaluate(() => window.__qa.settings.activeOcrProviderId), null);
+  await selectSettingsCategory('capture');
   await page.getByRole('button', { name: '删除 OCR QA unconfigured', exact: true }).click();
   await page.locator('#confirm-accept').click();
   await page.waitForFunction(() => window.__qa.settings.ocrProviders.length === 0);
 
   for (const kind of ['youdao', 'google']) {
+    await selectSettingsCategory('capture');
     await page.locator('#add-ocr-provider').click();
     await page.locator('#ocr-provider-kind').selectOption(kind);
     await page.locator('#ocr-provider-name').fill(`QA OCR ${kind}`);
@@ -2000,6 +2116,7 @@ try {
   for (const secret of ['qa-ocr-youdao-app', 'qa-ocr-youdao-secret', 'qa-ocr-google-secret', 'qa-discard-ocr-scope', 'qa-discard-ocr-close']) assert.equal(await page.evaluate(secret => JSON.stringify(window.__qa.settingsWrites).includes(secret), secret), false);
 
   // OCR is independent of translation services and remains local until selected.
+  await selectSettingsCategory('capture');
   await page.locator('#add-ocr-provider').click();
   await page.getByRole('dialog', { name: '添加 OCR 服务' }).waitFor();
   await page.locator('#ocr-provider-name').fill('QA OCR gateway');
@@ -2013,18 +2130,23 @@ try {
   assert.equal(await page.evaluate(() => window.__qa.settings.activeOcrProviderId), null);
   assert.equal(await page.evaluate(() => window.__qa.credentialWrites.at(-1).kind), 'http-json');
   const ocrId = await page.evaluate(() => window.__qa.settings.ocrProviders[0].id);
+  await selectSettingsCategory('capture');
   await page.locator('#active-ocr-provider').selectOption(ocrId);
+  await selectSettingsCategory('capture');
   await page.locator('#ocr-privacy-notice').getByText('云端 OCR 已启用', { exact: false }).waitFor();
   assert.match(await page.locator('#ocr-privacy-notice').textContent(), /ocr\.example\.invalid/);
+  await selectSettingsCategory('capture');
   await page.getByRole('button', { name: '编辑 OCR QA OCR gateway', exact: true }).click();
   assert.equal(await page.locator('#ocr-provider-key').inputValue(), '');
   await page.locator('#ocr-provider-template').fill('invalid JSON');
   await page.locator('#save-ocr-provider').click();
   await page.locator('#ocr-provider-error').getByText('请输入有效的 JSON 请求模板。').waitFor();
   await page.locator('#cancel-ocr-provider-dialog').click();
+  await selectSettingsCategory('capture');
   await page.locator('#ocr-provider-list').getByRole('button', { name: '测试连接', exact: true }).click();
   await page.getByText('QA OCR test succeeded').waitFor();
   assert.equal(await page.evaluate(() => window.__qa.ocrTestCalls), 1);
+  await selectSettingsCategory('capture');
   await page.getByRole('button', { name: '删除 OCR QA OCR gateway', exact: true }).click();
   await page.locator('#confirm-accept').click();
   await page.waitForFunction(() => window.__qa.settings.ocrProviders.length === 0 && window.__qa.settings.activeOcrProviderId === null);
@@ -2111,6 +2233,7 @@ try {
   await page.locator('#source-text').dispatchEvent('keydown', { key: 'Enter', keyCode: 13, repeat: true });
   assert.equal(await page.evaluate(() => window.__qa.translationRequests.length), emptyRequestCount + 2);
   await goView('settings');
+  await selectSettingsCategory('translation');
   await page.getByRole('button', { name: '编辑', exact: true }).click();
   await page.locator('#provider-name').press('Enter');
   await page.locator('#provider-dialog').waitFor({ state: 'hidden' });
@@ -2146,6 +2269,7 @@ try {
 
   // New shortcuts suspend, rather than close or block on, a live credential draft.
   await goView('settings');
+  await selectSettingsCategory('translation');
   await page.getByRole('button', { name: '编辑', exact: true }).click();
   await page.locator('#provider-name').fill('QA unfinished editor');
   await page.locator('#provider-key').fill('private-unsaved-draft');
@@ -2179,6 +2303,7 @@ try {
 
   // Permission guidance also presents immediately without destroying a draft.
   await goView('settings');
+  await selectSettingsCategory('translation');
   await page.getByRole('button', { name: '编辑', exact: true }).click();
   await page.locator('#provider-name').fill('QA permission capture unfinished editor');
   const beforeQueuedPermission = await page.evaluate(() => ({ requests: window.__qa.translationRequests.length, opens: window.__qa.permissionSettings.length, authorizations: window.__qa.permissionRequests.length }));
@@ -2198,7 +2323,9 @@ try {
   await page.locator('#permission-guidance-help').click();
   await page.waitForFunction(() => document.activeElement.id === 'mac-permission-card');
   await page.evaluate(() => { window.__qa.permissionState.screenCaptureGranted = true; });
+  await selectSettingsCategory('permissions');
   await page.locator('#refresh-permissions').click();
+  await selectSettingsCategory('permissions');
   await page.locator('#screen-capture-permission-state').getByText('已授权').waitFor();
   assert.equal(await page.locator('#permission-guidance').evaluate((element) => element.hidden), true);
   assert.equal(await page.evaluate(() => window.__qa.permissionRequests.length), beforeQueuedPermission.authorizations);
@@ -2208,6 +2335,7 @@ try {
 
   // Explicit input similarly suspends a draft, and only current intent may focus.
   await goView('settings');
+  await selectSettingsCategory('translation');
   await page.getByRole('button', { name: '编辑', exact: true }).click();
   await page.locator('#provider-name').fill('QA input unfinished editor');
   await page.evaluate(() => window.__qa.emitInputFocus());
@@ -2229,38 +2357,51 @@ try {
   const managementBefore = await page.evaluate(() => window.__qa.managementShows?.length ?? 0);
   const settingsEpoch = await openNativeSettings();
   await page.waitForFunction((count) => window.__qa.managementShows?.length === count + 1, managementBefore);
+  // Assert native deep-link focus before manually exploring other categories.
+  assert.equal(await page.locator('[data-settings-tab="shortcuts"]').getAttribute('aria-selected'), 'true');
+  await page.waitForFunction(() => document.activeElement?.id === 'shortcut-selection');
   assert.equal(await page.locator('body').getAttribute('data-view'), 'settings');
+  await selectSettingsCategory('translation');
   assert.equal(await page.locator('#provider-list').isVisible(), true);
+  await selectSettingsCategory('capture');
   assert.equal(await page.locator('#ocr-provider-list').isVisible(), true);
+  await selectSettingsCategory('shortcuts');
   assert.equal(await page.locator('#shortcuts-form').isVisible(), true);
   assert.deepEqual(await page.evaluate(() => window.__qa.managementShows.at(-1)), { view: 'settings', layout: await page.evaluate(() => window.__qa.layoutCalls.at(-1)) });
-  await page.waitForFunction(() => document.activeElement?.id === 'shortcut-selection');
   await page.evaluate((presentationEpoch) => window.__qa.emit('open-settings', { presentationEpoch }), settingsEpoch);
   assert.equal(await page.evaluate(() => window.__qa.managementShows.length), managementBefore + 1);
   // Built-in translation never prepares/downloads from a status refresh. Its
   // service configuration has no endpoint or credential writes/deletions.
   await page.waitForFunction(() => document.querySelector('#system-translation-status').textContent === 'QA 语言包尚未准备');
   assert.deepEqual(await page.evaluate(() => window.__qa.systemPrepareCalls), []);
+  await selectSettingsCategory('translation');
   await page.locator('#system-translation-source').selectOption('zh-Hans');
+  await selectSettingsCategory('translation');
   await page.locator('#system-translation-target').selectOption('en');
   await page.waitForFunction(() => window.__qa.systemStatusCalls.at(-1)?.sourceLanguage === 'zh-Hans' && window.__qa.systemStatusCalls.at(-1)?.targetLanguage === 'en');
+  await selectSettingsCategory('translation');
   await page.locator('#prepare-system-translation').click();
   await page.waitForFunction(() => document.querySelector('#system-translation-status').textContent === 'QA 本机语言包已就绪');
   assert.deepEqual(await page.evaluate(() => window.__qa.systemPrepareCalls), [{ sourceLanguage: 'zh-Hans', targetLanguage: 'en' }]);
   assert.equal(await page.locator('#prepare-system-translation').isDisabled(), true);
   await page.evaluate(() => { window.__qa.systemStatus = { platform: 'windows', supported: false, ready: false, requiresSetup: false, message: 'QA 此系统暂无通用内置翻译接口' }; });
+  await selectSettingsCategory('translation');
   await page.locator('#refresh-system-translation').click();
   await page.waitForFunction(() => document.querySelector('#system-translation-status').textContent === 'QA 此系统暂无通用内置翻译接口');
   assert.equal(await page.locator('#prepare-system-translation').isDisabled(), true);
   assert.equal(await page.locator('#enable-system-translation').isHidden(), true);
   await page.evaluate(() => { window.__qa.systemStatus = { platform: 'macos', supported: true, ready: true, requiresSetup: false, message: 'QA 本机语言包已就绪' }; });
+  await selectSettingsCategory('translation');
   await page.locator('#refresh-system-translation').click();
+  await selectSettingsCategory('translation');
   await page.locator('#enable-system-translation').waitFor({ state: 'visible' });
   const systemKeysBefore = await page.evaluate(() => ({ writes: window.__qa.keyCalls, deletes: window.__qa.keyDeleteCalls }));
+  await selectSettingsCategory('translation');
   await page.locator('#enable-system-translation').click();
   await page.waitForFunction(() => window.__qa.settings.providers.some(p => p.kind === 'system' && p.enabled));
   assert.equal(await page.evaluate(() => window.__qa.settings.providers.find(p => p.id === 'qa-service').enabled), true);
   const systemRow = page.locator('.provider-row').filter({ hasText: '无需 API Key' });
+  await selectSettingsCategory('translation');
   await systemRow.getByRole('button', { name: '编辑', exact: true }).click();
   assert.equal(await page.locator('#provider-url').isVisible(), false);
   assert.equal(await page.locator('#provider-key').isVisible(), false);
@@ -2275,6 +2416,7 @@ try {
   assert.deepEqual(await page.evaluate(() => ({ writes: window.__qa.keyCalls, deletes: window.__qa.keyDeleteCalls })), systemKeysBefore);
   // Built-in services remain installed; editing/disabling must not touch credentials.
   const offlineKeysBefore = await page.evaluate(() => ({ writes: window.__qa.keyCalls, deletes: window.__qa.keyDeleteCalls, reads: window.__qa.credentialReadCalls }));
+  await selectSettingsCategory('translation');
   await page.locator('#add-provider').click();
   await page.locator('#provider-preset').selectOption('offline');
   assert.equal(await page.locator('#provider-url-field').isHidden(), true);
@@ -2284,6 +2426,7 @@ try {
   await page.locator('#provider-dialog').waitFor({ state: 'hidden' });
   const offlineRow = page.locator('.provider-row').filter({ hasText: '本机离线翻译' });
   assert.equal(await offlineRow.getByText('内置中英模型 · 离线使用 · 无需配置').isVisible(), true);
+  await selectSettingsCategory('translation');
   await offlineRow.getByRole('button', { name: '编辑', exact: true }).click();
   assert.equal(await page.locator('#provider-preset').inputValue(), 'offline');
   await page.locator('#save-provider').click();
@@ -2448,18 +2591,23 @@ try {
   // The countdown feature was removed; theme/favorites and bounded history remain.
   await goView('settings');
   assert.equal(await page.locator('#auto-hide-seconds').count(), 0);
+  await selectSettingsCategory('general');
   assert.equal(await page.locator('#theme-select').isVisible(), true);
   assert.equal(await page.locator('#max-history').getAttribute('max'), '100');
   assert.equal(await page.locator('#max-history').inputValue(), '20');
+  await selectSettingsCategory('general');
   await page.locator('#max-history').fill('37');
   await page.locator('#max-history').dispatchEvent('change');
   await page.waitForFunction(() => window.__qa.settings.maxHistory === 37);
+  await selectSettingsCategory('general');
   await page.locator('#max-history').fill('101');
   await page.locator('#max-history').dispatchEvent('change');
   assert.equal(await page.evaluate(() => window.__qa.settings.maxHistory), 37);
   assert.equal(await page.locator('#max-history').inputValue(), '37');
+  await selectSettingsCategory('general');
   await page.locator('#theme-select').selectOption('dark');
   await page.waitForFunction(() => window.__qa.settings.theme === 'dark' && document.documentElement.dataset.theme === 'dark');
+  await selectSettingsCategory('general');
   await page.locator('#theme-select').selectOption('system');
   await page.waitForFunction(() => window.__qa.settings.theme === 'system');
   await page.evaluate(() => { window.__qa.history = [
@@ -2852,15 +3000,20 @@ try {
     translations: window.__qa.translationRequests.length, translationTests: window.__qa.translationTestCalls,
     ocrTests: window.__qa.ocrTestCalls, keyWrites: window.__qa.keyCalls + window.__qa.ocrKeyCalls,
     providerName: window.__qa.settings.providers[0].name }));
-  const refreshCachedSettings = async () => {
+  const refreshCachedSettings = async (category) => {
+    await selectSettingsCategory('general');
     await page.locator('#save-history').setChecked(!await page.locator('#save-history').isChecked());
     await page.waitForFunction(() => window.__qa.settings.saveHistory === document.querySelector('#save-history').checked);
+    // Refresh through General, then observe the credential in its real panel.
+    // A visible-state assertion must not wait on an intentionally hidden tab.
+    await selectSettingsCategory(category);
   };
   const translationCredentialRow = page.locator('#provider-list .provider-row').filter({ has: page.locator('.provider-title', { hasText: credentialBaseline.providerName }) });
   await page.evaluate(() => window.__qa.setCredentialState(window.__qa.settings.providers[0], 'unloaded'));
-  await refreshCachedSettings();
+  await refreshCachedSettings('translation');
   await translationCredentialRow.getByText('· 凭据未读取', { exact: true }).waitFor();
   assert.equal(await page.evaluate(() => window.__qa.settings.providers[0].hasKey), false);
+  await selectSettingsCategory('translation');
   await translationCredentialRow.getByRole('button', { name: '编辑', exact: true }).click();
   assert.match(await page.locator('#provider-key').getAttribute('placeholder'), /尚未读取.*留空保留/);
   assert.match(await page.locator('#provider-key-help').textContent(), /打开设置不会读取.*不会删除已有凭据/);
@@ -2870,8 +3023,9 @@ try {
   assert.doesNotMatch(await page.locator('#provider-key').getAttribute('placeholder'), /尚未读取|已保存/);
   await page.locator('#cancel-provider-dialog').click();
   await page.evaluate(() => window.__qa.setCredentialState(window.__qa.settings.providers[0], 'blocked'));
-  await refreshCachedSettings();
+  await refreshCachedSettings('translation');
   await translationCredentialRow.getByText('· 凭据读取受阻', { exact: true }).waitFor();
+  await selectSettingsCategory('translation');
   await translationCredentialRow.getByRole('button', { name: '编辑', exact: true }).click();
   assert.match(await page.locator('#provider-key').getAttribute('placeholder'), /读取受阻.*留空保留/);
   assert.match(await page.locator('#provider-key-help').textContent(), /测试连接.*不会删除已有凭据/);
@@ -2880,6 +3034,7 @@ try {
   assert.equal(await page.evaluate(() => window.__qa.translationRequests.length), credentialBaseline.translations);
   assert.equal(await page.evaluate(() => window.__qa.keyCalls + window.__qa.ocrKeyCalls), credentialBaseline.keyWrites);
   const readsBeforeExplicitTest = await page.evaluate(() => window.__qa.settingsReads);
+  await selectSettingsCategory('translation');
   await translationCredentialRow.getByRole('button', { name: '测试连接', exact: true }).click();
   await translationCredentialRow.getByText('· 凭据已就绪', { exact: true }).waitFor();
   assert.equal(await page.evaluate(() => window.__qa.credentialReadCalls), credentialBaseline.reads + 1);
@@ -2887,6 +3042,7 @@ try {
   assert.equal(await page.evaluate(() => window.__qa.settingsReads), readsBeforeExplicitTest + 1);
   assert.equal(await page.evaluate(() => window.__qa.translationRequests.length), credentialBaseline.translations);
 
+  await selectSettingsCategory('capture');
   await page.locator('#add-ocr-provider').click();
   await page.locator('#ocr-provider-name').fill('QA unread native OCR');
   await page.locator('#save-ocr-provider').click();
@@ -2895,11 +3051,13 @@ try {
     const provider = window.__qa.settings.ocrProviders.find(item => item.name === 'QA unread native OCR');
     window.__qa.setCredentialState(provider, 'unloaded'); return provider.id;
   });
-  await refreshCachedSettings();
+  await refreshCachedSettings('capture');
   const unreadOcrRow = page.locator('#ocr-provider-list .provider-row').filter({ hasText: 'QA unread native OCR' });
   await unreadOcrRow.getByText('· 凭据未读取', { exact: true }).waitFor();
+  await selectSettingsCategory('capture');
   await page.locator('#active-ocr-provider').selectOption(unreadOcrId);
   await page.waitForFunction((id) => window.__qa.settings.activeOcrProviderId === id, unreadOcrId);
+  await selectSettingsCategory('capture');
   await unreadOcrRow.getByRole('button', { name: '编辑 OCR QA unread native OCR', exact: true }).click();
   assert.match(await page.locator('#ocr-protocol-notice').textContent(), /尚未|不会读取系统凭据/);
   assert.match(await page.locator('#ocr-protocol-notice').textContent(), /不会删除已有凭据/);
@@ -2908,16 +3066,19 @@ try {
   await page.locator('#cancel-ocr-provider-dialog').click();
   assert.equal(await page.evaluate(() => window.__qa.credentialReadCalls), credentialBaseline.reads + 1);
   assert.equal(await page.evaluate(() => window.__qa.translationRequests.length), credentialBaseline.translations);
+  await selectSettingsCategory('capture');
   await page.locator('#active-ocr-provider').selectOption('');
   await page.waitForFunction(() => window.__qa.settings.activeOcrProviderId === null);
   await page.evaluate((id) => window.__qa.setCredentialState(window.__qa.settings.ocrProviders.find(item => item.id === id), 'missing'), unreadOcrId);
-  await refreshCachedSettings();
+  await refreshCachedSettings('capture');
   await unreadOcrRow.getByText('· 未配置凭据', { exact: true }).waitFor();
+  await selectSettingsCategory('capture');
   await page.locator('#active-ocr-provider').selectOption(unreadOcrId);
   await page.getByText('此 OCR 服务尚未配置完整凭据，请先编辑并保存密钥。', { exact: true }).waitFor();
   assert.equal(await page.evaluate(() => window.__qa.settings.activeOcrProviderId), null);
   await page.evaluate((id) => window.__qa.setCredentialState(window.__qa.settings.ocrProviders.find(item => item.id === id), 'unloaded'), unreadOcrId);
-  await refreshCachedSettings();
+  await refreshCachedSettings('capture');
+  await selectSettingsCategory('capture');
   await unreadOcrRow.getByRole('button', { name: '测试连接', exact: true }).click();
   await unreadOcrRow.getByText('· 凭据已就绪', { exact: true }).waitFor();
   assert.equal(await page.evaluate(() => window.__qa.credentialReadCalls), credentialBaseline.reads + 2);
@@ -3099,6 +3260,7 @@ try {
     if (appleAction) {
       assert.equal(await page.locator('#system-translation-setup').getAttribute('open'), '');
       await page.waitForFunction(() => !document.querySelector('#prepare-system-translation').disabled);
+      await selectSettingsCategory('translation');
       await page.locator('#prepare-system-translation').click();
       await page.waitForFunction(() => window.__qa.systemPrepareCalls.length === 1);
       assert.deepEqual(await page.evaluate(() => window.__qa.systemPrepareCalls), [{ sourceLanguage: 'zh-Hant', targetLanguage: 'en' }]);
@@ -3132,6 +3294,7 @@ try {
     assert.deepEqual(await page.evaluate(() => window.__qa.systemPrepareCalls), []);
     assert.deepEqual(await page.evaluate(() => ({ source: window.__qa.settings.sourceLanguage, target: window.__qa.settings.targetLanguage, writes: window.__qa.saveCalls })), preferences);
     await page.waitForFunction(() => !document.querySelector('#prepare-system-translation').disabled);
+    await selectSettingsCategory('translation');
     await page.locator('#prepare-system-translation').click();
     await page.waitForFunction(() => window.__qa.systemPrepareCalls.length === 1);
     assert.deepEqual(await page.evaluate(() => window.__qa.systemPrepareCalls), [{ sourceLanguage: language, targetLanguage: 'zh-Hans' }]);
@@ -3142,7 +3305,9 @@ try {
     await page.goto(url.href);
     await page.waitForFunction(() => document.querySelector('#footer-status')?.textContent === '准备就绪');
     await goView('settings');
+    await selectSettingsCategory('translation');
     await page.locator('#system-translation-source').selectOption('fr');
+    await selectSettingsCategory('translation');
     await page.locator('#system-translation-target').selectOption('de');
     await goView('translate');
     await page.evaluate((pair) => { window.__qa.translationResultError = 'SYSTEM_TRANSLATION_DOWNLOAD_REQUIRED: fixture'; window.__qa.translationResultLanguages = pair; }, pair);
@@ -3165,10 +3330,13 @@ try {
     await page.goto(url.href);
     await page.waitForFunction(() => document.querySelector('#footer-status')?.textContent === '准备就绪');
     await goView('settings');
+    await selectSettingsCategory('translation');
     await page.locator('#system-translation-source').selectOption('fr');
+    await selectSettingsCategory('translation');
     await page.locator('#system-translation-target').selectOption('de');
     await page.waitForFunction(() => !document.querySelector('#prepare-system-translation').disabled);
     await page.evaluate(() => { window.__qa.holdSystemPreparation = true; });
+    await selectSettingsCategory('translation');
     await page.locator('#prepare-system-translation').click();
     await page.waitForFunction(() => window.__qa.systemPrepareCalls.length === 1);
     await goView('translate');
@@ -3201,10 +3369,14 @@ try {
   await goView('settings');
   // Use the existing Settings save mock to configure this exact native combo,
   // then leave a different draft so completing the recording must change it.
+  await selectSettingsCategory('shortcuts');
   await page.locator('#shortcut-selection').fill('Ctrl+Alt+Shift+F9');
+  await selectSettingsCategory('shortcuts');
   await page.locator('#save-shortcuts').click();
   await page.waitForFunction(() => window.__qa.settings.shortcuts.selection === 'Ctrl+Alt+Shift+F9');
+  await selectSettingsCategory('shortcuts');
   await page.locator('#shortcut-selection').fill('Ctrl+Alt+Shift+F8');
+  await selectSettingsCategory('shortcuts');
   await page.locator('[data-shortcut-record="selection"]').click();
   const releaseProbeReady = await page.waitForFunction(() =>
     window.__qa.shortcutLeases.at(-1)?.active === true
@@ -3255,7 +3427,9 @@ try {
   // Native modifier evidence clears only modifier bookkeeping. An unrelated
   // ordinary key still needs its own DOM release before the candidate commits.
   const beginReleaseBoundary = async () => {
+    await selectSettingsCategory('shortcuts');
     await page.locator('#shortcut-selection').fill('Ctrl+Alt+Shift+F8');
+    await selectSettingsCategory('shortcuts');
     await page.locator('[data-shortcut-record="selection"]').click();
     await page.waitForFunction(() => window.__qa.shortcutLeases.at(-1)?.active === true
       && document.querySelector('#shortcut-feedback').textContent.startsWith('请按快捷键'), null, { timeout: 5000 });
@@ -3333,6 +3507,7 @@ try {
   await page.locator('#source-text').fill('Do not translate behind the setup modal');
   await goView('settings');
   for (const [kind, endpoint] of [['volcengine', 'https://translate.volcengineapi.com'], ['aliyun', 'https://mt.aliyuncs.com']]) {
+    await selectSettingsCategory('translation');
     await page.locator('#add-provider').click();
     await page.locator('#provider-preset').selectOption(kind);
     assert.equal(await page.locator('#provider-kind').inputValue(), kind);
@@ -3341,12 +3516,15 @@ try {
     assert.equal(await page.locator('#provider-key-field').isHidden(), true);
     await page.locator('#cancel-provider-dialog').click();
   }
+  await selectSettingsCategory('translation');
   await page.locator('#free-region-cn').click();
   assert.equal(await page.locator('#free-ocr-list .free-service').count(), 4);
   assert.equal(await page.locator('#free-translation-list .free-service').count(), new Date(Date.now() + 8 * 60 * 60 * 1000).toISOString().slice(0, 10) <= '2026-12-31' ? 13 : 12);
   assert.equal(await page.locator('[data-free-service="baidu"] .free-service-quota').getByText(/100 万字符|1,000,000/).count() > 0, true);
+  await selectSettingsCategory('translation');
   await page.locator('#free-setup-settings').click();
   assert.equal(await page.locator('#free-setup-dialog').isHidden(), true);
+  await selectSettingsCategory('translation');
   await page.locator('#free-translation-list .free-service-actions button:first-child').first().click();
   assert.equal(await page.locator('#free-setup-dialog').isVisible(), true);
   assert.equal(await page.locator('.app-shell').evaluate((element) => element.inert), true);
@@ -3367,6 +3545,7 @@ try {
   assert.equal(await page.evaluate(() => window.__qa.hideCalls), freeBaseline.hides);
   assert.equal(await page.locator('#free-field-key').count(), 0);
 
+  await selectSettingsCategory('translation');
   await page.locator('#free-translation-list .free-service-actions button:first-child').first().click();
   await page.locator('#free-field-key').fill('qa-wizard-private-key');
   await page.evaluate(() => { window.__qa.holdFreeSetupTest = true; });
@@ -3377,8 +3556,10 @@ try {
   await page.locator('#free-setup-next').dispatchEvent('click');
   assert.equal(await page.evaluate(() => window.__qa.keyCalls), 1);
   await page.locator('#free-setup-close').click();
+  await selectSettingsCategory('translation');
   await page.locator('#free-region-overseas').click();
   assert.equal(await page.locator('#free-translation-list .free-service').count(), 6);
+  await selectSettingsCategory('translation');
   await page.locator('#free-translation-list .free-service-actions button:first-child').nth(1).click();
   const reopenedFreeStep = await page.locator('#free-setup-step').textContent();
   await page.evaluate(() => { window.__qa.holdFreeSetupTest = false; window.__qa.releaseFreeSetupTest(); });
@@ -3392,7 +3573,9 @@ try {
   assert.equal(await page.evaluate(() => window.__qa.hideCalls), freeBaseline.hides);
   assert.deepEqual(errors, []);
   const independentBefore = await page.evaluate(() => structuredClone(window.__qa.settings));
+  await selectSettingsCategory('translation');
   await page.locator('#free-region-cn').click();
+  await selectSettingsCategory('translation');
   await page.locator('#free-ocr-summary').click();
   await page.locator('[data-free-service="baidu-ocr"] .free-service-actions button').first().click();
   await page.locator('#free-field-first').fill('qa-independent-ocr-key');
@@ -3435,9 +3618,11 @@ try {
   await page.goto(windowsSelectionUrl.toString());
   await page.waitForFunction(() => document.querySelector('#footer-status')?.textContent === '准备就绪');
   await goView('settings');
+  await selectSettingsCategory('shortcuts');
   assert.equal(await page.locator('#windows-selection-settings').isVisible(), true);
   assert.equal(await page.locator('#windows-selection-strategy').inputValue(), 'copy');
   const beforeStrategySave = await page.evaluate(() => structuredClone(window.__qa.settings));
+  await selectSettingsCategory('shortcuts');
   await page.locator('#windows-selection-strategy').selectOption('auto');
   await page.waitForFunction(() => window.__qa.settings.windowsSelectionStrategy === 'auto');
   assert.deepEqual(await page.evaluate(() => { const value = structuredClone(window.__qa.settings); delete value.windowsSelectionStrategy; return value; }), beforeStrategySave);
@@ -3445,16 +3630,20 @@ try {
   assert.equal(await page.locator('#windows-selection-strategy').inputValue(), 'auto');
   await page.evaluate(() => { window.__qa.failSave = true; });
   const failedStrategySaves = await page.evaluate(() => window.__qa.saveCalls);
+  await selectSettingsCategory('shortcuts');
   await page.locator('#windows-selection-strategy').selectOption('copy');
   await page.waitForFunction((count) => window.__qa.saveCalls > count && document.querySelector('#windows-selection-strategy').value === 'auto', failedStrategySaves);
   assert.equal(await page.evaluate(() => window.__qa.settings.windowsSelectionStrategy), 'auto');
   await page.evaluate(() => { window.__qa.failSave = false; });
+  await selectSettingsCategory('shortcuts');
   await page.locator('#windows-selection-strategy').selectOption('copy');
   await page.waitForFunction(() => window.__qa.settings.windowsSelectionStrategy === 'copy');
   // Windows side buttons share the recorder's release/cancel/autosave path.
   // Synthetic DOM pointers prove editor handling, not a native global hook.
   const beginMouseRecording = async (action = 'selection') => {
+    await selectSettingsCategory('shortcuts');
     await page.locator(`[data-shortcut-record="${action}"]`).click();
+    await selectSettingsCategory('shortcuts');
     await page.locator('#shortcut-feedback').getByText('请按快捷键', { exact: false }).waitFor();
   };
   const pointer = async (type, button, extra = {}) => page.evaluate(({ type, button, extra }) => {
@@ -3478,6 +3667,7 @@ try {
   });
   assert.deepEqual(releaseAndAuxclick, { upBlocked: true, auxBlocked: true });
   await page.waitForFunction(() => window.__qa.settings.shortcuts.selection === 'MouseX1');
+  await selectSettingsCategory('shortcuts');
   await page.locator('#shortcut-feedback').getByText('快捷键已保存并立即生效', { exact: false }).waitFor();
   assert.equal(await page.evaluate(() => window.__qa.saveCalls), beforeMouseSave + 1);
   assert.deepEqual(await page.evaluate(() => window.__qa.shortcutRetryActions.at(-1)), ['selection']);
@@ -3488,6 +3678,7 @@ try {
   assert.equal(await pointer('pointerdown', 4), true);
   await page.evaluate(() => window.__qa.emit('shortcut-recorded', { leaseId: window.__qa.shortcutLeases.at(-1).id, shortcut: 'MouseX2', modifiersDown: 0 }));
   await page.waitForFunction(() => window.__qa.settings.shortcuts.selection === 'MouseX2');
+  await selectSettingsCategory('shortcuts');
   await page.locator('#shortcut-feedback').getByText('快捷键已保存并立即生效', { exact: false }).waitFor();
   assert.equal(await page.evaluate(() => window.__qa.saveCalls), beforeNativeMouseSave + 1);
   // The native release can consume DOM pointerup. Its completed pairing must
@@ -3534,6 +3725,7 @@ try {
     await page.goto(url.href);
     await page.waitForFunction(() => document.querySelector('#footer-status')?.textContent === '准备就绪' && window.__qa.diagnosticCalls.length >= 1);
     await goView('settings');
+    await selectSettingsCategory('permissions');
     await page.locator('.diagnostics-details > summary').click();
     const diagnosticCopy = page.locator('#copy-diagnostics');
     assert.equal(await diagnosticCopy.isDisabled(), true);
@@ -3698,6 +3890,7 @@ try {
   await page.goto(process.env.ECHOLINGO_TEST_URL ?? 'http://127.0.0.1:1420/');
   await page.waitForFunction(() => document.querySelector('#footer-status')?.textContent === '准备就绪');
   await goView('settings');
+  await selectSettingsCategory('shortcuts');
   assert.equal(await page.locator('#windows-selection-settings').isHidden(), true);
   assert.deepEqual(errors, []);
   console.log('PASS: isolated Windows strategy settings default compatibility for old payloads; strict and copy save without changing providers/shortcuts/theme, navigation retains strict, failed save rolls back, and macOS hides the setting. Fake IPC only.');
@@ -3768,6 +3961,7 @@ try {
   await successCard.getByText('Keep successful result', { exact: true }).waitFor();
   await successCard.evaluate((element) => { element.dataset.retained = 'metadata-sibling'; });
   await goView('settings');
+  await selectSettingsCategory('translation');
   await page.locator('.provider-row').filter({ hasText: 'QA retry service' }).getByRole('button', { name: '编辑', exact: true }).click();
   await page.locator('#provider-preset').selectOption('system');
   await page.locator('#provider-name').fill('Renamed system retry');
@@ -3821,6 +4015,7 @@ try {
   assert.equal(await page.locator('#include-prerelease-updates').isChecked(), true);
   assert.deepEqual(await page.evaluate(() => window.__qa.updateChecks), []);
   await page.evaluate(() => { window.__qa.holdUpdate = true; window.__qa.updateStatus = { available: { version: '10.0.0', prerelease: true }, checkedAt: Date.now(), failed: false }; });
+  await selectSettingsCategory('about');
   await page.locator('#check-updates').evaluate(button => { button.click(); button.click(); });
   await page.waitForFunction(() => window.__qa.updateChecks.length === 1);
   assert.equal(await page.locator('#check-updates').isDisabled(), true);
@@ -3835,8 +4030,10 @@ try {
   assert.match(await page.locator('#update-status').textContent(), /10\.0\.0（内测版）/);
   assert.equal(await page.locator('#more-toggle').getAttribute('data-update-available'), 'true');
   assert.deepEqual(await page.evaluate(() => window.__qa.serviceLinks), []);
+  await selectSettingsCategory('about');
   await page.locator('#check-updates').click();
   await page.waitForFunction(() => window.__qa.updateChecks.length === 2);
+  await selectSettingsCategory('about');
   await page.locator('#include-prerelease-updates').uncheck();
   await page.waitForFunction(() => window.__qa.settings.includePrereleaseUpdates === false);
   await page.evaluate(() => { window.__qa.holdUpdate = false; window.__qa.releaseUpdate(); });
@@ -3844,10 +4041,12 @@ try {
   assert.doesNotMatch(await page.locator('#update-status').textContent(), /10\.0\.0/);
   assert.equal(await page.locator('#more-toggle').getAttribute('data-update-available'), 'false');
   await page.evaluate(() => { window.__qa.failUpdate = true; });
+  await selectSettingsCategory('about');
   await page.locator('#check-updates').click();
   await page.waitForFunction(() => document.querySelector('#update-status').textContent.includes('不影响翻译'));
   assert.doesNotMatch(await page.locator('#update-status').textContent(), /private|QA/);
   await page.evaluate(() => { window.__qa.holdServiceLink = true; });
+  await selectSettingsCategory('about');
   await page.locator('#open-update-page').evaluate(button => { button.click(); button.click(); });
   await page.waitForFunction(() => window.__qa.serviceLinks.length === 1);
   assert.deepEqual(await page.evaluate(() => window.__qa.serviceLinks), ['https://github.com/Blueeeecho/EchoLingo/releases']);
@@ -3857,6 +4056,7 @@ try {
   await page.evaluate(() => { window.__qa.failSave = true; });
   // .check() asserts the final checked state itself, which contradicts this
   // intentional failed save. Click normally, then verify the committed rollback.
+  await selectSettingsCategory('about');
   await page.locator('#automatic-update-checks').click();
   await page.waitForFunction(() => document.querySelector('#update-status').textContent.includes('保存失败'));
   assert.equal(await page.locator('#automatic-update-checks').isChecked(), false);
@@ -3868,6 +4068,7 @@ try {
   })), { saves: beforeFailedOptIn.saves + 1, checks: beforeFailedOptIn.checks, attempted: true, committed: false });
   await page.evaluate(() => { window.__qa.failSave = false; window.__qa.failUpdate = false; });
   await page.clock.install();
+  await selectSettingsCategory('about');
   await page.locator('#automatic-update-checks').check();
   await page.waitForFunction(() => window.__qa.settings.automaticUpdateChecks === true);
   const checksBeforeAuto = await page.evaluate(() => window.__qa.updateChecks.length);
@@ -3878,6 +4079,7 @@ try {
   await page.evaluate(() => { window.__qa.holdSave = true; });
   // Pending preference saves retain the committed checkbox state and disable
   // it. .uncheck() would incorrectly require the uncommitted state to be visible.
+  await selectSettingsCategory('about');
   await page.locator('#automatic-update-checks').click();
   await page.waitForFunction(count => window.__qa.saveCalls > count, savesBeforeDisable);
   assert.equal(await page.locator('#automatic-update-checks').isChecked(), true);
@@ -3898,44 +4100,61 @@ try {
     await page.goto(`http://127.0.0.1:1420/?twoShortcutDefaultsFixture=1${windows ? '&windowsSelectionFixture=1' : ''}`);
     await page.locator('#more-toggle').click();
     await page.locator('button[data-view="settings"]').click();
+    await selectSettingsCategory('shortcuts');
     await page.locator('#shortcut-selection').waitFor();
     assert.equal(await page.locator('#shortcut-selection').inputValue(), 'Alt+D');
     assert.equal(await page.locator('#shortcut-silentOcr').inputValue(), 'Alt+S');
     assert.deepEqual(await page.evaluate(() => Object.values(window.__qa.settings.shortcuts).filter(Boolean)), ['Alt+D', 'Alt+S', 'F1']);
+    await selectSettingsCategory('shortcuts');
     await page.locator('#shortcut-advanced > summary').click();
     assert.equal(await page.locator('input[name="input"]').inputValue(), '');
     assert.equal(await page.locator('input[name="ocr"]').inputValue(), '');
+    await selectSettingsCategory('shortcuts');
     await page.locator('input[name="selection"]').fill('Ctrl+Alt+T');
+    await selectSettingsCategory('shortcuts');
     await page.locator('input[name="silentOcr"]').fill('Ctrl+Alt+R');
+    await selectSettingsCategory('shortcuts');
     await page.locator('input[name="input"]').fill('Alt+A');
+    await selectSettingsCategory('shortcuts');
     await page.locator('input[name="ocr"]').fill('Alt+Shift+S');
+    await selectSettingsCategory('shortcuts');
     await page.locator('#save-shortcuts').click();
     await page.waitForFunction(() => window.__qa.settings.shortcuts.input === 'Alt+A' && window.__qa.settings.shortcuts.selection === 'Ctrl+Alt+T');
     assert.equal(await page.evaluate(() => window.__qa.settings.shortcutDefaultsVersion), 2);
     const saves = await page.evaluate(() => window.__qa.saveCalls);
+    await selectSettingsCategory('shortcuts');
     await page.locator('input[name="input"]').fill('Ctrl+Alt+T');
+    await selectSettingsCategory('shortcuts');
     await page.locator('#save-shortcuts').click();
+    await selectSettingsCategory('shortcuts');
     await page.locator('#shortcut-feedback').getByText('不同操作不能使用相同的快捷键。', { exact: false }).waitFor();
     assert.equal(await page.evaluate(() => window.__qa.saveCalls), saves);
+    await selectSettingsCategory('shortcuts');
     for (const key of ['selection', 'silentOcr', 'screenshot', 'input', 'ocr']) await page.locator(`input[name="${key}"]`).fill('');
+    await selectSettingsCategory('shortcuts');
     await page.locator('#save-shortcuts').click();
     await page.waitForFunction(() => Object.values(window.__qa.settings.shortcuts).every(value => value === ''));
   }
   // Screenshot settings use narrow dialogs, preserve cancellation and persist
   // the chosen folder without placing image data in settings/history.
   const screenshotSettingsBefore = await page.evaluate(() => ({ writes: window.__qa.settingsWrites.length, translations: window.__qa.translationRequests.length }));
+  await selectSettingsCategory('capture');
   await page.locator('#screenshot-choose-folder').click();
   await page.getByText('已取消，保存位置未改变。', { exact: true }).waitFor();
   assert.equal(await page.evaluate(() => window.__qa.settingsWrites.length), screenshotSettingsBefore.writes);
   await page.evaluate(() => { window.__qa.screenshotDirectoryChoices = [{ path: '/fixture/用户/截图', isDefault: false }]; });
+  await selectSettingsCategory('capture');
   await page.locator('#screenshot-choose-folder').click();
   await page.waitForFunction(() => window.__qa.settings.screenshotSaveDirectory === '/fixture/用户/截图' && !document.querySelector('#screenshot-choose-folder').disabled);
   assert.match(await page.locator('#screenshot-folder').textContent(), /用户\/截图/);
+  await selectSettingsCategory('capture');
   await page.locator('#screenshot-reset-folder').click();
   await page.waitForFunction(() => window.__qa.settings.screenshotSaveDirectory === '' && !document.querySelector('#screenshot-reset-folder').disabled);
   assert.match(await page.locator('#screenshot-folder').textContent(), /桌面（默认）/);
+  await selectSettingsCategory('capture');
   await page.locator('#screenshot-open-local').click();
   await page.waitForFunction(() => window.__qa.screenshotOpenCalls === 1);
+  await selectSettingsCategory('capture');
   await page.locator('#screenshot-start').click();
   await page.waitForFunction(() => window.__qa.actionCalls?.at(-1) === 'screenshot');
   assert.equal(await page.evaluate(() => window.__qa.translationRequests.length), screenshotSettingsBefore.translations);
@@ -4050,6 +4269,7 @@ try {
     await closeManagement.dispatchEvent('pointerdown', { pointerId: 1, pointerType: 'mouse' });
     assert.equal(await closeManagement.evaluate(element => getComputedStyle(element).outlineStyle), 'none', 'pointer intent clears settings keyboard ring');
     assert.equal(await closeManagement.evaluate(element => document.activeElement === element), true, 'clearing a ring does not move focus');
+    await selectSettingsCategory('translation');
     await page.locator('#add-provider').click();
     assert.equal(await page.locator('#close-provider-dialog').evaluate(element => document.activeElement === element), true, 'dialog autofocus is not redirected');
     await page.keyboard.press('Tab'); await page.keyboard.press('Shift+Tab');
@@ -4284,17 +4504,22 @@ try {
       await goView('settings');
       let modal, secret;
       if (kind === 'translation') {
+        await selectSettingsCategory('translation');
         await page.locator('#provider-list [data-service-id="qa-service"] [data-service-action="edit"]').click();
         modal = '#provider-dialog'; secret = '#provider-key';
       } else if (kind === 'ocr') {
+        await selectSettingsCategory('capture');
         await page.locator('#ocr-provider-list [data-service-id="qa-ocr-1"] [data-service-action="edit"]').click();
         modal = '#ocr-provider-dialog'; secret = '#ocr-provider-key';
       } else if (kind === 'free') {
+        await selectSettingsCategory('translation');
         await page.locator('#free-region-cn').click();
+        await selectSettingsCategory('translation');
         await page.locator('#free-translation-summary').click();
         await page.locator('[data-free-service="siliconflow"] .free-service-actions button').first().click();
         modal = '#free-setup-dialog'; secret = '#free-field-key';
       } else {
+        await selectSettingsCategory('translation');
         await page.locator('#provider-list [data-service-id="qa-service"] [data-service-action="remove"]').click();
         modal = '#confirm-dialog';
       }
@@ -4344,6 +4569,7 @@ try {
     await page.goto(`http://127.0.0.1:1420/?serviceManagerFixture=1${windows ? '&windowsSelectionFixture=1' : ''}`);
     await page.waitForFunction(() => document.querySelector('#footer-status')?.textContent === '准备就绪');
     await goView('settings');
+    await selectSettingsCategory('translation');
     await page.locator('#provider-list [data-service-id="qa-service"] [data-service-action="edit"]').click();
     await page.locator('#provider-name').fill('Saved while suspended');
     await page.evaluate(() => { window.__qa.holdSave = true; });
@@ -4368,7 +4594,9 @@ try {
     // A suspended wizard keeps its existing test request. Restoring/cancelling
     // and opening a different wizard invalidates that result, never the new draft.
     await goView('settings');
+    await selectSettingsCategory('translation');
     await page.locator('#free-region-cn').click();
+    await selectSettingsCategory('translation');
     if (!await page.locator('#free-translation-section').evaluate(el => el.open)) await page.locator('#free-translation-summary').click();
     await page.locator('[data-free-service="siliconflow"] .free-service-actions button').first().click();
     await page.locator('#free-field-key').fill('private-pending-wizard');

@@ -1,3 +1,4 @@
+import { revealSettingsTarget } from './settings-navigation';
 import { invoke } from '@tauri-apps/api/core';
 import { serviceById, servicesFor, type FreePiece, type FreeRegion } from './free-services';
 import { EXTRA_SERVICE_LINKS } from './service-quotas';
@@ -330,7 +331,7 @@ export function installFreeSetup(context: SetupContext): { refresh: () => void; 
     const group = document.querySelector<HTMLDetailsElement>('#free-translation-section');
     if (group) group.open = true;
     const section = document.querySelector<HTMLElement>('#free-translation-summary');
-    section?.scrollIntoView?.({ block: 'start' }); section?.focus();
+    revealSettingsTarget(section); section?.scrollIntoView?.({ block: 'start' }); section?.focus();
   };
   document.querySelector('#free-region-cn')?.addEventListener('click', () => { region = 'cn'; renderCards(); });
   document.querySelector('#free-region-overseas')?.addEventListener('click', () => { region = 'overseas'; renderCards(); });

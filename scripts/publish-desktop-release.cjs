@@ -3,8 +3,17 @@ const fs = require('node:fs');
 const path = require('node:path');
 const crypto = require('node:crypto');
 const { execFileSync } = require('node:child_process');
-const VERSION = '0.2.17';
+const VERSION = '0.2.18';
 const MODE = 'desktop-macos-runtime-unpack-v2';
+// A successful workflow summary can conceal skipped jobs from a narrow mode.
+// Require every full-mode main CI job, from the latest attempt, before any write.
+const FULL_CI_JOBS = [
+  'validation-mode',
+  'Isolated Rust capture candidate (native Windows runtime)',
+  'Isolated macOS native frame geometry probe',
+  'macOS native screenshot capture (permission block is not a pass)',
+  'desktop (windows-latest)', 'desktop (macos-latest)', 'frontend-interactions'
+];
 const PAYLOADS = [`EchoLingo_${VERSION}_windows_x64-setup.exe`, `EchoLingo_${VERSION}_macos_arm64.dmg`, 'EchoLingo-offline-engine-source.zip', `EchoLingo_${VERSION}_windows_x64-unpack.zip`, 'WINDOWS-ZIP-MANIFEST.json'].sort();
 const NAMES = [...PAYLOADS, 'RELEASE-MANIFEST.json', 'SHA256SUMS.txt'].sort();
 const hash = bytes => crypto.createHash('sha256').update(bytes).digest('hex');
@@ -82,6 +91,15 @@ async function publish({github, context, core}, io = {fs, execFileSync}) {
   const sameSource = runs.workflow_runs.filter(run => run.head_sha === context.sha && run.event === 'push' && run.path === '.github/workflows/ci.yml');
   sameSource.sort((a,b) => b.id-a.id);
   requireThat(sameSource.length > 0 && sameSource[0].status === 'completed' && sameSource[0].conclusion === 'success', 'Current exact-source CI has not passed');
+  const ciRun = sameSource[0];
+  const jobs = await github.paginate(github.rest.actions.listJobsForWorkflowRun,
+    {owner, repo, run_id:ciRun.id, filter:'latest', per_page:100});
+  for (const name of FULL_CI_JOBS) {
+    const matches = jobs.filter(job => job.name === name);
+    requireThat(matches.length === 1 && matches[0].run_id === ciRun.id && matches[0].head_sha === context.sha &&
+      matches[0].status === 'completed' && matches[0].conclusion === 'success',
+      `Full main CI job missing, skipped, or not successful: ${name}`);
+  }
   await github.rest.git.createRef({owner, repo, ref:`refs/tags/${VERSION}`, sha:context.sha});
   await ensureMain();
   await noExistingRelease();
@@ -104,4 +122,4 @@ async function publish({github, context, core}, io = {fs, execFileSync}) {
   await core.summary.addLink(`${VERSION} 内测版`, result.html_url).write();
   return result;
 }
-module.exports = {publish, validateInputs, VERSION, MODE, NAMES, PAYLOADS};
+module.exports = {publish, validateInputs, VERSION, MODE, NAMES, PAYLOADS, FULL_CI_JOBS};

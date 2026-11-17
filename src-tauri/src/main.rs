@@ -20,11 +20,13 @@ mod screenshot;
 mod screenshot_overlay;
 mod screenshot_pins;
 mod service_links;
+mod shareable_diagnostics;
 mod shortcut_bindings;
 mod shortcut_control;
 mod shortcut_probe;
 mod source_delivery;
 mod startup_launch;
+mod startup_storage;
 #[cfg(test)]
 mod storage_tests;
 #[cfg(any(target_os = "macos", test))]
@@ -3310,7 +3312,17 @@ async fn diagnostics(
     value["startupWarnings"] = serde_json::json!(startup_warnings);
     value["shortcutRegistration"] = serde_json::json!(registrations);
     value["dataDirectory"] = serde_json::json!(state.data_dir.display().to_string());
-    value["ocrUpload"] = serde_json::json!(false);
+    value["diagnosticsUploadsContent"] = serde_json::json!(false);
+    value["configuredOcrMode"] = serde_json::json!(if locked(&state.settings)?
+        .active_ocr_provider_id
+        .is_some()
+    {
+        "cloud"
+    } else {
+        "local"
+    });
+    // Configuration is not a claim about a previous request's network activity.
+    value["ocrUploadHistory"] = serde_json::json!("notRecorded");
     value["lastTranslation"] = translation_health::snapshot();
     value["popupDelivery"] =
         serde_json::to_value(&*locked(&state.popup_health)?).map_err(|_| "无法读取浮窗诊断")?;
@@ -3332,6 +3344,7 @@ async fn diagnostics(
     }
     #[cfg(not(target_os = "macos"))]
     let _ = app;
+    shareable_diagnostics::scrub(&mut value);
     Ok(value)
 }
 #[tauri::command]
@@ -3528,30 +3541,30 @@ fn main() {
                 fs::set_permissions(&data_dir, fs::Permissions::from_mode(0o700))?;
             }
             let mut warnings = Vec::new();
-            let mut settings = match fs::read(data_dir.join("settings.json")) {
-                Ok(bytes) => match serde_json::from_slice::<Settings>(&bytes).map(|mut s| {
-                    // Upgrade former defaults before enforcing the new cap.
-                    // Otherwise a healthy legacy 200-entry config would be
-                    // misclassified as corrupt and lose its provider choices.
-                    migrate_core_preferences(&mut s);
-                    s
-                }) {
-                    Ok(s) if validate_settings(&s).is_ok() => s,
-                    _ => {
-                        warnings.push("设置文件损坏，已使用默认设置；原文件保留".into());
-                        Settings::default()
-                    }
+            let mut settings = startup_storage::load(
+                &data_dir.join("settings.json"),
+                |bytes| {
+                    let mut settings: Settings = serde_json::from_slice(bytes).ok()?;
+                    // Migrate valid legacy preferences before validating their limits.
+                    migrate_core_preferences(&mut settings);
+                    validate_settings(&settings).ok()?;
+                    Some(settings)
                 },
-                Err(_) => Settings::default(),
-            };
+                Settings::default,
+                "设置文件",
+                &mut warnings,
+            )?;
             add_system_translation_option(&mut settings);
             add_offline_translation_option(&mut settings);
             migrate_language_direction(&mut settings);
             migrate_shortcut_defaults(&mut settings);
-            let mut history: Vec<HistoryEntry> = fs::read(data_dir.join("history.json"))
-                .ok()
-                .and_then(|b| serde_json::from_slice(&b).ok())
-                .unwrap_or_default();
+            let mut history: Vec<HistoryEntry> = startup_storage::load(
+                &data_dir.join("history.json"),
+                |bytes| serde_json::from_slice(bytes).ok(),
+                Vec::new,
+                "历史文件",
+                &mut warnings,
+            )?;
             trim_history(&mut history, settings.max_history);
             let client = reqwest::Client::builder()
                 .timeout(Duration::from_secs(45))

@@ -1,3 +1,5 @@
+import { codePointLength, truncateCodePoints, safeTextRange } from './text-limit';
+import { installSettingsNavigation, revealSettingsTarget, selectSettingsCategory } from './settings-navigation';
 import { installScreenshotSettings } from './screenshot-settings';
 import './styles.css';
 import { installServiceManager } from './service-manager';
@@ -28,6 +30,8 @@ import { coreGuidanceMessage, coreShortcutProblems, emptyPopupPlaceholder, type 
 import { engineLimitCopy, isWeakEngineSignal, shouldShowFirstRun, shouldShowSoftHint, type EngineHintState } from './engine-hint';
 import type { Action, CredentialState, HistoryEntry, PermissionKind, Provider, ProviderKind, Settings, ShortcutAction, SourceTextEvent, SystemTranslationStatus, TranslationProgress, TranslationResult } from './types';
 import './settings-readability.css';
+import './settings-navigation.css';
+installSettingsNavigation();
 
 const desktop = isTauri();
 const $ = <T extends HTMLElement = HTMLElement>(selector: string): T => {
@@ -353,11 +357,22 @@ function beginTranslation(presentationEpoch: number): Promise<number> {
   return ticket;
 }
 function setSourceText(text: string): void {
-  source.value = text.slice(0, MAX_TEXT_LENGTH);
+  source.value = truncateCodePoints(text, MAX_TEXT_LENGTH);
   sourceEdited();
-  if (text.length > MAX_TEXT_LENGTH) toast('文字超过 20,000 字符，已截取前 20,000 字符。', 'error');
+  if (codePointLength(text) > MAX_TEXT_LENGTH) toast('文字超过 20,000 字符，已截取前 20,000 字符。', 'error');
+}
+function enforceSourceLimit(): void {
+  if (sourceComposing) return; // Let the IME commit before applying the limit.
+  const limited = truncateCodePoints(source.value, MAX_TEXT_LENGTH);
+  if (limited !== source.value) {
+    const start = source.selectionStart, end = source.selectionEnd;
+    source.value = limited;
+    source.setSelectionRange(Math.min(start, limited.length), Math.min(end, limited.length));
+    toast('文字超过 20,000 字符，已截取前 20,000 字符。', 'error');
+  }
 }
 function sourceEdited(): void {
+  enforceSourceLimit();
   clearPermissionGuidance();
   clearOriginalCapture();
   resizeSourceEditor();
@@ -454,11 +469,13 @@ async function receiveCapturedText(payload: SourceTextEvent): Promise<void> {
     const presentation = await panelLayout.presentPopup(presentationEpoch, Boolean(payload.focusInput), Boolean(payload.reuseVisiblePopup ?? payload.updateVisiblePopup));
     if (presentation) { applyTranslationPresentation(presentation); presentedEpoch = presentation.epoch; recordPopupStage(presentedEpoch, 'presentationComplete'); }
     else if (desktop) {
+      if (payload.mode === 'translate') recordInputDiagnostic('automaticDispatchSkipped', undefined, { epoch: presentationEpoch, generation: token }, 'presentationUnavailable');
       if (inputSession) endSourceInputSession(inputSession);
       return;
     }
   } catch (error) {
     if (inputSession) endSourceInputSession(inputSession);
+    if (payload.mode === 'translate') recordInputDiagnostic('automaticDispatchSkipped', undefined, { epoch: presentationEpoch, generation: token }, errorMessage(error).startsWith('CANCELLED:') ? 'presentationCancelled' : 'presentationFailed');
     if (errorMessage(error).startsWith('CANCELLED:')) return;
     recordPopupStage(translationPresentation.epoch, 'presentationFailed');
     throw error;
@@ -468,6 +485,8 @@ async function receiveCapturedText(payload: SourceTextEvent): Promise<void> {
   // so compare against the accepted response, not the original capture epoch.
   if (token !== generation || intent !== focusIntentRevision || currentView !== 'translate' || allModals.some(modalActive)
     || (desktop && (!translationPresentation.presented || translationPresentation.epoch !== presentedEpoch))) {
+    if (payload.mode === 'translate') recordInputDiagnostic('automaticDispatchSkipped', undefined, { epoch: presentationEpoch, generation: token },
+      token !== generation ? 'generationChanged' : intent !== focusIntentRevision ? 'intentChanged' : currentView !== 'translate' ? 'viewChanged' : allModals.some(modalActive) ? 'modalActive' : 'presentationChanged');
     if (inputSession) endSourceInputSession(inputSession);
     return;
   }
@@ -504,11 +523,10 @@ function sourceInputSessionActive(): boolean {
   return sourceInputSession !== 0 && currentView === 'translate' && !allModals.some(modalActive);
 }
 function insertIntoSource(text: string): void {
-  const start = source.selectionStart ?? source.value.length;
-  const end = source.selectionEnd ?? start;
-  const room = MAX_TEXT_LENGTH - (source.value.length - (end - start));
+  const [start, end] = safeTextRange(source.value, source.selectionStart ?? source.value.length, source.selectionEnd ?? source.value.length);
+  const room = MAX_TEXT_LENGTH - codePointLength(source.value.slice(0, start) + source.value.slice(end));
   if (room <= 0 || !text) return;
-  const chunk = text.slice(0, room);
+  const chunk = truncateCodePoints(text, room);
   source.focus({ preventScroll: true });
   source.setRangeText(chunk, start, end, 'end');
   // setRangeText does not emit input. Keep fallback typing/paste on the same
@@ -539,7 +557,8 @@ function redirectSourceInputKey(event: KeyboardEvent): void {
     const end = source.selectionEnd ?? start;
     source.focus({ preventScroll: true });
     if (start !== end || start > 0) {
-      source.setRangeText('', start !== end ? start : start - 1, end, 'end');
+      const [deleteStart, deleteEnd] = safeTextRange(source.value, start !== end ? start : start - 1, end);
+      source.setRangeText('', deleteStart, deleteEnd, 'end');
       sourceEdited();
     }
     return;
@@ -595,6 +614,7 @@ async function openSettingsFromNative(payload: NativeSettingsRequest): Promise<v
   pendingTranslate = false;
   clearToast(); clearPermissionGuidance(); stopPendingTranslation();
   setView('settings');
+  if (payload.section === 'shortcuts') selectSettingsCategory('shortcuts');
   const intent = focusIntentRevision;
   try {
     const presentation = await panelLayout.presentManagement(payload.presentationEpoch);
@@ -602,7 +622,7 @@ async function openSettingsFromNative(payload: NativeSettingsRequest): Promise<v
     if (payload.section === 'shortcuts' && currentView === 'settings' && latestSettingsOpenEpoch === payload.presentationEpoch
       && intent === focusIntentRevision && (!desktop || (presentation?.presented === true && presentation.epoch === translationPresentation.epoch))) {
       const input = $<HTMLInputElement>('#shortcut-selection');
-      input.scrollIntoView({ block: 'center' }); input.focus({ preventScroll: true });
+      revealSettingsTarget(input); input.scrollIntoView({ block: 'center' }); input.focus({ preventScroll: true });
     }
   } catch (error) {
     if (!errorMessage(error).startsWith('CANCELLED:')) throw error;
@@ -672,6 +692,7 @@ function openResultSettings(view: ResultView): void {
   if (!view.card.isConnected || !view.done || !view.result.error) return;
   const systemSetup = needsSystemTranslationSetup(view);
   setView('settings', systemSetup);
+  selectSettingsCategory('translation');
   if (systemSetup) {
     if (systemTranslationPreparing) {
       toast('系统翻译正在准备，请完成或取消后再选择该语言对。');
@@ -772,7 +793,7 @@ async function translate(providerId?: string): Promise<void> {
   const text = source.value;
   if (!text.trim() || translating) return;
   if (!settingsReady) throw new Error('设置正在加载，请稍候。');
-  if (text.length > MAX_TEXT_LENGTH) throw new Error('每次最多翻译 20,000 字符。');
+  if (codePointLength(text) > MAX_TEXT_LENGTH) throw new Error('每次最多翻译 20,000 字符。');
   if (!requireDesktop()) return;
   const from = sourceLanguage.value, to = targetLanguage.value;
   const snapshot = { text, sourceLanguage: from, targetLanguage: to };
@@ -783,7 +804,7 @@ async function translate(providerId?: string): Promise<void> {
   }
   const providers = settings.providers.filter((provider) => provider.enabled && (!retrying || provider.id === providerId));
   if (retrying && providers.length === 0) { toast('翻译服务已停用或删除，请检查设置。'); return; }
-  if (!settings.providers.some((provider) => provider.enabled)) { setView('settings'); toast('请先添加并启用一个翻译服务。'); return; }
+  if (!settings.providers.some((provider) => provider.enabled)) { setView('settings'); selectSettingsCategory('translation'); toast('请先添加并启用一个翻译服务。'); return; }
   focusIntentRevision += 1;
   const token = ++generation;
   const presentationEpoch = translationPresentation.epoch;
@@ -1081,7 +1102,7 @@ function renderPopupServices(): void {
     label.append(checkbox, node('span', '', provider.name)); list.append(label);
   }
   const manage = node('button', 'text-button', '管理翻译服务'); manage.type = 'button';
-  manage.addEventListener('click', () => setView('settings')); list.append(manage);
+  manage.addEventListener('click', () => { setView('settings'); selectSettingsCategory('translation'); }); list.append(manage);
   renderEngineStatus();
   notifyLayout();
 }
@@ -1479,7 +1500,7 @@ function openPermissionGuide(): void {
   $<HTMLDetailsElement>('#permission-setup-steps').open = true;
   requestAnimationFrame(() => {
     const card = $('#mac-permission-card');
-    card.scrollIntoView({ block: 'start' });
+    revealSettingsTarget(card); card.scrollIntoView({ block: 'start' });
     card.focus({ preventScroll: true });
   });
 }
@@ -1564,7 +1585,11 @@ const ocrUi = createOcrUi({
   showModal, closeModal, resumeDraft: resumeSuspendedDraft, confirm: confirmAction, toast, reportError,
 });
 
-$('#service-manager-advanced').addEventListener('click', () => setView('settings'));
+document.addEventListener('settings-category-change', () => {
+  if ($<HTMLElement>('#settings-panel-shortcuts').hidden) shortcutEditor.leave();
+  notifyLayout();
+});
+$('#service-manager-advanced').addEventListener('click', () => { setView('settings'); selectSettingsCategory('translation'); });
 $('#open-service-manager').addEventListener('click', () => setView('services'));
 serviceManager = installServiceManager({
   settings: () => settings, ready: () => settingsReady, reportError, providerKindLabel,
@@ -1583,7 +1608,7 @@ serviceManager = installServiceManager({
     setView('settings');
     $<HTMLDetailsElement>(`#free-${role}-section`).open = true;
     const summary = $(`#free-${role}-summary`);
-    summary.scrollIntoView({ block: 'start' }); summary.focus({ preventScroll: true });
+    revealSettingsTarget(summary); summary.scrollIntoView({ block: 'start' }); summary.focus({ preventScroll: true });
   },
 });
 
@@ -1592,15 +1617,16 @@ for (const button of document.querySelectorAll<HTMLButtonElement>('[data-action]
 $('#copy-source').addEventListener('click', () => run(() => copyText(source.value)));
 $('#speak-source').addEventListener('click', () => speak(source.value, sourceLanguage.value));
 source.addEventListener('compositionstart', () => { sourceComposing = true; });
-source.addEventListener('compositionend', () => { sourceComposing = false; resizeSourceEditor(); });
-source.addEventListener('blur', () => { sourceComposing = false; });
+source.addEventListener('compositionend', () => { sourceComposing = false; sourceEdited(); });
+source.addEventListener('blur', () => { const wasComposing = sourceComposing; sourceComposing = false; if (wasComposing) sourceEdited(); });
 // Explicit acceptance-only mode; the ordinary app never persists this record.
 // Observe only Enter arrival and fixed request stages, never text/key sequences.
 let inputDiagnosticsEnabled = false, inputDiagnosticSequence = 0, inputDiagnosticsPending = 0;
 let inputDiagnosticQueue: Promise<unknown> = Promise.resolve();
-function recordInputDiagnostic(stage: 'ready' | 'arrival' | 'handler' | 'translateStart' | 'ticket' | 'dispatch' | 'complete' | 'error', event?: KeyboardEvent, request?: { epoch: number; generation: number }): void {
+type AutomaticSkipReason = 'presentationUnavailable' | 'presentationCancelled' | 'presentationFailed' | 'generationChanged' | 'intentChanged' | 'viewChanged' | 'modalActive' | 'presentationChanged';
+function recordInputDiagnostic(stage: 'ready' | 'arrival' | 'handler' | 'translateStart' | 'ticket' | 'dispatch' | 'complete' | 'error' | 'automaticDispatchSkipped', event?: KeyboardEvent, request?: { epoch: number; generation: number }, skipReason?: AutomaticSkipReason): void {
   if (!inputDiagnosticsEnabled || inputDiagnosticsPending >= 32) return;
-  const record = { stage, sequence: ++inputDiagnosticSequence, timestamp: Date.now(), epoch: translationPresentation.epoch, generation, requestEpoch: request?.epoch ?? null, requestGeneration: request?.generation ?? null,
+  const record = { stage, ...(skipReason ? { skipReason } : {}), sequence: ++inputDiagnosticSequence, timestamp: Date.now(), epoch: translationPresentation.epoch, generation, requestEpoch: request?.epoch ?? null, requestGeneration: request?.generation ?? null,
     composing: sourceComposing || Boolean(event?.isComposing) || event?.keyCode === 229,
     shift: Boolean(event?.shiftKey), alt: Boolean(event?.altKey), ctrl: Boolean(event?.ctrlKey), meta: Boolean(event?.metaKey), repeat: Boolean(event?.repeat),
     translating, sourceNonempty: Boolean(source.value.trim()), sourceFocused: document.activeElement === source, settingsReady };
@@ -1714,7 +1740,7 @@ document.addEventListener('paste', (event) => {
   event.preventDefault();
   insertIntoSource(text);
 });
-$('#engine-hint-settings').addEventListener('click', () => setView('settings'));
+$('#engine-hint-settings').addEventListener('click', () => { setView('settings'); selectSettingsCategory('translation'); });
 $('#engine-hint-docs').addEventListener('click', () => {
   if (desktop) run(() => invoke('open_service_link', { url: OFFICIAL_SERVICES_URL }));
   else window.open(OFFICIAL_SERVICES_URL, '_blank', 'noopener');
@@ -1728,7 +1754,7 @@ $('#engine-hint-dismiss').addEventListener('click', () => {
 $('#core-guidance-settings').addEventListener('click', () => {
   setView('settings');
   const input = document.querySelector<HTMLInputElement>('#shortcut-selection');
-  input?.scrollIntoView({ block: 'center' });
+  revealSettingsTarget(input); input?.scrollIntoView({ block: 'center' });
   input?.focus({ preventScroll: true });
 });
 $('#core-guidance-retry').addEventListener('click', () => run(async () => {

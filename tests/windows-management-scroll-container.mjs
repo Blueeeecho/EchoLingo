@@ -76,6 +76,8 @@ try {
     await page.setViewportSize({ width, height: 652 }); await page.goto(origin);
     await page.waitForFunction(() => document.querySelector('#footer-status').textContent === '准备就绪');
     await page.locator('#more-toggle').click(); await page.locator('#popup-more-menu button[data-view="settings"]').click();
+    await page.locator('[data-settings-tab="translation"]').click();
+    await page.locator('#free-translation-summary').click();
     await frames();
     const geometry = await snapshot(`management-${width}`);
     // Native fixtures enter eight client pixels from the physical window edge.
@@ -93,13 +95,17 @@ try {
     await page.waitForFunction(() => document.querySelector('main').scrollTop > 0);
     await page.keyboard.press('End');
     await page.waitForFunction(() => { const main = document.querySelector('main'); return main.scrollTop + main.clientHeight >= main.scrollHeight - 1; });
+    await page.locator('[data-settings-tab="shortcuts"]').click();
     await visibleHit('#save-shortcuts');
+    await page.locator('[data-settings-tab="permissions"]').click();
     await page.locator('.diagnostics-details summary').click();
     await page.locator('#run-diagnostics').click();
     await page.waitForFunction(() => !document.querySelector('#copy-diagnostics').disabled);
     const copyCount = await page.evaluate(() => window.__scrollQA.copies.length);
     await visibleHit('#copy-diagnostics'); await page.locator('#copy-diagnostics').click();
     await page.waitForFunction(count => window.__scrollQA.copies.length === count + 1, copyCount);
+    await page.locator('[data-settings-tab="translation"]').click();
+    await page.locator('main').evaluate(main => main.scrollTop = 0);
     const mainBox = await page.locator('main').boundingBox();
     const wheelPoint = { x: mainBox.x + 4, y: mainBox.y + mainBox.height - 30 };
     (report.wheelChecks ??= []).push(await page.evaluate(point => {
@@ -116,9 +122,10 @@ try {
     assert.equal(bottom.root.scrollTop, 0); assert.equal(bottom.windowScrollY, 0);
     await visibleHit('#close-management');
     // Focus-driven scrolling must move the inner content, not the root page.
+    await page.locator('[data-settings-tab="general"]').click();
     await page.locator('#max-history').focus(); await page.keyboard.press('Tab'); await frames();
     assert.equal(await page.evaluate(() => scrollY), 0);
-    await page.locator('.diagnostics-details summary').click();
+    await page.locator('[data-settings-tab="translation"]').click();
     // Copy feedback is a real timed overlay. Let it disappear through the
     // application before checking controls at the same viewport coordinates.
     await page.locator('#toast').waitFor({ state: 'hidden' });
