@@ -9,7 +9,7 @@
 
 **[Download Windows 0.2.19 installer (x64)](https://github.com/Blueeeecho/EchoLingo/releases/download/0.2.19/EchoLingo_0.2.19_windows_x64-setup.exe)** · **[Download macOS 0.2.19 prerelease (Apple silicon)](https://github.com/Blueeeecho/EchoLingo/releases/download/0.2.19/EchoLingo_0.2.19_macos_arm64.dmg)**
 
-Need a portable build? The [0.2.18 Windows portable ZIP](https://github.com/Blueeeecho/EchoLingo/releases/download/0.2.18/EchoLingo_0.2.18_windows_x64-unpack.zip) remains available. Extract all files before opening `Start-EchoLingo.cmd`. Windows requires Microsoft Edge WebView2 Runtime. Settings, history, and credentials do not move with the ZIP.
+The Windows installer requires Microsoft Edge WebView2 Runtime.
 
 Windows supports Windows 10 1809+ and Windows 11. The macOS package is for Apple silicon Macs on macOS 12 or later. Apple system translation needs macOS 26 or later. After launch, EchoLingo stays in the tray or menu bar. Quit the previous version completely before you upgrade.
 
@@ -23,7 +23,7 @@ This is an internal prerelease, not a stable release. Windows has no commercial 
 
 [Release notes](https://github.com/Blueeeecho/EchoLingo/releases/tag/0.2.19) · [SHA-256 checksums](https://github.com/Blueeeecho/EchoLingo/releases/download/0.2.19/SHA256SUMS.txt) · [Release manifest](https://github.com/Blueeeecho/EchoLingo/releases/download/0.2.19/RELEASE-MANIFEST.json)
 
-0.2.19 is a test prerelease, not a stable GitHub `Latest` release. See [all releases](https://github.com/Blueeeecho/EchoLingo/releases) for earlier versions. The packages correspond to the [0.2.19 source tag](https://github.com/Blueeeecho/EchoLingo/tree/0.2.19), not the default branch; see the release manifest for the relationship between source and installer bytes. The previous [0.2.18 prerelease](https://github.com/Blueeeecho/EchoLingo/releases/tag/0.2.18) remains available.
+0.2.19 is a test prerelease, not a stable GitHub `Latest` release. The packages correspond to the [0.2.19 source tag](https://github.com/Blueeeecho/EchoLingo/tree/0.2.19), not the default branch; see the release manifest for the relationship between source and installer bytes.
 
 [First-launch notes for macOS](docs/macos-install.zh-CN.md) (Chinese) · [Build from source](docs/build.md) (Chinese)
 

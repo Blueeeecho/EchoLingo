@@ -9,7 +9,7 @@
 
 **[下载 Windows 0.2.19 安装版（x64）](https://github.com/Blueeeecho/EchoLingo/releases/download/0.2.19/EchoLingo_0.2.19_windows_x64-setup.exe)** · **[下载 macOS 0.2.19 内测版（Apple 芯片）](https://github.com/Blueeeecho/EchoLingo/releases/download/0.2.19/EchoLingo_0.2.19_macos_arm64.dmg)**
 
-需要免安装？[0.2.18 Windows 免安装 ZIP](https://github.com/Blueeeecho/EchoLingo/releases/download/0.2.18/EchoLingo_0.2.18_windows_x64-unpack.zip) 仍可下载。请完整解压后打开 `Start-EchoLingo.cmd`。Windows 仍需 Microsoft Edge WebView2 Runtime；配置、历史和密钥不会随 ZIP 搬走。
+Windows 安装版需要 Microsoft Edge WebView2 Runtime。
 
 Windows 适用于 Windows 10 1809+ / Windows 11；macOS 安装包适用于 Apple 芯片 Mac、macOS 12+，Apple 系统翻译需要 macOS 26+。打开回声译后，应用会驻留托盘或菜单栏；升级前先完整退出旧版。
 
@@ -23,7 +23,7 @@ Windows 与 macOS 现统一提供 0.2.19 测试版。翻译与 OCR 服务独立�
 
 [版本说明](https://github.com/Blueeeecho/EchoLingo/releases/tag/0.2.19) · [SHA-256 校验值](https://github.com/Blueeeecho/EchoLingo/releases/download/0.2.19/SHA256SUMS.txt) · [发布清单](https://github.com/Blueeeecho/EchoLingo/releases/download/0.2.19/RELEASE-MANIFEST.json)
 
-0.2.19 是测试预发布版，不使用 GitHub 的稳定版 `Latest` 标记。历史版本见[全部发布](https://github.com/Blueeeecho/EchoLingo/releases)。程序包对应 [0.2.19 标签源码](https://github.com/Blueeeecho/EchoLingo/tree/0.2.19)，不等同于默认分支源码；程序包源码与实际文件对应关系请查看发布清单。上一内测版 [0.2.18](https://github.com/Blueeeecho/EchoLingo/releases/tag/0.2.18) 仍可下载。
+0.2.19 是测试预发布版，不使用 GitHub 的稳定版 `Latest` 标记。程序包对应 [0.2.19 标签源码](https://github.com/Blueeeecho/EchoLingo/tree/0.2.19)，不等同于默认分支源码；程序包源码与实际文件对应关系请查看发布清单。
 
 [macOS 首次安装说明](docs/macos-install.zh-CN.md) · [源码构建](docs/build.md)
 

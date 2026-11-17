@@ -622,15 +622,14 @@ class PostReleaseDocumentationSelectorTests(unittest.TestCase):
         return subprocess.run([sys.executable, '-c', source], cwd=directory,
             capture_output=True, text=True).returncode
 
-    def test_both_readmes_link_to_current_installers_and_previous_portable(self):
+    def test_both_readmes_link_only_to_current_prerelease(self):
         import re
         base = 'https://github.com/Blueeeecho/EchoLingo'
         prefix = base+'/releases/download/0.2.19/'
-        portable = base+'/releases/download/0.2.18/EchoLingo_0.2.18_windows_x64-unpack.zip'
         expected = {prefix+name for name in (
             'EchoLingo_0.2.19_windows_x64-setup.exe',
             'EchoLingo_0.2.19_macos_arm64.dmg', 'SHA256SUMS.txt', 'RELEASE-MANIFEST.json')}
-        expected |= {portable, base+'/releases/tag/0.2.19', base+'/tree/0.2.19', base+'/releases/tag/0.2.18'}
+        expected |= {base+'/releases/tag/0.2.19', base+'/tree/0.2.19'}
         for name in ('README.md', 'README.en.md'):
             with self.subTest(document=name):
                 text = (R.ROOT/name).read_text(encoding='utf-8')
@@ -638,6 +637,9 @@ class PostReleaseDocumentationSelectorTests(unittest.TestCase):
                 self.assertTrue(expected <= urls)
                 self.assertEqual({url for url in urls if '/releases/download/' in url},
                                  {url for url in expected if '/releases/download/' in url})
+                self.assertEqual({url for url in urls if '/releases/tag/' in url},
+                                 {base+'/releases/tag/0.2.19'})
+                self.assertNotIn(base+'/releases', urls)
                 self.assertNotIn('/releases/latest', text)
                 self.assertTrue('预发布' in text or 'prerelease' in text)
 
