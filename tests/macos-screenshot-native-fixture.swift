@@ -439,7 +439,7 @@ private final class ScreenshotProbe {
             window.isOpaque = true; window.backgroundColor = NSColor(srgbRed: 1, green: 0, blue: 1, alpha: 1)
             window.sharingType = .readOnly; window.animationBehavior = .none
             self.oracleOccluder = window; window.orderFrontRegardless(); window.displayIfNeeded()
-            DispatchQueue.main.async {
+            self.awaitOwnedOracleWindowMetadata(window, target: target, deadline: Date().addingTimeInterval(3)) {
                 self.captureVisibilityOracle(target, stage: "generated-occlusion", occluded: true) {
                     window.orderOut(nil); window.close()
                     guard !window.isVisible else { self.finish("failed", reason: "owned-oracle-occluder-remained-visible"); return }
@@ -472,6 +472,48 @@ private final class ScreenshotProbe {
                 }
             }
         }
+    }
+
+    // orderFrontRegardless acknowledges AppKit, not WindowServer publication.
+    // Wait only for this generated window's missing metadata, before a single
+    // strict visible-pixel oracle. A present-but-wrong record fails immediately.
+    @available(macOS 14.0, *)
+    func awaitOwnedOracleWindowMetadata(_ window: NSWindow, target: CaptureWindowTarget,
+                                       deadline: Date, observations: Int = 0,
+                                       completion: @escaping () -> Void) {
+        guard !finished else { return }
+        report["ownedOracleReadinessObservations"] = observations + 1
+        report["ownedOracleReadinessDeadlineMilliseconds"] = 3000
+        do {
+            try fixtureNeed(Date() <= deadline, "owned oracle metadata readiness timeout")
+            _ = try oracleSourceIdentity(target)
+            let expectedFrame = CGRect(x: target.frame.minX + 224, y: target.frame.minY + 128, width: 64, height: 64)
+            try fixtureNeed(oracleOccluder === window && window.isVisible && window.windowNumber > 0
+                && window.frame == expectedFrame && window.level == .normal && window.sharingType == .readOnly,
+                "owned oracle AppKit identity/frame/sharing changed before capture")
+            guard let records = captureCurrentWindows() else {
+                throw NativeError("FIXTURE: owned oracle window metadata unavailable")
+            }
+            recordOwnedOracleWindow(window, records: records, expectedFrame: expectedFrame)
+            let ownPID = ProcessInfo.processInfo.processIdentifier
+            let matches = records.filter {
+                captureWindowNumber($0[kCGWindowNumber as String]) == Double(window.windowNumber)
+                    && captureWindowNumber($0[kCGWindowOwnerPID as String]) == Double(ownPID)
+            }
+            if matches.isEmpty {
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.025) {
+                    self.awaitOwnedOracleWindowMetadata(window, target: target, deadline: deadline,
+                        observations: observations + 1, completion: completion)
+                }
+                return
+            }
+            let identity = CaptureWindowTarget(id: CGWindowID(window.windowNumber), pid: ownPID, frame: expectedFrame)
+            try fixtureNeed(matches.count == 1 && captureWindowIsCurrent(identity, records: records,
+                primaryHeight: CGDisplayBounds(CGMainDisplayID()).height, excludingPID: target.pid),
+                "owned oracle published identity/frame/sharing changed before capture")
+            report["ownedOracleMetadataReady"] = true
+            completion()
+        } catch { finish("failed", reason: String(describing: error)) }
     }
 
     // Only the generated, process-owned oracle window is described. Never
