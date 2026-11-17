@@ -26,8 +26,9 @@ class Homepage(HTMLParser):
         self.text.append(data)
 
 
-def validate(source, version, previous):
-    for value in (version, previous):
+def validate(source, version, previous, portable_version=None):
+    portable_version = portable_version or version
+    for value in (version, previous, portable_version):
         if not re.fullmatch(r"\d+\.\d+\.\d+(?:-[\w.-]+)?", value):
             raise ValueError(f"Invalid version: {value}")
     page = Homepage()
@@ -36,13 +37,13 @@ def validate(source, version, previous):
     expected_downloads = {
         f"{REPO}/releases/download/{version}/{name}"
         for name in (
-            f"EchoLingo_{version}_windows_x64-unpack.zip",
             f"EchoLingo_{version}_windows_x64-setup.exe",
             f"EchoLingo_{version}_macos_arm64.dmg",
             "SHA256SUMS.txt",
             "RELEASE-MANIFEST.json",
         )
     }
+    expected_downloads.add(f"{REPO}/releases/download/{portable_version}/EchoLingo_{portable_version}_windows_x64-unpack.zip")
     actual_downloads = {url for url in page.links if "/releases/download/" in url}
     if actual_downloads != expected_downloads:
         errors.append(f"Download links differ: {sorted(actual_downloads ^ expected_downloads)}")
@@ -85,9 +86,10 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--version", required=True)
     parser.add_argument("--previous", required=True)
+    parser.add_argument("--portable-version")
     parser.add_argument("--html", type=Path, default=Path(__file__).resolve().parents[1] / "index.html")
     args = parser.parse_args()
-    errors = validate(args.html.read_text(encoding="utf-8"), args.version, args.previous)
+    errors = validate(args.html.read_text(encoding="utf-8"), args.version, args.previous, args.portable_version)
     if errors:
         parser.exit(1, "\n".join(errors) + "\n")
     print(f"Release {args.version} website links and bilingual prerelease labels passed")
