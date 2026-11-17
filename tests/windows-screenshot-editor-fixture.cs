@@ -305,6 +305,22 @@ public static partial class EchoLingoApplicationSmoke {
         AutomationElement host=TreeWalker.RawViewWalker.GetParent(combo);if(!ScreenshotFilenameNode(host,ControlType.Pane,"ComboBoxEx32",process,modal))return false;
         AutomationElement parent=TreeWalker.RawViewWalker.GetParent(host);return parent!=null&&Automation.Compare(parent,root);
     }
+    static void ScreenshotSelectCaptureSettings(Process app,IntPtr owner) {
+        AutomationElement tab=null;
+        WaitFor(delegate{
+            uint pid;GetWindowThreadProcessId(owner,out pid);
+            Assert(pid==app.Id&&MainWindow(app.Id)==owner,"Screenshot settings owner changed.");
+            if(!IsWindowVisible(owner)||!IsWindowEnabled(owner))return false;
+            AutomationElementCollection matches=AutomationElement.FromHandle(owner).FindAll(TreeScope.Descendants,new AndCondition(new PropertyCondition(AutomationElement.ControlTypeProperty,ControlType.TabItem),new PropertyCondition(AutomationElement.NameProperty,"\u8bc6\u522b\u4e0e\u622a\u56fe")));
+            Assert(matches.Count<=1,"Screenshot settings category is ambiguous.");
+            if(matches.Count==0)return false;tab=matches[0];return !tab.Current.IsOffscreen&&tab.Current.IsEnabled;
+        },10,"Actual screenshot settings category missing.",app);
+        object raw;Assert(tab.TryGetCurrentPattern(SelectionItemPattern.Pattern,out raw),"Screenshot settings category has no SelectionItemPattern.");
+        SelectionItemPattern selection=(SelectionItemPattern)raw;
+        // A single real category selection, never a hidden DOM invocation.
+        if(!selection.Current.IsSelected)selection.Select();
+        WaitFor(delegate{return selection.Current.IsSelected;},5,"Screenshot settings category did not become selected.",app);
+    }
     static Dictionary<string,object> ScreenshotOpenGenerated(Process app,IntPtr editor,string path,string format,Bitmap expected,string output,ProcessStartInfo settingsStart=null,bool saveOpened=true) {
         Assert(File.Exists(path)&&(File.GetAttributes(path)&FileAttributes.ReparsePoint)==0,"Generated image input is missing or redirected.");
         byte[] original=File.ReadAllBytes(path);Assert(original.Length>0&&original.Length<65536,"Generated image input exceeds its fixture bound.");
@@ -312,6 +328,7 @@ public static partial class EchoLingoApplicationSmoke {
         if(settingsStart!=null) {
             using(Process secondary=Process.Start(settingsStart))Assert(secondary.WaitForExit(5000)&&secondary.ExitCode==0,"Explicit settings launch did not exit via the existing single-instance route.");
             dialogOwner=MainWindow(app.Id);Assert(dialogOwner!=IntPtr.Zero,"Actual settings window missing.");
+            ScreenshotSelectCaptureSettings(app,dialogOwner);
             AutomationElement open=null;WaitFor(delegate{return (open=ScreenshotButton(dialogOwner,"\u6253\u5f00\u672c\u5730 PNG / JPEG"))!=null;},10,"Actual screenshot settings Open action missing.",app);
             object scroll;if(open.TryGetCurrentPattern(ScrollItemPattern.Pattern,out scroll))((ScrollItemPattern)scroll).ScrollIntoView();
             ScreenshotInvoke(app,dialogOwner,"\u6253\u5f00\u672c\u5730 PNG / JPEG");
