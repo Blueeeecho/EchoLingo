@@ -12,6 +12,7 @@ try {
     await page.addInitScript(value => Object.defineProperty(navigator, 'platform', { configurable: true, get: () => value }), platform);
     await page.goto(origin);
     await page.locator('#more-toggle').click(); await page.locator('#popup-more-menu button[data-view="settings"]').click();
+    await page.locator('[data-settings-tab="translation"]').click();
     await page.locator('#add-provider').waitFor({ state:'visible' });
     // Native disclosures share production markup on both platforms. Hidden
     // service actions must not occupy layout or enter the keyboard tab order.
@@ -50,10 +51,12 @@ try {
     await page.locator('#free-region-cn').click();
     assert.equal(await page.locator('#free-translation-section').evaluate(el => el.open), false);
     assert.equal(await page.locator('#free-ocr-section').evaluate(el => el.open), false);
+    await page.locator('[data-settings-tab="capture"]').click();
     assert.match(await page.locator('#ocr-quota-card').innerText(), /本机免费/);
     assert.equal(await page.locator('#active-ocr-provider').inputValue(),'');
     assert.match(await page.locator('#active-ocr-provider option').textContent(),/免费/);
     const data = await page.evaluate(async () => { const value=await import('/src/service-quotas.ts'); return {translation:value.TRANSLATION_QUOTAS,ocr:value.OCR_QUOTAS,date:value.SERVICE_QUOTA_CHECKED_ON}; });
+    await page.locator('[data-settings-tab="translation"]').click();
     await page.locator('#add-provider').click();
     const recommendations=await page.locator('#provider-preset option[data-recommended="true"]').evaluateAll(options=>options.map(option=>option.value));
     assert.deepEqual(recommendations,[platform==='MacIntel'?'system':'offline','microsoft','baidu','siliconflow']);
@@ -93,6 +96,7 @@ try {
     assert.equal(await page.locator('#provider-preset').inputValue(),'siliconflow');
     assert.equal(await page.locator('#provider-model').inputValue(),'existing-paid-model');
     await page.locator('#cancel-provider-dialog').click();
+    await page.locator('[data-settings-tab="capture"]').click();
     await page.locator('#add-ocr-provider').click();
     for(const [kind,quota] of Object.entries(data.ocr)) {
       if(kind==='local')continue;
@@ -110,6 +114,7 @@ try {
     }
     await page.locator('#cancel-ocr-provider-dialog').click();
     await page.setViewportSize({width:420,height:820});
+    await page.locator('[data-settings-tab="translation"]').click();
     await page.locator('#add-provider').click(); await page.locator('#provider-preset').selectOption('microsoft');
     assert.equal(await page.locator('#provider-service-guide .service-quota-badge').isVisible(),true);
     assert.equal(await page.locator('#provider-service-guide').evaluate(element=>element.scrollWidth<=element.clientWidth),true,'Quota conditions and pricing links must wrap at 420px.');

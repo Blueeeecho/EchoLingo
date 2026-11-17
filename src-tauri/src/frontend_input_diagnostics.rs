@@ -11,11 +11,26 @@ pub enum Stage {
     Dispatch,
     Complete,
     Error,
+    AutomaticDispatchSkipped,
+}
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum AutomaticSkipReason {
+    PresentationUnavailable,
+    PresentationCancelled,
+    PresentationFailed,
+    GenerationChanged,
+    IntentChanged,
+    ViewChanged,
+    ModalActive,
+    PresentationChanged,
 }
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Record {
     pub stage: Stage,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub skip_reason: Option<AutomaticSkipReason>,
     pub sequence: u64,
     pub timestamp: u64,
     pub epoch: u64,
@@ -55,6 +70,28 @@ mod tests {
         assert!(serde_json::from_value::<Record>(value).is_err());
         let mut value = record();
         value["stage"] = serde_json::json!("arbitrary");
+        assert!(serde_json::from_value::<Record>(value).is_err());
+    }
+    #[test]
+    fn automatic_skip_reason_is_optional_and_fixed_metadata_only() {
+        assert!(serde_json::from_value::<Record>(record()).is_ok());
+        for reason in [
+            "presentationUnavailable",
+            "presentationCancelled",
+            "presentationFailed",
+            "generationChanged",
+            "intentChanged",
+            "viewChanged",
+            "modalActive",
+            "presentationChanged",
+        ] {
+            let mut value = record();
+            value["stage"] = serde_json::json!("automaticDispatchSkipped");
+            value["skipReason"] = serde_json::json!(reason);
+            assert!(serde_json::from_value::<Record>(value).is_ok());
+        }
+        let mut value = record();
+        value["skipReason"] = serde_json::json!("private source text");
         assert!(serde_json::from_value::<Record>(value).is_err());
     }
     #[test]

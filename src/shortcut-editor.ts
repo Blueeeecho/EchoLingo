@@ -53,7 +53,7 @@ export function createShortcutEditor(context: Context) {
     const row = feedbackAction ? inputs.get(feedbackAction)?.closest('.shortcut-binding') : null;
     (row ?? form).append(feedback);
   };
-  saveButton.textContent = '保存并立即生效';
+  saveButton.textContent = '保存手动修改';
   const help = form.nextElementSibling;
   if (help instanceof HTMLElement) help.textContent = '录制后松开按键即保存。Esc 取消。未生效的组合会自动重试，也可一键更换。' + (windows
     ? 'Alt+D、Alt+S 在本应用运行时优先，退出后交还其他程序。其他组合若被占用会保留原绑定。'

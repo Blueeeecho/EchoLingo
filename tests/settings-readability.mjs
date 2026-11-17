@@ -24,23 +24,27 @@ try {
     const sourceFont = await fontSize(page.locator('#source-text'));
     await page.locator('#more-toggle').click();
     await page.locator('#popup-more-menu [data-view="settings"]').click();
+    const category = async name => page.locator(`[data-settings-tab="${name}"]`).click();
+    await category('translation');
     await page.locator('#free-region-cn').click();
     await page.locator('#free-translation-summary').click();
     await page.locator('#free-ocr-summary').click();
 
     for (const theme of ['light', 'dark']) {
+      await category('general');
       await page.locator('#theme-select').selectOption(theme);
+      await category('translation');
       for (const width of [420, 640, 900, 1000]) {
         await page.setViewportSize({ width, height: 850 });
         await page.mouse.move(0, 0);
         await fits(page, '#view-settings');
         for (const selector of ['.settings-card-heading p', '.field-help', '.free-service small']) {
-          assert.ok(await fontSize(page.locator(`#view-settings ${selector}`).first()) >= 13, `${selector} remains readable at ${width}px`);
+          assert.ok(await fontSize(page.locator(`#view-settings [data-settings-panel]:not([hidden]) ${selector}`).first()) >= 13, `${selector} remains readable at ${width}px`);
         }
-        for (const selector of ['#theme-select', '#max-history', '#add-provider', '#free-translation-list .free-service p']) {
+        for (const selector of ['#add-provider', '#free-translation-list .free-service p']) {
           assert.ok(await fontSize(page.locator(selector).first()) >= 14, `${selector} readable controls/body`);
         }
-        assert.ok(await fontSize(page.locator('#view-settings h2').first()) >= 17);
+        assert.ok(await fontSize(page.locator('#view-settings [data-settings-panel]:not([hidden]) h2').first()) >= 17);
         const actions = page.locator('#free-translation-list .free-service-actions').first();
         for (const action of await actions.locator('button, a').all()) {
           const style = await action.evaluate(el => {
@@ -80,11 +84,13 @@ try {
         assert.equal(await page.locator('#provider-service-guide a').first().evaluate(el => getComputedStyle(el).textDecorationLine), 'underline');
         if (width === 420) await page.screenshot({ path: `test-results/service-manager-add-readable-${platform}-${theme}.png` });
         await page.locator('#cancel-provider-dialog').click();
+        await category('capture');
         await page.locator('#add-ocr-provider').click();
         await page.locator('#ocr-provider-kind').selectOption('azure-vision');
         await fits(page, '#ocr-provider-dialog .provider-dialog');
         await page.locator('#cancel-ocr-provider-dialog').click();
 
+        await category('translation');
         await page.locator('#open-service-manager').click();
         await page.locator('[data-service-role="ocr"]').click();
         await fits(page, '#view-services');
@@ -101,6 +107,7 @@ try {
     // An enlarged/short settings window must show recording instructions at
     // the active field, not only somewhere in the offscreen accessibility tree.
     await page.setViewportSize({ width: 420, height: 420 });
+    await category('shortcuts');
     await page.locator('#shortcut-advanced > summary').click();
     const feedbackInView = async (action, focused = false) => {
       const observed = await page.evaluate(({ action, focused }) => {
@@ -145,3 +152,6 @@ try {
   }
   console.log('PASS: readable settings/forms, blue underlined keyboard links, repeated cancel/reopen, 420–1000px layout, light/dark and macOS/Windows DOM branches. Browser-only, no native font claim.');
 } finally { await browser.close(); }
+
+// Keep category coverage in the existing settings smoke entrypoint.
+await import("./settings-navigation.mjs");
