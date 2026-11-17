@@ -3,17 +3,17 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const crypto = require('node:crypto');
 const path = require('node:path');
-const {publish, validateInputs, NAMES, PAYLOADS, MODE} = require('./publish-desktop-release.cjs');
+const {publish, validateInputs, NAMES, PAYLOADS, MODE, FULL_CI_JOBS} = require('./publish-desktop-release.cjs');
 const sha = 'a'.repeat(40), pin = 'b'.repeat(40);
 const hash = value => crypto.createHash('sha256').update(value).digest('hex');
 function fixture(change = {}) {
   const context = {repo:{owner:'Blueeeecho',repo:'EchoLingo'}, ref:'refs/heads/main', sha, runId:123};
   const data = new Map(PAYLOADS.map(name => [name, Buffer.from(`payload ${name}`)]));
-  const manifest = {version:'0.2.17', commit:sha, reviewedSourceCommit:pin, validationRun:'https://github.com/Blueeeecho/EchoLingo/actions/runs/123', validationMode:MODE, scope:{fullRegression:false,installerExecuted:false,macOSRuntimeAcceptance:true,windowsZipRuntimeAcceptance:true,interactiveCaptureAcceptance:false,networkIsolationAcceptance:false}, files:PAYLOADS.map(name => ({name,size:data.get(name).length,sha256:hash(data.get(name))}))};
-  const zipName='EchoLingo_0.2.17_windows_x64-unpack.zip';
-  const portable={version:'0.2.17',commit:sha,userDataPortable:false,
+  const manifest = {version:'0.2.18', commit:sha, reviewedSourceCommit:pin, validationRun:'https://github.com/Blueeeecho/EchoLingo/actions/runs/123', validationMode:MODE, scope:{fullRegression:false,installerExecuted:false,macOSRuntimeAcceptance:true,windowsZipRuntimeAcceptance:true,interactiveCaptureAcceptance:false,networkIsolationAcceptance:false}, files:PAYLOADS.map(name => ({name,size:data.get(name).length,sha256:hash(data.get(name))}))};
+  const zipName='EchoLingo_0.2.18_windows_x64-unpack.zip';
+  const portable={version:'0.2.18',commit:sha,userDataPortable:false,
     archives:[zipName,'EchoLingo-offline-engine-source.zip'].map(name=>({name,size:data.get(name).length,sha256:hash(data.get(name))}))};
-  const runtime={version:'0.2.17',applicationSha256:'e'.repeat(64),archiveSha256:hash(data.get(zipName)),interactiveCaptureTested:false,networkIsolationTested:false};
+  const runtime={version:'0.2.18',applicationSha256:'e'.repeat(64),archiveSha256:hash(data.get(zipName)),interactiveCaptureTested:false,networkIsolationTested:false};
   for(const flag of ['ok','windowsRuntimeExecuted','settingsWebViewReady','expectedLocalWebViewProfileCreated','roamingDirectoryAvailable','packageUnchangedAfterRun','realTranslationBothDirections','embeddedCaptureMemorySelfTest','peDependencyChecks','launcherMissingZeroPresentMocks']) runtime[flag]=true;
   change.portable?.(portable);change.runtime?.(runtime);
   data.set('WINDOWS-ZIP-MANIFEST.json',Buffer.from(JSON.stringify(portable)));
@@ -22,8 +22,8 @@ function fixture(change = {}) {
   manifest.windowsSettingsAcceptance={actualSettingsUiTested:true,fakeIpcUsed:false,applicationSha256:'e'.repeat(64),evidence:{name:'windows-settings.json',size:100,sha256:'d'.repeat(64)}};
   manifest.windowsGeneratedFocusAcceptance={generatedSourceOnly:true,actualApplicationTested:false,passedCases:2,nativeAssemblySha256:'f'.repeat(64),evidence:{name:'windows-native-focus.json',size:100,sha256:'d'.repeat(64)}};
   manifest.tree='c'.repeat(40);
-  manifest.nativePackageInspection={macOS:{source:{commit:sha,tree:manifest.tree},runUrl:manifest.validationRun,application:{sha256:'a'.repeat(64)},installer:{sha256:hash(data.get('EchoLingo_0.2.17_macos_arm64.dmg'))}}};
-  manifest.macOSRuntimeAcceptance={version:'0.2.17',commit:sha,tree:manifest.tree,runUrl:manifest.validationRun,applicationSha256:'a'.repeat(64),installerSha256:manifest.nativePackageInspection.macOS.installer.sha256,fakeIpcUsed:false,userContentRead:false,codexInteractiveSelectionTested:false};
+  manifest.nativePackageInspection={macOS:{source:{commit:sha,tree:manifest.tree},runUrl:manifest.validationRun,application:{sha256:'a'.repeat(64)},installer:{sha256:hash(data.get('EchoLingo_0.2.18_macos_arm64.dmg'))}}};
+  manifest.macOSRuntimeAcceptance={version:'0.2.18',commit:sha,tree:manifest.tree,runUrl:manifest.validationRun,applicationSha256:'a'.repeat(64),installerSha256:manifest.nativePackageInspection.macOS.installer.sha256,fakeIpcUsed:false,userContentRead:false,codexInteractiveSelectionTested:false};
   for(const flag of ['ok','extractedBundleLaunched','restartPassed','secondInstancePassed','frontendWebViewReady','settingsWindowShown','nativeSelfTestsPassed','nativeWindowResizeFixturePassed','packageUnchangedAfterRun','cleanupComplete']) manifest.macOSRuntimeAcceptance[flag]=true;
   change.manifest?.(manifest);
   data.set('RELEASE-MANIFEST.json', Buffer.from(JSON.stringify(manifest)));
@@ -33,12 +33,12 @@ function fixture(change = {}) {
   let mainCalls = 0, tagExists = !!change.existingTag;
   const writes = [], uploaded = [];
   const missing = () => {throw Object.assign(new Error('Missing'), {status:404});};
-  const github = {rest:{actions:{listWorkflowRuns:async args=>{assert.equal(args.head_sha,sha);assert.equal(args.event,'push');return {data:{workflow_runs:change.runs??[{id:10,head_sha:sha,event:'push',path:'.github/workflows/ci.yml',status:'completed',conclusion:'success'}]}};}},git:{getRef:async ({ref}) => {
+  const github = {rest:{actions:{listJobsForWorkflowRun:()=>{},listWorkflowRuns:async args=>{assert.equal(args.head_sha,sha);assert.equal(args.event,'push');return {data:{workflow_runs:change.runs??[{id:10,head_sha:sha,event:'push',path:'.github/workflows/ci.yml',status:'completed',conclusion:'success'}]}};}},git:{getRef:async ({ref}) => {
     if(ref === 'heads/main') return {data:{object:{type:'commit',sha:change.mainMoves && ++mainCalls >= 3 ? 'c'.repeat(40):sha}}};
     if(change.badTag) return {data:{object:{type:'commit',sha:pin}}};
     if(!tagExists) missing();
     return {data:{object:{type:'commit',sha}}};
-  },createRef:async args => {writes.push(['tag',args]);tagExists=true;}},repos:{getReleaseByTag:async()=>{if(change.existing) return {data:{id:3}};missing();},createRelease:async args=>{writes.push(['draft',args]);return {data:{id:12}};},uploadReleaseAsset:async args=>{const asset={name:args.name,state:'uploaded',size:args.data.length,digest:`sha256:${hash(args.data)}`};uploaded.push(asset);return {data:change.badUpload ? {...asset,digest:'sha256:bad'} : asset};},listReleaseAssets:()=>{},updateRelease:async args=>{writes.push(['publish',args]);return {data:{draft:false,prerelease:true,tag_name:'0.2.17',html_url:'https://github.com/Blueeeecho/EchoLingo/releases/tag/0.2.17'}};}}},paginate:async()=>change.badInventory ? uploaded.slice(1) : change.extraUploaded ? [...uploaded,{name:'private.txt'}] : uploaded};
+  },createRef:async args => {writes.push(['tag',args]);tagExists=true;}},repos:{getReleaseByTag:async()=>{if(change.existing) return {data:{id:3}};missing();},createRelease:async args=>{writes.push(['draft',args]);return {data:{id:12}};},uploadReleaseAsset:async args=>{const asset={name:args.name,state:'uploaded',size:args.data.length,digest:`sha256:${hash(args.data)}`};uploaded.push(asset);return {data:change.badUpload ? {...asset,digest:'sha256:bad'} : asset};},listReleaseAssets:()=>{},updateRelease:async args=>{writes.push(['publish',args]);return {data:{draft:false,prerelease:true,tag_name:'0.2.18',html_url:'https://github.com/Blueeeecho/EchoLingo/releases/tag/0.2.18'}};}}},paginate:async(method,args)=> {if(method===github.rest.actions.listJobsForWorkflowRun){assert.equal(args.filter,'latest');assert.equal(args.run_id,10);return change.jobs ?? FULL_CI_JOBS.map(name=>({name,run_id:10,head_sha:sha,status:'completed',conclusion:'success'}));}return change.badInventory ? uploaded.slice(1) : change.extraUploaded ? [...uploaded,{name:'private.txt'}] : uploaded;}};
   const core={summary:{addLink(){return this;},async write(){}}};
   return {context,io,github,core,writes,data};
 }
@@ -113,3 +113,21 @@ for(const field of ['version','commit','tree','runUrl','installerSha256','applic
   });
 }
 test('refuses missing macOS runtime report',async()=>{const f=fixture({manifest:m=>delete m.macOSRuntimeAcceptance});await assert.rejects(publish(f,f.io),/macOS runtime/);assert.equal(f.writes.length,0);});
+
+for (const name of FULL_CI_JOBS) {
+  for (const bad of ['missing', 'skipped', 'failure', 'cancelled', 'neutral', 'in_progress', 'wrong-sha', 'wrong-run', 'duplicate']) {
+    test(`refuses full main CI ${name}: ${bad} before any write`, async () => {
+      let jobs=FULL_CI_JOBS.map(n=>({name:n,run_id:10,head_sha:sha,status:'completed',conclusion:'success'}));
+      const job=jobs.find(j=>j.name===name);
+      if(bad==='missing') jobs=jobs.filter(j=>j!==job);
+      else if(bad==='duplicate') jobs.push({...job});
+      else if(bad==='wrong-sha') job.head_sha=pin;
+      else if(bad==='wrong-run') job.run_id=9;
+      else if(bad==='in_progress') job.status='in_progress';
+      else job.conclusion=bad;
+      const f=fixture({jobs});
+      await assert.rejects(publish(f,f.io),/Full main CI job/);
+      assert.equal(f.writes.length,0);
+    });
+  }
+}

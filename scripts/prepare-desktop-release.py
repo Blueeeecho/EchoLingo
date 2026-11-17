@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Prepare 0.2.17 using current-run Mac runtime and accepted Windows ZIP bytes."""
+"""Prepare 0.2.18 using current-run Mac runtime and accepted Windows ZIP bytes."""
 import argparse
 import copy
 import hashlib
@@ -13,10 +13,10 @@ import zipfile
 import tomllib
 
 ROOT = Path(__file__).resolve().parents[1]
-VERSION = '0.2.17'
-REVIEWED_SOURCE = '6d33403c37711116919175239ca686d14b7512d6'
-MANIFEST_BASELINE = '207982231449c78e5efd726ba4ba1c42d8561e93'
-BASELINE_VERSION = '0.2.16'
+VERSION = '0.2.18'
+REVIEWED_SOURCE = 'aba6c80bf5f0d18c40e5c1d490f09fefbb60ce30'
+MANIFEST_BASELINE = 'dcde0c1d40530eb0c9c64da5f9bbd7cdc4081234'
+BASELINE_VERSION = '0.2.17'
 MODE = 'desktop-macos-runtime-unpack-v2'
 # Production and behavioral fixtures are fixed at REVIEWED_SOURCE. Only these
 # release/version inputs may change afterward; never widen this to app sources.
@@ -29,7 +29,7 @@ SUPPORT = {
     'scripts/publish-desktop-release.cjs', 'scripts/test-desktop-release.cjs',
     '.github/workflows/release-desktop.yml', '.github/workflows/ci.yml',
     '.github/workflows/history-language-regression.yml',
-    'docs/releases/0.2.17.zh-CN.md',
+    'docs/releases/0.2.18.zh-CN.md',
 }
 
 
@@ -79,7 +79,7 @@ def check_version_only_manifest(name, baseline, current):
 
 
 def check_source():
-    if re.fullmatch('[0-9a-f]{40}', REVIEWED_SOURCE) is None:
+    if re.fullmatch('[0-9a-f]{40}', REVIEWED_SOURCE) is None or REVIEWED_SOURCE == '0' * 40:
         raise ValueError('Final verified integration commit must be pinned before release')
     subprocess.run(['git', 'merge-base', '--is-ancestor', REVIEWED_SOURCE, 'HEAD'], cwd=ROOT, check=True)
     subprocess.run(['git', 'merge-base', '--is-ancestor', MANIFEST_BASELINE, 'HEAD'], cwd=ROOT, check=True)
