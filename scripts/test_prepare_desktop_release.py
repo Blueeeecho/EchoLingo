@@ -479,7 +479,7 @@ class FixedDesktopRecoveryModeTests(unittest.TestCase):
 
 class PackageAwareVersionTests(unittest.TestCase):
     def test_production_and_behavioral_fixtures_require_a_new_review_pin(self):
-        self.assertEqual(R.REVIEWED_SOURCE, 'f4892cac82b2ef4d7d16d87cd94b645853467697')
+        self.assertEqual(R.REVIEWED_SOURCE, '42cf68dce4b47680b0e856f7589992bffa7fb48c')
         for name in ('src/main.ts', 'src-tauri/src/translation_requests.rs',
                      'src-tauri/src/window_layout.rs', 'tests/frontend-interactions.mjs',
                      'tests/test_popup_language_session_contract.py',
