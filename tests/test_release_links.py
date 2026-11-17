@@ -12,15 +12,15 @@ class ReleaseLinksTest(unittest.TestCase):
     source = (ROOT / "index.html").read_text(encoding="utf-8")
 
     def check(self, source):
-        return module.validate(source, "0.2.19", "0.2.18", portable_version="0.2.18")
+        return module.validate(source, "0.2.19")
 
     def test_current_page(self):
         self.assertEqual(self.check(self.source), [])
 
     def test_stale_package_rejected(self):
         self.assertTrue(self.check(self.source.replace(
-            "/download/0.2.18/EchoLingo_0.2.18_windows_x64-unpack.zip",
-            "/download/0.2.17/EchoLingo_0.2.17_windows_x64-unpack.zip")))
+            "/download/0.2.19/EchoLingo_0.2.19_windows_x64-setup.exe",
+            "/download/0.2.18/EchoLingo_0.2.18_windows_x64-setup.exe")))
 
     def test_stale_label_rejected(self):
         self.assertTrue(self.check(self.source.replace(
@@ -40,7 +40,10 @@ class ReleaseLinksTest(unittest.TestCase):
 
     def test_stale_previous_release_rejected(self):
         self.assertTrue(self.check(self.source.replace(
-            "/releases/tag/0.2.18", "/releases/tag/0.2.14")))
+            "/releases/tag/0.2.19", "/releases/tag/0.2.18")))
+
+    def test_archive_link_rejected(self):
+        self.assertTrue(self.check(self.source + f'<a href="{module.REPO}/releases">Archive</a>'))
 
     def test_missing_checksum_rejected(self):
         self.assertTrue(self.check(self.source.replace("SHA256SUMS.txt", "checksums.txt")))

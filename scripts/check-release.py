@@ -26,11 +26,9 @@ class Homepage(HTMLParser):
         self.text.append(data)
 
 
-def validate(source, version, previous, portable_version=None):
-    portable_version = portable_version or version
-    for value in (version, previous, portable_version):
-        if not re.fullmatch(r"\d+\.\d+\.\d+(?:-[\w.-]+)?", value):
-            raise ValueError(f"Invalid version: {value}")
+def validate(source, version):
+    if not re.fullmatch(r"\d+\.\d+\.\d+(?:-[\w.-]+)?", version):
+        raise ValueError(f"Invalid version: {version}")
     page = Homepage()
     page.feed(source)
     errors = []
@@ -43,16 +41,15 @@ def validate(source, version, previous, portable_version=None):
             "RELEASE-MANIFEST.json",
         )
     }
-    expected_downloads.add(f"{REPO}/releases/download/{portable_version}/EchoLingo_{portable_version}_windows_x64-unpack.zip")
     actual_downloads = {url for url in page.links if "/releases/download/" in url}
     if actual_downloads != expected_downloads:
         errors.append(f"Download links differ: {sorted(actual_downloads ^ expected_downloads)}")
-    expected_notes = {f"{REPO}/releases/tag/{tag}" for tag in (version, previous)}
+    expected_notes = {f"{REPO}/releases/tag/{version}"}
     actual_notes = {url for url in page.links if "/releases/tag/" in url}
     if actual_notes != expected_notes:
-        errors.append("Release notes must link to the current and previous previews")
-    if any("/releases/latest" in url for url in page.links):
-        errors.append("A prerelease must not use the stable Latest URL")
+        errors.append("Release notes must link only to the current prerelease")
+    if any("/releases/latest" in url or url == f"{REPO}/releases" for url in page.links):
+        errors.append("The download page must not use the stable Latest URL or the release archive")
     text = " ".join(page.text)
     for required in (
         f"Windows / macOS · {version} 内测版",
@@ -61,8 +58,6 @@ def validate(source, version, previous, portable_version=None):
         f"Download {version} test build",
         f"{version} 更新：",
         f"New in {version}:",
-        f"{previous} 安装包与版本说明",
-        f"{previous} installers and release notes",
         "这是内测预发布版本，不是稳定版",
         "This is an internal prerelease, not a stable",
         "未经 Apple 公证",
@@ -72,8 +67,8 @@ def validate(source, version, previous, portable_version=None):
     ):
         if required not in text:
             errors.append(f"Missing release text: {required}")
-    if set(re.findall(r"\b\d+\.\d+\.\d+\b", text)) != {version, previous}:
-        errors.append("Visible version labels must name only the current and previous previews")
+    if set(re.findall(r"\b\d+\.\d+\.\d+\b", text)) != {version}:
+        errors.append("Visible version labels must name only the current prerelease")
     if len(page.ids) != len(set(page.ids)):
         errors.append("Duplicate HTML IDs")
     for url in page.links:
@@ -85,11 +80,9 @@ def validate(source, version, previous, portable_version=None):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--version", required=True)
-    parser.add_argument("--previous", required=True)
-    parser.add_argument("--portable-version")
     parser.add_argument("--html", type=Path, default=Path(__file__).resolve().parents[1] / "index.html")
     args = parser.parse_args()
-    errors = validate(args.html.read_text(encoding="utf-8"), args.version, args.previous, args.portable_version)
+    errors = validate(args.html.read_text(encoding="utf-8"), args.version)
     if errors:
         parser.exit(1, "\n".join(errors) + "\n")
     print(f"Release {args.version} website links and bilingual prerelease labels passed")
