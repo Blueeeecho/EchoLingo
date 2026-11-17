@@ -70,8 +70,13 @@ export class PopupDragController {
   }
   retainsAfterStreamLoss(pointerId: number, pointerType: string): boolean {
     // DOM cancellation ends an event stream, not necessarily the physical
-    // mouse press. Never extend this native mouse policy to touch/pen input.
-    return pointerType === 'mouse' && this.retainsNativeGesture(pointerId);
+    // mouse press. A begin IPC can already have acquired its native token while
+    // its reply is still in transit. Keep that threshold-crossed request until
+    // native validation resolves it; no move occurs without a valid token.
+    // Never extend this native mouse policy to touch/pen input.
+    const gesture = this.gesture;
+    return pointerType === 'mouse' && gesture?.pointerId === pointerId && this.check()
+      && (gesture.token !== null || (gesture.crossed && gesture.starting));
   }
   release(pointerId: number): boolean {
     if (!this.gesture || this.gesture.pointerId !== pointerId) return false;

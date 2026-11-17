@@ -28,12 +28,22 @@ export function installPanelLayout(desktop: boolean, getPresentation: () => Tran
   let unlistenSizing: UnlistenFn | null = null;
   const nativeSizingSupported = /Win/.test(navigator.platform);
   const shell = document.querySelector<HTMLElement>('.app-shell');
+  const legacyScrollbar = !CSS.supports('scrollbar-gutter', 'stable both-edges');
+  let mirroredScrollbar: number | undefined;
   const boundedSize = (value: number): number => Math.min(100_000, Math.max(1, Math.ceil(Number.isFinite(value) ? value : 1)));
   const measure = (): { presentation: string; contentHeight: number; contentWidth: number } => {
     syncModalResizeInset();
     const management = document.body.dataset.view !== 'translate';
     const main = document.querySelector('main');
     const view = document.querySelector<HTMLElement>('.view:not([hidden])');
+    if (!management && view && legacyScrollbar && view.offsetWidth > 0) {
+      // clientWidth includes padding but excludes the classic scrollbar.
+      const width = Math.max(0, view.offsetWidth - view.clientWidth);
+      if (width !== mirroredScrollbar) {
+        view.style.setProperty('--popup-classic-scrollbar', `${width}px`);
+        mirroredScrollbar = width;
+      }
+    }
     const header = document.querySelector<HTMLElement>(management ? '.management-header' : '.popup-toolbar');
     const padding = main ? getComputedStyle(main) : null;
     const viewHeight = view ? Math.max(view.getBoundingClientRect().height, view.scrollHeight) : 0;
@@ -206,7 +216,8 @@ export function installPanelLayout(desktop: boolean, getPresentation: () => Tran
   const lostPopupCapture = (event: PointerEvent): void => {
     // A moved WKWebView may lose DOM capture while the same physical press is
     // still active. pointercancel precedes implicit lostpointercapture too;
-    // only an established mouse token can keep native press tracking safely.
+    // retain an established token or its in-flight begin reply. Native physical
+    // press/presentation validation still gates every movement.
     if (!popupDrag.retainsAfterStreamLoss(event.pointerId, event.pointerType)) cancelPopupDrag(event);
   };
   const movePopupDrag = (event: PointerEvent): void => popupDrag.move(event.pointerId, event.screenX, event.screenY, event.buttons);

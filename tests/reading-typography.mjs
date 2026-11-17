@@ -14,7 +14,7 @@ try {
       await page.setViewportSize({ width, height: 820 });
       for (const text of fixtures) {
         const metrics = await page.evaluate(async ({ platform, text }) => {
-          const { renderTranslationParagraphs } = await import('/src/translation-text-layout.ts');
+          const { compactBlankLines } = await import('/src/translation-text-layout.ts');
           document.documentElement.dataset.platform = platform;
           document.body.dataset.view = 'translate';
           const source = document.querySelector('#source-text');
@@ -26,8 +26,8 @@ try {
           const container = document.querySelector('.results-container');
           container.innerHTML = '<article class="result-card"><p class="result-text"></p></article>';
           const result = container.querySelector('.result-text');
-          renderTranslationParagraphs(result, text);
-          const run = result.querySelector('.result-text-run') ?? result;
+          result.textContent = compactBlankLines(text);
+          const run = result;
           const props = ['fontFamily', 'fontSize', 'fontWeight', 'lineHeight', 'letterSpacing', 'padding', 'margin', 'textAlign', 'textAlignLast', 'whiteSpace', 'wordBreak', 'overflowWrap'];
           const box = element => {
             const rect = element.getBoundingClientRect(), style = getComputedStyle(element);
@@ -42,11 +42,10 @@ try {
             boxes: { source: box(source), result: box(result),
               sourceColumn: box(source.closest('.source-column')), resultCard: box(result.closest('.result-card')),
               resultsColumn: box(result.closest('.results-column')) },
-            sourceText: source.value, resultText: result.textContent, selected, compact: result.dataset.paragraphSpacing,
+            sourceText: source.value, resultText: result.textContent, selected,
             overflow: source.scrollWidth > source.clientWidth + 1 || result.scrollWidth > result.clientWidth + 1 };
         }, { platform, text });
-        // Blank paragraph lines deliberately stay compact only in the read-only
-        // renderer; normal text lines and all literal/code lines share density.
+        // Manual source keeps its content; result shapes only nonblank lines.
         metrics.result.lineHeight = metrics.runHeight;
         assert.deepEqual(metrics.source, metrics.result, `${platform}/${width}: shared text styling`);
         assert.equal(metrics.source.fontSize, platform === 'windows' ? '16px' : '14px');
@@ -56,9 +55,9 @@ try {
           `both text panels must be laid out: ${geometryContext}`);
         assert.ok(Math.abs(metrics.boxes.source.left - metrics.boxes.result.left) < 1,
           `matching left text inset: ${geometryContext}`);
-        assert.equal(metrics.sourceText, text); assert.equal(metrics.resultText, text); assert.equal(metrics.selected, text);
+        const compact = text.replace(/\n{2,}/g, '\n');
+        assert.equal(metrics.sourceText, text); assert.equal(metrics.resultText, compact); assert.equal(metrics.selected, compact);
         assert.equal(metrics.overflow, false);
-        if (text.includes('```')) assert.equal(metrics.compact, 'literal');
         await page.locator('#source-text').fill('Still editable 中文');
         assert.equal(await page.locator('#source-text').inputValue(), 'Still editable 中文');
       }

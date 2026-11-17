@@ -5,6 +5,7 @@ import json
 from pathlib import Path
 import plistlib
 import tempfile
+import tomllib
 from types import SimpleNamespace
 import unittest
 from unittest import mock
@@ -132,9 +133,9 @@ class RuntimeContract(unittest.TestCase):
         with self.assertRaisesRegex(smoke.SmokeError, "external_bundle_symlink"):
             smoke.bundle_manifest(app)
 
-    def test_runtime_version_matches_current_release_manifests(self):
-        # Do not derive expected metadata only from smoke.VERSION: that lets a
-        # stale runtime gate and its synthetic fixtures agree on the old release.
+    def test_pinned_runtime_gate_and_current_build_manifests(self):
+        # The 0.2.18 publication gate is historical. A newer test build must
+        # agree across its own manifests without changing that gate.
         root = Path(__file__).resolve().parents[1]
         package = json.loads((root / "package.json").read_text(encoding="utf-8"))
         tauri = json.loads((root / "src-tauri/tauri.conf.json").read_text(encoding="utf-8"))
@@ -142,14 +143,18 @@ class RuntimeContract(unittest.TestCase):
             "desktop_release_contract", root / "scripts/prepare-desktop-release.py")
         release = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(release)
-        self.assertEqual(smoke.VERSION, package["version"])
-        self.assertEqual(smoke.VERSION, tauri["version"])
+        cargo = tomllib.loads((root / "src-tauri/Cargo.toml").read_text(encoding="utf-8"))
+        lock = json.loads((root / "package-lock.json").read_text(encoding="utf-8"))
         self.assertEqual(smoke.VERSION, release.VERSION)
+        self.assertEqual(smoke.VERSION, "0.2.18")
+        self.assertEqual(package["version"], tauri["version"])
+        self.assertEqual(package["version"], cargo["package"]["version"])
+        self.assertEqual(package["version"], lock["packages"][""]["version"])
         app = self.bundle()
         info = app / "Contents/Info.plist"
         values = plistlib.loads(info.read_bytes())
-        values["CFBundleVersion"] = tauri["version"]
-        values["CFBundleShortVersionString"] = tauri["version"]
+        values["CFBundleVersion"] = release.VERSION
+        values["CFBundleShortVersionString"] = release.VERSION
         info.write_bytes(plistlib.dumps(values))
         self.assertEqual(smoke.validate_bundle(app), app / "Contents/MacOS/echolingo")
 

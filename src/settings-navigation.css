@@ -1,4 +1,6 @@
-/* Quiet, task-oriented preferences. Keep the translation popup untouched. */
+/* The settings page has no footer content; the empty status strip only
+   draws a border through the remaining window space. */
+body[data-view="settings"] .app-footer { display: none; }
 #view-settings .settings-layout { display: grid; grid-template-columns: 158px minmax(0, 1fr); gap: 28px; align-items: start; }
 #view-settings .settings-navigation { display: flex; flex-direction: column; gap: 4px; position: sticky; top: 12px; }
 #view-settings .settings-navigation button { text-align: left; padding: 10px 12px; min-height: 40px; border-radius: 7px; font-size: 14px; color: var(--secondary); }
@@ -9,7 +11,7 @@
 #view-settings [data-settings-panel][hidden] { display: none !important; }
 #view-settings .settings-category-description { color: var(--muted); font-size: 13px; margin: 0 0 18px; }
 #view-settings .settings-card { border: 0; border-radius: 0; background: transparent; padding: 0 0 24px; margin: 0 0 24px; border-bottom: 1px solid var(--border); box-shadow: none; }
-#view-settings .settings-card:last-child { border-bottom: 0; margin-bottom: 0; }
+#view-settings .settings-card:last-child { border-bottom: 0; margin-bottom: 0; padding-bottom: 0; }
 #view-settings .settings-card-heading { margin-bottom: 16px; }
 #view-settings .settings-card-heading h2 { font-size: 17px; margin-bottom: 6px; }
 #view-settings .preference-row { min-height: 40px; margin-bottom: 18px; }
@@ -18,6 +20,6 @@
 #view-settings [data-settings-panel]:focus-visible { outline: 2px solid var(--accent); outline-offset: 5px; }
 @media (max-width: 680px) {
   #view-settings .settings-layout { grid-template-columns: minmax(0, 1fr); gap: 20px; }
-  #view-settings .settings-navigation { position: static; flex-direction: row; flex-wrap: wrap; gap: 4px; padding-bottom: 12px; border-bottom: 1px solid var(--border); }
+  #view-settings .settings-navigation { position: static; flex-direction: row; flex-wrap: wrap; gap: 4px; }
   #view-settings .settings-navigation button { padding: 8px 10px; min-height: 40px; }
 }

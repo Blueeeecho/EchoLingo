@@ -3,7 +3,7 @@ import { installSettingsNavigation, revealSettingsTarget, selectSettingsCategory
 import { installScreenshotSettings } from './screenshot-settings';
 import './styles.css';
 import { installServiceManager } from './service-manager';
-import { renderTranslationParagraphs } from './translation-text-layout';
+import { compactBlankLines } from './translation-text-layout';
 import { installUpdateNotice } from './update-notice-ui';
 import { createOcrUi } from './ocr-ui';
 import { installPanelLayout } from './panel-layout';
@@ -263,10 +263,9 @@ function applyLanguagePair(pair: LanguagePair): void {
 function resizeSourceEditor(): void {
   if (currentView === 'translate') {
     source.style.height = '0px';
-    const naturalHeight = source.scrollHeight;
-    const height = Math.min(180, Math.max(source.value.trim() ? 25 : 46, naturalHeight));
-    source.style.height = `${height}px`;
-    source.style.overflowY = naturalHeight > 180 ? 'auto' : 'hidden';
+    // The popup viewport, not the editor, owns overflow. The editor grows
+    // only as far as its wrapped content while preserving normal editing.
+    source.style.height = `${Math.max(25, source.scrollHeight)}px`;
   }
   const empty = !source.value.trim();
   document.body.classList.toggle('source-empty', empty);
@@ -445,8 +444,10 @@ async function receiveCapturedText(payload: SourceTextEvent): Promise<void> {
   setView('translate');
   applyLanguagePair(historyLanguages.newInput(selectedLanguagePair()));
   const normalized = payload.mode === 'input' ? payload.text
-    : payload.captureOrigin === 'ocr' || payload.mode === 'ocr' ? normalizeOcrCapturedText(payload.text) : normalizeCapturedText(payload.text);
+    : compactBlankLines(payload.captureOrigin === 'ocr' || payload.mode === 'ocr'
+      ? normalizeOcrCapturedText(payload.text) : normalizeCapturedText(payload.text));
   setSourceText(normalized);
+  $('#view-translate').scrollTop = 0;
   // A passive shortcut must not revive a control's old keyboard-focus ring.
   // Blur only this WebView's retained DOM focus; never focus another element
   // or activate the native window. Explicit Alt+A still focuses the editor.
@@ -652,6 +653,12 @@ function speak(text: string, language: string): void {
   window.speechSynthesis.speak(utterance);
 }
 function updateResultView(view: ResultView, result: TranslationResult, done: boolean): void {
+  // Keep error/preserved-original text untouched. A successful translation
+  // uses the same compact text for display, copy and speech, including streams.
+  if (!result.error && !result.preserved) {
+    const text = compactBlankLines(result.text);
+    if (text !== result.text) result = { ...result, text };
+  }
   view.result = result; view.done = done;
   view.preservedNotice.hidden = !done || !result.preserved;
   view.actions[0].setAttribute('aria-label', result.preserved ? '朗读原文' : '朗读译文');
@@ -666,13 +673,7 @@ function updateResultView(view: ResultView, result: TranslationResult, done: boo
   const content = result.error ? userFacingError(result.error) + (setupPair
     ? ` 本次语言组合：${languageName(setupPair.sourceLanguage)} → ${languageName(setupPair.targetLanguage)}。` : '') : result.text;
   const previous = view.body.textContent ?? '';
-  const compact = done && !result.error && !result.preserved;
-  const layoutChanged = view.body.dataset.paragraphLayout !== String(compact);
-  view.body.dataset.paragraphLayout = String(compact);
-  if (compact && (content !== previous || layoutChanged)) {
-    renderTranslationParagraphs(view.body, content);
-  } else if (!compact && (content !== previous || layoutChanged)) {
-    delete view.body.dataset.paragraphSpacing;
+  if (content !== previous || view.body.firstChild?.nodeType !== Node.TEXT_NODE) {
     if (view.body.childNodes.length === 1 && view.body.firstChild instanceof Text && content.startsWith(previous)) {
       view.body.firstChild.appendData(content.slice(previous.length));
     } else view.body.textContent = content;
@@ -1709,7 +1710,8 @@ $('#swap-language').addEventListener('click', () => {
   sourceLanguage.value = targetLanguage.value; targetLanguage.value = previousSource;
   historyLanguages.choose();
   const pair = selectedLanguagePair();
-  if (currentResults.find((result) => !result.error)?.text && resultSource === source.value) setSourceText(currentResults.find((result) => !result.error)!.text);
+  const result = currentResults.find((result) => !result.error);
+  if (result?.text && resultSource === source.value) setSourceText(result.preserved ? result.text : compactBlankLines(result.text));
   else invalidateResults();
   run(() => updateSettings((next) => { next.sourceLanguage = pair.sourceLanguage; next.targetLanguage = pair.targetLanguage; }));
 });

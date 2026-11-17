@@ -122,12 +122,45 @@ describe('Mac popup drag uses a real gesture rather than an asynchronous current
     const { drag } = fixture(); drag.press(press); drag.move(1, -1100, 250, 1); await tick();
     expect(drag.retainsAfterStreamLoss(1, pointerType)).toBe(false); drag.cancel();
   });
-  it('stream cancellation before native begin resolves still retires the late token', async () => {
-    const { drag, host } = fixture(); const wait = deferred<number>(); host.begin.mockReturnValueOnce(wait.promise);
-    drag.press(press); drag.move(1, -1100, 250, 1);
-    expect(drag.retainsAfterStreamLoss(1, 'mouse')).toBe(false); drag.release(1);
-    wait.resolve(8); await tick(); expect(host.move).not.toHaveBeenCalled(); expect(host.end).toHaveBeenCalledWith(8);
+  it('stream loss during begin IPC does not discard an accepted native press', async () => {
+    const { drag, host, frame } = fixture(); const wait = deferred<number>(); host.begin.mockReturnValueOnce(wait.promise);
+    drag.press(press);
     expect(drag.retainsAfterStreamLoss(1, 'mouse')).toBe(false);
+    drag.move(1, -1100, 250, 1);
+    // Native has accepted the press but its IPC reply has not arrived yet.
+    expect(drag.retainsAfterStreamLoss(1, 'mouse')).toBe(true);
+    expect(drag.retainsAfterStreamLoss(2, 'mouse')).toBe(false);
+    expect(drag.retainsAfterStreamLoss(1, 'touch')).toBe(false);
+    expect(host.move).not.toHaveBeenCalled();
+    wait.resolve(8); await tick(); await frame();
+    expect(host.move).toHaveBeenCalledTimes(2);
+    expect(host.move).toHaveBeenCalledWith(8); expect(host.end).not.toHaveBeenCalled();
+    drag.release(1); await frame(); expect(host.end).toHaveBeenCalledWith(8);
+    expect(host.move).toHaveBeenCalledTimes(2);
+  });
+  it.each(['release', 'hidden', 'epoch', 'blur', 'new-press'] as const)('pending stream loss cannot survive %s', async reason => {
+    const { drag, host, hide, change } = fixture(); const wait = deferred<number>();
+    host.begin.mockReturnValueOnce(wait.promise);
+    drag.press(press); drag.move(1, -1100, 250, 1);
+    expect(drag.retainsAfterStreamLoss(1, 'mouse')).toBe(true);
+    if (reason === 'release') drag.release(1);
+    else if (reason === 'hidden') hide();
+    else if (reason === 'epoch') change();
+    else if (reason === 'new-press') drag.press({ ...press, pointerId: 2 });
+    else drag.cancel();
+    wait.resolve(8); await tick();
+    expect(host.move).not.toHaveBeenCalled(); expect(host.end).toHaveBeenCalledWith(8);
+    expect(drag.retainsAfterStreamLoss(1, 'mouse')).toBe(false);
+    drag.cancel();
+  });
+  it('native rejection after pending stream loss never moves and clears active state', async () => {
+    const { drag, host, frames } = fixture(); let reject!: (error: Error) => void;
+    host.begin.mockReturnValueOnce(new Promise<number>((_resolve, fail) => { reject = fail; }));
+    drag.press(press); drag.move(1, -1100, 250, 1);
+    expect(drag.retainsAfterStreamLoss(1, 'mouse')).toBe(true);
+    reject(new Error('released / wrong presentation')); await tick();
+    expect(host.move).not.toHaveBeenCalled(); expect(drag.check()).toBe(false);
+    expect(frames.size).toBe(0); expect(host.active).toHaveBeenLastCalledWith(false);
   });
   it.each(['hidden', 'epoch', 'blur'] as const)('stream loss cannot retain after %s', async reason => {
     const { drag, host, hide, change } = fixture();

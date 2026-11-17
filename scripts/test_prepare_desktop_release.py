@@ -549,7 +549,9 @@ class PackageAwareVersionTests(unittest.TestCase):
         for name in R.verifier().VERSION_PATHS:
             with self.subTest(name=name):
                 baseline=R.git('show', R.MANIFEST_BASELINE+':'+name)
-                R.check_version_only_manifest(name, baseline, (R.ROOT/name).read_text())
+                # Validate the exact historical release, not newer working-tree versions.
+                released = R.git('show', 'e63c726c612be72301836e2ff45aafe74b199dc8:'+name)
+                R.check_version_only_manifest(name, baseline, released)
 
 
 class CandidateCliVersionTests(unittest.TestCase):

@@ -1205,15 +1205,15 @@ try {
   assert.equal(await page.evaluate(() => window.__qa.hideCalls), 0);
   await page.locator('#source-text').fill(Array(30).fill('A line for automatic height.').join('\n'));
   const tallSourceShell = await page.locator('.app-shell').evaluate((element) => element.getBoundingClientRect().height);
-  // The editor grows past one line for a long selection, then stops at 180px and scrolls.
+  // Long source expands past the old cap without its own scrolling.
   assert.ok(await page.locator('#source-text').evaluate((element) => {
     const height = element.getBoundingClientRect().height;
-    return height > 100 && height <= 180;
+    return height > 180 && element.scrollHeight <= element.clientHeight + 1 && getComputedStyle(element).overflowY === 'hidden';
   }));
   assert.equal(await page.locator('#translate-button').isEnabled(), true);
   await page.locator('#source-text').fill('');
   assert.ok(await page.locator('.app-shell').evaluate((element, tall) => element.getBoundingClientRect().height < tall - 40, tallSourceShell));
-  assert.ok(await page.locator('#source-text').evaluate((element) => element.getBoundingClientRect().height >= 44));
+  assert.ok(await page.locator('#source-text').evaluate((element) => element.getBoundingClientRect().height <= 26));
 
   // A blocked screenshot is an atomic source event: its persistent guidance is
   // prepared before the native popup is shown. Receiving it is always passive.
@@ -2249,7 +2249,7 @@ try {
   // Captured text is cleaned before display AND API submission, while manual
   // input and explicit restoration retain their intentional line breaks.
   const captured = 'This paragraph uses a deliberately long first line copied from a PDF viewer\nand continues on the following visual line without starting a paragraph.\n\nSecond paragraph remains separate.';
-  const cleaned = captured.replace('viewer\nand', 'viewer and');
+  const cleaned = captured.replace('viewer\nand', 'viewer and').replace('\n\n', '\n');
   const beforeCapture = await page.evaluate(() => window.__qa.translationRequests.length);
   await page.evaluate((text) => window.__qa.emit('source-text', { text, mode: 'translate' }), captured);
   await page.waitForFunction((length) => window.__qa.translationRequests.length === length + 1, beforeCapture);
@@ -2266,6 +2266,10 @@ try {
   await page.waitForFunction((length) => window.__qa.translationRequests.length === length + 3, beforeCapture);
   assert.equal(await page.evaluate(() => window.__qa.translationRequests.at(-1).text), captured);
   assert.equal(await page.locator('#restore-original-breaks').isHidden(), true);
+
+  const ocrLines = '甲。\n　\n\n乙。\n\n\n丙。';
+  await page.evaluate(text => window.__qa.emit('source-text', { text, mode: 'ocr' }), ocrLines);
+  await page.waitForFunction(() => document.querySelector('#source-text').value === '甲。\n乙。\n丙。');
 
   // New shortcuts suspend, rather than close or block on, a live credential draft.
   await goView('settings');
@@ -3765,10 +3769,11 @@ try {
     assert.equal(await page.evaluate(() => window.__qa.copies.length), diagnosticBefore.copies + 2);
     await goView('translate');
     const preservedText = '中文段落保留原有换行，输入和译文使用相同的阅读对齐方式。\n\nconst values = [1, 2, 3];\n  return values.map(value => value + 1);\nhttps://example.invalid/' + 'LongEnglishIdentifier'.repeat(16);
+    const compactPreserved = preservedText.replace('\n\n', '\n');
     await page.evaluate((text) => { window.__qa.translationResultText = text; }, preservedText);
     await page.locator('#source-text').fill(preservedText);
     await page.locator('#source-text').press('Enter');
-    await page.waitForFunction((text) => document.querySelector('.result-text')?.textContent === text, preservedText);
+    await page.waitForFunction((text) => document.querySelector('.result-text')?.textContent === text, compactPreserved);
     assert.equal(await page.locator('#source-text').inputValue(), preservedText);
     const alignment = await page.evaluate(() => {
       const read = (element) => {
@@ -3787,46 +3792,20 @@ try {
     assert.equal(alignment.actions.includes('justify'), false);
     await page.locator('#copy-source').click();
     await page.getByRole('button', { name: '复制译文', exact: true }).click();
-    assert.deepEqual(await page.evaluate(() => window.__qa.copies.slice(-2)), [preservedText, preservedText]);
-    assert.equal(await page.locator('.result-paragraph-break').count(), 0, 'indented literal text keeps original whitespace geometry');
+    assert.deepEqual(await page.evaluate(() => window.__qa.copies.slice(-2)), [preservedText, compactPreserved]);
     const paragraphText = 'First paragraph with a normal line.\nSecond line remains in the paragraph.\n\n\nSecond paragraph.\n\n- List one\n- List two\n\n<b>Literal markup stays text.</b>';
     await page.evaluate((text) => { window.__qa.translationResultText = text; }, paragraphText);
     await page.locator('#source-text').fill(paragraphText);
     await page.locator('#source-text').press('Enter');
-    await page.waitForFunction((text) => {
-      const result = document.querySelector('.result-text');
-      return result?.textContent === text && result.dataset.paragraphLayout === 'true';
-    }, paragraphText);
-    const paragraphLayout = await page.locator('.result-text').evaluate((element) => {
-      const style = getComputedStyle(element);
-      const reference = element.cloneNode(false);
-      reference.removeAttribute('data-paragraph-spacing');
-      reference.textContent = element.textContent;
-      reference.style.cssText = `position:absolute;visibility:hidden;width:${element.getBoundingClientRect().width}px`;
-      element.parentElement.append(reference);
-      const rawHeight = reference.getBoundingClientRect().height;
-      reference.remove();
-      const selection = window.getSelection();
-      const range = document.createRange(); range.selectNodeContents(element);
-      selection.removeAllRanges(); selection.addRange(range);
-      const selected = selection.toString(); selection.removeAllRanges();
-      return { height: element.getBoundingClientRect().height, rawHeight, lineHeight: Number.parseFloat(getComputedStyle(element.querySelector('.result-text-run')).lineHeight),
-        gaps: [...element.querySelectorAll('.result-paragraph-break')].map(gap => Number.parseFloat(getComputedStyle(gap).lineHeight)),
-        inlineOnly: [...element.children].every(run => getComputedStyle(run).display === 'inline'),
-        literalMarkup: element.querySelector('b') === null, selected };
-    });
-    assert.equal(paragraphLayout.gaps.length, 3);
-    assert.ok(paragraphLayout.gaps.every(gap => gap > 0 && gap < paragraphLayout.lineHeight / 2));
-    assert.ok(paragraphLayout.height < paragraphLayout.rawHeight - paragraphLayout.lineHeight, `${platform}: paragraph gaps should reduce actual layout height`);
-    assert.equal(paragraphLayout.inlineOnly, true, 'block separators must not synthesize selection newlines');
-    assert.equal(paragraphLayout.literalMarkup, true);
-    assert.equal(paragraphLayout.selected, paragraphText, 'manual text selection retains exact provider whitespace');
+    const compactParagraph = 'First paragraph with a normal line.\nSecond line remains in the paragraph.\nSecond paragraph.\n- List one\n- List two\n<b>Literal markup stays text.</b>';
+    await page.waitForFunction(text => document.querySelector('.result-text')?.textContent === text, compactParagraph);
+    assert.equal(await page.locator('.result-text b').count(), 0, 'provider HTML remains inert plain text');
     await page.getByRole('button', { name: '复制译文', exact: true }).click();
-    assert.equal(await page.evaluate(() => window.__qa.copies.at(-1)), paragraphText);
+    assert.equal(await page.evaluate(() => window.__qa.copies.at(-1)), compactParagraph);
     assert.equal(await page.locator('#source-text').inputValue(), paragraphText);
     await page.locator('.result-card').screenshot({ path: `test-results/result-paragraph-spacing-${platform}.png` });
     // Reading density is shared across platform fonts and source/result panels.
-    // Text is never normalized to achieve visual compactness.
+    // Manual source stays literal; successful output removes empty rows.
     const densityCases = [
       { name: 'short', text: '中文与 English stay readable. Ág gjpq 中文。' },
       { name: 'paragraphs', text: `${'中文正文保持完整 English body text remains intact. '.repeat(8)}\n\n${'Second paragraph 第二段原文。 '.repeat(6)}` },
@@ -3835,22 +3814,19 @@ try {
     for (const width of [520, 1000]) {
       await page.setViewportSize({ width, height: 820 });
       for (const fixture of densityCases) {
+        const compact = fixture.text.replace(/\n{2,}/g, '\n');
         await page.evaluate(text => { window.__qa.translationResultText = text; }, fixture.text);
         await page.locator('#source-text').fill(fixture.text);
         await page.locator('#source-text').press('Enter');
-        await page.waitForFunction(text => {
-          const result = document.querySelector('.result-text');
-          return result?.textContent === text && result.dataset.paragraphLayout === 'true';
-        }, fixture.text);
+        await page.waitForFunction(text => document.querySelector('.result-text')?.textContent === text, compact);
         const geometry = await page.evaluate(() => {
           const source = document.querySelector('#source-text');
           const result = document.querySelector('.result-text');
-          const run = result.querySelector('.result-text-run') ?? result;
+          const run = result;
           const sourceStyle = getComputedStyle(source), resultStyle = getComputedStyle(run);
           const old = result.cloneNode(true);
           old.style.cssText = `position:absolute;visibility:hidden;width:${result.getBoundingClientRect().width}px`;
-          if (!old.querySelector('.result-text-run')) old.style.lineHeight = '1.75';
-          for (const textRun of old.querySelectorAll('.result-text-run')) textRun.style.lineHeight = '1.75';
+          old.style.lineHeight = '1.75';
           result.parentElement.append(old);
           const oldHeight = old.getBoundingClientRect().height; old.remove();
           const selection = window.getSelection(), range = document.createRange();
@@ -3874,12 +3850,12 @@ try {
         assert.ok(geometry.runLineHeight > geometry.fontSize, 'keep glyph ascent/descent breathing room');
         assert.ok(geometry.resultHeight < geometry.oldHeight - 1, 'actual text geometry is tighter than the old 1.75 setting');
         assert.equal(geometry.resultOverflow, false); assert.equal(geometry.sourceOverflow, false);
-        assert.equal(geometry.selected, fixture.text);
+        assert.equal(geometry.selected, compact);
         assert.equal(await page.locator('#source-text').inputValue(), fixture.text);
         await page.getByRole('button', { name: '复制译文', exact: true }).click();
         await page.getByRole('button', { name: '朗读译文', exact: true }).click();
-        assert.equal(await page.evaluate(() => window.__qa.copies.at(-1)), fixture.text);
-        assert.equal(await page.evaluate(() => window.__qa.spoken.at(-1).text), fixture.text);
+        assert.equal(await page.evaluate(() => window.__qa.copies.at(-1)), compact);
+        assert.equal(await page.evaluate(() => window.__qa.spoken.at(-1).text), compact);
       }
       await page.locator('.result-card').screenshot({ path: `test-results/reading-density-${platform}-${width}.png` });
     }
@@ -4620,6 +4596,72 @@ try {
     assert.equal(await page.locator('#free-setup-next').isEnabled(), true);
     await page.keyboard.press('Escape');
     await goView('translate');
+  }
+  // Keep the source, language controls and result card centered with a
+  // classic scrollbar, independent of the previous native window height.
+  const balanceBrowser = await chromium.launch({ headless: true, ignoreDefaultArgs: ['--hide-scrollbars'],
+    ...(process.env.ECHOLINGO_TEST_CHROMIUM ? { executablePath: process.env.ECHOLINGO_TEST_CHROMIUM } : {}) });
+  try {
+    const balance = await balanceBrowser.newPage({ viewport: { width: 700, height: 750 } });
+    await balance.goto(process.env.ECHOLINGO_TEST_URL ?? 'http://127.0.0.1:1420/');
+    await balance.addStyleTag({ content: '#view-translate::-webkit-scrollbar { width: 14px; }' });
+    const geometry = () => balance.evaluate(() => {
+      const view = document.querySelector('#view-translate');
+      const rects = ['.source-column', '.language-bar', '.result-card'].map(selector => {
+        const { left, right, width } = view.querySelector(selector).getBoundingClientRect();
+        return { left, right: window.innerWidth - right, width };
+      });
+      return { rects, gutter: view.offsetWidth - view.clientWidth, overflow: view.scrollHeight > view.clientHeight };
+    });
+    await balance.evaluate(() => {
+      const results = document.querySelector('#results');
+      results.closest('.results-column').hidden = false;
+      const card = document.createElement('div'); card.className = 'result-card';
+      const text = document.createElement('p'); text.className = 'result-text';
+      text.textContent = 'Generated layout fixture'; card.append(text); results.replaceChildren(card);
+    });
+    for (const width of [420, 700, 900]) {
+      await balance.setViewportSize({ width, height: 750 });
+      const short = await geometry();
+      assert.equal(short.overflow, false);
+      assert.ok(short.gutter >= 24, 'fixture exercises two classic scrollbar gutters');
+      await balance.locator('.result-card').evaluate(el => { el.style.minHeight = '1000px'; });
+      const tall = await geometry();
+      assert.equal(tall.overflow, true);
+      assert.deepEqual(tall.rects, short.rects, 'scrolling does not rewrap the text');
+      for (const { left, right } of tall.rects) assert.ok(Math.abs(left - right) <= 1 && left >= 10, `balanced popup margins: ${left}/${right}`);
+      await balance.locator('#view-translate').evaluate(el => { el.scrollTop = 200; });
+      assert.ok(await balance.locator('#view-translate').evaluate(el => el.scrollTop) > 0);
+      await balance.locator('.result-card').evaluate(el => { el.style.minHeight = ''; });
+    }
+    await balance.setViewportSize({ width: 700, height: 400 });
+    const generated = Array.from({ length: 36 }, (_, index) => 'Generated source line ' + (index + 1)).join('\n');
+    await balance.locator('#source-text').fill(generated);
+    const bounds = await balance.evaluate(() => {
+      const source = document.querySelector('#source-text');
+      const results = document.querySelector('#results');
+      const card = document.createElement('div'), result = document.createElement('p');
+      card.className = 'result-card'; result.className = 'result-text'; result.textContent = 'Reference translation';
+      card.append(result); results.replaceChildren(card); results.closest('.results-column').hidden = false;
+      const a = source.getBoundingClientRect(), b = result.getBoundingClientRect();
+      return { source: [a.left, a.right], result: [b.left, b.right], fullyExpanded: source.clientHeight >= source.scrollHeight - 1,
+        viewportScrolls: document.querySelector('#view-translate').scrollHeight > document.querySelector('#view-translate').clientHeight };
+    });
+    assert.deepEqual(bounds.source, bounds.result, 'editable text aligns with translated text');
+    assert.equal(bounds.fullyExpanded, true);
+    assert.equal(bounds.viewportScrolls, true);
+    assert.equal(await balance.locator('#source-text').inputValue(), generated);
+    await balance.locator('#source-text').fill('');
+    await balance.setViewportSize({ width: 640, height: 720 });
+    await balance.locator('#more-toggle').click();
+    await balance.locator('#popup-more-menu [data-view="settings"]').click();
+    assert.equal(await balance.locator('.app-footer').isHidden(), true);
+    assert.equal(await balance.locator('.settings-navigation').evaluate(el => getComputedStyle(el).borderBottomWidth), '0px');
+    assert.equal(await balance.locator('#theme-select').isVisible(), true);
+    await balance.getByRole('tab', { name: '关于与更新' }).click();
+    assert.equal(await balance.locator('#update-settings').isVisible(), true);
+  } finally {
+    await balanceBrowser.close();
   }
   console.log('PASS: macOS/Windows modal suspension presents fresh source immediately, preserves memory-only drafts, restores accessible editing, and lets submitted saves complete without focus theft or duplicate writes. Mock IPC only.');
   console.log('PASS: persistent screenshot permission guidance prepared before presentation; click-only correct pane without authorization; retained sanitized link failure and manual path; first-use pending-open help navigation/focus; 800 px light and 420 px narrow/dark screenshots; dismiss/input/quiet Alt+D/Alt+A/stale-epoch recovery; suspended-modal permission payload and granted-status clearing; backend cancellation tickets on edit/clear/stop/Escape/close/native hide; native presentation epochs cover unallocated tickets, omitted/stale hide events, reopen overtaking pending begin and stale delayed popup fitting; backend-only cancellation clears old result state; late-ticket and replacement ordering; pending-save close/reentry guard; failure unlock; blank shortcuts; duplicate rejection; no countdown; theme/favorites and history bounds; OCR dual-key bundles/protocol isolation/no plaintext settings; documented vendor presets; origin-bound saved-key indications; minimal popup/menu/automatic source height; OCR configuration/privacy; empty-selection immediate typing; persistent source copy/speech; pin edge/icon/keyboard hit areas and drag isolation; captured source editing after completion and pending cancellation/retranslation; narrow-wrap source presentation; inconsistent permission feedback; automatic/fixed targets; Enter/ShiftEnter/IME/repeat; passive permissions; real capture and translation error preservation.');
