@@ -68,8 +68,13 @@ public static class UnpackDesktop {
         var windows=AutomationElement.RootElement.FindAll(TreeScope.Children,new PropertyCondition(AutomationElement.ProcessIdProperty,pid));
         foreach(AutomationElement w in windows) {
             if(w.Current.IsOffscreen)continue;
-            var button=w.FindFirst(TreeScope.Descendants,new AndCondition(new PropertyCondition(AutomationElement.ControlTypeProperty,ControlType.Button),new PropertyCondition(AutomationElement.NameProperty,"\u6253\u5f00\u670d\u52a1\u7ba1\u7406")));
-            if(button!=null && !button.Current.IsOffscreen)return true;
+            // The default category is General. Service management now lives in
+            // Translation and must not be used as a visible startup sentinel.
+            // Require real WebView controls, not just a native window title.
+            var tab=w.FindFirst(TreeScope.Descendants,new AndCondition(new PropertyCondition(AutomationElement.ControlTypeProperty,ControlType.TabItem),new PropertyCondition(AutomationElement.NameProperty,"\u5e38\u89c4")));
+            var theme=w.FindFirst(TreeScope.Descendants,new AndCondition(new PropertyCondition(AutomationElement.ControlTypeProperty,ControlType.ComboBox),new PropertyCondition(AutomationElement.NameProperty,"\u754c\u9762\u4e3b\u9898")));
+            if(tab!=null && !tab.Current.IsOffscreen && tab.Current.IsEnabled &&
+               theme!=null && !theme.Current.IsOffscreen && theme.Current.IsEnabled)return true;
         }
         return false;
     }
