@@ -1488,6 +1488,7 @@ try {
 
   // Saving is atomic from the form's perspective: closing or submitting again
   // while the backend is pending cannot replace or close a different editor.
+  await selectSettingsCategory('translation');
   await page.getByRole('button', { name: '编辑', exact: true }).click();
   await page.locator('#provider-name').fill('QA edited fixture');
   await page.evaluate(() => { window.__qa.holdSave = true; });
@@ -1513,6 +1514,7 @@ try {
   assert.equal(await page.evaluate(() => window.__qa.saveCalls), 1);
   await page.evaluate(() => { window.__qa.holdSave = false; window.__qa.releaseSave(); });
   await page.locator('#provider-dialog').waitFor({ state: 'hidden' });
+  await selectSettingsCategory('translation');
   await page.getByRole('button', { name: '编辑', exact: true }).click();
   assert.equal(await page.locator('#provider-name').inputValue(), 'QA edited fixture');
   await page.evaluate(() => { window.__qa.failSave = true; });
@@ -1959,6 +1961,7 @@ try {
     await page.locator('#provider-dialog').waitFor({ state: 'hidden' });
     assert.deepEqual(JSON.parse(await page.evaluate(() => window.__qa.translationCredentialWrites.at(-1).key)), expected);
     const nativeRow = page.locator('#provider-list .provider-row').filter({ hasText: `QA MT ${kind}` });
+    await selectSettingsCategory('translation');
     await nativeRow.getByRole('button', { name: '编辑', exact: true }).click();
     for (const [field] of fields) assert.equal(await page.locator(`#${field}`).inputValue(), '');
     const writes = await page.evaluate(() => window.__qa.translationCredentialWrites.length);
@@ -1966,6 +1969,7 @@ try {
     await page.locator('#provider-dialog').waitFor({ state: 'hidden' });
     assert.equal(await page.evaluate(() => window.__qa.translationCredentialWrites.length), writes);
     if (kind === 'microsoft') assert.equal(await page.evaluate(() => window.__qa.settings.providers.find(item => item.kind === 'microsoft').region), 'eastasia');
+    await selectSettingsCategory('translation');
     await nativeRow.getByRole('button', { name: '编辑', exact: true }).click();
     await page.locator(`#${fields[0][0]}`).fill('qa-discard-mt-scope');
     await page.locator('#provider-preset').selectOption('openai');
@@ -1981,6 +1985,7 @@ try {
 
   // Same-origin edits preserve the saved-key indication; a cross-vendor preset
   // clears typed secrets and cannot claim that the original origin's key is valid.
+  await selectSettingsCategory('translation');
   await page.getByRole('button', { name: '编辑', exact: true }).click();
   await page.locator('#provider-url').fill('https://example.invalid/another/path');
   await page.locator('#provider-model').fill('qa-other-model');
@@ -1993,6 +1998,7 @@ try {
   await page.locator('#provider-dialog').waitFor({ state: 'hidden' });
   assert.equal(await page.evaluate(() => window.__qa.settings.providers[0].hasKey), false);
   assert.doesNotMatch(await page.locator('#provider-list').textContent(), /密钥已保存/);
+  await selectSettingsCategory('translation');
   await page.getByRole('button', { name: '编辑', exact: true }).click();
   assert.doesNotMatch(await page.locator('#provider-key').getAttribute('placeholder'), /已保存/);
   await page.locator('#cancel-provider-dialog').click();
@@ -2015,12 +2021,14 @@ try {
   assert.deepEqual(JSON.parse(await page.evaluate(() => window.__qa.credentialWrites.at(-1).key)), { apiKey: 'qa-baidu-api', secretKey: 'qa-baidu-secret' });
   assert.equal(await page.evaluate(() => window.__qa.settings.activeOcrProviderId), null);
   const afterBaidu = await page.evaluate(() => window.__qa.credentialWrites.length);
+  await selectSettingsCategory('capture');
   await page.getByRole('button', { name: '编辑 OCR QA Baidu', exact: true }).click();
   assert.equal(await page.locator('#ocr-baidu-api-key').inputValue(), '');
   assert.equal(await page.locator('#ocr-baidu-secret-key').inputValue(), '');
   await page.locator('#save-ocr-provider').click();
   await page.locator('#ocr-provider-dialog').waitFor({ state: 'hidden' });
   assert.equal(await page.evaluate(() => window.__qa.credentialWrites.length), afterBaidu);
+  await selectSettingsCategory('capture');
   await page.getByRole('button', { name: '编辑 OCR QA Baidu', exact: true }).click();
   await page.locator('#ocr-baidu-api-key').fill('discard-on-protocol-change');
   await page.locator('#ocr-provider-kind').selectOption('tencent');
@@ -2043,6 +2051,7 @@ try {
   assert.equal(await page.evaluate(() => window.__qa.settings.ocrProviders[0].region), 'ap-shanghai');
   const settingsJson = await page.evaluate(() => JSON.stringify(window.__qa.settingsWrites));
   for (const secret of ['qa-baidu-api', 'qa-baidu-secret', 'qa-tencent-id', 'qa-tencent-secret', 'qa-tencent-session', 'discard-on-protocol-change', 'qa-original-translation-key', 'qa-discard-on-vendor-change']) assert.equal(settingsJson.includes(secret), false);
+  await selectSettingsCategory('capture');
   await page.getByRole('button', { name: '删除 OCR QA Tencent', exact: true }).click();
   await page.locator('#confirm-accept').click();
   await page.waitForFunction(() => window.__qa.settings.ocrProviders.length === 0);
@@ -2056,6 +2065,7 @@ try {
   await page.locator('#active-ocr-provider').selectOption(unconfiguredId);
   await page.getByText('此 OCR 服务尚未配置完整凭据，请先编辑并保存密钥。').waitFor();
   assert.equal(await page.evaluate(() => window.__qa.settings.activeOcrProviderId), null);
+  await selectSettingsCategory('capture');
   await page.getByRole('button', { name: '删除 OCR QA unconfigured', exact: true }).click();
   await page.locator('#confirm-accept').click();
   await page.waitForFunction(() => window.__qa.settings.ocrProviders.length === 0);
@@ -2125,6 +2135,7 @@ try {
   await selectSettingsCategory('capture');
   await page.locator('#ocr-privacy-notice').getByText('云端 OCR 已启用', { exact: false }).waitFor();
   assert.match(await page.locator('#ocr-privacy-notice').textContent(), /ocr\.example\.invalid/);
+  await selectSettingsCategory('capture');
   await page.getByRole('button', { name: '编辑 OCR QA OCR gateway', exact: true }).click();
   assert.equal(await page.locator('#ocr-provider-key').inputValue(), '');
   await page.locator('#ocr-provider-template').fill('invalid JSON');
@@ -2135,6 +2146,7 @@ try {
   await page.locator('#ocr-provider-list').getByRole('button', { name: '测试连接', exact: true }).click();
   await page.getByText('QA OCR test succeeded').waitFor();
   assert.equal(await page.evaluate(() => window.__qa.ocrTestCalls), 1);
+  await selectSettingsCategory('capture');
   await page.getByRole('button', { name: '删除 OCR QA OCR gateway', exact: true }).click();
   await page.locator('#confirm-accept').click();
   await page.waitForFunction(() => window.__qa.settings.ocrProviders.length === 0 && window.__qa.settings.activeOcrProviderId === null);
@@ -2221,6 +2233,7 @@ try {
   await page.locator('#source-text').dispatchEvent('keydown', { key: 'Enter', keyCode: 13, repeat: true });
   assert.equal(await page.evaluate(() => window.__qa.translationRequests.length), emptyRequestCount + 2);
   await goView('settings');
+  await selectSettingsCategory('translation');
   await page.getByRole('button', { name: '编辑', exact: true }).click();
   await page.locator('#provider-name').press('Enter');
   await page.locator('#provider-dialog').waitFor({ state: 'hidden' });
@@ -2256,6 +2269,7 @@ try {
 
   // New shortcuts suspend, rather than close or block on, a live credential draft.
   await goView('settings');
+  await selectSettingsCategory('translation');
   await page.getByRole('button', { name: '编辑', exact: true }).click();
   await page.locator('#provider-name').fill('QA unfinished editor');
   await page.locator('#provider-key').fill('private-unsaved-draft');
@@ -2289,6 +2303,7 @@ try {
 
   // Permission guidance also presents immediately without destroying a draft.
   await goView('settings');
+  await selectSettingsCategory('translation');
   await page.getByRole('button', { name: '编辑', exact: true }).click();
   await page.locator('#provider-name').fill('QA permission capture unfinished editor');
   const beforeQueuedPermission = await page.evaluate(() => ({ requests: window.__qa.translationRequests.length, opens: window.__qa.permissionSettings.length, authorizations: window.__qa.permissionRequests.length }));
@@ -2320,6 +2335,7 @@ try {
 
   // Explicit input similarly suspends a draft, and only current intent may focus.
   await goView('settings');
+  await selectSettingsCategory('translation');
   await page.getByRole('button', { name: '编辑', exact: true }).click();
   await page.locator('#provider-name').fill('QA input unfinished editor');
   await page.evaluate(() => window.__qa.emitInputFocus());
@@ -2385,6 +2401,7 @@ try {
   await page.waitForFunction(() => window.__qa.settings.providers.some(p => p.kind === 'system' && p.enabled));
   assert.equal(await page.evaluate(() => window.__qa.settings.providers.find(p => p.id === 'qa-service').enabled), true);
   const systemRow = page.locator('.provider-row').filter({ hasText: '无需 API Key' });
+  await selectSettingsCategory('translation');
   await systemRow.getByRole('button', { name: '编辑', exact: true }).click();
   assert.equal(await page.locator('#provider-url').isVisible(), false);
   assert.equal(await page.locator('#provider-key').isVisible(), false);
@@ -2409,6 +2426,7 @@ try {
   await page.locator('#provider-dialog').waitFor({ state: 'hidden' });
   const offlineRow = page.locator('.provider-row').filter({ hasText: '本机离线翻译' });
   assert.equal(await offlineRow.getByText('内置中英模型 · 离线使用 · 无需配置').isVisible(), true);
+  await selectSettingsCategory('translation');
   await offlineRow.getByRole('button', { name: '编辑', exact: true }).click();
   assert.equal(await page.locator('#provider-preset').inputValue(), 'offline');
   await page.locator('#save-provider').click();
@@ -2992,6 +3010,7 @@ try {
   await refreshCachedSettings();
   await translationCredentialRow.getByText('· 凭据未读取', { exact: true }).waitFor();
   assert.equal(await page.evaluate(() => window.__qa.settings.providers[0].hasKey), false);
+  await selectSettingsCategory('translation');
   await translationCredentialRow.getByRole('button', { name: '编辑', exact: true }).click();
   assert.match(await page.locator('#provider-key').getAttribute('placeholder'), /尚未读取.*留空保留/);
   assert.match(await page.locator('#provider-key-help').textContent(), /打开设置不会读取.*不会删除已有凭据/);
@@ -3003,6 +3022,7 @@ try {
   await page.evaluate(() => window.__qa.setCredentialState(window.__qa.settings.providers[0], 'blocked'));
   await refreshCachedSettings();
   await translationCredentialRow.getByText('· 凭据读取受阻', { exact: true }).waitFor();
+  await selectSettingsCategory('translation');
   await translationCredentialRow.getByRole('button', { name: '编辑', exact: true }).click();
   assert.match(await page.locator('#provider-key').getAttribute('placeholder'), /读取受阻.*留空保留/);
   assert.match(await page.locator('#provider-key-help').textContent(), /测试连接.*不会删除已有凭据/);
@@ -3011,6 +3031,7 @@ try {
   assert.equal(await page.evaluate(() => window.__qa.translationRequests.length), credentialBaseline.translations);
   assert.equal(await page.evaluate(() => window.__qa.keyCalls + window.__qa.ocrKeyCalls), credentialBaseline.keyWrites);
   const readsBeforeExplicitTest = await page.evaluate(() => window.__qa.settingsReads);
+  await selectSettingsCategory('translation');
   await translationCredentialRow.getByRole('button', { name: '测试连接', exact: true }).click();
   await translationCredentialRow.getByText('· 凭据已就绪', { exact: true }).waitFor();
   assert.equal(await page.evaluate(() => window.__qa.credentialReadCalls), credentialBaseline.reads + 1);
@@ -3033,6 +3054,7 @@ try {
   await selectSettingsCategory('capture');
   await page.locator('#active-ocr-provider').selectOption(unreadOcrId);
   await page.waitForFunction((id) => window.__qa.settings.activeOcrProviderId === id, unreadOcrId);
+  await selectSettingsCategory('capture');
   await unreadOcrRow.getByRole('button', { name: '编辑 OCR QA unread native OCR', exact: true }).click();
   assert.match(await page.locator('#ocr-protocol-notice').textContent(), /尚未|不会读取系统凭据/);
   assert.match(await page.locator('#ocr-protocol-notice').textContent(), /不会删除已有凭据/);
@@ -3053,6 +3075,7 @@ try {
   assert.equal(await page.evaluate(() => window.__qa.settings.activeOcrProviderId), null);
   await page.evaluate((id) => window.__qa.setCredentialState(window.__qa.settings.ocrProviders.find(item => item.id === id), 'unloaded'), unreadOcrId);
   await refreshCachedSettings();
+  await selectSettingsCategory('capture');
   await unreadOcrRow.getByRole('button', { name: '测试连接', exact: true }).click();
   await unreadOcrRow.getByText('· 凭据已就绪', { exact: true }).waitFor();
   assert.equal(await page.evaluate(() => window.__qa.credentialReadCalls), credentialBaseline.reads + 2);
@@ -3934,6 +3957,7 @@ try {
   await successCard.getByText('Keep successful result', { exact: true }).waitFor();
   await successCard.evaluate((element) => { element.dataset.retained = 'metadata-sibling'; });
   await goView('settings');
+  await selectSettingsCategory('translation');
   await page.locator('.provider-row').filter({ hasText: 'QA retry service' }).getByRole('button', { name: '编辑', exact: true }).click();
   await page.locator('#provider-preset').selectOption('system');
   await page.locator('#provider-name').fill('Renamed system retry');

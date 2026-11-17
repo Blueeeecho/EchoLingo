@@ -9,6 +9,11 @@ try {
  await page.goto(origin); await page.locator('#more-toggle').click(); await page.locator('#popup-more-menu [data-view="settings"]').click();
  assert.equal(await page.locator('#theme-select').isVisible(),true);
  assert.equal(await page.locator('#update-settings').isVisible(),false);
+ // The persistent header shortcut jump must reveal its now-categorized target.
+ await page.locator('#open-shortcut-settings').click();
+ assert.equal(await page.locator('#shortcut-selection').isVisible(),true);
+ assert.equal(await page.locator('#shortcut-selection').evaluate(el=>document.activeElement===el),true);
+ await page.locator('[data-settings-tab="general"]').click();
  const categories=['general','translation','capture','shortcuts','permissions','about'];
  for(const width of [420,680,900]) {
   await page.setViewportSize({width,height:720});
@@ -33,5 +38,11 @@ try {
  await page.locator('[data-settings-tab="shortcuts"]').click();
  await page.locator('.management-header [data-view="translate"]').click(); await page.locator('#more-toggle').click(); await page.locator('#popup-more-menu [data-view="settings"]').click();
  assert.equal(await page.locator('#shortcuts-form').isVisible(),true);
+ // Popup service management must not land on the last visited unrelated tab.
+ await page.locator('[data-settings-tab="general"]').click();
+ await page.locator('.management-header [data-view="translate"]').click();
+ await page.locator('#popup-services summary').click();
+ await page.locator('#popup-services-list button').click();
+ assert.equal(await page.locator('#translation-settings').isVisible(),true);
  assert.deepEqual(errors,[]); console.log('PASS settings categories, narrow layout, keyboard navigation, deep links and return state (browser only).');
 } finally {await browser.close();}

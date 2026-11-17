@@ -20,13 +20,13 @@ mod screenshot;
 mod screenshot_overlay;
 mod screenshot_pins;
 mod service_links;
+mod shareable_diagnostics;
 mod shortcut_bindings;
 mod shortcut_control;
 mod shortcut_probe;
 mod source_delivery;
 mod startup_launch;
 mod startup_storage;
-mod shareable_diagnostics;
 #[cfg(test)]
 mod storage_tests;
 #[cfg(any(target_os = "macos", test))]
@@ -3313,9 +3313,14 @@ async fn diagnostics(
     value["shortcutRegistration"] = serde_json::json!(registrations);
     value["dataDirectory"] = serde_json::json!(state.data_dir.display().to_string());
     value["diagnosticsUploadsContent"] = serde_json::json!(false);
-    value["configuredOcrMode"] = serde_json::json!(if locked(&state.settings)?.active_ocr_provider_id.is_some() {
+    value["configuredOcrMode"] = serde_json::json!(if locked(&state.settings)?
+        .active_ocr_provider_id
+        .is_some()
+    {
         "cloud"
-    } else { "local" });
+    } else {
+        "local"
+    });
     // Configuration is not a claim about a previous request's network activity.
     value["ocrUploadHistory"] = serde_json::json!("notRecorded");
     value["lastTranslation"] = translation_health::snapshot();
@@ -3545,7 +3550,9 @@ fn main() {
                     validate_settings(&settings).ok()?;
                     Some(settings)
                 },
-                Settings::default, "设置文件", &mut warnings,
+                Settings::default,
+                "设置文件",
+                &mut warnings,
             )?;
             add_system_translation_option(&mut settings);
             add_offline_translation_option(&mut settings);
@@ -3554,7 +3561,9 @@ fn main() {
             let mut history: Vec<HistoryEntry> = startup_storage::load(
                 &data_dir.join("history.json"),
                 |bytes| serde_json::from_slice(bytes).ok(),
-                Vec::new, "历史文件", &mut warnings,
+                Vec::new,
+                "历史文件",
+                &mut warnings,
             )?;
             trim_history(&mut history, settings.max_history);
             let client = reqwest::Client::builder()

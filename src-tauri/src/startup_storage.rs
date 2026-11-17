@@ -33,13 +33,15 @@ fn load_with<T>(
     let bytes = match read {
         Ok(bytes) => bytes,
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(default()),
-        Err(error) => return Err(io::Error::new(
-            error.kind(),
-            format!(
+        Err(error) => {
+            return Err(io::Error::new(
+                error.kind(),
+                format!(
                 "{label}无法读取（{:?}）；为保护原文件，未使用默认值覆盖，请检查数据目录权限后重试",
                 error.kind()
             ),
-        )),
+            ))
+        }
     };
     if let Some(value) = decode(&bytes) {
         return Ok(value);

@@ -1102,7 +1102,7 @@ function renderPopupServices(): void {
     label.append(checkbox, node('span', '', provider.name)); list.append(label);
   }
   const manage = node('button', 'text-button', '管理翻译服务'); manage.type = 'button';
-  manage.addEventListener('click', () => setView('settings')); list.append(manage);
+  manage.addEventListener('click', () => { setView('settings'); selectSettingsCategory('translation'); }); list.append(manage);
   renderEngineStatus();
   notifyLayout();
 }

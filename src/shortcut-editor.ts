@@ -1,3 +1,4 @@
+import { revealSettingsTarget } from './settings-navigation';
 import { recordingAvailabilityNote } from './shortcut-guidance';
 import { displayShortcut, normalizeShortcut, normalizeShortcuts, recordedMouseShortcut, recordedShortcut } from './shortcuts';
 import type { ShortcutAction, ShortcutRegistration } from './types';
@@ -43,8 +44,8 @@ export function createShortcutEditor(context: Context) {
   let auxclickTimer: ReturnType<typeof setTimeout> | undefined;
   const inputs = new Map<ShortcutAction, HTMLInputElement>(), buttons = new Map<ShortcutAction, HTMLButtonElement>();
   const registrationNotes = new Map<ShortcutAction, HTMLElement>();
-  const jump = document.createElement('button'); jump.type = 'button'; jump.className = 'secondary-button'; jump.textContent = '快捷键设置';
-  jump.addEventListener('click', () => { const input = inputs.get('selection'); input?.scrollIntoView({ block: 'center' }); input?.focus({ preventScroll: true }); });
+  const jump = document.createElement('button'); jump.type = 'button'; jump.className = 'secondary-button'; jump.id = 'open-shortcut-settings'; jump.textContent = '快捷键设置';
+  jump.addEventListener('click', () => { const input = inputs.get('selection'); revealSettingsTarget(input ?? null); input?.scrollIntoView({ block: 'center' }); input?.focus({ preventScroll: true }); });
   document.querySelector('#view-settings .section-heading')?.append(jump);
   const feedback = document.createElement('p'); feedback.className = 'shortcut-feedback'; feedback.id = 'shortcut-feedback';
   feedback.setAttribute('role', 'status'); feedback.setAttribute('aria-live', 'polite');
