@@ -3000,14 +3000,17 @@ try {
     translations: window.__qa.translationRequests.length, translationTests: window.__qa.translationTestCalls,
     ocrTests: window.__qa.ocrTestCalls, keyWrites: window.__qa.keyCalls + window.__qa.ocrKeyCalls,
     providerName: window.__qa.settings.providers[0].name }));
-  const refreshCachedSettings = async () => {
+  const refreshCachedSettings = async (category) => {
     await selectSettingsCategory('general');
     await page.locator('#save-history').setChecked(!await page.locator('#save-history').isChecked());
     await page.waitForFunction(() => window.__qa.settings.saveHistory === document.querySelector('#save-history').checked);
+    // Refresh through General, then observe the credential in its real panel.
+    // A visible-state assertion must not wait on an intentionally hidden tab.
+    await selectSettingsCategory(category);
   };
   const translationCredentialRow = page.locator('#provider-list .provider-row').filter({ has: page.locator('.provider-title', { hasText: credentialBaseline.providerName }) });
   await page.evaluate(() => window.__qa.setCredentialState(window.__qa.settings.providers[0], 'unloaded'));
-  await refreshCachedSettings();
+  await refreshCachedSettings('translation');
   await translationCredentialRow.getByText('· 凭据未读取', { exact: true }).waitFor();
   assert.equal(await page.evaluate(() => window.__qa.settings.providers[0].hasKey), false);
   await selectSettingsCategory('translation');
@@ -3020,7 +3023,7 @@ try {
   assert.doesNotMatch(await page.locator('#provider-key').getAttribute('placeholder'), /尚未读取|已保存/);
   await page.locator('#cancel-provider-dialog').click();
   await page.evaluate(() => window.__qa.setCredentialState(window.__qa.settings.providers[0], 'blocked'));
-  await refreshCachedSettings();
+  await refreshCachedSettings('translation');
   await translationCredentialRow.getByText('· 凭据读取受阻', { exact: true }).waitFor();
   await selectSettingsCategory('translation');
   await translationCredentialRow.getByRole('button', { name: '编辑', exact: true }).click();
@@ -3048,7 +3051,7 @@ try {
     const provider = window.__qa.settings.ocrProviders.find(item => item.name === 'QA unread native OCR');
     window.__qa.setCredentialState(provider, 'unloaded'); return provider.id;
   });
-  await refreshCachedSettings();
+  await refreshCachedSettings('capture');
   const unreadOcrRow = page.locator('#ocr-provider-list .provider-row').filter({ hasText: 'QA unread native OCR' });
   await unreadOcrRow.getByText('· 凭据未读取', { exact: true }).waitFor();
   await selectSettingsCategory('capture');
@@ -3067,14 +3070,14 @@ try {
   await page.locator('#active-ocr-provider').selectOption('');
   await page.waitForFunction(() => window.__qa.settings.activeOcrProviderId === null);
   await page.evaluate((id) => window.__qa.setCredentialState(window.__qa.settings.ocrProviders.find(item => item.id === id), 'missing'), unreadOcrId);
-  await refreshCachedSettings();
+  await refreshCachedSettings('capture');
   await unreadOcrRow.getByText('· 未配置凭据', { exact: true }).waitFor();
   await selectSettingsCategory('capture');
   await page.locator('#active-ocr-provider').selectOption(unreadOcrId);
   await page.getByText('此 OCR 服务尚未配置完整凭据，请先编辑并保存密钥。', { exact: true }).waitFor();
   assert.equal(await page.evaluate(() => window.__qa.settings.activeOcrProviderId), null);
   await page.evaluate((id) => window.__qa.setCredentialState(window.__qa.settings.ocrProviders.find(item => item.id === id), 'unloaded'), unreadOcrId);
-  await refreshCachedSettings();
+  await refreshCachedSettings('capture');
   await selectSettingsCategory('capture');
   await unreadOcrRow.getByRole('button', { name: '测试连接', exact: true }).click();
   await unreadOcrRow.getByText('· 凭据已就绪', { exact: true }).waitFor();
@@ -3887,6 +3890,7 @@ try {
   await page.goto(process.env.ECHOLINGO_TEST_URL ?? 'http://127.0.0.1:1420/');
   await page.waitForFunction(() => document.querySelector('#footer-status')?.textContent === '准备就绪');
   await goView('settings');
+  await selectSettingsCategory('shortcuts');
   assert.equal(await page.locator('#windows-selection-settings').isHidden(), true);
   assert.deepEqual(errors, []);
   console.log('PASS: isolated Windows strategy settings default compatibility for old payloads; strict and copy save without changing providers/shortcuts/theme, navigation retains strict, failed save rolls back, and macOS hides the setting. Fake IPC only.');
