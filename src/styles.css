@@ -452,9 +452,9 @@ body[data-popup-focus-managed="true"] :is(.popup-toolbar, .management-header) > 
 :root[data-platform="macos"] body[data-view="translate"] { --popup-toolbar-height: 28px; }
 :root[data-platform="macos"] body[data-view="translate"] .popup-toolbar { height: var(--popup-toolbar-height); }
 :root[data-platform="macos"] body[data-view="translate"] .popup-toolbar > .icon-button { height: 28px; }
-:root[data-platform="macos"] body[data-view="translate"] main { padding-inline: 4px; }
-:root[data-platform="macos"] body[data-view="translate"] .language-bar { min-height: 27px; padding-block: 1px; }
-:root[data-platform="macos"] body[data-view="translate"] .view { max-height: calc(100vh - var(--popup-toolbar-height) - 12px); scrollbar-width: none; scrollbar-gutter: auto; padding-inline: 0; }
+:root[data-platform="macos"] body[data-view="translate"] main { padding: 6px 8px 8px; }
+:root[data-platform="macos"] body[data-view="translate"] .language-bar { min-height: 28px; margin-top: 8px; padding: 1px 10px; border: 1px solid var(--border); border-radius: 6px; background: var(--surface-soft); }
+:root[data-platform="macos"] body[data-view="translate"] .view { max-height: calc(100vh - var(--popup-toolbar-height) - 14px); scrollbar-width: none; scrollbar-gutter: auto; padding-inline: 0; }
 :root[data-platform="macos"] body[data-view="translate"] .view::-webkit-scrollbar { display: none; }
 :root[data-platform="macos"] body[data-view="translate"] .popup-resize-edge:is([data-window-resize="west"], [data-window-resize="east"]) { top: var(--popup-toolbar-height); width: 8px; }
 

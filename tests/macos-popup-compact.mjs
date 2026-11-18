@@ -16,13 +16,13 @@ try {
   });
   const geometry = () => page.evaluate(() => {
     const rect = selector => { const r = document.querySelector(selector).getBoundingClientRect(); return { left: r.left, right: innerWidth-r.right, width: r.width, height:r.height }; };
-    return { header:rect('.popup-toolbar'), source:rect('.source-column'), result:rect('.result-card'),
+    return { header:rect('.popup-toolbar'), source:rect('.source-column'), language:rect('.language-bar'), result:rect('.result-card'),
       sourceFont:getComputedStyle(document.querySelector('#source-text')).fontSize,resultFont:getComputedStyle(document.querySelector('.result-text')).fontSize,
       gutter:document.querySelector('#view-translate').offsetWidth-document.querySelector('#view-translate').clientWidth };
   });
   const short = await geometry();
-  assert.equal(short.header.height,28); assert.equal(short.source.left,4);assert.equal(short.source.right,4);
-  assert.deepEqual([short.result.left,short.result.right],[4,4]);assert.equal(short.gutter,0);
+  assert.equal(short.header.height,28); assert.equal(short.source.left,8);assert.equal(short.source.right,8);
+  assert.deepEqual([short.result.left,short.result.right],[8,8]);assert.equal(short.gutter,0);assert.deepEqual([short.language.left,short.language.right],[8,8]);
   assert.deepEqual([short.sourceFont,short.resultFont],['14px','14px']);
   for (const side of ['west','east']) for (const inset of [1,2]) {
     assert.equal(await page.evaluate(({side,inset}) => document.elementFromPoint(side==='west'?inset:innerWidth-inset,30)?.getAttribute('data-window-resize'),{side,inset}),side);
@@ -42,5 +42,16 @@ try {
   await page.keyboard.press('Home');
   await mkdir('test-results',{recursive:true});await page.screenshot({path:'test-results/macos-popup-compact-520.png'});
   await page.setViewportSize({width:760,height:550});await page.screenshot({path:'test-results/macos-popup-compact-760.png'});
-  console.log(JSON.stringify({ok:true,outerInset:4,toolbar:28,resizeTarget:8,scrollbarSeparate:true,fontsUnchanged:true,physicalMac:false}));
+  for (const width of [420,680,900]) {
+    await page.setViewportSize({width,height:550});
+    for (const length of ['short','long']) {
+      await page.locator('.result-text').evaluate((el,length) => { el.textContent = length === 'short' ? '用于验证对齐与留白的中性短句。' : 'A neutral generated paragraph. 中性示例文本。\n'.repeat(60); },length);
+      await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+      const current = await geometry();
+      assert.deepEqual([current.source.left,current.source.right,current.result.left,current.result.right],[8,8,8,8]);
+      assert.deepEqual([current.sourceFont,current.resultFont],['14px','14px']);
+      await page.screenshot({path:`test-results/macos-popup-${length}-${width}.png`});
+    }
+  }
+  console.log(JSON.stringify({ok:true,outerInset:8,toolbar:28,resizeTarget:8,scrollbarSeparate:true,fontsUnchanged:true,physicalMac:false}));
 } finally {await browser.close();}
