@@ -221,6 +221,39 @@ jobs:
           path: |
             ${{ runner.temp }}/echolingo-offline-validation.json
             ${{ runner.temp }}/echolingo-installed-screenshot-editor.log
+      - name: Hash failed Windows package bytes without accepting them
+        if: failure() && runner.os == 'Windows'
+        shell: bash
+        run: |
+          python - <<'PYHASH'
+          import hashlib, json, os, subprocess
+          from pathlib import Path
+          package = Path(os.environ['RUNNER_TEMP'])/'desktop-package'
+          package.mkdir(exist_ok=True)
+          files = sorted(package.glob('*.exe')) + [Path('src-tauri/target/release/echolingo.exe')]
+          identities = []
+          for path in files:
+              if not path.is_file():
+                  continue
+              with path.open('rb') as stream:
+                  sha = hashlib.file_digest(stream, 'sha256').hexdigest()
+              identities.append({'name': path.name, 'bytes': path.stat().st_size, 'sha256': sha})
+          report = {'sourceCommit': subprocess.check_output(['git','rev-parse','HEAD'],text=True).strip(),
+                    'accepted': False, 'purpose': 'failure-diagnosis-only', 'files': identities}
+          (package/'FAILED-PACKAGE-SHA256.json').write_text(json.dumps(report,indent=2)+'\n',encoding='utf-8')
+          PYHASH
+      - name: Preserve failed Windows package bytes for diagnosis only
+        if: failure() && runner.os == 'Windows'
+        uses: actions/upload-artifact@v4
+        with:
+          name: Desktop-021-failed-package-not-accepted
+          if-no-files-found: warn
+          path: |
+            ${{ runner.temp }}/desktop-package/*.exe
+            ${{ runner.temp }}/desktop-package/candidate.json
+            ${{ runner.temp }}/desktop-package/candidate.json.sha256
+            ${{ runner.temp }}/desktop-package/FAILED-PACKAGE-SHA256.json
+            src-tauri/target/release/echolingo.exe
       - name: Accept extracted Mac bundle and native regression fixtures
         if: runner.os == 'macOS'
         timeout-minutes: 12
