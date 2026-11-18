@@ -59,7 +59,7 @@ private func routeCallback(_ context: UnsafeMutableRawPointer?, _ action: Int32,
             let held = token
             for index in 1...5 {
                 javascript("document.getElementById('result').textContent += ' Neutral streamed result.'")
-                observer.configure(revision: UInt64(serial*10+index), epoch: epoch, region: NSRect(x: 40, y: 0, width: 400, height: 28), viewport: web.bounds.size)
+                observer.configure(revision: serial * 10 + UInt64(index), epoch: epoch, region: NSRect(x: 40, y: 0, width: 400, height: 28), viewport: web.bounds.size)
                 physical.pointer.x += 12
                 RunLoop.main.run(until: Date().addingTimeInterval(0.025))
                 precondition(token == held)
