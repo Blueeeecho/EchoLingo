@@ -195,5 +195,5 @@ try {
   await page.evaluate(()=>window.__resizeQA.layout.dispose());
   assert.equal(await page.evaluate(() => window.__resizeQA.commands.some(command => /show|focus|hide|drag$/.test(command))), false, 'Real modal layout/resize must not initiate any drag or presentation operation.');
   assert.deepEqual(errors,[]);
-  console.log(JSON.stringify({ok:true,scope:'real browser pointer capture + production CSS/layout; mocked native IPC only',managementDirections:8,managementModalDirections:8,popupEdgeLogicalPixels:10,physicalPlatformAcceptance:false}));
+  console.log(JSON.stringify({ok:true,scope:'real browser pointer capture + production CSS/layout; mocked native IPC only',managementDirections:8,managementModalDirections:8,popupEdgeLogicalPixels:8,physicalPlatformAcceptance:false}));
 } finally { await browser.close(); }
