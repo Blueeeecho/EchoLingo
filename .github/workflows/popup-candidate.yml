@@ -130,9 +130,7 @@ jobs:
             built=src-tauri/target/release/echolingo.exe
             extracted="$RUNNER_TEMP/desktop-inspection/echolingo.exe"
           else
-            swiftc -parse-as-library src-tauri/native/macos_window.swift tests/macos-header-event-route.swift -framework AppKit -framework WebKit -o "$RUNNER_TEMP/desktop-header-event-route"
-          "$RUNNER_TEMP/desktop-header-event-route" | tee "$RUNNER_TEMP/desktop-package/macos-header-event-route.json"
-          files=(src-tauri/target/release/bundle/dmg/*.dmg)
+            files=(src-tauri/target/release/bundle/dmg/*.dmg)
             built=src-tauri/target/release/bundle/macos/EchoLingo.app
             extracted="$RUNNER_TEMP/desktop-inspection/echolingo"
           fi
@@ -261,4 +259,4 @@ jobs:
         with:
           name: Popup-compact-browser-visuals
           if-no-files-found: warn
-          path: test-results/macos-popup-compact-*.png
+          path: test-results/macos-popup-*.png

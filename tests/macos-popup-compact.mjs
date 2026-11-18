@@ -42,6 +42,12 @@ try {
   await page.keyboard.press('Home');
   await mkdir('test-results',{recursive:true});await page.screenshot({path:'test-results/macos-popup-compact-520.png'});
   await page.setViewportSize({width:760,height:550});await page.screenshot({path:'test-results/macos-popup-compact-760.png'});
+  // Representative configured-content captures; earlier checks retain all setup UI.
+  await page.evaluate(() => {
+    document.querySelectorAll('.core-guidance').forEach(el => { el.hidden = true; });
+    document.body.classList.remove('source-empty');
+    document.querySelector('.popup-scroll-rail')?.blur();
+  });
   for (const width of [420,680,900]) {
     await page.setViewportSize({width,height:550});
     for (const length of ['short','long']) {

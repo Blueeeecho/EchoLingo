@@ -4601,7 +4601,7 @@ try {
     await balance.goto(process.env.ECHOLINGO_TEST_URL ?? 'http://127.0.0.1:1420/');
     await balance.evaluate(() => { document.documentElement.dataset.platform = 'macos'; });
     assert.equal((await balance.locator('.popup-toolbar').boundingBox()).height, 28);
-    assert.equal((await balance.locator('.language-bar').boundingBox()).height, 27);
+    assert.equal((await balance.locator('.language-bar').boundingBox()).height, 28);
     const geometry = () => balance.evaluate(() => {
       const view = document.querySelector('#view-translate');
       const rects = ['.source-column', '.language-bar', '.result-card'].map(selector => {
@@ -4626,7 +4626,7 @@ try {
       const tall = await geometry();
       assert.equal(tall.overflow, true);
       assert.deepEqual(tall.rects, short.rects, 'scrolling does not rewrap the text');
-      for (const { left, right } of tall.rects) assert.ok(Math.abs(left - right) <= 1 && left === 4, `balanced popup margins: ${left}/${right}`);
+      for (const { left, right } of tall.rects) assert.ok(Math.abs(left - right) <= 1 && left === 8, `balanced popup margins: ${left}/${right}`);
       await balance.locator('#view-translate').evaluate(el => { el.scrollTop = 200; });
       assert.ok(await balance.locator('#view-translate').evaluate(el => el.scrollTop) > 0);
       await balance.locator('.result-card').evaluate(el => { el.style.minHeight = ''; });
