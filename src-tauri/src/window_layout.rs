@@ -1926,7 +1926,8 @@ pub async fn configure_popup_header_drag(
                             if drag.active.is_some_and(|token| token.id == id) {
                                 drag.finish(id);
                                 drag.last_stop = reason.clamp(1, 8);
-                                let _ = window.emit("popup-native-drag-ended", epoch);
+                                let _ =
+                                    tauri::Emitter::emit(&window, "popup-native-drag-ended", epoch);
                             }
                             return 0;
                         }
