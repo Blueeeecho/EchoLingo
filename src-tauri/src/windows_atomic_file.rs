@@ -13,6 +13,19 @@ use windows::Win32::{
     Storage::FileSystem::{FileRenameInfoEx, SetFileInformationByHandle, FILE_RENAME_INFO},
 };
 
+// Serialize publication, not JSON encoding, temporary writes, or readers. Native
+// concurrent-publisher diagnostics reproduced failed opens with FILE_DELETED
+// while the directory remained alive; serialized publication avoided the race.
+// Keep the publishing handle's final close inside the same critical section.
+static PUBLICATION: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+pub fn publish(file: File, path: &Path) -> Result<(), String> {
+    let _publication = PUBLICATION.lock().map_err(|_| "本地数据发布锁不可用")?;
+    let result = replace(&file, path);
+    drop(file);
+    result
+}
+
 pub fn replace(file: &File, path: &Path) -> Result<(), String> {
     let target = std::path::absolute(path).map_err(|_| "无效本地数据路径")?;
     let name: Vec<u16> = target.as_os_str().encode_wide().collect();

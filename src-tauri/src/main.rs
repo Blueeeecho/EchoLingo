@@ -426,7 +426,7 @@ fn write_json(path: &Path, value: &impl Serialize) -> Result<(), String> {
     file.sync_all().map_err(|_| "无法同步本地数据")?;
     #[cfg(target_os = "windows")]
     {
-        windows_atomic_file::replace(&file, path)
+        windows_atomic_file::publish(file, path)
     }
     #[cfg(not(target_os = "windows"))]
     {
