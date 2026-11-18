@@ -161,6 +161,8 @@ jobs:
           "$RUNNER_TEMP/desktop-window-size"
           swiftc -parse-as-library src-tauri/native/macos_window.swift tests/macos-popup-viewport.swift -o "$RUNNER_TEMP/desktop-popup-viewport"
           "$RUNNER_TEMP/desktop-popup-viewport"
+          swiftc -parse-as-library src-tauri/native/macos_window.swift tests/macos-header-drag.swift -framework AppKit -o "$RUNNER_TEMP/desktop-header-drag"
+          "$RUNNER_TEMP/desktop-header-drag" | tee "$RUNNER_TEMP/desktop-package/macos-header-drag.json"
           files=(src-tauri/target/release/bundle/dmg/*.dmg)
           test "${#files[@]}" -eq 1
           python3 tests/macos-installed-runtime-smoke.py --expected-version 0.2.20 --installer "${files[0]}" --built-application src-tauri/target/release/bundle/macos/EchoLingo.app --output "$RUNNER_TEMP/desktop-package/macos-runtime.json" --run-url "$RUN_URL" --native-self-tests-passed --native-window-resize-fixture-passed
@@ -246,7 +248,13 @@ jobs:
           trap 'kill "$server"' EXIT
           for attempt in {1..30}; do curl -fsS http://127.0.0.1:1420/ >/dev/null && break; sleep 1; done
           status=0
-          for test in frontend-interactions window-resize-edges popup-viewport; do
+          for test in frontend-interactions window-resize-edges popup-viewport macos-popup-compact; do
             if ! node "tests/$test.mjs"; then status=1; fi
           done
           exit "$status"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: Popup-compact-browser-visuals
+          if-no-files-found: warn
+          path: test-results/macos-popup-compact-*.png

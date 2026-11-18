@@ -186,6 +186,9 @@ struct DragToken {
 struct PopupDrag {
     next_id: u64,
     active: Option<DragToken>,
+    starts: u32,
+    samples: u32,
+    last_stop: i32,
 }
 #[cfg(any(target_os = "macos", test))]
 impl PopupDrag {
@@ -1469,9 +1472,13 @@ pub fn cancel_stale_native_layout(app: &tauri::AppHandle) {
         };
         unsafe extern "C" {
             fn echolingo_cancel_stale_resize_wait(window: *mut std::ffi::c_void, epoch: u64);
+            fn echolingo_cancel_stale_header_drag(window: *mut std::ffi::c_void, epoch: u64, presented: i32);
         }
         // Read the current epoch when executing, not an older queued announcement.
-        unsafe { echolingo_cancel_stale_resize_wait(native, current.epoch) };
+        unsafe {
+            echolingo_cancel_stale_resize_wait(native, current.epoch);
+            echolingo_cancel_stale_header_drag(native, current.epoch, i32::from(current.presented));
+        };
     });
 }
 
@@ -1830,127 +1837,87 @@ fn mac_drag_operation(
     }
 }
 
+// The only WebView command configures a blank-header region. It cannot start,
+// move or finish a gesture: the original local NSEvent establishes ownership.
 #[tauri::command]
-pub async fn begin_popup_drag(
-    window: WebviewWindow,
-    presentation_epoch: u64,
-    anchor_x: f64,
-    anchor_y: f64,
-) -> Result<u64, String> {
+pub async fn configure_popup_header_drag(
+    window: WebviewWindow, revision: u64, presentation_epoch: u64,
+    x: f64, y: f64, width: f64, height: f64, viewport_width: f64, viewport_height: f64,
+) -> Result<(), String> {
     #[cfg(not(target_os = "macos"))]
-    {
-        let _ = (window, presentation_epoch, anchor_x, anchor_y);
-        Err("此平台无需自定义拖动".into())
-    }
+    { let _ = (window, revision, presentation_epoch, x, y, width, height, viewport_width, viewport_height); Ok(()) }
     #[cfg(target_os = "macos")]
     {
-        let app = window.app_handle().clone();
+        if ![x,y,width,height,viewport_width,viewport_height].iter().all(|v| v.is_finite())
+            || revision == 0 || x < 0.0 || y < 0.0 || width < 0.0 || height < 0.0
+            || viewport_width <= 0.0 || viewport_height <= 0.0 || viewport_width > MAX_INPUT_DIMENSION
+            || viewport_height > MAX_INPUT_DIMENSION || x + width > viewport_width || y + height > 32.0
+            || (width > 0.0 && (x < 32.0 || x + width > viewport_width - 64.0)) {
+            return Err("无效的顶栏区域".into());
+        }
         let (reply, result) = tokio::sync::oneshot::channel();
-        app.run_on_main_thread(move || {
+        let dispatcher = window.app_handle().clone();
+        dispatcher.run_on_main_thread(move || {
             let operation = (|| {
-                let state = window.state::<LayoutState>();
-                let current = window
-                    .state::<crate::AppState>()
-                    .translation_requests
-                    .presentation()?;
-                if window.label() != "main"
-                    || !resize_allowed(
-                        presentation_epoch,
-                        current,
-                        state.is_popup(),
-                        window.is_visible().unwrap_or(false),
-                    )
-                {
+                let current = window.state::<crate::AppState>().translation_requests.presentation()?;
+                if window.label() != "main" || current.epoch != presentation_epoch {
                     return Err(crate::translation_requests::CANCELLED.into());
+                }
+                let enabled = window.state::<LayoutState>().is_popup() && width > 0.0 && height > 0.0;
+                unsafe extern "C" fn callback(context: *mut std::ffi::c_void, action: i32,
+                    epoch: u64, id: u64, press: u64, x: f64, y: f64, reason: i32) -> u64 {
+                    let app = unsafe { &*context.cast::<tauri::AppHandle>() };
+                    let Some(window) = app.get_webview_window("main") else { return 0; };
+                    let state = app.state::<LayoutState>();
+                    let Ok(mut drag) = state.popup_drag.lock() else { return 0; };
+                    if action == 2 {
+                        if drag.active.is_some_and(|token| token.id == id) {
+                            drag.finish(id);
+                            drag.last_stop = reason.clamp(1, 8);
+                            let _ = window.emit("popup-native-drag-ended", epoch);
+                        }
+                        return 0;
+                    }
+                    let Ok(current) = app.state::<crate::AppState>().translation_requests.presentation() else { return 0; };
+                    if !resize_allowed(epoch, current, state.is_popup(), window.is_visible().unwrap_or(false)) { return 0; }
+                    if action == 0 {
+                        drag.starts = drag.starts.saturating_add(1).min(1_000_000);
+                        return drag.begin(epoch, (x,y), press).id;
+                    }
+                    if action == 1 && drag.active.is_some_and(|token| token.id == id && token.epoch == epoch) {
+                        drag.samples = drag.samples.saturating_add(1).min(1_000_000);
+                        return 1;
+                    }
+                    0
+                }
+                unsafe extern "C" fn release(context: *mut std::ffi::c_void) {
+                    drop(unsafe { Box::from_raw(context.cast::<tauri::AppHandle>()) });
                 }
                 unsafe extern "C" {
-                    fn echolingo_popup_drag_press_identity() -> u64;
+                    fn echolingo_configure_header_drag(window: *mut std::ffi::c_void, revision: u64, epoch: u64,
+                        x: f64, y: f64, width: f64, height: f64, viewport_width: f64, viewport_height: f64,
+                        callback: unsafe extern "C" fn(*mut std::ffi::c_void, i32, u64, u64, u64, f64, f64, i32) -> u64,
+                        release: unsafe extern "C" fn(*mut std::ffi::c_void), context: *mut std::ffi::c_void) -> i32;
                 }
-                // SAFETY: read-only event counters; no hooks, event posting or permissions.
-                let press_identity = unsafe { echolingo_popup_drag_press_identity() };
-                mac_drag_operation(&window, (anchor_x, anchor_y), press_identity, true)?;
-                let token = state
-                    .popup_drag
-                    .lock()
-                    .map_err(|_| "窗口拖动状态异常")?
-                    .begin(presentation_epoch, (anchor_x, anchor_y), press_identity);
-                Ok(token.id)
+                let native = window.ns_window().map_err(|_| "窗口不可用")?;
+                let context = Box::into_raw(Box::new(window.app_handle().clone())).cast();
+                let status = unsafe { echolingo_configure_header_drag(native, revision, presentation_epoch,
+                    x, y, if enabled { width } else { 0.0 }, height, viewport_width, viewport_height, callback, release, context) };
+                if status != 0 { unsafe { release(context) }; return Err("无法配置顶栏拖动".into()); }
+                Ok(())
             })();
             let _ = reply.send(operation);
-        })
-        .map_err(|_| "无法开始拖动窗口")?;
-        result.await.map_err(|_| "窗口拖动已中断".to_string())?
+        }).map_err(|_| "无法配置顶栏拖动")?;
+        result.await.map_err(|_| "顶栏配置已中断".to_string())?
     }
 }
-#[tauri::command]
-pub async fn move_popup_drag(window: WebviewWindow, drag_id: u64) -> Result<(), String> {
-    #[cfg(not(target_os = "macos"))]
-    {
-        let _ = (window, drag_id);
-        Err("此平台无需自定义拖动".into())
-    }
-    #[cfg(target_os = "macos")]
-    {
-        let app = window.app_handle().clone();
-        let (reply, result) = tokio::sync::oneshot::channel();
-        app.run_on_main_thread(move || {
-            let operation = (|| {
-                let state = window.state::<LayoutState>();
-                let mut drag = state.popup_drag.lock().map_err(|_| "窗口拖动状态异常")?;
-                let Some(token) = drag.active.filter(|token| token.id == drag_id) else {
-                    return Err(crate::translation_requests::CANCELLED.into());
-                };
-                let current = window
-                    .state::<crate::AppState>()
-                    .translation_requests
-                    .presentation()?;
-                if window.label() != "main"
-                    || !resize_allowed(
-                        token.epoch,
-                        current,
-                        state.is_popup(),
-                        window.is_visible().unwrap_or(false),
-                    )
-                {
-                    drag.finish(drag_id);
-                    return Err(crate::translation_requests::CANCELLED.into());
-                }
-                let outcome =
-                    mac_drag_operation(&window, token.anchor, token.press_identity, false);
-                if outcome.is_err() {
-                    drag.finish(drag_id);
-                }
-                outcome
-            })();
-            let _ = reply.send(operation);
-        })
-        .map_err(|_| "无法移动窗口")?;
-        result.await.map_err(|_| "窗口拖动已中断".to_string())?
-    }
-}
-#[tauri::command]
-pub async fn end_popup_drag(window: WebviewWindow, drag_id: u64) -> Result<(), String> {
-    #[cfg(not(target_os = "macos"))]
-    {
-        let _ = (window, drag_id);
-        Ok(())
-    }
-    #[cfg(target_os = "macos")]
-    {
-        let app = window.app_handle().clone();
-        let (reply, result) = tokio::sync::oneshot::channel();
-        app.run_on_main_thread(move || {
-            let outcome = window
-                .state::<LayoutState>()
-                .popup_drag
-                .lock()
-                .map_err(|_| "窗口拖动状态异常".to_string())
-                .map(|mut drag| drag.finish(drag_id));
-            let _ = reply.send(outcome);
-        })
-        .map_err(|_| "无法结束拖动窗口")?;
-        result.await.map_err(|_| "窗口拖动已中断".to_string())?
-    }
+#[cfg(target_os = "macos")]
+pub fn popup_drag_diagnostics(state: &LayoutState) -> serde_json::Value {
+    let Ok(drag) = state.popup_drag.lock() else { return serde_json::json!({"available": false}); };
+    let reason = match drag.last_stop { 1 => "released", 2 => "replaced", 3 => "presentation",
+        4 => "hidden", 5 => "disabled", 6 => "closed", 7 => "escape", 8 => "invalidFrame", _ => "none" };
+    serde_json::json!({"owner":"localAppKit", "active":drag.active.is_some(), "starts":drag.starts,
+        "samples":drag.samples, "lastStopReason":reason, "containsContent":false})
 }
 
 #[derive(Clone, Copy, PartialEq)]

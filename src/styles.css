@@ -449,11 +449,17 @@ body[data-popup-focus-managed="true"] :is(.popup-toolbar, .management-header) > 
 #screenshot-settings .preference-row > button { flex-shrink: 0; }
 
 /* Mac translation popup: keep type size and aligned text insets unchanged. */
-:root[data-platform="macos"] body[data-view="translate"] { --popup-toolbar-height: 30px; }
+:root[data-platform="macos"] body[data-view="translate"] { --popup-toolbar-height: 28px; }
 :root[data-platform="macos"] body[data-view="translate"] .popup-toolbar { height: var(--popup-toolbar-height); }
 :root[data-platform="macos"] body[data-view="translate"] .popup-toolbar > .icon-button { height: 28px; }
-:root[data-platform="macos"] body[data-view="translate"] main { padding-inline: 8px; }
+:root[data-platform="macos"] body[data-view="translate"] main { padding-inline: 4px; }
 :root[data-platform="macos"] body[data-view="translate"] .language-bar { min-height: 27px; padding-block: 1px; }
-:root[data-platform="macos"] body[data-view="translate"] .view { max-height: calc(100vh - var(--popup-toolbar-height) - 12px); scrollbar-width: thin; }
-:root[data-platform="macos"] body[data-view="translate"] .view::-webkit-scrollbar { width: 6px; }
+:root[data-platform="macos"] body[data-view="translate"] .view { max-height: calc(100vh - var(--popup-toolbar-height) - 12px); scrollbar-width: none; scrollbar-gutter: auto; padding-inline: 0; }
+:root[data-platform="macos"] body[data-view="translate"] .view::-webkit-scrollbar { display: none; }
 :root[data-platform="macos"] body[data-view="translate"] .popup-resize-edge:is([data-window-resize="west"], [data-window-resize="east"]) { top: var(--popup-toolbar-height); width: 8px; }
+
+.popup-scroll-rail { position: fixed; z-index: 25; right: 8px; width: 4px; touch-action: none; user-select: none; border-radius: 2px; }
+.popup-scroll-thumb { width: 100%; background: var(--muted); opacity: .45; border-radius: 2px; }
+.popup-scroll-rail:hover .popup-scroll-thumb, .popup-scroll-rail:focus-visible .popup-scroll-thumb { opacity: .85; }
+:root[data-platform="macos"] body[data-view="translate"] .translate-trigger { right: 12px; }
+:root[data-platform="macos"] body[data-view="translate"] .language-bar { padding-right: 12px; }

@@ -126,6 +126,153 @@ public func echoLingoPopupDrag(_ pointer: UnsafeMutableRawPointer?, _ anchorX: D
     return 0
 }
 
+// Header-only ownership is established from the original local AppKit event,
+// before WebKit can delay or suppress a DOM event. No global monitor/tap/posting.
+enum HeaderDragStop: Int32 { case released = 1, replaced, presentation, hidden, disabled, closed, escape, invalidFrame }
+struct HeaderDragMachine {
+    var id: UInt64 = 0
+    var epoch: UInt64 = 0
+    var press: UInt64 = 0
+    var anchor = NSPoint.zero
+    var origin = NSPoint.zero
+    var crossed = false
+    mutating func arm(id: UInt64, epoch: UInt64, press: UInt64, anchor: NSPoint, pointer: NSPoint) {
+        self.id = id; self.epoch = epoch; self.press = press
+        self.anchor = anchor; origin = pointer; crossed = false
+    }
+    func stopReason(leftDown: Bool, press: UInt64, valid: Bool, visible: Bool) -> HeaderDragStop? {
+        if !leftDown { return .released }
+        if self.press != press { return .replaced }
+        if !visible { return .hidden }
+        if !valid { return .presentation }
+        return nil
+    }
+    mutating func position(pointer: NSPoint, frame: NSRect, area: NSRect) -> NSPoint? {
+        guard id != 0 else { return nil }
+        if !crossed {
+            guard hypot(pointer.x - origin.x, pointer.y - origin.y) >= 4 else { return nil }
+            crossed = true
+        }
+        return popupDragOrigin(frame: frame, pointer: pointer, anchor: anchor, area: area)
+    }
+}
+public typealias HeaderDragCallback = @convention(c) (UnsafeMutableRawPointer?, Int32, UInt64, UInt64, UInt64, Double, Double, Int32) -> UInt64
+private var headerDragObserverKey: UInt8 = 0
+struct HeaderDragInput { var pointer: NSPoint; var press: UInt64; var leftDown: Bool; var lastReleaseTime: TimeInterval = -.infinity }
+final class PopupHeaderDragObserver {
+    var input: () -> HeaderDragInput = { HeaderDragInput(pointer: NSEvent.mouseLocation, press: popupDragPressIdentity(), leftDown: NSEvent.pressedMouseButtons & 1 != 0, lastReleaseTime: ProcessInfo.processInfo.systemUptime - CGEventSource.secondsSinceLastEventType(.combinedSessionState, eventType: .leftMouseUp)) }
+    weak var window: NSWindow?
+    let callback: HeaderDragCallback
+    let release: @convention(c) (UnsafeMutableRawPointer?) -> Void
+    let context: UnsafeMutableRawPointer?
+    var monitor: Any?
+    var closeObserver: NSObjectProtocol?
+    var timer: Timer?
+    var region = NSRect.zero
+    var viewport = NSSize.zero
+    var epoch: UInt64 = 0
+    var revision: UInt64 = 0
+    var machine = HeaderDragMachine()
+    init(window: NSWindow, callback: @escaping HeaderDragCallback,
+         release: @escaping @convention(c) (UnsafeMutableRawPointer?) -> Void, context: UnsafeMutableRawPointer?) {
+        self.window = window; self.callback = callback; self.release = release; self.context = context
+        monitor = NSEvent.addLocalMonitorForEvents(matching: [.leftMouseDown, .leftMouseDragged, .leftMouseUp, .rightMouseDown, .otherMouseDown, .keyDown]) { [weak self] event in
+            guard let self else { return event }
+            return self.event(event)
+        }
+        closeObserver = NotificationCenter.default.addObserver(forName: NSWindow.willCloseNotification, object: window, queue: .main) { [weak self] _ in self?.finish(.closed) }
+    }
+    deinit {
+        timer?.invalidate()
+        if let monitor { NSEvent.removeMonitor(monitor) }
+        if let closeObserver { NotificationCenter.default.removeObserver(closeObserver) }
+        release(context)
+    }
+    func configure(revision: UInt64, epoch: UInt64, region: NSRect, viewport: NSSize) {
+        guard revision > self.revision else { return }
+        self.revision = revision
+        if machine.id != 0 && (epoch != self.epoch || region.isEmpty) { finish(region.isEmpty ? .disabled : .presentation) }
+        self.epoch = epoch; self.region = region; self.viewport = viewport
+    }
+    func finish(_ reason: HeaderDragStop) {
+        guard machine.id != 0 else { return }
+        let ended = machine; machine = HeaderDragMachine()
+        timer?.invalidate(); timer = nil
+        _ = callback(context, 2, ended.epoch, ended.id, 0, 0, 0, reason.rawValue)
+    }
+    func event(_ event: NSEvent) -> NSEvent? {
+        if event.type == .keyDown && event.keyCode == 53 { finish(.escape); return event }
+        if event.type == .rightMouseDown || event.type == .otherMouseDown { finish(.replaced); return event }
+        if event.type == .leftMouseUp {
+            let owned = machine.id != 0 && event.window === window
+            sample() // A queued old up cannot end a newer physical press.
+            return owned ? nil : event
+        }
+        if event.type == .leftMouseDragged { return machine.id != 0 && event.window === window ? nil : event }
+        guard event.type == .leftMouseDown else { return event }
+        finish(.replaced)
+        guard let window, event.window === window, window.isVisible, !window.isMiniaturized,
+              !window.inLiveResize, popupDragFrameAllowed(window), !region.isEmpty,
+              let content = window.contentView,
+              abs(content.bounds.width - viewport.width) <= 1,
+              content.bounds.height >= region.maxY else { return event }
+        let anchor = NSPoint(x: event.locationInWindow.x, y: content.bounds.height - event.locationInWindow.y)
+        let physical = input()
+        // Reject a queued down if any physical release occurred after that event.
+        // A later press must not lend its identity to the original queued down.
+        guard region.contains(anchor), physical.leftDown, event.timestamp > physical.lastReleaseTime else { return event }
+        let press = physical.press
+        let id = callback(context, 0, epoch, 0, press, anchor.x, anchor.y, 0)
+        guard id != 0 else { return event }
+        machine.arm(id: id, epoch: epoch, press: press, anchor: anchor, pointer: physical.pointer)
+        let timer = Timer(timeInterval: 1.0 / 120.0, repeats: true) { [weak self] _ in self?.sample() }
+        self.timer = timer
+        RunLoop.main.add(timer, forMode: .common)
+        return nil // Only the configured blank header consumes the original down.
+    }
+    func sample() {
+        guard machine.id != 0 else { return }
+        guard let window else { finish(.closed); return }
+        let valid = callback(context, 1, machine.epoch, machine.id, 0, 0, 0, 0) == 1
+        let physical = input()
+        if let reason = machine.stopReason(leftDown: physical.leftDown,
+                press: physical.press, valid: valid, visible: window.isVisible && !window.isMiniaturized) { finish(reason); return }
+        guard popupDragFrameAllowed(window), !window.inLiveResize else { finish(.invalidFrame); return }
+        let pointer = physical.pointer
+        guard let screen = NSScreen.screens.first(where: { $0.frame.contains(pointer) }) ?? window.screen else { finish(.invalidFrame); return }
+        guard let next = machine.position(pointer: pointer, frame: window.frame, area: screen.visibleFrame) else { return }
+        // Recheck directly before mutating, including release+new press between samples.
+        let latest = input()
+        if let reason = machine.stopReason(leftDown: latest.leftDown, press: latest.press,
+              valid: callback(context, 1, machine.epoch, machine.id, 0, 0, 0, 0) == 1, visible: window.isVisible && !window.isMiniaturized) { finish(reason); return }
+        if next != window.frame.origin { window.setFrameOrigin(next) }
+    }
+}
+@_cdecl("echolingo_configure_header_drag")
+public func echoLingoConfigureHeaderDrag(_ pointer: UnsafeMutableRawPointer?, _ revision: UInt64, _ epoch: UInt64,
+    _ x: Double, _ y: Double, _ width: Double, _ height: Double, _ viewportWidth: Double, _ viewportHeight: Double,
+    _ callback: @escaping HeaderDragCallback, _ release: @escaping @convention(c) (UnsafeMutableRawPointer?) -> Void,
+    _ context: UnsafeMutableRawPointer?) -> Int32 {
+    guard Thread.isMainThread, let pointer,
+          let window = Unmanaged<AnyObject>.fromOpaque(pointer).takeUnretainedValue() as? NSWindow else { return -1 }
+    let observer: PopupHeaderDragObserver
+    if let existing = objc_getAssociatedObject(window, &headerDragObserverKey) as? PopupHeaderDragObserver {
+        release(context); observer = existing
+    } else {
+        observer = PopupHeaderDragObserver(window: window, callback: callback, release: release, context: context)
+        objc_setAssociatedObject(window, &headerDragObserverKey, observer, .OBJC_ASSOCIATION_RETAIN_NONATOMIC)
+    }
+    observer.configure(revision: revision, epoch: epoch, region: NSRect(x: x, y: y, width: width, height: height), viewport: NSSize(width: viewportWidth, height: viewportHeight))
+    return 0
+}
+@_cdecl("echolingo_cancel_stale_header_drag")
+public func echoLingoCancelStaleHeaderDrag(_ pointer: UnsafeMutableRawPointer?, _ epoch: UInt64, _ presented: Int32) {
+    guard Thread.isMainThread, let pointer,
+          let window = Unmanaged<AnyObject>.fromOpaque(pointer).takeUnretainedValue() as? NSWindow,
+          let observer = objc_getAssociatedObject(window, &headerDragObserverKey) as? PopupHeaderDragObserver else { return }
+    if observer.machine.id != 0 && (observer.machine.epoch != epoch || presented == 0) { observer.finish(.presentation) }
+}
+
 #if ECHOLINGO_WINDOW_FIXTURE
 // Compile only for the explicit standalone fixture. It creates its own hidden
 // window and calls the production C ABI above, never any user's app window.

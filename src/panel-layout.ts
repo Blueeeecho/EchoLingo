@@ -1,7 +1,8 @@
 import { invoke } from '@tauri-apps/api/core';
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 import { nextPopupContentHeight } from './popup-growth';
-import { PopupDragController } from './popup-drag';
+import { popupHeaderRegion } from './popup-drag';
+import { installPopupScrollbar } from './popup-scrollbar';
 import { installPopupFocusRing } from './popup-focus';
 import { layoutViewport, viewportMatches, waitForViewport, type LayoutViewport } from './popup-viewport';
 
@@ -12,6 +13,7 @@ export interface TranslationPresentation { epoch: number; presented: boolean; la
 export function installPanelLayout(desktop: boolean, getPresentation: () => TranslationPresentation, preparePopupContent: () => void = () => {}): { dispose: () => void; presentPopup: (presentationEpoch: number, focusInput?: boolean, reuseVisiblePopup?: boolean) => Promise<TranslationPresentation | null>; presentManagement: (presentationEpoch: number) => Promise<TranslationPresentation | null> } {
   if (!desktop) return { dispose: () => {}, presentPopup: async () => null, presentManagement: async () => null };
   const disposeFocusRing = installPopupFocusRing();
+  const disposeScrollbar = installPopupScrollbar();
   let frame = 0, pending = false, disposed = false, last = '';
   let invalidation = 0;
   let unlistenUserResize: UnlistenFn | null = null;
@@ -82,6 +84,7 @@ export function installPanelLayout(desktop: boolean, getPresentation: () => Tran
     return inFlight;
   };
   const schedule = (): void => {
+    syncNativeHeaderDrag();
     checkViewport();
     pending = true;
     if (nativeSizingRevision !== null) return;
@@ -195,49 +198,33 @@ export function installPanelLayout(desktop: boolean, getPresentation: () => Tran
     if (gesture && !currentResizePresentation(gesture.presentationEpoch, gesture.management, gesture.modalOpen)) clearGesture();
     syncModalResizeInset();
   };
-  let dragCapture: { target: HTMLElement; pointerId: number } | null = null;
-  let suppressDragClickUntil = 0;
-  const clearDragCapture = (): void => {
-    const previous = dragCapture; dragCapture = null;
-    if (previous?.target.hasPointerCapture(previous.pointerId)) previous.target.releasePointerCapture(previous.pointerId);
-  };
-  const popupDrag = new PopupDragController({
-    valid: epoch => currentResizePresentation(epoch, false, false),
-    begin: press => invoke<number>('begin_popup_drag', { presentationEpoch: press.epoch, anchorX: press.anchorX, anchorY: press.anchorY }),
-    move: dragId => invoke('move_popup_drag', { dragId }),
-    end: dragId => invoke('end_popup_drag', { dragId }),
-    active: value => document.body.classList.toggle('popup-dragging', value),
-    settled: () => { last = ''; schedule(); },
-  });
-  const cancelPopupDrag = (event?: Event): void => {
-    if (event instanceof PointerEvent && (!dragCapture || event.pointerId !== dragCapture.pointerId)) return;
-    popupDrag.cancel(); clearDragCapture();
-  };
-  const lostPopupCapture = (event: PointerEvent): void => {
-    // A moved WKWebView may lose DOM capture while the same physical press is
-    // still active. pointercancel precedes implicit lostpointercapture too;
-    // retain an established token or its in-flight begin reply. Native physical
-    // press/presentation validation still gates every movement.
-    if (!popupDrag.retainsAfterStreamLoss(event.pointerId, event.pointerType)) cancelPopupDrag(event);
-  };
-  const movePopupDrag = (event: PointerEvent): void => popupDrag.move(event.pointerId, event.screenX, event.screenY, event.buttons);
-  const endPopupDrag = (event: PointerEvent): void => {
-    if (!dragCapture || event.pointerId !== dragCapture.pointerId) return;
-    if (popupDrag.release(event.pointerId)) suppressDragClickUntil = performance.now() + 400;
-    clearDragCapture();
-  };
-  const suppressDragClick = (event: MouseEvent): void => {
-    if (performance.now() < suppressDragClickUntil) {
-      suppressDragClickUntil = 0; event.preventDefault(); event.stopImmediatePropagation();
+  let headerRevision = Date.now() * 1000, headerSignature = '';
+  let unlistenHeader: UnlistenFn | null = null;
+  function syncNativeHeaderDrag(): void {
+    if (!/Mac/.test(navigator.platform)) return;
+    const region = document.querySelector<HTMLElement>('.popup-drag-space')?.getBoundingClientRect() ?? null;
+    const geometry = popupHeaderRegion(region, innerWidth, innerHeight, !disposed
+      && document.body.dataset.view === 'translate' && !document.body.classList.contains('modal-open'));
+    const payload = { presentationEpoch: getPresentation().epoch, ...geometry };
+    const signature = JSON.stringify(payload);
+    if (signature === headerSignature) return;
+    headerSignature = signature;
+    void invoke('configure_popup_header_drag', { revision: ++headerRevision, ...payload }).catch(() => {
+      if (headerSignature === signature) headerSignature = '';
+    });
+  }
+  const checkDragPresentation = syncNativeHeaderDrag;
+  if (/Mac/.test(navigator.platform)) void listen<number>('popup-native-drag-ended', ({ payload }) => {
+    // A late old completion only requests a current measurement. Rust still
+    // suppresses fitting while a newer native token is held, even in this epoch.
+    if (!disposed && payload === getPresentation().epoch && document.body.dataset.view === 'translate') {
+      last = ''; schedule();
     }
-  };
-  const checkDragPresentation = (): void => { if (!popupDrag.check()) clearDragCapture(); };
+  }).then(unlisten => { if (disposed) unlisten(); else unlistenHeader = unlisten; }).catch(() => {});
   const widthViewObserver = new MutationObserver(() => { checkWidthPresentation(); checkDragPresentation(); });
   widthViewObserver.observe(document.body, { attributes: true, attributeFilter: ['data-view', 'class'] });
   document.body.classList.add('popup-resize-enabled');
   const drag = (event: PointerEvent): void => {
-    // Any new press, including a button/input or secondary click, retires an old drag.
-    if (/Mac/.test(navigator.platform)) cancelPopupDrag();
     if (event.button !== 0 || !event.isPrimary || !(event.target instanceof Element)) return;
     const edge = event.target.closest<HTMLElement>('[data-window-resize]');
     if (edge) {
@@ -264,33 +251,16 @@ export function installPanelLayout(desktop: boolean, getPresentation: () => Tran
       }
       return;
     }
-    // Starting any new press clears a drag's click suppression. A click on a
-    // button/text input is never a native drag, including nested SVG children.
-    suppressDragClickUntil = 0;
     const dragTarget = event.target.closest<HTMLElement>('[data-window-drag]');
     if (!dragTarget || event.target.closest('button, a, input, textarea, select, [role="menu"], [contenteditable="true"]')) return;
+    if (/Mac/.test(navigator.platform)) return; // AppKit consumes only real blank-header down events.
     event.preventDefault();
-    if (/Mac/.test(navigator.platform)) {
-      if (event.pointerType !== 'mouse') return;
-      const presentation = getPresentation();
-      if (!currentResizePresentation(presentation.epoch, false, false)) return;
-      cancelPopupDrag();
-      try { dragTarget.setPointerCapture(event.pointerId); } catch { return; }
-      dragCapture = { target: dragTarget, pointerId: event.pointerId };
-      popupDrag.press({ pointerId: event.pointerId, screenX: event.screenX, screenY: event.screenY,
-        anchorX: event.clientX, anchorY: event.clientY, epoch: presentation.epoch });
-    } else void invoke('start_window_drag').catch(() => {});
+    void invoke('start_window_drag').catch(() => {});
   };
   // Custom commands avoid granting unrelated general window-control powers.
   document.addEventListener('pointerdown', drag);
   document.addEventListener('pointermove', moveWidth);
-  document.addEventListener('pointermove', movePopupDrag);
-  document.addEventListener('pointerup', endPopupDrag);
-  document.addEventListener('pointercancel', lostPopupCapture);
-  document.addEventListener('lostpointercapture', lostPopupCapture);
-  document.addEventListener('click', suppressDragClick, true);
   document.addEventListener('visibilitychange', checkDragPresentation);
-  window.addEventListener('blur', cancelPopupDrag);
   window.addEventListener('echolingo:layout', checkDragPresentation);
   document.addEventListener('pointerup', endWidth);
   document.addEventListener('pointercancel', cancelWidth);
@@ -300,8 +270,8 @@ export function installPanelLayout(desktop: boolean, getPresentation: () => Tran
   window.addEventListener('echolingo:layout', checkWidthPresentation);
   schedule();
   const dispose = (): void => {
-    disposeFocusRing();
-    disposed = true; presentationWait?.abort(); cancelPopupDrag(); clearGesture(); widthViewObserver.disconnect(); observer.disconnect(); cancelAnimationFrame(frame);
+    disposeFocusRing(); disposeScrollbar();
+    disposed = true; presentationWait?.abort(); syncNativeHeaderDrag(); unlistenHeader?.(); clearGesture(); widthViewObserver.disconnect(); observer.disconnect(); cancelAnimationFrame(frame);
     unlistenSizing?.(); unlistenSizing = null;
     unlistenUserResize?.(); unlistenUserResize = null;
     document.body.classList.remove('popup-resize-enabled');
@@ -312,13 +282,7 @@ export function installPanelLayout(desktop: boolean, getPresentation: () => Tran
     window.removeEventListener('echolingo:layout', checkWidthPresentation);
     document.removeEventListener('pointerdown', drag);
     document.removeEventListener('pointermove', moveWidth);
-    document.removeEventListener('pointermove', movePopupDrag);
-    document.removeEventListener('pointerup', endPopupDrag);
-    document.removeEventListener('pointercancel', lostPopupCapture);
-    document.removeEventListener('lostpointercapture', lostPopupCapture);
-    document.removeEventListener('click', suppressDragClick, true);
     document.removeEventListener('visibilitychange', checkDragPresentation);
-    window.removeEventListener('blur', cancelPopupDrag);
     window.removeEventListener('echolingo:layout', checkDragPresentation);
     document.removeEventListener('pointerup', endWidth);
     document.removeEventListener('pointercancel', cancelWidth);

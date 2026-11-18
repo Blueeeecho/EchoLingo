@@ -215,6 +215,7 @@ try {
         if (command === 'wait_for_window_sizing') return 0;
         if (command === 'fit_window') { fixture.layoutCalls.push(args); if (fixture.manualHeightQA) { const manual = fixture.manualHeightQA; (fixture.appliedHeightQA ??= []).push(manual.epoch === fixture.presentation.epoch ? manual.height : args.contentHeight); } if (fixture.holdFit) { fixture.fitWaits++; await new Promise((resolve) => { fixture.releaseFit = resolve; }); } return; }
         if (command === 'start_window_drag') { fixture.dragCalls++; return; }
+        if (command === 'configure_popup_header_drag') { (fixture.headerRegions ??= []).push(structuredClone(args)); return null; }
         if (command === 'begin_popup_drag') {
           if (args.presentationEpoch !== fixture.presentation.epoch || !fixture.presentation.presented) throw new Error('CANCELLED: stale popup drag');
           const dragId = ++fixture.nextPopupDragId;
@@ -1090,46 +1091,36 @@ try {
   assert.equal(await page.locator('.popup-toolbar').getAttribute('data-window-drag'), null);
   assert.equal(await page.locator('.popup-drag-space').getAttribute('data-window-drag'), '');
   assert.equal(await page.locator('.popup-toolbar').getAttribute('data-tauri-drag-region'), null);
-  // Mac ordinary clicks, including nested pin SVGs and toolbar blank space,
-  // must not enter either native drag path. Only a deliberate >4px gesture
-  // begins a tokenized drag using the original local press anchor.
-  assert.equal(await page.evaluate(() => window.__qa.popupDragCommands.length), pinPopupDragCalls);
-  await page.locator('.popup-drag-space').click();
-  assert.equal(await page.evaluate(() => window.__qa.dragCalls), pinDragCalls);
-  assert.equal(await page.evaluate(() => window.__qa.popupDragCommands.length), pinPopupDragCalls);
+  // Browser events cannot start/move/end a Mac drag. Only the registered
+  // blank header is consumed by the original native NSEvent in the Swift fixture.
+  await page.waitForFunction(() => window.__qa.headerRegions?.at(-1)?.width > 0);
+  const region = await page.evaluate(() => window.__qa.headerRegions.at(-1));
   const dragBox = await page.locator('.popup-drag-space').boundingBox();
-  const dragX = dragBox.x + dragBox.width / 2, dragY = dragBox.y + dragBox.height / 2;
-  const dragEpoch = await page.evaluate(() => window.__qa.presentation.epoch);
-  await page.mouse.move(dragX, dragY); await page.mouse.down();
-  await page.mouse.move(dragX + 2, dragY + 1);
-  await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
-  assert.equal(await page.evaluate(() => window.__qa.popupDragCommands.length), pinPopupDragCalls);
-  await page.mouse.move(dragX + 30, dragY + 10, { steps: 3 });
-  await page.waitForFunction(before => window.__qa.popupDragCommands.slice(before).some(value => value.command === 'move_popup_drag'), pinPopupDragCalls);
-  const beginDrag = await page.evaluate(before => window.__qa.popupDragCommands[before], pinPopupDragCalls);
-  assert.deepEqual(beginDrag, { command: 'begin_popup_drag', presentationEpoch: dragEpoch, anchorX: dragX, anchorY: dragY, dragId: 1 });
-  // A suppressed WKWebView stream can emit cancel before implicit capture loss.
-  // The original physical mouse remains held; only native press checks may stop it.
-  const movesBeforeLoss = await page.evaluate(() => window.__qa.popupDragCommands.filter(x => x.command === 'move_popup_drag').length);
-  await page.locator('.popup-drag-space').evaluate(element => {
-    element.dispatchEvent(new PointerEvent('pointermove', { pointerId: 1, pointerType: 'mouse', buttons: 0, bubbles: true }));
-    for (const type of ['pointercancel', 'lostpointercapture']) element.dispatchEvent(new PointerEvent(type,
-      { pointerId: 1, pointerType: 'mouse', isPrimary: true, buttons: 1, bubbles: true }));
+  assert.deepEqual([region.x, region.y, region.width, region.height], [dragBox.x, dragBox.y, dragBox.width, dragBox.height]);
+  for (const selector of ['#source-text', '.result-text']) {
+    const target = page.locator(selector).first();
+    if (await target.count() && await target.isVisible()) await target.evaluate(element => {
+      if (element instanceof HTMLTextAreaElement) element.select();
+      else { const range = document.createRange(); range.selectNodeContents(element); getSelection().removeAllRanges(); getSelection().addRange(range); }
+    });
+    await page.mouse.move(dragBox.x + 40, 14); await page.mouse.down();
+    await page.mouse.move(dragBox.x + 140, 60); await page.mouse.up();
+  }
+  const beforeBlur = await page.evaluate(() => window.__qa.headerRegions.length);
+  await page.evaluate(() => {
+    window.dispatchEvent(new Event('blur'));
+    const header = document.querySelector('.popup-drag-space');
+    for (const type of ['pointermove', 'pointercancel', 'lostpointercapture']) header.dispatchEvent(new PointerEvent(type, { bubbles: true, pointerId: 1, pointerType: 'mouse', buttons: 0 }));
   });
-  await page.waitForFunction(n => window.__qa.popupDragCommands.filter(x => x.command === 'move_popup_drag').length > n, movesBeforeLoss);
-  assert.equal(await page.evaluate(() => window.__qa.popupDragCommands.filter(x => x.command === 'end_popup_drag').length), 0);
-  await page.mouse.up();
-  await page.waitForFunction(() => window.__qa.popupDragCommands.at(-1)?.command === 'end_popup_drag');
-  const dragCommands = await page.evaluate(before => window.__qa.popupDragCommands.slice(before), pinPopupDragCalls);
-  assert.equal(dragCommands.filter(value => value.command === 'begin_popup_drag').length, 1);
-  assert.ok(dragCommands.filter(value => value.command === 'move_popup_drag').length >= 1);
-  assert.ok(dragCommands.every(value => value.dragId === beginDrag.dragId));
-  assert.equal(dragCommands.filter(value => value.command === 'end_popup_drag').length, 1);
-  assert.equal(await page.evaluate(() => window.__qa.activePopupDragId), null);
-  assert.equal(await page.locator('body').evaluate(element => element.classList.contains('popup-dragging')), false);
+  await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+  assert.equal(await page.evaluate(() => window.__qa.headerRegions.length), beforeBlur);
+  assert.equal(await page.evaluate(() => window.__qa.popupDragCommands.length), pinPopupDragCalls);
+  await page.evaluate(() => document.body.classList.add('modal-open'));
+  await page.waitForFunction(() => window.__qa.headerRegions.at(-1).width === 0);
+  await page.evaluate(() => document.body.classList.remove('modal-open'));
+  await page.waitForFunction(() => window.__qa.headerRegions.at(-1).width > 0);
   assert.equal(await page.evaluate(() => window.__qa.dragCalls), pinDragCalls);
   assert.deepEqual(await page.evaluate(() => window.__qa.resizeRequests), []);
-  assert.deepEqual(await page.evaluate(() => window.__qa.nativeResizeRequests), []);
   // The actual macOS tao backend has no native drag-resize implementation.
   // Thin edges capture the pointer and send only bounded width/epoch requests.
   await page.setViewportSize({ width: 680, height: 820 });
@@ -4609,7 +4600,7 @@ try {
     const balance = await balanceBrowser.newPage({ viewport: { width: 700, height: 750 } });
     await balance.goto(process.env.ECHOLINGO_TEST_URL ?? 'http://127.0.0.1:1420/');
     await balance.evaluate(() => { document.documentElement.dataset.platform = 'macos'; });
-    assert.equal((await balance.locator('.popup-toolbar').boundingBox()).height, 30);
+    assert.equal((await balance.locator('.popup-toolbar').boundingBox()).height, 28);
     assert.equal((await balance.locator('.language-bar').boundingBox()).height, 27);
     const geometry = () => balance.evaluate(() => {
       const view = document.querySelector('#view-translate');
@@ -4630,12 +4621,12 @@ try {
       await balance.setViewportSize({ width, height: 750 });
       const short = await geometry();
       assert.equal(short.overflow, false);
-      assert.ok(short.gutter >= 12 && short.gutter <= 20, 'fixture exercises two thin symmetric classic scrollbar gutters');
+      assert.equal(short.gutter, 0, 'native scrollbar preferences add no stacked gutter');
       await balance.locator('.result-card').evaluate(el => { el.style.minHeight = '1000px'; });
       const tall = await geometry();
       assert.equal(tall.overflow, true);
       assert.deepEqual(tall.rects, short.rects, 'scrolling does not rewrap the text');
-      for (const { left, right } of tall.rects) assert.ok(Math.abs(left - right) <= 1 && left >= 10, `balanced popup margins: ${left}/${right}`);
+      for (const { left, right } of tall.rects) assert.ok(Math.abs(left - right) <= 1 && left === 4, `balanced popup margins: ${left}/${right}`);
       await balance.locator('#view-translate').evaluate(el => { el.scrollTop = 200; });
       assert.ok(await balance.locator('#view-translate').evaluate(el => el.scrollTop) > 0);
       await balance.locator('.result-card').evaluate(el => { el.style.minHeight = ''; });

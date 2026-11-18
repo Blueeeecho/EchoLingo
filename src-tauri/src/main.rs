@@ -3338,6 +3338,7 @@ async fn diagnostics(
     }
     #[cfg(target_os = "macos")]
     {
+        value["popupDrag"] = window_layout::popup_drag_diagnostics(&app.state::<window_layout::LayoutState>());
         let policy_diagnostics = app.state::<ApplicationPolicyDiagnostics>();
         value["windowPolicy"] = serde_json::to_value(&*locked(&policy_diagnostics.0)?)
             .map_err(|_| "无法读取窗口策略诊断")?;
@@ -3719,9 +3720,7 @@ fn main() {
             fit_window_with_visibility,
             window_layout::wait_for_window_sizing,
             window_layout::start_window_drag,
-            window_layout::begin_popup_drag,
-            window_layout::move_popup_drag,
-            window_layout::end_popup_drag,
+            window_layout::configure_popup_header_drag,
             window_layout::start_window_resize,
             window_layout::resize_popup_width,
             window_layout::resize_management_window,
