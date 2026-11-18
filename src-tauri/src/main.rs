@@ -15,6 +15,7 @@ mod ocr_native;
 mod ocr_outcome;
 mod offline_translation;
 mod platform;
+mod popup_drag_diagnostics;
 mod popup_health;
 mod screenshot;
 mod screenshot_overlay;
@@ -3728,6 +3729,8 @@ fn main() {
             window_layout::wait_for_window_sizing,
             window_layout::start_window_drag,
             window_layout::configure_popup_header_drag,
+            window_layout::set_popup_drag_diagnostics,
+            window_layout::record_popup_drag_event,
             window_layout::start_window_resize,
             window_layout::resize_popup_width,
             window_layout::resize_management_window,

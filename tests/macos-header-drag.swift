@@ -10,7 +10,7 @@ private var physical = HeaderDragInput(pointer: .zero, press: 1, leftDown: true)
 private func callback(_ context: UnsafeMutableRawPointer?, _ action: Int32, _ epoch: UInt64, _ id: UInt64,
                       _ press: UInt64, _ x: Double, _ y: Double, _ reason: Int32) -> UInt64 {
     if action == 0 { guard epoch == fixtureEpoch else { return 0 }; nextToken += 1; currentToken = nextToken; return currentToken }
-    if action == 1 { return epoch == fixtureEpoch && id == currentToken ? 1 : 0 }
+    if action == 1 { return epoch != fixtureEpoch ? 2 : id == currentToken ? 1 : 6 }
     if action == 2 && id == currentToken { currentToken = 0; stops.append(reason) }
     return 0
 }

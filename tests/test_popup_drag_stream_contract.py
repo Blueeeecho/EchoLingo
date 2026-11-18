@@ -20,7 +20,11 @@ class PopupDragStreamContract(unittest.TestCase):
         self.assertIn('guard region.contains(anchor)', SWIFT)
     def test_old_completion_cannot_retire_new_token_or_fit_during_drag(self):
         self.assertIn('token.id == id', RUST)
-        self.assertIn('current.epoch == token.epoch', RUST)
+        fit = RUST[RUST.index('fn fit_inner('):RUST.index('fn mac_drag_operation(')]
+        self.assertNotIn('mac_drag_operation(', fit)
+        self.assertNotIn('drag.finish(', fit)
+        self.assertIn('echolingo_cancel_stale_header_drag', fit)
+        self.assertIn('current.epoch != token.epoch', fit)
         self.assertIn('popup-native-drag-ended', PANEL)
         self.assertIn('revision > self.revision', SWIFT)
 
@@ -31,3 +35,17 @@ class PopupDragStreamContract(unittest.TestCase):
         transaction = main[main.index('async fn show_prepared_popup('):main.index('fn start_action(')]
         self.assertLess(transaction.index('adopt_popup_header_presentation'), transaction.index('window.show()'))
         self.assertIn('guard epoch == previous, next >= previous', SWIFT)
+
+    def test_diagnostics_default_off_fixed_and_bounded(self):
+        diagnostic = (ROOT/'src-tauri/src/popup_drag_diagnostics.rs').read_text()
+        self.assertIn('#[derive(Default)]', diagnostic)
+        self.assertIn('if !self.enabled', diagnostic)
+        self.assertIn('self.events.len() == 64', diagnostic)
+        self.assertIn('min(1_000_000)', diagnostic)
+        self.assertIn('Stage::FitDeferred', RUST)
+        self.assertIn('Stage::FitRepositioned', RUST)
+        self.assertIn('default: return .invalidOwner', SWIFT)
+        self.assertIn("if (diagnosticsEnabled)", PANEL)
+        for stage in ['resizeBlur', 'resizePointerCancel', 'resizeCaptureLost', 'resizeButtonsZero']:
+            self.assertIn(stage, PANEL)
+        self.assertIn('id="popup-drag-diagnostics-toggle"', (ROOT/'index.html').read_text())

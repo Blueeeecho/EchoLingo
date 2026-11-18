@@ -128,7 +128,7 @@ public func echoLingoPopupDrag(_ pointer: UnsafeMutableRawPointer?, _ anchorX: D
 
 // Header-only ownership is established from the original local AppKit event,
 // before WebKit can delay or suppress a DOM event. No global monitor/tap/posting.
-enum HeaderDragStop: Int32 { case released = 1, replaced, presentation, hidden, disabled, closed, escape, invalidFrame }
+enum HeaderDragStop: Int32 { case released = 1, replaced, presentation, hidden, disabled, closed, escape, invalidFrame, invalidOwner }
 struct HeaderDragMachine {
     var id: UInt64 = 0
     var epoch: UInt64 = 0
@@ -140,12 +140,17 @@ struct HeaderDragMachine {
         self.id = id; self.epoch = epoch; self.press = press
         self.anchor = anchor; origin = pointer; crossed = false
     }
-    func stopReason(leftDown: Bool, press: UInt64, valid: Bool, visible: Bool) -> HeaderDragStop? {
+    func stopReason(leftDown: Bool, press: UInt64, ownerStatus: UInt64, visible: Bool) -> HeaderDragStop? {
         if !leftDown { return .released }
         if self.press != press { return .replaced }
         if !visible { return .hidden }
-        if !valid { return .presentation }
-        return nil
+        switch ownerStatus {
+        case 1: return nil
+        case 2, 3: return .presentation
+        case 4: return .disabled
+        case 5: return .hidden
+        default: return .invalidOwner
+        }
     }
     mutating func position(pointer: NSPoint, frame: NSRect, area: NSRect) -> NSPoint? {
         guard id != 0 else { return nil }
@@ -183,6 +188,7 @@ final class PopupHeaderDragObserver {
         closeObserver = NotificationCenter.default.addObserver(forName: NSWindow.willCloseNotification, object: window, queue: .main) { [weak self] _ in self?.finish(.closed) }
     }
     deinit {
+        finish(.closed)
         timer?.invalidate()
         if let monitor { NSEvent.removeMonitor(monitor) }
         if let closeObserver { NotificationCenter.default.removeObserver(closeObserver) }
@@ -205,6 +211,7 @@ final class PopupHeaderDragObserver {
         timer?.invalidate(); timer = nil
         _ = callback(context, 2, ended.epoch, ended.id, 0, 0, 0, reason.rawValue)
     }
+    func trace(_ stage: Int32) { _ = callback(context, 3, epoch, machine.id, 0, 0, 0, stage) }
     func event(_ event: NSEvent) -> NSEvent? {
         if event.type == .keyDown && event.keyCode == 53 { finish(.escape); return event }
         if event.type == .rightMouseDown || event.type == .otherMouseDown { finish(.replaced); return event }
@@ -216,16 +223,18 @@ final class PopupHeaderDragObserver {
         if event.type == .leftMouseDragged { return machine.id != 0 && event.window === window ? nil : event }
         guard event.type == .leftMouseDown else { return event }
         finish(.replaced)
-        guard let window, event.window === window, window.isVisible, !window.isMiniaturized,
-              !window.inLiveResize, popupDragFrameAllowed(window), !region.isEmpty,
-              let content = window.contentView,
-              abs(content.bounds.width - viewport.width) <= 1,
-              content.bounds.height >= region.maxY else { return event }
+        guard let window, event.window === window else { return event }
+        trace(20)
+        guard window.isVisible, !window.isMiniaturized, !window.inLiveResize,
+              popupDragFrameAllowed(window), !region.isEmpty, let content = window.contentView else { trace(22); return event }
+        guard abs(content.bounds.width - viewport.width) <= 1,
+              content.bounds.height >= region.maxY else { trace(23); return event }
         let anchor = NSPoint(x: event.locationInWindow.x, y: content.bounds.height - event.locationInWindow.y)
         let physical = input()
         // Reject a queued down if any physical release occurred after that event.
         // A later press must not lend its identity to the original queued down.
-        guard region.contains(anchor), physical.leftDown, event.timestamp > physical.lastReleaseTime else { return event }
+        guard region.contains(anchor) else { trace(21); return event }
+        guard physical.leftDown, event.timestamp > physical.lastReleaseTime else { trace(24); return event }
         let press = physical.press
         let id = callback(context, 0, epoch, 0, press, anchor.x, anchor.y, 0)
         guard id != 0 else { return event }
@@ -240,10 +249,10 @@ final class PopupHeaderDragObserver {
     func sample() {
         guard machine.id != 0 else { return }
         guard let window else { finish(.closed); return }
-        let valid = callback(context, 1, machine.epoch, machine.id, 0, 0, 0, 0) == 1
+        let ownerStatus = callback(context, 1, machine.epoch, machine.id, 0, 0, 0, 0)
         let physical = input()
         if let reason = machine.stopReason(leftDown: physical.leftDown,
-                press: physical.press, valid: valid, visible: window.isVisible && !window.isMiniaturized) { finish(reason); return }
+                press: physical.press, ownerStatus: ownerStatus, visible: window.isVisible && !window.isMiniaturized) { finish(reason); return }
         guard popupDragFrameAllowed(window), !window.inLiveResize else { finish(.invalidFrame); return }
         let pointer = physical.pointer
         guard let screen = NSScreen.screens.first(where: { $0.frame.contains(pointer) }) ?? window.screen else { finish(.invalidFrame); return }
@@ -251,8 +260,8 @@ final class PopupHeaderDragObserver {
         // Recheck directly before mutating, including release+new press between samples.
         let latest = input()
         if let reason = machine.stopReason(leftDown: latest.leftDown, press: latest.press,
-              valid: callback(context, 1, machine.epoch, machine.id, 0, 0, 0, 0) == 1, visible: window.isVisible && !window.isMiniaturized) { finish(reason); return }
-        if next != window.frame.origin { window.setFrameOrigin(next) }
+              ownerStatus: callback(context, 1, machine.epoch, machine.id, 0, 0, 0, 0), visible: window.isVisible && !window.isMiniaturized) { finish(reason); return }
+        if next != window.frame.origin { window.setFrameOrigin(next); trace(25) }
     }
 }
 @_cdecl("echolingo_configure_header_drag")

@@ -130,7 +130,9 @@ jobs:
             built=src-tauri/target/release/echolingo.exe
             extracted="$RUNNER_TEMP/desktop-inspection/echolingo.exe"
           else
-            files=(src-tauri/target/release/bundle/dmg/*.dmg)
+            swiftc -parse-as-library src-tauri/native/macos_window.swift tests/macos-header-event-route.swift -framework AppKit -framework WebKit -o "$RUNNER_TEMP/desktop-header-event-route"
+          "$RUNNER_TEMP/desktop-header-event-route" | tee "$RUNNER_TEMP/desktop-package/macos-header-event-route.json"
+          files=(src-tauri/target/release/bundle/dmg/*.dmg)
             built=src-tauri/target/release/bundle/macos/EchoLingo.app
             extracted="$RUNNER_TEMP/desktop-inspection/echolingo"
           fi
@@ -163,6 +165,8 @@ jobs:
           "$RUNNER_TEMP/desktop-popup-viewport"
           swiftc -parse-as-library src-tauri/native/macos_window.swift tests/macos-header-drag.swift -framework AppKit -o "$RUNNER_TEMP/desktop-header-drag"
           "$RUNNER_TEMP/desktop-header-drag" | tee "$RUNNER_TEMP/desktop-package/macos-header-drag.json"
+          swiftc -parse-as-library src-tauri/native/macos_window.swift tests/macos-header-event-route.swift -framework AppKit -framework WebKit -o "$RUNNER_TEMP/desktop-header-event-route"
+          "$RUNNER_TEMP/desktop-header-event-route" | tee "$RUNNER_TEMP/desktop-package/macos-header-event-route.json"
           files=(src-tauri/target/release/bundle/dmg/*.dmg)
           test "${#files[@]}" -eq 1
           python3 tests/macos-installed-runtime-smoke.py --expected-version 0.2.20 --installer "${files[0]}" --built-application src-tauri/target/release/bundle/macos/EchoLingo.app --output "$RUNNER_TEMP/desktop-package/macos-runtime.json" --run-url "$RUN_URL" --native-self-tests-passed --native-window-resize-fixture-passed

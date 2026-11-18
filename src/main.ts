@@ -1839,6 +1839,16 @@ $('#remove-provider-key').addEventListener('click', () => run(async () => {
     toast('已从系统凭据库移除密钥。');
   } finally { setProviderSaving(false); }
 }));
+const popupDragDiagnosticsButton = $<HTMLButtonElement>('#popup-drag-diagnostics-toggle');
+popupDragDiagnosticsButton.hidden = !desktop || !/Mac/.test(navigator.platform);
+popupDragDiagnosticsButton.addEventListener('click', () => run(async () => {
+  const enabled = popupDragDiagnosticsButton.getAttribute('aria-pressed') !== 'true';
+  await invoke('set_popup_drag_diagnostics', { enabled });
+  popupDragDiagnosticsButton.setAttribute('aria-pressed', String(enabled));
+  popupDragDiagnosticsButton.textContent = enabled ? '停止记录拖动过程' : '记录拖动过程（仅本机）';
+  window.dispatchEvent(new CustomEvent('echolingo:drag-diagnostics', { detail: enabled }));
+  toast(enabled ? '开始记录本机状态，不含文字或坐标。重现后可运行诊断查看。' : '已停止记录，可运行诊断查看本次状态。');
+}));
 $('#run-diagnostics').addEventListener('click', () => run(async () => {
   const button = $<HTMLButtonElement>('#run-diagnostics');
   button.disabled = true; showDiagnostics('正在检查…', false);

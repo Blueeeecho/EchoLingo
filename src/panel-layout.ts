@@ -12,6 +12,20 @@ export interface TranslationPresentation { epoch: number; presented: boolean; la
 // can shrink again after a long result. Requests are coalesced and serialized.
 export function installPanelLayout(desktop: boolean, getPresentation: () => TranslationPresentation, preparePopupContent: () => void = () => {}): { dispose: () => void; presentPopup: (presentationEpoch: number, focusInput?: boolean, reuseVisiblePopup?: boolean) => Promise<TranslationPresentation | null>; presentManagement: (presentationEpoch: number) => Promise<TranslationPresentation | null> } {
   if (!desktop) return { dispose: () => {}, presentPopup: async () => null, presentManagement: async () => null };
+  // Local opt-in sends only fixed state names. Never text, geometry or app identity.
+  let diagnosticsEnabled = false;
+  const diagnosticToggle = (event: Event): void => { diagnosticsEnabled = (event as CustomEvent).detail === true; };
+  const trace = (stage: string): void => { if (diagnosticsEnabled) void invoke('record_popup_drag_event', { stage }).catch(() => {}); };
+  const diagnosticDown = (event: PointerEvent): void => {
+    if (!(event.target instanceof Element)) return;
+    if (event.target.closest('.popup-drag-space')) trace('domHeaderDown');
+    else if (event.target.closest('#source-text')) trace('domSourceDown');
+    else if (event.target.closest('#results')) trace('domResultDown');
+  };
+  const diagnosticBlur = (): void => trace('domBlur');
+  window.addEventListener('echolingo:drag-diagnostics', diagnosticToggle);
+  window.addEventListener('blur', diagnosticBlur);
+  document.addEventListener('pointerdown', diagnosticDown, true);
   const disposeFocusRing = installPopupFocusRing();
   const disposeScrollbar = installPopupScrollbar();
   let frame = 0, pending = false, disposed = false, last = '';
@@ -151,6 +165,7 @@ export function installPanelLayout(desktop: boolean, getPresentation: () => Tran
         const key = JSON.stringify(payload);
         if (key === lastWidth) continue;
         try {
+          trace('resizeRequest');
           if (payload.management) await invoke('resize_management_window', { width: payload.width, height: payload.height, direction: payload.direction, presentationEpoch: payload.presentationEpoch });
           else await invoke('resize_popup_width', { width: payload.width, direction: payload.direction, presentationEpoch: payload.presentationEpoch });
           lastWidth = key;
@@ -167,7 +182,8 @@ export function installPanelLayout(desktop: boolean, getPresentation: () => Tran
   };
   const queueWidth = (event: PointerEvent, final = false): void => {
     if (!gesture || event.pointerId !== gesture.pointerId) return;
-    if (!currentResizePresentation(gesture.presentationEpoch, gesture.management, gesture.modalOpen) || (!final && !(event.buttons & 1))) { clearGesture(); return; }
+    if (!currentResizePresentation(gesture.presentationEpoch, gesture.management, gesture.modalOpen)) { clearGesture(); return; }
+    if (!final && !(event.buttons & 1)) { trace('resizeButtonsZero'); clearGesture(); return; }
     const horizontal = gesture.direction.includes('west') ? -1 : gesture.direction.includes('east') ? 1 : 0;
     const vertical = gesture.direction.includes('north') ? -1 : gesture.direction.includes('south') ? 1 : 0;
     nextWidth = { width: boundedSize(gesture.width + (event.screenX - gesture.startX) * horizontal),
@@ -184,6 +200,11 @@ export function installPanelLayout(desktop: boolean, getPresentation: () => Tran
   };
   const cancelWidth = (event?: Event): void => {
     if (event instanceof PointerEvent && (!gesture || event.pointerId !== gesture.pointerId)) return;
+    if (gesture) {
+      if (event?.type === 'blur') trace('resizeBlur');
+      else if (event?.type === 'pointercancel') trace('resizePointerCancel');
+      else if (event?.type === 'lostpointercapture') trace('resizeCaptureLost');
+    }
     clearGesture();
   };
   function syncModalResizeInset(): void {
@@ -237,6 +258,8 @@ export function installPanelLayout(desktop: boolean, getPresentation: () => Tran
       event.preventDefault();
       if (/Mac/.test(navigator.platform)) {
         clearGesture();
+        if (direction === 'west') trace('resizeWestDown');
+        if (direction === 'east') trace('resizeEastDown');
         // Global screen coordinates remain stable when north/west edges move
         // the window; client coordinates would feed that movement back in.
         try { edge.setPointerCapture(event.pointerId); } catch { return; }
@@ -270,6 +293,9 @@ export function installPanelLayout(desktop: boolean, getPresentation: () => Tran
   window.addEventListener('echolingo:layout', checkWidthPresentation);
   schedule();
   const dispose = (): void => {
+    window.removeEventListener('echolingo:drag-diagnostics', diagnosticToggle);
+    window.removeEventListener('blur', diagnosticBlur);
+    document.removeEventListener('pointerdown', diagnosticDown, true);
     disposeFocusRing(); disposeScrollbar();
     disposed = true; presentationWait?.abort(); syncNativeHeaderDrag(); unlistenHeader?.(); clearGesture(); widthViewObserver.disconnect(); observer.disconnect(); cancelAnimationFrame(frame);
     unlistenSizing?.(); unlistenSizing = null;
