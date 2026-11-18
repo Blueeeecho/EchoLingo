@@ -8,7 +8,7 @@ const browser = await chromium.launch({ headless: true, ignoreDefaultArgs: ['--h
 try {
   const page = await browser.newPage({ viewport: { width: 640, height: 720 }, deviceScaleFactor: 2 });
   const errors = []; page.on('pageerror', error => errors.push(error.message));
-  await page.route(`${origin}/__popup_viewport`, route => route.fulfill({ contentType: 'text/html', body: `<!doctype html>
+  await page.route(`${origin}/__popup_viewport`, route => route.fulfill({ contentType: 'text/html', body: `<!doctype html><html data-platform="macos">
     <link rel="stylesheet" href="/src/styles.css"><style>::-webkit-scrollbar{width:15px}</style>
     <body data-view="translate"><div class="app-shell"><div class="main-shell"><header class="popup-toolbar"></header><main>
     <section class="view"><div class="source-column" style="height:80px">Generated source</div><div class="language-bar">auto</div>

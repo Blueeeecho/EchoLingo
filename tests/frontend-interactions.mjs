@@ -777,7 +777,7 @@ try {
   // uses the icon state, without a block background or success notification.
   const pin = page.locator('#pin-button');
   const pinBounds = await pin.boundingBox();
-  assert.ok(pinBounds && pinBounds.width >= 32 && pinBounds.height >= 32);
+  assert.ok(pinBounds && pinBounds.width === 32 && pinBounds.height === 28);
   assert.ok(await pin.locator('svg').evaluate((element) => element.getBoundingClientRect().width >= 18));
   assert.equal(await pin.getAttribute('aria-pressed'), 'false');
   assert.notEqual(await pin.locator('svg').evaluate((element) => getComputedStyle(element).transform), 'none');

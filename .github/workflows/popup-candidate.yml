@@ -245,6 +245,8 @@ jobs:
           server=$!
           trap 'kill "$server"' EXIT
           for attempt in {1..30}; do curl -fsS http://127.0.0.1:1420/ >/dev/null && break; sleep 1; done
-          node tests/frontend-interactions.mjs
-          node tests/window-resize-edges.mjs
-          node tests/popup-viewport.mjs
+          status=0
+          for test in frontend-interactions window-resize-edges popup-viewport; do
+            if ! node "tests/$test.mjs"; then status=1; fi
+          done
+          exit "$status"
