@@ -10,13 +10,13 @@ try {
   const errors = []; page.on('pageerror', error => errors.push(error.message));
   await page.route(`${origin}/__popup_viewport`, route => route.fulfill({ contentType: 'text/html', body: `<!doctype html><html data-platform="macos">
     <link rel="stylesheet" href="/src/styles.css"><style>::-webkit-scrollbar{width:15px}</style>
-    <body data-view="translate"><div class="app-shell"><div class="main-shell"><header class="popup-toolbar"></header><main>
+    <body data-view="translate"><div class="app-shell"><div class="main-shell"><header class="popup-toolbar"><button class="icon-button"></button><div class="popup-drag-space" data-window-drag></div><button class="icon-button"></button><button class="icon-button"></button></header><main>
     <section class="view"><div class="source-column" style="height:80px">Generated source</div><div class="language-bar">auto</div>
     <div class="result-card"><header class="result-card-header">Provider</header><p class="result-text">Generated result</p><div class="result-actions">Copy</div></div>
     </section></main></div></div></body>` }));
   await page.addInitScript(() => {
     Object.defineProperty(navigator, 'platform', { configurable: true, get: () => 'MacIntel' });
-    const q = window.__viewportQA = { presentation: { epoch: 1, presented: false }, target: null, fits: [], shows: [], preparations: [], scale: 2, scaleQueries: [] };
+    const q = window.__viewportQA = { presentation: { epoch: 1, presented: false }, target: null, fits: [], shows: [], preparations: [], headerRegions: [], pendingHeader: [], deferHeader: false, scale: 2, scaleQueries: [] };
     Object.defineProperty(window, 'devicePixelRatio', { configurable: true, get: () => q.scale });
     const matchMedia = window.matchMedia.bind(window);
     window.matchMedia = query => {
@@ -24,6 +24,11 @@ try {
       const media = new EventTarget(); q.scaleQueries.push(media); return media;
     };
     window.__TAURI_INTERNALS__ = { invoke: async (command, args) => {
+      if (command === 'configure_popup_header_drag') {
+        q.headerRegions.push(structuredClone(args));
+        if (q.deferHeader) return new Promise(resolve => q.pendingHeader.push(resolve));
+        return;
+      }
       if (command === 'fit_window') {
         q.fits.push(structuredClone(args));
         if (q.failFit) throw new Error('WINDOW_LAYOUT: generated sizing failure');
@@ -46,6 +51,20 @@ try {
     });
     await page.waitForFunction(() => window.__viewportQA.fits.length > 0);
   };
+  await load();
+  await page.evaluate(() => {
+    const q = window.__viewportQA; q.deferHeader = true; q.pending = q.layout.presentPopup(1);
+  });
+  await page.waitForFunction(() => window.__viewportQA.pendingHeader.length > 0);
+  assert.equal(await page.evaluate(() => window.__viewportQA.shows.length), 0, 'First reveal waits for native header registration');
+  assert.equal(await page.evaluate(() => window.__viewportQA.headerRegions.at(-1).width > 0), true);
+  await page.evaluate(() => {
+    const q = window.__viewportQA; q.deferHeader = false;
+    for (const resolve of q.pendingHeader.splice(0)) resolve();
+  });
+  await page.evaluate(() => window.__viewportQA.pending);
+  assert.equal(await page.evaluate(() => window.__viewportQA.shows.length), 1);
+
   await load();
   await page.evaluate(() => {
     const q = window.__viewportQA; q.target = { width: 680, height: 300, scaleFactor: 2 };
@@ -142,5 +161,5 @@ try {
     }
   }
   assert.deepEqual(errors, []);
-  console.log(JSON.stringify({ ok: true, scope: 'generated DOM + mock IPC, not physical Mac clarity', cases: 14 }));
+  console.log(JSON.stringify({ ok: true, scope: 'generated DOM + mock IPC, not physical Mac clarity', cases: 15 }));
 } finally { await browser.close(); }
