@@ -2019,6 +2019,26 @@ pub async fn configure_popup_header_drag(
     }
 }
 #[cfg(target_os = "macos")]
+pub fn adopt_popup_header_presentation(
+    window: &WebviewWindow,
+    previous: u64,
+    next: u64,
+) -> Result<(), String> {
+    unsafe extern "C" {
+        fn echolingo_adopt_header_drag_presentation(
+            window: *mut std::ffi::c_void,
+            previous: u64,
+            next: u64,
+        );
+    }
+    let native = window.ns_window().map_err(|_| "窗口不可用")?;
+    unsafe {
+        echolingo_adopt_header_drag_presentation(native, previous, next);
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
 pub fn popup_drag_diagnostics(state: &LayoutState) -> serde_json::Value {
     let Ok(drag) = state.popup_drag.lock() else {
         return serde_json::json!({"available": false});

@@ -23,3 +23,11 @@ class PopupDragStreamContract(unittest.TestCase):
         self.assertIn('current.epoch == token.epoch', RUST)
         self.assertIn('popup-native-drag-ended', PANEL)
         self.assertIn('revision > self.revision', SWIFT)
+
+    def test_first_reveal_registers_before_show_and_adopts_only_prepared_epoch(self):
+        reveal = PANEL[PANEL.index('const presentPopup ='):PANEL.index('const presentManagement =')]
+        self.assertLess(reveal.index("await invoke('configure_popup_header_drag'"), reveal.index("('show_popup'"))
+        main = (ROOT/'src-tauri/src/main.rs').read_text()
+        transaction = main[main.index('async fn show_prepared_popup('):main.index('fn start_action(')]
+        self.assertLess(transaction.index('adopt_popup_header_presentation'), transaction.index('window.show()'))
+        self.assertIn('guard epoch == previous, next >= previous', SWIFT)

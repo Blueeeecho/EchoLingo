@@ -36,7 +36,15 @@ private func callback(_ context: UnsafeMutableRawPointer?, _ action: Int32, _ ep
             precondition(observer.event(event(.leftMouseDown)) == nil)
         }
         func sample(dx: Double, dy: Double = 0) { physical.pointer.x += dx; physical.pointer.y += dy; observer.sample() }
+        // Prepared hidden epoch -> native resume -> first grab, without a DOM reply.
+        observer.adoptPresentation(previous: 7, next: 8); fixtureEpoch = 8
+        press(); physical.leftDown = false; observer.sample()
+        observer.adoptPresentation(previous: 7, next: 9) // Stale show cannot rebind current region.
+        precondition(observer.epoch == 8)
+        observer.adoptPresentation(previous: 8, next: 7) // No backwards adoption.
+        precondition(observer.epoch == 8)
         // A queued original down followed by release/new press cannot arm.
+        physical.leftDown = true
         physical.lastReleaseTime = ProcessInfo.processInfo.systemUptime + 1
         precondition(observer.event(event(.leftMouseDown)) != nil && observer.machine.id == 0)
         physical.lastReleaseTime = -.infinity
@@ -52,7 +60,7 @@ private func callback(_ context: UnsafeMutableRawPointer?, _ action: Int32, _ ep
         window.setContentSize(NSSize(width: 320, height: 240))
         press(); let begin = window.frame.origin
         let heldToken = observer.machine.id
-        observer.configure(revision: 2, epoch: 7, region: region, viewport: window.contentView!.bounds.size)
+        observer.configure(revision: 2, epoch: fixtureEpoch, region: region, viewport: window.contentView!.bounds.size)
         precondition(observer.machine.id == heldToken)
         _ = observer.event(event(.leftMouseUp)) // Old queued up while the same physical press is still down.
         precondition(observer.machine.id == heldToken)

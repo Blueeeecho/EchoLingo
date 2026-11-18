@@ -346,6 +346,15 @@ export function installPanelLayout(desktop: boolean, getPresentation: () => Tran
       fittedPopupEpoch = presentationEpoch; invalidation++; last = ''; committedPopupHeight = 0;
     }
     if (!await preparePresentation(presentationEpoch, false) || reveal !== revealRevision) return null;
+    if (/Mac/.test(navigator.platform)) {
+      // Complete hit-region registration before reveal. Native resume may advance
+      // the epoch; show_popup adopts this verified region in that same UI turn.
+      const region = document.querySelector<HTMLElement>('.popup-drag-space')?.getBoundingClientRect() ?? null;
+      const geometry = popupHeaderRegion(region, innerWidth, innerHeight, !disposed
+        && document.body.dataset.view === 'translate' && !document.body.classList.contains('modal-open'));
+      await invoke('configure_popup_header_drag', { revision: ++headerRevision, presentationEpoch, ...geometry });
+      if (disposed || reveal !== revealRevision || presentationEpoch < getPresentation().epoch) return null;
+    }
     // The source event has switched the DOM and fitted its content before the
     // native window is shown, so a previous settings page cannot flash first.
     if (!disposed && document.body.dataset.view === 'translate' && presentationEpoch >= getPresentation().epoch) return invoke<TranslationPresentation>('show_popup', { presentationEpoch, focusInput, reuseVisiblePopup });

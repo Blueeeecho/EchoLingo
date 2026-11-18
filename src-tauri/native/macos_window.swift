@@ -194,6 +194,11 @@ final class PopupHeaderDragObserver {
         if machine.id != 0 && (epoch != self.epoch || region.isEmpty) { finish(region.isEmpty ? .disabled : .presentation) }
         self.epoch = epoch; self.region = region; self.viewport = viewport
     }
+    func adoptPresentation(previous: UInt64, next: UInt64) {
+        guard epoch == previous, next >= previous else { return }
+        if next != previous { finish(.presentation) }
+        epoch = next
+    }
     func finish(_ reason: HeaderDragStop) {
         guard machine.id != 0 else { return }
         let ended = machine; machine = HeaderDragMachine()
@@ -264,6 +269,15 @@ public func echoLingoConfigureHeaderDrag(_ pointer: UnsafeMutableRawPointer?, _ 
     }
     observer.configure(revision: revision, epoch: epoch, region: NSRect(x: x, y: y, width: width, height: height), viewport: NSSize(width: viewportWidth, height: viewportHeight))
     return 0
+}
+// Called inside the trusted native resume/show transaction, before visibility.
+// Only the already-verified prepared epoch may transfer its registered region.
+@_cdecl("echolingo_adopt_header_drag_presentation")
+public func echoLingoAdoptHeaderDragPresentation(_ pointer: UnsafeMutableRawPointer?, _ previous: UInt64, _ next: UInt64) {
+    guard Thread.isMainThread, let pointer,
+          let window = Unmanaged<AnyObject>.fromOpaque(pointer).takeUnretainedValue() as? NSWindow,
+          let observer = objc_getAssociatedObject(window, &headerDragObserverKey) as? PopupHeaderDragObserver else { return }
+    observer.adoptPresentation(previous: previous, next: next)
 }
 @_cdecl("echolingo_cancel_stale_header_drag")
 public func echoLingoCancelStaleHeaderDrag(_ pointer: UnsafeMutableRawPointer?, _ epoch: UInt64, _ presented: Int32) {

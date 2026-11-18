@@ -2139,6 +2139,12 @@ async fn show_prepared_popup(
             verify_application_policy(&handle, "beforePopup")?;
             platform::ensure_popup_behavior(&window)?;
             let presentation = state.translation_requests.resume(Some(expected_epoch))?;
+            #[cfg(target_os = "macos")]
+            window_layout::adopt_popup_header_presentation(
+                &window,
+                expected_epoch,
+                presentation.epoch,
+            )?;
             announce_presentation(&handle, presentation);
             if focus_input {
                 window.show().map_err(|_| "WINDOW_SHOW: 无法显示翻译窗口")?;
