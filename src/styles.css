@@ -447,3 +447,13 @@ body[data-popup-focus-managed="true"] :is(.popup-toolbar, .management-header) > 
 #screenshot-settings .preference-row > span { min-width: 0; }
 #screenshot-folder { overflow-wrap: anywhere; }
 #screenshot-settings .preference-row > button { flex-shrink: 0; }
+
+/* Mac translation popup: keep type size and aligned text insets unchanged. */
+:root[data-platform="macos"] body[data-view="translate"] { --popup-toolbar-height: 30px; }
+:root[data-platform="macos"] body[data-view="translate"] .popup-toolbar { height: var(--popup-toolbar-height); }
+:root[data-platform="macos"] body[data-view="translate"] .popup-toolbar > .icon-button { height: 28px; }
+:root[data-platform="macos"] body[data-view="translate"] main { padding-inline: 8px; }
+:root[data-platform="macos"] body[data-view="translate"] .language-bar { min-height: 27px; padding-block: 1px; }
+:root[data-platform="macos"] body[data-view="translate"] .view { max-height: calc(100vh - var(--popup-toolbar-height) - 12px); scrollbar-width: thin; }
+:root[data-platform="macos"] body[data-view="translate"] .view::-webkit-scrollbar { width: 6px; }
+:root[data-platform="macos"] body[data-view="translate"] .popup-resize-edge:is([data-window-resize="west"], [data-window-resize="east"]) { top: var(--popup-toolbar-height); width: 8px; }

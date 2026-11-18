@@ -8,7 +8,7 @@ const browser = await chromium.launch({ headless: true, ...(process.env.ECHOLING
 try {
   const page = await browser.newPage({ viewport: { width: 800, height: 820 } });
   const errors = []; page.on('pageerror', error => errors.push(error.message));
-  await page.route(`${origin}/__resize_edges`, route => route.fulfill({ contentType: 'text/html', body: `<!doctype html><link rel="stylesheet" href="/src/styles.css"><body data-view="translate">${directions.map(direction => `<div class="popup-resize-edge" data-window-resize="${direction}" aria-hidden="true"></div>`).join('')}<div class="app-shell"><div class="main-shell"><header class="popup-toolbar"><button class="icon-button" id="pin-button">P</button><div class="popup-drag-space" data-window-drag></div><button class="icon-button" id="more-toggle">M</button><button class="icon-button" id="close-popup">X</button></header><header class="management-header"><button class="icon-button" id="back">B</button><span class="management-spacer"></span><button class="icon-button" id="close-management">X</button></header><main><section class="view">Content</section></main></div></div></body>` }));
+  await page.route(`${origin}/__resize_edges`, route => route.fulfill({ contentType: 'text/html', body: `<!doctype html><html data-platform="macos"><link rel="stylesheet" href="/src/styles.css"><body data-view="translate">${directions.map(direction => `<div class="popup-resize-edge" data-window-resize="${direction}" aria-hidden="true"></div>`).join('')}<div class="app-shell"><div class="main-shell"><header class="popup-toolbar"><button class="icon-button" id="pin-button">P</button><div class="popup-drag-space" data-window-drag></div><button class="icon-button" id="more-toggle">M</button><button class="icon-button" id="close-popup">X</button></header><header class="management-header"><button class="icon-button" id="back">B</button><span class="management-spacer"></span><button class="icon-button" id="close-management">X</button></header><main><section class="view">Content</section></main></div></div></body>` }));
   await page.addInitScript(() => {
     Object.defineProperty(navigator, 'platform', { configurable: true, get: () => window.__resizeQA?.platform ?? 'MacIntel' });
     window.__resizeQA = { platform: 'MacIntel', presentation: { epoch: 1, presented: true }, requests: [], commands: [], dragCommands: [], hold: false, nextDrag: 0,
@@ -33,7 +33,7 @@ try {
   const edge = direction => page.locator(`[data-window-resize="${direction}"]`);
   for (const direction of directions) assert.equal(await edge(direction).isVisible(), direction === 'west' || direction === 'east');
   for (const direction of ['west', 'east']) {
-    const box = await edge(direction).boundingBox(); assert.equal(box.width, 10); assert.equal(box.y, 36);
+    const box = await edge(direction).boundingBox(); assert.equal(box.width, 8); assert.equal(box.y, 30);
   }
   for (const selector of ['#pin-button', '#more-toggle', '#close-popup']) assert.equal(await page.locator(selector).evaluate(element => { const r=element.getBoundingClientRect(); return document.elementFromPoint(r.x+r.width/2,r.y+r.height/2) === element; }), true, `${selector} must retain its click target`);
   const drag = async (direction, dx, dy) => {
@@ -44,6 +44,13 @@ try {
     assert.ok(await page.evaluate(before => window.__resizeQA.requests.length > before,before));
     return page.evaluate(() => window.__resizeQA.requests.at(-1));
   };
+  for (const direction of ['west', 'east']) {
+    const box = await edge(direction).boundingBox();
+    for (const inset of [1, 2]) {
+      const x = direction === 'west' ? inset : 800 - inset, y = box.y + 2;
+      assert.equal(await page.evaluate(({ x, y }) => document.elementFromPoint(x, y)?.getAttribute('data-window-resize'), { x, y }), direction);
+    }
+  }
   assert.deepEqual(await drag('east',-50,30), { command:'resize_popup_width', width:750, direction:'east', presentationEpoch:1 });
   await page.evaluate(() => { document.body.dataset.view='settings'; window.__resizeQA.presentation.epoch=2; });
   for (const selector of ['#back','#close-management']) assert.equal(await page.locator(selector).evaluate(element => { const r=element.getBoundingClientRect(); return document.elementFromPoint(r.x+r.width/2,r.y+r.height/2)===element; }),true);

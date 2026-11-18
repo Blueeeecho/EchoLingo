@@ -3,27 +3,27 @@
 <h1 align="center">EchoLingo · 回声译</h1>
 <p align="center"><strong>A familiar echo for unfamiliar words.</strong></p>
 <p align="center">A lightweight desktop app for selection translation and seamless OCR, so understanding can keep up with your reading.</p>
-<p align="center"><a href="https://blueeeecho.github.io/EchoLingo/">Website</a> · <a href="https://github.com/Blueeeecho/EchoLingo/releases/tag/0.2.18">Windows 0.2.18 test prerelease</a> · <a href="https://github.com/Blueeeecho/EchoLingo/releases/tag/0.2.18">macOS 0.2.18 test prerelease</a> · <a href="https://github.com/Blueeeecho/EchoLingo/issues">Feedback</a></p>
+<p align="center"><a href="https://blueeeecho.github.io/EchoLingo/">Website</a> · <a href="https://github.com/Blueeeecho/EchoLingo/releases/tag/0.2.19">Windows 0.2.19 test prerelease</a> · <a href="https://github.com/Blueeeecho/EchoLingo/releases/tag/0.2.19">macOS 0.2.19 test prerelease</a> · <a href="https://github.com/Blueeeecho/EchoLingo/issues">Feedback</a></p>
 
 ## Download and install
 
-**[Recommended: Windows 0.2.18 unpack-and-run ZIP (x64)](https://github.com/Blueeeecho/EchoLingo/releases/download/0.2.18/EchoLingo_0.2.18_windows_x64-unpack.zip)** · **[Download macOS 0.2.18 test prerelease (Apple silicon)](https://github.com/Blueeeecho/EchoLingo/releases/download/0.2.18/EchoLingo_0.2.18_macos_arm64.dmg)**
+**[Download Windows 0.2.19 installer (x64)](https://github.com/Blueeeecho/EchoLingo/releases/download/0.2.19/EchoLingo_0.2.19_windows_x64-setup.exe)** · **[Download macOS 0.2.19 prerelease (Apple silicon)](https://github.com/Blueeeecho/EchoLingo/releases/download/0.2.19/EchoLingo_0.2.19_macos_arm64.dmg)**
 
-Extract the entire Windows ZIP, then open `Start-EchoLingo.cmd`. The [Windows NSIS installer](https://github.com/Blueeeecho/EchoLingo/releases/download/0.2.18/EchoLingo_0.2.18_windows_x64-setup.exe) remains available. Microsoft Edge WebView2 Runtime is still required; the launcher does not download or install it automatically. Settings, history and WebView data stay in the current user's AppData, and keys stay in Windows Credential Manager. They do not move with the ZIP.
+The Windows installer requires Microsoft Edge WebView2 Runtime.
 
 Windows supports Windows 10 1809+ and Windows 11. The macOS package is for Apple silicon Macs on macOS 12 or later. Apple system translation needs macOS 26 or later. After launch, EchoLingo stays in the tray or menu bar. Quit the previous version completely before you upgrade.
 
-Windows and macOS now both offer the 0.2.18 test prerelease. Translation and OCR services are managed separately, with collapsible free-service recommendations. The defaults are `Alt+D`, `Alt+S`, and a separate `F1` screenshot and local editor action; shortcuts can be changed, cleared, or customized.
+Windows and macOS now both offer the 0.2.19 test prerelease. Translation and OCR services are managed separately, with collapsible free-service recommendations. The defaults are `Alt+D`, `Alt+S`, and a separate `F1` screenshot and local editor action; shortcuts can be changed, cleared, or customized.
 
-0.2.18 organizes Settings into six categories and improves readability. It corrects character counting for long inputs and preserves recovery copies of damaged local settings and history. Optional first-translation diagnostics help identify where an initial attempt fails; they do not establish a fix on every device. Process sampling provides a memory baseline, not a demonstrated reduction.
+0.2.19 aligns the source and translation, uses one scroll area for long text, and removes extra blank lines from captured text and translations. It fixes a popup drag interruption and lets a new macOS OCR request supersede the previous one. Missing messages when multi-selecting in WeChat remain unresolved.
 
-Both platform packages were built from the same commit and passed release checks. GitHub CI verified launch and settings on the Mac DMG, launch and bidirectional offline translation from the Windows unpack-and-run ZIP, and native installed-app acceptance on Windows, including F1 screenshot editing. These checks do not replace field testing of Apple system translation, device permissions, or physical multi-display and mixed-DPI setups. See the [CI records](https://github.com/Blueeeecho/EchoLingo/actions/runs/44026844279) and release notes.
+See the [CI records](https://github.com/Blueeeecho/EchoLingo/actions/runs/44097599304) and release manifest. Automated checks do not replace field testing of Apple system translation, chat-app selection, device permissions, or physical multi-display setups.
 
 This is an internal prerelease, not a stable release. Windows has no commercial code signature; macOS uses ad hoc signing and is not notarized by Apple. Your system may show warnings or request permissions again. Use only files from this repository’s release page with matching checksums.
 
-[Release notes](https://github.com/Blueeeecho/EchoLingo/releases/tag/0.2.18) · [SHA-256 checksums](https://github.com/Blueeeecho/EchoLingo/releases/download/0.2.18/SHA256SUMS.txt) · [Release manifest](https://github.com/Blueeeecho/EchoLingo/releases/download/0.2.18/RELEASE-MANIFEST.json)
+[Release notes](https://github.com/Blueeeecho/EchoLingo/releases/tag/0.2.19) · [SHA-256 checksums](https://github.com/Blueeeecho/EchoLingo/releases/download/0.2.19/SHA256SUMS.txt) · [Release manifest](https://github.com/Blueeeecho/EchoLingo/releases/download/0.2.19/RELEASE-MANIFEST.json)
 
-0.2.18 is a test prerelease, not a stable GitHub `Latest` release. See [all releases](https://github.com/Blueeeecho/EchoLingo/releases) for earlier versions. The packages correspond to the [0.2.18 source tag](https://github.com/Blueeeecho/EchoLingo/tree/0.2.18), not the default branch; see the release manifest for the relationship between source and installer bytes. The previous [0.2.17 prerelease](https://github.com/Blueeeecho/EchoLingo/releases/tag/0.2.17) remains available.
+0.2.19 is a test prerelease, not a stable GitHub `Latest` release. The packages correspond to the [0.2.19 source tag](https://github.com/Blueeeecho/EchoLingo/tree/0.2.19), not the default branch; see the release manifest for the relationship between source and installer bytes.
 
 [First-launch notes for macOS](docs/macos-install.zh-CN.md) (Chinese) · [Build from source](docs/build.md) (Chinese)
 

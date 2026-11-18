@@ -178,3 +178,31 @@ describe('Mac popup drag uses a real gesture rather than an asynchronous current
   });
 
 });
+
+describe('WKWebView zero-button hint after native acceptance', () => {
+  it('continues the same held token after zero, then stops on real release', async () => {
+    const { drag, host, frame, frames } = fixture();
+    drag.press(press); drag.move(1, -1100, 250, 1); await tick();
+    drag.move(1, -1080, 250, 0); await frame(); await frame();
+    expect(host.move).toHaveBeenCalledTimes(3); expect(host.end).not.toHaveBeenCalled();
+    expect(host.begin).toHaveBeenCalledTimes(1);
+    drag.release(1); await frame(); expect(host.move).toHaveBeenCalledTimes(3);
+    expect(host.end).toHaveBeenCalledWith(1); expect(frames.size).toBe(0);
+  });
+  it('native release rejects a zero-button hint even if DOM up is missing', async () => {
+    const { drag, host, frame, frames } = fixture();
+    drag.press(press); drag.move(1, -1100, 250, 1); await tick();
+    drag.move(1, -1080, 250, 0); host.move.mockResolvedValueOnce(false);
+    await frame(); expect(drag.check()).toBe(false); expect(frames.size).toBe(0);
+  });
+  it('zero while pending retires its late token without touching the next gesture', async () => {
+    const { drag, host } = fixture(); const pending = deferred<number>();
+    host.begin.mockReturnValueOnce(pending.promise).mockResolvedValueOnce(2);
+    drag.press(press); drag.move(1, -1100, 250, 1); drag.move(1, -1080, 250, 0);
+    expect(drag.check()).toBe(false);
+    drag.press({ ...press, pointerId: 2 }); drag.move(2, -1100, 250, 1); await tick();
+    pending.resolve(1); await tick();
+    expect(host.end).toHaveBeenCalledWith(1); expect(host.move.mock.calls.every(([id]) => id === 2)).toBe(true);
+    expect(drag.retainsNativeGesture(2)).toBe(true); drag.cancel();
+  });
+});

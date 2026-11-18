@@ -24,7 +24,9 @@ export class PopupDragController {
   move(pointerId: number, screenX: number, screenY: number, buttons: number): void {
     const gesture = this.gesture;
     if (!gesture || gesture.pointerId !== pointerId) return;
-    if (!(buttons & 1) || !this.host.valid(gesture.epoch)) { this.cancel(); return; }
+    // WKWebView may report zero buttons while a native drag is still held.
+    // Only an established token can defer to native button + press-ID checks.
+    if ((!(buttons & 1) && gesture.token === null) || !this.host.valid(gesture.epoch)) { this.cancel(); return; }
     if (!gesture.crossed) {
       if (Math.hypot(screenX - gesture.screenX, screenY - gesture.screenY) < 4) return;
       gesture.crossed = true;

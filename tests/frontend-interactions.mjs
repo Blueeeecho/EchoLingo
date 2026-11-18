@@ -1112,6 +1112,7 @@ try {
   // The original physical mouse remains held; only native press checks may stop it.
   const movesBeforeLoss = await page.evaluate(() => window.__qa.popupDragCommands.filter(x => x.command === 'move_popup_drag').length);
   await page.locator('.popup-drag-space').evaluate(element => {
+    element.dispatchEvent(new PointerEvent('pointermove', { pointerId: 1, pointerType: 'mouse', buttons: 0, bubbles: true }));
     for (const type of ['pointercancel', 'lostpointercapture']) element.dispatchEvent(new PointerEvent(type,
       { pointerId: 1, pointerType: 'mouse', isPrimary: true, buttons: 1, bubbles: true }));
   });
@@ -1143,7 +1144,7 @@ try {
     assert.equal(await edge.getAttribute('tabindex'), null);
     assert.equal(await edge.getAttribute('title'), '拖动调整窗口宽度');
     assert.equal(await edge.evaluate((element) => getComputedStyle(element).cursor), 'ew-resize');
-    assert.equal((await edge.boundingBox()).width, 10);
+    assert.equal((await edge.boundingBox()).width, 8);
   }
   assert.deepEqual(await page.evaluate(() => ['pin-button', 'more-toggle', 'close-popup'].map(id => {
     const button = document.getElementById(id), bounds = button.getBoundingClientRect();
@@ -1152,8 +1153,11 @@ try {
   })), ['pin-button', 'more-toggle', 'close-popup'].map(id => ({ id, buttonReceivesCenter: true, coveredByResizeEdge: false })));
   for (const [edge, movement, expected, direction] of [[eastEdge, -80, 600, 'east'], [westEdge, 75, 605, 'west']]) {
     const bounds = await edge.boundingBox(), count = await page.evaluate(() => window.__qa.resizeRequests.length);
-    await page.mouse.move(bounds.x + 2, 45); await page.mouse.down();
-    await page.mouse.move(bounds.x + 2 + movement, 45, { steps: 4 }); await page.mouse.up();
+    const x = direction === 'east' ? bounds.x + bounds.width - 2 : bounds.x + 2;
+    const y = (await page.locator('.popup-toolbar').boundingBox()).height + 2;
+    assert.equal(bounds.y, y - 2);
+    await page.mouse.move(x, y); await page.mouse.down();
+    await page.mouse.move(x + movement, y, { steps: 4 }); await page.mouse.up();
     await page.waitForFunction(({ count, width }) => window.__qa.resizeRequests.length > count && window.__qa.resizeRequests.at(-1).width === width, { count, width: expected });
     assert.equal(await page.evaluate(() => window.__qa.resizeRequests.at(-1).direction), direction);
     assert.equal(await page.evaluate(() => window.__qa.resizeRequests.at(-1).presentationEpoch === window.__qa.presentation.epoch), true);
@@ -4604,7 +4608,9 @@ try {
   try {
     const balance = await balanceBrowser.newPage({ viewport: { width: 700, height: 750 } });
     await balance.goto(process.env.ECHOLINGO_TEST_URL ?? 'http://127.0.0.1:1420/');
-    await balance.addStyleTag({ content: '#view-translate::-webkit-scrollbar { width: 14px; }' });
+    await balance.evaluate(() => { document.documentElement.dataset.platform = 'macos'; });
+    assert.equal((await balance.locator('.popup-toolbar').boundingBox()).height, 30);
+    assert.equal((await balance.locator('.language-bar').boundingBox()).height, 27);
     const geometry = () => balance.evaluate(() => {
       const view = document.querySelector('#view-translate');
       const rects = ['.source-column', '.language-bar', '.result-card'].map(selector => {
@@ -4624,7 +4630,7 @@ try {
       await balance.setViewportSize({ width, height: 750 });
       const short = await geometry();
       assert.equal(short.overflow, false);
-      assert.ok(short.gutter >= 24, 'fixture exercises two classic scrollbar gutters');
+      assert.ok(short.gutter >= 12 && short.gutter <= 20, 'fixture exercises two thin symmetric classic scrollbar gutters');
       await balance.locator('.result-card').evaluate(el => { el.style.minHeight = '1000px'; });
       const tall = await geometry();
       assert.equal(tall.overflow, true);

@@ -41,6 +41,14 @@ class RuntimeContract(unittest.TestCase):
                            "CFBundleShortVersionString": smoke.VERSION}, stream)
         return app
 
+    def test_candidate_version_is_explicit_and_rejects_historical_bundle(self):
+        self.assertEqual(smoke.VERSION, "0.2.18")
+        app = self.bundle()
+        with mock.patch.object(smoke, "VERSION", "0.2.20"):
+            with self.assertRaisesRegex(smoke.SmokeError, "bundle_identity_mismatch"):
+                smoke.validate_bundle(app)
+        smoke.validate_bundle(app)
+
     def test_runner_guard_requires_all_three_conditions(self):
         for platform, actions, runner in [("linux", "true", "macOS"),
                                            ("darwin", "false", "macOS"),
