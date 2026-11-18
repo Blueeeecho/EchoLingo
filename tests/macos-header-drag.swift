@@ -30,9 +30,9 @@ private func callback(_ context: UnsafeMutableRawPointer?, _ action: Int32, _ ep
             NSEvent.mouseEvent(with: type, location: NSPoint(x: x, y: window.contentView!.bounds.height - top), modifierFlags: [],
                 timestamp: ProcessInfo.processInfo.systemUptime, windowNumber: window.windowNumber, context: nil, eventNumber: 1, clickCount: 1, pressure: 1)!
         }
-        func press() {
+        func press(initialDelta: Double = 0) {
             physical.press += 1; physical.leftDown = true
-            physical.pointer = NSPoint(x: window.frame.minX + 100, y: window.frame.maxY - 14)
+            physical.pointer = NSPoint(x: window.frame.minX + 100 + initialDelta, y: window.frame.maxY - 14)
             precondition(observer.event(event(.leftMouseDown)) == nil)
         }
         func sample(dx: Double, dy: Double = 0) { physical.pointer.x += dx; physical.pointer.y += dy; observer.sample() }
@@ -56,6 +56,11 @@ private func callback(_ context: UnsafeMutableRawPointer?, _ action: Int32, _ ep
             press(); let before = window.frame.origin; sample(dx: 20); precondition(window.frame.origin != before)
             physical.leftDown = false; observer.sample(); precondition(observer.machine.id == 0)
         }
+        // Fast movement already occurred before native down dispatch.
+        let beforeDelayedDown = window.frame.origin
+        press(initialDelta: 40); observer.sample()
+        precondition(window.frame.origin != beforeDelayedDown)
+        physical.leftDown = false; observer.sample()
         // Result-driven height changes retain the same top-relative header and width.
         window.setContentSize(NSSize(width: 320, height: 240))
         press(); let begin = window.frame.origin

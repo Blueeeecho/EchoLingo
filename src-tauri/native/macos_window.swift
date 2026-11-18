@@ -229,7 +229,9 @@ final class PopupHeaderDragObserver {
         let press = physical.press
         let id = callback(context, 0, epoch, 0, press, anchor.x, anchor.y, 0)
         guard id != 0 else { return event }
-        machine.arm(id: id, epoch: epoch, press: press, anchor: anchor, pointer: physical.pointer)
+        // Measure the threshold from the original down, including movement that
+        // already happened before this local event reached the main thread.
+        machine.arm(id: id, epoch: epoch, press: press, anchor: anchor, pointer: window.convertPoint(toScreen: event.locationInWindow))
         let timer = Timer(timeInterval: 1.0 / 120.0, repeats: true) { [weak self] _ in self?.sample() }
         self.timer = timer
         RunLoop.main.add(timer, forMode: .common)
