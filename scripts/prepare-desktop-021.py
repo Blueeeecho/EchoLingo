@@ -7,7 +7,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 VERSION = '0.2.21'
-REVIEWED_SOURCE = 'a7dabdc211c735e6851cc43290880dd5b38e1d30'
+REVIEWED_SOURCE = '1e76398cfdb146034b79d13228f1f9dfac3e38f4'
 SPEC = importlib.util.spec_from_file_location('desktop_018', ROOT/'scripts/prepare-desktop-release.py')
 legacy = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(legacy)
