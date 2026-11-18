@@ -1,4 +1,4 @@
-name: Popup 0.2.20 candidate acceptance
+name: Popup 0.2.21 candidate acceptance
 on:
   pull_request:
     branches: [main]
@@ -135,10 +135,10 @@ jobs:
             extracted="$RUNNER_TEMP/desktop-inspection/echolingo"
           fi
           test "${#files[@]}" -eq 1
-          python scripts/inspect-candidate-package.py --expected-version 0.2.20 --platform "$RUNNER_OS" --installer "${files[0]}" --built-application "$built" --output-dir "$RUNNER_TEMP/desktop-inspection" --run-url "$RUN_URL" --locked-build-passed --focused-tests-passed
+          python scripts/inspect-candidate-package.py --expected-version 0.2.21 --platform "$RUNNER_OS" --installer "${files[0]}" --built-application "$built" --output-dir "$RUNNER_TEMP/desktop-inspection" --run-url "$RUN_URL" --locked-build-passed --focused-tests-passed
           mkdir "$RUNNER_TEMP/desktop-package"
           # Bash 3 with nounset rejects expansion of an empty optional array.
-          verifier=(scripts/verify-candidate-package.py --expected-version 0.2.20 --platform "$RUNNER_OS" --installer "${files[0]}" --application "$extracted" --checks-json "$RUNNER_TEMP/desktop-inspection/checks.json" --output "$RUNNER_TEMP/desktop-package/candidate.json" --run-url "$RUN_URL")
+          verifier=(scripts/verify-candidate-package.py --expected-version 0.2.21 --platform "$RUNNER_OS" --installer "${files[0]}" --application "$extracted" --checks-json "$RUNNER_TEMP/desktop-inspection/checks.json" --output "$RUNNER_TEMP/desktop-package/candidate.json" --run-url "$RUN_URL")
           if [ "$RUNNER_OS" = Windows ]; then
             verifier+=(--offline-staging-manifest "$RUNNER_TEMP/candidate-offline-evidence/baseline-reuse.json" --offline-source-archive "$RUNNER_TEMP/candidate-offline-evidence/EchoLingo-offline-engine-source.zip")
           fi
@@ -167,7 +167,7 @@ jobs:
           "$RUNNER_TEMP/desktop-header-event-route" | tee "$RUNNER_TEMP/desktop-package/macos-header-event-route.json"
           files=(src-tauri/target/release/bundle/dmg/*.dmg)
           test "${#files[@]}" -eq 1
-          python3 tests/macos-installed-runtime-smoke.py --expected-version 0.2.20 --installer "${files[0]}" --built-application src-tauri/target/release/bundle/macos/EchoLingo.app --output "$RUNNER_TEMP/desktop-package/macos-runtime.json" --run-url "$RUN_URL" --native-self-tests-passed --native-window-resize-fixture-passed
+          python3 tests/macos-installed-runtime-smoke.py --expected-version 0.2.21 --installer "${files[0]}" --built-application src-tauri/target/release/bundle/macos/EchoLingo.app --output "$RUNNER_TEMP/desktop-package/macos-runtime.json" --run-url "$RUN_URL" --native-self-tests-passed --native-window-resize-fixture-passed
       - name: Preserve bounded Mac runtime acceptance report
         if: always() && runner.os == 'macOS'
         uses: actions/upload-artifact@v4
@@ -181,9 +181,9 @@ jobs:
         run: |
           & python scripts/package-windows-unpack.py --application src-tauri/target/release/echolingo.exe --source-archive "$env:RUNNER_TEMP/candidate-offline-evidence/EchoLingo-offline-engine-source.zip" --output "$env:RUNNER_TEMP/desktop-unpack"
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          & powershell.exe -NoProfile -STA -ExecutionPolicy Bypass -File tests/windows-unpack-smoke.ps1 -ArchivePath "$env:RUNNER_TEMP/desktop-unpack/EchoLingo_0.2.20_windows_x64-unpack.zip" -ManifestPath "$env:RUNNER_TEMP/desktop-unpack/WINDOWS-ZIP-MANIFEST.json" -ReportPath "$env:RUNNER_TEMP/desktop-unpack/windows-unpack-smoke.json"
+          & powershell.exe -NoProfile -STA -ExecutionPolicy Bypass -File tests/windows-unpack-smoke.ps1 -ArchivePath "$env:RUNNER_TEMP/desktop-unpack/EchoLingo_0.2.21_windows_x64-unpack.zip" -ManifestPath "$env:RUNNER_TEMP/desktop-unpack/WINDOWS-ZIP-MANIFEST.json" -ReportPath "$env:RUNNER_TEMP/desktop-unpack/windows-unpack-smoke.json"
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          foreach ($name in @('EchoLingo_0.2.20_windows_x64-unpack.zip','WINDOWS-ZIP-MANIFEST.json','windows-unpack-smoke.json')) {
+          foreach ($name in @('EchoLingo_0.2.21_windows_x64-unpack.zip','WINDOWS-ZIP-MANIFEST.json','windows-unpack-smoke.json')) {
             Copy-Item -LiteralPath (Join-Path "$env:RUNNER_TEMP/desktop-unpack" $name) -Destination "$env:RUNNER_TEMP/desktop-package/"
           }
       - name: Accept real Windows settings and generated native focus behavior
