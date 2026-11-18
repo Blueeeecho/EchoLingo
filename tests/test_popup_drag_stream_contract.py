@@ -24,7 +24,8 @@ class PopupDragStreamContract(unittest.TestCase):
         self.assertNotIn('mac_drag_operation(', fit)
         self.assertNotIn('drag.finish(', fit)
         self.assertIn('echolingo_cancel_stale_header_drag', fit)
-        self.assertIn('current.epoch != token.epoch', fit)
+        self.assertIn('defer_header_fit(', fit)
+        self.assertIn('epoch != token.epoch', RUST)
         self.assertIn('popup-native-drag-ended', PANEL)
         self.assertIn('revision > self.revision', SWIFT)
 

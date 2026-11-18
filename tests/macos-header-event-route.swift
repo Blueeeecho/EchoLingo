@@ -60,9 +60,16 @@ private func routeCallback(_ context: UnsafeMutableRawPointer?, _ action: Int32,
             for index in 1...5 {
                 javascript("document.getElementById('result').textContent += ' Neutral streamed result.'")
                 observer.configure(revision: serial * 10 + UInt64(index), epoch: epoch, region: NSRect(x: 40, y: 0, width: 400, height: 28), viewport: web.bounds.size)
+                // Assert every step, away from screen clamps. A single early
+                // move followed by a stalled drag must fail this fixture.
+                let stepStart = window.frame.origin
                 physical.pointer.x += 12
-                RunLoop.main.run(until: Date().addingTimeInterval(0.025))
+                observer.sample()
+                let stepEnd = window.frame.origin
+                precondition(abs((stepEnd.x - stepStart.x) - 12) < 0.5 && abs(stepEnd.y - stepStart.y) < 0.5,
+                             "Held drag stalled or moved by the wrong increment")
                 precondition(token == held)
+                RunLoop.main.run(until: Date().addingTimeInterval(0.025))
             }
             precondition(window.frame.origin != before)
             physical.leftDown = false; dispatch(.leftMouseUp, top: 14)

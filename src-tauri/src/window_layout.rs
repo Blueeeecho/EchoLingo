@@ -210,6 +210,31 @@ impl PopupDrag {
     }
 }
 
+// Shared production gate: only lifecycle invalidation asks the native owner
+// to finish. No physical-state sampling or token retirement belongs to fitting.
+#[cfg(any(target_os = "macos", test))]
+fn defer_header_fit(
+    drag: &Mutex<PopupDrag>,
+    epoch: u64,
+    presented: bool,
+    management: bool,
+    cancel_owner: impl FnOnce() -> Result<(), String>,
+) -> Result<bool, String> {
+    let active = drag.lock().map_err(|_| "窗口拖动状态异常")?.active;
+    if let Some(token) = active {
+        if management || epoch != token.epoch || !presented {
+            // Drop the lock before the owner's synchronous finish callback.
+            cancel_owner()?;
+        }
+        return Ok(drag
+            .lock()
+            .map_err(|_| "窗口拖动状态异常")?
+            .active
+            .is_some());
+    }
+    Ok(false)
+}
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 struct Bounds {
     x: f64,
@@ -1592,21 +1617,16 @@ fn fit_inner(
     }
     #[cfg(target_os = "macos")]
     {
-        // The native header owner alone judges release. A height fit must not
-        // turn one transient legacy button/frame check into a cancelled gesture.
-        let active = state
-            .popup_drag
-            .lock()
-            .map_err(|_| "窗口拖动状态异常")?
-            .active;
-        if let Some(token) = active {
-            let current = window
-                .state::<crate::AppState>()
-                .translation_requests
-                .presentation()?;
-            if management || current.epoch != token.epoch || !current.presented {
-                // True lifecycle changes ask the owner to finish synchronously;
-                // never clear its token behind its back or hold its callback lock.
+        let current = window
+            .state::<crate::AppState>()
+            .translation_requests
+            .presentation()?;
+        if defer_header_fit(
+            &state.popup_drag,
+            current.epoch,
+            current.presented,
+            management,
+            || {
                 unsafe extern "C" {
                     fn echolingo_cancel_stale_header_drag(
                         window: *mut std::ffi::c_void,
@@ -1622,17 +1642,11 @@ fn fit_inner(
                         i32::from(!management && current.presented),
                     );
                 }
-            }
-            if state
-                .popup_drag
-                .lock()
-                .map_err(|_| "窗口拖动状态异常")?
-                .active
-                .is_some()
-            {
-                trace_drag(state, crate::popup_drag_diagnostics::Stage::FitDeferred);
-                return Ok(());
-            }
+                Ok(())
+            },
+        )? {
+            trace_drag(state, crate::popup_drag_diagnostics::Stage::FitDeferred);
+            return Ok(());
         }
     }
     let presentation = window
@@ -2553,6 +2567,34 @@ mod tests {
         assert_eq!(drag.active, None);
         let next = drag.begin(5, (100.0, 18.0), (12 << 32) | 11);
         assert!(next.id > current.id);
+    }
+
+    #[test]
+    fn streamed_fit_gate_keeps_native_owner_until_release_and_rejects_old_end() {
+        let drag = Mutex::new(PopupDrag::default());
+        let token = drag.lock().unwrap().begin(7, (100.0, 14.0), 42);
+        // Each result growth reaches the same gate used by fit_inner. Fitting
+        // cannot invoke a release check or finish an unchanged presentation.
+        for _height in [180.0, 240.0, 320.0, 440.0, 560.0] {
+            assert!(
+                defer_header_fit(&drag, 7, true, false, || panic!("fit cancelled held owner"))
+                    .unwrap()
+            );
+            assert_eq!(drag.lock().unwrap().active, Some(token));
+        }
+        drag.lock().unwrap().finish(token.id); // Native owner's release callback.
+        assert!(!defer_header_fit(&drag, 7, true, false, || panic!("idle cancellation")).unwrap());
+        let next = drag.lock().unwrap().begin(8, (120.0, 14.0), 43);
+        drag.lock().unwrap().finish(token.id); // Late prior completion.
+        assert!(
+            defer_header_fit(&drag, 8, true, false, || panic!("old end cancelled next")).unwrap()
+        );
+        assert_eq!(drag.lock().unwrap().active, Some(next));
+        assert!(!defer_header_fit(&drag, 9, true, false, || {
+            drag.lock().unwrap().finish(next.id);
+            Ok(())
+        })
+        .unwrap()); // True replacement asks owner, outside the lock.
     }
 
     #[test]
