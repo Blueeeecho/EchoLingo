@@ -35,6 +35,7 @@ def validate(source, version):
     expected_downloads = {
         f"{REPO}/releases/download/{version}/{name}"
         for name in (
+            f"EchoLingo_{version}_windows_x64-unpack.zip",
             f"EchoLingo_{version}_windows_x64-setup.exe",
             f"EchoLingo_{version}_macos_arm64.dmg",
             "SHA256SUMS.txt",
