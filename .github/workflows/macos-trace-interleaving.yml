@@ -1,0 +1,18 @@
+name: Bounded Mac self-test trace interleaving
+on:
+  push:
+    branches: [fix/windows-capture-first-failure]
+    paths: ['tests/macos-trace-interleaving.py', '.github/workflows/macos-trace-interleaving.yml']
+permissions:
+  contents: read
+jobs:
+  compare:
+    runs-on: macos-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Compare serial and controlled overlapping Rust to Swift entrypoints once
+        run: python3 tests/macos-trace-interleaving.py
