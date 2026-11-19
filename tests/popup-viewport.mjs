@@ -8,24 +8,35 @@ const browser = await chromium.launch({ headless: true, ignoreDefaultArgs: ['--h
 try {
   const page = await browser.newPage({ viewport: { width: 640, height: 720 }, deviceScaleFactor: 2 });
   const errors = []; page.on('pageerror', error => errors.push(error.message));
-  await page.route(`${origin}/__popup_viewport`, route => route.fulfill({ contentType: 'text/html', body: `<!doctype html>
+  await page.route(`${origin}/__popup_viewport`, route => route.fulfill({ contentType: 'text/html', body: `<!doctype html><html data-platform="macos">
     <link rel="stylesheet" href="/src/styles.css"><style>::-webkit-scrollbar{width:15px}</style>
-    <body data-view="translate"><div class="app-shell"><div class="main-shell"><header class="popup-toolbar"></header><main>
+    <body data-view="translate"><div class="app-shell"><div class="main-shell"><header class="popup-toolbar"><button class="icon-button"></button><div class="popup-drag-space" data-window-drag></div><button class="icon-button"></button><button class="icon-button"></button></header><main>
     <section class="view"><div class="source-column" style="height:80px">Generated source</div><div class="language-bar">auto</div>
     <div class="result-card"><header class="result-card-header">Provider</header><p class="result-text">Generated result</p><div class="result-actions">Copy</div></div>
     </section></main></div></div></body>` }));
   await page.addInitScript(() => {
     Object.defineProperty(navigator, 'platform', { configurable: true, get: () => 'MacIntel' });
-    const q = window.__viewportQA = { presentation: { epoch: 1, presented: false }, target: null, fits: [], shows: [], preparations: [], scale: 2, scaleQueries: [] };
+    const q = window.__viewportQA = { presentation: { epoch: 1, presented: false }, target: null, fits: [], shows: [], preparations: [], headerRegions: [], pendingHeader: [], deferHeader: false, scale: 2, scaleQueries: [] };
     Object.defineProperty(window, 'devicePixelRatio', { configurable: true, get: () => q.scale });
     const matchMedia = window.matchMedia.bind(window);
     window.matchMedia = query => {
       if (!query.includes('resolution:')) return matchMedia(query);
       const media = new EventTarget(); q.scaleQueries.push(media); return media;
     };
-    window.__TAURI_INTERNALS__ = { invoke: async (command, args) => {
+    const callbacks = new Map(), listeners = new Map(); let callbackId = 0;
+    q.emit = (event, payload) => listeners.get(event)?.({ event, payload, id: 1 });
+    window.__TAURI_EVENT_PLUGIN_INTERNALS__ = { unregisterListener: event => listeners.delete(event) };
+    window.__TAURI_INTERNALS__ = { transformCallback: callback => { callbacks.set(++callbackId, callback); return callbackId; }, invoke: async (command, args) => {
+      if (command === 'plugin:event|listen') { listeners.set(args.event, callbacks.get(args.handler)); return args.handler; }
+      if (command === 'plugin:event|unlisten') { listeners.delete(args.event); return; }
+      if (command === 'configure_popup_header_drag') {
+        q.headerRegions.push(structuredClone(args));
+        if (q.deferHeader) return new Promise(resolve => q.pendingHeader.push(resolve));
+        return;
+      }
       if (command === 'fit_window') {
         q.fits.push(structuredClone(args));
+        (q.fitEpochs ??= []).push(q.presentation.epoch);
         if (q.failFit) throw new Error('WINDOW_LAYOUT: generated sizing failure');
         return q.target ? { ...q.target, presentationEpoch: q.presentation.epoch } : null;
       }
@@ -48,6 +59,20 @@ try {
   };
   await load();
   await page.evaluate(() => {
+    const q = window.__viewportQA; q.deferHeader = true; q.pending = q.layout.presentPopup(1);
+  });
+  await page.waitForFunction(() => window.__viewportQA.pendingHeader.length > 0);
+  assert.equal(await page.evaluate(() => window.__viewportQA.shows.length), 0, 'First reveal waits for native header registration');
+  assert.equal(await page.evaluate(() => window.__viewportQA.headerRegions.at(-1).width > 0), true);
+  await page.evaluate(() => {
+    const q = window.__viewportQA; q.deferHeader = false;
+    for (const resolve of q.pendingHeader.splice(0)) resolve();
+  });
+  await page.evaluate(() => window.__viewportQA.pending);
+  assert.equal(await page.evaluate(() => window.__viewportQA.shows.length), 1);
+
+  await load();
+  await page.evaluate(() => {
     const q = window.__viewportQA; q.target = { width: 680, height: 300, scaleFactor: 2 };
     q.pending = q.layout.presentPopup(1);
   });
@@ -58,6 +83,37 @@ try {
   assert.deepEqual(await page.evaluate(() => window.__viewportQA.shows[0].viewport), { width: 680, height: 300, scaleFactor: 2 });
   assert.equal(await page.evaluate(() => window.__viewportQA.preparations.at(-1)), 680, 'Source auto-height is remeasured at adopted width before reveal');
   assert.equal(await page.evaluate(() => window.__viewportQA.fits.at(-1).contentWidth), 680);
+
+  // Production panel-layout completion listener, mocked native boundary.
+  // The Rust defer_header_fit test covers the actual held-fit gate separately;
+  // this is not a combined live Tauri/physical drag integration test.
+  await load();
+  await page.evaluate(async () => {
+    const q = window.__viewportQA; q.presentation = { epoch: 7, presented: true };
+    for (let index=1; index<=5; index++) {
+      document.querySelector('.result-text').textContent = 'Current streamed neutral result. '.repeat(index*12);
+      window.dispatchEvent(new Event('echolingo:layout'));
+      for (let frame=0;frame<3;frame++) await new Promise(requestAnimationFrame);
+    }
+    q.releaseBaseline = { count:q.fits.length, height:q.fits.at(-1).contentHeight };
+    q.emit('popup-native-drag-ended', 7);
+  });
+  await page.waitForFunction(() => window.__viewportQA.fits.length > window.__viewportQA.releaseBaseline.count);
+  assert.equal(await page.evaluate(() => window.__viewportQA.fits.at(-1).contentHeight === window.__viewportQA.releaseBaseline.height), true, 'Release remeasures latest streamed DOM, not an old fit snapshot');
+  await page.evaluate(async () => {
+    const q = window.__viewportQA; q.presentation = { epoch: 8, presented: true };
+    document.querySelector('.result-text').textContent = 'New current result. '.repeat(100);
+    window.dispatchEvent(new Event('echolingo:layout'));
+    for (let frame=0;frame<3;frame++) await new Promise(requestAnimationFrame);
+    q.releaseBaseline = { count:q.fits.length, height:q.fits.at(-1).contentHeight };
+    q.emit('popup-native-drag-ended', 7); // Old owner's delayed completion.
+    for (let frame=0;frame<3;frame++) await new Promise(requestAnimationFrame);
+  });
+  assert.equal(await page.evaluate(() => window.__viewportQA.fits.length === window.__viewportQA.releaseBaseline.count), true, 'Old completion cannot schedule a new presentation fit');
+  await page.evaluate(() => window.__viewportQA.emit('popup-native-drag-ended',8));
+  await page.waitForFunction(() => window.__viewportQA.fits.length > window.__viewportQA.releaseBaseline.count);
+  assert.equal(await page.evaluate(() => window.__viewportQA.fitEpochs.at(-1)),8);
+  assert.equal(await page.evaluate(() => window.__viewportQA.fits.at(-1).contentHeight === window.__viewportQA.releaseBaseline.height),true);
 
   // Latest intent and disposal cannot revive an old wait when resize arrives.
   for (const dispose of [false, true]) {
@@ -142,5 +198,5 @@ try {
     }
   }
   assert.deepEqual(errors, []);
-  console.log(JSON.stringify({ ok: true, scope: 'generated DOM + mock IPC, not physical Mac clarity', cases: 14 }));
+  console.log(JSON.stringify({ ok: true, scope: 'generated DOM + mock IPC, not physical Mac clarity', cases: 18 }));
 } finally { await browser.close(); }

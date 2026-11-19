@@ -338,6 +338,7 @@ def run(args):
 
 
 def main():
+    global VERSION
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--installer", required=True, type=Path)
     parser.add_argument("--built-application", required=True, type=Path)
@@ -345,7 +346,9 @@ def main():
     parser.add_argument("--run-url", required=True)
     parser.add_argument("--native-self-tests-passed", action="store_true")
     parser.add_argument("--native-window-resize-fixture-passed", action="store_true")
+    parser.add_argument("--expected-version", choices=("0.2.18", "0.2.20", "0.2.21"), default=VERSION)
     args = parser.parse_args()
+    VERSION = args.expected_version
     report = run(args)
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(json.dumps(report, indent=2, sort_keys=True) + "\n", encoding="utf-8")

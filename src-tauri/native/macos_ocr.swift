@@ -2,7 +2,8 @@ import Foundation
 
 // Foundation-only coordination: no AppKit/clipboard/screenshot operations or
 // borrowed C-ABI buffers run here. An admitted closure owns its immutable image
-// and request. At most one work call and one cancel call can be outstanding.
+// and request. At most two work/cancel pairs and one replaceable pending image
+// exist: a draining old request must not prevent a fresh selection.
 enum NativeOCRPhase: String {
     case workerAdmitted, workerStarted, callerWaiting, handlerCreationStarted, handlerCreated
     case requestCreationStarted, requestCreated
@@ -15,9 +16,10 @@ enum NativeOCRPhase: String {
 enum NativeOCRStop: String { case cancelled, deadline }
 enum NativeOCRWorkError: Error { case busy, cancelled, timedOut }
 
-private final class NativeOCRWorkBody: @unchecked Sendable {
+fileprivate final class NativeOCRWorkBody: @unchecked Sendable {
     private var action: ((NativeOCRJob) throws -> String)?
     init(_ action: @escaping (NativeOCRJob) throws -> String) { self.action = action }
+    func discard() { action = nil }
     func run(_ job: NativeOCRJob) -> Result<String, Error> {
         let work = action; action = nil
         do { try job.checkStopped(); return .success(try work!(job)) }
@@ -34,9 +36,12 @@ private final class NativeOCRCancelBody: @unchecked Sendable {
 final class NativeOCRDomain: @unchecked Sendable {
     static let shared = NativeOCRDomain()
     private let lock = NSLock()
-    private let workQueue = DispatchQueue(label: "EchoLingo.Vision.work", qos: .userInitiated)
-    private let cancelQueue = DispatchQueue(label: "EchoLingo.Vision.cancel", qos: .utility)
+    private let workQueue = DispatchQueue(label: "EchoLingo.Vision.work", qos: .userInitiated, attributes: .concurrent)
+    private let cancelQueue = DispatchQueue(label: "EchoLingo.Vision.cancel", qos: .utility, attributes: .concurrent)
     private var active: NativeOCRJob?
+    private var running: [NativeOCRJob] = []
+    private var pending: (job: NativeOCRJob, body: NativeOCRWorkBody)?
+    private let workerLimit = 2
     private var sequence: UInt64 = 0
     private var lastDrained: [String: Any]?
     private let clock: () -> TimeInterval
@@ -45,41 +50,93 @@ final class NativeOCRDomain: @unchecked Sendable {
         self.clock = clock
     }
 
-    // Reserve BEFORE displaying another selector. Repeated shortcuts do not
-    // enqueue images or threads behind an unresponsive Vision request.
+    // A fresh explicit action always gets a selector. Old Vision calls may be
+    // uncooperative; keep their resources until they really drain, never queue
+    // an unbounded number of images or threads behind them.
     func reserve(observer: @escaping (NativeOCRPhase) -> Void = { _ in }) throws -> NativeOCRJob {
         lock.lock()
-        guard active == nil else { lock.unlock(); throw NativeOCRWorkError.busy }
+        let previous = active
         sequence &+= 1
-        let job = NativeOCRJob(id: sequence, clock: clock, workQueue: workQueue, cancelQueue: cancelQueue,
-                               observer: observer, drained: { [weak self] job in self?.release(job) })
+        let job = NativeOCRJob(id: sequence, clock: clock, cancelQueue: cancelQueue,
+            observer: observer, enqueue: { [weak self] job, body in self?.enqueue(job, body) },
+            stopped: { [weak self] job in self?.discardPending(job) },
+            drained: { [weak self] job in self?.release(job) })
         active = job
         lock.unlock()
+        previous?.cancel()
         job.observe(.workerAdmitted)
         return job
+    }
+
+    private func enqueue(_ job: NativeOCRJob, _ body: NativeOCRWorkBody) {
+        lock.lock()
+        guard active === job, !job.isStopped else {
+            lock.unlock(); body.discard(); job.finish(.failure(NativeOCRWorkError.cancelled)); return
+        }
+        if running.count < workerLimit {
+            running.append(job); lock.unlock(); dispatch(job, body)
+        } else {
+            // reserve() cancels the previous pending job before handoff.
+            let replaced = pending
+            pending = (job, body); lock.unlock()
+            if let replaced {
+                replaced.body.discard(); replaced.job.cancel()
+                replaced.job.finish(.failure(NativeOCRWorkError.cancelled))
+            }
+        }
+    }
+
+    private func dispatch(_ job: NativeOCRJob, _ body: NativeOCRWorkBody) {
+        workQueue.async {
+            job.observe(.workerStarted)
+            let outcome = body.run(job)
+            job.finish(outcome)
+        }
+    }
+
+    private func discardPending(_ job: NativeOCRJob) {
+        lock.lock()
+        let abandoned = pending?.job === job ? pending : nil
+        if abandoned != nil { pending = nil }
+        lock.unlock()
+        if let abandoned {
+            abandoned.body.discard()
+            job.finish(.failure(NativeOCRWorkError.cancelled))
+        }
     }
 
     private func release(_ job: NativeOCRJob) {
         job.observe(.workerReleased)
         let snapshot = job.snapshot()
         lock.lock()
-        if active === job { active = nil; lastDrained = snapshot }
+        running.removeAll { $0 === job }
+        if active === job { active = nil }
+        lastDrained = snapshot
+        let next = running.count < workerLimit ? pending : nil
+        if let next { pending = nil; running.append(next.job) }
         lock.unlock()
+        if let next { dispatch(next.job, next.body) }
     }
 
     func snapshot() -> [String: Any] {
-        lock.lock(); let job = active; let previous = lastDrained; lock.unlock()
-        if let job { return job.snapshot() }
-        return ["state": "idle", "lastDrained": previous ?? [:]]
+        lock.lock()
+        let job = active ?? running.last; let previous = lastDrained
+        let workers = running.count; let queued = pending != nil
+        lock.unlock()
+        var result = job?.snapshot() ?? ["state": "idle", "lastDrained": previous ?? [:]]
+        result["workerCount"] = workers; result["pendingLatest"] = queued
+        result["workerLimit"] = workerLimit
+        return result
     }
 }
 
 final class NativeOCRJob: @unchecked Sendable {
     private let condition = NSLock()
     private let wake = DispatchSemaphore(value: 0)
-    private let workQueue: DispatchQueue
     private let cancelQueue: DispatchQueue
     private let observer: (NativeOCRPhase) -> Void
+    private let enqueue: (NativeOCRJob, NativeOCRWorkBody) -> Void
+    private let stopped: (NativeOCRJob) -> Void
     private let drained: (NativeOCRJob) -> Void
     private var started = false
     private var workFinished = false
@@ -99,11 +156,13 @@ final class NativeOCRJob: @unchecked Sendable {
     private var configuration: [String: Any] = [:]
     private var latestPhase = NativeOCRPhase.workerAdmitted
 
-    fileprivate init(id: UInt64, clock: @escaping () -> TimeInterval, workQueue: DispatchQueue, cancelQueue: DispatchQueue,
+    fileprivate init(id: UInt64, clock: @escaping () -> TimeInterval, cancelQueue: DispatchQueue,
                      observer: @escaping (NativeOCRPhase) -> Void,
+                     enqueue: @escaping (NativeOCRJob, NativeOCRWorkBody) -> Void,
+                     stopped: @escaping (NativeOCRJob) -> Void,
                      drained: @escaping (NativeOCRJob) -> Void) {
         self.id = id; self.clock = clock; self.admittedAt = clock()
-        self.workQueue = workQueue; self.cancelQueue = cancelQueue
+        self.enqueue = enqueue; self.stopped = stopped; self.cancelQueue = cancelQueue
         self.observer = observer; self.drained = drained
     }
 
@@ -154,13 +213,7 @@ final class NativeOCRJob: @unchecked Sendable {
         deadline = startedAt! + timeout
         condition.unlock()
         let body = NativeOCRWorkBody(work)
-        workQueue.async {
-            self.observe(.workerStarted)
-            // run() releases the captured image/work closure before finish()
-            // can make the slot available to another request.
-            let outcome = body.run(self)
-            self.finish(outcome)
-        }
+        enqueue(self, body)
     }
 
     // Binding after a cancellation remembers that intent. The worker checks
@@ -190,6 +243,7 @@ final class NativeOCRJob: @unchecked Sendable {
         wake.signal()
         condition.unlock()
         observe(reason == .deadline ? .deadlineFired : .callerCancelled)
+        stopped(self)
         if let pending { dispatchCancellation(pending) }
     }
 
@@ -216,7 +270,7 @@ final class NativeOCRJob: @unchecked Sendable {
         }
     }
 
-    private func finish(_ outcome: Result<String, Error>) {
+    fileprivate func finish(_ outcome: Result<String, Error>) {
         observe(.workerFinished)
         condition.lock()
         workFinished = true
@@ -264,6 +318,7 @@ final class NativeOCRJob: @unchecked Sendable {
                 wake.signal()
                 condition.unlock()
                 observe(.deadlineFired)
+                stopped(self)
                 if let pending { dispatchCancellation(pending) }
                 throw NativeOCRWorkError.timedOut
             }

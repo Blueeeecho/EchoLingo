@@ -293,6 +293,35 @@ fn windows_concurrent_json_open_and_read_report_original_failure_stage() {
     assert_eq!(fs::read_dir(&fixture.0).unwrap().count(), 1);
 }
 
+// Readers do not take the publication lock: each open must see a complete
+// snapshot while multiple writers publish, without retrying any operation.
+#[cfg(target_os = "windows")]
+#[test]
+fn windows_continuous_readers_during_concurrent_json_publication() {
+    let fixture = StorageFixture::new();
+    let path = fixture.file();
+    let value = serde_json::json!({"text": "x".repeat(65536)});
+    write_json(&path, &value).unwrap();
+    let barrier = std::sync::Barrier::new(8);
+    std::thread::scope(|scope| {
+        for worker in 0..8 {
+            let (path, value, barrier) = (&path, &value, &barrier);
+            scope.spawn(move || {
+                barrier.wait();
+                for _ in 0..128 {
+                    if worker < 4 {
+                        write_json(path, value).unwrap();
+                    }
+                    let actual: serde_json::Value =
+                        serde_json::from_slice(&fs::read(path).unwrap()).unwrap();
+                    assert_eq!(&actual, value);
+                }
+            });
+        }
+    });
+    assert_eq!(fs::read_dir(&fixture.0).unwrap().count(), 1);
+}
+
 fn entry(id: &str, favorite: bool) -> HistoryEntry {
     HistoryEntry {
         id: id.into(),

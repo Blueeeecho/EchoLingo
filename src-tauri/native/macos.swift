@@ -4310,7 +4310,7 @@ func captureOCR(cancellation: CaptureScreenshotOperation? = nil) throws -> Strin
             defer { if let cancellationHandler { cancellation?.removeCancellationHandler(cancellationHandler) } }
             trace.record(.ocrStarted)
             // Selection panels and input monitors are already gone. Only this
-            // immutable in-memory image crosses into the single OCR work slot.
+            // immutable in-memory image crosses into bounded latest-wins OCR work.
             try job.start { job in try autoreleasepool { try recognize(image, job: job) } }
             let result = try job.wait()
             trace.record(.ocrCompleted)

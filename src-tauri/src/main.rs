@@ -15,6 +15,7 @@ mod ocr_native;
 mod ocr_outcome;
 mod offline_translation;
 mod platform;
+mod popup_drag_diagnostics;
 mod popup_health;
 mod screenshot;
 mod screenshot_overlay;
@@ -425,7 +426,7 @@ fn write_json(path: &Path, value: &impl Serialize) -> Result<(), String> {
     file.sync_all().map_err(|_| "无法同步本地数据")?;
     #[cfg(target_os = "windows")]
     {
-        windows_atomic_file::replace(&file, path)
+        windows_atomic_file::publish(file, path)
     }
     #[cfg(not(target_os = "windows"))]
     {
@@ -2139,6 +2140,12 @@ async fn show_prepared_popup(
             verify_application_policy(&handle, "beforePopup")?;
             platform::ensure_popup_behavior(&window)?;
             let presentation = state.translation_requests.resume(Some(expected_epoch))?;
+            #[cfg(target_os = "macos")]
+            window_layout::adopt_popup_header_presentation(
+                &window,
+                expected_epoch,
+                presentation.epoch,
+            )?;
             announce_presentation(&handle, presentation);
             if focus_input {
                 window.show().map_err(|_| "WINDOW_SHOW: 无法显示翻译窗口")?;
@@ -3338,6 +3345,8 @@ async fn diagnostics(
     }
     #[cfg(target_os = "macos")]
     {
+        value["popupDrag"] =
+            window_layout::popup_drag_diagnostics(&app.state::<window_layout::LayoutState>());
         let policy_diagnostics = app.state::<ApplicationPolicyDiagnostics>();
         value["windowPolicy"] = serde_json::to_value(&*locked(&policy_diagnostics.0)?)
             .map_err(|_| "无法读取窗口策略诊断")?;
@@ -3719,9 +3728,9 @@ fn main() {
             fit_window_with_visibility,
             window_layout::wait_for_window_sizing,
             window_layout::start_window_drag,
-            window_layout::begin_popup_drag,
-            window_layout::move_popup_drag,
-            window_layout::end_popup_drag,
+            window_layout::configure_popup_header_drag,
+            window_layout::set_popup_drag_diagnostics,
+            window_layout::record_popup_drag_event,
             window_layout::start_window_resize,
             window_layout::resize_popup_width,
             window_layout::resize_management_window,

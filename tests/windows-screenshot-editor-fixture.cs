@@ -529,11 +529,36 @@ public static partial class EchoLingoApplicationSmoke {
     }
     static void ScreenshotWaitAdjustment(Form form,Process app,uint helper,Rectangle expected,Dictionary<string,object> evidence) {
         IntPtr editor=IntPtr.Zero;
-        WaitFor(delegate{
-            editor=ScreenshotWindow(app.Id);if(editor==IntPtr.Zero||!IsWindowVisible(editor)||!ProcessExited(helper)||AppOverlays(app.Id)!=0)return false;
+        // Bounded last-state categories only. Keep the same deadline, exact
+        // geometry and control requirements; never resend input or retry F1.
+        try { WaitFor(delegate{
+            editor=ScreenshotWindow(app.Id);
+            evidence["adjustmentFailedGate"]="editor-missing";if(editor==IntPtr.Zero)return false;
+            evidence["adjustmentFailedGate"]="editor-hidden";if(!IsWindowVisible(editor))return false;
+            evidence["adjustmentFailedGate"]="helper-running";if(!ProcessExited(helper))return false;
+            evidence["adjustmentFailedGate"]="native-overlays-remain";if(AppOverlays(app.Id)!=0)return false;
             AutomationElement select=ScreenshotButton(editor,"\u9009\u62e9"),undo=ScreenshotButton(editor,"\u64a4\u9500");object pattern;
-            return ScreenshotWebSelection(editor)==expected&&select!=null&&select.Current.IsEnabled&&!select.Current.IsOffscreen&&select.TryGetCurrentPattern(TogglePattern.Pattern,out pattern)&&((TogglePattern)pattern).Current.ToggleState==ToggleState.On&&undo!=null&&!undo.Current.IsEnabled;
-        },10,"Released F1 did not hand off exact geometry to the persistent Web editor.",app);
+            evidence["adjustmentFailedGate"]="selection-geometry";if(ScreenshotWebSelection(editor,evidence)!=expected)return false;
+            evidence["adjustmentFailedGate"]="select-missing";if(select==null)return false;
+            evidence["adjustmentFailedGate"]="select-disabled";if(!select.Current.IsEnabled)return false;
+            evidence["adjustmentFailedGate"]="select-offscreen";if(select.Current.IsOffscreen)return false;
+            evidence["adjustmentFailedGate"]="select-toggle-missing";if(!select.TryGetCurrentPattern(TogglePattern.Pattern,out pattern))return false;
+            evidence["adjustmentFailedGate"]="select-not-on";if(((TogglePattern)pattern).Current.ToggleState!=ToggleState.On)return false;
+            evidence["adjustmentFailedGate"]="undo-missing";if(undo==null)return false;
+            evidence["adjustmentFailedGate"]="undo-enabled";if(undo.Current.IsEnabled)return false;
+            evidence["adjustmentFailedGate"]="none";return true;
+        },10,"Released F1 did not hand off exact geometry to the persistent Web editor.",app); }
+        catch {
+            // Observe only after failure; preserve the original exception even
+            // when the owned window disappears during diagnostic reads.
+            try {
+                if(editor!=IntPtr.Zero&&IsWindow(editor))ScreenshotAdjustmentFailureState(app,editor,evidence);
+                Dictionary<string,object> health=ScreenshotCaptureHealth();
+                foreach(string key in new string[]{"attemptId","attemptStage","nativeCaptureBackend","resultOk","helperResponseReceived","hostOwnedButtons","inputPlaneRemainingAfterCleanup"})
+                    evidence["adjustmentNative_"+key]=CaptureNumber(health,key);
+            }catch{evidence["adjustmentFailureObservationUnavailable"]=true;}
+            throw;
+        }
         RequireForeground(form);Assert((GetWindowLongPtr(editor,-20).ToInt64()&0x08000000L)!=0,"Geometry editor lost passive NOACTIVATE style.");
         ScreenshotSelectionEditors[helper]=editor;
         evidence["selectionAttemptId"]=CaptureNumber(ScreenshotCaptureHealth(),"attemptId");evidence["webAdjustmentVisible"]=true;evidence["initialWebAdjustmentPreservedSourceForeground"]=true;evidence["selectionHelperExitedBeforeAdjustment"]=true;
@@ -686,11 +711,11 @@ public static partial class EchoLingoApplicationSmoke {
         RequireForeground(form);evidence["copySourceForegroundAfterClick"]=true;
     }
     static void ScreenshotRecordCaptureCounts(Dictionary<string,object> report,Dictionary<string,object> after,int selections,int deferred) {
-        Assert(VerifiedNativeChildren.Count==selections,"F1 picker identity count differs from exact selection cycles.");
+        Assert(VerifiedNativeGenerations.Count==selections,"F1 picker identity count differs from exact selection cycles.");
         long attempts=CaptureNumber(after,"attemptId")-ScreenshotInitialAttempt;
         Assert(ScreenshotFirstStrokeReleaseChecks==(ScreenshotPinOnly?1:4),"Exact first-stroke release checks required.");report["verifiedFirstStrokeReleaseChecks"]=ScreenshotFirstStrokeReleaseChecks;
         Assert(attempts==selections+deferred,"Unexpected selected-region capture attempt count.");
-        report["verifiedF1SelectionGenerations"]=VerifiedNativeChildren.Count;report["verifiedDeferredPixelCaptures"]=deferred;report["verifiedNativeCaptureAttempts"]=attempts;
+        report["verifiedF1SelectionGenerations"]=VerifiedNativeGenerations.Count;report["verifiedDeferredPixelCaptures"]=deferred;report["verifiedNativeCaptureAttempts"]=attempts;
     }
     static void ScreenshotRequireDeferredReleased(Dictionary<string,object> health) {
         Assert(CaptureNumber(health,"nativeDeferredCapture")==1&&CaptureNumber(health,"attemptStage")==4&&CaptureNumber(health,"helperResponseReceived")==1&&CaptureNumber(health,"resultOk")==1,"Deferred pixels did not complete successfully.");
@@ -919,7 +944,7 @@ public static partial class EchoLingoApplicationSmoke {
         Assert(sourceEvents()==0,"Native F1 click/drag leaked mouse input to generated source controls.");
         report["screenshotOcrInvocationCount"]=CaptureNumber(after,"ocrInvocationCount");report["screenshotHttpConnections"]=server.Connections;report["screenshotNetworkEvidenceScope"]="configured-loopback-provider-trap; no global packet capture";report["screenshotTranslationHistoryCount"]=0;
         report["screenshotRequiredCases"]=3;report["screenshotPassedCases"]=cases.Count;ScreenshotRecordCaptureCounts(report,after,8,6);report["screenshotNativeCompletion"]=after;
-        Assert(cases.Count==3&&VerifiedNativeChildren.Count==8,"Screenshot fixture missed a required real native generation.");
+        Assert(cases.Count==3&&VerifiedNativeGenerations.Count==8,"Screenshot fixture missed a required real native generation.");
         passed.Add("Actual F1 cancel, annotated pin, in-place copy/save dismissal with two fresh save captures, then actual settings local Open and native dialog cancellation; window-click copy plus new capture cancellation; zero OCR/configured-provider HTTP/history (loopback trap, not global packet capture)");
     }
 }

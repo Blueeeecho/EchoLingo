@@ -179,9 +179,10 @@ public static class WindowsSelectionApplicationFixture {
         if(Interlocked.CompareExchange(ref ExplicitFocusBAllowed,0,0)==0&&(Server.CountFor(ForbiddenFocusB)>0||HistorySourceCount(ForbiddenFocusB)>0))unexpected=Math.Max(1,unexpected);
         if(unexpected>0){FocusRaceCase["ok"]=false;FocusRaceCase["unrelatedBImported"]=true;FocusRaceCase["error"]="WRONG_POST_TRIGGER_SELECTION_B_IMPORTED_BEFORE_EXPLICIT_B_INTENT";FocusRaceCase["unauthorizedBRequests"]=unexpected;}
     }
-    static void SelectionCase(string name,Form form,TextBoxBase source,Control[] controls,string raw,bool mouse){
-        string expected=raw.Replace("\r\n","\n");Server.Allow(expected,false);int requestsBefore=Server.CountFor(expected);
-        Dictionary<string,object> c=Begin(name,expected,mouse?"actual-SendInput-left-drag":"generated-control-Select");c["rawSelectedText"]=raw;c["rawSelectedTextSha256"]=Hash(raw);c["normalizationExpectation"]="Only CRLF to LF; explicit paragraph breaks preserved. Expected known before capture.";
+    static void SelectionCase(string name,Form form,TextBoxBase source,Control[] controls,string raw,bool mouse,string normalized=null){
+        // Keep the exact native-selection fixture independent of the explicit UI/request expectation.
+        string expected=normalized??raw.Replace("\r\n","\n");Server.Allow(expected,false);int requestsBefore=Server.CountFor(expected);
+        Dictionary<string,object> c=Begin(name,expected,mouse?"actual-SendInput-left-drag":"generated-control-Select");c["rawSelectedText"]=raw;c["rawSelectedTextSha256"]=Hash(raw);c["normalizationExpectation"]=normalized==null?"Only CRLF to LF for this fixture. Expected known before capture.":"Keep both captured paragraphs, replacing the blank row with one LF. Expected known before capture.";
         Dictionary<string,object> setup=new Dictionary<string,object>();c["generatedSelectionSetup"]=setup;
         try{PutSource(form,source,controls,raw,mouse,setup);}catch(Exception e){
             Exception actual=e;while(actual.InnerException!=null)actual=actual.InnerException;
@@ -510,7 +511,7 @@ public static class WindowsSelectionApplicationFixture {
                         Invoke("\u9489\u4f4f\u7a97\u53e3");Wait(delegate{return Element("\u53d6\u6d88\u9489\u4f4f")!=null;},5000,"PIN_NOT_ENGAGED");SelectionCase("pinned-edit-update",form,edit,controls,"Pinned edit exact source 54001",false);
                         BlankCase(form,edit,controls);
                         for(int round=2;round<=3;round++)SelectionCase("edit-mouse-round-"+round,form,edit,controls,"Selection Edit round "+round+" token "+(51000+round),true);
-                        SelectionCase("multiline-explicit-paragraphs",form,multi,controls,"First paragraph 53001.\r\n\r\nSecond paragraph 53002.",false);
+                        SelectionCase("multiline-explicit-paragraphs",form,multi,controls,"First paragraph 53001.\r\n\r\nSecond paragraph 53002.",false,"First paragraph 53001.\nSecond paragraph 53002.");
                         for(int round=1;round<=3;round++)SelectionCase("rich-mouse-round-"+round,form,rich,controls,"Selection Rich round "+round+" token "+(52000+round),true);
                         SelectionCase("pinned-rich-update",form,rich,controls,"Pinned rich exact source 54002",true);
                         Ui(form,delegate{other.Show(form);});DelayedCases(form,other,edit,otherEdit,controls);Report["historySources"]=HistorySources();Report["historySourceSha256"]=HistorySources().ConvertAll(delegate(string s){return Hash(s);});Report["actualHotkeysSent"]=Hotkeys;Report["ok"]=true;

@@ -15,12 +15,13 @@ private func idle(_ domain: NativeOCRDomain) throws {
         Thread.sleep(forTimeInterval: 0.002)
     }
 }
-private func busy(_ domain: NativeOCRDomain) throws {
-    for _ in 0..<100 {
-        do {
-            let unexpected = try domain.reserve(); unexpected.releaseReservation()
-            throw FixtureFailure(message: "A blocked worker admitted another image")
-        } catch NativeOCRWorkError.busy { }
+private func replacement(_ domain: NativeOCRDomain) throws {
+    for _ in 0..<20 {
+        let fresh = try domain.reserve()
+        try fresh.start { _ in "replacement" }
+        let text = try fresh.wait()
+        try require(text == "replacement", "Replacement was blocked by old OCR")
+        try require((domain.snapshot()["workerCount"] as? Int ?? 99) <= 2, "Worker bound exceeded")
     }
 }
 private func stopped(_ job: NativeOCRJob, deadline: Bool = false) throws {
@@ -64,7 +65,7 @@ private enum OCRDomainFixture {
         success.cancel()
         try require(success.snapshot()["cancelScheduled"] as? Bool == false, "Late cleanup cancelled completed work")
 
-        // Work ignores cancellation. Caller still returns, one slot remains busy,
+        // Work ignores cancellation. Caller still returns, one old slot remains occupied,
         // late output is discarded, and owned image is released before reuse.
         let entered = DispatchSemaphore(value: 0), releaseWork = DispatchSemaphore(value: 0)
         let work = try domain.reserve()
@@ -77,7 +78,7 @@ private enum OCRDomainFixture {
         image = nil
         defer { releaseWork.signal() }
         try reached(entered)
-        work.cancel(); try stopped(work); try busy(domain)
+        work.cancel(); try stopped(work); try replacement(domain)
         try require(imageProbe != nil, "Image disappeared while request was running")
         releaseWork.signal(); try idle(domain)
         try require(imageProbe == nil, "Image retained after worker slot released")
@@ -110,7 +111,7 @@ private enum OCRDomainFixture {
         try reached(binding); prebind.cancel(); try stopped(prebind)
         allowBinding.signal(); try reached(cancelling); try reached(finished)
         for _ in 0..<100 { prebind.cancel() }
-        try busy(domain)
+        try replacement(domain)
         try require(cancels.count == 1, "Cancellation queued more than once")
         try require(requestProbe != nil, "Cancel request released while cancel was running")
         releaseCancel.signal(); try idle(domain); try stopped(prebind)
@@ -127,7 +128,7 @@ private enum OCRDomainFixture {
         }
         defer { finishPerform.signal() }
         try reached(performing); postbind.cancel(); try stopped(postbind); try reached(cancelDone)
-        try busy(domain); finishPerform.signal(); try idle(domain)
+        try replacement(domain); finishPerform.signal(); try idle(domain)
 
         // Cancellation wakes an already-admitted waiting caller while work
         // remains blocked. Signaling before semaphore wait also covers the
@@ -147,7 +148,44 @@ private enum OCRDomainFixture {
         }
         try reached(waiterReady); waking.cancel(); try reached(waiterDone)
         try require(waiterFailures.count == 0, "Waiting caller did not observe cancellation")
-        try busy(domain); releaseAwakeWork.signal(); try idle(domain)
+        try replacement(domain); releaseAwakeWork.signal(); try idle(domain)
+
+        // Two uncooperative Vision calls consume the bounded workers. A third
+        // selection is admitted immediately, but only its latest image waits.
+        let saturated = NativeOCRDomain()
+        let enteredA = DispatchSemaphore(value: 0), enteredB = DispatchSemaphore(value: 0)
+        let releaseA = DispatchSemaphore(value: 0), releaseB = DispatchSemaphore(value: 0)
+        defer { releaseA.signal(); releaseB.signal() }
+        let first = try saturated.reserve()
+        try first.start { _ in enteredA.signal(); releaseA.wait(); return "stale A" }
+        try reached(enteredA)
+        let second = try saturated.reserve()
+        try second.start { _ in enteredB.signal(); releaseB.wait(); throw FixtureFailure(message: "stale B failure") }
+        try reached(enteredB); try stopped(first)
+        var newest: NativeOCRJob?
+        let queuedRuns = Counter()
+        for _ in 0..<100 {
+            var queuedImage: Lifetime? = Lifetime(); weak var probe = queuedImage
+            let queued = try saturated.reserve()
+            if let newest { try stopped(newest) }
+            try queued.start { [ownedImage = queuedImage!] _ in
+                withExtendedLifetime(ownedImage) { queuedRuns.increment(); return "obsolete queued" }
+            }
+            queuedImage = nil
+            try require(probe != nil, "Pending image was not owned")
+            let replacement = try saturated.reserve()
+            try stopped(queued)
+            try require(probe == nil, "Superseded pending image leaked")
+            try replacement.start { _ in queuedRuns.increment(); return "newest" }
+            newest = replacement
+            try require(saturated.snapshot()["workerCount"] as? Int == 2, "Unbounded workers")
+            try require(saturated.snapshot()["pendingLatest"] as? Bool == true, "Latest pending missing")
+        }
+        try require(queuedRuns.count == 0, "Saturated work escaped the bound")
+        releaseA.signal()
+        let latestText = try newest!.wait()
+        try require(latestText == "newest" && queuedRuns.count == 1, "Obsolete pending work ran")
+        releaseB.signal(); try idle(saturated); try stopped(second)
 
         // Deadline starts before handler/language lookup, not just perform.
         // No cancel request is bound yet; a blocked language query is isolated.
@@ -161,7 +199,7 @@ private enum OCRDomainFixture {
         }
         defer { finishQuery.signal() }
         try reached(querying); clock.advance(31)
-        try stopped(timed, deadline: true); try busy(deadlineDomain)
+        try stopped(timed, deadline: true); try replacement(deadlineDomain)
         finishQuery.signal(); try idle(deadlineDomain); try stopped(timed, deadline: true)
 
         // Finishing late cannot win merely because the caller hasn't called wait.

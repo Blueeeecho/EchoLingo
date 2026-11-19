@@ -34,7 +34,10 @@ class MacOCRCancellationContract(unittest.TestCase):
         self.assertIn('start(timeout: TimeInterval = 30', domain)
         self.assertIn('wake.wait(timeout: .now() + remaining)', domain)
         self.assertNotIn('Date().addingTimeInterval', domain)
-        self.assertIn('guard active == nil', domain)
+        self.assertIn('private let workerLimit = 2', domain)
+        self.assertIn('guard active === job, !job.isStopped', domain)
+        self.assertIn('previous?.cancel()', domain)
+        self.assertIn('abandoned.body.discard()', domain)
         self.assertIn('(!cancelScheduled || cancelReturned)', domain)
         self.assertIn('if stop == nil { result = outcome }', domain)
     def test_timings_are_bounded_static_metadata(self):
@@ -59,7 +62,7 @@ class MacOCRCancellationContract(unittest.TestCase):
         self.assertIn('macos-ocr-domain-fixture.swift', runner)
         fixture = read("tests/macos-ocr-domain-fixture.swift")
         for injection in ('releaseWork.wait()', 'releaseCancel.wait()', 'allowBinding.wait()',
-                          'finishQuery.wait()', 'try busy(domain)', 'imageProbe == nil'):
+                          'finishQuery.wait()', 'try replacement(domain)', 'imageProbe == nil'):
             self.assertIn(injection, fixture)
 
     def test_diagnostics_does_not_query_vision_again(self):

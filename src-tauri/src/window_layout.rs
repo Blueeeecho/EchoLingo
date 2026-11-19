@@ -95,6 +95,7 @@ pub struct LayoutState {
     layout_revision: std::sync::atomic::AtomicU64,
     #[cfg(target_os = "macos")]
     popup_drag: Mutex<PopupDrag>,
+    drag_diagnostics: Mutex<crate::popup_drag_diagnostics::Diagnostics>,
     #[cfg(target_os = "windows")]
     native_sizing: Mutex<NativeSizing>,
     #[cfg(target_os = "windows")]
@@ -112,6 +113,7 @@ impl Default for LayoutState {
             layout_revision: std::sync::atomic::AtomicU64::new(0),
             #[cfg(target_os = "macos")]
             popup_drag: Mutex::new(PopupDrag::default()),
+            drag_diagnostics: Mutex::new(crate::popup_drag_diagnostics::Diagnostics::default()),
             #[cfg(target_os = "windows")]
             native_sizing: Mutex::new(NativeSizing::default()),
             #[cfg(target_os = "windows")]
@@ -186,6 +188,7 @@ struct DragToken {
 struct PopupDrag {
     next_id: u64,
     active: Option<DragToken>,
+    last_stop: i32,
 }
 #[cfg(any(target_os = "macos", test))]
 impl PopupDrag {
@@ -205,6 +208,31 @@ impl PopupDrag {
             self.active = None;
         }
     }
+}
+
+// Shared production gate: only lifecycle invalidation asks the native owner
+// to finish. No physical-state sampling or token retirement belongs to fitting.
+#[cfg(any(target_os = "macos", test))]
+fn defer_header_fit(
+    drag: &Mutex<PopupDrag>,
+    epoch: u64,
+    presented: bool,
+    management: bool,
+    cancel_owner: impl FnOnce() -> Result<(), String>,
+) -> Result<bool, String> {
+    let active = drag.lock().map_err(|_| "窗口拖动状态异常")?.active;
+    if let Some(token) = active {
+        if management || epoch != token.epoch || !presented {
+            // Drop the lock before the owner's synchronous finish callback.
+            cancel_owner()?;
+        }
+        return Ok(drag
+            .lock()
+            .map_err(|_| "窗口拖动状态异常")?
+            .active
+            .is_some());
+    }
+    Ok(false)
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -1469,9 +1497,17 @@ pub fn cancel_stale_native_layout(app: &tauri::AppHandle) {
         };
         unsafe extern "C" {
             fn echolingo_cancel_stale_resize_wait(window: *mut std::ffi::c_void, epoch: u64);
+            fn echolingo_cancel_stale_header_drag(
+                window: *mut std::ffi::c_void,
+                epoch: u64,
+                presented: i32,
+            );
         }
         // Read the current epoch when executing, not an older queued announcement.
-        unsafe { echolingo_cancel_stale_resize_wait(native, current.epoch) };
+        unsafe {
+            echolingo_cancel_stale_resize_wait(native, current.epoch);
+            echolingo_cancel_stale_header_drag(native, current.epoch, i32::from(current.presented));
+        };
     });
 }
 
@@ -1581,21 +1617,36 @@ fn fit_inner(
     }
     #[cfg(target_os = "macos")]
     {
-        let mut drag = state.popup_drag.lock().map_err(|_| "窗口拖动状态异常")?;
-        if let Some(token) = drag.active {
-            let current = window
-                .state::<crate::AppState>()
-                .translation_requests
-                .presentation()?;
-            if !management
-                && current.epoch == token.epoch
-                && current.presented
-                && mac_drag_operation(window, token.anchor, token.press_identity, true).is_ok()
-            {
-                return Ok(());
-            }
-            // Lost frontend cancellation cannot leave layout permanently suspended.
-            drag.finish(token.id);
+        let current = window
+            .state::<crate::AppState>()
+            .translation_requests
+            .presentation()?;
+        if defer_header_fit(
+            &state.popup_drag,
+            current.epoch,
+            current.presented,
+            management,
+            || {
+                unsafe extern "C" {
+                    fn echolingo_cancel_stale_header_drag(
+                        window: *mut std::ffi::c_void,
+                        epoch: u64,
+                        presented: i32,
+                    );
+                }
+                let native = window.ns_window().map_err(|_| "窗口不可用")?;
+                unsafe {
+                    echolingo_cancel_stale_header_drag(
+                        native,
+                        current.epoch,
+                        i32::from(!management && current.presented),
+                    );
+                }
+                Ok(())
+            },
+        )? {
+            trace_drag(state, crate::popup_drag_diagnostics::Stage::FitDeferred);
+            return Ok(());
         }
     }
     let presentation = window
@@ -1676,6 +1727,7 @@ fn fit_inner(
         || (old_size.width - width).abs() > 1.0
         || (old_size.height - height).abs() > 1.0
     {
+        trace_drag(state, crate::popup_drag_diagnostics::Stage::FitApplied);
         apply_content_size(window, width, height)?;
     }
     let frame = if management { (16.0, 44.0) } else { (0.0, 0.0) };
@@ -1688,6 +1740,7 @@ fn fit_inner(
             (height + frame.1) * scale,
         );
         if (position.x, position.y) != next {
+            trace_drag(state, crate::popup_drag_diagnostics::Stage::FitRepositioned);
             window
                 .set_position(PhysicalPosition::new(next.0, next.1))
                 .map_err(|_| "无法调整窗口位置")?;
@@ -1831,126 +1884,276 @@ fn mac_drag_operation(
 }
 
 #[tauri::command]
-pub async fn begin_popup_drag(
+pub fn set_popup_drag_diagnostics(
+    state: State<'_, LayoutState>,
+    enabled: bool,
+) -> Result<bool, String> {
+    state
+        .drag_diagnostics
+        .lock()
+        .map_err(|_| "诊断状态不可用")?
+        .set_enabled(enabled);
+    Ok(enabled)
+}
+#[tauri::command]
+pub fn record_popup_drag_event(
+    state: State<'_, LayoutState>,
+    stage: crate::popup_drag_diagnostics::Stage,
+) {
+    if let Ok(mut trace) = state.drag_diagnostics.lock() {
+        trace.record(stage);
+    }
+}
+fn trace_drag(state: &LayoutState, stage: crate::popup_drag_diagnostics::Stage) {
+    if let Ok(mut trace) = state.drag_diagnostics.lock() {
+        trace.record(stage);
+    }
+}
+
+// The only WebView command configures a blank-header region. It cannot start,
+// move or finish a gesture: the original local NSEvent establishes ownership.
+#[tauri::command]
+pub async fn configure_popup_header_drag(
     window: WebviewWindow,
+    revision: u64,
     presentation_epoch: u64,
-    anchor_x: f64,
-    anchor_y: f64,
-) -> Result<u64, String> {
+    x: f64,
+    y: f64,
+    width: f64,
+    height: f64,
+    viewport_width: f64,
+    viewport_height: f64,
+) -> Result<(), String> {
     #[cfg(not(target_os = "macos"))]
     {
-        let _ = (window, presentation_epoch, anchor_x, anchor_y);
-        Err("此平台无需自定义拖动".into())
-    }
-    #[cfg(target_os = "macos")]
-    {
-        let app = window.app_handle().clone();
-        let (reply, result) = tokio::sync::oneshot::channel();
-        app.run_on_main_thread(move || {
-            let operation = (|| {
-                let state = window.state::<LayoutState>();
-                let current = window
-                    .state::<crate::AppState>()
-                    .translation_requests
-                    .presentation()?;
-                if window.label() != "main"
-                    || !resize_allowed(
-                        presentation_epoch,
-                        current,
-                        state.is_popup(),
-                        window.is_visible().unwrap_or(false),
-                    )
-                {
-                    return Err(crate::translation_requests::CANCELLED.into());
-                }
-                unsafe extern "C" {
-                    fn echolingo_popup_drag_press_identity() -> u64;
-                }
-                // SAFETY: read-only event counters; no hooks, event posting or permissions.
-                let press_identity = unsafe { echolingo_popup_drag_press_identity() };
-                mac_drag_operation(&window, (anchor_x, anchor_y), press_identity, true)?;
-                let token = state
-                    .popup_drag
-                    .lock()
-                    .map_err(|_| "窗口拖动状态异常")?
-                    .begin(presentation_epoch, (anchor_x, anchor_y), press_identity);
-                Ok(token.id)
-            })();
-            let _ = reply.send(operation);
-        })
-        .map_err(|_| "无法开始拖动窗口")?;
-        result.await.map_err(|_| "窗口拖动已中断".to_string())?
-    }
-}
-#[tauri::command]
-pub async fn move_popup_drag(window: WebviewWindow, drag_id: u64) -> Result<(), String> {
-    #[cfg(not(target_os = "macos"))]
-    {
-        let _ = (window, drag_id);
-        Err("此平台无需自定义拖动".into())
-    }
-    #[cfg(target_os = "macos")]
-    {
-        let app = window.app_handle().clone();
-        let (reply, result) = tokio::sync::oneshot::channel();
-        app.run_on_main_thread(move || {
-            let operation = (|| {
-                let state = window.state::<LayoutState>();
-                let mut drag = state.popup_drag.lock().map_err(|_| "窗口拖动状态异常")?;
-                let Some(token) = drag.active.filter(|token| token.id == drag_id) else {
-                    return Err(crate::translation_requests::CANCELLED.into());
-                };
-                let current = window
-                    .state::<crate::AppState>()
-                    .translation_requests
-                    .presentation()?;
-                if window.label() != "main"
-                    || !resize_allowed(
-                        token.epoch,
-                        current,
-                        state.is_popup(),
-                        window.is_visible().unwrap_or(false),
-                    )
-                {
-                    drag.finish(drag_id);
-                    return Err(crate::translation_requests::CANCELLED.into());
-                }
-                let outcome =
-                    mac_drag_operation(&window, token.anchor, token.press_identity, false);
-                if outcome.is_err() {
-                    drag.finish(drag_id);
-                }
-                outcome
-            })();
-            let _ = reply.send(operation);
-        })
-        .map_err(|_| "无法移动窗口")?;
-        result.await.map_err(|_| "窗口拖动已中断".to_string())?
-    }
-}
-#[tauri::command]
-pub async fn end_popup_drag(window: WebviewWindow, drag_id: u64) -> Result<(), String> {
-    #[cfg(not(target_os = "macos"))]
-    {
-        let _ = (window, drag_id);
+        let _ = (
+            window,
+            revision,
+            presentation_epoch,
+            x,
+            y,
+            width,
+            height,
+            viewport_width,
+            viewport_height,
+        );
         Ok(())
     }
     #[cfg(target_os = "macos")]
     {
-        let app = window.app_handle().clone();
+        if ![x, y, width, height, viewport_width, viewport_height]
+            .iter()
+            .all(|v| v.is_finite())
+            || revision == 0
+            || x < 0.0
+            || y < 0.0
+            || width < 0.0
+            || height < 0.0
+            || viewport_width <= 0.0
+            || viewport_height <= 0.0
+            || viewport_width > MAX_INPUT_DIMENSION
+            || viewport_height > MAX_INPUT_DIMENSION
+            || x + width > viewport_width
+            || y + height > 32.0
+            || (width > 0.0 && (x < 32.0 || x + width > viewport_width - 64.0))
+        {
+            return Err("无效的顶栏区域".into());
+        }
         let (reply, result) = tokio::sync::oneshot::channel();
-        app.run_on_main_thread(move || {
-            let outcome = window
-                .state::<LayoutState>()
-                .popup_drag
-                .lock()
-                .map_err(|_| "窗口拖动状态异常".to_string())
-                .map(|mut drag| drag.finish(drag_id));
-            let _ = reply.send(outcome);
-        })
-        .map_err(|_| "无法结束拖动窗口")?;
-        result.await.map_err(|_| "窗口拖动已中断".to_string())?
+        let dispatcher = window.app_handle().clone();
+        dispatcher
+            .run_on_main_thread(move || {
+                let operation = (|| {
+                    let current = window
+                        .state::<crate::AppState>()
+                        .translation_requests
+                        .presentation()?;
+                    if window.label() != "main" || current.epoch != presentation_epoch {
+                        return Err(crate::translation_requests::CANCELLED.into());
+                    }
+                    let enabled =
+                        window.state::<LayoutState>().is_popup() && width > 0.0 && height > 0.0;
+                    unsafe extern "C" fn callback(
+                        context: *mut std::ffi::c_void,
+                        action: i32,
+                        epoch: u64,
+                        id: u64,
+                        press: u64,
+                        x: f64,
+                        y: f64,
+                        reason: i32,
+                    ) -> u64 {
+                        use crate::popup_drag_diagnostics::Stage;
+                        let app = unsafe { &*context.cast::<tauri::AppHandle>() };
+                        let state = app.state::<LayoutState>();
+                        if action == 3 {
+                            let stage = match reason {
+                                20 => Stage::NativeDown,
+                                21 => Stage::OutsideHeader,
+                                22 => Stage::GuardFrame,
+                                23 => Stage::GuardViewport,
+                                24 => Stage::GuardButton,
+                                25 => Stage::HeaderMoved,
+                                _ => return 0,
+                            };
+                            trace_drag(&state, stage);
+                            return 0;
+                        }
+                        let Ok(mut drag) = state.popup_drag.lock() else {
+                            return if action == 0 { 0 } else { 6 };
+                        };
+                        if action == 2 {
+                            if drag.active.is_some_and(|token| token.id == id) {
+                                drag.finish(id);
+                                drag.last_stop = reason.clamp(1, 9);
+                                let stage = match reason {
+                                    1 => Stage::Released,
+                                    2 => Stage::Replaced,
+                                    3 => Stage::PresentationChanged,
+                                    4 => Stage::Hidden,
+                                    5 => Stage::Disabled,
+                                    6 => Stage::Closed,
+                                    7 => Stage::Escape,
+                                    8 => Stage::InvalidFrame,
+                                    _ => Stage::InvalidOwner,
+                                };
+                                drop(drag);
+                                trace_drag(&state, stage);
+                                if let Some(window) = app.get_webview_window("main") {
+                                    let _ = tauri::Emitter::emit(
+                                        &window,
+                                        "popup-native-drag-ended",
+                                        epoch,
+                                    );
+                                }
+                            }
+                            return 0;
+                        }
+                        let Some(window) = app.get_webview_window("main") else {
+                            return if action == 0 { 0 } else { 5 };
+                        };
+                        let Ok(current) = app
+                            .state::<crate::AppState>()
+                            .translation_requests
+                            .presentation()
+                        else {
+                            return if action == 0 { 0 } else { 6 };
+                        };
+                        let guard = if current.epoch != epoch {
+                            Some((2, Stage::GuardEpoch))
+                        } else if !current.presented {
+                            Some((3, Stage::GuardNotPresented))
+                        } else if !state.is_popup() {
+                            Some((4, Stage::GuardNotPopup))
+                        } else if !window.is_visible().unwrap_or(false) {
+                            Some((5, Stage::GuardHidden))
+                        } else {
+                            None
+                        };
+                        if let Some((code, stage)) = guard {
+                            trace_drag(&state, stage);
+                            return if action == 0 { 0 } else { code };
+                        }
+                        if action == 0 {
+                            let id = drag.begin(epoch, (x, y), press).id;
+                            trace_drag(&state, Stage::HeaderStarted);
+                            return id;
+                        }
+                        if action == 1
+                            && drag
+                                .active
+                                .is_some_and(|token| token.id == id && token.epoch == epoch)
+                        {
+                            return 1;
+                        }
+                        trace_drag(&state, Stage::GuardToken);
+                        6
+                    }
+                    unsafe extern "C" fn release(context: *mut std::ffi::c_void) {
+                        drop(unsafe { Box::from_raw(context.cast::<tauri::AppHandle>()) });
+                    }
+                    unsafe extern "C" {
+                        fn echolingo_configure_header_drag(
+                            window: *mut std::ffi::c_void,
+                            revision: u64,
+                            epoch: u64,
+                            x: f64,
+                            y: f64,
+                            width: f64,
+                            height: f64,
+                            viewport_width: f64,
+                            viewport_height: f64,
+                            callback: unsafe extern "C" fn(
+                                *mut std::ffi::c_void,
+                                i32,
+                                u64,
+                                u64,
+                                u64,
+                                f64,
+                                f64,
+                                i32,
+                            ) -> u64,
+                            release: unsafe extern "C" fn(*mut std::ffi::c_void),
+                            context: *mut std::ffi::c_void,
+                        ) -> i32;
+                    }
+                    let native = window.ns_window().map_err(|_| "窗口不可用")?;
+                    let context = Box::into_raw(Box::new(window.app_handle().clone())).cast();
+                    let status = unsafe {
+                        echolingo_configure_header_drag(
+                            native,
+                            revision,
+                            presentation_epoch,
+                            x,
+                            y,
+                            if enabled { width } else { 0.0 },
+                            height,
+                            viewport_width,
+                            viewport_height,
+                            callback,
+                            release,
+                            context,
+                        )
+                    };
+                    if status != 0 {
+                        unsafe { release(context) };
+                        return Err("无法配置顶栏拖动".into());
+                    }
+                    Ok(())
+                })();
+                let _ = reply.send(operation);
+            })
+            .map_err(|_| "无法配置顶栏拖动")?;
+        result.await.map_err(|_| "顶栏配置已中断".to_string())?
     }
+}
+#[cfg(target_os = "macos")]
+pub fn adopt_popup_header_presentation(
+    window: &WebviewWindow,
+    previous: u64,
+    next: u64,
+) -> Result<(), String> {
+    unsafe extern "C" {
+        fn echolingo_adopt_header_drag_presentation(
+            window: *mut std::ffi::c_void,
+            previous: u64,
+            next: u64,
+        );
+    }
+    let native = window.ns_window().map_err(|_| "窗口不可用")?;
+    unsafe {
+        echolingo_adopt_header_drag_presentation(native, previous, next);
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+pub fn popup_drag_diagnostics(state: &LayoutState) -> serde_json::Value {
+    state
+        .drag_diagnostics
+        .lock()
+        .map(|trace| trace.snapshot())
+        .unwrap_or_else(|_| serde_json::json!({"available":false}))
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -2364,6 +2567,34 @@ mod tests {
         assert_eq!(drag.active, None);
         let next = drag.begin(5, (100.0, 18.0), (12 << 32) | 11);
         assert!(next.id > current.id);
+    }
+
+    #[test]
+    fn streamed_fit_gate_keeps_native_owner_until_release_and_rejects_old_end() {
+        let drag = Mutex::new(PopupDrag::default());
+        let token = drag.lock().unwrap().begin(7, (100.0, 14.0), 42);
+        // Each result growth reaches the same gate used by fit_inner. Fitting
+        // cannot invoke a release check or finish an unchanged presentation.
+        for _height in [180.0, 240.0, 320.0, 440.0, 560.0] {
+            assert!(
+                defer_header_fit(&drag, 7, true, false, || panic!("fit cancelled held owner"))
+                    .unwrap()
+            );
+            assert_eq!(drag.lock().unwrap().active, Some(token));
+        }
+        drag.lock().unwrap().finish(token.id); // Native owner's release callback.
+        assert!(!defer_header_fit(&drag, 7, true, false, || panic!("idle cancellation")).unwrap());
+        let next = drag.lock().unwrap().begin(8, (120.0, 14.0), 43);
+        drag.lock().unwrap().finish(token.id); // Late prior completion.
+        assert!(
+            defer_header_fit(&drag, 8, true, false, || panic!("old end cancelled next")).unwrap()
+        );
+        assert_eq!(drag.lock().unwrap().active, Some(next));
+        assert!(!defer_header_fit(&drag, 9, true, false, || {
+            drag.lock().unwrap().finish(next.id);
+            Ok(())
+        })
+        .unwrap()); // True replacement asks owner, outside the lock.
     }
 
     #[test]

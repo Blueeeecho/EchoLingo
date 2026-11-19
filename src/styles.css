@@ -237,17 +237,16 @@ body[data-view="translate"] .main-shell { min-height: 0; height: auto; }
 body[data-view="translate"] .popup-toolbar { display: flex; }
 body[data-view="translate"] .management-header, body[data-view="translate"] .preview-banner, body[data-view="translate"] .app-footer { display: none !important; }
 body[data-view="translate"] main { flex: none; width: 100%; max-width: none; margin: 0; padding: 4px 8px 6px; min-height: 0; overflow: visible; }
-body[data-view="translate"] .view { animation: none; max-height: calc(100vh - 46px); margin-right: 12px; overflow-y: auto; scrollbar-gutter: stable; overscroll-behavior: contain; }
-/* macOS “Always” scrollbars otherwise narrow the text only while the old
-   viewport overflows, changing line breaks again after each native height fit.
-   Older supported WebKit has no scrollbar-gutter; reserve its classic gutter
-   with overflow:scroll instead. Overlay scrollbars still consume no width. */
-@supports not (scrollbar-gutter: stable) {
-  body[data-view="translate"] .view { overflow-y: scroll; }
+body[data-view="translate"] .view { animation: none; max-height: calc(100vh - 46px); overflow-y: auto; scrollbar-gutter: stable both-edges; overscroll-behavior: contain; }
+/* Keep text width stable across native height fits without shifting the
+   cards off center. Older WebKit keeps its classic scrollbar on the end;
+   mirror its measured width on the start. Overlay scrollbars need no inset. */
+@supports not (scrollbar-gutter: stable both-edges) {
+  body[data-view="translate"] .view { overflow-y: scroll; padding-inline-start: var(--popup-classic-scrollbar, 0px); }
 }
 body[data-view="translate"] .translator-panel { margin: 0; padding: 0; background: transparent; border: 0; border-radius: 0; box-shadow: none; }
-body[data-view="translate"] .source-column { position: relative; display: block; padding: 1px 29px 2px 4px; border: 0; border-radius: 0; background: transparent; }
-body[data-view="translate"] #source-text { display: block; width: 100%; height: 25px; min-height: 25px; max-height: 180px; resize: none; padding: 0; border: 0; border-radius: 0; font-size: 14px; line-height: var(--reading-line-height); background: transparent; letter-spacing: 0; }
+body[data-view="translate"] .source-column { position: relative; display: block; padding: 1px var(--reading-inline-inset) 2px; border: 0; border-radius: 0; background: transparent; }
+body[data-view="translate"] #source-text { display: block; width: 100%; height: 25px; min-height: 25px; max-height: none; resize: none; overflow: hidden; padding: 0; border: 0; border-radius: 0; font-size: 14px; line-height: var(--reading-line-height); background: transparent; letter-spacing: 0; }
 body[data-view="translate"] #source-text:focus-visible { outline: none; box-shadow: inset 0 -1px 0 var(--accent-soft); }
 body[data-view="translate"] #source-text::placeholder { color: var(--muted); opacity: .7; font-size: 12px; }
 body[data-view="translate"] .translate-trigger { position: absolute; right: 1px; bottom: 3px; width: 23px; height: 22px; color: var(--accent); border-radius: 4px; }
@@ -276,8 +275,8 @@ body[data-view="translate"] .result-actions .result-retry { margin-left: auto; }
 body[data-view="translate"] .result-loading { min-height: 0; height: 28px; opacity: .5; }.result-loading .spinner { width: 12px; height: 12px; }
 body[data-view="translate"] .toast { bottom: 10px; max-width: calc(100vw - 24px); padding: 8px 12px; font-size: 10px; border-radius: 6px; }
 /* A quiet blank editor still offers a comfortable place to start typing. */
-body[data-view="translate"] main { padding: 5px 9px 7px; }
-body[data-view="translate"] .source-column { padding: 6px 29px 6px var(--reading-inline-inset); background: var(--surface-soft); border: 1px solid var(--border); border-radius: 6px; }
+body[data-view="translate"] main { padding: 5px 11px 7px; }
+body[data-view="translate"] .source-column { padding: 8px var(--reading-inline-inset); background: var(--surface-soft); border: 1px solid var(--border); border-radius: 6px; }
 body[data-view="translate"] .source-column:focus-within { border-color: var(--accent-soft); }
 body[data-view="translate"] #source-text { font-size: 14px; line-height: var(--reading-line-height); }
 body[data-view="translate"] #source-text:focus-visible { box-shadow: none; }
@@ -378,9 +377,8 @@ body[data-view="translate"] .result-provider { font-size: 10px; }
 .free-setup-fields label { display: flex; flex-direction: column; gap: 4px; font-size: 11px; }
 .free-setup-fields input { font-size: 12px; border: 1px solid var(--border); border-radius: 7px; padding: 8px 10px; background: var(--surface-soft); }
 
-/* One reading style for the editable source and translated prose. Keep the
-   source's right-side action clearance and the result's compact blank-line
-   renderer; neither should change literal text, selection or code whitespace. */
+/* The editable source follows the translated text's reading width and style.
+   Scroll only the popup itself, without changing literal text or selection. */
 body[data-view="translate"] #source-text,
 body[data-view="translate"] .result-text {
   font-family: var(--reading-font-family);
@@ -401,13 +399,6 @@ body[data-view="translate"] #source-text, body[data-view="translate"] .result-te
 #update-settings .settings-card-heading > div { min-width: 0; }
 #check-updates { flex-shrink: 0; }
 
-/* Inline-only paragraph layout keeps both the raw text and browser-selected
-   text unchanged. The small parent strut compacts blank lines; normal text
-   runs restore readable line height on both macOS and Windows. No block boxes
-   or generated content may be introduced between runs (they add copy newlines). */
-:root body[data-view] .result-text[data-paragraph-spacing="compact"] { line-height: .35; }
-.result-text .result-text-run { display: inline; line-height: var(--reading-line-height); }
-.result-text .result-paragraph-break { display: inline; line-height: .35; white-space: pre-wrap; }
 .free-service-warning { padding: 8px 10px; border-left: 3px solid var(--danger); color: var(--text); background: var(--surface-soft); font-size: 12px; line-height: 1.6; }
 
 /* Native window restoration is not keyboard navigation. Scope this to header
@@ -456,3 +447,19 @@ body[data-popup-focus-managed="true"] :is(.popup-toolbar, .management-header) > 
 #screenshot-settings .preference-row > span { min-width: 0; }
 #screenshot-folder { overflow-wrap: anywhere; }
 #screenshot-settings .preference-row > button { flex-shrink: 0; }
+
+/* Mac translation popup: keep type size and aligned text insets unchanged. */
+:root[data-platform="macos"] body[data-view="translate"] { --popup-toolbar-height: 28px; }
+:root[data-platform="macos"] body[data-view="translate"] .popup-toolbar { height: var(--popup-toolbar-height); }
+:root[data-platform="macos"] body[data-view="translate"] .popup-toolbar > .icon-button { height: 28px; }
+:root[data-platform="macos"] body[data-view="translate"] main { padding: 6px 8px 8px; }
+:root[data-platform="macos"] body[data-view="translate"] .language-bar { min-height: 28px; margin-top: 8px; padding: 1px 10px; border: 1px solid var(--border); border-radius: 6px; background: var(--surface-soft); }
+:root[data-platform="macos"] body[data-view="translate"] .view { max-height: calc(100vh - var(--popup-toolbar-height) - 14px); scrollbar-width: none; scrollbar-gutter: auto; padding-inline: 0; }
+:root[data-platform="macos"] body[data-view="translate"] .view::-webkit-scrollbar { display: none; }
+:root[data-platform="macos"] body[data-view="translate"] .popup-resize-edge:is([data-window-resize="west"], [data-window-resize="east"]) { top: var(--popup-toolbar-height); width: 8px; }
+
+.popup-scroll-rail { position: fixed; z-index: 25; right: 8px; width: 4px; touch-action: none; user-select: none; border-radius: 2px; }
+.popup-scroll-thumb { width: 100%; background: var(--muted); opacity: .45; border-radius: 2px; }
+.popup-scroll-rail:hover .popup-scroll-thumb, .popup-scroll-rail:focus-visible .popup-scroll-thumb { opacity: .85; }
+:root[data-platform="macos"] body[data-view="translate"] .translate-trigger { right: 12px; }
+:root[data-platform="macos"] body[data-view="translate"] .language-bar { padding-right: 12px; }
