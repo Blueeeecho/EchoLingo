@@ -3,27 +3,27 @@
 <h1 align="center">EchoLingo · 回声译</h1>
 <p align="center"><strong>让陌生的语言，有熟悉的回声。</strong></p>
 <p align="center">轻量的桌面选词翻译与无感 OCR 工具，让理解跟上思路。</p>
-<p align="center"><a href="https://blueeeecho.github.io/EchoLingo/">官方网站</a> · <a href="https://github.com/Blueeeecho/EchoLingo/releases/tag/0.2.19">Windows 0.2.19 测试版</a> · <a href="https://github.com/Blueeeecho/EchoLingo/releases/tag/0.2.19">macOS 0.2.19 测试版</a> · <a href="https://github.com/Blueeeecho/EchoLingo/issues">反馈与建议</a></p>
+<p align="center"><a href="https://blueeeecho.github.io/EchoLingo/">官方网站</a> · <a href="https://github.com/Blueeeecho/EchoLingo/releases/tag/0.2.21">Windows 0.2.21 测试版</a> · <a href="https://github.com/Blueeeecho/EchoLingo/releases/tag/0.2.21">macOS 0.2.21 测试版</a> · <a href="https://github.com/Blueeeecho/EchoLingo/issues">反馈与建议</a></p>
 
 ## 下载与安装
 
-**[下载 Windows 0.2.19 安装版（x64）](https://github.com/Blueeeecho/EchoLingo/releases/download/0.2.19/EchoLingo_0.2.19_windows_x64-setup.exe)** · **[下载 macOS 0.2.19 内测版（Apple 芯片）](https://github.com/Blueeeecho/EchoLingo/releases/download/0.2.19/EchoLingo_0.2.19_macos_arm64.dmg)**
+**[下载 Windows 0.2.21 免安装 ZIP（x64，推荐）](https://github.com/Blueeeecho/EchoLingo/releases/download/0.2.21/EchoLingo_0.2.21_windows_x64-unpack.zip)** · **[Windows EXE 安装版](https://github.com/Blueeeecho/EchoLingo/releases/download/0.2.21/EchoLingo_0.2.21_windows_x64-setup.exe)** · **[下载 macOS 0.2.21 内测版（Apple 芯片）](https://github.com/Blueeeecho/EchoLingo/releases/download/0.2.21/EchoLingo_0.2.21_macos_arm64.dmg)**
 
-Windows 安装版需要 Microsoft Edge WebView2 Runtime。
+Windows ZIP 请完整解压后运行 `Start-EchoLingo.cmd`；ZIP 和安装版均需要 Microsoft Edge WebView2 Runtime。用户配置与密钥仍保存在当前用户环境，不随 ZIP 搬移。
 
 Windows 适用于 Windows 10 1809+ / Windows 11；macOS 安装包适用于 Apple 芯片 Mac、macOS 12+，Apple 系统翻译需要 macOS 26+。打开回声译后，应用会驻留托盘或菜单栏；升级前先完整退出旧版。
 
-Windows 与 macOS 现统一提供 0.2.19 测试版。翻译与 OCR 服务独立管理，免费推荐列表可折叠；默认启用 `Alt+D`、`Alt+S`，另提供独立的 `F1` 截图与本地编辑；快捷键可修改、清空或自定义。
+Windows 与 macOS 现统一提供 0.2.21 测试版。翻译与 OCR 服务独立管理，免费推荐列表可折叠；默认启用 `Alt+D`、`Alt+S`，另提供独立的 `F1` 截图与本地编辑；快捷键可修改、清空或自定义。
 
-0.2.19 将翻译弹窗的原文和译文对齐，长内容统一滚动，划词、OCR 和译文不再显示多余空行。修正部分拖动断触；macOS 重按 OCR 会切换到最新请求。微信多选漏句仍待解决。
+0.2.21 调整 Mac 翻译弹窗的对齐与留白，字号不变；顶栏原生拖动期间延后结果增长引起的窗口适配。Windows 恢复同版本免安装 ZIP 优先下载。Mac 实体设备断触根因尚未确认，不宣称现场手势验收通过。
 
-详见 [CI 记录](https://github.com/Blueeeecho/EchoLingo/actions/runs/44097599304)和发布清单。自动检查不替代真实 Apple 翻译、聊天软件取词、用户设备权限或物理多屏测试。
+详见 [CI 记录](https://github.com/Blueeeecho/EchoLingo/actions/runs/44439900790)和发布清单。自动检查不替代真实 Apple 翻译、聊天软件取词、用户设备权限或物理多屏测试。
 
 这是内测预发布版本，不是稳定版。Windows 未商业签名；macOS 使用 ad hoc 签名，未经 Apple 公证。系统可能提示风险或要求重新授权，请仅安装来自本仓库发布页且校验值相符的文件。
 
-[版本说明](https://github.com/Blueeeecho/EchoLingo/releases/tag/0.2.19) · [SHA-256 校验值](https://github.com/Blueeeecho/EchoLingo/releases/download/0.2.19/SHA256SUMS.txt) · [发布清单](https://github.com/Blueeeecho/EchoLingo/releases/download/0.2.19/RELEASE-MANIFEST.json)
+[版本说明](https://github.com/Blueeeecho/EchoLingo/releases/tag/0.2.21) · [SHA-256 校验值](https://github.com/Blueeeecho/EchoLingo/releases/download/0.2.21/SHA256SUMS.txt) · [发布清单](https://github.com/Blueeeecho/EchoLingo/releases/download/0.2.21/RELEASE-MANIFEST.json)
 
-0.2.19 是测试预发布版，不使用 GitHub 的稳定版 `Latest` 标记。程序包对应 [0.2.19 标签源码](https://github.com/Blueeeecho/EchoLingo/tree/0.2.19)，不等同于默认分支源码；程序包源码与实际文件对应关系请查看发布清单。
+0.2.21 是测试预发布版，不使用 GitHub 的稳定版 `Latest` 标记。程序包对应 [0.2.21 标签源码](https://github.com/Blueeeecho/EchoLingo/tree/0.2.21)，不等同于默认分支源码；程序包源码与实际文件对应关系请查看发布清单。
 
 [macOS 首次安装说明](docs/macos-install.zh-CN.md) · [源码构建](docs/build.md)
 

@@ -3,27 +3,27 @@
 <h1 align="center">EchoLingo · 回声译</h1>
 <p align="center"><strong>A familiar echo for unfamiliar words.</strong></p>
 <p align="center">A lightweight desktop app for selection translation and seamless OCR, so understanding can keep up with your reading.</p>
-<p align="center"><a href="https://blueeeecho.github.io/EchoLingo/">Website</a> · <a href="https://github.com/Blueeeecho/EchoLingo/releases/tag/0.2.19">Windows 0.2.19 test prerelease</a> · <a href="https://github.com/Blueeeecho/EchoLingo/releases/tag/0.2.19">macOS 0.2.19 test prerelease</a> · <a href="https://github.com/Blueeeecho/EchoLingo/issues">Feedback</a></p>
+<p align="center"><a href="https://blueeeecho.github.io/EchoLingo/">Website</a> · <a href="https://github.com/Blueeeecho/EchoLingo/releases/tag/0.2.21">Windows 0.2.21 test prerelease</a> · <a href="https://github.com/Blueeeecho/EchoLingo/releases/tag/0.2.21">macOS 0.2.21 test prerelease</a> · <a href="https://github.com/Blueeeecho/EchoLingo/issues">Feedback</a></p>
 
 ## Download and install
 
-**[Download Windows 0.2.19 installer (x64)](https://github.com/Blueeeecho/EchoLingo/releases/download/0.2.19/EchoLingo_0.2.19_windows_x64-setup.exe)** · **[Download macOS 0.2.19 prerelease (Apple silicon)](https://github.com/Blueeeecho/EchoLingo/releases/download/0.2.19/EchoLingo_0.2.19_macos_arm64.dmg)**
+**[Download Windows 0.2.21 portable ZIP (x64, recommended)](https://github.com/Blueeeecho/EchoLingo/releases/download/0.2.21/EchoLingo_0.2.21_windows_x64-unpack.zip)** · **[Windows EXE installer](https://github.com/Blueeeecho/EchoLingo/releases/download/0.2.21/EchoLingo_0.2.21_windows_x64-setup.exe)** · **[Download macOS 0.2.21 prerelease (Apple silicon)](https://github.com/Blueeeecho/EchoLingo/releases/download/0.2.21/EchoLingo_0.2.21_macos_arm64.dmg)**
 
-The Windows installer requires Microsoft Edge WebView2 Runtime.
+Extract the complete Windows ZIP and run `Start-EchoLingo.cmd`. Both ZIP and installer require Microsoft Edge WebView2 Runtime. Settings and credentials remain in the current user environment and do not travel with the ZIP.
 
 Windows supports Windows 10 1809+ and Windows 11. The macOS package is for Apple silicon Macs on macOS 12 or later. Apple system translation needs macOS 26 or later. After launch, EchoLingo stays in the tray or menu bar. Quit the previous version completely before you upgrade.
 
-Windows and macOS now both offer the 0.2.19 test prerelease. Translation and OCR services are managed separately, with collapsible free-service recommendations. The defaults are `Alt+D`, `Alt+S`, and a separate `F1` screenshot and local editor action; shortcuts can be changed, cleared, or customized.
+Windows and macOS now both offer the 0.2.21 test prerelease. Translation and OCR services are managed separately, with collapsible free-service recommendations. The defaults are `Alt+D`, `Alt+S`, and a separate `F1` screenshot and local editor action; shortcuts can be changed, cleared, or customized.
 
-0.2.19 aligns the source and translation, uses one scroll area for long text, and removes extra blank lines from captured text and translations. It fixes a popup drag interruption and lets a new macOS OCR request supersede the previous one. Missing messages when multi-selecting in WeChat remain unresolved.
+0.2.21 adjusts Mac popup alignment and spacing without changing font sizes, and defers result-driven window fitting during native header dragging. Windows again offers a same-version portable ZIP as the preferred download. The physical Mac drag-interruption root cause remains unconfirmed; field gesture acceptance is not claimed.
 
-See the [CI records](https://github.com/Blueeeecho/EchoLingo/actions/runs/44097599304) and release manifest. Automated checks do not replace field testing of Apple system translation, chat-app selection, device permissions, or physical multi-display setups.
+See the [CI records](https://github.com/Blueeeecho/EchoLingo/actions/runs/44439900790) and release manifest. Automated checks do not replace field testing of Apple system translation, chat-app selection, device permissions, or physical multi-display setups.
 
 This is an internal prerelease, not a stable release. Windows has no commercial code signature; macOS uses ad hoc signing and is not notarized by Apple. Your system may show warnings or request permissions again. Use only files from this repository’s release page with matching checksums.
 
-[Release notes](https://github.com/Blueeeecho/EchoLingo/releases/tag/0.2.19) · [SHA-256 checksums](https://github.com/Blueeeecho/EchoLingo/releases/download/0.2.19/SHA256SUMS.txt) · [Release manifest](https://github.com/Blueeeecho/EchoLingo/releases/download/0.2.19/RELEASE-MANIFEST.json)
+[Release notes](https://github.com/Blueeeecho/EchoLingo/releases/tag/0.2.21) · [SHA-256 checksums](https://github.com/Blueeeecho/EchoLingo/releases/download/0.2.21/SHA256SUMS.txt) · [Release manifest](https://github.com/Blueeeecho/EchoLingo/releases/download/0.2.21/RELEASE-MANIFEST.json)
 
-0.2.19 is a test prerelease, not a stable GitHub `Latest` release. The packages correspond to the [0.2.19 source tag](https://github.com/Blueeeecho/EchoLingo/tree/0.2.19), not the default branch; see the release manifest for the relationship between source and installer bytes.
+0.2.21 is a test prerelease, not a stable GitHub `Latest` release. The packages correspond to the [0.2.21 source tag](https://github.com/Blueeeecho/EchoLingo/tree/0.2.21), not the default branch; see the release manifest for the relationship between source and installer bytes.
 
 [First-launch notes for macOS](docs/macos-install.zh-CN.md) (Chinese) · [Build from source](docs/build.md) (Chinese)
 
