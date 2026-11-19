@@ -2226,22 +2226,22 @@ impl Picker {
                 sampler_stopped = self.sampler.join_if_finished();
             }
             if let Err(e) = self.host.pulse(true, false) {
-                self.failure.get_or_insert(e);
+                self.failure = Some(e);
                 break;
             }
             pump();
             if let Err(e) = self.events() {
-                self.failure.get_or_insert(e);
+                self.failure = Some(e);
                 break;
             }
             std::thread::sleep(Duration::from_millis(5));
         }
         if !self.host.stopped {
             let error = self.host.fail(7, 0);
-            self.failure.get_or_insert(error);
+            self.failure = Some(error);
         }
         if sampler_stopped != Some(true) {
-            self.failure.get_or_insert(error("CAPTURE_SAMPLE_STOP"));
+            self.failure = Some(error("CAPTURE_SAMPLE_STOP"));
         }
         self.health.insert(
             "magnifierSampleThreadStopped",
@@ -2262,7 +2262,7 @@ impl Picker {
             }
         }
         if !self.escape.stop() {
-            self.failure.get_or_insert(error("CAPTURE_INPUT"));
+            self.failure = Some(error("CAPTURE_INPUT"));
         }
         self.health.insert(
             "hookEscapeDowns",
@@ -2297,14 +2297,14 @@ impl Picker {
             .chain(&mut self.handles)
         {
             if !edge.destroy() {
-                self.failure.get_or_insert(error("CAPTURE_OVERLAY_CLEANUP"));
+                self.failure = Some(error("CAPTURE_OVERLAY_CLEANUP"));
             }
         }
         if !self.loupe.destroy() {
-            self.failure.get_or_insert(error("CAPTURE_OVERLAY_CLEANUP"));
+            self.failure = Some(error("CAPTURE_OVERLAY_CLEANUP"));
         }
         if remaining != 0 {
-            self.failure.get_or_insert(error("CAPTURE_INPUT_PLANE"));
+            self.failure = Some(error("CAPTURE_INPUT_PLANE"));
         }
         self.health.insert(
             "inputPlaneFallbackUsed",

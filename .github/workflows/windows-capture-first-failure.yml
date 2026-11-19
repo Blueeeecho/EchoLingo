@@ -39,6 +39,17 @@ jobs:
           if($LASTEXITCODE -ne 0){throw 'CHILD_BUILD'}
           rustc --edition=2021 tests/windows-native-capture-harness.rs -O -o "$env:RUNNER_TEMP/diagnostic-host.exe"
           if($LASTEXITCODE -ne 0){throw 'HOST_BUILD'}
+      - name: Run original native continuity prelude once
+        id: continuity
+        continue-on-error: true
+        shell: powershell
+        env:
+          ECHOLINGO_CAPTURE_DIAGNOSTICS: '1'
+        run: |
+          $output=@(& powershell.exe -NoProfile -STA -ExecutionPolicy Bypass -File tests/windows-native-capture-smoke.ps1 -NativeCapturePath "$env:RUNNER_TEMP/diagnostic-child/release/echolingo-native-capture.exe" -HarnessPath "$env:RUNNER_TEMP/diagnostic-host.exe" -IsolatedTestSession 2>&1)
+          $code=$LASTEXITCODE
+          $output | Out-File "$env:RUNNER_TEMP/first-failure/native-continuity.log" -Encoding utf8
+          exit $code
       - name: Run unchanged ten-case native F1 fixture once
         id: native
         continue-on-error: true
@@ -65,7 +76,7 @@ jobs:
             const b=Buffer.from((await github.rest.actions.downloadArtifact({...context.repo,artifact_id:a.id,archive_format:'zip'})).data);
             if(b.length!==19007048||crypto.createHash('sha256').update(b).digest('hex')!==sha)throw Error('ARCHIVE_BYTES');
             fs.writeFileSync(path.join(process.env.RUNNER_TEMP,'immutable-evidence.zip'),b);
-      - name: Observe WPF to F1 boundaries on exact unchanged application once
+      - name: Observe Notepad to WPF to F1 boundaries on exact unchanged application once
         id: clipboard
         if: always()
         continue-on-error: true
@@ -89,8 +100,8 @@ jobs:
           name: Windows-capture-first-failure
           path: ${{ runner.temp }}/first-failure
           if-no-files-found: error
-      - name: Require both diagnostic paths to pass without retries
+      - name: Require all diagnostic paths to pass without retries
         if: always()
         shell: pwsh
         run: |
-          if('${{ steps.native.outcome }}' -ne 'success' -or '${{ steps.clipboard.outcome }}' -ne 'success'){throw 'DIAGNOSTIC_FAILURE_RETAINED; not release acceptance'}
+          if('${{ steps.continuity.outcome }}' -ne 'success' -or '${{ steps.native.outcome }}' -ne 'success' -or '${{ steps.clipboard.outcome }}' -ne 'success'){throw 'DIAGNOSTIC_FAILURE_RETAINED; not release acceptance'}

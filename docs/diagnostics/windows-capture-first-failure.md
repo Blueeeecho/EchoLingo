@@ -11,18 +11,21 @@ retains its existing generated-window reports. No timeout or input retry changes
 Child first-failure/cleanup reason: 0 none, 1 PostThreadMessage failed (immediate
 Win32 error), 2 READY deadline, 3 ACK deadline, 4 negative STOP_ACK, 5 FAILURE,
 6 negative PING_ACK, 7 STOP unconfirmed during cleanup. First error and cleanup
-error are independent, and later failures cannot overwrite either first record.
+error are independent, and later failures cannot overwrite either first diagnostic record.
+The existing final error priority is unchanged: cleanup may still determine the
+public error code (for example CAPTURE_INPUT_HOST for an unconfirmed owned
+release). This prevents diagnostic retention from changing failure contracts.
 Wire-event bits: READY sent 1, ARM sent 2, STOP sent 4, READY_ACK 8, ARM_ACK 16,
 STOP_ACK 32, FAILURE 64, PING_ACK 128. These are observations, not proof of cause.
 Parent READY bits: received 1, closing 2, refresh incomplete 4, child unbound 8,
 window query failed 16, endpoint mismatch 32, ACK sent 64, ACK send failed 128.
 Only ACK send failure currently has a Win32 code. No unknown IDs are exported.
 
-One branch-triggered Windows run performs the unchanged ten-case native F1
-fixture once on the freshly built diagnostic child and exact-source host. This
+One branch-triggered Windows run performs the original native continuity prelude
+then the unchanged ten-case native F1 fixture once on the freshly built diagnostic child and exact-source host. This
 is not a packaged application or physical-device acceptance. A separate phase
 uses the immutable *failed normal CI* app and embedded child, verified by full
-hash, for the original WPF fixture followed by original F1 fixture once. It does
+hash, for original Notepad mouse selection, then WPF, then F1 once. It does
 not substitute the different passing release-workflow package. Boundary
 observations read emptiness, sequence changes, and known fixture ownership only;
 unknown content is never read or cleared. Existing fixture failures remain
@@ -31,3 +34,11 @@ failures; subsequent observation does not authorize publication.
 The immutable experiment omits the earlier full-CI workload. A pass cannot prove
 that workload, CPU, linking, clipboard ownership or timing caused the old failure.
 No automatic merge, release or website mutation is part of this workflow.
+
+The first PR check exposed an instrumentation regression: preserving the final
+operation error changed `escape-held-release-after-helper-close` from expected
+CAPTURE_INPUT_HOST to CAPTURE_INPUT_RELEASE. Original final-error assignments
+are restored; no assertion is changed. The independent diagnostic first-error
+record remains intact. The follow-up adds the original immediate native
+continuity and Notepad preludes, not the entire earlier build/browser workload.
+The separate ordinary PR CI retains that full original order with diagnostics off.

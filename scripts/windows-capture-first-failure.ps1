@@ -34,6 +34,13 @@ function Observe([string]$stage) {
  $script:previous=$v[1]
  $script:rows | ConvertTo-Json | Set-Content (Join-Path $OutputDirectory 'clipboard-boundaries.json') -Encoding utf8
 }
+Observe 'before-notepad'
+$ErrorActionPreference='Continue'
+$notepad=@(& powershell.exe -NoProfile -STA -ExecutionPolicy Bypass -File tests/windows-selection-notepad-smoke.ps1 -ApplicationPath $ApplicationPath -ExpectedApplicationSha256 $expected -ExpectedApplicationBytes 8237568 -IsolatedTestSession 2>&1)
+$notepadExit=$LASTEXITCODE
+$notepad | Out-File (Join-Path $OutputDirectory 'notepad.log') -Encoding utf8
+foreach($line in $notepad){try{$r=($line.ToString()|ConvertFrom-Json);if($r.applicationProcessId){$knownPid=[uint32]$r.applicationProcessId}}catch{}}
+Observe 'after-notepad'
 Observe 'before-wpf'
 $ErrorActionPreference='Continue'
 $wpf=@(& powershell.exe -NoProfile -STA -ExecutionPolicy Bypass -File tests/windows-selection-wpf-smoke.ps1 -ApplicationPath $ApplicationPath -ExpectedApplicationSha256 $expected -ExpectedApplicationBytes 8237568 -IsolatedTestSession 2>&1)
@@ -47,5 +54,5 @@ $f1Exit=$LASTEXITCODE
 $f1 | Out-File (Join-Path $OutputDirectory 'f1.log') -Encoding utf8
 foreach($line in $f1){try{$r=($line.ToString()|ConvertFrom-Json);if($r.applicationProcessId){$knownPid=[uint32]$r.applicationProcessId}}catch{}}
 Observe 'after-f1'
-[ordered]@{wpfExit=$wpfExit;f1Exit=$f1Exit;applicationSha256=$expected;diagnosticOnly=$true;releaseAcceptance=$false;retries=0} | ConvertTo-Json | Set-Content (Join-Path $OutputDirectory 'result.json') -Encoding utf8
-if ($wpfExit -ne 0 -or $f1Exit -ne 0) { exit 1 }
+[ordered]@{notepadExit=$notepadExit;wpfExit=$wpfExit;f1Exit=$f1Exit;applicationSha256=$expected;diagnosticOnly=$true;releaseAcceptance=$false;retries=0} | ConvertTo-Json | Set-Content (Join-Path $OutputDirectory 'result.json') -Encoding utf8
+if ($notepadExit -ne 0 -or $wpfExit -ne 0 -or $f1Exit -ne 0) { exit 1 }
