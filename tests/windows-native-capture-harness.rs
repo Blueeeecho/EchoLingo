@@ -291,7 +291,14 @@ mod desktop {
             }
             let mut child = OwnedChild {
                 child: Command::new(&helper)
-                    .args(["-Mode", if command == "screenshot" { "capture-screenshot" } else { "capture-image" }])
+                    .args([
+                        "-Mode",
+                        if command == "screenshot" {
+                            "capture-screenshot"
+                        } else {
+                            "capture-image"
+                        },
+                    ])
                     .args(["-CaptureOwnerProcessId", &std::process::id().to_string()])
                     .arg("-CaptureHostThreadId")
                     .arg(session.thread().to_string())
@@ -328,6 +335,13 @@ mod desktop {
                 }
                 thread::sleep(Duration::from_millis(5));
             };
+            let host_diagnostics = child
+                .session
+                .ready_diagnostics()
+                .map(|(events, code)| {
+                    format!(",\"hostReadyEvents\":{events},\"hostReadyWin32Error\":{code}")
+                })
+                .unwrap_or_default();
             child.session.close();
             let (reply, valid) = output.join().map_err(|_| "HELPER_STDOUT_THREAD")?;
             let (stderr, _) = error.join().map_err(|_| "HELPER_STDERR_THREAD")?;
@@ -338,7 +352,7 @@ mod desktop {
             } else {
                 emit("{\"ok\":false,\"error\":\"HELPER_REPLY_MISSING_OR_INVALID\"}")?;
             }
-            emit(&format!("{{\"event\":\"closed\",\"generation\":{generation},\"helperExitCode\":{},\"helperDeadlineKilled\":{},\"helperElapsedMilliseconds\":{},\"helperStderrCharacters\":{},\"hostThreadId\":{},\"sessionCloseCalled\":true}}",status.code().unwrap_or(-1),killed,started.elapsed().as_millis(),stderr.len(),host_thread))?;
+            emit(&format!("{{\"event\":\"closed\",\"generation\":{generation},\"helperExitCode\":{},\"helperDeadlineKilled\":{},\"helperElapsedMilliseconds\":{},\"helperStderrCharacters\":{},\"hostThreadId\":{},\"sessionCloseCalled\":true{host_diagnostics}}}",status.code().unwrap_or(-1),killed,started.elapsed().as_millis(),stderr.len(),host_thread))?;
         }
         observer::stop();
         emit(&format!("{{\"event\":\"stopped\",\"ok\":true,\"completedGenerations\":{generation},\"productionObserverStopRequested\":true}}"))?;

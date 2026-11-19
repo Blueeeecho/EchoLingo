@@ -15,6 +15,8 @@ use std::{
     },
     time::{Duration, Instant},
 };
+#[path = "windows_capture_diagnostics.rs"]
+mod diagnostics;
 type Result<T> = std::result::Result<T, String>;
 const TOPMOST: w::H = -1isize as w::H;
 const PLANE_EX: u32 = 0x0020_0000 | 0x0800_0000 | 0x80 | 8;
@@ -1029,6 +1031,7 @@ impl Drop for EscapeListener {
     }
 }
 struct Host {
+    diagnostics: diagnostics::HostDiagnostics,
     thread: u32,
     token: i64,
     mailbox: w::H,
@@ -1042,13 +1045,19 @@ struct Host {
     started: Instant,
 }
 impl Host {
-    fn fail(&mut self) -> String {
+    fn fail(&mut self, stage: u32, code: u32) -> String {
+        self.diagnostics.fail(stage, code);
         self.failed = true;
         error("CAPTURE_INPUT_HOST")
     }
     fn new(request: &Request, mailbox: w::H) -> Self {
         let now = Instant::now();
         Self {
+            diagnostics: diagnostics::HostDiagnostics {
+                enabled: std::env::var_os("ECHOLINGO_CAPTURE_DIAGNOSTICS")
+                    .is_some_and(|v| v == "1"),
+                ..Default::default()
+            },
             thread: request.host_thread,
             token: request.host_token,
             mailbox,
@@ -1063,6 +1072,12 @@ impl Host {
         }
     }
     fn send(&mut self, kind: u32) -> Result<()> {
+        self.diagnostics.event(match kind {
+            wire::READY => 1,
+            wire::ARM => 2,
+            wire::STOP => 4,
+            _ => 0,
+        });
         if unsafe {
             w::PostThreadMessageW(
                 self.thread,
@@ -1072,17 +1087,17 @@ impl Host {
             )
         } == 0
         {
-            return Err(self.fail());
+            return Err(self.fail(1, unsafe { w::GetLastError() }));
         }
         Ok(())
     }
     fn pulse(&mut self, finishing: bool, may_arm: bool) -> Result<()> {
         let now = Instant::now();
         if !self.ready && self.started.elapsed() > Duration::from_secs(3) {
-            return Err(self.fail());
+            return Err(self.fail(2, 0));
         }
         if self.ready && self.last_ack.elapsed() > Duration::from_millis(1250) {
-            return Err(self.fail());
+            return Err(self.fail(3, 0));
         }
         if now.duration_since(self.last_send) < Duration::from_millis(50) {
             return Ok(());
@@ -1632,6 +1647,14 @@ impl Picker {
                     if token != self.host.token as usize {
                         continue;
                     }
+                    self.host.diagnostics.event(match kind {
+                        wire::READY_ACK => 8,
+                        wire::ARM_ACK => 16,
+                        wire::STOP_ACK => 32,
+                        wire::FAILURE => 64,
+                        wire::PING_ACK => 128,
+                        _ => 0,
+                    });
                     self.host.last_ack = Instant::now();
                     match kind {
                         wire::READY_ACK => {
@@ -1646,13 +1669,13 @@ impl Picker {
                             self.host.stopped = true;
                             self.health.insert("nativeHostStopped", 1);
                             if value != 0 {
-                                return Err(self.host.fail());
+                                return Err(self.host.fail(4, 0));
                             }
                         }
-                        wire::FAILURE => return Err(self.host.fail()),
+                        wire::FAILURE => return Err(self.host.fail(5, 0)),
                         wire::PING_ACK => {
                             if value != 0 {
-                                return Err(self.host.fail());
+                                return Err(self.host.fail(6, 0));
                             }
                         }
                         wire::DRAG_EXCURSION => {
@@ -2184,6 +2207,7 @@ impl Picker {
             return;
         }
         self.cleaned = true;
+        self.host.diagnostics.cleaning = true;
         self.sample_policy.close();
         self.sampler.stop();
         self.loupe.hide();
@@ -2202,21 +2226,22 @@ impl Picker {
                 sampler_stopped = self.sampler.join_if_finished();
             }
             if let Err(e) = self.host.pulse(true, false) {
-                self.failure = Some(e);
+                self.failure.get_or_insert(e);
                 break;
             }
             pump();
             if let Err(e) = self.events() {
-                self.failure = Some(e);
+                self.failure.get_or_insert(e);
                 break;
             }
             std::thread::sleep(Duration::from_millis(5));
         }
         if !self.host.stopped {
-            self.failure = Some(self.host.fail());
+            let error = self.host.fail(7, 0);
+            self.failure.get_or_insert(error);
         }
         if sampler_stopped != Some(true) {
-            self.failure = Some(error("CAPTURE_SAMPLE_STOP"));
+            self.failure.get_or_insert(error("CAPTURE_SAMPLE_STOP"));
         }
         self.health.insert(
             "magnifierSampleThreadStopped",
@@ -2224,8 +2249,20 @@ impl Picker {
         );
         self.health
             .insert("nativeHostFailed", u64::from(self.host.failed));
+        let d = &self.host.diagnostics;
+        if d.enabled {
+            for (key, value) in [
+                ("hostFirstFailure", d.first),
+                ("hostFirstWin32Error", d.first_error),
+                ("hostCleanupFailure", d.cleanup),
+                ("hostCleanupWin32Error", d.cleanup_error),
+                ("hostWireEvents", d.events),
+            ] {
+                self.health.insert(key, u64::from(value));
+            }
+        }
         if !self.escape.stop() {
-            self.failure = Some(error("CAPTURE_INPUT"));
+            self.failure.get_or_insert(error("CAPTURE_INPUT"));
         }
         self.health.insert(
             "hookEscapeDowns",
@@ -2260,14 +2297,14 @@ impl Picker {
             .chain(&mut self.handles)
         {
             if !edge.destroy() {
-                self.failure = Some(error("CAPTURE_OVERLAY_CLEANUP"));
+                self.failure.get_or_insert(error("CAPTURE_OVERLAY_CLEANUP"));
             }
         }
         if !self.loupe.destroy() {
-            self.failure = Some(error("CAPTURE_OVERLAY_CLEANUP"));
+            self.failure.get_or_insert(error("CAPTURE_OVERLAY_CLEANUP"));
         }
         if remaining != 0 {
-            self.failure = Some(error("CAPTURE_INPUT_PLANE"));
+            self.failure.get_or_insert(error("CAPTURE_INPUT_PLANE"));
         }
         self.health.insert(
             "inputPlaneFallbackUsed",
