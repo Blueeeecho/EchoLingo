@@ -261,7 +261,11 @@ body[data-view="translate"] main { min-height: 0; }
 body[data-view="translate"] .view { min-height: 0; }
 body[data-view="translate"] .results-column { min-height: 0; max-height: none; padding: 0; background: transparent; overflow: visible; }
 body[data-view="translate"] .results-container { gap: 8px; padding-top: 8px; }
-body[data-view="translate"] .result-card { margin: 0; padding: 9px var(--reading-inline-inset) 8px; border: 1px solid var(--border); border-radius: 6px; background: var(--surface-soft); box-shadow: none; }
+body[data-view="translate"] .result-card,
+body[data-view="translate"] .result-placeholder { margin: 0; padding: 9px var(--reading-inline-inset) 8px; border: 1px solid var(--border); border-radius: 6px; background: var(--surface-soft); box-shadow: none; }
+body[data-view="translate"] .result-placeholder { display: flex; align-items: center; min-height: 88px; color: var(--secondary); font-size: 12px; line-height: 1.5; }
+body[data-view="translate"] #results:not(:empty) + .result-placeholder { display: none; }
+
 body[data-view="translate"] .result-card:focus-visible { outline: 1px solid var(--ring); outline-offset: -1px; }
 body[data-view="translate"] .result-card-header { display: flex; align-items: center; min-height: 19px; gap: 9px; margin-bottom: 4px; }
 body[data-view="translate"] .result-provider { font-size: 10px; line-height: 1.5; color: var(--secondary); font-weight: 450; gap: 6px; }
