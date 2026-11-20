@@ -5,6 +5,8 @@ import importlib.util
 import json
 from pathlib import Path
 import subprocess
+import sys
+import tempfile
 import unittest
 
 ROOT=Path(__file__).resolve().parents[1]
@@ -84,5 +86,54 @@ class StaticContracts(unittest.TestCase):
         self.assertIn('tests/macos-header-event-route.swift',s)
     def test_support_does_not_allow_application_or_historical_changes(self):
         self.assertEqual(R.legacy.SUPPORT,{'scripts/prepare-desktop-022.py','scripts/publish-desktop-022.cjs','scripts/test_prepare_desktop_022.py','scripts/test-desktop-022.cjs','.github/workflows/release-desktop-022.yml','docs/releases/0.2.22.zh-CN.md'})
+
+class VersionCLIContracts(unittest.TestCase):
+    def test_helpers_are_only_additive_relative_to_previous_public_sources(self):
+        for path in ('scripts/inspect-candidate-package.py',
+                     'scripts/verify-candidate-package.py',
+                     'tests/macos-installed-runtime-smoke.py'):
+            with self.subTest(path=path):
+                before=subprocess.check_output(['git','show',R.legacy.MANIFEST_BASELINE+':'+path],cwd=ROOT)
+                old=b'"0.2.21"), default=VERSION)'
+                self.assertEqual(before.count(old),1)
+                self.assertEqual((ROOT/path).read_bytes().replace(b'\r\n',b'\n'),
+                                 before.replace(old,b'"0.2.21", "0.2.22"), default=VERSION)',1))
+
+    def test_version_cli_reaches_real_validation_and_rejects_unknown_version(self):
+        with tempfile.TemporaryDirectory() as directory:
+            output=Path(directory)/'runtime.json'
+            common=['--installer','nonexistent-installer','--run-url','invalid-run-url']
+            cases=[
+                ('scripts/inspect-candidate-package.py',
+                 ['--platform','Windows','--built-application','unbuilt','--output-dir',directory],
+                 'Locked build and focused-test attestations are required'),
+                ('scripts/verify-candidate-package.py',
+                 ['--platform','Windows','--application','unbuilt','--checks-json','missing',
+                  '--output',str(output)],
+                 'A canonical candidate build run URL is required'),
+                ('tests/macos-installed-runtime-smoke.py',
+                 ['--built-application','unbuilt','--output',str(output)],None),
+            ]
+            for path, arguments, detail in cases:
+                for version in ('0.2.21','0.2.22','0.2.999'):
+                    with self.subTest(path=path, version=version):
+                        if output.exists(): output.unlink()
+                        run=subprocess.run([sys.executable,str(ROOT/path),'--expected-version',
+                                            version,*common,*arguments],cwd=ROOT,capture_output=True,text=True)
+                        if version == '0.2.999':
+                            self.assertEqual(run.returncode,2)
+                            self.assertIn('invalid choice',run.stderr)
+                            self.assertFalse(output.exists())
+                        else:
+                            self.assertEqual(run.returncode,1,run.stderr)
+                            if detail is not None:
+                                self.assertIn(detail,run.stderr)
+                            else:
+                                report=json.loads(output.read_text())
+                                self.assertEqual(report['version'],version)
+                                self.assertEqual(report['failureStage'],'runner_preflight')
+                                self.assertFalse(report['ok'])
+                                self.assertFalse(report['extractedBundleLaunched'])
+
 
 if __name__=='__main__':unittest.main()
