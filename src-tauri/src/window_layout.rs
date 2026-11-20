@@ -1846,43 +1846,6 @@ pub async fn wait_for_window_sizing(
 pub fn start_window_drag(window: WebviewWindow) -> Result<(), String> {
     window.start_dragging().map_err(|_| "无法拖动窗口".into())
 }
-// Deliberately restricted to a current, visible Mac popup. No generic window
-// coordinates are accepted; AppKit uses the actual physical pointer and the
-// original toolbar-local press anchor in Cocoa points, including mixed DPI.
-#[cfg(target_os = "macos")]
-fn mac_drag_operation(
-    window: &WebviewWindow,
-    anchor: (f64, f64),
-    press_identity: u64,
-    check_only: bool,
-) -> Result<(), String> {
-    unsafe extern "C" {
-        fn echolingo_popup_drag(
-            window: *mut std::ffi::c_void,
-            x: f64,
-            y: f64,
-            press_identity: u64,
-            check_only: i32,
-        ) -> i32;
-    }
-    let native = window.ns_window().map_err(|_| "窗口不可用")?;
-    // SAFETY: callers run on the app main thread with Tauri's borrowed NSWindow.
-    if unsafe {
-        echolingo_popup_drag(
-            native,
-            anchor.0,
-            anchor.1,
-            press_identity,
-            i32::from(check_only),
-        )
-    } == 0
-    {
-        Ok(())
-    } else {
-        Err(crate::translation_requests::CANCELLED.into())
-    }
-}
-
 #[tauri::command]
 pub fn set_popup_drag_diagnostics(
     state: State<'_, LayoutState>,
@@ -1994,6 +1957,7 @@ pub async fn configure_popup_header_drag(
                                 23 => Stage::GuardViewport,
                                 24 => Stage::GuardButton,
                                 25 => Stage::HeaderMoved,
+                                26 => Stage::NativeHandoff,
                                 _ => return 0,
                             };
                             trace_drag(&state, stage);
