@@ -834,7 +834,8 @@ try {
   await page.waitForFunction(count => window.__qa.translationRequests.length > count, fallbackPending.requests);
   await fallbackPaste(' newer fallback edit');
   await page.waitForFunction(count => window.__qa.cancellationRequests.length > count, fallbackPending.cancellations);
-  assert.equal(await page.locator('.results-column').isHidden(), true);
+  assert.equal(await page.locator('#result-placeholder').isVisible(), true);
+  assert.equal(await page.locator('#result-placeholder').textContent(), '译文会显示在这里');
   assert.equal(await page.locator('#translate-button').getAttribute('aria-label'), '翻译');
   await page.evaluate(() => { window.__qa.holdTranslation = false; window.__qa.releaseTranslation(); });
   await page.locator('#source-text').fill('x'.repeat(20000));
@@ -2555,6 +2556,54 @@ try {
     await page.locator('.result-text').evaluate((element) => getComputedStyle(element).fontFamily));
   assert.doesNotMatch(await page.locator('.result-actions button').first().evaluate((element) => getComputedStyle(element).fontFamily), /Times New Roman/);
 
+  // A quiet input popup and a real automatic request both fit a bordered
+  // results pane before first reveal, with different status text.
+  const firstFrame = await page.evaluate(() => {
+    const q = window.__qa;
+    const baseline = { waits: q.popupAckWaits, requests: q.translationRequests.length };
+    q.holdPopupAck = true;
+    const task = q.nativeHide();
+    q.emit('source-text', { text: '', mode: 'input', focusInput: true, presentationEpoch: task.epoch });
+    return baseline;
+  });
+  await page.waitForFunction(count => window.__qa.popupAckWaits > count, firstFrame.waits);
+  const idlePane = page.locator('#result-placeholder');
+  assert.equal(await idlePane.isVisible(), true);
+  assert.equal(await idlePane.textContent(), '译文会显示在这里');
+  assert.equal(await idlePane.getByRole('status').count(), 0);
+  const initialPane = await idlePane.evaluate((element) => ({
+    width: element.getBoundingClientRect().width, height: element.getBoundingClientRect().height,
+    border: getComputedStyle(element).borderTopWidth,
+  }));
+  assert.ok(initialPane.height >= 88 && initialPane.width > 100);
+  assert.equal(initialPane.border, '1px');
+  await page.evaluate(() => { window.__qa.holdPopupAck = false; window.__qa.releasePopupAck(); });
+  await page.waitForFunction(() => document.activeElement?.id === 'source-text');
+  assert.equal(await page.evaluate(() => window.__qa.translationRequests.length), firstFrame.requests);
+  const pendingFirstFrame = await page.evaluate(() => {
+    const q = window.__qa;
+    const baseline = { waits: q.popupAckWaits, requests: q.translationRequests.length, begins: q.beginAttempts.length };
+    q.holdPopupAck = true; q.holdTranslation = true;
+    const task = q.nativeHide();
+    q.emit('source-text', { text: 'A short capture', mode: 'translate', presentationEpoch: task.epoch });
+    return baseline;
+  });
+  await page.waitForFunction(count => window.__qa.popupAckWaits > count, pendingFirstFrame.waits);
+  assert.equal(await idlePane.isVisible(), true);
+  assert.equal(await idlePane.getByRole('status').textContent(), '翻译中…');
+  assert.equal(await idlePane.evaluate(element => element.getBoundingClientRect().height), initialPane.height);
+  assert.equal(await page.locator('#popup-services').isHidden(), true);
+  assert.deepEqual(await page.evaluate(() => [window.__qa.translationRequests.length, window.__qa.beginAttempts.length]),
+    [pendingFirstFrame.requests, pendingFirstFrame.begins]);
+  await page.evaluate(() => { window.__qa.holdPopupAck = false; window.__qa.releasePopupAck(); });
+  await page.waitForFunction(count => window.__qa.translationRequests.length > count, pendingFirstFrame.requests);
+  assert.equal(await idlePane.getByRole('status').textContent(), '翻译中…');
+  await page.evaluate(() => { window.__qa.holdTranslation = false; window.__qa.releaseTranslation(); });
+  await page.getByText('Isolated test translation fixture', { exact: true }).waitFor();
+  assert.equal(await idlePane.isHidden(), true);
+  assert.equal(await page.locator('#results .result-card').count(), 1);
+  console.log('PASS: first popup fit includes the same bordered pane for quiet empty input and pending capture before show acknowledgement.');
+
   // Fitting content is asynchronous. An older capture must not show its popup
   // after the user has already hidden it and reopened a newer input window.
   await page.evaluate(() => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve))));
@@ -2575,6 +2624,8 @@ try {
   assert.equal(await page.evaluate(() => window.__qa.showCalls.length), beforeDelayedPopup.shows);
   assert.equal(await page.evaluate(() => window.__qa.translationRequests.length), beforeDelayedPopup.requests);
   assert.equal(await page.locator('#source-text').inputValue(), 'QA newer input survives delayed popup');
+  assert.equal(await idlePane.textContent(), '译文会显示在这里');
+  assert.equal(await idlePane.getByRole('status').count(), 0);
   // Auto direction is a first-class target; fixed targets remain selectable.
   await page.locator('#target-language').selectOption('auto');
   await page.waitForFunction(() => window.__qa.settings.targetLanguage === 'auto');
@@ -4289,7 +4340,8 @@ try {
         }, { retained });
         await page.waitForFunction(() => document.querySelector('#source-text').value === '' && window.__qa.sourceAcks.includes(901));
         assert.equal(await page.locator('.result-card').count(), 0);
-        assert.equal(await page.locator('.results-column').isHidden(), true);
+        assert.equal(await page.locator('#result-placeholder').isVisible(), true);
+        assert.equal(await page.locator('#result-placeholder').textContent(), '译文会显示在这里');
         assert.equal(await page.locator('#toast').isHidden(), true);
         assert.equal(await page.locator('#translation-state').textContent(), '');
         assert.equal(await page.locator('#pin-button').getAttribute('aria-pressed'), String(retained));

@@ -110,6 +110,9 @@ let progressEpoch: number | null = null;
 let resultSource = '';
 let resultSnapshot: TranslationSnapshot | null = null;
 let pendingTranslate = false;
+// Intent prepared before show_popup acknowledges. Unlike `translating`, this
+// owns no request ticket; explicit local close may still cancel its reveal.
+let preparedTranslationEpoch: number | null = null;
 let originalCapture: SourceTextEvent | null = null;
 
 interface InputFocusRequest { epoch: number; generation: number; intentRevision: number }
@@ -291,14 +294,16 @@ function setLoading(value: boolean): void {
   notifyLayout();
 }
 function emptyResults(): void {
+  preparedTranslationEpoch = null;
   progressViews.clear(); progressEpoch = null;
   resultsContainer.replaceChildren();
-  $('.results-column').hidden = true;
+  setResultPlaceholder(false);
   $('#popup-services').hidden = false;
   $('#translation-state').textContent = '';
   notifyLayout();
 }
 function invalidateResults(preserveFocusIntent = false): void {
+  pendingTranslate = false;
   cancelActiveTranslation();
   generation += 1;
   if (!preserveFocusIntent) focusIntentRevision += 1;
@@ -314,7 +319,7 @@ function cancelActiveTranslation(): void {
   if (desktop && requestId !== null) void invoke('cancel_translation', { requestId }).catch(reportError);
 }
 function stopPendingTranslation(preserveFocusIntent = false): void {
-  if (!translating) return;
+  if (!translating && !pendingTranslate && (preserveFocusIntent || preparedTranslationEpoch === null)) return;
   invalidateResults(preserveFocusIntent);
   status('翻译已取消');
 }
@@ -337,7 +342,9 @@ function applyTranslationPresentation(presentation: TranslationPresentation, sou
   if (changed) {
     // This cancellation is part of accepting the native presentation itself,
     // not a newer user edit/navigation that invalidates its input-focus intent.
-    stopPendingTranslation(true);
+    if (!presentation.presented && preparedTranslationEpoch !== null && presentation.epoch > preparedTranslationEpoch) {
+      invalidateResults(true);
+    } else stopPendingTranslation(true);
     // Bind only when this epoch is first observed. A delayed duplicate state or
     // complete focus event must not rebind after the user edits or navigates.
     presentationFocusIntent = presentation.presented ? { epoch: presentation.epoch, intentRevision: focusIntentRevision } : null;
@@ -454,6 +461,15 @@ async function receiveCapturedText(payload: SourceTextEvent): Promise<void> {
   if (document.activeElement instanceof HTMLElement && document.activeElement.closest('.app-shell')) document.activeElement.blur();
   if (payload.permissionRequired) showPermissionGuidance(payload.permissionRequired);
   if (payload.mode === 'input') $<HTMLDetailsElement>('#popup-services').open = false;
+  // The popup layout is measured and shown before the translation ticket is
+  // issued. Reserve the final-looking pane in that first measurement.
+  const preparedLoading = payload.mode === 'translate' && source.value.trim()
+    && (!settingsReady || settings.providers.some((provider) => provider.enabled))
+    ? setResultPlaceholder(true) : null;
+  if (preparedLoading) {
+    preparedTranslationEpoch = presentationEpoch;
+    $('#popup-services').hidden = true;
+  }
   if (normalized !== payload.text && payload.mode !== 'input') {
     originalCapture = payload;
     const restore = $('#restore-original-breaks');
@@ -466,15 +482,25 @@ async function receiveCapturedText(payload: SourceTextEvent): Promise<void> {
   endSourceInputSession();
   const inputSession = payload.focusInput ? beginSourceInputSession() : 0;
   recordPopupStage(presentationEpoch, 'domPrepared');
+  const clearUnstartedLoading = () => {
+    if (preparedLoading !== null && $('#result-placeholder').firstChild === preparedLoading) {
+      preparedTranslationEpoch = null;
+      setResultPlaceholder(false);
+      $('#popup-services').hidden = false;
+      notifyLayout();
+    }
+  };
   try {
     const presentation = await panelLayout.presentPopup(presentationEpoch, Boolean(payload.focusInput), Boolean(payload.reuseVisiblePopup ?? payload.updateVisiblePopup));
     if (presentation) { applyTranslationPresentation(presentation); presentedEpoch = presentation.epoch; recordPopupStage(presentedEpoch, 'presentationComplete'); }
     else if (desktop) {
+      clearUnstartedLoading();
       if (payload.mode === 'translate') recordInputDiagnostic('automaticDispatchSkipped', undefined, { epoch: presentationEpoch, generation: token }, 'presentationUnavailable');
       if (inputSession) endSourceInputSession(inputSession);
       return;
     }
   } catch (error) {
+    clearUnstartedLoading();
     if (inputSession) endSourceInputSession(inputSession);
     if (payload.mode === 'translate') recordInputDiagnostic('automaticDispatchSkipped', undefined, { epoch: presentationEpoch, generation: token }, errorMessage(error).startsWith('CANCELLED:') ? 'presentationCancelled' : 'presentationFailed');
     if (errorMessage(error).startsWith('CANCELLED:')) return;
@@ -489,13 +515,19 @@ async function receiveCapturedText(payload: SourceTextEvent): Promise<void> {
     if (payload.mode === 'translate') recordInputDiagnostic('automaticDispatchSkipped', undefined, { epoch: presentationEpoch, generation: token },
       token !== generation ? 'generationChanged' : intent !== focusIntentRevision ? 'intentChanged' : currentView !== 'translate' ? 'viewChanged' : allModals.some(modalActive) ? 'modalActive' : 'presentationChanged');
     if (inputSession) endSourceInputSession(inputSession);
+    clearUnstartedLoading();
     return;
   }
   // Source-bound failure guidance must follow successful presentation and the
   // same generation/intent guard above, never a separate racing toast event.
   if (payload.actionError) handleActionError(payload.actionError);
-  if (payload.mode === 'translate') { if (settingsReady) run(translate); else pendingTranslate = true; }
-  else if (payload.mode === 'ocr') {
+  if (payload.mode === 'translate' && source.value.trim()) {
+    preparedTranslationEpoch = null;
+    if (settingsReady) {
+      run(translate);
+      if (!translating) clearUnstartedLoading();
+    } else pendingTranslate = true;
+  } else if (payload.mode === 'ocr') {
     status('文字识别完成');
     if (!normalized.trim() || normalized.includes('没有识别')) {
       maybeSoftEngineHint('没有识别到文字');
@@ -612,7 +644,6 @@ async function openSettingsFromNative(payload: NativeSettingsRequest): Promise<v
   }
   if (payload.presentationEpoch < translationPresentation.epoch || payload.presentationEpoch <= latestSettingsOpenEpoch) return;
   latestSettingsOpenEpoch = payload.presentationEpoch;
-  pendingTranslate = false;
   clearToast(); clearPermissionGuidance(); stopPendingTranslation();
   setView('settings');
   if (payload.section === 'shortcuts') selectSettingsCategory('shortcuts');
@@ -695,6 +726,13 @@ function translationLoadingStatus(): HTMLElement {
   indicator.append(spinner, node('span', '', '翻译中…'));
   return indicator;
 }
+// Keep the pane in the DOM at startup and throughout the request. CSS hides
+// this card once actual provider result/error cards occupy the same slot.
+function setResultPlaceholder(pending: boolean): HTMLElement {
+  const content = pending ? translationLoadingStatus() : node('span', '', '译文会显示在这里');
+  $('#result-placeholder').replaceChildren(content);
+  return content;
+}
 function needsSystemTranslationSetup(view: ResultView): boolean {
   return macDesktop && view.providerKind === 'system'
     && view.result.error?.startsWith('SYSTEM_TRANSLATION_DOWNLOAD_REQUIRED:') === true;
@@ -771,7 +809,7 @@ function renderResults(results: TranslationResult[]): void {
   const existing = new Map(progressViews);
   progressViews.clear(); progressEpoch = null;
   if (results.length === 0) { emptyResults(); return; }
-  $('.results-column').hidden = false;
+  setResultPlaceholder(false);
   $('#popup-services').hidden = true;
   const cards = results.map((result) => {
     const view = existing.get(result.providerId) ?? createResultView(result, true);
@@ -816,6 +854,7 @@ async function translate(providerId?: string): Promise<void> {
   const providers = settings.providers.filter((provider) => provider.enabled && (!retrying || provider.id === providerId));
   if (retrying && providers.length === 0) { toast('翻译服务已停用或删除，请检查设置。'); return; }
   if (!settings.providers.some((provider) => provider.enabled)) { setView('settings'); selectSettingsCategory('translation'); toast('请先添加并启用一个翻译服务。'); return; }
+  preparedTranslationEpoch = null;
   focusIntentRevision += 1;
   const token = ++generation;
   const presentationEpoch = translationPresentation.epoch;
@@ -823,11 +862,9 @@ async function translate(providerId?: string): Promise<void> {
   if (!retrying) { currentResults = []; resultSource = ''; resultSnapshot = null; progressViews.clear(); }
   progressEpoch = presentationEpoch;
   setLoading(true);
-  if (!retrying) resultsContainer.replaceChildren();
-  $('.results-column').hidden = false;
   if (!retrying) {
-    const loading = node('div', 'result-loading'); loading.append(translationLoadingStatus());
-    resultsContainer.append(loading);
+    resultsContainer.replaceChildren();
+    setResultPlaceholder(true);
   }
   for (const view of progressViews.values()) view.actions[2].disabled = true;
   notifyLayout();
@@ -871,7 +908,7 @@ async function translate(providerId?: string): Promise<void> {
     resultsContainer.replaceChildren();
     const card = node('article', 'result-card');
     card.append(node('p', 'result-error', userFacingError(error)));
-    resultsContainer.append(card); $('.results-column').hidden = false; notifyLayout();
+    resultsContainer.append(card); setResultPlaceholder(false); notifyLayout();
     $('#translation-state').textContent = '翻译失败';
     status('翻译失败');
     maybeSoftEngineHint('翻译失败');
@@ -1964,16 +2001,21 @@ async function initialize(): Promise<void> {
     settingsReady = true;
     applyTheme(); renderLanguages(); renderSettings(); renderShortcutHints();
     if (settings.sourceLanguage !== 'auto' || settings.targetLanguage !== 'auto') persistAutomaticLanguages();
-    if (!translating) emptyResults();
+    if (!translating && !pendingTranslate && preparedTranslationEpoch === null) emptyResults();
     status('准备就绪');
     if (pendingSettingsOpen) { const request = pendingSettingsOpen; pendingSettingsOpen = null; await openSettingsFromNative(request); }
     const pendingSource = await invoke<SourceTextEvent | null>('get_pending_source');
     if (pendingSource) await receiveNativeSource(pendingSource, true);
     await flushSourceDeliveries();
-    if (pendingTranslate) run(translate);
+    if (pendingTranslate) {
+      pendingTranslate = false;
+      run(translate);
+      if (!translating) { emptyResults(); }
+    }
     const diagnostic = await invoke<{ warnings?: unknown }>('diagnostics', document.documentElement.dataset.platform === 'windows' ? { includeNative: false } : {}).catch(() => null);
     if (Array.isArray(diagnostic?.warnings) && diagnostic.warnings.length > 0) toast(diagnostic.warnings.filter((warning): warning is string => typeof warning === 'string').join('\n'), 'error', 10_000);
   } catch (error) {
+    if (pendingTranslate || preparedTranslationEpoch !== null) invalidateResults(true);
     status('启动检查失败'); reportError(error);
     showDiagnostics(`启动检查失败：${errorMessage(error)}`);
   } finally { resizeSourceEditor(); }
