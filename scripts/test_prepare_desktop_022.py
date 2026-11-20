@@ -111,9 +111,12 @@ class VersionCLIContracts(unittest.TestCase):
                  ['--platform','Windows','--application','unbuilt','--checks-json','missing',
                   '--output',str(output)],
                  'A canonical candidate build run URL is required'),
-                ('tests/macos-installed-runtime-smoke.py',
-                 ['--built-application','unbuilt','--output',str(output)],None),
             ]
+            # This macOS-only probe imports the POSIX pwd module. Both shared
+            # package tools still run on Windows; macOS CI runs this extra case.
+            if sys.platform != 'win32':
+                cases.append(('tests/macos-installed-runtime-smoke.py',
+                              ['--built-application','unbuilt','--output',str(output)],None))
             for path, arguments, detail in cases:
                 for version in ('0.2.21','0.2.22','0.2.999'):
                     with self.subTest(path=path, version=version):
