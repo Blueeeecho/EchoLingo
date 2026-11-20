@@ -666,24 +666,34 @@ function updateResultView(view: ResultView, result: TranslationResult, done: boo
   for (const button of view.actions.slice(0, 2)) button.title = button.getAttribute('aria-label')!;
   view.actions[0].parentElement?.setAttribute('aria-label', `${result.providerName}${result.preserved ? '原文' : '译文'}操作`);
   view.card.setAttribute('aria-busy', String(!done));
-  view.body.className = result.error ? 'result-error' : !done && !result.text ? 'result-loading' : 'result-text';
+  const waiting = !done && !result.error && !result.text.trim();
+  view.body.className = result.error ? 'result-error' : waiting ? 'result-loading' : 'result-text';
   const setupPair = needsSystemTranslationSetup(view) ? systemTranslationSetupPair(result.resolvedLanguages) : null;
   // A session resource failure is not evidence that language detection failed.
   // Preserve the resolved pair without blaming detection or installation.
   const content = result.error ? userFacingError(result.error) + (setupPair
-    ? ` 本次语言组合：${languageName(setupPair.sourceLanguage)} → ${languageName(setupPair.targetLanguage)}。` : '') : result.text;
+    ? ` 本次语言组合：${languageName(setupPair.sourceLanguage)} → ${languageName(setupPair.targetLanguage)}。` : '') : waiting ? '' : result.text;
   const previous = view.body.textContent ?? '';
   if (content !== previous || view.body.firstChild?.nodeType !== Node.TEXT_NODE) {
     if (view.body.childNodes.length === 1 && view.body.firstChild instanceof Text && content.startsWith(previous)) {
       view.body.firstChild.appendData(content.slice(previous.length));
     } else view.body.textContent = content;
   }
-  if (!done && !result.text) view.body.append(node('span', 'spinner'), node('span', 'sr-only', '正在翻译'));
+  if (waiting) view.body.append(translationLoadingStatus());
   for (const button of view.actions.slice(0, 2)) button.disabled = !!result.error || !result.text.trim();
   view.actions[2].disabled = translating;
   const setup = view.actions[3];
   setup.hidden = !done || !result.error;
   setup.textContent = needsSystemTranslationSetup(view) ? '准备系统翻译' : '打开翻译设置';
+}
+function translationLoadingStatus(): HTMLElement {
+  const indicator = node('span', 'translation-loading-status');
+  indicator.setAttribute('role', 'status');
+  indicator.setAttribute('aria-live', 'polite');
+  const spinner = node('span', 'spinner');
+  spinner.setAttribute('aria-hidden', 'true');
+  indicator.append(spinner, node('span', '', '翻译中…'));
+  return indicator;
 }
 function needsSystemTranslationSetup(view: ResultView): boolean {
   return macDesktop && view.providerKind === 'system'
@@ -816,7 +826,7 @@ async function translate(providerId?: string): Promise<void> {
   if (!retrying) resultsContainer.replaceChildren();
   $('.results-column').hidden = false;
   if (!retrying) {
-    const loading = node('div', 'result-loading'); loading.append(node('span', 'spinner'), node('span', 'sr-only', '正在翻译'));
+    const loading = node('div', 'result-loading'); loading.append(translationLoadingStatus());
     resultsContainer.append(loading);
   }
   for (const view of progressViews.values()) view.actions[2].disabled = true;

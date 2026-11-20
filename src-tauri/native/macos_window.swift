@@ -80,16 +80,6 @@ public func echoLingoEnsurePopupBehavior(_ pointer: UnsafeMutableRawPointer?) ->
     return window.level.rawValue > NSWindow.Level.normal.rawValue && window.collectionBehavior == behavior ? 0 : -3
 }
 
-// Cocoa screen and window frames are both in points with a bottom-left origin.
-// Keep the original top-left-local press anchor, never an unrelated currentEvent
-// or a global coordinate mistaken for an NSWindow-local mouse event.
-func popupDragOrigin(frame: NSRect, pointer: NSPoint, anchor: NSPoint, area: NSRect) -> NSPoint {
-    let x = pointer.x - anchor.x
-    let y = pointer.y - (frame.height - anchor.y)
-    return NSPoint(x: min(max(x, area.minX), max(area.minX, area.maxX - frame.width)),
-                   y: min(max(y, area.minY), max(area.minY, area.maxY - frame.height)))
-}
-
 // Event counters identify one physical press. A release followed by a new
 // press must not make an old queued drag valid again merely because left is down.
 func popupDragPressIdentity() -> UInt64 {
@@ -103,29 +93,6 @@ func popupDragPressMatches(_ expected: UInt64, _ current: UInt64, _ leftDown: Bo
 @_cdecl("echolingo_popup_drag_press_identity")
 public func echoLingoPopupDragPressIdentity() -> UInt64 { popupDragPressIdentity() }
 
-// checkOnly starts a gesture without moving anything. Every actual move checks
-// the physical button again, so an IPC arriving after release cannot move UI.
-@_cdecl("echolingo_popup_drag")
-public func echoLingoPopupDrag(_ pointer: UnsafeMutableRawPointer?, _ anchorX: Double,
-                               _ anchorY: Double, _ pressIdentity: UInt64, _ checkOnly: Int32) -> Int32 {
-    guard Thread.isMainThread else { return -1 }
-    guard let pointer,
-          let window = Unmanaged<AnyObject>.fromOpaque(pointer).takeUnretainedValue() as? NSWindow else { return -2 }
-    guard window.isVisible, !window.isMiniaturized, popupDragFrameAllowed(window),
-          popupDragPressMatches(pressIdentity, popupDragPressIdentity(), NSEvent.pressedMouseButtons & 1 != 0) else { return -3 }
-    let frame = window.frame
-    guard anchorX.isFinite, anchorY.isFinite, anchorX >= 0, anchorX <= frame.width,
-          anchorY >= 0, anchorY <= min(48, frame.height) else { return -4 }
-    guard checkOnly == 0 else { return 0 }
-    let mouse = NSEvent.mouseLocation
-    guard let screen = NSScreen.screens.first(where: { $0.frame.contains(mouse) }) ?? window.screen else { return -5 }
-    let next = popupDragOrigin(frame: frame, pointer: mouse,
-                               anchor: NSPoint(x: anchorX, y: anchorY), area: screen.visibleFrame)
-    guard popupDragPressMatches(pressIdentity, popupDragPressIdentity(), NSEvent.pressedMouseButtons & 1 != 0) else { return -3 }
-    if next != frame.origin { window.setFrameOrigin(next) }
-    return 0
-}
-
 // Header-only ownership is established from the original local AppKit event,
 // before WebKit can delay or suppress a DOM event. No global monitor/tap/posting.
 enum HeaderDragStop: Int32 { case released = 1, replaced, presentation, hidden, disabled, closed, escape, invalidFrame, invalidOwner }
@@ -133,12 +100,8 @@ struct HeaderDragMachine {
     var id: UInt64 = 0
     var epoch: UInt64 = 0
     var press: UInt64 = 0
-    var anchor = NSPoint.zero
-    var origin = NSPoint.zero
-    var crossed = false
-    mutating func arm(id: UInt64, epoch: UInt64, press: UInt64, anchor: NSPoint, pointer: NSPoint) {
+    mutating func arm(id: UInt64, epoch: UInt64, press: UInt64) {
         self.id = id; self.epoch = epoch; self.press = press
-        self.anchor = anchor; origin = pointer; crossed = false
     }
     func stopReason(leftDown: Bool, press: UInt64, ownerStatus: UInt64, visible: Bool) -> HeaderDragStop? {
         if !leftDown { return .released }
@@ -152,26 +115,23 @@ struct HeaderDragMachine {
         default: return .invalidOwner
         }
     }
-    mutating func position(pointer: NSPoint, frame: NSRect, area: NSRect) -> NSPoint? {
-        guard id != 0 else { return nil }
-        if !crossed {
-            guard hypot(pointer.x - origin.x, pointer.y - origin.y) >= 4 else { return nil }
-            crossed = true
-        }
-        return popupDragOrigin(frame: frame, pointer: pointer, anchor: anchor, area: area)
-    }
 }
 public typealias HeaderDragCallback = @convention(c) (UnsafeMutableRawPointer?, Int32, UInt64, UInt64, UInt64, Double, Double, Int32) -> UInt64
 private var headerDragObserverKey: UInt8 = 0
-struct HeaderDragInput { var pointer: NSPoint; var press: UInt64; var leftDown: Bool; var lastReleaseTime: TimeInterval = -.infinity }
+struct HeaderDragInput { var press: UInt64; var leftDown: Bool; var lastReleaseTime: TimeInterval = -.infinity }
 final class PopupHeaderDragObserver {
-    var input: () -> HeaderDragInput = { HeaderDragInput(pointer: NSEvent.mouseLocation, press: popupDragPressIdentity(), leftDown: NSEvent.pressedMouseButtons & 1 != 0, lastReleaseTime: ProcessInfo.processInfo.systemUptime - CGEventSource.secondsSinceLastEventType(.combinedSessionState, eventType: .leftMouseUp)) }
+    var input: () -> HeaderDragInput = { HeaderDragInput(press: popupDragPressIdentity(), leftDown: NSEvent.pressedMouseButtons & 1 != 0, lastReleaseTime: ProcessInfo.processInfo.systemUptime - CGEventSource.secondsSinceLastEventType(.combinedSessionState, eventType: .leftMouseUp)) }
+    // Called synchronously with the original AppKit event. The Window Server
+    // owns all subsequent pointer tracking and geometry.
+    var systemDrag: (NSWindow, NSEvent) -> Void = { $0.performDrag(with: $1) }
     weak var window: NSWindow?
     let callback: HeaderDragCallback
     let release: @convention(c) (UnsafeMutableRawPointer?) -> Void
     let context: UnsafeMutableRawPointer?
     var monitor: Any?
     var closeObserver: NSObjectProtocol?
+    var moveObserver: NSObjectProtocol?
+    var restoredMovability = false
     var timer: Timer?
     var region = NSRect.zero
     var viewport = NSSize.zero
@@ -181,23 +141,30 @@ final class PopupHeaderDragObserver {
     init(window: NSWindow, callback: @escaping HeaderDragCallback,
          release: @escaping @convention(c) (UnsafeMutableRawPointer?) -> Void, context: UnsafeMutableRawPointer?) {
         self.window = window; self.callback = callback; self.release = release; self.context = context
-        monitor = NSEvent.addLocalMonitorForEvents(matching: [.leftMouseDown, .leftMouseDragged, .leftMouseUp, .rightMouseDown, .otherMouseDown, .keyDown]) { [weak self] event in
+        monitor = NSEvent.addLocalMonitorForEvents(matching: [.leftMouseDown, .leftMouseUp]) { [weak self] event in
             guard let self else { return event }
             return self.event(event)
         }
         closeObserver = NotificationCenter.default.addObserver(forName: NSWindow.willCloseNotification, object: window, queue: .main) { [weak self] _ in self?.finish(.closed) }
+        moveObserver = NotificationCenter.default.addObserver(forName: NSWindow.didMoveNotification, object: window, queue: .main) { [weak self] _ in
+            guard let self, self.machine.id != 0 else { return }
+            self.trace(25)
+        }
     }
     deinit {
         finish(.closed)
         timer?.invalidate()
         if let monitor { NSEvent.removeMonitor(monitor) }
         if let closeObserver { NotificationCenter.default.removeObserver(closeObserver) }
+        if let moveObserver { NotificationCenter.default.removeObserver(moveObserver) }
         release(context)
     }
     func configure(revision: UInt64, epoch: UInt64, region: NSRect, viewport: NSSize) {
         guard revision > self.revision else { return }
         self.revision = revision
-        if machine.id != 0 && (epoch != self.epoch || region.isEmpty) { finish(region.isEmpty ? .disabled : .presentation) }
+        // A same-presentation region can briefly disappear while WebView
+        // redraws. It gates new mouse-downs only, not Window Server tracking.
+        if machine.id != 0 && epoch != self.epoch { finish(.presentation) }
         self.epoch = epoch; self.region = region; self.viewport = viewport
     }
     func adoptPresentation(previous: UInt64, next: UInt64) {
@@ -209,59 +176,61 @@ final class PopupHeaderDragObserver {
         guard machine.id != 0 else { return }
         let ended = machine; machine = HeaderDragMachine()
         timer?.invalidate(); timer = nil
+        if restoredMovability, let window, popupDragFrameAllowed(window) { window.isMovable = false }
+        restoredMovability = false
         _ = callback(context, 2, ended.epoch, ended.id, 0, 0, 0, reason.rawValue)
     }
     func trace(_ stage: Int32) { _ = callback(context, 3, epoch, machine.id, 0, 0, 0, stage) }
     func event(_ event: NSEvent) -> NSEvent? {
-        if event.type == .keyDown && event.keyCode == 53 { finish(.escape); return event }
-        if event.type == .rightMouseDown || event.type == .otherMouseDown { finish(.replaced); return event }
         if event.type == .leftMouseUp {
             let owned = machine.id != 0 && event.window === window
-            sample() // A queued old up cannot end a newer physical press.
+            checkRelease() // AppKit may swallow the up; the timer is the fallback.
             return owned ? nil : event
         }
-        if event.type == .leftMouseDragged { return machine.id != 0 && event.window === window ? nil : event }
-        guard event.type == .leftMouseDown else { return event }
-        finish(.replaced)
-        guard let window, event.window === window else { return event }
+        guard event.type == .leftMouseDown, let window, event.window === window else { return event }
         trace(20)
+        // Reject stale downs before retiring a current owner's fit protection.
+        let physical = input()
+        guard physical.leftDown, event.timestamp > physical.lastReleaseTime else { trace(24); return event }
+        if machine.id != 0 {
+            guard machine.press != physical.press else { return event }
+            finish(.replaced)
+        }
         guard window.isVisible, !window.isMiniaturized, !window.inLiveResize,
               popupDragFrameAllowed(window), !region.isEmpty, let content = window.contentView else { trace(22); return event }
         guard abs(content.bounds.width - viewport.width) <= 1,
               content.bounds.height >= region.maxY else { trace(23); return event }
         let anchor = NSPoint(x: event.locationInWindow.x, y: content.bounds.height - event.locationInWindow.y)
-        let physical = input()
-        // Reject a queued down if any physical release occurred after that event.
-        // A later press must not lend its identity to the original queued down.
         guard region.contains(anchor) else { trace(21); return event }
-        guard physical.leftDown, event.timestamp > physical.lastReleaseTime else { trace(24); return event }
         let press = physical.press
         let id = callback(context, 0, epoch, 0, press, anchor.x, anchor.y, 0)
         guard id != 0 else { return event }
-        // Measure the threshold from the original down, including movement that
-        // already happened before this local event reached the main thread.
-        machine.arm(id: id, epoch: epoch, press: press, anchor: anchor, pointer: window.convertPoint(toScreen: event.locationInWindow))
-        let timer = Timer(timeInterval: 1.0 / 120.0, repeats: true) { [weak self] _ in self?.sample() }
+        machine.arm(id: id, epoch: epoch, press: press)
+        let confirmed = input()
+        if !confirmed.leftDown || confirmed.press != press {
+            finish(confirmed.leftDown ? .replaced : .released)
+            return event
+        }
+        // Keep the popup nonmovable outside this one trusted header gesture, so
+        // body selection and controls do not accidentally start a system drag.
+        restoredMovability = !window.isMovable
+        if restoredMovability { window.isMovable = true }
+        // performDrag returns immediately and does not guarantee mouseUp. Keep
+        // the fit token until release; this timer never reads position or moves.
+        let timer = Timer(timeInterval: 1.0 / 30.0, repeats: true) { [weak self] _ in self?.checkRelease() }
         self.timer = timer
         RunLoop.main.add(timer, forMode: .common)
-        return nil // Only the configured blank header consumes the original down.
+        trace(26)
+        systemDrag(window, event)
+        return nil
     }
-    func sample() {
+    func checkRelease() {
         guard machine.id != 0 else { return }
         guard let window else { finish(.closed); return }
-        let ownerStatus = callback(context, 1, machine.epoch, machine.id, 0, 0, 0, 0)
         let physical = input()
+        let ownerStatus = callback(context, 1, machine.epoch, machine.id, 0, 0, 0, 0)
         if let reason = machine.stopReason(leftDown: physical.leftDown,
-                press: physical.press, ownerStatus: ownerStatus, visible: window.isVisible && !window.isMiniaturized) { finish(reason); return }
-        guard popupDragFrameAllowed(window), !window.inLiveResize else { finish(.invalidFrame); return }
-        let pointer = physical.pointer
-        guard let screen = NSScreen.screens.first(where: { $0.frame.contains(pointer) }) ?? window.screen else { finish(.invalidFrame); return }
-        guard let next = machine.position(pointer: pointer, frame: window.frame, area: screen.visibleFrame) else { return }
-        // Recheck directly before mutating, including release+new press between samples.
-        let latest = input()
-        if let reason = machine.stopReason(leftDown: latest.leftDown, press: latest.press,
-              ownerStatus: callback(context, 1, machine.epoch, machine.id, 0, 0, 0, 0), visible: window.isVisible && !window.isMiniaturized) { finish(reason); return }
-        if next != window.frame.origin { window.setFrameOrigin(next); trace(25) }
+                press: physical.press, ownerStatus: ownerStatus, visible: window.isVisible && !window.isMiniaturized) { finish(reason) }
     }
 }
 @_cdecl("echolingo_configure_header_drag")
@@ -328,23 +297,6 @@ struct PopupBehaviorFixture {
                 echoLingoApplicationPolicyMetadata($0.baseAddress, 7) == -3
             }
         let unrelated: NSWindow.CollectionBehavior = [.stationary, .ignoresCycle, .fullScreenDisallowsTiling]
-        // These are Cocoa points, not physical pixels or a synthetic event's
-        // local coordinates. Retina scale does not enter this transformation.
-        let dragFrame = NSRect(x: -1200, y: 200, width: 680, height: 300)
-        let dragArea = NSRect(x: -1920, y: -200, width: 1920, height: 1080)
-        let anchor = NSPoint(x: 140, y: 18)
-        let dragGeometryPassed = popupDragOrigin(frame: dragFrame,
-            pointer: NSPoint(x: -1060, y: 482), anchor: anchor, area: dragArea) == dragFrame.origin
-            && popupDragOrigin(frame: dragFrame, pointer: NSPoint(x: -1000, y: 512),
-                anchor: anchor, area: dragArea) == NSPoint(x: -1140, y: 230)
-            && popupDragOrigin(frame: dragFrame, pointer: NSPoint(x: -2500, y: -400),
-                anchor: anchor, area: dragArea) == NSPoint(x: -1920, y: -200)
-            && popupDragOrigin(frame: dragFrame, pointer: NSPoint(x: 100, y: 1000),
-                anchor: anchor, area: dragArea) == NSPoint(x: -680, y: 580)
-            && popupDragOrigin(frame: dragFrame, pointer: NSPoint(x: 2400, y: 900),
-                anchor: anchor, area: NSRect(x: 1920, y: 0, width: 2560, height: 1440)) == NSPoint(x: 2260, y: 618)
-            && echoLingoPopupDrag(pointer, 100, 18, 0, 1) == -3 // hidden windows never move
-            && echoLingoPopupDrag(nil, 100, 18, 0, 0) == -2
         let originalPress: UInt64 = (10 << 32) | 9
         let released: UInt64 = (10 << 32) | 10
         let newPress: UInt64 = (11 << 32) | 10
@@ -353,7 +305,7 @@ struct PopupBehaviorFixture {
             && !popupDragPressMatches(originalPress, released, false)
             && !popupDragPressMatches(originalPress, newPress, true)
         var steps = 0
-        var passed = !visible && !key && !main && metadataPassed && dragGeometryPassed && dragPressPassed
+        var passed = !visible && !key && !main && metadataPassed && dragPressPassed
         for style: NSWindow.StyleMask in [[.borderless, .resizable], [.titled, .closable, .resizable], [.borderless, .resizable]] {
             window.styleMask = style
             // A native full-screen cycle can leave normal level behind. Seed
@@ -386,7 +338,6 @@ struct PopupBehaviorFixture {
         passed = passed && finished.wait(timeout: .now() + 2) == .success && rejectedBackgroundCall
         let report: [String: Any] = [
             "popupBehaviorFixturePassed": passed,
-            "popupDragGeometryPassed": dragGeometryPassed,
             "popupDragPressIdentityPassed": dragPressPassed,
             "fixtureSteps": steps,
             "levelAboveNormal": window.level.rawValue > NSWindow.Level.normal.rawValue,
@@ -570,6 +521,14 @@ public func echoLingoConfigureWindowFrame(_ pointer: UnsafeMutableRawPointer?, _
     guard let pointer = pointer,
           let window = Unmanaged<AnyObject>.fromOpaque(pointer).takeUnretainedValue() as? NSWindow else { return -2 }
     guard window.styleMask.contains([.titled, .resizable]) else { return -3 }
+    // Fitting may request the same presentation while Window Server is
+    // tracking the gesture. Do not mutate style or origin before fit_inner
+    // sees the owner and defers content sizing.
+    if popup != 0,
+       let observer = objc_getAssociatedObject(window, &headerDragObserverKey) as? PopupHeaderDragObserver,
+       observer.machine.id != 0 {
+        return 0
+    }
     let topLeft = NSPoint(x: window.frame.minX, y: window.frame.maxY)
     // AppKit may change the frame while adding/removing full-size content.
     // Sizing afterwards preserves only its then-current origin, so anchor the
@@ -599,8 +558,8 @@ public func echoLingoConfigureWindowFrame(_ pointer: UnsafeMutableRawPointer?, _
     for kind: NSWindow.ButtonType in [.closeButton, .miniaturizeButton, .zoomButton] {
         if let button = window.standardWindowButton(kind), button.isHidden != isPopup { button.isHidden = isPopup }
     }
-    // The floating popup uses its explicit toolbar drag controller. Do not let
-    // native transparent-title dragging compete with its original press anchor.
+    // The popup is nonmovable until its measured blank-header down hands
+    // the original event to AppKit. Do not make its background draggable.
     if window.isMovable == isPopup { window.isMovable = !isPopup }
     if (objc_getAssociatedObject(window, &popupNativeFrameKey) as? NSNumber)?.boolValue != isPopup {
         objc_setAssociatedObject(window, &popupNativeFrameKey, NSNumber(value: isPopup), .OBJC_ASSOCIATION_RETAIN_NONATOMIC)

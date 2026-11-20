@@ -11,6 +11,7 @@ pub enum Stage {
     GuardButton,
     HeaderStarted,
     HeaderMoved,
+    NativeHandoff,
     FitDeferred,
     FitApplied,
     FitRepositioned,
@@ -68,7 +69,7 @@ impl Diagnostics {
         }
     }
     pub fn snapshot(&self) -> serde_json::Value {
-        serde_json::json!({"schemaVersion":1,"enabled":self.enabled,"owner":"native-header-single-owner-v3",
+        serde_json::json!({"schemaVersion":1,"enabled":self.enabled,"owner":"appkit-window-server-v1",
             "memoryOnly":true,"containsContent":false,"containsCoordinates":false,
             "events":self.events,"counts":self.counts})
     }
