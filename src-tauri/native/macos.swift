@@ -4218,9 +4218,13 @@ func recognize(_ image: CGImage, job: NativeOCRJob) throws -> String {
     job.observe(.languageQueryStarted)
     let supported: [String] = try {
         defer { job.observe(.languageQueryReturned) }
-        return try request.supportedRecognitionLanguages()
+        if let cached = NativeOCRCapabilities.shared.cached(revision: request.revision) {
+            return cached
+        }
+        let queried = try request.supportedRecognitionLanguages()
+        NativeOCRCapabilities.shared.record(queried, revision: request.revision)
+        return queried
     }()
-    NativeOCRCapabilities.shared.record(supported)
     try job.checkStopped()
     let preferred = ["zh-Hans", "zh-Hant", "en-US", "ja-JP", "ko-KR"]
     request.recognitionLanguages = preferred.filter { supported.contains($0) }

@@ -220,7 +220,6 @@ function setView(view: string, skipSystemStatusRefresh = false): void {
   window.scrollTo({ top: 0, behavior: 'instant' });
   if (view === 'translate') resizeSourceEditor();
   renderCoreGuidance();
-  renderEngineStatus();
   if (view !== 'translate') restoreConfigurationDialogs();
   notifyLayout();
 }
@@ -263,8 +262,10 @@ function applyLanguagePair(pair: LanguagePair): void {
     select.value = value;
   }
 }
+let lastSourceResizeWidth = 0;
 function resizeSourceEditor(): void {
   if (currentView === 'translate') {
+    lastSourceResizeWidth = window.innerWidth;
     source.style.height = '0px';
     // The popup viewport, not the editor, owns overflow. The editor grows
     // only as far as its wrapped content while preserving normal editing.
@@ -280,6 +281,9 @@ let sourceResizeFrame = 0;
 function scheduleSourceEditorResize(): void {
   if (sourceResizeFrame) return;
   sourceResizeFrame = requestAnimationFrame(() => { sourceResizeFrame = 0; resizeSourceEditor(); });
+}
+function handleWindowResize(): void {
+  if (window.innerWidth !== lastSourceResizeWidth) scheduleSourceEditorResize();
 }
 function setLoading(value: boolean): void {
   translating = value;
@@ -303,10 +307,15 @@ function emptyResults(): void {
   notifyLayout();
 }
 function invalidateResults(preserveFocusIntent = false): void {
+  const alreadyIdleEmpty = !translating && !pendingTranslate && activeTranslationId === null
+    && currentResults.length === 0 && !resultSource && resultSnapshot === null
+    && preparedTranslationEpoch === null && progressViews.size === 0
+    && $('#result-placeholder').dataset?.placeholderState === 'idle';
   pendingTranslate = false;
   cancelActiveTranslation();
   generation += 1;
   if (!preserveFocusIntent) focusIntentRevision += 1;
+  if (alreadyIdleEmpty) return;
   setLoading(false);
   currentResults = [];
   resultSource = '';
@@ -381,7 +390,8 @@ function sourceEdited(): void {
   enforceSourceLimit();
   clearPermissionGuidance();
   clearOriginalCapture();
-  resizeSourceEditor();
+  if (sourceComposing) scheduleSourceEditorResize();
+  else resizeSourceEditor();
   invalidateResults();
 }
 function clearOriginalCapture(): void {
@@ -729,8 +739,14 @@ function translationLoadingStatus(): HTMLElement {
 // Keep the pane in the DOM at startup and throughout the request. CSS hides
 // this card once actual provider result/error cards occupy the same slot.
 function setResultPlaceholder(pending: boolean): HTMLElement {
+  const placeholder = $('#result-placeholder');
+  const expected = pending ? 'pending' : 'idle';
+  if (placeholder.dataset?.placeholderState === expected && placeholder.firstElementChild) {
+    return placeholder.firstElementChild as HTMLElement;
+  }
+  if (placeholder.dataset) placeholder.dataset.placeholderState = expected;
   const content = pending ? translationLoadingStatus() : node('span', '', '译文会显示在这里');
-  $('#result-placeholder').replaceChildren(content);
+  placeholder.replaceChildren(content);
   return content;
 }
 function needsSystemTranslationSetup(view: ResultView): boolean {
@@ -802,7 +818,9 @@ function receiveTranslationProgress(payload: TranslationProgress): void {
   // Provider identity comes from the request snapshot, not a changing event label.
   updateResultView(view, { ...payload.result, providerName: view.result.providerName }, payload.done);
   if (!view.card.isConnected) resultsContainer.replaceChildren(...[...progressViews.values()].map((item) => item.card));
-  $('#translation-state').textContent = payload.done ? '正在翻译' : '正在输出';
+  const stateLabel = payload.done ? '正在翻译' : '正在输出';
+  const stateNode = $('#translation-state');
+  if (stateNode.textContent !== stateLabel) stateNode.textContent = stateLabel;
   notifyLayout();
 }
 function renderResults(results: TranslationResult[]): void {
@@ -996,7 +1014,6 @@ function renderShortcutHints(): void {
   for (const button of document.querySelectorAll<HTMLElement>('[data-action="capture"]')) button.title = `截图翻译${settings.shortcuts.capture ? ` · ${settings.shortcuts.capture}` : ''}`;
   for (const button of document.querySelectorAll<HTMLElement>('[data-action="silentOcr"]')) button.title = `无感 OCR${settings.shortcuts.silentOcr ? ` · ${settings.shortcuts.silentOcr}，按住左键拖选，Esc 取消` : ''}`;
   renderCoreGuidance();
-  freeSetup.refresh();
 }
 async function retryInactiveShortcuts(actions: ShortcutAction[]): Promise<void> {
   await updateSettings((next) => next, undefined, actions);
@@ -1022,6 +1039,15 @@ async function updateSettings(mutator: (next: Settings) => void, canCommit?: () 
   saveQueue = operation.catch(() => undefined);
   return operation;
 }
+function reloadSettings(after?: () => void): Promise<void> {
+  const operation = saveQueue.then(async () => {
+    if (!desktop) return;
+    settings = await invoke<Settings>('get_settings');
+    (after ?? renderSettings)();
+  });
+  saveQueue = operation.catch(() => undefined);
+  return operation;
+}
 async function loadHistory(): Promise<void> {
   await historyCache.load();
 }
@@ -1030,23 +1056,25 @@ async function refreshHistory(): Promise<void> {
   // Fetch and build history cards only when the user is looking at history.
   await historyCache.refresh();
 }
+const historyDateFormatter = new Intl.DateTimeFormat('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' });
 function historyDate(value: number): string {
   const date = new Date(normalizeTimestamp(value));
-  return Number.isNaN(date.getTime()) ? '时间未知' : new Intl.DateTimeFormat('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' }).format(date);
+  return Number.isNaN(date.getTime()) ? '时间未知' : historyDateFormatter.format(date);
 }
 function renderHistory(): void {
   if (currentView !== 'history') return;
   const history = historyCache.entries;
   const query = $<HTMLInputElement>('#history-search').value;
   const filtered = filterHistory(history, query, favoritesOnly);
-  const list = $('#history-list'); list.replaceChildren();
+  const list = $('#history-list');
   $('#history-summary').textContent = `${filtered.length} 条${favoritesOnly ? '收藏' : '翻译'}记录${query.trim() ? `（共 ${history.length} 条）` : ''} · 仅保存在此设备`;
   $<HTMLButtonElement>('#clear-history').disabled = history.length === 0;
   if (filtered.length === 0) {
     const empty = node('div', 'list-empty');
     empty.append(icon(favoritesOnly ? 'star' : 'history'), node('h2', '', query ? '没有找到相关翻译' : favoritesOnly ? '暂无收藏' : '暂无翻译记录'), node('p', '', query ? '试试搜索原文或译文中的其他关键词。' : favoritesOnly ? '点击历史记录旁的星标，即可加入收藏。' : '完成翻译后，最近记录会出现在这里。'));
-    list.append(empty); return;
+    list.replaceChildren(empty); return;
   }
+  const fragment = document.createDocumentFragment();
   for (const entry of filtered) {
     const item = node('article', 'history-item');
     const header = node('div', 'history-item-heading');
@@ -1071,8 +1099,9 @@ function renderHistory(): void {
     reopen.addEventListener('click', () => {
       restoreHistoryResults(entry); setView('translate');
     });
-    item.append(reopen); list.append(item);
+    item.append(reopen); fragment.append(item);
   }
+  list.replaceChildren(fragment);
 }
 function providerKindLabel(kind: ProviderKind): string { return { offline: '本机离线翻译', system: '系统翻译', baidu: '百度翻译', youdao: '有道翻译', microsoft: '微软翻译', openai: 'OpenAI 兼容', deepl: 'DeepL', libretranslate: 'LibreTranslate', volcengine: '火山引擎机器翻译', aliyun: '阿里云机器翻译', niutrans: '小牛翻译', 'google-translate': 'Google Cloud Translation', caiyun: '彩云小译' }[kind]; }
 const translationServiceTests = new Map<string, Promise<void>>();
@@ -1084,7 +1113,7 @@ function testTranslationService(id: string): Promise<void> {
     toast(isLocalProvider(provider.kind) ? '正在使用本机服务翻译 Hello。' : '正在发送 Hello 测试连接，可能消耗少量 API 额度。');
     try { toast(await invoke<string>('test_provider', { providerId: id }) || '服务连接成功。'); }
     finally {
-      try { settings = await invoke<Settings>('get_settings'); renderSettings(); }
+      try { await reloadSettings(); }
       catch (error) { reportError(error); }
     }
   })().finally(() => { translationServiceTests.delete(id); });
@@ -1111,7 +1140,7 @@ function renderProviders(): void {
     enabled.setAttribute('aria-label', `启用 ${provider.name}`);
     enabled.addEventListener('change', () => {
       const value = enabled.checked; enabled.disabled = true;
-      run(async () => { try { await updateSettings((next) => { const found = next.providers.find((item) => item.id === provider.id); if (found) found.enabled = value; }); } finally { renderProviders(); } });
+      run(async () => { try { await updateSettings((next) => { const found = next.providers.find((item) => item.id === provider.id); if (found) found.enabled = value; }); } catch (error) { renderProviders(); throw error; } });
     });
     const testLabel = isLocalProvider(provider.kind) ? '测试翻译' : '测试连接';
     const test = node('button', 'text-button', testLabel);
@@ -1145,7 +1174,7 @@ function renderPopupServices(): void {
     checkbox.addEventListener('change', () => run(async () => {
       const enabled = checkbox.checked; checkbox.disabled = true;
       try { await updateSettings((next) => { const item = next.providers.find((candidate) => candidate.id === provider.id); if (item) item.enabled = enabled; }); }
-      finally { renderPopupServices(); }
+      catch (error) { renderPopupServices(); throw error; }
     }));
     label.append(checkbox, node('span', '', provider.name)); list.append(label);
   }
@@ -1457,7 +1486,7 @@ function closeProviderDialog(): void {
   editingProviderId = null; providerScopeAtOpen = null; providerLastInputScope = null; providerHadKeyAtOpen = false; providerCredentialStateAtOpen = 'missing';
 }
 function confirmAction(title: string, description: string): Promise<boolean> {
-  if (resumeSuspendedDraft()) return Promise.resolve(false);
+  if (resumeSuspendedDraft() || confirmResolve) return Promise.resolve(false);
   $('#confirm-title').textContent = title;
   $('#confirm-description').textContent = description;
   showModal(confirmDialog);
@@ -1505,10 +1534,10 @@ async function saveProvider(event: SubmitEvent): Promise<void> {
     if (key && !isLocalProvider(provider.kind)) {
       try { await invoke('set_api_key', { providerId: provider.id, key }); }
       catch (error) { throw new Error(`服务已保存，但密钥未能存入系统凭据库：${errorMessage(error)}`); }
+      await reloadSettings();
     }
     clearProviderSecrets();
-    settings = await invoke<Settings>('get_settings');
-    renderSettings(); setProviderSaving(false); closeProviderDialog(); toast('翻译服务已保存。');
+    setProviderSaving(false); closeProviderDialog(); toast('翻译服务已保存。');
   } catch (error) { errorOutput.textContent = errorMessage(error); errorOutput.hidden = false; }
   finally { setProviderSaving(false); }
 }
@@ -1597,12 +1626,17 @@ function setPermissionBusy(busy: boolean): void {
   for (const button of $('#mac-permission-card').querySelectorAll<HTMLButtonElement>('button')) button.disabled = busy;
   $<HTMLButtonElement>('#permission-guidance-open').disabled = busy;
 }
+let permissionRefreshQueued = false;
 async function refreshPermissionStatus(): Promise<void> {
-  if (!macDesktop || permissionBusy) return;
+  if (!macDesktop) return;
+  if (permissionBusy) { permissionRefreshQueued = true; return; }
   $('#mac-permission-card').hidden = false; $('#permission-error').hidden = true; setPermissionBusy(true);
   try { renderPermissionStatus(await invoke<PermissionStatus>('permission_status')); }
   catch (error) { $('#permission-error').textContent = errorMessage(error); $('#permission-error').hidden = false; }
-  finally { setPermissionBusy(false); }
+  finally {
+    setPermissionBusy(false);
+    if (permissionRefreshQueued) { permissionRefreshQueued = false; void refreshPermissionStatus(); }
+  }
 }
 interface PresentedActionError { presentationEpoch: number; message: string }
 function receiveActionError(payload: string | PresentedActionError): void {
@@ -1629,7 +1663,7 @@ function handleActionError(message: string): void {
 let freeSetup: { refresh: () => void; noteWeak: (text?: string) => void; close: () => void } = { refresh() {}, noteWeak() {}, close() {} };
 const ocrUi = createOcrUi({
   desktop, settings: () => settings, updateSettings,
-  reloadSettings: async () => { settings = await invoke<Settings>('get_settings'); renderSettings(); },
+  reloadSettings: () => reloadSettings(),
   showModal, closeModal, resumeDraft: resumeSuspendedDraft, confirm: confirmAction, toast, reportError,
 });
 
@@ -1734,7 +1768,7 @@ for (const button of document.querySelectorAll<HTMLButtonElement>('[data-open-pe
 window.addEventListener('focus', () => { if (currentView === 'settings') void refreshPermissionStatus(); });
 translateButton.addEventListener('click', () => { if (translating) stopPendingTranslation(); else run(translate); });
 source.addEventListener('input', sourceEdited);
-window.addEventListener('resize', scheduleSourceEditorResize);
+window.addEventListener('resize', handleWindowResize);
 $('#restore-original-breaks').addEventListener('click', () => {
   const original = originalCapture;
   if (!original) return;
@@ -1834,7 +1868,7 @@ $('#theme-cycle').addEventListener('click', () => run(async () => {
 prefersDark.addEventListener('change', applyTheme);
 $<HTMLSelectElement>('#windows-selection-strategy').addEventListener('change', (event) => {
   const choice = (event.target as HTMLSelectElement).value === 'auto' ? 'auto' : 'copy';
-  run(async () => { try { await updateSettings((next) => { next.windowsSelectionStrategy = choice; }); } finally { renderSettings(); } });
+  run(async () => { try { await updateSettings((next) => { next.windowsSelectionStrategy = choice; }); } catch (error) { renderSettings(); throw error; } });
 });
 $<HTMLSelectElement>('#theme-select').addEventListener('change', (event) => {
   // Earlier queued saves re-render this control before our mutation executes.
@@ -1843,7 +1877,7 @@ $<HTMLSelectElement>('#theme-select').addEventListener('change', (event) => {
 });
 $<HTMLInputElement>('#save-history').addEventListener('change', (event) => {
   const value = (event.target as HTMLInputElement).checked;
-  run(async () => { try { await updateSettings((next) => { next.saveHistory = value; }); toast(value ? '已开启翻译历史。' : '已关闭历史保存；已有记录可在历史页面删除。'); } finally { renderSettings(); } });
+  run(async () => { try { await updateSettings((next) => { next.saveHistory = value; }); toast(value ? '已开启翻译历史。' : '已关闭历史保存；已有记录可在历史页面删除。'); } catch (error) { renderSettings(); throw error; } });
 });
 $<HTMLInputElement>('#max-history').addEventListener('change', (event) => {
   const input = event.target as HTMLInputElement;
@@ -1855,7 +1889,7 @@ $<HTMLInputElement>('#max-history').addEventListener('change', (event) => {
   }
   run(async () => {
     try { await updateSettings((next) => { next.maxHistory = value; }); await refreshHistory(); }
-    finally { renderSettings(); }
+    catch (error) { renderSettings(); throw error; }
   });
 });
 $('#add-provider').addEventListener('click', () => openProviderDialog());
@@ -1881,7 +1915,7 @@ $('#remove-provider-key').addEventListener('click', () => run(async () => {
   const providerId = editingProviderId; setProviderSaving(true);
   try {
     await invoke('delete_api_key', { providerId });
-    settings = await invoke<Settings>('get_settings'); renderProviders();
+    await reloadSettings(renderProviders);
     clearProviderSecrets(); providerHadKeyAtOpen = false; providerCredentialStateAtOpen = 'missing'; updateProviderCredentialState(false);
     toast('已从系统凭据库移除密钥。');
   } finally { setProviderSaving(false); }
@@ -1913,7 +1947,11 @@ $('#copy-diagnostics').addEventListener('click', () => run(async () => {
   if ($<HTMLButtonElement>('#copy-diagnostics').disabled || output.hidden || !output.textContent) return;
   await copyText(output.textContent);
 }));
-$('#history-search').addEventListener('input', renderHistory);
+let historySearchFrame = 0;
+$('#history-search').addEventListener('input', () => {
+  if (historySearchFrame) return;
+  historySearchFrame = requestAnimationFrame(() => { historySearchFrame = 0; renderHistory(); });
+});
 for (const [id, value] of [['#filter-all', false], ['#filter-favorites', true]] as const) $(id).addEventListener('click', () => {
   favoritesOnly = value;
   for (const [selector, selected] of [['#filter-all', !value], ['#filter-favorites', value]] as const) { $(selector).classList.toggle('active', selected); $(selector).setAttribute('aria-pressed', String(selected)); }
@@ -1956,7 +1994,9 @@ document.addEventListener('keydown', (event) => {
     event.preventDefault(); items[next]?.focus({ preventScroll: true }); return;
   }
   if (event.key === 'Enter' && (event.ctrlKey || event.metaKey) && !event.shiftKey && !event.altKey) {
-    event.preventDefault(); if (!event.repeat && !translating && source.value.trim()) { setView('translate'); run(translate); }
+    if (currentView === 'translate') {
+      event.preventDefault(); if (!event.repeat && !translating && source.value.trim()) run(translate);
+    }
   }
   if (event.key === 'Escape') {
     if (desktop) { endSourceInputSession(); event.preventDefault(); stopPendingTranslation(); run(() => invoke('hide_window')); }
@@ -1979,23 +2019,28 @@ async function initialize(): Promise<void> {
   status('正在加载设置…');
   try {
     // Listen before loading settings so an incoming native selection is not lost during startup.
-    cleanupListeners.push(await listen<SourceTextEvent>('source-text', (event) => run(() => receiveNativeSource(event.payload))));
-    cleanupListeners.push(await listen<unknown>('focus-input', (event) => run(() => receiveInputFocus(event.payload))));
-    cleanupListeners.push(await listen<NativeSettingsRequest>('open-settings', (event) => run(() => openSettingsFromNative(event.payload))));
-    cleanupListeners.push(await listen<TranslationPresentation>('translation-presentation', (event) => applyTranslationPresentation(event.payload)));
-    cleanupListeners.push(await listen<TranslationProgress>('translation-progress', (event) => receiveTranslationProgress(event.payload)));
-    cleanupListeners.push(await listen<string | PresentedActionError>('action-error', (event) => receiveActionError(event.payload)));
-    cleanupListeners.push(await listen<string>('shortcut-error', (event) => toast(event.payload, 'error', 8000)));
-    cleanupListeners.push(await listen('shortcut-registration-changed', () => run(async () => {
-      settings = await invoke<Settings>('get_settings');
-      renderSettings();
-      renderShortcutHints();
-      const problems = coreShortcutProblems(settings.shortcuts, settings.shortcutRegistration);
-      if (problems.length === 0) status('快捷键已生效');
-    })));
-    cleanupListeners.push(await listen<NativeRecordedShortcut>('shortcut-recorded', (event) => shortcutEditor.receiveNative(event.payload)));
-    applyTranslationPresentation(await invoke<TranslationPresentation>('get_translation_presentation'), startupSourceIntentRevision);
-    const startupSettings = await invoke<NativeSettingsRequest | null>('get_pending_settings');
+    const listeners = await Promise.all([
+      listen<SourceTextEvent>('source-text', (event) => run(() => receiveNativeSource(event.payload))),
+      listen<unknown>('focus-input', (event) => run(() => receiveInputFocus(event.payload))),
+      listen<NativeSettingsRequest>('open-settings', (event) => run(() => openSettingsFromNative(event.payload))),
+      listen<TranslationPresentation>('translation-presentation', (event) => applyTranslationPresentation(event.payload)),
+      listen<TranslationProgress>('translation-progress', (event) => receiveTranslationProgress(event.payload)),
+      listen<string | PresentedActionError>('action-error', (event) => receiveActionError(event.payload)),
+      listen<string>('shortcut-error', (event) => toast(event.payload, 'error', 8000)),
+      listen('shortcut-registration-changed', () => run(() => reloadSettings(() => {
+        renderSettings();
+        renderShortcutHints();
+        const problems = coreShortcutProblems(settings.shortcuts, settings.shortcutRegistration);
+        if (problems.length === 0) status('快捷键已生效');
+      }))),
+      listen<NativeRecordedShortcut>('shortcut-recorded', (event) => shortcutEditor.receiveNative(event.payload)),
+    ]);
+    cleanupListeners.push(...listeners);
+    const [presentation, startupSettings] = await Promise.all([
+      invoke<TranslationPresentation>('get_translation_presentation'),
+      invoke<NativeSettingsRequest | null>('get_pending_settings'),
+    ]);
+    applyTranslationPresentation(presentation, startupSourceIntentRevision);
     if (startupSettings) pendingSettingsOpen = !pendingSettingsOpen || startupSettings.presentationEpoch > pendingSettingsOpen.presentationEpoch ? startupSettings : pendingSettingsOpen;
     settings = await invoke<Settings>('get_settings');
     settingsReady = true;
@@ -2012,8 +2057,11 @@ async function initialize(): Promise<void> {
       run(translate);
       if (!translating) { emptyResults(); }
     }
-    const diagnostic = await invoke<{ warnings?: unknown }>('diagnostics', document.documentElement.dataset.platform === 'windows' ? { includeNative: false } : {}).catch(() => null);
-    if (Array.isArray(diagnostic?.warnings) && diagnostic.warnings.length > 0) toast(diagnostic.warnings.filter((warning): warning is string => typeof warning === 'string').join('\n'), 'error', 10_000);
+    void invoke<{ warnings?: unknown }>('diagnostics', document.documentElement.dataset.platform === 'windows' ? { includeNative: false } : {})
+      .then((diagnostic) => {
+        if (Array.isArray(diagnostic?.warnings) && diagnostic.warnings.length > 0) toast(diagnostic.warnings.filter((warning): warning is string => typeof warning === 'string').join('\n'), 'error', 10_000);
+      })
+      .catch(() => null);
   } catch (error) {
     if (pendingTranslate || preparedTranslationEpoch !== null) invalidateResults(true);
     status('启动检查失败'); reportError(error);

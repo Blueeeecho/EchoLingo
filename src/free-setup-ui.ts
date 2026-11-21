@@ -108,7 +108,10 @@ export function installFreeSetup(context: SetupContext): { refresh: () => void; 
     });
     return link;
   };
+  let renderedRegion: FreeRegion | null = null;
   const renderCards = (): void => {
+    if (renderedRegion === region) return;
+    renderedRegion = region;
     document.querySelector<HTMLButtonElement>('#free-region-cn')?.setAttribute('aria-pressed', String(region === 'cn'));
     document.querySelector<HTMLButtonElement>('#free-region-overseas')?.setAttribute('aria-pressed', String(region === 'overseas'));
     for (const role of ['translation', 'ocr'] as const) {
@@ -218,7 +221,6 @@ export function installFreeSetup(context: SetupContext): { refresh: () => void; 
     if (!selectedPiece) return;
     renderPiece();
     if (dialog && dialog.hidden) context.showModal(dialog);
-    document.querySelector<HTMLElement>('#free-setup-dialog')?.focus();
   };
   const closeWizard = (): void => {
     invalidate();

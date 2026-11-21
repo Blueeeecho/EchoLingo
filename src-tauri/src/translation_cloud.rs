@@ -59,26 +59,15 @@ fn hmac_hex(key: &[u8], message: &str) -> String {
 }
 
 fn percent_encode(value: &str) -> String {
-    let mut output = String::new();
+    const HEX: &[u8; 16] = b"0123456789ABCDEF";
+    let mut output = String::with_capacity(value.len());
     for byte in value.bytes() {
         if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b'~') {
             output.push(byte as char);
         } else {
             output.push('%');
-            output.push(
-                hex(&[byte])
-                    .chars()
-                    .next()
-                    .unwrap_or('0')
-                    .to_ascii_uppercase(),
-            );
-            output.push(
-                hex(&[byte])
-                    .chars()
-                    .nth(1)
-                    .unwrap_or('0')
-                    .to_ascii_uppercase(),
-            );
+            output.push(HEX[(byte >> 4) as usize] as char);
+            output.push(HEX[(byte & 0x0f) as usize] as char);
         }
     }
     output

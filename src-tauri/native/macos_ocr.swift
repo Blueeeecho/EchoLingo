@@ -357,7 +357,17 @@ final class NativeOCRCapabilities: @unchecked Sendable {
     static let shared = NativeOCRCapabilities()
     private let lock = NSLock()
     private var languages: [String]?
-    func record(_ values: [String]) { lock.lock(); languages = values; lock.unlock() }
+    private var languagesByRevision: [Int: [String]] = [:]
+    func record(_ values: [String], revision: Int? = nil) {
+        lock.lock()
+        languages = values
+        if let revision { languagesByRevision[revision] = values }
+        lock.unlock()
+    }
+    func cached(revision: Int) -> [String]? {
+        lock.lock(); defer { lock.unlock() }
+        return languagesByRevision[revision]
+    }
     func snapshot() -> (languages: [String], observed: Bool) {
         lock.lock(); defer { lock.unlock() }
         return (languages ?? [], languages != nil)

@@ -232,6 +232,7 @@ export function createShortcutEditor(context: Context) {
     if (session.modifierEvidence && !session.modifiers && session.held.size === 0) void finish(false);
   };
   const leave = () => {
+    if (!session && !starting && !ending && !pendingSave) return;
     const automaticSavePending = pendingSave !== null && pendingSave.intent !== null;
     revision++; void finish(true);
     if (automaticSavePending) status('录制已结束。未保存的输入可点击保存。');

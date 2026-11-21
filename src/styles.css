@@ -1,7 +1,7 @@
 :root {
   font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
   color: var(--text); background: var(--bg); font-synthesis: none; font-weight: 400;
-  text-rendering: optimizeLegibility; -webkit-font-smoothing: antialiased;
+  text-rendering: auto; -webkit-font-smoothing: antialiased;
   /* Shared reading density for source, translated text and history; UI help
      and controls retain their independent spacing. */
   --reading-line-height: 1.45;
