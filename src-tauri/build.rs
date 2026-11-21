@@ -146,6 +146,7 @@ fn build_windows_rust_capture() {
     println!("cargo:rerun-if-changed=native-capture");
     for source in [
         "windows_capture_native.rs",
+        "windows_capture_diagnostics.rs",
         "windows_capture_ffi.rs",
         "windows_capture_policy.rs",
         "windows_capture_protocol.rs",
