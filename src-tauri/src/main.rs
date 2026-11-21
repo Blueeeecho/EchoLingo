@@ -2697,6 +2697,14 @@ fn start_action(app: tauri::AppHandle, action: String) {
             } else {
                 None
             };
+            #[cfg(not(target_os = "windows"))]
+            if worker_action != "selection" {
+                // Only yield briefly when hiding our own window before capture so
+                // WindowServer finishes compositing; clipboard/pinned OCR need no delay.
+                if capture && !keep_popup {
+                    std::thread::sleep(Duration::from_millis(30));
+                }
+            }
             if worker_request.cancelled() {
                 return Err(translation_requests::CANCELLED.into());
             }

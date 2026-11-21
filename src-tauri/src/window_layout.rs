@@ -1237,42 +1237,6 @@ fn layout_viewport(
     })
 }
 
-#[cfg(target_os = "macos")]
-#[allow(clippy::too_many_arguments)]
-fn finish_mac_fit(
-    app: &tauri::AppHandle,
-    native: &WebviewWindow,
-    revision: u64,
-    expected: &Result<crate::translation_requests::Presentation, String>,
-    gate_epoch: u64,
-    management: bool,
-    height: f64,
-    content_width: Option<f64>,
-) -> Result<Option<LayoutViewport>, String> {
-    let current = app
-        .state::<crate::AppState>()
-        .translation_requests
-        .presentation();
-    if expected.is_err()
-        || &current != expected
-        || !current_layout_request(
-            revision,
-            app.state::<LayoutState>()
-                .layout_revision
-                .load(Ordering::SeqCst),
-            true,
-            native.is_decorated().ok(),
-        )
-    {
-        return Err(crate::translation_requests::CANCELLED.into());
-    }
-    let state = app.state::<LayoutState>();
-    finish_native_resize_at_idle(native, &state, gate_epoch)?;
-    configure_mac_window_frame(native, management)?;
-    fit_inner(native, &state, management, height, content_width)?;
-    layout_viewport(native, gate_epoch).map(Some)
-}
-
 pub async fn fit(
     window: &WebviewWindow,
     state: &LayoutState,
@@ -1369,7 +1333,7 @@ pub async fn fit(
                         if !decorations_changed {
                             let _ = reply.send(finish_mac_fit(
                                 &app,
-                                &native,
+                                native,
                                 revision,
                                 &expected,
                                 gate_epoch,
@@ -1404,7 +1368,7 @@ pub async fn fit(
                                 }
                                 let _ = reply.send(finish_mac_fit(
                                     &app,
-                                    &native,
+                                    native,
                                     revision,
                                     &expected,
                                     gate_epoch,
@@ -1422,6 +1386,42 @@ pub async fn fit(
     }
     #[cfg(not(any(target_os = "windows", target_os = "macos")))]
     fit_inner(window, state, management, height, content_width).map(|_| None)
+}
+
+#[cfg(target_os = "macos")]
+#[allow(clippy::too_many_arguments)]
+fn finish_mac_fit(
+    app: &tauri::AppHandle,
+    native: WebviewWindow,
+    revision: u64,
+    expected: &Result<crate::translation_requests::Presentation, String>,
+    gate_epoch: u64,
+    management: bool,
+    height: f64,
+    content_width: Option<f64>,
+) -> Result<Option<LayoutViewport>, String> {
+    let current = app
+        .state::<crate::AppState>()
+        .translation_requests
+        .presentation();
+    if expected.is_err()
+        || &current != expected
+        || !current_layout_request(
+            revision,
+            app.state::<LayoutState>()
+                .layout_revision
+                .load(Ordering::SeqCst),
+            true,
+            native.is_decorated().ok(),
+        )
+    {
+        return Err(crate::translation_requests::CANCELLED.into());
+    }
+    let state = app.state::<LayoutState>();
+    finish_native_resize_at_idle(&native, &state, gate_epoch)?;
+    configure_mac_window_frame(&native, management)?;
+    fit_inner(&native, &state, management, height, content_width)?;
+    layout_viewport(&native, gate_epoch).map(Some)
 }
 
 #[cfg(target_os = "macos")]
