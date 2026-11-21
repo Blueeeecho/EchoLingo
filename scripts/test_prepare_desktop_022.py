@@ -99,11 +99,15 @@ class VersionCLIContracts(unittest.TestCase):
                 # Keep the original 0.2.22 assertion exact on its released bytes.
                 released=subprocess.check_output(['git','show','c29c15bbcc60ec1c9f4aa0576c896469f8e3b9e7:'+path],cwd=ROOT)
                 self.assertEqual(released,before.replace(old,b'"0.2.21", "0.2.22"), default=VERSION)',1))
-                # Live source permits only the explicitly reviewed additive 0.2.23 choice.
-                tail=b'"0.2.22"), default=VERSION)'
-                self.assertEqual(released.count(tail),1)
+                # Live source permits only the exact reviewed additions, in order.
+                tail22=b'"0.2.22"), default=VERSION)'
+                self.assertEqual(released.count(tail22),1)
+                with23=released.replace(tail22,b'"0.2.22", "0.2.23"), default=VERSION)',1)
+                tail23=b'"0.2.23"), default=VERSION)'
+                self.assertEqual(with23.count(tail23),1)
+                with24=with23.replace(tail23,b'"0.2.23", "0.2.24"), default=VERSION)',1)
                 current=(ROOT/path).read_bytes().replace(b'\r\n',b'\n')
-                self.assertIn(current,(released,released.replace(tail,b'"0.2.22", "0.2.23"), default=VERSION)',1)))
+                self.assertIn(current,(released,with23,with24))
 
     def test_version_cli_reaches_real_validation_and_rejects_unknown_version(self):
         with tempfile.TemporaryDirectory() as directory:
