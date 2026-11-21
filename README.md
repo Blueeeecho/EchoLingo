@@ -2,67 +2,56 @@
 <p align="center"><img src="https://blueeeecho.github.io/EchoLingo/assets/echolingo-icon.png" width="96" alt="EchoLingo · 回声译" /></p>
 <h1 align="center">EchoLingo · 回声译</h1>
 <p align="center"><strong>让陌生的语言，有熟悉的回声。</strong></p>
-<p align="center">轻量的桌面选词翻译与无感 OCR 工具，让理解跟上思路。</p>
-<p align="center"><a href="https://blueeeecho.github.io/EchoLingo/">官方网站</a> · <a href="https://github.com/Blueeeecho/EchoLingo/releases/tag/0.2.19">Windows 0.2.19 测试版</a> · <a href="https://github.com/Blueeeecho/EchoLingo/releases/tag/0.2.19">macOS 0.2.19 测试版</a> · <a href="https://github.com/Blueeeecho/EchoLingo/issues">反馈与建议</a></p>
+<p align="center">一款安静轻量的桌面划词翻译、框选 OCR 与截图工具。</p>
+<p align="center">
+  <a href="https://blueeeecho.github.io/EchoLingo/">官网</a> ·
+  <a href="#下载与安装">下载 0.2.23</a> ·
+  <a href="https://github.com/Blueeeecho/EchoLingo/releases/tag/0.2.23">更新日志</a> ·
+  <a href="https://github.com/Blueeeecho/EchoLingo/issues">反馈与建议</a>
+</p>
+
+## 核心用法
+
+只需要记住三个快捷键（macOS 上 `Alt` 对应 `Option`，均可在设置中自定义或清空）：
+
+| 快捷键 | 功能 | 说明 |
+| :--- | :--- | :--- |
+| **`Alt + D`** | 划词翻译 | 选中文字后按下，浮窗自动填入原文并翻译；未选中时直接打开输入框 |
+| **`Alt + S`** | 框选 OCR | 拖选屏幕任意区域，松手即识别文字并翻译 |
+| **`F1`** | 截图与标注 | 点击窗口或拖选范围，支持画笔、高亮、箭头、文字便签、马赛克、裁剪和贴图，一键复制或保存 PNG |
+
+在翻译浮窗中，原文随时可二次编辑：`Enter` 翻译，`Shift + Enter` 换行，`Esc` 取消框选或收起窗口。点击浮窗外部自动隐藏，需要对照阅读时点一下图钉即可常驻置顶。
+
+## 为什么做 EchoLingo
+
+- **安静、轻量**：基于 Tauri 2 与系统原生 WebView，不捆绑 Chromium；平时常驻托盘或菜单栏，用完即走。
+- **离线可用，也支持多引擎对照**：默认本机 OCR（Windows 还内置了中英离线翻译），同时支持接入百度、有道、微软、DeepL、OpenAI 兼容接口或本地 Ollama，可同时开启多个服务对照译文。
+- **隐私留在本地**：无遥测、不后台轮询剪贴板；API 密钥存入系统凭据库，历史记录只保存在本机。只有在你主动启用云端服务时，文字或图片才会发给你指定的服务商。
+- **顺手的小功能**：支持原文/译文复制与朗读、深浅主题切换、历史记录与收藏（默认 20 条，可调 1–100 条），以及可选的更新提醒。
 
 ## 下载与安装
 
-**[下载 Windows 0.2.19 安装版（x64）](https://github.com/Blueeeecho/EchoLingo/releases/download/0.2.19/EchoLingo_0.2.19_windows_x64-setup.exe)** · **[下载 macOS 0.2.19 内测版（Apple 芯片）](https://github.com/Blueeeecho/EchoLingo/releases/download/0.2.19/EchoLingo_0.2.19_macos_arm64.dmg)**
+当前最新内测版为 **[0.2.23](https://github.com/Blueeeecho/EchoLingo/releases/tag/0.2.23)**：
 
-Windows 安装版需要 Microsoft Edge WebView2 Runtime。
+| 平台 | 下载 | 系统要求 |
+| :--- | :--- | :--- |
+| **Windows (x64)** | [免安装压缩包 (.zip)](https://github.com/Blueeeecho/EchoLingo/releases/download/0.2.23/EchoLingo_0.2.23_windows_x64-unpack.zip)（推荐） · [安装版 (.exe)](https://github.com/Blueeeecho/EchoLingo/releases/download/0.2.23/EchoLingo_0.2.23_windows_x64-setup.exe) | Windows 10 1809+ / Windows 11（需 WebView2） |
+| **macOS (Apple 芯片)** | [安装包 (.dmg)](https://github.com/Blueeeecho/EchoLingo/releases/download/0.2.23/EchoLingo_0.2.23_macos_arm64.dmg) | macOS 12+（Apple 系统翻译需 macOS 26+） |
 
-Windows 适用于 Windows 10 1809+ / Windows 11；macOS 安装包适用于 Apple 芯片 Mac、macOS 12+，Apple 系统翻译需要 macOS 26+。打开回声译后，应用会驻留托盘或菜单栏；升级前先完整退出旧版。
+> 提示：当前为内测预发布版，暂未购买商业签名与 Apple 公证。升级前请先完全退出旧版；如果 macOS 首次打开提示无法验证开发者，请参考 [macOS 首次安装说明](docs/macos-install.zh-CN.md)。校验与归档：[SHA256SUMS.txt](https://github.com/Blueeeecho/EchoLingo/releases/download/0.2.23/SHA256SUMS.txt) · [发布清单](https://github.com/Blueeeecho/EchoLingo/releases/download/0.2.23/RELEASE-MANIFEST.json) · [0.2.23 源码](https://github.com/Blueeeecho/EchoLingo/tree/0.2.23)。
 
-Windows 与 macOS 现统一提供 0.2.19 测试版。翻译与 OCR 服务独立管理，免费推荐列表可折叠；默认启用 `Alt+D`、`Alt+S`，另提供独立的 `F1` 截图与本地编辑；快捷键可修改、清空或自定义。
+## 文档与开发
 
-0.2.19 将翻译弹窗的原文和译文对齐，长内容统一滚动，划词、OCR 和译文不再显示多余空行。修正部分拖动断触；macOS 重按 OCR 会切换到最新请求。微信多选漏句仍待解决。
+- [翻译与 OCR 服务配置说明](docs/official-services.zh-CN.md)
+- [免费云端额度配置指南](docs/free-setup.zh-CN.md)
+- [隐私说明](docs/privacy.md)
+- [从源码构建与本地测试](docs/build.md)
 
-详见 [CI 记录](https://github.com/Blueeeecho/EchoLingo/actions/runs/44097599304)和发布清单。自动检查不替代真实 Apple 翻译、聊天软件取词、用户设备权限或物理多屏测试。
+## 支持与许可
 
-这是内测预发布版本，不是稳定版。Windows 未商业签名；macOS 使用 ad hoc 签名，未经 Apple 公证。系统可能提示风险或要求重新授权，请仅安装来自本仓库发布页且校验值相符的文件。
+如果 EchoLingo 帮到了你，欢迎点个 **⭐ Star**，有问题或想法直接提 [Issue](https://github.com/Blueeeecho/EchoLingo/issues) 即可。
 
-[版本说明](https://github.com/Blueeeecho/EchoLingo/releases/tag/0.2.19) · [SHA-256 校验值](https://github.com/Blueeeecho/EchoLingo/releases/download/0.2.19/SHA256SUMS.txt) · [发布清单](https://github.com/Blueeeecho/EchoLingo/releases/download/0.2.19/RELEASE-MANIFEST.json)
-
-0.2.19 是测试预发布版，不使用 GitHub 的稳定版 `Latest` 标记。程序包对应 [0.2.19 标签源码](https://github.com/Blueeeecho/EchoLingo/tree/0.2.19)，不等同于默认分支源码；程序包源码与实际文件对应关系请查看发布清单。
-
-[macOS 首次安装说明](docs/macos-install.zh-CN.md) · [源码构建](docs/build.md)
-
-## 三个快捷动作
-
-- **选词翻译**：在原应用中选中文字，按 `Alt+D`，原文自动填入浮窗并翻译。
-- **无感 OCR**：按 `Alt+S`，用鼠标左键拖动框选，松开后自动识字、填入原文并翻译。
-
-- **截图与原位编辑**：按 `F1`，点击选择窗口或拖动框选；在同一编辑界面再次调整范围，直接在画布上输入文字或便签；支持画笔、高亮、椭圆、编号箭头、标注移动与再编辑、局部笔画擦除，也可固定贴图对照，再复制或保存 PNG。全程本机处理，不调用 OCR 或翻译服务。
-
-空按 `Alt+D` 可以直接输入。原文随时可编辑，`Enter` 翻译，`Shift+Enter` 换行，`Esc` 取消框选。快捷键可在设置中修改；Mac 上 Alt 对应 Option。
-
-## 按你的习惯使用
-
-- **安静轻量**：托盘常驻，按需唤起；翻译浮窗点击外部隐藏，钉住后保留。使用系统 WebView，无需捆绑 Chromium。
-- **自由选择服务**：Windows 内置中英离线翻译，OCR 默认本机识别；也能配置自己的翻译与 OCR 服务，同时启用多个翻译服务对照结果。
-- **顺手的小功能**：原文与译文支持复制、朗读，保留主题切换、历史与收藏。历史默认最近 20 条，可调整为 1–100 条。
-
-在托盘菜单打开设置，即可配置服务、管理密钥或调整快捷键。详见[服务配置说明](docs/official-services.zh-CN.md)。想用免费云端额度提高质量、同时保留本机默认，看[免费配置指南](docs/free-setup.zh-CN.md)。额度会变，不是永久免费。
-
-## 免费更新提示
-
-设置中可点「检查更新」和「打开下载页」。自动检查默认关闭；开启后每天最多一次，仅向 GitHub 请求公开版本信息，不上传文字或密钥。当前内测版默认包含内测更新，可切换为仅正式版。不会自动下载或安装，也不需要购买签名或更新服务。
-
-## 隐私与数据
-
-本机 OCR 和离线翻译在电脑上处理；选择云端服务后，文字或图片才会发送给你指定的服务。密钥存于系统凭据库，历史保存在本机。应用无遥测，不在后台持续轮询剪贴板。[阅读隐私说明](docs/privacy.md)。
-
-## 支持回声译
-
-如果回声译对你有帮助，欢迎点亮右上角的 **⭐ Star**。让更多人发现这个小工具，也支持我们持续打磨。
-
-遇到问题或有新的想法，欢迎提交 [Issue](https://github.com/Blueeeecho/EchoLingo/issues)。源码构建与测试方式见[开发说明](docs/build.md)。
-
-## 许可与商业授权
-
-当前项目自有代码采用 **MIT + Commons Clause v1.0**，源码可查看、学习、修改和按条款分发。详见 [LICENSE](LICENSE) 和[授权说明](LICENSING.md)。
-
-第三方组件与模型保留各自许可。已按 MIT 发布的旧版本继续适用其原有授权。
+本项目自有代码采用 **MIT + Commons Clause v1.0** 协议（详见 [LICENSE](LICENSE) 与 [LICENSING.md](LICENSING.md)），第三方组件与模型遵循各自原许可。
 
 <sub>感谢 Bob 在桌面翻译体验上的探索与启发。</sub>
 
