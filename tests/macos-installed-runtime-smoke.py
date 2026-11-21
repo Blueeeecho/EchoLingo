@@ -346,7 +346,7 @@ def main():
     parser.add_argument("--run-url", required=True)
     parser.add_argument("--native-self-tests-passed", action="store_true")
     parser.add_argument("--native-window-resize-fixture-passed", action="store_true")
-    parser.add_argument("--expected-version", choices=("0.2.18", "0.2.20", "0.2.21", "0.2.22", "0.2.23"), default=VERSION)
+    parser.add_argument("--expected-version", choices=("0.2.18", "0.2.20", "0.2.21", "0.2.22", "0.2.23", "0.2.24"), default=VERSION)
     args = parser.parse_args()
     VERSION = args.expected_version
     report = run(args)

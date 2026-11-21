@@ -156,51 +156,26 @@ impl LayoutState {
         drop(popup);
         std::thread::spawn(move || loop {
             std::thread::sleep(Duration::from_millis(200));
-            let (preferred, target_revision) = {
-                let Ok(mut popup) = shared.lock() else {
-                    return;
-                };
-                if popup.revision != revision {
-                    revision = popup.revision;
-                    continue;
-                }
-                (popup.preferred, popup.revision)
-            };
-            let saved = write_saved_width(&directory, preferred).is_ok();
             let Ok(mut popup) = shared.lock() else {
                 return;
             };
-            if saved {
-                popup.saved_revision = target_revision;
-            }
-            if popup.revision != target_revision {
+            if popup.revision != revision {
                 revision = popup.revision;
                 continue;
             }
+            let _ = write_saved_width(&directory, popup.preferred);
             popup.save_pending = false;
             return;
         });
     }
 
-    /// Optional shutdown flush; skips disk fsync if popup width did not change.
+    /// Optional shutdown flush; also serializes with a pending debounced write.
     pub fn flush(&self) -> Result<(), String> {
         let Some(directory) = &self.data_dir else {
             return Ok(());
         };
-        let (preferred, target_revision) = {
-            let popup = self.popup.lock().map_err(|_| "窗口布局状态异常")?;
-            if popup.revision == popup.saved_revision {
-                return Ok(());
-            }
-            (popup.preferred, popup.revision)
-        };
-        write_saved_width(directory, preferred)?;
-        if let Ok(mut popup) = self.popup.lock() {
-            if popup.revision == target_revision {
-                popup.saved_revision = target_revision;
-            }
-        }
-        Ok(())
+        let popup = self.popup.lock().map_err(|_| "窗口布局状态异常")?;
+        write_saved_width(directory, popup.preferred)
     }
 }
 
@@ -360,7 +335,6 @@ struct PopupWidth {
     preferred: f64,
     applied: Option<AppliedWidth>,
     revision: u64,
-    saved_revision: u64,
     save_pending: bool,
 }
 impl PopupWidth {
@@ -371,7 +345,6 @@ impl PopupWidth {
                 .unwrap_or(DEFAULT_POPUP_WIDTH),
             applied: None,
             revision: 0,
-            saved_revision: 0,
             save_pending: false,
         }
     }
