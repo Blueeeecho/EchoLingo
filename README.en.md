@@ -2,65 +2,56 @@
 <p align="center"><img src="https://blueeeecho.github.io/EchoLingo/assets/echolingo-icon.png" width="96" alt="EchoLingo" /></p>
 <h1 align="center">EchoLingo · 回声译</h1>
 <p align="center"><strong>A familiar echo for unfamiliar words.</strong></p>
-<p align="center">A lightweight desktop app for selection translation and seamless OCR, so understanding can keep up with your reading.</p>
-<p align="center"><a href="https://blueeeecho.github.io/EchoLingo/">Website</a> · <a href="https://github.com/Blueeeecho/EchoLingo/releases/tag/0.2.19">Windows 0.2.19 test prerelease</a> · <a href="https://github.com/Blueeeecho/EchoLingo/releases/tag/0.2.19">macOS 0.2.19 test prerelease</a> · <a href="https://github.com/Blueeeecho/EchoLingo/issues">Feedback</a></p>
-
-## Download and install
-
-**[Download Windows 0.2.19 installer (x64)](https://github.com/Blueeeecho/EchoLingo/releases/download/0.2.19/EchoLingo_0.2.19_windows_x64-setup.exe)** · **[Download macOS 0.2.19 prerelease (Apple silicon)](https://github.com/Blueeeecho/EchoLingo/releases/download/0.2.19/EchoLingo_0.2.19_macos_arm64.dmg)**
-
-The Windows installer requires Microsoft Edge WebView2 Runtime.
-
-Windows supports Windows 10 1809+ and Windows 11. The macOS package is for Apple silicon Macs on macOS 12 or later. Apple system translation needs macOS 26 or later. After launch, EchoLingo stays in the tray or menu bar. Quit the previous version completely before you upgrade.
-
-Windows and macOS now both offer the 0.2.19 test prerelease. Translation and OCR services are managed separately, with collapsible free-service recommendations. The defaults are `Alt+D`, `Alt+S`, and a separate `F1` screenshot and local editor action; shortcuts can be changed, cleared, or customized.
-
-0.2.19 aligns the source and translation, uses one scroll area for long text, and removes extra blank lines from captured text and translations. It fixes a popup drag interruption and lets a new macOS OCR request supersede the previous one. Missing messages when multi-selecting in WeChat remain unresolved.
-
-See the [CI records](https://github.com/Blueeeecho/EchoLingo/actions/runs/44097599304) and release manifest. Automated checks do not replace field testing of Apple system translation, chat-app selection, device permissions, or physical multi-display setups.
-
-This is an internal prerelease, not a stable release. Windows has no commercial code signature; macOS uses ad hoc signing and is not notarized by Apple. Your system may show warnings or request permissions again. Use only files from this repository’s release page with matching checksums.
-
-[Release notes](https://github.com/Blueeeecho/EchoLingo/releases/tag/0.2.19) · [SHA-256 checksums](https://github.com/Blueeeecho/EchoLingo/releases/download/0.2.19/SHA256SUMS.txt) · [Release manifest](https://github.com/Blueeeecho/EchoLingo/releases/download/0.2.19/RELEASE-MANIFEST.json)
-
-0.2.19 is a test prerelease, not a stable GitHub `Latest` release. The packages correspond to the [0.2.19 source tag](https://github.com/Blueeeecho/EchoLingo/tree/0.2.19), not the default branch; see the release manifest for the relationship between source and installer bytes.
-
-[First-launch notes for macOS](docs/macos-install.zh-CN.md) (Chinese) · [Build from source](docs/build.md) (Chinese)
+<p align="center">A quiet, lightweight desktop companion for selection translation, screen OCR, and quick screenshots.</p>
+<p align="center">
+  <a href="https://blueeeecho.github.io/EchoLingo/">Website</a> ·
+  <a href="#download">Download 0.2.23</a> ·
+  <a href="https://github.com/Blueeeecho/EchoLingo/releases/tag/0.2.23">Release Notes</a> ·
+  <a href="https://github.com/Blueeeecho/EchoLingo/issues">Issues</a>
+</p>
 
 ## Three shortcuts
 
-- **Selection translation**: select text in the app you are using, then press `Alt+D`. The popup fills in the text and translates it.
-- **Seamless OCR**: press `Alt+S` and drag with the left mouse button. When you release, EchoLingo reads the text, fills it in, and translates it.
+Everything centers around three defaults (on macOS, `Alt` maps to `Option`; all shortcuts can be customized or cleared in Settings):
 
-- **Screenshot and in-place editing**: press `F1`, then click a window or drag a region. Readjust the capture bounds in the same editor; type text or notes on the canvas and annotate with a pen, highlighter, ellipses or numbered arrows. Move or re-edit annotations, erase parts of strokes, pin a reference image, or copy/save a PNG. Capture and editing stay local, without OCR or translation services.
+| Shortcut | Action | What it does |
+| :--- | :--- | :--- |
+| **`Alt + D`** | Selection translation | Translate selected text in place; press with nothing selected to type directly |
+| **`Alt + S`** | Screen OCR | Drag across any area on screen to recognize and translate on release |
+| **`F1`** | Screenshot & annotate | Capture a window or region, annotate (pen, highlighter, arrows, notes, mosaic, crop), pin to desktop, or copy/save PNG |
 
-Press `Alt+D` with nothing selected to type directly. The source stays editable. `Enter` translates, `Shift+Enter` inserts a line break, and `Esc` cancels a region selection. Shortcuts can be changed in Settings. On a Mac, Alt is Option.
+Inside the translation popup, source text stays editable: `Enter` translates, `Shift + Enter` inserts a newline, and `Esc` cancels or hides. Click outside to dismiss, or pin the window when reading side by side.
 
-## Use it your way
+## Highlights
 
-- **Quiet and light**: it lives in the tray and appears when you call it. Click outside to hide the translation popup, or pin it to keep it. It uses the system web view and does not bundle Chromium.
-- **Your choice of service**: Windows includes offline Chinese–English translation, and OCR stays on the device by default. You can also configure your own translation and OCR services, with multiple translation services enabled together to compare results.
-- **Small things close at hand**: copy or speak the source and the translation, switch themes, and keep history and favorites. History keeps the latest 20 items by default, adjustable from 1 to 100.
+- **Light and unobtrusive**: Built with Tauri 2 and the native system WebView — no bundled Chromium. Stays in your tray or menu bar until you call it.
+- **Local first, extensible when you want**: Uses on-device OCR by default (plus built-in offline Chinese–English translation on Windows), and plugs into Baidu, Youdao, Microsoft, DeepL, OpenAI-compatible APIs, or local Ollama. Enable multiple translators at once to compare results.
+- **Private by default**: No telemetry and no background clipboard polling. API keys live in your OS credential store, history stays local, and text/images only leave your machine if you enable a cloud provider.
+- **Everyday comforts**: Copy and text-to-speech, light/dark themes, history and favorites (20 items by default, adjustable from 1 to 100), and optional update notices.
 
-Open Settings from the tray menu to configure services, manage keys, or change shortcuts. See the [service setup notes](docs/official-services.zh-CN.md) (Chinese). For optional free cloud quotas while keeping the local default, see the [free setup guide](docs/free-setup.md). Quotas change and are not permanently free.
+## Download
 
-## Free update notices
+Latest prerelease: **[0.2.23](https://github.com/Blueeeecho/EchoLingo/releases/tag/0.2.23)**
 
-Use **Check for updates** and **Open download page** in Settings. Automatic checks are off by default; opt in for at most one public GitHub metadata request per day. No text or keys are sent. The current internal preview builds include prereleases by default; you can select stable releases only. Downloads and installation remain manual, with no paid updater or signing purchase required.
+| Platform | Package | Requirements |
+| :--- | :--- | :--- |
+| **Windows (x64)** | [Portable ZIP](https://github.com/Blueeeecho/EchoLingo/releases/download/0.2.23/EchoLingo_0.2.23_windows_x64-unpack.zip) (recommended) · [Installer (.exe)](https://github.com/Blueeeecho/EchoLingo/releases/download/0.2.23/EchoLingo_0.2.23_windows_x64-setup.exe) | Windows 10 1809+ / Windows 11 (WebView2 Runtime) |
+| **macOS (Apple silicon)** | [Disk Image (.dmg)](https://github.com/Blueeeecho/EchoLingo/releases/download/0.2.23/EchoLingo_0.2.23_macos_arm64.dmg) | macOS 12+ (Apple system translation needs macOS 26+) |
 
-## Privacy and data
+> Note: Prerelease builds are not commercially signed or Apple-notarized yet. Quit any previous version before upgrading; see [macOS first-launch notes](docs/macos-install.zh-CN.md) (Chinese) if Gatekeeper prompts on first run. Verification & source: [SHA256SUMS.txt](https://github.com/Blueeeecho/EchoLingo/releases/download/0.2.23/SHA256SUMS.txt) · [Release manifest](https://github.com/Blueeeecho/EchoLingo/releases/download/0.2.23/RELEASE-MANIFEST.json) · [0.2.23 source](https://github.com/Blueeeecho/EchoLingo/tree/0.2.23).
 
-Local OCR and offline translation run on your computer. Text or images are sent out only after you choose a cloud service. Keys stay in the system credential store, and history stays on the device. The app has no telemetry and does not keep polling the clipboard. [Read the privacy note](docs/privacy.md) (Chinese).
+## Docs & development
 
-## Support EchoLingo
+- [Service configuration guide](docs/official-services.zh-CN.md) (Chinese)
+- [Optional free cloud quotas guide](docs/free-setup.md)
+- [Privacy note](docs/privacy.md) (Chinese)
+- [Build & test from source](docs/build.md) (Chinese)
 
-If EchoLingo is useful, a **Star** helps more people find it and supports the work. Questions and ideas are welcome as [issues](https://github.com/Blueeeecho/EchoLingo/issues). Building and testing from source is described in the [development notes](docs/build.md) (Chinese).
+## Support & license
 
-## License
+If EchoLingo helps your workflow, a **Star** is always appreciated. Bug reports and ideas are welcome in [Issues](https://github.com/Blueeeecho/EchoLingo/issues).
 
-The project’s own code uses **MIT + Commons Clause v1.0**. You can read, study, modify, and distribute it under those terms. See [LICENSE](LICENSE) and the [licensing notes](LICENSING.md).
-
-Third-party components and models keep their own licenses. Older versions already released under MIT stay under that original license.
+Original project code is licensed under **MIT + Commons Clause v1.0** (see [LICENSE](LICENSE) and [LICENSING.md](LICENSING.md)). Third-party dependencies and models retain their own licenses.
 
 <sub>Thanks to Bob for the exploration and inspiration around desktop translation.</sub>
 
