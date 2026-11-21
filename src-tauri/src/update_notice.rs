@@ -151,7 +151,12 @@ impl Controller {
         }
         cache.last_attempt = Some(started);
         // Persist before networking: restarting after a failure cannot poll GitHub.
-        let persisted = crate::write_json(&self.path, &*cache).is_ok();
+        let path = self.path.clone();
+        let snapshot = cache.clone();
+        let persisted = tokio::task::spawn_blocking(move || crate::write_json(&path, &snapshot))
+            .await
+            .map(|res| res.is_ok())
+            .unwrap_or(false);
         if !manual && !persisted {
             // Fail closed: without durable cadence an automatic check could
             // run on every restart. Explicit manual checks remain available.
@@ -160,19 +165,27 @@ impl Controller {
         }
         let result = fetch_releases().await;
         cache.complete(result, crate::now());
-        let _ = crate::write_json(&self.path, &*cache);
+        let path = self.path.clone();
+        let snapshot = cache.clone();
+        let _ = tokio::task::spawn_blocking(move || crate::write_json(&path, &snapshot)).await;
         cache.status(current, include_prereleases)
     }
 }
 
 async fn fetch_releases() -> Result<Vec<Release>, ()> {
     // A separate credential-free client never inherits a provider's headers.
-    let client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(8))
-        .connect_timeout(Duration::from_secs(4))
-        .redirect(reqwest::redirect::Policy::none())
-        .user_agent("EchoLingo-update-notice")
-        .build()
+    static CLIENT: std::sync::OnceLock<Result<reqwest::Client, ()>> = std::sync::OnceLock::new();
+    let client = CLIENT
+        .get_or_init(|| {
+            reqwest::Client::builder()
+                .timeout(Duration::from_secs(8))
+                .connect_timeout(Duration::from_secs(4))
+                .redirect(reqwest::redirect::Policy::none())
+                .user_agent("EchoLingo-update-notice")
+                .build()
+                .map_err(|_| ())
+        })
+        .as_ref()
         .map_err(|_| ())?;
     let mut response = client
         .get(RELEASES_API)

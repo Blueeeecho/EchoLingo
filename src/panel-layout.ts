@@ -98,12 +98,11 @@ export function installPanelLayout(desktop: boolean, getPresentation: () => Tran
     return inFlight;
   };
   const schedule = (): void => {
-    syncNativeHeaderDrag();
     checkViewport();
     pending = true;
     if (nativeSizingRevision !== null) return;
     if (disposed || frame) return;
-    frame = requestAnimationFrame(() => { frame = 0; pending = true; void drain(); });
+    frame = requestAnimationFrame(() => { frame = 0; syncNativeHeaderDrag(); pending = true; void drain(); });
   };
   if (nativeSizingSupported) void listen<unknown>('popup-native-sizing', ({ payload: value }) => {
     if (disposed || !value || typeof value !== 'object') return;
@@ -207,10 +206,13 @@ export function installPanelLayout(desktop: boolean, getPresentation: () => Tran
     }
     clearGesture();
   };
+  let lastResizeInset: number | undefined;
   function syncModalResizeInset(): void {
     const modal = document.querySelector<HTMLElement>('.modal-overlay:not([hidden])');
     const inset = document.body.dataset.view !== 'translate' && document.body.classList.contains('modal-open') && modal
       ? Math.max(0, modal.offsetWidth - modal.clientWidth) : 0;
+    if (inset === lastResizeInset) return;
+    lastResizeInset = inset;
     // A classic Windows scrollbar occupies real client pixels. Place the
     // narrow east hit strip beside it, never over its thumb or track.
     document.body.style.setProperty('--resize-scrollbar-inset', `${inset}px`);
@@ -284,7 +286,6 @@ export function installPanelLayout(desktop: boolean, getPresentation: () => Tran
   document.addEventListener('pointerdown', drag);
   document.addEventListener('pointermove', moveWidth);
   document.addEventListener('visibilitychange', checkDragPresentation);
-  window.addEventListener('echolingo:layout', checkDragPresentation);
   document.addEventListener('pointerup', endWidth);
   document.addEventListener('pointercancel', cancelWidth);
   document.addEventListener('lostpointercapture', cancelWidth);
@@ -309,7 +310,6 @@ export function installPanelLayout(desktop: boolean, getPresentation: () => Tran
     document.removeEventListener('pointerdown', drag);
     document.removeEventListener('pointermove', moveWidth);
     document.removeEventListener('visibilitychange', checkDragPresentation);
-    window.removeEventListener('echolingo:layout', checkDragPresentation);
     document.removeEventListener('pointerup', endWidth);
     document.removeEventListener('pointercancel', cancelWidth);
     document.removeEventListener('lostpointercapture', cancelWidth);
@@ -378,7 +378,11 @@ export function installPanelLayout(desktop: boolean, getPresentation: () => Tran
       const region = document.querySelector<HTMLElement>('.popup-drag-space')?.getBoundingClientRect() ?? null;
       const geometry = popupHeaderRegion(region, innerWidth, innerHeight, !disposed
         && document.body.dataset.view === 'translate' && !document.body.classList.contains('modal-open'));
-      await invoke('configure_popup_header_drag', { revision: ++headerRevision, presentationEpoch, ...geometry });
+      const payload = { presentationEpoch, ...geometry };
+      const signature = JSON.stringify(payload);
+      headerSignature = signature;
+      try { await invoke('configure_popup_header_drag', { revision: ++headerRevision, ...payload }); }
+      catch (error) { if (headerSignature === signature) headerSignature = ''; throw error; }
       if (disposed || reveal !== revealRevision || presentationEpoch < getPresentation().epoch) return null;
     }
     // The source event has switched the DOM and fitted its content before the

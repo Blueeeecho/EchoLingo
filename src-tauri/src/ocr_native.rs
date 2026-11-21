@@ -258,14 +258,31 @@ fn recognized_lines(value: &Value, array_path: &str, text_field: &str) -> Result
     Ok(lines.join("\n"))
 }
 
-async fn baidu_at(
+fn baidu_token_cache_key(root: &str, credentials: &BaiduCredentials) -> (String, [u8; 32]) {
+    let mut digest = Sha256::new();
+    digest.update(credentials.api_key.as_bytes());
+    digest.update([0]);
+    digest.update(credentials.secret_key.as_bytes());
+    (root.to_owned(), digest.finalize().into())
+}
+
+fn baidu_token_cache() -> &'static std::sync::Mutex<
+    std::collections::HashMap<(String, [u8; 32]), (String, std::time::Instant)>,
+> {
+    static CACHE: std::sync::OnceLock<
+        std::sync::Mutex<
+            std::collections::HashMap<(String, [u8; 32]), (String, std::time::Instant)>,
+        >,
+    > = std::sync::OnceLock::new();
+    CACHE.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
+}
+
+async fn fetch_baidu_token(
     client: &Client,
-    action: &str,
+    root: &Url,
     credentials: &BaiduCredentials,
-    image: &str,
-    root: &str,
+    cache_key: &(String, [u8; 32]),
 ) -> Result<String, String> {
-    let root = Url::parse(root).map_err(|_| "OCR 内部端点不合法")?;
     let token_url = root
         .join("oauth/2.0/token")
         .map_err(|_| "OCR 内部端点不合法")?;
@@ -290,32 +307,88 @@ async fn baidu_at(
         .filter(|token| {
             token.len() <= 8192 && !token.is_empty() && token.bytes().all(|b| b.is_ascii_graphic())
         })
-        .ok_or("百度 OCR 未返回有效访问令牌")?;
-    let mut ocr_url = root
-        .join(&format!("rest/2.0/ocr/v1/{action}"))
-        .map_err(|_| "OCR 内部端点不合法")?;
-    ocr_url.query_pairs_mut().append_pair("access_token", token);
-    let response = client
-        .post(ocr_url)
-        .timeout(Duration::from_secs(30))
-        .form(&[("image", image), ("detect_direction", "true")])
-        .send()
-        .await
-        .map_err(transport_error)?;
-    let value = limited_json(response, MAX_RESPONSE).await?;
-    if let Some(code) = value.get("error_code") {
-        if code.as_i64() != Some(0) {
-            return Err(match code.as_i64() {
-                Some(110 | 111 | 100 | 6) => {
-                    "百度 OCR 令牌或服务权限无效，请检查凭据和服务开通状态".into()
+        .ok_or("百度 OCR 未返回有效访问令牌")?
+        .to_owned();
+    if let Some(expires_in) = token_json.get("expires_in").and_then(Value::as_u64) {
+        if expires_in >= 120 {
+            let ttl = Duration::from_secs(expires_in.saturating_sub(60).min(86_400 * 30));
+            if let Ok(mut cache) = baidu_token_cache().lock() {
+                if cache.len() >= 8 && !cache.contains_key(cache_key) {
+                    cache.clear();
                 }
-                Some(17 | 18 | 19) => "百度 OCR 配额或调用频率受限，请检查账号额度".into(),
-                Some(216202 | 216201) => "百度 OCR 图片格式或大小被拒绝，请重新截图".into(),
-                _ => "百度 OCR 识别失败，请检查接口权限、图片和账号状态".into(),
-            });
+                cache.insert(
+                    cache_key.clone(),
+                    (token.clone(), std::time::Instant::now() + ttl),
+                );
+            }
         }
     }
-    recognized_lines(&value, "/words_result", "words")
+    Ok(token)
+}
+
+async fn baidu_at(
+    client: &Client,
+    action: &str,
+    credentials: &BaiduCredentials,
+    image: &str,
+    root: &str,
+) -> Result<String, String> {
+    let cache_key = baidu_token_cache_key(root, credentials);
+    let root = Url::parse(root).map_err(|_| "OCR 内部端点不合法")?;
+    let cached = baidu_token_cache().lock().ok().and_then(|mut cache| {
+        let now = std::time::Instant::now();
+        match cache.get(&cache_key) {
+            Some((token, expires_at)) if *expires_at > now => Some(token.clone()),
+            Some(_) => {
+                cache.remove(&cache_key);
+                None
+            }
+            None => None,
+        }
+    });
+    let mut from_cache = cached.is_some();
+    let mut token = match cached {
+        Some(token) => token,
+        None => fetch_baidu_token(client, &root, credentials, &cache_key).await?,
+    };
+    loop {
+        let mut ocr_url = root
+            .join(&format!("rest/2.0/ocr/v1/{action}"))
+            .map_err(|_| "OCR 内部端点不合法")?;
+        ocr_url
+            .query_pairs_mut()
+            .append_pair("access_token", &token);
+        let response = client
+            .post(ocr_url)
+            .timeout(Duration::from_secs(30))
+            .form(&[("image", image), ("detect_direction", "true")])
+            .send()
+            .await
+            .map_err(transport_error)?;
+        let value = limited_json(response, MAX_RESPONSE).await?;
+        if let Some(code) = value.get("error_code") {
+            let error_code = code.as_i64();
+            if from_cache && matches!(error_code, Some(110 | 111)) {
+                if let Ok(mut cache) = baidu_token_cache().lock() {
+                    cache.remove(&cache_key);
+                }
+                from_cache = false;
+                token = fetch_baidu_token(client, &root, credentials, &cache_key).await?;
+                continue;
+            }
+            if error_code != Some(0) {
+                return Err(match error_code {
+                    Some(110 | 111 | 100 | 6) => {
+                        "百度 OCR 令牌或服务权限无效，请检查凭据和服务开通状态".into()
+                    }
+                    Some(17 | 18 | 19) => "百度 OCR 配额或调用频率受限，请检查账号额度".into(),
+                    Some(216202 | 216201) => "百度 OCR 图片格式或大小被拒绝，请重新截图".into(),
+                    _ => "百度 OCR 识别失败，请检查接口权限、图片和账号状态".into(),
+                });
+            }
+        }
+        return recognized_lines(&value, "/words_result", "words");
+    }
 }
 
 fn hex(bytes: &[u8]) -> String {

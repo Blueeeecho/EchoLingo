@@ -96,19 +96,22 @@ function layoutOverlayTools(): void {
   const monitor = overlayToolBounds(innerWidth, innerHeight, session?.overlay?.toolbarBounds);
   const margin = Math.min(8, monitor.width / 8, monitor.height / 8);
   const bounds = { x: monitor.x + margin, y: monitor.y + margin, width: monitor.width - margin * 2, height: monitor.height - margin * 2 };
-  const toolbar = $('.editor-toolbar'); toolbar.dataset.compact = String(bounds.width < 620);
+  const toolbar = $('.editor-toolbar'), info = $('#overlay-info'), message = $('#editor-status');
+  toolbar.dataset.compact = String(bounds.width < 620);
   toolbar.style.maxWidth = `${bounds.width}px`; toolbar.style.maxHeight = `${bounds.height}px`;
-  // Read after applying monitor width: wrapping/tool option changes affect height.
+  info.style.maxWidth = `${bounds.width}px`;
+  message.style.maxWidth = `${bounds.width}px`; message.style.maxHeight = `${Math.max(20, Math.min(70, bounds.height / 4))}px`;
+  // Read all box metrics in one pass after applying width constraints.
   const selection = frame.getBoundingClientRect(), tools = toolbar.getBoundingClientRect();
+  const infoWidth = info.offsetWidth, infoHeight = info.offsetHeight;
+  const messageWidth = message.offsetWidth, messageHeight = message.offsetHeight;
   const position = placeOverlayToolbar({ x: selection.x, y: selection.y, width: selection.width, height: selection.height }, tools.width, tools.height, bounds);
+  const infoPosition = clampOverlayBox(selection.left, selection.top - infoHeight - 6, infoWidth, infoHeight, bounds);
+  const statusY = position.y + tools.height + 6 + messageHeight <= bounds.y + bounds.height
+    ? position.y + tools.height + 6 : position.y - messageHeight - 6;
+  const statusPosition = clampOverlayBox(position.x, statusY, messageWidth, messageHeight, bounds);
   toolbar.style.left = `${position.x}px`; toolbar.style.top = `${position.y}px`;
-  const info = $('#overlay-info'); info.style.maxWidth = `${bounds.width}px`;
-  const infoPosition = clampOverlayBox(selection.left, selection.top - info.offsetHeight - 6, info.offsetWidth, info.offsetHeight, bounds);
   info.style.left = `${infoPosition.x}px`; info.style.top = `${infoPosition.y}px`;
-  const message = $('#editor-status'); message.style.maxWidth = `${bounds.width}px`; message.style.maxHeight = `${Math.max(20, Math.min(70, bounds.height / 4))}px`;
-  const statusY = position.y + tools.height + 6 + message.offsetHeight <= bounds.y + bounds.height
-    ? position.y + tools.height + 6 : position.y - message.offsetHeight - 6;
-  const statusPosition = clampOverlayBox(position.x, statusY, message.offsetWidth, message.offsetHeight, bounds);
   message.style.left = `${statusPosition.x}px`; message.style.top = `${statusPosition.y}px`; message.style.bottom = 'auto';
 }
 function setPresentation(overlay?: ScreenshotOverlay): void {
@@ -341,9 +344,11 @@ function chooseTool(next: Tool): void {
   $('#tool-hint').textContent = hints[next]; canvas.dataset.tool = next; placeOverlayTools();
 }
 function clearPendingPreview(): void {
+  cancelPointerRender();
   $('#gesture-rect').setAttribute('visibility', 'hidden'); $('#gesture-line').setAttribute('visibility', 'hidden');
   $('#pending-ink').setAttribute('points', '');
   const preview = $<HTMLCanvasElement>('#annotation-preview'); preview.hidden = true; preview.width = preview.height = 1;
+  blankPreviewSource.width = blankPreviewSource.height = 1;
 }
 function draftStyle(scale: number): DraftStyle {
   return { color: $<HTMLInputElement>('#edit-color').value, width: Number($<HTMLSelectElement>('#edit-width').value),
@@ -470,17 +475,50 @@ canvas.addEventListener('pointerdown', event => {
   previewPendingStroke(event); controls();
 
 });
+let pointerRenderFrame = 0;
+let queuedMoveEvent: PointerEvent | null = null;
+let queuedPendingStrokeEvent: PointerEvent | null = null;
+function cancelPointerRender(): void {
+  if (pointerRenderFrame) { cancelAnimationFrame(pointerRenderFrame); pointerRenderFrame = 0; }
+  queuedMoveEvent = null; queuedPendingStrokeEvent = null;
+}
+function schedulePointerRender(): void {
+  if (pointerRenderFrame) return;
+  pointerRenderFrame = requestAnimationFrame(() => {
+    pointerRenderFrame = 0;
+    const pendingEvent = queuedPendingStrokeEvent; queuedPendingStrokeEvent = null;
+    if (pendingEvent && pendingStroke) previewPendingStroke(pendingEvent);
+    const moveEvent = queuedMoveEvent; queuedMoveEvent = null;
+    if (moveEvent) moveCanvasPointer(moveEvent, false);
+  });
+}
+function collectStrokePoint(event: PointerEvent): boolean {
+  if (!gesture?.points || !model || gesture.pointerId !== event.pointerId) return false;
+  gesture.end = point(event);
+  const points = gesture.points, last = points[points.length - 1];
+  if (Math.hypot(last.x - gesture.end.x, last.y - gesture.end.y) >= 1) {
+    if (points.length >= MAX_STROKE_POINTS) { cancelPointer(); status('单笔路径过长，已取消本笔；请分成多笔绘制或擦除。', true); return false; }
+    points.push(gesture.end);
+  }
+  return true;
+}
 canvas.addEventListener('pointermove', event => {
   if (pendingStroke) {
     if (event.pointerId !== pendingStroke.down.pointerId) return;
     if (pendingStroke.events.length >= MAX_STROKE_POINTS) { pendingStroke.cancelled = true; return; }
-    pendingStroke.events.push(event); previewPendingStroke(event); return;
+    pendingStroke.events.push(event); queuedPendingStrokeEvent = event; schedulePointerRender(); return;
   }
-  moveCanvasPointer(event);
+  if (gesture?.points) {
+    if (!collectStrokePoint(event)) return;
+    if (tool === 'pen' || tool === 'highlight') { queuedMoveEvent = event; schedulePointerRender(); }
+    return;
+  }
+  if (moveGesture || gesture) { queuedMoveEvent = event; schedulePointerRender(); }
 });
 canvas.addEventListener('pointerup', event => {
   if (pendingStroke) {
     if (event.pointerId !== pendingStroke.down.pointerId) return;
+    cancelPointerRender();
     const pending = pendingStroke; pending.released = true; pending.events.push(event);
     if (pending.cancelled) { pendingStroke = null; clearPendingPreview(); controls(); return; }
     // Hide/capture only after release: suspending a native host during a held
@@ -489,10 +527,14 @@ canvas.addEventListener('pointerup', event => {
       if (!ok || pending.cancelled || pending.generation !== generation || pendingStroke !== pending || pending.tool !== tool || pending.style !== annotationStyleKey()) return;
       await beginCanvasPointer(pending.down);
       if (pending.cancelled || pending.generation !== generation || pendingStroke !== pending || pending.tool !== tool || pending.style !== annotationStyleKey()) { cancelPointer(); return; }
-      for (const e of pending.events) { if (e.type === 'pointerup') endCanvasPointer(e); else moveCanvasPointer(e); }
+      for (const e of pending.events) {
+        if (e.type === 'pointerup') endCanvasPointer(e);
+        else if (gesture?.points) { if (!collectStrokePoint(e)) return; }
+      }
     }).finally(() => { if (pendingStroke === pending) { pendingStroke = null; clearPendingPreview(); controls(); } });
     return;
   }
+  cancelPointerRender();
   endCanvasPointer(event);
 });
 
@@ -553,7 +595,7 @@ async function beginCanvasPointer(event: PointerEvent): Promise<void> {
   gesture = { start, end: start, pointerId: event.pointerId, ...(['pen', 'highlight', 'eraser'].includes(tool) ? { points: [start] } : {}) }; if (event.buttons) { try { canvas.setPointerCapture(event.pointerId); } catch { /* Buffered pointer may already be released. */ } } event.preventDefault();
   if (tool === 'number') moveCanvasPointer(event);
 }
-function moveCanvasPointer(event: PointerEvent): void {
+function moveCanvasPointer(event: PointerEvent, collectPoint = true): void {
   if (moveGesture && model && original && event.pointerId === moveGesture.pointerId) {
     const p = point(event), g = moveGesture;
     if (model.operations[g.index] !== g.original) { cancelPointer(); return; }
@@ -567,21 +609,17 @@ function moveCanvasPointer(event: PointerEvent): void {
     return;
   }
   if (!gesture || !model || gesture.pointerId !== event.pointerId) return;
-  gesture.end = point(event);
   if (gesture.points) {
-    const points = gesture.points, last = points[points.length - 1];
-    if (Math.hypot(last.x - gesture.end.x, last.y - gesture.end.y) >= 1) {
-      if (points.length >= MAX_STROKE_POINTS) { cancelPointer(); status('单笔路径过长，已取消本笔；请分成多笔绘制或擦除。', true); return; }
-      points.push(gesture.end);
-    }
+    if (collectPoint && !collectStrokePoint(event)) return;
     if (tool === 'pen' || tool === 'highlight') {
       try {
-        const op: EditOperation = { kind: tool, points, color: $<HTMLInputElement>('#edit-color').value, width: Number($<HTMLSelectElement>('#edit-width').value) * (tool === 'highlight' ? 4 : 1) };
+        const op: EditOperation = { kind: tool, points: gesture.points, color: $<HTMLInputElement>('#edit-color').value, width: Number($<HTMLSelectElement>('#edit-width').value) * (tool === 'highlight' ? 4 : 1) };
         rendered = null; controls(); renderScreenshot(canvas, original!, model.original, [...model.operations, op]);
       } catch (error) { cancelPointer(); status(readableError(error), true); }
     }
     return;
   }
+  gesture.end = point(event);
   if (tool === 'crop') { previewRegion(gesture.start, gesture.end, model.size, '#4997ef'); return; }
   const op = draftAnnotation(tool, gesture.start, gesture.end, model.size,
     draftStyle(model.size.width / canvas.getBoundingClientRect().width), model.nextNumber);
@@ -628,6 +666,7 @@ canvas.addEventListener('contextlost', event => {
 });
 canvas.addEventListener('contextrestored', () => { contextLost = false; if (render()) status('图片画布已恢复。'); });
 function cancelPointer(): void {
+  cancelPointerRender();
   if (pendingStroke) { pendingStroke.cancelled = true; if (!capturePending) { pendingStroke = null; clearPendingPreview(); controls(); } }
   const moving = moveGesture; moveGesture = null;
   if (moving && canvas.hasPointerCapture(moving.pointerId)) canvas.releasePointerCapture(moving.pointerId);
@@ -664,9 +703,12 @@ $('#redo-edit').addEventListener('click', () => { if (!busy && commitText() && m
 function changeZoom(value: number): void { fit = false; zoom = Math.max(0.05, Math.min(4, value)); applyZoom(); }
 $('#zoom-in').addEventListener('click', () => changeZoom(zoom * 1.25)); $('#zoom-out').addEventListener('click', () => changeZoom(zoom / 1.25));
 $('#zoom-actual').addEventListener('click', () => changeZoom(1)); $('#zoom-fit').addEventListener('click', () => { fit = true; applyZoom(); });
-new ResizeObserver(() => { if (fit || inplace()) applyZoom(); }).observe(workspace);
-new ResizeObserver(placeOverlayTools).observe($('.editor-toolbar'));
-new ResizeObserver(placeTextEditor).observe(textDialog);
+const workspaceObserver = new ResizeObserver(() => { if (fit || inplace()) applyZoom(); });
+workspaceObserver.observe(workspace);
+const toolbarObserver = new ResizeObserver(placeOverlayTools);
+toolbarObserver.observe($('.editor-toolbar'));
+const canvasObserver = new ResizeObserver(placeTextEditor);
+canvasObserver.observe(canvas);
 window.addEventListener('resize', placeTextEditor);
 for (const selector of ['#edit-font-size', '#edit-color', '#note-style']) $(selector).addEventListener('input', placeTextEditor);
 async function exportImage(action: 'copy' | 'save' | 'saveAs' | 'pin'): Promise<void> {
@@ -801,23 +843,33 @@ document.addEventListener('keydown', event => {
   } else if (!mod && !event.altKey && !busy) { const next = ({ v: 'select', r: 'rectangle', a: 'arrow', t: 'text', p: 'pen', h: 'highlight', e: 'eraser', n: 'number', m: 'mosaic', b: 'solid', x: 'crop' } as Record<string, Tool>)[key]; if (next) chooseTool(next); }
 });
 clearGesture(); controls();
+const cleanupListeners: Array<() => void> = [];
+window.addEventListener('beforeunload', () => {
+  cancelPointerRender();
+  if (placementFrame) { cancelAnimationFrame(placementFrame); placementFrame = 0; }
+  workspaceObserver.disconnect(); toolbarObserver.disconnect(); canvasObserver.disconnect();
+  for (const unlisten of cleanupListeners) unlisten();
+});
 if (desktop) {
   // Register before the snapshot; monotonic session ids reject delayed delivery.
   void (async () => {
-    await listen<IncomingSession | null>('screenshot-session', event => { void acceptSession(event.payload); });
-    await listen<{ id: number }>('screenshot-session-cleared', event => {
-      const id = event.payload.id;
-      if (!Number.isSafeInteger(id)) return;
-      latestId = Math.max(latestId, id); // Tombstone even a clear preceding startup replay.
-      if (session?.id === id) void acceptSession(null);
-    });
-    await listen<{ sessionId: number; key: string }>('screenshot-overlay-key', event => {
-      if (textFocusPending || !inplace() || event.payload.sessionId !== session?.id || composing || textOpen() || dialogOpen(discardDialog)
-        || document.activeElement instanceof HTMLInputElement || document.activeElement instanceof HTMLTextAreaElement || document.activeElement instanceof HTMLSelectElement) return;
-      if (event.payload.key === 'Enter') void exportImage('copy');
-      else if (event.payload.key === 'Escape') { if (gesture || moveGesture) cancelPointer(); else if (selectedIndex !== null) { selectedIndex = null; selectionOutline(); } else void closeEditor(); }
-    });
-    await listen('screenshot-close-requested', () => { void closeEditor(); });
+    const unlisteners = await Promise.all([
+      listen<IncomingSession | null>('screenshot-session', event => { void acceptSession(event.payload); }),
+      listen<{ id: number }>('screenshot-session-cleared', event => {
+        const id = event.payload.id;
+        if (!Number.isSafeInteger(id)) return;
+        latestId = Math.max(latestId, id); // Tombstone even a clear preceding startup replay.
+        if (session?.id === id) void acceptSession(null);
+      }),
+      listen<{ sessionId: number; key: string }>('screenshot-overlay-key', event => {
+        if (textFocusPending || !inplace() || event.payload.sessionId !== session?.id || composing || textOpen() || dialogOpen(discardDialog)
+          || document.activeElement instanceof HTMLInputElement || document.activeElement instanceof HTMLTextAreaElement || document.activeElement instanceof HTMLSelectElement) return;
+        if (event.payload.key === 'Enter') void exportImage('copy');
+        else if (event.payload.key === 'Escape') { if (gesture || moveGesture) cancelPointer(); else if (selectedIndex !== null) { selectedIndex = null; selectionOutline(); } else void closeEditor(); }
+      }),
+      listen('screenshot-close-requested', () => { void closeEditor(); }),
+    ]);
+    cleanupListeners.push(...unlisteners);
     const snapshot = await invoke<IncomingSession | null>('get_screenshot_session');
     if (snapshot) await acceptSession(snapshot);
   })().catch(error => status(`截图窗口初始化失败：${readableError(error)}`, true));

@@ -8,17 +8,33 @@ export function installPopupScrollbar(): () => void {
   rail.tabIndex = 0; rail.setAttribute('role', 'scrollbar'); rail.setAttribute('aria-label', '滚动翻译内容');
   rail.setAttribute('aria-controls', view.id); rail.setAttribute('aria-orientation', 'vertical');
   const thumb = document.createElement('div'); thumb.className = 'popup-scroll-thumb'; rail.append(thumb); document.body.append(rail);
-  let pointer: number | null = null, startY = 0, startScroll = 0, travel = 1, maximum = 0;
+  let pointer: number | null = null, startY = 0, startScroll = 0, travel = 1, maximum = 0, frame = 0;
   const update = () => {
-    const box = view.getBoundingClientRect(); maximum = Math.max(0, view.scrollHeight - view.clientHeight);
-    rail.hidden = document.body.dataset.view !== 'translate' || document.body.classList.contains('modal-open') || maximum <= 0;
-    if (rail.hidden) pointer = null;
+    frame = 0;
+    if (document.body.dataset.view !== 'translate' || document.body.classList.contains('modal-open')) {
+      pointer = null;
+      rail.hidden = true;
+      return;
+    }
+    const box = view.getBoundingClientRect();
+    const scrollHeight = view.scrollHeight, clientHeight = view.clientHeight, scrollTop = view.scrollTop;
+    maximum = Math.max(0, scrollHeight - clientHeight);
+    if (maximum <= 0) {
+      pointer = null;
+      rail.hidden = true;
+      return;
+    }
+    rail.hidden = false;
     rail.style.top = `${box.top}px`; rail.style.height = `${box.height}px`;
-    const height = Math.min(box.height, Math.max(24, box.height * view.clientHeight / Math.max(1, view.scrollHeight)));
+    const height = Math.min(box.height, Math.max(24, box.height * clientHeight / Math.max(1, scrollHeight)));
     travel = Math.max(1, box.height - height); thumb.style.height = `${height}px`;
-    thumb.style.transform = `translateY(${maximum ? view.scrollTop / maximum * travel : 0}px)`;
+    thumb.style.transform = `translateY(${scrollTop / maximum * travel}px)`;
     rail.setAttribute('aria-valuemin', '0'); rail.setAttribute('aria-valuemax', String(maximum));
-    rail.setAttribute('aria-valuenow', String(Math.round(view.scrollTop)));
+    rail.setAttribute('aria-valuenow', String(Math.round(scrollTop)));
+  };
+  const scheduleUpdate = () => {
+    if (frame) return;
+    frame = requestAnimationFrame(update);
   };
   const down = (event: PointerEvent) => {
     if (event.button !== 0 || rail.hidden) return;
@@ -37,10 +53,10 @@ export function installPopupScrollbar(): () => void {
   };
   rail.addEventListener('pointerdown', down); rail.addEventListener('pointermove', move);
   rail.addEventListener('pointerup', end); rail.addEventListener('pointercancel', end); rail.addEventListener('lostpointercapture', end); rail.addEventListener('keydown', key);
-  view.addEventListener('scroll', update); window.addEventListener('resize', update);
-  const resize = new ResizeObserver(update); resize.observe(view); if (view.firstElementChild) resize.observe(view.firstElementChild);
-  const mutation = new MutationObserver(update); mutation.observe(view, { childList: true, subtree: true, characterData: true });
+  view.addEventListener('scroll', scheduleUpdate, { passive: true }); window.addEventListener('resize', scheduleUpdate);
+  const resize = new ResizeObserver(scheduleUpdate); resize.observe(view); if (view.firstElementChild) resize.observe(view.firstElementChild);
+  const mutation = new MutationObserver(scheduleUpdate); mutation.observe(view, { childList: true, subtree: true, characterData: true });
   mutation.observe(document.body, { attributes: true, attributeFilter: ['data-view', 'class'] });
   update();
-  return () => { resize.disconnect(); mutation.disconnect(); view.removeEventListener('scroll', update); window.removeEventListener('resize', update); rail.remove(); };
+  return () => { cancelAnimationFrame(frame); resize.disconnect(); mutation.disconnect(); view.removeEventListener('scroll', scheduleUpdate); window.removeEventListener('resize', scheduleUpdate); rail.remove(); };
 }

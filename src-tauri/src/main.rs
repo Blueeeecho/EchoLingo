@@ -111,12 +111,16 @@ fn verify_application_policy(app: &tauri::AppHandle, phase: &'static str) -> Res
             phase.to_owned(),
             serde_json::json!({ "recordedAtUnixMs": now(), "metadata": metadata }),
         );
-        let _ = write_json(
-            &app.state::<AppState>()
-                .data_dir
-                .join("window-policy-diagnostics.json"),
-            &*observations,
-        );
+        // Avoid synchronous main-thread fsync on every popup/capture show;
+        // write to disk once at setup or if the accessory policy ever fails.
+        if phase == "setup" || !accessory {
+            let _ = write_json(
+                &app.state::<AppState>()
+                    .data_dir
+                    .join("window-policy-diagnostics.json"),
+                &*observations,
+            );
+        }
         if !accessory {
             return Err("WINDOW_POLICY: macOS 菜单栏应用模式未生效，请重新打开 EchoLingo。".into());
         }
@@ -682,40 +686,54 @@ fn ocr_deletion_accounts(p: &ocr::OcrProvider) -> Vec<String> {
     accounts
 }
 #[tauri::command]
-fn set_ocr_api_key(state: State<AppState>, provider_id: String, key: String) -> Result<(), String> {
-    let provider = locked(&state.settings)?
-        .ocr_providers
-        .iter()
-        .find(|p| p.id == provider_id)
-        .cloned()
-        .ok_or("请先保存 OCR 服务配置")?;
-    if key.is_empty() || key.len() > 8192 {
-        return Err("OCR API 凭据为空或超过长度上限".into());
-    }
-    if ocr_native::is_native(&provider.kind) {
-        ocr_native::validate_credentials(&provider.kind, &key)?;
-    } else if key.contains(['\r', '\n']) {
-        return Err("OCR API 密钥不能包含换行".into());
-    }
-    let cache_key = ocr_credential_key(&provider)?;
-    let stored = encode_credential(ocr_credential_scope(&provider)?, key.clone())?;
-    secret_entry(&ocr_secret_id(&provider))?
-        .set_password(&stored)
-        .map_err(|_| "无法将 OCR 密钥保存到系统凭据库".to_string())?;
-    state.credentials.store(&cache_key, Ok(key))
+async fn set_ocr_api_key(
+    app: tauri::AppHandle,
+    provider_id: String,
+    key: String,
+) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        let provider = locked(&state.settings)?
+            .ocr_providers
+            .iter()
+            .find(|p| p.id == provider_id)
+            .cloned()
+            .ok_or("请先保存 OCR 服务配置")?;
+        if key.is_empty() || key.len() > 8192 {
+            return Err("OCR API 凭据为空或超过长度上限".into());
+        }
+        if ocr_native::is_native(&provider.kind) {
+            ocr_native::validate_credentials(&provider.kind, &key)?;
+        } else if key.contains(['\r', '\n']) {
+            return Err("OCR API 密钥不能包含换行".into());
+        }
+        let cache_key = ocr_credential_key(&provider)?;
+        let stored = encode_credential(ocr_credential_scope(&provider)?, key.clone())?;
+        secret_entry(&ocr_secret_id(&provider))?
+            .set_password(&stored)
+            .map_err(|_| "无法将 OCR 密钥保存到系统凭据库".to_string())?;
+        state.credentials.store(&cache_key, Ok(key))
+    })
+    .await
+    .map_err(|_| "保存 OCR 密钥任务被中断".to_string())?
 }
 #[tauri::command]
-fn delete_ocr_api_key(state: State<AppState>, provider_id: String) -> Result<(), String> {
-    let provider = locked(&state.settings)?
-        .ocr_providers
-        .iter()
-        .find(|p| p.id == provider_id)
-        .cloned()
-        .ok_or("OCR 服务不存在")?;
-    for account in ocr_deletion_accounts(&provider) {
-        delete_stored_key(&state.credentials, &account)?;
-    }
-    Ok(())
+async fn delete_ocr_api_key(app: tauri::AppHandle, provider_id: String) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        let provider = locked(&state.settings)?
+            .ocr_providers
+            .iter()
+            .find(|p| p.id == provider_id)
+            .cloned()
+            .ok_or("OCR 服务不存在")?;
+        for account in ocr_deletion_accounts(&provider) {
+            delete_stored_key(&state.credentials, &account)?;
+        }
+        Ok(())
+    })
+    .await
+    .map_err(|_| "删除 OCR 密钥任务被中断".to_string())?
 }
 #[tauri::command]
 async fn test_ocr_provider(
@@ -1513,41 +1531,55 @@ fn persist_settings_and_history(
     Ok(())
 }
 #[tauri::command]
-fn set_api_key(state: State<AppState>, provider_id: String, key: String) -> Result<(), String> {
-    let provider = locked(&state.settings)?
-        .providers
-        .iter()
-        .find(|p| p.id == provider_id)
-        .cloned()
-        .ok_or("请先保存服务配置，再保存密钥")?;
-    if local_translation_provider(&provider.kind) {
-        return Err("本机翻译无需 API 密钥".into());
-    }
-    if key.is_empty() || key.len() > 8192 || key.contains(['\r', '\n']) {
-        return Err("API 密钥为空、过长或包含换行".into());
-    }
-    if translation::native::is_native(&provider.kind) {
-        translation::native::validate_credentials(&provider.kind, &key)?;
-    }
-    let cache_key = translation_credential_key(&provider)?;
-    let stored = encode_credential(translation_credential_scope(&provider)?, key.clone())?;
-    secret_entry(&translation_secret_id(&provider))?
-        .set_password(&stored)
-        .map_err(|_| "无法保存到系统凭据库；密钥没有保存到文件".to_string())?;
-    state.credentials.store(&cache_key, Ok(key))
+async fn set_api_key(
+    app: tauri::AppHandle,
+    provider_id: String,
+    key: String,
+) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        let provider = locked(&state.settings)?
+            .providers
+            .iter()
+            .find(|p| p.id == provider_id)
+            .cloned()
+            .ok_or("请先保存服务配置，再保存密钥")?;
+        if local_translation_provider(&provider.kind) {
+            return Err("本机翻译无需 API 密钥".into());
+        }
+        if key.is_empty() || key.len() > 8192 || key.contains(['\r', '\n']) {
+            return Err("API 密钥为空、过长或包含换行".into());
+        }
+        if translation::native::is_native(&provider.kind) {
+            translation::native::validate_credentials(&provider.kind, &key)?;
+        }
+        let cache_key = translation_credential_key(&provider)?;
+        let stored = encode_credential(translation_credential_scope(&provider)?, key.clone())?;
+        secret_entry(&translation_secret_id(&provider))?
+            .set_password(&stored)
+            .map_err(|_| "无法保存到系统凭据库；密钥没有保存到文件".to_string())?;
+        state.credentials.store(&cache_key, Ok(key))
+    })
+    .await
+    .map_err(|_| "保存密钥任务被中断".to_string())?
 }
 #[tauri::command]
-fn delete_api_key(state: State<AppState>, provider_id: String) -> Result<(), String> {
-    let provider = locked(&state.settings)?
-        .providers
-        .iter()
-        .find(|p| p.id == provider_id)
-        .cloned()
-        .ok_or("翻译服务不存在")?;
-    if local_translation_provider(&provider.kind) {
-        return Err("本机翻译不使用 API 密钥".into());
-    }
-    delete_stored_key(&state.credentials, &translation_secret_id(&provider))
+async fn delete_api_key(app: tauri::AppHandle, provider_id: String) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        let provider = locked(&state.settings)?
+            .providers
+            .iter()
+            .find(|p| p.id == provider_id)
+            .cloned()
+            .ok_or("翻译服务不存在")?;
+        if local_translation_provider(&provider.kind) {
+            return Err("本机翻译不使用 API 密钥".into());
+        }
+        delete_stored_key(&state.credentials, &translation_secret_id(&provider))
+    })
+    .await
+    .map_err(|_| "删除密钥任务被中断".to_string())?
 }
 fn delete_stored_key(
     cache: &credential_cache::CredentialCache<String>,
@@ -1726,14 +1758,21 @@ async fn translate(
                 Ok::<_, String>((resolved_source, resolved_target, results))
             })
             .await??;
-        finish_translation(
-            &state,
-            request_id,
-            text,
-            resolved_source,
-            resolved_target,
-            &results,
-        )?;
+        let finish_app = app.clone();
+        let finish_results = results.clone();
+        tauri::async_runtime::spawn_blocking(move || {
+            let state = finish_app.state::<AppState>();
+            finish_translation(
+                &state,
+                request_id,
+                text,
+                resolved_source,
+                resolved_target,
+                &finish_results,
+            )
+        })
+        .await
+        .map_err(|_| "保存翻译历史任务被中断".to_string())??;
         Ok(results)
     }
     .await;
@@ -1866,38 +1905,44 @@ fn get_history(state: State<AppState>) -> Result<Vec<HistoryEntry>, String> {
     Ok(locked(&state.history)?.clone())
 }
 #[tauri::command]
-fn toggle_favorite(state: State<AppState>, id: String) -> Result<(), String> {
-    let mut h = locked(&state.history)?;
-    let mut updated = h.clone();
-    let item = updated
-        .iter_mut()
-        .find(|v| v.id == id)
-        .ok_or("历史记录不存在")?;
-    item.favorite = !item.favorite;
-    write_json(&state.data_dir.join("history.json"), &updated)?;
-    *h = updated;
-    Ok(())
+async fn toggle_favorite(app: tauri::AppHandle, id: String) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        let mut h = locked(&state.history)?;
+        let mut updated = h.clone();
+        let item = updated
+            .iter_mut()
+            .find(|v| v.id == id)
+            .ok_or("历史记录不存在")?;
+        item.favorite = !item.favorite;
+        write_json(&state.data_dir.join("history.json"), &updated)?;
+        *h = updated;
+        Ok(())
+    })
+    .await
+    .map_err(|_| "收藏操作被中断".to_string())?
 }
 #[tauri::command]
-fn delete_history(
-    app: tauri::AppHandle,
-    state: State<AppState>,
-    id: Option<String>,
-) -> Result<(), String> {
-    // Clearing history must not be undone by an older in-flight request.
-    if id.is_none() {
-        announce_presentation(&app, state.translation_requests.invalidate()?);
-    }
-    let mut h = locked(&state.history)?;
-    let mut updated = h.clone();
-    if let Some(id) = id {
-        updated.retain(|v| v.id != id)
-    } else {
-        updated.clear()
-    };
-    write_json(&state.data_dir.join("history.json"), &updated)?;
-    *h = updated;
-    Ok(())
+async fn delete_history(app: tauri::AppHandle, id: Option<String>) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        // Clearing history must not be undone by an older in-flight request.
+        if id.is_none() {
+            announce_presentation(&app, state.translation_requests.invalidate()?);
+        }
+        let mut h = locked(&state.history)?;
+        let mut updated = h.clone();
+        if let Some(id) = id {
+            updated.retain(|v| v.id != id)
+        } else {
+            updated.clear()
+        };
+        write_json(&state.data_dir.join("history.json"), &updated)?;
+        *h = updated;
+        Ok(())
+    })
+    .await
+    .map_err(|_| "删除历史操作被中断".to_string())?
 }
 
 fn prepare_input_presentation(
@@ -2652,12 +2697,6 @@ fn start_action(app: tauri::AppHandle, action: String) {
             } else {
                 None
             };
-            #[cfg(not(target_os = "windows"))]
-            if worker_action != "selection" {
-                // Selection already waits for modifier release before Copy.
-                // Do not postpone its initial AX/focus read by another 180 ms.
-                std::thread::sleep(Duration::from_millis(180));
-            }
             if worker_request.cancelled() {
                 return Err(translation_requests::CANCELLED.into());
             }
@@ -3567,14 +3606,18 @@ fn main() {
             add_offline_translation_option(&mut settings);
             migrate_language_direction(&mut settings);
             migrate_shortcut_defaults(&mut settings);
+            let history_path = data_dir.join("history.json");
             let mut history: Vec<HistoryEntry> = startup_storage::load(
-                &data_dir.join("history.json"),
+                &history_path,
                 |bytes| serde_json::from_slice(bytes).ok(),
                 Vec::new,
                 "历史文件",
                 &mut warnings,
             )?;
-            trim_history(&mut history, settings.max_history);
+            let history_bytes = fs::metadata(&history_path).map_or(0, |m| m.len() as usize);
+            if history.len() > settings.max_history || history_bytes > MAX_HISTORY_BYTES {
+                trim_history(&mut history, settings.max_history);
+            }
             let client = reqwest::Client::builder()
                 .timeout(Duration::from_secs(45))
                 .connect_timeout(Duration::from_secs(12))

@@ -8,6 +8,7 @@ use std::{
     io::Read,
     path::{Component, Path, PathBuf},
     process::Stdio,
+    sync::atomic::{AtomicBool, Ordering},
     time::{Duration, Instant},
 };
 use tokio::{
@@ -25,6 +26,7 @@ const ENGINE_ERROR: &str = "本机离线翻译未能完成，请缩短原文后�
 pub struct OfflineTranslation {
     root: PathBuf,
     worker: Mutex<Option<Worker>>,
+    validated: AtomicBool,
 }
 
 struct Worker {
@@ -124,6 +126,7 @@ impl OfflineTranslation {
         Self {
             root,
             worker: Mutex::new(None),
+            validated: AtomicBool::new(false),
         }
     }
 
@@ -132,10 +135,13 @@ impl OfflineTranslation {
         if !std::is_x86_feature_detected!("sse4.1") {
             return Err("内置离线翻译需要支持 SSE4.1 的处理器，请改用你配置的 API 服务".into());
         }
-        let root = self.root.clone();
-        tokio::task::spawn_blocking(move || validate_resources(&root))
-            .await
-            .map_err(|_| RESOURCE_ERROR)??;
+        if !self.validated.load(Ordering::Acquire) {
+            let root = self.root.clone();
+            tokio::task::spawn_blocking(move || validate_resources(&root))
+                .await
+                .map_err(|_| RESOURCE_ERROR)??;
+            self.validated.store(true, Ordering::Release);
+        }
         let executable = self.root.join("bin").join(if cfg!(windows) {
             "echolingo-offline-engine.exe"
         } else {

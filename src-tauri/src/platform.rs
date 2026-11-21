@@ -310,10 +310,7 @@ fn run_macos_capture_cancelable_input(
     cancel: NativeCancel,
     input: Option<&str>,
 ) -> Result<Value, String> {
-    use std::sync::{
-        atomic::{AtomicBool, Ordering},
-        Arc,
-    };
+    use std::sync::{atomic::Ordering, Arc, Condvar, Mutex};
     // Register before the watcher can cancel, so cancellation cannot get lost
     // while AppKit presentation is queued. Tokens isolate repeated screenshot and OCR requests.
     let operation = run("begin-native-capture", None)?
@@ -322,21 +319,26 @@ fn run_macos_capture_cancelable_input(
         .filter(|id| id.len() == 36)
         .ok_or("NATIVE_PROTOCOL: Missing screenshot operation.")?
         .to_owned();
-    let finished = Arc::new(AtomicBool::new(false));
+    let finished = Arc::new((Mutex::new(false), Condvar::new()));
     let watching = finished.clone();
     let cancellation = cancel.clone();
     let watched_operation = operation.clone();
     let watcher = std::thread::Builder::new()
         .name("screenshot-cancel".into())
         .spawn(move || {
-            while !watching.load(Ordering::SeqCst) {
+            let (lock, cvar) = &*watching;
+            let mut done = lock.lock().unwrap_or_else(|e| e.into_inner());
+            while !*done {
                 if cancellation.load(Ordering::SeqCst) {
                     // Cancellation is outside the serialized capture lock. Swift
                     // only flips this request's flag; its own main-thread session
                     // disposes panels/monitors, never another request's selector.
                     return run("cancel-native-capture", Some(&watched_operation)).map(|_| ());
                 }
-                std::thread::sleep(std::time::Duration::from_millis(20));
+                let (guard, _) = cvar
+                    .wait_timeout(done, std::time::Duration::from_millis(20))
+                    .unwrap_or_else(|e| e.into_inner());
+                done = guard;
             }
             Ok(())
         });
@@ -361,7 +363,11 @@ fn run_macos_capture_cancelable_input(
             run(mode, Some(&operation))
         }
     };
-    finished.store(true, Ordering::SeqCst);
+    {
+        let (lock, cvar) = &*finished;
+        *lock.lock().unwrap_or_else(|e| e.into_inner()) = true;
+        cvar.notify_all();
+    }
     let cancellation_result = watcher
         .join()
         .map_err(|_| "CAPTURE: Screenshot cancellation watcher failed.");

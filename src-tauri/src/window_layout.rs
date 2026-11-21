@@ -95,6 +95,8 @@ pub struct LayoutState {
     layout_revision: std::sync::atomic::AtomicU64,
     #[cfg(target_os = "macos")]
     popup_drag: Mutex<PopupDrag>,
+    #[cfg(target_os = "macos")]
+    mac_observer_installed: AtomicBool,
     drag_diagnostics: Mutex<crate::popup_drag_diagnostics::Diagnostics>,
     #[cfg(target_os = "windows")]
     native_sizing: Mutex<NativeSizing>,
@@ -113,6 +115,8 @@ impl Default for LayoutState {
             layout_revision: std::sync::atomic::AtomicU64::new(0),
             #[cfg(target_os = "macos")]
             popup_drag: Mutex::new(PopupDrag::default()),
+            #[cfg(target_os = "macos")]
+            mac_observer_installed: AtomicBool::new(false),
             drag_diagnostics: Mutex::new(crate::popup_drag_diagnostics::Diagnostics::default()),
             #[cfg(target_os = "windows")]
             native_sizing: Mutex::new(NativeSizing::default()),
@@ -152,26 +156,51 @@ impl LayoutState {
         drop(popup);
         std::thread::spawn(move || loop {
             std::thread::sleep(Duration::from_millis(200));
+            let (preferred, target_revision) = {
+                let Ok(mut popup) = shared.lock() else {
+                    return;
+                };
+                if popup.revision != revision {
+                    revision = popup.revision;
+                    continue;
+                }
+                (popup.preferred, popup.revision)
+            };
+            let saved = write_saved_width(&directory, preferred).is_ok();
             let Ok(mut popup) = shared.lock() else {
                 return;
             };
-            if popup.revision != revision {
+            if saved {
+                popup.saved_revision = target_revision;
+            }
+            if popup.revision != target_revision {
                 revision = popup.revision;
                 continue;
             }
-            let _ = write_saved_width(&directory, popup.preferred);
             popup.save_pending = false;
             return;
         });
     }
 
-    /// Optional shutdown flush; also serializes with a pending debounced write.
+    /// Optional shutdown flush; skips disk fsync if popup width did not change.
     pub fn flush(&self) -> Result<(), String> {
         let Some(directory) = &self.data_dir else {
             return Ok(());
         };
-        let popup = self.popup.lock().map_err(|_| "窗口布局状态异常")?;
-        write_saved_width(directory, popup.preferred)
+        let (preferred, target_revision) = {
+            let popup = self.popup.lock().map_err(|_| "窗口布局状态异常")?;
+            if popup.revision == popup.saved_revision {
+                return Ok(());
+            }
+            (popup.preferred, popup.revision)
+        };
+        write_saved_width(directory, preferred)?;
+        if let Ok(mut popup) = self.popup.lock() {
+            if popup.revision == target_revision {
+                popup.saved_revision = target_revision;
+            }
+        }
+        Ok(())
     }
 }
 
@@ -331,6 +360,7 @@ struct PopupWidth {
     preferred: f64,
     applied: Option<AppliedWidth>,
     revision: u64,
+    saved_revision: u64,
     save_pending: bool,
 }
 impl PopupWidth {
@@ -341,6 +371,7 @@ impl PopupWidth {
                 .unwrap_or(DEFAULT_POPUP_WIDTH),
             applied: None,
             revision: 0,
+            saved_revision: 0,
             save_pending: false,
         }
     }
@@ -687,6 +718,13 @@ mod native_resize {
     unsafe extern "system" {
         fn GetCurrentThreadId() -> u32;
     }
+    fn resize_probe_enabled() -> bool {
+        static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        *ENABLED.get_or_init(|| {
+            std::env::var_os("ECHOLINGO_NATIVE_RESIZE_PROBE").as_deref()
+                == Some(std::ffi::OsStr::new("1"))
+        })
+    }
     struct ResizeFilter {
         hook: Handle,
         window: Handle,
@@ -695,9 +733,7 @@ mod native_resize {
         fn install(window: Handle) -> Option<Self> {
             // Opt-in fixture observation only. No global hook, no user runtime
             // dependency, and failure must not change normal sizing behavior.
-            if std::env::var_os("ECHOLINGO_NATIVE_RESIZE_PROBE").as_deref()
-                != Some(std::ffi::OsStr::new("1"))
-                || RESIZE_FILTER.with(|value| !value.get().window.is_null())
+            if !resize_probe_enabled() || RESIZE_FILTER.with(|value| !value.get().window.is_null())
             {
                 return None;
             }
@@ -856,6 +892,9 @@ mod native_resize {
         unsafe { SetPropW(window, diagnostic_key(name).as_ptr(), value as Handle) != 0 }
     }
     fn diagnostic_write(window: Handle, reset: bool, values: &[(&str, isize)]) {
+        if !resize_probe_enabled() {
+            return;
+        }
         let previous = diagnostic_get(window, "version");
         // Only a full new ENTER snapshot can recover a failed partial write.
         if !reset && (previous == 0 || previous & 1 != 0) {
@@ -875,6 +914,9 @@ mod native_resize {
         }
     }
     fn diagnostic_enter(window: Handle) {
+        if !resize_probe_enabled() {
+            return;
+        }
         let mut point = Point { x: 0, y: 0 };
         if unsafe { GetCursorPos(&mut point) } == 0 {
             diagnostic_set(window, "version", 0);
@@ -925,6 +967,9 @@ mod native_resize {
         requested: DiagnosticRect,
         returned: DiagnosticRect,
     ) {
+        if !resize_probe_enabled() {
+            return;
+        }
         diagnostic_write(
             window,
             false,
@@ -1192,6 +1237,42 @@ fn layout_viewport(
     })
 }
 
+#[cfg(target_os = "macos")]
+#[allow(clippy::too_many_arguments)]
+fn finish_mac_fit(
+    app: &tauri::AppHandle,
+    native: &WebviewWindow,
+    revision: u64,
+    expected: &Result<crate::translation_requests::Presentation, String>,
+    gate_epoch: u64,
+    management: bool,
+    height: f64,
+    content_width: Option<f64>,
+) -> Result<Option<LayoutViewport>, String> {
+    let current = app
+        .state::<crate::AppState>()
+        .translation_requests
+        .presentation();
+    if expected.is_err()
+        || &current != expected
+        || !current_layout_request(
+            revision,
+            app.state::<LayoutState>()
+                .layout_revision
+                .load(Ordering::SeqCst),
+            true,
+            native.is_decorated().ok(),
+        )
+    {
+        return Err(crate::translation_requests::CANCELLED.into());
+    }
+    let state = app.state::<LayoutState>();
+    finish_native_resize_at_idle(native, &state, gate_epoch)?;
+    configure_mac_window_frame(native, management)?;
+    fit_inner(native, &state, management, height, content_width)?;
+    layout_viewport(native, gate_epoch).map(Some)
+}
+
 pub async fn fit(
     window: &WebviewWindow,
     state: &LayoutState,
@@ -1269,20 +1350,33 @@ pub async fn fit(
                             return;
                         }
                         // Tao maintains its own decoration flag but applies the
-                        // AppKit style mask asynchronously. Queue our continuation
-                        // after that change, before measuring frame/content sizes.
-                        let preparation = native
-                            .is_decorated()
-                            .map_err(|_| "无法读取窗口外观")
-                            .and_then(|decorated| {
-                                if !decorated {
-                                    native.set_decorations(true).map_err(|_| "无法调整窗口外观")
-                                } else {
-                                    Ok(())
+                        // AppKit style mask asynchronously. Only queue an extra
+                        // turnaround when decorations actually changed.
+                        let decorations_changed = match native.is_decorated() {
+                            Ok(true) => false,
+                            Ok(false) => match native.set_decorations(true) {
+                                Ok(()) => true,
+                                Err(_) => {
+                                    let _ = reply.send(Err("无法调整窗口外观".into()));
+                                    return;
                                 }
-                            });
-                        if let Err(error) = preparation {
-                            let _ = reply.send(Err(error.into()));
+                            },
+                            Err(_) => {
+                                let _ = reply.send(Err("无法读取窗口外观".into()));
+                                return;
+                            }
+                        };
+                        if !decorations_changed {
+                            let _ = reply.send(finish_mac_fit(
+                                &app,
+                                &native,
+                                revision,
+                                &expected,
+                                gate_epoch,
+                                management,
+                                height,
+                                content_width,
+                            ));
                             return;
                         }
                         after_mac_window_changes(move || {
@@ -1308,44 +1402,16 @@ pub async fn fit(
                                         .send(Err(crate::translation_requests::CANCELLED.into()));
                                     return;
                                 }
-                                let current = app
-                                    .state::<crate::AppState>()
-                                    .translation_requests
-                                    .presentation();
-                                if expected.is_err()
-                                    || current != expected
-                                    || !current_layout_request(
-                                        revision,
-                                        app.state::<LayoutState>()
-                                            .layout_revision
-                                            .load(Ordering::SeqCst),
-                                        true,
-                                        native.is_decorated().ok(),
-                                    )
-                                {
-                                    let _ = reply
-                                        .send(Err(crate::translation_requests::CANCELLED.into()));
-                                    return;
-                                }
-                                let state = app.state::<LayoutState>();
-                                let value =
-                                    finish_native_resize_at_idle(&native, &state, gate_epoch)
-                                        .and_then(|_| {
-                                            configure_mac_window_frame(&native, management)
-                                        })
-                                        .and_then(|_| {
-                                            fit_inner(
-                                                &native,
-                                                &state,
-                                                management,
-                                                height,
-                                                content_width,
-                                            )
-                                        })
-                                        .and_then(|_| {
-                                            layout_viewport(&native, gate_epoch).map(Some)
-                                        });
-                                let _ = reply.send(value);
+                                let _ = reply.send(finish_mac_fit(
+                                    &app,
+                                    &native,
+                                    revision,
+                                    &expected,
+                                    gate_epoch,
+                                    management,
+                                    height,
+                                    content_width,
+                                ));
                             });
                         });
                     });
@@ -1654,7 +1720,10 @@ fn fit_inner(
         .translation_requests
         .presentation()?;
     #[cfg(target_os = "macos")]
-    install_mac_resize_observer(window)?;
+    if !state.mac_observer_installed.load(Ordering::Acquire) {
+        install_mac_resize_observer(window)?;
+        state.mac_observer_installed.store(true, Ordering::Release);
+    }
     let manual = state.manual_height.lock().map_err(|_| "窗口布局状态异常")?;
     let automatic_height = !management
         && !manual

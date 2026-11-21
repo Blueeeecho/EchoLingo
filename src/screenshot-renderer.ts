@@ -17,13 +17,15 @@ function strokePath(ctx: CanvasRenderingContext2D, points: readonly Point[], wid
   if (points.length === 1) { ctx.beginPath(); ctx.arc(points[0].x, points[0].y, width / 2, 0, Math.PI * 2); ctx.fill(); return; }
   ctx.beginPath(); ctx.moveTo(points[0].x, points[0].y); for (const point of points.slice(1)) ctx.lineTo(point.x, point.y); ctx.stroke();
 }
+let strokeScratchCanvas: HTMLCanvasElement | null = null;
 function drawStroke(ctx: CanvasRenderingContext2D, operation: StrokeOperation, width: number, height: number): void {
   // Erasure is isolated to this transparent annotation surface. Never use
   // destination-out on the source image or any mosaic/opaque privacy mask.
   const bounds = operationBounds(operation), x = Math.max(0, Math.floor(bounds.x)), y = Math.max(0, Math.floor(bounds.y));
   const right = Math.min(width, Math.ceil(bounds.x + bounds.width)), bottom = Math.min(height, Math.ceil(bounds.y + bounds.height));
   if (right <= x || bottom <= y) return;
-  const layer = document.createElement('canvas'); layer.width = right - x; layer.height = bottom - y;
+  const layer = strokeScratchCanvas ?? (strokeScratchCanvas = document.createElement('canvas'));
+  layer.width = right - x; layer.height = bottom - y;
   const paint = context(layer); paint.translate(-x, -y); paint.fillStyle = operation.color; paint.strokeStyle = operation.color;
   strokePath(paint, operation.points, operation.width);
   paint.globalCompositeOperation = 'destination-out';
@@ -34,8 +36,12 @@ function drawStroke(ctx: CanvasRenderingContext2D, operation: StrokeOperation, w
 /** Each render starts with the immutable decoded source. Crops change actual
  * canvas dimensions, not a viewport or exported hidden layer. */
 export function renderScreenshot(canvas: HTMLCanvasElement, original: CanvasImageSource, size: Size, operations: readonly EditOperation[]): void {
-  canvas.width = size.width; canvas.height = size.height;
-  let ctx = context(canvas); ctx.drawImage(original, 0, 0, size.width, size.height);
+  if (canvas.width !== size.width || canvas.height !== size.height) {
+    canvas.width = size.width; canvas.height = size.height;
+  }
+  let ctx = context(canvas);
+  ctx.clearRect(0, 0, size.width, size.height);
+  ctx.drawImage(original, 0, 0, size.width, size.height);
   for (const operation of operations) {
     if (operation.kind === 'crop') {
       const { x, y, width, height } = operation.rect;
