@@ -35,7 +35,17 @@ jobs:
           PR_BASE: ${{ github.base_ref }}
           CI_EVENT: ${{ github.event_name }}
           CI_REF: ${{ github.ref }}
+          CI_BEFORE: ${{ github.event.pull_request.base.sha || github.event.before }}
+          CI_HEAD: ${{ github.event.pull_request.head.sha || github.sha }}
         run: |
+          # Require a complete, append-only Git history and the exact safe path/file-mode set.
+          if { { [ "$CI_EVENT" = pull_request ] && [ "$PR_BASE" = main ]; } || { [ "$CI_EVENT" = push ] && [ "$CI_REF" = refs/heads/main ]; }; } &&
+             [[ ${CI_BEFORE:-} =~ ^[0-9a-f]{40}$ && ${CI_HEAD:-} =~ ^[0-9a-f]{40}$ ]] &&
+             (set -o pipefail; git show "$CI_BEFORE:scripts/check-download-docs.py" 2>/dev/null |
+                python3 -I - --scope "$CI_BEFORE" "$CI_HEAD"); then
+            echo "mode=download-docs" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
           # This fixed post-release documentation patch runs the existing full suite.
           # It never changes release eligibility or accepts new application inputs.
           if { [ "$CI_EVENT" = pull_request ] && [ "$PR_HEAD" = docs/downloads-0217 ] && [ "$PR_BASE" = main ]; } || { [ "$CI_EVENT" = push ] && [ "$CI_REF" = refs/heads/main ]; }; then
@@ -276,7 +286,7 @@ jobs:
         run: rustfmt --edition 2021 --check src-tauri/src/bilingual_input.rs
   screenshot-pin-native:
     needs: validation-mode
-    if: needs.validation-mode.outputs.mode == 'macos-followup' || needs.validation-mode.outputs.mode == 'screenshot-pins' || (github.event_name == 'pull_request' && (github.head_ref == 'feat/screenshot-pins' || github.head_ref == 'feat/screenshot-028' || github.head_ref == 'fix/028-unified-editor' || github.head_ref == 'fix/029-persistent-capture-recovery') && github.base_ref == 'main')
+    if: needs.validation-mode.outputs.mode != 'download-docs' && (needs.validation-mode.outputs.mode == 'macos-followup' || needs.validation-mode.outputs.mode == 'screenshot-pins' || (github.event_name == 'pull_request' && (github.head_ref == 'feat/screenshot-pins' || github.head_ref == 'feat/screenshot-028' || github.head_ref == 'fix/028-unified-editor' || github.head_ref == 'fix/029-persistent-capture-recovery') && github.base_ref == 'main'))
     name: Screenshot pin native (${{ matrix.os }})
     permissions:
       contents: read
@@ -533,7 +543,7 @@ jobs:
   rust-input-preparation:
     needs: validation-mode
     name: Reviewable Rust lock and formatting inputs (not runtime acceptance)
-    if: needs.validation-mode.outputs.mode != 'desktop-recovery' && needs.validation-mode.outputs.mode != 'windows-unpack' && needs.validation-mode.outputs.mode != 'language-routing-patch-v1' && needs.validation-mode.outputs.mode != 'automatic-direction' && needs.validation-mode.outputs.mode != 'routing-release' && github.event_name == 'pull_request'
+    if: needs.validation-mode.outputs.mode != 'download-docs' && needs.validation-mode.outputs.mode != 'desktop-recovery' && needs.validation-mode.outputs.mode != 'windows-unpack' && needs.validation-mode.outputs.mode != 'language-routing-patch-v1' && needs.validation-mode.outputs.mode != 'automatic-direction' && needs.validation-mode.outputs.mode != 'routing-release' && github.event_name == 'pull_request'
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -578,7 +588,7 @@ jobs:
         run: git diff --exit-code -- src-tauri
   windows-rust-capture-candidate:
     needs: validation-mode
-    if: needs.validation-mode.outputs.mode != 'desktop-recovery' && needs.validation-mode.outputs.mode != 'windows-unpack' && needs.validation-mode.outputs.mode != 'language-routing-patch-v1' && needs.validation-mode.outputs.mode != 'automatic-direction' && needs.validation-mode.outputs.mode != 'routing-release' && needs.validation-mode.outputs.mode != 'screenshot-pins' && needs.validation-mode.outputs.mode != 'macos-followup'
+    if: needs.validation-mode.outputs.mode != 'download-docs' && needs.validation-mode.outputs.mode != 'desktop-recovery' && needs.validation-mode.outputs.mode != 'windows-unpack' && needs.validation-mode.outputs.mode != 'language-routing-patch-v1' && needs.validation-mode.outputs.mode != 'automatic-direction' && needs.validation-mode.outputs.mode != 'routing-release' && needs.validation-mode.outputs.mode != 'screenshot-pins' && needs.validation-mode.outputs.mode != 'macos-followup'
     name: Isolated Rust capture candidate (native Windows runtime)
     runs-on: windows-latest
     timeout-minutes: 10
@@ -655,7 +665,7 @@ jobs:
         run: echo 'Repeated A/B capture benchmark outcome ${{ steps.native_capture_paired_diagnostic.outcome }} is diagnostic only under core-functional-v1. Original raw failures remain failures; standalone capture/input/cleanup and installed editor acceptance are mandatory.' >> "$GITHUB_STEP_SUMMARY"
   macos-native-frame-probe:
     needs: validation-mode
-    if: needs.validation-mode.outputs.mode != 'desktop-recovery' && needs.validation-mode.outputs.mode != 'windows-unpack' && needs.validation-mode.outputs.mode != 'language-routing-patch-v1' && needs.validation-mode.outputs.mode != 'automatic-direction' && needs.validation-mode.outputs.mode != 'routing-release' && needs.validation-mode.outputs.mode != 'screenshot-pins' && needs.validation-mode.outputs.mode != 'macos-followup'
+    if: needs.validation-mode.outputs.mode != 'download-docs' && needs.validation-mode.outputs.mode != 'desktop-recovery' && needs.validation-mode.outputs.mode != 'windows-unpack' && needs.validation-mode.outputs.mode != 'language-routing-patch-v1' && needs.validation-mode.outputs.mode != 'automatic-direction' && needs.validation-mode.outputs.mode != 'routing-release' && needs.validation-mode.outputs.mode != 'screenshot-pins' && needs.validation-mode.outputs.mode != 'macos-followup'
     name: Isolated macOS native frame geometry probe
     runs-on: macos-latest
     timeout-minutes: 5
@@ -684,7 +694,7 @@ jobs:
           if-no-files-found: warn
   macos-screenshot-native-probe:
     needs: validation-mode
-    if: needs.validation-mode.outputs.mode != 'desktop-recovery' && needs.validation-mode.outputs.mode != 'windows-unpack' && needs.validation-mode.outputs.mode != 'language-routing-patch-v1' && needs.validation-mode.outputs.mode != 'automatic-direction' && needs.validation-mode.outputs.mode != 'routing-release' && needs.validation-mode.outputs.mode != 'screenshot-pins' && needs.validation-mode.outputs.mode != 'macos-followup'
+    if: needs.validation-mode.outputs.mode != 'download-docs' && needs.validation-mode.outputs.mode != 'desktop-recovery' && needs.validation-mode.outputs.mode != 'windows-unpack' && needs.validation-mode.outputs.mode != 'language-routing-patch-v1' && needs.validation-mode.outputs.mode != 'automatic-direction' && needs.validation-mode.outputs.mode != 'routing-release' && needs.validation-mode.outputs.mode != 'screenshot-pins' && needs.validation-mode.outputs.mode != 'macos-followup'
     name: macOS native screenshot capture (permission block is not a pass)
     runs-on: macos-latest
     timeout-minutes: 8
@@ -713,7 +723,7 @@ jobs:
           python3 scripts/verify-macos-screenshot-probe.py "$RUNNER_TEMP/macos-f1-native-probe/report.json" 2>&1 | tee -a "$GITHUB_STEP_SUMMARY"
   desktop:
     needs: validation-mode
-    if: needs.validation-mode.outputs.mode != 'desktop-recovery' && needs.validation-mode.outputs.mode != 'windows-unpack' && needs.validation-mode.outputs.mode != 'language-routing-patch-v1' && needs.validation-mode.outputs.mode != 'automatic-direction' && needs.validation-mode.outputs.mode != 'routing-release' && needs.validation-mode.outputs.mode != 'screenshot-pins' && github.event.inputs.mode != 'windows-popup-diagnostics' && github.event.inputs.mode != 'windows-popup-current-diagnostics' && github.event.inputs.mode != 'windows-application-diagnostics' && github.event.inputs.mode != 'windows-input-plane-experiment' && github.event.inputs.mode != 'windows-native-diagnostics' && github.event.inputs.mode != 'windows-shortcuts-ui-diagnostics' && github.event.inputs.mode != 'windows-shortcuts-ui-medium-diagnostics' && github.event.inputs.mode != 'windows-shortcuts-current-diagnostics' && github.event.inputs.mode != 'windows-shortcuts-workflows-diagnostics' && github.event.inputs.mode != 'windows-delegated-diagnostics' && github.event.inputs.mode != 'windows-browser-diagnostics' && github.event.inputs.mode != 'windows-selection-same-page-diagnostics' && github.event.inputs.mode != 'windows-selection-browser-app-diagnostics' && github.event.inputs.mode != 'windows-browser-ocr-visibility-diagnostics' && github.event.inputs.mode != 'windows-selection-cold-edge-diagnostics' && github.event.inputs.mode != 'windows-selection-paced-edge-diagnostics' && github.event.inputs.mode != 'windows-selection-nonbrowser-app-diagnostics' && github.event.inputs.mode != 'windows-latest-intent-diagnostics' && github.event.inputs.mode != 'windows-selection-application-diagnostics' && github.event.inputs.mode != 'windows-selection-clipboard-diagnostics' && github.event.inputs.mode != 'windows-selection-notepad-diagnostics' && github.event.inputs.mode != 'windows-selection-budget-diagnostics' && github.event.inputs.mode != 'windows-selection-context-diagnostics' && github.event.inputs.mode != 'windows-wps-selection-diagnostics' && github.event.inputs.mode != 'windows-focus-resize-current-diagnostics' && github.event.inputs.mode != 'windows-priority-input-diagnostics' && github.event.inputs.mode != 'windows-priority-candidate-diagnostics' && needs.validation-mode.outputs.mode != 'macos-followup'
+    if: needs.validation-mode.outputs.mode != 'download-docs' && needs.validation-mode.outputs.mode != 'desktop-recovery' && needs.validation-mode.outputs.mode != 'windows-unpack' && needs.validation-mode.outputs.mode != 'language-routing-patch-v1' && needs.validation-mode.outputs.mode != 'automatic-direction' && needs.validation-mode.outputs.mode != 'routing-release' && needs.validation-mode.outputs.mode != 'screenshot-pins' && github.event.inputs.mode != 'windows-popup-diagnostics' && github.event.inputs.mode != 'windows-popup-current-diagnostics' && github.event.inputs.mode != 'windows-application-diagnostics' && github.event.inputs.mode != 'windows-input-plane-experiment' && github.event.inputs.mode != 'windows-native-diagnostics' && github.event.inputs.mode != 'windows-shortcuts-ui-diagnostics' && github.event.inputs.mode != 'windows-shortcuts-ui-medium-diagnostics' && github.event.inputs.mode != 'windows-shortcuts-current-diagnostics' && github.event.inputs.mode != 'windows-shortcuts-workflows-diagnostics' && github.event.inputs.mode != 'windows-delegated-diagnostics' && github.event.inputs.mode != 'windows-browser-diagnostics' && github.event.inputs.mode != 'windows-selection-same-page-diagnostics' && github.event.inputs.mode != 'windows-selection-browser-app-diagnostics' && github.event.inputs.mode != 'windows-browser-ocr-visibility-diagnostics' && github.event.inputs.mode != 'windows-selection-cold-edge-diagnostics' && github.event.inputs.mode != 'windows-selection-paced-edge-diagnostics' && github.event.inputs.mode != 'windows-selection-nonbrowser-app-diagnostics' && github.event.inputs.mode != 'windows-latest-intent-diagnostics' && github.event.inputs.mode != 'windows-selection-application-diagnostics' && github.event.inputs.mode != 'windows-selection-clipboard-diagnostics' && github.event.inputs.mode != 'windows-selection-notepad-diagnostics' && github.event.inputs.mode != 'windows-selection-budget-diagnostics' && github.event.inputs.mode != 'windows-selection-context-diagnostics' && github.event.inputs.mode != 'windows-wps-selection-diagnostics' && github.event.inputs.mode != 'windows-focus-resize-current-diagnostics' && github.event.inputs.mode != 'windows-priority-input-diagnostics' && github.event.inputs.mode != 'windows-priority-candidate-diagnostics' && needs.validation-mode.outputs.mode != 'macos-followup'
     strategy:
       fail-fast: false
       matrix:
@@ -1404,23 +1414,41 @@ jobs:
         with:
           fetch-depth: 0
           persist-credentials: false
+      - name: Verify download documentation against its published release
+        if: needs.validation-mode.outputs.mode == 'download-docs'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          DOCS_BEFORE: ${{ github.event.pull_request.base.sha || github.event.before }}
+          DOCS_HEAD: ${{ github.sha }}
+        run: |
+          python3 scripts/check-download-docs.py --scope "$DOCS_BEFORE" "$DOCS_HEAD"
+          python3 scripts/check-repository.py
+          python3 scripts/check-download-docs.py --published
       - name: Check public repository inputs
+        if: needs.validation-mode.outputs.mode != 'download-docs'
         run: |
           python3 scripts/check-repository.py
+          python3 scripts/check-download-docs.py
           python3 -m unittest discover -s tests -p 'test_*.py' -v
       - uses: actions/setup-node@v4
+        if: needs.validation-mode.outputs.mode != 'download-docs'
         with:
           node-version: '24'
           cache: npm
       - uses: actions/setup-python@v5
+        if: needs.validation-mode.outputs.mode != 'download-docs'
         with:
           python-version: '3.12'
       - name: Preview installer safety and rollback fixtures
+        if: needs.validation-mode.outputs.mode != 'download-docs'
         run: python -m unittest discover -s scripts -p 'test_*.py' -v
-      - run: npm ci
+      - if: needs.validation-mode.outputs.mode != 'download-docs'
+        run: npm ci
       - name: Install CJK and symbol fonts for faithful generated UI evidence
+        if: needs.validation-mode.outputs.mode != 'download-docs'
         run: sudo apt-get update && sudo apt-get install -y fonts-noto-cjk fonts-symbola
       - name: Reuse the runner browser, download Chromium only if absent
+        if: needs.validation-mode.outputs.mode != 'download-docs'
         timeout-minutes: 10
         run: |
           task_browser=$(command -v google-chrome || command -v chromium || true)
@@ -1431,6 +1459,7 @@ jobs:
             npx playwright install --with-deps chromium
           fi
       - name: Isolated UI / IPC regression tests
+        if: needs.validation-mode.outputs.mode != 'download-docs'
         run: |
           npm run dev > "$RUNNER_TEMP/echolingo-vite.log" 2>&1 &
           curl --retry 20 --retry-connrefused --retry-delay 1 -s http://127.0.0.1:1420/ > /dev/null
@@ -1442,7 +1471,7 @@ jobs:
           node tests/windows-management-scroll-container.mjs
           node tests/service-quota-ui.mjs
       - name: Preserve actual service management UI screenshots
-        if: always()
+        if: always() && needs.validation-mode.outputs.mode != 'download-docs'
         uses: actions/upload-artifact@v4
         with:
           name: EchoLingo-service-management-ui

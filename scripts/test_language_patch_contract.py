@@ -39,6 +39,8 @@ def assert_language_job_gates(test, source):
             test.assertEqual(len(gates), 1)
             clauses = gates[0].split(' && ')
             expected_modes = base_modes.copy()
+            if name != 'frontend-interactions' and 'mode=download-docs' in source:
+                expected_modes.add('download-docs')
             if name != 'rust-input-preparation':
                 expected_modes.add('screenshot-pins')
             if name not in {'rust-input-preparation', 'frontend-interactions'}:

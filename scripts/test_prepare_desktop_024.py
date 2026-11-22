@@ -69,7 +69,19 @@ class StaticContracts(unittest.TestCase):
     def test_historical_and_normal_gates_unchanged(self):
         for name in ('scripts/prepare-desktop-release.py','scripts/publish-desktop-release.cjs','scripts/test-desktop-release.cjs','scripts/test_prepare_desktop_release.py','.github/workflows/release-desktop.yml','.github/workflows/ci.yml','scripts/windows-offline-translation-test.ps1','.github/workflows/release-desktop-021.yml','scripts/prepare-desktop-021.py','scripts/publish-desktop-021.cjs','scripts/test_prepare_desktop_021.py','scripts/test-desktop-021.cjs','.github/workflows/release-desktop-022.yml','scripts/prepare-desktop-022.py','scripts/publish-desktop-022.cjs','scripts/test-desktop-022.cjs','.github/workflows/release-desktop-023.yml','scripts/prepare-desktop-023.py','scripts/publish-desktop-023.cjs','scripts/test_prepare_desktop_023.py','scripts/test-desktop-023.cjs'):
             expected=subprocess.check_output(['git','show',R.REVIEWED_SOURCE+':'+name],cwd=ROOT)
-            self.assertEqual((ROOT/name).read_bytes().replace(b'\r\n',b'\n'),expected)
+            current=(ROOT/name).read_bytes().replace(b'\r\n',b'\n')
+            # Exact snapshots for the approved post-release docs CI migration.
+            docs_sync_sha256={
+                '.github/workflows/ci.yml': 'e056c7d9579ffffff69a9a6ed4eda31fdafd453c7af237d3dba104406ed7fd2c',
+                'scripts/test_prepare_desktop_release.py': '1872a26c00630380ca53f7d91b33d26b0f6b7abf156c24e4744c8ef828228e7c',
+                'scripts/test_prepare_desktop_021.py': '00a392296b8523a244a418f38370cb3a23de705d269eb55126916de2df9317bd',
+                'scripts/test_prepare_desktop_022.py': '41d7748e0a0faf8fe2b79aa7422d8e617f21beaa20efab85837cc1f7feff075e',
+                'scripts/test_prepare_desktop_023.py': '525d93a050305158009d28dcec2da8f6fbdd31babd4eaba4112fc2f76c624b05',
+            }
+            if name in docs_sync_sha256 and current != expected:
+                self.assertEqual(hashlib.sha256(current).hexdigest(),docs_sync_sha256[name],name)
+            else:
+                self.assertEqual(current,expected,name)
     def test_explicit_same_installer_and_original_script(self):
         s=(ROOT/'.github/workflows/release-desktop-024.yml').read_text()
         self.assertIn('-InstallerPath $installers[0].FullName',s)

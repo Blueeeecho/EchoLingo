@@ -4,6 +4,8 @@ import json
 from pathlib import Path
 import tempfile
 import unittest
+
+from download_docs_workflow_contract import without_download_docs
 from unittest.mock import patch
 import zipfile
 
@@ -166,7 +168,7 @@ class ReleaseAssetsTests(unittest.TestCase):
 
     def test_release_keeps_every_full_ci_gate_and_existing_priority_input_gate(self):
         root = Path(__file__).resolve().parents[1]
-        ci = (root / ".github/workflows/ci.yml").read_text()
+        ci = without_download_docs((root / ".github/workflows/ci.yml").read_text())
         start = ci.index("  macos-screenshot-native-probe:\n")
         end = ci.index("\n  windows-popup-diagnostics:", start)
         expected = ci[start:end]
