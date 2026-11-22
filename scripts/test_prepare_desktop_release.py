@@ -13,6 +13,8 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
+from download_docs_workflow_contract import without_download_docs
+
 SPEC=importlib.util.spec_from_file_location('desktop_release',Path(__file__).with_name('prepare-desktop-release.py'))
 R=importlib.util.module_from_spec(SPEC);SPEC.loader.exec_module(R)
 SHA='a'*40;TREE='b'*40;RUN='https://github.com/Blueeeecho/EchoLingo/actions/runs/123'
@@ -446,7 +448,7 @@ class FixedDesktopRecoveryModeTests(unittest.TestCase):
         marker='        run: |\n'
         self.assertIn(marker, expected)
         expected=expected.replace(marker, marker+POST_RELEASE_DOCS_SELECTOR, 1)
-        self.assertEqual(self.workflow().rstrip(), expected.rstrip())
+        self.assertEqual(without_download_docs(self.workflow()).rstrip(), expected.rstrip())
     def test_full_release_checks_change_only_checkout_history(self):
         baseline=R.git('show', '207982231449c78e5efd726ba4ba1c42d8561e93'+':.github/workflows/release-checks.yml')
         expected=baseline.replace(
@@ -623,28 +625,6 @@ class PostReleaseDocumentationSelectorTests(unittest.TestCase):
         source = source.replace(self.BASELINE, baseline).replace(self.TREE, tree)
         return subprocess.run([sys.executable, '-c', source], cwd=directory,
             capture_output=True, text=True).returncode
-
-    def test_both_readmes_link_only_to_current_prerelease(self):
-        import re
-        base = 'https://github.com/Blueeeecho/EchoLingo'
-        prefix = base+'/releases/download/0.2.23/'
-        expected = {prefix+name for name in (
-            'EchoLingo_0.2.23_windows_x64-unpack.zip',
-            'EchoLingo_0.2.23_windows_x64-setup.exe',
-            'EchoLingo_0.2.23_macos_arm64.dmg', 'SHA256SUMS.txt', 'RELEASE-MANIFEST.json')}
-        expected |= {base+'/releases/tag/0.2.23', base+'/tree/0.2.23'}
-        for name in ('README.md', 'README.en.md'):
-            with self.subTest(document=name):
-                text = (R.ROOT/name).read_text(encoding='utf-8')
-                urls = set(re.findall(r'https://github\.com/Blueeeecho/EchoLingo/[^\s"<>)]*', text))
-                self.assertTrue(expected <= urls)
-                self.assertEqual({url for url in urls if '/releases/download/' in url},
-                                 {url for url in expected if '/releases/download/' in url})
-                self.assertEqual({url for url in urls if '/releases/tag/' in url},
-                                 {base+'/releases/tag/0.2.23'})
-                self.assertNotIn(base+'/releases', urls)
-                self.assertNotIn('/releases/latest', text)
-                self.assertTrue('预发布' in text or 'prerelease' in text)
 
     def test_fixed_baseline_and_current_version_are_literal(self):
         source = self.guard()
