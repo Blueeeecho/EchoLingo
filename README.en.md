@@ -5,8 +5,8 @@
 <p align="center">A quiet, lightweight desktop companion for selection translation, screen OCR, and quick screenshots.</p>
 <p align="center">
   <a href="https://blueeeecho.github.io/EchoLingo/">Website</a> ·
-  <a href="#download">Download 0.2.23</a> ·
-  <a href="https://github.com/Blueeeecho/EchoLingo/releases/tag/0.2.23">Release Notes</a> ·
+  <a href="#download">Download 0.2.24</a> ·
+  <a href="https://github.com/Blueeeecho/EchoLingo/releases/tag/0.2.24">Release Notes</a> ·
   <a href="https://github.com/Blueeeecho/EchoLingo/issues">Issues</a>
 </p>
 
@@ -31,14 +31,14 @@ Inside the translation popup, source text stays editable: `Enter` translates, `S
 
 ## Download
 
-Latest prerelease: **[0.2.23](https://github.com/Blueeeecho/EchoLingo/releases/tag/0.2.23)**
+Latest prerelease: **[0.2.24](https://github.com/Blueeeecho/EchoLingo/releases/tag/0.2.24)**
 
 | Platform | Package | Requirements |
 | :--- | :--- | :--- |
-| **Windows (x64)** | [Portable ZIP](https://github.com/Blueeeecho/EchoLingo/releases/download/0.2.23/EchoLingo_0.2.23_windows_x64-unpack.zip) (recommended) · [Installer (.exe)](https://github.com/Blueeeecho/EchoLingo/releases/download/0.2.23/EchoLingo_0.2.23_windows_x64-setup.exe) | Windows 10 1809+ / Windows 11 (WebView2 Runtime) |
-| **macOS (Apple silicon)** | [Disk Image (.dmg)](https://github.com/Blueeeecho/EchoLingo/releases/download/0.2.23/EchoLingo_0.2.23_macos_arm64.dmg) | macOS 12+ (Apple system translation needs macOS 26+) |
+| **Windows (x64)** | [Portable ZIP](https://github.com/Blueeeecho/EchoLingo/releases/download/0.2.24/EchoLingo_0.2.24_windows_x64-unpack.zip) (recommended) · [Installer (.exe)](https://github.com/Blueeeecho/EchoLingo/releases/download/0.2.24/EchoLingo_0.2.24_windows_x64-setup.exe) | Windows 10 1809+ / Windows 11 (WebView2 Runtime) |
+| **macOS (Apple silicon)** | [Disk Image (.dmg)](https://github.com/Blueeeecho/EchoLingo/releases/download/0.2.24/EchoLingo_0.2.24_macos_arm64.dmg) | macOS 12+ (Apple system translation needs macOS 26+) |
 
-> Note: Prerelease builds are not commercially signed or Apple-notarized yet. Quit any previous version before upgrading; see [macOS first-launch notes](docs/macos-install.zh-CN.md) (Chinese) if Gatekeeper prompts on first run. Verification & source: [SHA256SUMS.txt](https://github.com/Blueeeecho/EchoLingo/releases/download/0.2.23/SHA256SUMS.txt) · [Release manifest](https://github.com/Blueeeecho/EchoLingo/releases/download/0.2.23/RELEASE-MANIFEST.json) · [0.2.23 source](https://github.com/Blueeeecho/EchoLingo/tree/0.2.23).
+> Note: Prerelease builds are not commercially signed or Apple-notarized yet. Quit any previous version before upgrading; see [macOS first-launch notes](docs/macos-install.zh-CN.md) (Chinese) if Gatekeeper prompts on first run. Verification & source: [SHA256SUMS.txt](https://github.com/Blueeeecho/EchoLingo/releases/download/0.2.24/SHA256SUMS.txt) · [Release manifest](https://github.com/Blueeeecho/EchoLingo/releases/download/0.2.24/RELEASE-MANIFEST.json) · [0.2.24 source](https://github.com/Blueeeecho/EchoLingo/tree/0.2.24).
 
 ## Docs & development
 
