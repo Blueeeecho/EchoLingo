@@ -1,0 +1,445 @@
+name: Validate and publish desktop 0.2.26
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths: [package.json, .github/workflows/release-desktop-026.yml, 'scripts/*desktop-026*', scripts/test_prepare_desktop_026.py, docs/releases/0.2.26.zh-CN.md]
+# Windows runner locale must not reinterpret UTF-8 source or helper output.
+env:
+  PYTHONUTF8: '1'
+permissions:
+  contents: read
+  actions: read
+concurrency:
+  group: echolingo-prerelease-0.2.26-${{ github.ref }}
+  cancel-in-progress: false
+jobs:
+  build:
+    if: github.repository == 'Blueeeecho/EchoLingo' && github.ref == 'refs/heads/main'
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, macos-26]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 70
+    env:
+      RUSTFLAGS: ${{ matrix.os == 'windows-latest' && '-C target-feature=+crt-static' || '' }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - uses: ilammy/msvc-dev-cmd@v1
+        if: runner.os == 'Windows'
+      - name: Pin the MSVC linker for Cargo in every shell
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $linker = Join-Path $env:VCToolsInstallDir 'bin/HostX64/x64/link.exe'
+          if (-not (Test-Path -LiteralPath $linker -PathType Leaf)) { throw 'MSVC linker not found' }
+          "CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_LINKER=$linker" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+      - uses: swatinem/rust-cache@v2
+        with:
+          key: desktop-release-0218-static-crt
+          cache-on-failure: true
+          workspaces: |
+            src-tauri -> target
+            tests/language-routing-patch -> target
+      - name: Require reviewed source and exact release metadata
+        shell: bash
+        run: |
+          set -euo pipefail
+          python scripts/prepare-desktop-026.py --check-source
+          python scripts/check-repository.py
+      - name: Verify release does not already exist and source is current main
+        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b
+        with:
+          script: |
+            const { owner, repo } = context.repo;
+            const { data: main } = await github.rest.git.getRef({owner,repo,ref:'heads/main'});
+            if (main.object.sha !== context.sha) throw new Error('Source is no longer main');
+            try { await github.rest.repos.getReleaseByTag({owner,repo,tag:'0.2.26'}); throw new Error('Release already exists'); }
+            catch (e) { if (e.status !== 404) throw e; }
+      - name: Verify only unchanged offline resource inputs may be reused
+        if: runner.os == 'Windows'
+        shell: bash
+        run: |
+          set -euo pipefail
+          git diff --exit-code 4b8c5f5ac67e07cc4005812963b2c02acdd14d5d HEAD -- \
+            scripts/offline-engine scripts/prepare-offline-models.py scripts/test_prepare_offline_models.py \
+            scripts/prepare-offline-notices.py scripts/package-offline-source.py \
+            scripts/audit-windows-resources.py \
+            resources/offline-translation src-tauri/tauri.windows.conf.json LICENSE LICENSING.md
+          git diff --exit-code da0b5d03060a62ea120d931cc6c9eede5af66a7f HEAD -- scripts/stage-language-patch-resources.py
+      - name: Download pinned offline resources and corresponding source without old app reuse
+        if: runner.os == 'Windows'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('node:fs');
+            const path = require('node:path');
+            const pins = [
+              [13034542412, 'windows.zip', 'da42d05739744f5eafa71f9758d6a045b42020403d4228f3007d9bbda92fbb25'],
+              [13034970610, 'evidence.zip', '2520b83f54d3774b75c0cc1c6fc3f3105f0c9fb380800d94ac73001e36295285']
+            ];
+            const directory = path.join(process.env.RUNNER_TEMP, 'candidate-offline-inputs');
+            fs.mkdirSync(directory);
+            const { data: run } = await github.rest.actions.getWorkflowRun({owner:'Blueeeecho',repo:'EchoLingo',run_id:41178655504});
+            if (run.conclusion !== 'success' || run.head_sha !== '4b8c5f5ac67e07cc4005812963b2c02acdd14d5d') throw new Error('Pinned resource run mismatch');
+            for (const [id,name,hash] of pins) {
+              const { data: artifact } = await github.rest.actions.getArtifact({owner:'Blueeeecho',repo:'EchoLingo',artifact_id:id});
+              if (artifact.expired || artifact.workflow_run.id !== 41178655504 || artifact.digest !== `sha256:${hash}`) throw new Error('Pinned resource artifact mismatch');
+              const { data } = await github.rest.actions.downloadArtifact({owner:'Blueeeecho',repo:'EchoLingo',artifact_id:id,archive_format:'zip'});
+              fs.writeFileSync(path.join(directory,name), Buffer.from(data));
+            }
+      - name: Extract only hash-verified offline engine models licenses and source
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          python scripts/stage-language-patch-resources.py --windows-zip "$env:RUNNER_TEMP/candidate-offline-inputs/windows.zip" --evidence-zip "$env:RUNNER_TEMP/candidate-offline-inputs/evidence.zip" --output-dir "$env:RUNNER_TEMP/candidate-offline-evidence"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          python scripts/audit-windows-resources.py --staged
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - run: npm ci
+      - run: npm audit --audit-level=high
+      - run: npm run check
+      - run: npm test
+      - run: npm run build
+      - name: Test frontend, actual Rust sources, routing and release boundaries
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ "$RUNNER_OS" = Windows ]; then export ECHOLINGO_WORKFLOW_BASH="$(cygpath -w "$BASH")"; fi
+          rustfmt --edition 2021 --check src-tauri/src/window_layout.rs src-tauri/src/translation_health.rs
+          python scripts/test_automatic_translation_contract.py
+          python -m unittest discover -s scripts -p 'test_package_windows_unpack.py' -v
+          python -m unittest discover -s scripts -p 'test_prepare_desktop_release.py' -v
+          node --test scripts/test-desktop-release.cjs
+          python -m unittest discover -s scripts -p 'test_prepare_desktop_026.py' -v
+          node --test scripts/test-desktop-026.cjs
+          cargo test --manifest-path tests/language-routing-patch/Cargo.toml --locked
+          cargo test --manifest-path src-tauri/Cargo.toml --locked
+          if [ "$RUNNER_OS" = Windows ]; then cargo test --manifest-path src-tauri/native-capture/Cargo.toml --locked; fi
+      - name: Build fresh native release installer with locked dependencies
+        run: npm run tauri build -- --bundles ${{ runner.os == 'Windows' && 'nsis' || 'app,dmg' }} -- --locked
+      - name: Inspect actual installer and bind fresh application identity
+        shell: bash
+        env:
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          if [ "$RUNNER_OS" = Windows ]; then
+            files=(src-tauri/target/release/bundle/nsis/*.exe)
+            built=src-tauri/target/release/echolingo.exe
+            extracted="$RUNNER_TEMP/desktop-inspection/echolingo.exe"
+          else
+            files=(src-tauri/target/release/bundle/dmg/*.dmg)
+            built=src-tauri/target/release/bundle/macos/EchoLingo.app
+            extracted="$RUNNER_TEMP/desktop-inspection/echolingo"
+          fi
+          test "${#files[@]}" -eq 1
+          python scripts/inspect-candidate-package.py --expected-version 0.2.26 --platform "$RUNNER_OS" --installer "${files[0]}" --built-application "$built" --output-dir "$RUNNER_TEMP/desktop-inspection" --run-url "$RUN_URL" --locked-build-passed --focused-tests-passed
+          mkdir "$RUNNER_TEMP/desktop-package"
+          # Bash 3 with nounset rejects expansion of an empty optional array.
+          verifier=(scripts/verify-candidate-package.py --expected-version 0.2.26 --platform "$RUNNER_OS" --installer "${files[0]}" --application "$extracted" --checks-json "$RUNNER_TEMP/desktop-inspection/checks.json" --output "$RUNNER_TEMP/desktop-package/candidate.json" --run-url "$RUN_URL")
+          if [ "$RUNNER_OS" = Windows ]; then
+            verifier+=(--offline-staging-manifest "$RUNNER_TEMP/candidate-offline-evidence/baseline-reuse.json" --offline-source-archive "$RUNNER_TEMP/candidate-offline-evidence/EchoLingo-offline-engine-source.zip")
+          fi
+          python "${verifier[@]}"
+          cp "${files[0]}" "$RUNNER_TEMP/desktop-package/"
+          if [ "$RUNNER_OS" = Windows ]; then cp "$RUNNER_TEMP/candidate-offline-evidence/EchoLingo-offline-engine-source.zip" "$RUNNER_TEMP/desktop-package/"; fi
+      - name: Identify exact embedded native payloads for installed acceptance
+        id: windows_native_candidate
+        if: runner.os == 'Windows'
+        shell: powershell
+        run: |
+          $dll = Get-ChildItem src-tauri/target/release/build -Recurse -File -Filter echolingo-windows-native.dll | Sort-Object LastWriteTimeUtc -Descending | Select-Object -First 1
+          if ($null -eq $dll) { throw 'The production Windows native DLL was not built.' }
+          $appBytes = [IO.File]::ReadAllBytes((Resolve-Path src-tauri/target/release/echolingo.exe))
+          $dllBytes = [IO.File]::ReadAllBytes($dll.FullName)
+          Add-Type -TypeDefinition @'
+          public static class EchoLingoExactPayload {
+            public static int Find(byte[] binary, byte[] payload) {
+              if (payload.Length == 0) return -1;
+              for (int i = 0; i <= binary.Length - payload.Length; i++) {
+                if (binary[i] != payload[0]) continue;
+                int j = 1; while (j < payload.Length && binary[i+j] == payload[j]) j++;
+                if (j == payload.Length) return i;
+              }
+              return -1;
+            }
+          }
+          '@
+          $payloadOffset = [EchoLingoExactPayload]::Find($appBytes, $dllBytes)
+          if ($payloadOffset -lt 0) { throw 'The selected complete DLL is not embedded byte-for-byte in the actual application.' }
+          $launcher = Join-Path $dll.DirectoryName 'echolingo-windows-launcher.ps1'
+          if (-not (Test-Path -LiteralPath $launcher -PathType Leaf)) { throw 'Generated Windows launcher is missing beside the accepted DLL.' }
+          $launcherBytes = [IO.File]::ReadAllBytes($launcher)
+          $launcherOffset = [EchoLingoExactPayload]::Find($appBytes, $launcherBytes)
+          if ($launcherOffset -lt 0) { throw 'The complete candidate launcher is not embedded byte-for-byte in the actual application.' }
+          [ordered]@{ launcherBytes = $launcherBytes.Length; launcherSha256 = (Get-FileHash $launcher -Algorithm SHA256).Hash.ToLowerInvariant(); completeLauncherEmbedded = $true; exactLauncherOffset = $launcherOffset } | ConvertTo-Json -Compress
+          "path=$($dll.FullName)" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+          $capture = Join-Path $dll.DirectoryName 'echolingo-native-capture.exe'
+          $captureBytes = [IO.File]::ReadAllBytes($capture)
+          $captureOffset = [EchoLingoExactPayload]::Find($appBytes, $captureBytes)
+          if ($captureOffset -lt 0) { throw 'The complete Rust capture child is not embedded byte-for-byte in the actual application.' }
+          "capturePath=$capture" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+          [ordered]@{ nativeCaptureBytes = $captureBytes.Length; nativeCaptureSha256 = (Get-FileHash $capture -Algorithm SHA256).Hash.ToLowerInvariant(); completeNativeCaptureEmbedded = $true; exactNativeCaptureOffset = $captureOffset } | ConvertTo-Json -Compress
+          [ordered]@{ dllBytes = $dllBytes.Length; dllSha256 = (Get-FileHash $dll.FullName -Algorithm SHA256).Hash.ToLowerInvariant(); completePayloadEmbedded = $true; exactPayloadOffset = $payloadOffset } | ConvertTo-Json -Compress
+      - name: Windows installed NSIS real offline-model acceptance
+        if: runner.os == 'Windows'
+        timeout-minutes: 25
+        shell: powershell
+        run: |
+          $installers = @(Get-ChildItem src-tauri/target/release/bundle/nsis/*.exe)
+          if ($installers.Count -ne 1) { throw 'Exactly one fresh installer required' }
+          & powershell.exe -NoProfile -STA -ExecutionPolicy Bypass -File scripts/windows-offline-translation-test.ps1 -InstallerPath $installers[0].FullName -NativeCapturePath '${{ steps.windows_native_candidate.outputs.capturePath }}'
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          Copy-Item "$env:RUNNER_TEMP/echolingo-offline-validation.json" "$env:RUNNER_TEMP/desktop-package/echolingo-offline-validation.json"
+      - name: Preserve installed acceptance failures
+        if: always() && runner.os == 'Windows'
+        uses: actions/upload-artifact@v4
+        with:
+          name: Desktop-026-installed-diagnostics
+          if-no-files-found: warn
+          path: |
+            ${{ runner.temp }}/echolingo-offline-validation.json
+            ${{ runner.temp }}/echolingo-installed-screenshot-editor.log
+      - name: Hash failed Windows package bytes without accepting them
+        if: failure() && runner.os == 'Windows'
+        shell: bash
+        run: |
+          python - <<'PYHASH'
+          import hashlib, json, os, subprocess
+          from pathlib import Path
+          package = Path(os.environ['RUNNER_TEMP'])/'desktop-package'
+          package.mkdir(exist_ok=True)
+          files = sorted(package.glob('*.exe')) + [Path('src-tauri/target/release/echolingo.exe')]
+          identities = []
+          for path in files:
+              if not path.is_file():
+                  continue
+              with path.open('rb') as stream:
+                  sha = hashlib.file_digest(stream, 'sha256').hexdigest()
+              identities.append({'name': path.name, 'bytes': path.stat().st_size, 'sha256': sha})
+          report = {'sourceCommit': subprocess.check_output(['git','rev-parse','HEAD'],text=True).strip(),
+                    'accepted': False, 'purpose': 'failure-diagnosis-only', 'files': identities}
+          (package/'FAILED-PACKAGE-SHA256.json').write_text(json.dumps(report,indent=2)+'\n',encoding='utf-8')
+          PYHASH
+      - name: Preserve failed Windows package bytes for diagnosis only
+        if: failure() && runner.os == 'Windows'
+        uses: actions/upload-artifact@v4
+        with:
+          name: Desktop-026-failed-package-not-accepted
+          if-no-files-found: warn
+          path: |
+            ${{ runner.temp }}/desktop-package/*.exe
+            ${{ runner.temp }}/desktop-package/candidate.json
+            ${{ runner.temp }}/desktop-package/candidate.json.sha256
+            ${{ runner.temp }}/desktop-package/FAILED-PACKAGE-SHA256.json
+            src-tauri/target/release/echolingo.exe
+      - name: Accept extracted Mac bundle and native regression fixtures
+        if: runner.os == 'macOS'
+        timeout-minutes: 12
+        shell: bash
+        env:
+          ECHOLINGO_REQUIRE_SYSTEM_TRANSLATION_RECOVERY: '1'
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          bash tests/macos-native-self-test.sh
+          swiftc -D ECHOLINGO_WINDOW_FIXTURE -parse-as-library src-tauri/native/macos_window.swift -framework AppKit -o "$RUNNER_TEMP/desktop-drag-policy"
+          "$RUNNER_TEMP/desktop-drag-policy" | tee "$RUNNER_TEMP/desktop-package/macos-drag-policy.json"
+          swiftc src-tauri/native/macos_window.swift tests/macos-window-size.swift -parse-as-library -O -framework AppKit -o "$RUNNER_TEMP/desktop-window-size"
+          "$RUNNER_TEMP/desktop-window-size"
+          swiftc -parse-as-library src-tauri/native/macos_window.swift tests/macos-popup-viewport.swift -o "$RUNNER_TEMP/desktop-popup-viewport"
+          "$RUNNER_TEMP/desktop-popup-viewport"
+          swiftc -parse-as-library src-tauri/native/macos_window.swift tests/macos-header-drag.swift -framework AppKit -o "$RUNNER_TEMP/desktop-header-drag"
+          "$RUNNER_TEMP/desktop-header-drag" | tee "$RUNNER_TEMP/desktop-package/macos-header-drag.json"
+          swiftc -parse-as-library src-tauri/native/macos_window.swift tests/macos-header-event-route.swift -framework AppKit -framework WebKit -o "$RUNNER_TEMP/desktop-header-event-route"
+          "$RUNNER_TEMP/desktop-header-event-route" | tee "$RUNNER_TEMP/desktop-package/macos-header-event-route.json"
+          files=(src-tauri/target/release/bundle/dmg/*.dmg)
+          test "${#files[@]}" -eq 1
+          python3 tests/macos-installed-runtime-smoke.py --expected-version 0.2.26 --installer "${files[0]}" --built-application src-tauri/target/release/bundle/macos/EchoLingo.app --output "$RUNNER_TEMP/desktop-package/macos-runtime.json" --run-url "$RUN_URL" --native-self-tests-passed --native-window-resize-fixture-passed
+      - name: Preserve bounded Mac runtime acceptance report
+        if: always() && runner.os == 'macOS'
+        uses: actions/upload-artifact@v4
+        with:
+          name: Mac-runtime-acceptance
+          if-no-files-found: warn
+          path: ${{ runner.temp }}/desktop-package/macos-runtime.json
+      - name: Build and accept exact Windows unpack ZIP
+        if: runner.os == 'Windows'
+        shell: powershell
+        run: |
+          & python scripts/package-windows-unpack.py --application src-tauri/target/release/echolingo.exe --source-archive "$env:RUNNER_TEMP/candidate-offline-evidence/EchoLingo-offline-engine-source.zip" --output "$env:RUNNER_TEMP/desktop-unpack"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & powershell.exe -NoProfile -STA -ExecutionPolicy Bypass -File tests/windows-unpack-smoke.ps1 -ArchivePath "$env:RUNNER_TEMP/desktop-unpack/EchoLingo_0.2.26_windows_x64-unpack.zip" -ManifestPath "$env:RUNNER_TEMP/desktop-unpack/WINDOWS-ZIP-MANIFEST.json" -ReportPath "$env:RUNNER_TEMP/desktop-unpack/windows-unpack-smoke.json"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          foreach ($name in @('EchoLingo_0.2.26_windows_x64-unpack.zip','WINDOWS-ZIP-MANIFEST.json','windows-unpack-smoke.json')) {
+            Copy-Item -LiteralPath (Join-Path "$env:RUNNER_TEMP/desktop-unpack" $name) -Destination "$env:RUNNER_TEMP/desktop-package/"
+          }
+      - name: Accept real Windows settings and generated native focus behavior
+        if: runner.os == 'Windows'
+        shell: powershell
+        run: |
+          $app = (Resolve-Path src-tauri/target/release/echolingo.exe).Path
+          $hash = (Get-FileHash -LiteralPath $app -Algorithm SHA256).Hash.ToLowerInvariant()
+          $bytes = (Get-Item -LiteralPath $app).Length
+          $result = @(& powershell.exe -NoProfile -STA -ExecutionPolicy Bypass -File tests/windows-shortcuts-uia-smoke.ps1 -ApplicationPath $app -ExpectedApplicationSha256 $hash -ExpectedApplicationBytes $bytes -IsolatedTestSession)
+          if ($LASTEXITCODE -ne 0) { $result | Write-Output; exit 1 }
+          $report = ($result | Where-Object { $_ -match '^\{' } | Select-Object -Last 1) | ConvertFrom-Json
+          if (-not $report.ok -or -not $report.actualSettingsUiTested -or $report.fakeIpcUsed -or $report.applicationSha256 -ne $hash) { throw 'Actual settings acceptance failed' }
+          $report | ConvertTo-Json -Depth 16 | Set-Content "$env:RUNNER_TEMP/desktop-package/windows-settings.json" -Encoding UTF8
+          @'
+          import pathlib, sys
+          app, build, target = map(pathlib.Path, sys.argv[1:])
+          binary = app.read_bytes()
+          matches = {p.read_bytes() for p in build.rglob('echolingo-windows-native.dll') if p.is_file()}
+          matches = [value for value in matches if value and value in binary]
+          if len(matches) != 1: raise SystemExit('Exact embedded native DLL not uniquely identified')
+          target.write_bytes(matches[0])
+          '@ | python - $app src-tauri/target/release/build "$env:RUNNER_TEMP/desktop-native.dll"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $result = @(& powershell.exe -NoProfile -STA -ExecutionPolicy Bypass -File tests/windows-selection-native-focus-smoke.ps1 -NativeAssemblyPath "$env:RUNNER_TEMP/desktop-native.dll" -OutputDirectory "$env:RUNNER_TEMP/desktop-focus" -ExpectCrossProcessSuccess -IsolatedTestSession)
+          if ($LASTEXITCODE -ne 0) { $result | Write-Output; exit 1 }
+          $report = ($result | Where-Object { $_ -match '^\{' } | Select-Object -Last 1) | ConvertFrom-Json
+          if (-not $report.ok -or $report.passedCases -ne 2 -or -not $report.generatedSourceOnly -or -not $report.expectCrossProcessSuccess) { throw 'Generated native focus acceptance failed' }
+          $report | ConvertTo-Json -Depth 16 | Set-Content "$env:RUNNER_TEMP/desktop-package/windows-native-focus.json" -Encoding UTF8
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Desktop-package-${{ runner.os }}
+          if-no-files-found: error
+          path: ${{ runner.temp }}/desktop-package/*
+      - name: State exact validation scope
+        shell: bash
+        run: |
+          if [ "$RUNNER_OS" = Windows ]; then
+            echo 'Fresh NSIS and ZIP. ZIP runtime, actual Windows settings and generated native focus passed; NSIS installed offline-model and F1 acceptance passed on these exact installer bytes. No physical multi-display or user-field root cause is claimed. Offline resources alone reuse pinned historical bytes.' >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo 'Fresh macOS app/DMG, extracted-bundle launch and settings WebView, native Swift policy self-tests and window-resize fixtures passed. No real Codex selection, physical-device full regression, or field-root-cause acceptance is claimed.' >> "$GITHUB_STEP_SUMMARY"
+          fi
+  browser:
+    if: github.repository == 'Blueeeecho/EchoLingo' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+      - run: npm ci
+      - run: npx playwright install --with-deps chromium
+      - name: Production DOM and mocked IPC regressions
+        shell: bash
+        run: |
+          set -euo pipefail
+          npm run dev > "$RUNNER_TEMP/popup-vite.log" 2>&1 &
+          server=$!
+          trap 'kill "$server"' EXIT
+          for attempt in {1..30}; do curl -fsS http://127.0.0.1:1420/ >/dev/null && break; sleep 1; done
+          status=0
+          for test in frontend-interactions window-resize-edges popup-viewport macos-popup-compact settings-navigation screenshot-editor; do
+            if ! node "tests/$test.mjs"; then status=1; fi
+          done
+          exit "$status"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: Popup-compact-browser-visuals
+          if-no-files-found: warn
+          path: test-results/macos-popup-*.png
+
+  prepare:
+    needs: [build, browser]
+    timeout-minutes: 10
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/download-artifact@v4
+        with:
+          name: Desktop-package-Windows
+          path: desktop-inputs/Windows
+      - uses: actions/download-artifact@v4
+        with:
+          name: Desktop-package-macOS
+          path: desktop-inputs/macOS
+      - name: Validate preparation and publisher policy
+        run: |
+          python3 -m unittest discover -s scripts -p 'test_prepare_desktop_release.py' -v
+          node --test scripts/test-desktop-release.cjs
+          python3 -m unittest discover -s scripts -p 'test_prepare_desktop_026.py' -v
+          node --test scripts/test-desktop-026.cjs
+      - name: Prepare exact inspected release bytes
+        env:
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: python3 scripts/prepare-desktop-026.py --artifacts desktop-inputs --output release-assets --run-url "$RUN_URL"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: EchoLingo-0.2.26-publication
+          if-no-files-found: error
+          path: release-assets/*
+  publish:
+    needs: prepare
+    if: github.repository == 'Blueeeecho/EchoLingo' && github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+    timeout-minutes: 50
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      actions: read
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/download-artifact@v4
+        with:
+          name: EchoLingo-0.2.26-publication
+          path: release-assets
+      - name: Require successful exact-source main CI before publishing
+        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b
+        timeout-minutes: 45
+        with:
+          script: |
+            const {owner, repo} = context.repo;
+            const deadline = Date.now() + 40 * 60 * 1000;
+            while (Date.now() < deadline) {
+              const {data: main} = await github.rest.git.getRef({owner,repo,ref:'heads/main'});
+              if (main.object.sha !== context.sha) throw new Error('Main moved during CI wait');
+              const {data} = await github.rest.actions.listWorkflowRuns({owner,repo,workflow_id:'ci.yml',head_sha:context.sha,event:'push',per_page:100});
+              const runs = data.workflow_runs.filter(run => run.head_sha === context.sha && run.event === 'push' && run.path === '.github/workflows/ci.yml').sort((a,b) => b.id-a.id);
+              if (runs.length && runs[0].status === 'completed') {
+                if (runs[0].conclusion !== 'success') throw new Error('Exact-source CI did not pass: '+runs[0].html_url);
+                return;
+              }
+              await new Promise(resolve => setTimeout(resolve, 30000));
+            }
+            throw new Error('Exact-source CI remains pending; no release was published');
+      - name: Publish a new prerelease without replacing old assets
+        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b
+        with:
+          script: |
+            const { publish } = require('./scripts/publish-desktop-026.cjs');
+            await publish({ github, context, core });

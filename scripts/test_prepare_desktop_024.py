@@ -75,8 +75,8 @@ class StaticContracts(unittest.TestCase):
                 '.github/workflows/ci.yml': 'e056c7d9579ffffff69a9a6ed4eda31fdafd453c7af237d3dba104406ed7fd2c',
                 'scripts/test_prepare_desktop_release.py': '1872a26c00630380ca53f7d91b33d26b0f6b7abf156c24e4744c8ef828228e7c',
                 'scripts/test_prepare_desktop_021.py': '00a392296b8523a244a418f38370cb3a23de705d269eb55126916de2df9317bd',
-                'scripts/test_prepare_desktop_022.py': ('41d7748e0a0faf8fe2b79aa7422d8e617f21beaa20efab85837cc1f7feff075e', 'f48a0183bd5ef0efcf411fe6fc220e3b545f765079e1f4e288efd215b7e3b87a'),
-                'scripts/test_prepare_desktop_023.py': ('525d93a050305158009d28dcec2da8f6fbdd31babd4eaba4112fc2f76c624b05', 'ebcb6ad657aeb5604c2b99c7f005ee4b79fd4e957f1210247ae06fbc956dbdca'),
+                'scripts/test_prepare_desktop_022.py': ('41d7748e0a0faf8fe2b79aa7422d8e617f21beaa20efab85837cc1f7feff075e', 'f48a0183bd5ef0efcf411fe6fc220e3b545f765079e1f4e288efd215b7e3b87a', 'e4a4ec764a97f301264bf92f22a1eec4758003ecef97653140c51c4c782a2e42'),
+                'scripts/test_prepare_desktop_023.py': ('525d93a050305158009d28dcec2da8f6fbdd31babd4eaba4112fc2f76c624b05', 'ebcb6ad657aeb5604c2b99c7f005ee4b79fd4e957f1210247ae06fbc956dbdca', '93adfc93be95dfaa7e15954428f64aeff4064042f0c21ed09535c5d40a699620'),
             }
             if name in docs_sync_sha256 and current != expected:
                 approved=docs_sync_sha256[name]
@@ -141,8 +141,11 @@ class VersionCLIContracts(unittest.TestCase):
                 tail24=b'"0.2.24"), default=VERSION)'
                 self.assertEqual(released.count(tail24),1)
                 with25=released.replace(tail24,b'"0.2.24", "0.2.25"), default=VERSION)',1)
+                tail25=b'"0.2.25"), default=VERSION)'
+                self.assertEqual(with25.count(tail25),1)
+                with26=with25.replace(tail25,b'"0.2.25", "0.2.26"), default=VERSION)',1)
                 current=(ROOT/path).read_bytes().replace(b'\r\n',b'\n')
-                self.assertIn(current,(released,with25))
+                self.assertIn(current,(released,with25,with26))
 
     def test_version_cli_reaches_real_validation_and_rejects_unknown_version(self):
         with tempfile.TemporaryDirectory() as directory:
