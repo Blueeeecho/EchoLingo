@@ -1,6 +1,6 @@
 {
   "name": "echolingo",
-  "version": "0.2.25",
+  "version": "0.2.26",
   "private": true,
   "description": "EchoLingo · 回声译 — a lightweight Windows-first translation and offline OCR companion",
   "type": "module",

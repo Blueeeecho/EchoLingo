@@ -77,7 +77,16 @@ class StaticContracts(unittest.TestCase):
         for name in names:
             with self.subTest(path=name):
                 expected=subprocess.check_output(['git','show',R.REVIEWED_SOURCE+':'+name],cwd=ROOT)
-                self.assertEqual((ROOT/name).read_bytes().replace(b'\r\n',b'\n'),expected)
+                current=(ROOT/name).read_bytes().replace(b'\r\n',b'\n')
+                approved_version_cli_fixtures={
+                    'scripts/test_prepare_desktop_022.py': 'e4a4ec764a97f301264bf92f22a1eec4758003ecef97653140c51c4c782a2e42',
+                    'scripts/test_prepare_desktop_023.py': '93adfc93be95dfaa7e15954428f64aeff4064042f0c21ed09535c5d40a699620',
+                    'scripts/test_prepare_desktop_024.py': '95fe20000fce5c73055a93f0455ef1c87bd9f2b2e4d99f51dc1e8e536a2d3eab',
+                }
+                if name in approved_version_cli_fixtures and current != expected:
+                    self.assertEqual(hashlib.sha256(current).hexdigest(),approved_version_cli_fixtures[name])
+                else:
+                    self.assertEqual(current,expected)
     def test_explicit_same_installer_and_original_script(self):
         s=(ROOT/'.github/workflows/release-desktop-025.yml').read_text()
         self.assertIn('-InstallerPath $installers[0].FullName',s)
@@ -132,8 +141,13 @@ class VersionCLIContracts(unittest.TestCase):
                 before=subprocess.check_output(['git','show',R.legacy.MANIFEST_BASELINE+':'+path],cwd=ROOT)
                 old=b'"0.2.24"), default=VERSION)'
                 self.assertEqual(before.count(old),1)
-                self.assertEqual((ROOT/path).read_bytes().replace(b'\r\n',b'\n'),
-                                 before.replace(old,b'"0.2.24", "0.2.25"), default=VERSION)',1))
+                released=subprocess.check_output(['git','show','c9bc9d954d0a54dd1da80e0809239a22db160e75:'+path],cwd=ROOT)
+                self.assertEqual(released,before.replace(old,b'"0.2.24", "0.2.25"), default=VERSION)',1))
+                tail25=b'"0.2.25"), default=VERSION)'
+                self.assertEqual(released.count(tail25),1)
+                with26=released.replace(tail25,b'"0.2.25", "0.2.26"), default=VERSION)',1)
+                current=(ROOT/path).read_bytes().replace(b'\r\n',b'\n')
+                self.assertIn(current,(released,with26))
 
     def test_version_cli_reaches_real_validation_and_rejects_unknown_version(self):
         with tempfile.TemporaryDirectory() as directory:
