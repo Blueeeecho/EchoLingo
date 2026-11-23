@@ -41,6 +41,7 @@ try {
       if (replayAction) q.session = { ...q.session, initialAction: replayAction === 'copy-failure' ? 'copy' : replayAction, overlay: { x: 30, y: 100, width: 192, height: 128, viewportWidth: innerWidth, viewportHeight: innerHeight } };
       const drawImage = CanvasRenderingContext2D.prototype.drawImage;
       CanvasRenderingContext2D.prototype.drawImage = function(...args) {
+        if (this.canvas.id === 'annotation-preview' && args.length === 5) q.previewSourceDraws = (q.previewSourceDraws ?? 0) + 1;
         const result = drawImage.apply(this, args);
         if (this.canvas.id === 'image-canvas' && q.failAfterSourceDraw) {
           if (q.failAfterSourceDraw > 0) q.failAfterSourceDraw--;
@@ -943,6 +944,12 @@ try {
     await page.mouse.move(box.x + 25, box.y + 25); await page.mouse.down(); await page.mouse.move(box.x + 80, box.y + 40, { steps: 4 });
     assert.equal(await geometryCalls(), beforeGeometry, 'held first stroke previews without hiding the native host');
     assert.equal(await page.locator('#annotation-preview').isVisible(), true, 'first ink has same-surface final-renderer preview');
+    const previewPixels = await page.locator('#annotation-preview').evaluate(canvas => {
+      const ctx = canvas.getContext('2d');
+      return { ink: ctx.getImageData(50, 50, 1, 1).data[3] > 0, corner: ctx.getImageData(0, 0, 1, 1).data[3] };
+    });
+    assert.deepEqual(previewPixels, { ink: true, corner: 0 }, 'held ink paints only its stroke, not a background');
+    assert.equal(await page.evaluate(() => window.__screenshotQA.previewSourceDraws ?? 0), 0, 'transparent live preview must not draw a full-size background on each frame');
     const heldPreview = await page.locator('#annotation-preview').evaluate(c => c.toDataURL());
     await page.evaluate(() => {
       const canvas = document.querySelector('#image-canvas');

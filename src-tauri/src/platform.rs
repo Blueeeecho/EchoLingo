@@ -437,16 +437,18 @@ pub fn capture_ocr() -> Result<String, String> {
 pub fn capture_image() -> Result<String, String> {
     image_response(run("capture-image", None)?)
 }
-fn image_response(result: Value) -> Result<String, String> {
-    result
-        .get("imageBase64")
-        .and_then(Value::as_str)
-        .filter(|image| !image.is_empty() && image.len() <= (8usize * 1024 * 1024).div_ceil(3) * 4)
-        .map(str::to_owned)
-        .ok_or_else(|| {
+fn image_response(mut result: Value) -> Result<String, String> {
+    match result.get_mut("imageBase64").map(Value::take) {
+        Some(Value::String(image))
+            if !image.is_empty() && image.len() <= (8usize * 1024 * 1024).div_ceil(3) * 4 =>
+        {
+            Ok(image)
+        }
+        _ => Err(
             "NATIVE_PROTOCOL: Native helper returned an empty or oversized PNG imageBase64 field."
-                .into()
-        })
+                .into(),
+        ),
+    }
 }
 
 pub fn clipboard_text() -> Result<String, String> {
@@ -2380,11 +2382,15 @@ mod tests {
     }
     #[test]
     fn capture_image_validation_is_shared_by_ordinary_and_cancelable_paths() {
-        assert_eq!(
-            super::image_response(serde_json::json!({"imageBase64":"fixture-only"})).unwrap(),
-            "fixture-only"
-        );
+        let image = String::from("fixture-only");
+        let allocation = image.as_ptr();
+        let mut response = serde_json::json!({"ok":true});
+        response["imageBase64"] = serde_json::Value::String(image);
+        let extracted = super::image_response(response).unwrap();
+        assert_eq!(extracted, "fixture-only");
+        assert_eq!(extracted.as_ptr(), allocation);
         assert!(super::image_response(serde_json::json!({"imageBase64":""})).is_err());
+        assert!(super::image_response(serde_json::json!({"imageBase64":123})).is_err());
         assert!(super::image_response(serde_json::json!({"text":"not-an-image"})).is_err());
     }
     #[test]

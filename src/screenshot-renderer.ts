@@ -33,15 +33,15 @@ function drawStroke(ctx: CanvasRenderingContext2D, operation: StrokeOperation, w
   ctx.save(); ctx.globalAlpha = operation.kind === 'highlight' ? .3 : 1; ctx.drawImage(layer, x, y); ctx.restore();
   layer.width = layer.height = 1;
 }
-/** Each render starts with the immutable decoded source. Crops change actual
- * canvas dimensions, not a viewport or exported hidden layer. */
-export function renderScreenshot(canvas: HTMLCanvasElement, original: CanvasImageSource, size: Size, operations: readonly EditOperation[]): void {
+/** Each render starts with the immutable source, or transparent pixels for a
+ * live selection preview. Crops change the actual canvas dimensions. */
+export function renderScreenshot(canvas: HTMLCanvasElement, original: CanvasImageSource | null, size: Size, operations: readonly EditOperation[]): void {
   if (canvas.width !== size.width || canvas.height !== size.height) {
     canvas.width = size.width; canvas.height = size.height;
   }
   let ctx = context(canvas);
   ctx.clearRect(0, 0, size.width, size.height);
-  ctx.drawImage(original, 0, 0, size.width, size.height);
+  if (original) ctx.drawImage(original, 0, 0, size.width, size.height);
   for (const operation of operations) {
     if (operation.kind === 'crop') {
       const { x, y, width, height } = operation.rect;

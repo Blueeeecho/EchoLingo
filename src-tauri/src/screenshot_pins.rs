@@ -29,7 +29,17 @@ struct Entry {
     ready: Option<Reply>,
     delivered: bool,
 }
-#[derive(Clone, Serialize)]
+impl Entry {
+    fn take_snapshot(&mut self) -> Result<Snapshot, String> {
+        if self.delivered {
+            return Err(CLOSED.into());
+        }
+        let snapshot = self.image.take().ok_or(CLOSED)?;
+        self.delivered = true;
+        Ok(snapshot)
+    }
+}
+#[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Snapshot {
     png_base64: String,
@@ -426,13 +436,10 @@ pub fn get_pinned_screenshot(
 ) -> Result<Snapshot, String> {
     let state = app.state::<super::AppState>();
     let mut entries = super::locked(&state.screenshot_pins.entries)?;
-    let entry = entries
+    entries
         .get_mut(window.label())
-        .filter(|entry| !entry.delivered)
-        .ok_or(CLOSED)?;
-    let snapshot = entry.image.as_ref().ok_or(CLOSED)?.clone();
-    entry.delivered = true;
-    Ok(snapshot)
+        .ok_or(CLOSED)?
+        .take_snapshot()
 }
 #[tauri::command]
 pub async fn pinned_screenshot_ready(
@@ -472,7 +479,6 @@ pub async fn pinned_screenshot_ready(
         };
         let mut entries = super::locked(&state.screenshot_pins.entries)?;
         let entry = entries.get_mut(window.label()).ok_or(CLOSED)?;
-        entry.image = None; // Frontend owns the immutable decoded bitmap now.
         if let Some(reply) = entry.ready.take() {
             let _ = reply.send(result.clone());
         }
@@ -728,6 +734,26 @@ mod tests {
             ready: None,
             delivered: true,
         }
+    }
+    #[test]
+    fn snapshot_payload_moves_once_without_releasing_the_registry_budget() {
+        let payload = String::from("aGVsbG8=");
+        let allocation = payload.as_ptr();
+        let size = payload.len();
+        let mut pending = entry(1, size);
+        let (reply, _receive) = tokio::sync::oneshot::channel();
+        pending.ready = Some(reply);
+        pending.delivered = false;
+        pending.image = Some(Snapshot {
+            png_base64: payload,
+            width: 1,
+            height: 1,
+        });
+        let moved = pending.take_snapshot().unwrap();
+        assert_eq!(moved.png_base64.as_ptr(), allocation);
+        assert_eq!(pending.encoded, size);
+        assert!(pending.delivered && pending.ready.is_some() && pending.image.is_none());
+        assert!(pending.take_snapshot().is_err());
     }
     fn assert_inside(frame: Rect, area: Rect, decoration: (f64, f64)) {
         assert!(frame.x >= area.x && frame.y >= area.y);

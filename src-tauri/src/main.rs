@@ -53,6 +53,7 @@ use model::*;
 use serde::{Deserialize, Serialize};
 use shortcut_bindings::Binding;
 use std::{
+    borrow::Borrow,
     fs,
     path::{Path, PathBuf},
     sync::{
@@ -1509,7 +1510,7 @@ fn persist_settings_and_history(
     history: &mut Vec<HistoryEntry>,
     settings: Settings,
 ) -> Result<(), String> {
-    let mut updated = history.clone();
+    let mut updated: Vec<_> = history.iter().collect();
     trim_history(&mut updated, settings.max_history);
     let settings_path = data_dir.join("settings.json");
     write_json(&settings_path, &settings)?;
@@ -1520,12 +1521,12 @@ fn persist_settings_and_history(
                 // the settings that did reach disk and enforce the new limit;
                 // startup will retry trimming the older history file.
                 *current = settings;
-                *history = updated;
+                *history = updated.into_iter().cloned().collect();
                 return Err("设置已保存，但历史文件更新失败；本次运行已应用条数限制，请检查本地数据目录后重试".into());
             }
             return Err(format!("历史记录未能更新，设置没有更改：{error}"));
         }
-        *history = updated;
+        *history = updated.into_iter().cloned().collect();
     }
     *current = settings;
     Ok(())
@@ -1826,20 +1827,37 @@ fn finish_translation(
             if write_json(&state.data_dir.join("history.json"), &updated).is_ok() {
                 *history = updated;
             } else {
-                locked(&state.startup_warnings)?
-                    .push("最近一次翻译的历史记录保存失败，译文仍正常返回".into());
+                const WARNING: &str = "最近一次翻译的历史记录保存失败，译文仍正常返回";
+                let mut warnings = locked(&state.startup_warnings)?;
+                if !warnings.iter().any(|warning| warning == WARNING) {
+                    warnings.push(WARNING.into());
+                }
             }
         }
         Ok(())
     })
 }
 const MAX_HISTORY_BYTES: usize = 8 * 1024 * 1024;
-fn trim_history(history: &mut Vec<HistoryEntry>, max: usize) {
+fn trim_history<T: Borrow<HistoryEntry>>(history: &mut Vec<T>, max: usize) {
+    #[derive(Default)]
+    struct JsonSize(usize);
+    impl std::io::Write for JsonSize {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0 = self.0.saturating_add(bytes.len());
+            Ok(bytes.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
     let mut sizes: Vec<usize> = history
         .iter()
         .map(|h| {
-            serde_json::to_vec(h)
-                .map(|v| v.len() + 1)
+            let mut size = JsonSize::default();
+            serde_json::to_writer(&mut size, Borrow::<HistoryEntry>::borrow(h))
+                .map(|()| size.0.saturating_add(1))
                 .unwrap_or(MAX_HISTORY_BYTES + 1)
         })
         .collect();
@@ -1857,7 +1875,7 @@ fn trim_history(history: &mut Vec<HistoryEntry>, max: usize) {
     while history.len() > max || total > MAX_HISTORY_BYTES {
         let Some(index) = history
             .iter()
-            .rposition(|h| !h.favorite)
+            .rposition(|h| !h.borrow().favorite)
             .or_else(|| history.len().checked_sub(1))
         else {
             break;
@@ -4762,6 +4780,20 @@ mod tests {
         assert!(!fs::read_to_string(directory.join("history.json"))
             .unwrap()
             .contains("resolvedLanguages"));
+
+        // A blocked write preserves existing history and records one useful
+        // warning, even if many successful translations cannot be saved.
+        let path = directory.join("history.json");
+        fs::remove_file(&path).unwrap();
+        fs::create_dir(&path).unwrap();
+        for _ in 0..3 {
+            finish(state.translation_requests.begin(epoch).unwrap()).unwrap();
+        }
+        assert_eq!(state.history.lock().unwrap().len(), 1);
+        assert_eq!(
+            *state.startup_warnings.lock().unwrap(),
+            ["最近一次翻译的历史记录保存失败，译文仍正常返回"]
+        );
         fs::remove_dir_all(directory).unwrap();
     }
     #[test]
@@ -5442,6 +5474,29 @@ mod tests {
         assert_eq!(saved.len(), 1);
         assert_eq!(saved[0].id, "new");
         fs::remove_dir_all(directory).unwrap();
+    }
+    #[test]
+    fn borrowed_history_trim_preserves_the_exact_compact_json_limit() {
+        let mut entry = HistoryEntry {
+            id: "fixture".into(),
+            text: "转\n译".into(),
+            source_language: "en".into(),
+            target_language: "zh-Hans".into(),
+            results: vec![],
+            created_at: 0,
+            favorite: true,
+        };
+        let base_size = serde_json::to_vec(&[&entry]).unwrap().len();
+        entry
+            .text
+            .push_str(&"x".repeat(MAX_HISTORY_BYTES - base_size));
+        let mut retained = vec![&entry];
+        trim_history(&mut retained, 1);
+        assert_eq!(retained.len(), 1);
+        entry.favorite = false; // One more byte than the `true` JSON value.
+        let mut retained = vec![&entry];
+        trim_history(&mut retained, 1);
+        assert!(retained.is_empty());
     }
     #[test]
     fn settings_history_write_failure_restores_settings_and_keeps_history() {

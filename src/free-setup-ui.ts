@@ -373,8 +373,8 @@ export function installFreeSetup(context: SetupContext): { refresh: () => void; 
   const cardSummary = document.querySelector('#free-setup-card-summary');
   if (cardTitle) cardTitle.textContent = tx('有免费额度的服务', 'Services with free allowances');
   if (cardSummary) cardSummary.textContent = tx(
-    '默认仍是本机翻译和本机识别。翻译和 OCR 分开选择，可自由搭配，也可只配置其中一项。免费额度与条件以官方当时说明为准。',
-    'The default stays local. Choose translation and OCR independently, or configure only one. Free allowances and eligibility follow the current vendor terms.',
+    '未配置时仍使用本机服务。翻译和 OCR 可分别配置；免费额度以服务商的最新说明为准。',
+    'Translation and OCR stay local unless configured. Set them up separately; free allowances follow the current vendor terms.',
   );
   // The host refreshes hints after rendering its existing engine/privacy state.
   // Do not consume the first-run timestamp before that banner can block this one.

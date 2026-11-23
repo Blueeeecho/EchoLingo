@@ -1,13 +1,13 @@
 /** Settings categories organize the existing controls; native visibility remains
  * owned by the original platform logic inside each panel. */
 export type SettingsCategory = 'general' | 'translation' | 'capture' | 'shortcuts' | 'permissions' | 'about';
-const categories: Array<[SettingsCategory, string, string]> = [
-  ['general', '常规', '外观与历史记录'],
-  ['translation', '翻译服务', '服务、语言包与推荐'],
-  ['capture', '识别与截图', '文字识别与图片保存'],
-  ['shortcuts', '快捷键', '按你的习惯操作'],
-  ['permissions', '权限与诊断', '授权状态与问题排查'],
-  ['about', '关于与更新', '版本与更新偏好'],
+const categories: Array<[SettingsCategory, string, string, string]> = [
+  ['general', '常规', '调整界面主题与本机历史记录。', 'settings'],
+  ['translation', '翻译服务', '管理本机语言包和云端翻译服务。', 'translate'],
+  ['capture', '识别与截图', '选择识别方式，或更改截图的保存位置。', 'capture'],
+  ['shortcuts', '快捷键', '修改划词、文字识别和截图编辑的快捷键。', 'bolt'],
+  ['permissions', '权限与诊断', '排查划词、截图和快捷键问题。', 'shield'],
+  ['about', '关于与更新', '查看当前版本，选择何时检查更新。', 'history'],
 ];
 let installed = false;
 let current: SettingsCategory = 'general';
@@ -38,7 +38,7 @@ export function installSettingsNavigation(): void {
   const root = document.querySelector<HTMLElement>('#view-settings');
   if (!root) return;
   const groups: Record<SettingsCategory, (Element | null | undefined)[]> = {
-    general: [document.querySelector('#general-settings')],
+    general: [document.querySelector('#general-settings'), document.querySelector('#history-settings')],
     translation: [document.querySelector('#translation-settings'), document.querySelector('#free-setup-card')],
     capture: [document.querySelector('#ocr-settings'), document.querySelector('#screenshot-settings')],
     shortcuts: [document.querySelector('#shortcut-settings'), document.querySelector('#windows-selection-settings')],
@@ -48,14 +48,18 @@ export function installSettingsNavigation(): void {
   const layout = document.createElement('div'); layout.className = 'settings-layout';
   const nav = document.createElement('div'); nav.className = 'settings-navigation'; nav.setAttribute('role', 'tablist'); nav.setAttribute('aria-label', '设置分类'); nav.setAttribute('aria-orientation', 'vertical');
   const content = document.createElement('div'); content.className = 'settings-content';
-  for (const [id, label, description] of categories) {
-    const tab = document.createElement('button'); tab.type = 'button'; tab.id = `settings-tab-${id}`; tab.dataset.settingsTab = id; tab.setAttribute('role', 'tab'); tab.setAttribute('aria-controls', `settings-panel-${id}`); tab.textContent = label;
+  for (const [id, label, description, iconName] of categories) {
+    const tab = document.createElement('button'); tab.type = 'button'; tab.id = `settings-tab-${id}`; tab.dataset.settingsTab = id; tab.setAttribute('role', 'tab'); tab.setAttribute('aria-controls', `settings-panel-${id}`);
+    const icon = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+    icon.classList.add('icon'); icon.setAttribute('aria-hidden', 'true');
+    const use = document.createElementNS(icon.namespaceURI, 'use'); use.setAttribute('href', `#i-${iconName}`);
+    icon.append(use); tab.append(icon, label);
     tab.addEventListener('click', () => selectSettingsCategory(id)); nav.append(tab);
     const panel = document.createElement('section'); panel.id = `settings-panel-${id}`; panel.dataset.settingsPanel = id; panel.setAttribute('role', 'tabpanel'); panel.setAttribute('aria-labelledby', tab.id); panel.tabIndex = 0;
-    const intro = document.createElement('p'); intro.className = 'settings-category-description'; intro.textContent = description; panel.append(intro);
-    if (id === 'translation') {
-      const manager = document.querySelector('#open-service-manager'); if (manager) panel.append(manager);
-    }
+    const heading = document.createElement('header'); heading.className = 'settings-category-heading';
+    const title = document.createElement('h1'); title.textContent = label;
+    const intro = document.createElement('p'); intro.textContent = description;
+    heading.append(title, intro); panel.append(heading);
     for (const card of groups[id]) if (card) panel.append(card);
     content.append(panel);
   }
@@ -66,7 +70,8 @@ export function installSettingsNavigation(): void {
   layout.append(nav, content); root.append(layout);
   nav.addEventListener('keydown', event => {
     const key = event.key;
-    if (!['ArrowDown', 'ArrowUp', 'ArrowRight', 'ArrowLeft', 'Home', 'End'].includes(key)) return;
+    const arrows = compact.matches ? ['ArrowLeft', 'ArrowRight'] : ['ArrowUp', 'ArrowDown'];
+    if (!arrows.includes(key) && key !== 'Home' && key !== 'End') return;
     event.preventDefault();
     const index = categories.findIndex(([id]) => id === current);
     const next = key === 'Home' ? 0 : key === 'End' ? categories.length - 1 : (index + (key === 'ArrowDown' || key === 'ArrowRight' ? 1 : -1) + categories.length) % categories.length;

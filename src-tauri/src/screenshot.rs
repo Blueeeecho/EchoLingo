@@ -10,7 +10,7 @@ use std::{
     path::{Path, PathBuf},
     sync::{
         atomic::{AtomicBool, Ordering},
-        Mutex,
+        Arc, Mutex,
     },
 };
 use tauri::{Emitter, Manager};
@@ -27,7 +27,8 @@ pub struct Session {
     pub kind: &'static str,
     pub revision: u64,
     pub id: u64,
-    pub png_base64: String,
+    #[serde(serialize_with = "serialize_png")]
+    pub png_base64: Arc<String>,
     pub width: u32,
     pub height: u32,
     pub captured_at: u64,
@@ -39,6 +40,12 @@ pub struct Session {
     pub overlay: Option<super::screenshot_overlay::Layout>,
     #[serde(skip)]
     capture_geometry: Option<super::platform::ScreenshotGeometry>,
+}
+fn serialize_png<S: serde::Serializer>(
+    png: &Arc<String>,
+    serializer: S,
+) -> Result<S::Ok, S::Error> {
+    serializer.serialize_str(png)
 }
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -434,7 +441,7 @@ fn make_session(
         kind: "image",
         revision: 0,
         id,
-        png_base64: base64::engine::general_purpose::STANDARD.encode(encode(&pixels)?),
+        png_base64: Arc::new(base64::engine::general_purpose::STANDARD.encode(encode(&pixels)?)),
         width: pixels.width(),
         height: pixels.height(),
         captured_at,
@@ -460,7 +467,7 @@ pub(crate) fn install_native_pin_smoke(controller: &Controller, id: u64) -> Resu
         0,
         Some("generated-pin-fixture".into()),
     )?;
-    let png = session.png_base64.clone();
+    let png = session.png_base64.as_ref().clone();
     controller.begin(id)?;
     controller.install_and_publish(session, "generated.png".into(), |_| Ok(()))?;
     Ok(png)
@@ -1750,6 +1757,24 @@ mod tests {
     }
 
     #[test]
+    fn image_session_clones_share_payload_and_keep_the_same_json_string() {
+        let bytes = png();
+        let session = make_session(1, &bytes, 123, None).unwrap();
+        let copy = session.clone();
+        assert!(Arc::ptr_eq(&session.png_base64, &copy.png_base64));
+        let original = serde_json::to_value(&session).unwrap();
+        assert_eq!(original, serde_json::to_value(&copy).unwrap());
+        assert_eq!(
+            original["pngBase64"].as_str(),
+            Some(
+                base64::engine::general_purpose::STANDARD
+                    .encode(bytes)
+                    .as_str()
+            )
+        );
+    }
+
+    #[test]
     fn image_round_trip_is_png_pixels_only_and_has_bounded_dimensions() {
         let bytes = png();
         let decoded = decode(&bytes, true).unwrap();
@@ -1774,7 +1799,7 @@ mod tests {
         assert!(decode(&bytes, true).is_err());
         let session = make_session(1, &bytes, 123, Some("original.jpg".into())).unwrap();
         let normalized = base64::engine::general_purpose::STANDARD
-            .decode(session.png_base64)
+            .decode(session.png_base64.as_bytes())
             .unwrap();
         assert_eq!(image::guess_format(&normalized).unwrap(), ImageFormat::Png);
     }
@@ -1796,7 +1821,7 @@ mod tests {
         let session = make_session(1, &bytes, 1, None).unwrap();
         assert_eq!((session.width, session.height), (3, 4));
         let exported = base64::engine::general_purpose::STANDARD
-            .decode(session.png_base64)
+            .decode(session.png_base64.as_bytes())
             .unwrap();
         assert!(!exported.windows(6).any(|part| part == b"Exif\0\0"));
     }
@@ -1823,7 +1848,7 @@ mod tests {
         bytes.splice(bytes.len() - 12..bytes.len() - 12, encoded);
         let session = make_session(1, &bytes, 1, None).unwrap();
         let flattened = base64::engine::general_purpose::STANDARD
-            .decode(session.png_base64)
+            .decode(session.png_base64.as_bytes())
             .unwrap();
         assert!(!flattened
             .windows(payload.len())

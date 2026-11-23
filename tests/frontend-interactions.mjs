@@ -4,6 +4,13 @@
 import assert from 'node:assert/strict';
 import { chromium } from '@playwright/test';
 
+const testUrl = process.env.ECHOLINGO_TEST_URL ?? 'http://127.0.0.1:1420/';
+function fixtureUrl(query) {
+  const url = new URL(testUrl);
+  for (const [name, value] of new URLSearchParams(query)) url.searchParams.set(name, value);
+  return url.href;
+}
+
 const browser = await chromium.launch({ headless: true, ...(process.env.ECHOLINGO_TEST_CHROMIUM ? { executablePath: process.env.ECHOLINGO_TEST_CHROMIUM } : {}) });
 try {
   const page = await browser.newPage({ viewport: { width: 800, height: 820 } });
@@ -289,7 +296,7 @@ try {
   });
   // A queued preference must capture the user's choice before an earlier save
   // re-renders the settings controls. Only fake IPC and generated settings.
-  await page.goto(process.env.ECHOLINGO_TEST_URL ?? 'http://127.0.0.1:1420/');
+  await page.goto(testUrl);
   await page.waitForFunction(() => document.querySelector('#theme-select')?.value === 'light');
   await page.evaluate(() => {
     window.__qa.holdSave = true;
@@ -310,7 +317,7 @@ try {
   console.log('PASS: queued theme changes retain the latest user choice after older saves render. Mock IPC only.');
 
   const sourceFixtureUrl = (mode) => {
-    const url = new URL(process.env.ECHOLINGO_TEST_URL ?? 'http://127.0.0.1:1420/');
+    const url = new URL(testUrl);
     url.searchParams.set('sourceDeliveryFixture', mode); return url.href;
   };
   for (const mode of ['before-listener', 'dual', 'newtask']) {
@@ -351,7 +358,7 @@ try {
   // Even legacy selection-error payloads are quiet manual input. Real delivery
   // IDs and delayed IPC must preserve focus and reject stale source/errors.
   for (const prefix of ['COPY_NO_UPDATE', 'SELECTION_UNAVAILABLE']) {
-    await page.goto(process.env.ECHOLINGO_TEST_URL ?? 'http://127.0.0.1:1420/');
+    await page.goto(testUrl);
     await page.waitForFunction(() => document.querySelector('#footer-status')?.textContent === '准备就绪');
     await page.locator('#source-text').fill('Generated editor content before failed selection\n'.repeat(12));
     await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
@@ -463,7 +470,7 @@ try {
   assert.deepEqual(await page.evaluate(() => window.__qa.permissionSettings), []);
   assert.equal(await page.evaluate(() => window.__qa.translationRequests.length), 0);
   console.log('PASS: capture before listener replays once after readiness; event plus pull translates once; old startup payloads cannot overwrite edits, management, or a newer task; empty Alt+D retains first-input focus. Fake IPC only.');
-  await page.goto(process.env.ECHOLINGO_TEST_URL ?? 'http://127.0.0.1:1420/');
+  await page.goto(testUrl);
   await page.waitForFunction(() => document.querySelector('#footer-status')?.textContent === '准备就绪');
   const goView = async (view) => {
     if (await page.locator('body').getAttribute('data-view') === view) return;
@@ -538,7 +545,7 @@ try {
   // Both platform DOM branches use generated content and fake IPC only.
   const languagePair = () => page.evaluate(() => [document.querySelector('#source-language').value, document.querySelector('#target-language').value]);
   for (const windows of [false, true]) {
-    const sessionUrl = new URL(process.env.ECHOLINGO_TEST_URL ?? 'http://127.0.0.1:1420/');
+    const sessionUrl = new URL(testUrl);
     if (windows) sessionUrl.searchParams.set('windowsSelectionFixture', '1');
     sessionUrl.searchParams.set('persistedLanguageFixture', '1');
     await page.goto(sessionUrl.href);
@@ -656,7 +663,7 @@ try {
   // Replaying a resolved historical direction must not become the next capture's
   // language preference. Only an explicit picker change is a new preference.
   for (const preferred of [['auto', 'auto'], ['auto', 'zh-Hans'], ['en', 'zh-Hant']]) {
-    await page.goto(process.env.ECHOLINGO_TEST_URL ?? 'http://127.0.0.1:1420/');
+    await page.goto(testUrl);
     await page.waitForFunction(() => document.querySelector('#theme-select')?.value === 'light');
     await page.locator('#source-language').selectOption(preferred[0]);
     await page.locator('#target-language').selectOption(preferred[1]);
@@ -717,7 +724,7 @@ try {
       return [request.sourceLanguage, request.targetLanguage];
     }), ['zh-Hans', 'en'], 'explicit swaps during replay must remain the new preference');
   }
-  await page.goto(process.env.ECHOLINGO_TEST_URL ?? 'http://127.0.0.1:1420/');
+  await page.goto(testUrl);
   await page.waitForFunction(() => document.querySelector('#theme-select')?.value === 'light');
   await page.evaluate(() => {
     window.__qa.history = [{ id: 'queued-language-history', createdAt: Date.now(), text: 'Generated queue fixture',
@@ -735,7 +742,7 @@ try {
   assert.deepEqual(await page.evaluate(() => window.__qa.settingsWrites.map(item => [item.sourceLanguage, item.targetLanguage])), [['auto', 'auto'], ['ja', 'auto']]);
   console.log('PASS: history replay keeps manual edits scoped; capture/Clear restore preferences; picker/swap and queued saves retain explicit choices. Mock IPC only.');
 
-  await page.goto(process.env.ECHOLINGO_TEST_URL ?? 'http://127.0.0.1:1420/');
+  await page.goto(testUrl);
   await page.waitForFunction(() => document.querySelector('#footer-status')?.textContent === '准备就绪');
   // A blank popup has no app chrome, tutorial, counters, or result placeholder.
   assert.equal(await page.locator('.management-header').isVisible(), false);
@@ -3139,7 +3146,7 @@ try {
   // Both desktop presentations replace pending translation with an explicit
   // structural bypass result, preserving whitespace through IPC, DOM and copy.
   for (const platform of ['mac', 'windows']) {
-    const url = new URL(process.env.ECHOLINGO_TEST_URL ?? 'http://127.0.0.1:1420/');
+    const url = new URL(testUrl);
     url.searchParams.set('translationSetupFixture', platform === 'mac' ? 'system' : 'offline');
     if (platform === 'windows') url.searchParams.set('windowsSelectionFixture', '1');
     await page.goto(url.href);
@@ -3181,7 +3188,7 @@ try {
   // An automatic source delivery and unchanged Enter use the same language
   // and provider request. Native installed-session recovery is intentionally
   // opaque here: exhausting it must not trigger frontend retries/downloads.
-  const systemRecoveryUrl = new URL(process.env.ECHOLINGO_TEST_URL ?? 'http://127.0.0.1:1420/');
+  const systemRecoveryUrl = new URL(testUrl);
   systemRecoveryUrl.searchParams.set('translationSetupFixture', 'system');
   for (const captureOrigin of ['selection', 'ocr']) {
     await page.goto(systemRecoveryUrl.href);
@@ -3278,7 +3285,7 @@ try {
     ['mac', 'system', true], ['windows', 'offline', false],
     ['windows', 'system', false], ['mac', 'openai', false],
   ]) {
-    const url = new URL(process.env.ECHOLINGO_TEST_URL ?? 'http://127.0.0.1:1420/');
+    const url = new URL(testUrl);
     url.searchParams.set('translationSetupFixture', kind);
     if (platform === 'windows') url.searchParams.set('windowsSelectionFixture', '1');
     await page.goto(url.href);
@@ -3317,7 +3324,7 @@ try {
     }
   }
   for (const language of ['ca', 'da', 'pt-BR']) {
-    const url = new URL(process.env.ECHOLINGO_TEST_URL ?? 'http://127.0.0.1:1420/');
+    const url = new URL(testUrl);
     url.searchParams.set('translationSetupFixture', 'system');
     await page.goto(url.href);
     await page.waitForFunction(() => document.querySelector('#footer-status')?.textContent === '准备就绪');
@@ -3350,7 +3357,7 @@ try {
     assert.deepEqual(await page.evaluate(() => window.__qa.systemPrepareCalls), [{ sourceLanguage: language, targetLanguage: 'zh-Hans' }]);
   }
   for (const pair of [null, { sourceLanguage: 'auto', targetLanguage: 'en' }, { sourceLanguage: 'xx-unknown', targetLanguage: 'en' }, { sourceLanguage: 'en', targetLanguage: 'en' }, { sourceLanguage: 7, targetLanguage: 'en' }]) {
-    const url = new URL(process.env.ECHOLINGO_TEST_URL ?? 'http://127.0.0.1:1420/');
+    const url = new URL(testUrl);
     url.searchParams.set('translationSetupFixture', 'system');
     await page.goto(url.href);
     await page.waitForFunction(() => document.querySelector('#footer-status')?.textContent === '准备就绪');
@@ -3375,7 +3382,7 @@ try {
     assert.deepEqual(await page.evaluate(() => ({ translations: window.__qa.translationRequests.length, keys: window.__qa.credentialReadCalls, writes: window.__qa.saveCalls })), baseline);
   }
   {
-    const url = new URL(process.env.ECHOLINGO_TEST_URL ?? 'http://127.0.0.1:1420/');
+    const url = new URL(testUrl);
     url.searchParams.set('translationSetupFixture', 'system');
     await page.goto(url.href);
     await page.waitForFunction(() => document.querySelector('#footer-status')?.textContent === '准备就绪');
@@ -3414,7 +3421,7 @@ try {
   // not proof of the cause of any particular Windows runtime failure.
   // A fresh page reruns the existing mock bootstrap and isolates this probe
   // from the earlier clock override and intentionally delayed IPC replies.
-  await page.goto(process.env.ECHOLINGO_TEST_URL ?? 'http://127.0.0.1:1420/');
+  await page.goto(testUrl);
   await page.waitForFunction(() => document.querySelector('#footer-status')?.textContent === '准备就绪');
   await goView('settings');
   // Use the existing Settings save mock to configure this exact native combo,
@@ -3552,7 +3559,7 @@ try {
   console.log('PASS: popup left/right pointer-captured width requests; native Windows resize dispatch fixture; pin/input/toolbar drag isolation; bounded actual viewport width participates in same-height680→850 layout fits; later height fits retain850; coalesced pending resize invalidated by hide/epoch; management edges hidden/inert;680px light/dark long-prose screenshots inspected separately.');
   // The free-service wizard is a real modal, not a hidden settings panel. Test
   // production handlers with held IPC and no external service or real secret.
-  await page.goto(process.env.ECHOLINGO_TEST_URL ?? 'http://127.0.0.1:1420/');
+  await page.goto(testUrl);
   await page.waitForFunction(() => document.querySelector('#footer-status')?.textContent === '准备就绪');
   await page.locator('#source-text').fill('Do not translate behind the setup modal');
   await goView('settings');
@@ -3647,7 +3654,7 @@ try {
   assert.equal(JSON.stringify(translationOnly).includes('qa-independent-'), false);
   console.log('PASS: free setup blank validation, modal inert/focus trap/shortcuts/Escape, duplicate submission, pending-test close/reopen, owned credential cleanup, and independent translation/OCR recommendation lists. Fake IPC only.');
 
-  const combinedHintsUrl = new URL(process.env.ECHOLINGO_TEST_URL ?? 'http://127.0.0.1:1420/');
+  const combinedHintsUrl = new URL(testUrl);
   combinedHintsUrl.searchParams.set('combinedHintsFixture', '1');
   await page.goto(combinedHintsUrl.toString());
   await page.waitForFunction(() => document.querySelector('#footer-status')?.textContent === '准备就绪');
@@ -3663,7 +3670,7 @@ try {
 
   // Windows-only choice: legacy payload defaults to compatibility, saves only
   // the chosen field, survives management navigation, and rolls back failed saves.
-  const windowsSelectionUrl = new URL(process.env.ECHOLINGO_TEST_URL ?? 'http://127.0.0.1:1420/');
+  const windowsSelectionUrl = new URL(testUrl);
   windowsSelectionUrl.searchParams.set('windowsSelectionFixture', '1');
   await page.goto(windowsSelectionUrl.toString());
   await page.waitForFunction(() => document.querySelector('#footer-status')?.textContent === '准备就绪');
@@ -3770,7 +3777,7 @@ try {
   assert.doesNotMatch(readingFonts.action, /Times New Roman/);
   console.log('PASS: translated Latin font prefers installed Times New Roman; source and result share SimSun CJK fallback while UI action typography stays independent. Computed CSS only, not physical font rendering.');
   for (const platform of ['mac', 'windows']) {
-    const url = new URL(process.env.ECHOLINGO_TEST_URL ?? 'http://127.0.0.1:1420/');
+    const url = new URL(testUrl);
     if (platform === 'windows') url.searchParams.set('windowsSelectionFixture', '1');
     await page.goto(url.href);
     await page.waitForFunction(() => document.querySelector('#footer-status')?.textContent === '准备就绪' && window.__qa.diagnosticCalls.length >= 1);
@@ -3909,14 +3916,14 @@ try {
   }
   assert.deepEqual(errors, []);
   console.log('PASS: macOS/Windows shared UI copies only the displayed Chinese multiline diagnostics without rerunning checks/credentials/translation; absent, pending and empty reports stay disabled. Source/result justify with left final lines, preserved code/URL/long-token text and independent action styling. Mock IPC and computed CSS only.');
-  await page.goto(process.env.ECHOLINGO_TEST_URL ?? 'http://127.0.0.1:1420/');
+  await page.goto(testUrl);
   await page.waitForFunction(() => document.querySelector('#footer-status')?.textContent === '准备就绪');
   await goView('settings');
   await selectSettingsCategory('shortcuts');
   assert.equal(await page.locator('#windows-selection-settings').isHidden(), true);
   assert.deepEqual(errors, []);
   console.log('PASS: isolated Windows strategy settings default compatibility for old payloads; strict and copy save without changing providers/shortcuts/theme, navigation retains strict, failed save rolls back, and macOS hides the setting. Fake IPC only.');
-  const retryUrl = new URL(process.env.ECHOLINGO_TEST_URL ?? 'http://127.0.0.1:1420/');
+  const retryUrl = new URL(testUrl);
   retryUrl.searchParams.set('translationRetryFixture', '1');
   await page.goto(retryUrl.href);
   await page.waitForFunction(() => document.querySelector('#footer-status')?.textContent === '准备就绪');
@@ -4028,7 +4035,7 @@ try {
   console.log('PASS: same-ID cloud-to-system/rename and history-card retries refresh provider kind, visible name and accessible action labels, route to the resolved system-language setup without downloading, and preserve successful sibling DOM. Mock IPC only.');
   // Free release notices: metadata-only startup, explicit networking, no dialogs,
   // cached notice across navigation and no stale beta result after a channel change.
-  const updateFixtureUrl = new URL(process.env.ECHOLINGO_TEST_URL ?? 'http://127.0.0.1:1420/');
+  const updateFixtureUrl = new URL(testUrl);
   updateFixtureUrl.searchParams.set('updateNoticeFixture', '1');
   await page.goto(updateFixtureUrl.href);
   await page.waitForFunction(() => window.__qa.updateReads > 0);
@@ -4119,7 +4126,7 @@ try {
   assert.deepEqual(errors, []);
   console.log('PASS: free update notice defaults offline; manual duplicate clicks, hidden/reopened windows, channel changes during pending requests, sanitized offline failures, exact allowlisted release-page opening, failed opt-in rollback and opt-in/off automatic timer. Mock IPC only.');
   for (const windows of [false, true]) {
-    await page.goto(`http://127.0.0.1:1420/?twoShortcutDefaultsFixture=1${windows ? '&windowsSelectionFixture=1' : ''}`);
+    await page.goto(fixtureUrl(`twoShortcutDefaultsFixture=1${windows ? '&windowsSelectionFixture=1' : ''}`));
     await page.locator('#more-toggle').click();
     await page.locator('button[data-view="settings"]').click();
     await selectSettingsCategory('shortcuts');
@@ -4184,7 +4191,7 @@ try {
   // Production main.ts/panel-layout and real pin handler, with native resize
   // events at the IPC boundary. Native policy itself has Rust/AppKit fixtures.
   for (const platform of ['macos', 'windows']) {
-    await page.goto(`${process.env.ECHOLINGO_TEST_URL ?? 'http://127.0.0.1:1420/'}${platform === 'windows' ? '?windowsSelectionFixture=1' : ''}`);
+    await page.goto(fixtureUrl(platform === 'windows' ? 'windowsSelectionFixture=1' : ''));
     await page.waitForFunction(() => document.querySelector('#core-guidance').hidden);
     await page.locator('#source-text').fill('明白');
     await page.locator('#translate-button').click();
@@ -4230,7 +4237,7 @@ try {
   assert.deepEqual(errors, []);
   console.log('PASS: Windows and macOS two-default shortcut UI permits changing core bindings, explicitly opting in optional actions, rejecting duplicates and clearing all bindings. Mock IPC only.');
   for (const windows of [false, true]) {
-    await page.goto(`http://127.0.0.1:1420/?twoShortcutDefaultsFixture=1${windows ? '&windowsSelectionFixture=1' : ''}`);
+    await page.goto(fixtureUrl(`twoShortcutDefaultsFixture=1${windows ? '&windowsSelectionFixture=1' : ''}`));
     const pin = page.locator('#pin-button'), more = page.locator('#more-toggle');
     await pin.waitFor();
     await pin.evaluate(element => element.focus({ preventScroll: true }));
@@ -4317,7 +4324,7 @@ try {
   for (const platform of ['mac', 'windows']) {
     for (const action of ['capture', 'ocr', 'silentOcr']) {
       for (const retained of [false, true]) {
-        const url = new URL(process.env.ECHOLINGO_TEST_URL ?? 'http://127.0.0.1:1420/');
+        const url = new URL(testUrl);
         if (platform === 'windows') url.searchParams.set('windowsSelectionFixture', '1');
         await page.goto(url.href);
         await page.waitForFunction(() => document.querySelector('#footer-status')?.textContent === '准备就绪');
@@ -4372,7 +4379,7 @@ try {
   assert.deepEqual(errors, []);
   console.log('PASS: Windows/macOS capture, OCR and silent OCR quiet blank delivery clears earlier completed source/results, does not translate or copy, preserves pin, ignores repeats and old empty completions, and retains real provider/permission/clipboard error feedback. Mock IPC only.');
   for (const enabled of [false, true]) {
-    await page.goto(`http://127.0.0.1:1420/${enabled ? '?inputDiagnosticsFixture=1' : ''}`);
+    await page.goto(fixtureUrl(enabled ? 'inputDiagnosticsFixture=1' : ''));
     await page.waitForFunction(() => document.querySelector('#footer-status')?.textContent === '准备就绪');
     await page.locator('#source-text').fill('Private generated diagnostic marker');
     await page.locator('#source-text').press('Shift+Enter');
@@ -4409,7 +4416,7 @@ try {
   for (const windows of [false, true]) {
     for (const width of [900, 420]) {
       await page.setViewportSize({ width, height: 850 });
-      await page.goto(`http://127.0.0.1:1420/?serviceManagerFixture=1${windows ? '&windowsSelectionFixture=1' : ''}`);
+      await page.goto(fixtureUrl(`serviceManagerFixture=1${windows ? '&windowsSelectionFixture=1' : ''}`));
       await page.waitForFunction(() => document.querySelector('#footer-status')?.textContent === '准备就绪');
       await page.locator('#more-toggle').click();
       await page.locator('#popup-more-menu [data-view="services"]').click();
@@ -4499,7 +4506,7 @@ try {
   }
   await page.setViewportSize({ width: 800, height: 820 });
   for (const windows of [false, true]) {
-    await page.goto(`http://127.0.0.1:1420/?serviceManagerFixture=1&managerOllamaFixture=1${windows ? '&windowsSelectionFixture=1' : ''}`);
+    await page.goto(fixtureUrl(`serviceManagerFixture=1&managerOllamaFixture=1${windows ? '&windowsSelectionFixture=1' : ''}`));
     await page.waitForFunction(() => document.querySelector('#footer-status')?.textContent === '准备就绪');
     await page.locator('#more-toggle').click();
     await page.locator('#popup-more-menu [data-view="services"]').click();
@@ -4522,7 +4529,7 @@ try {
   // fresh native deliveries immediately present the newest translation source.
   for (const windows of [false, true]) {
     for (const kind of ['translation', 'ocr', 'free', 'confirm']) {
-      await page.goto(`http://127.0.0.1:1420/?serviceManagerFixture=1${windows ? '&windowsSelectionFixture=1' : ''}`);
+      await page.goto(fixtureUrl(`serviceManagerFixture=1${windows ? '&windowsSelectionFixture=1' : ''}`));
       await page.waitForFunction(() => document.querySelector('#footer-status')?.textContent === '准备就绪');
       await goView('settings');
       let modal, secret;
@@ -4589,7 +4596,7 @@ try {
     }
     // An already submitted save finishes once while suspended without reviving
     // its editor, stealing focus, or throwing away the new translation source.
-    await page.goto(`http://127.0.0.1:1420/?serviceManagerFixture=1${windows ? '&windowsSelectionFixture=1' : ''}`);
+    await page.goto(fixtureUrl(`serviceManagerFixture=1${windows ? '&windowsSelectionFixture=1' : ''}`));
     await page.waitForFunction(() => document.querySelector('#footer-status')?.textContent === '准备就绪');
     await goView('settings');
     await selectSettingsCategory('translation');
@@ -4650,7 +4657,7 @@ try {
     ...(process.env.ECHOLINGO_TEST_CHROMIUM ? { executablePath: process.env.ECHOLINGO_TEST_CHROMIUM } : {}) });
   try {
     const balance = await balanceBrowser.newPage({ viewport: { width: 700, height: 750 } });
-    await balance.goto(process.env.ECHOLINGO_TEST_URL ?? 'http://127.0.0.1:1420/');
+    await balance.goto(testUrl);
     await balance.evaluate(() => { document.documentElement.dataset.platform = 'macos'; });
     assert.equal((await balance.locator('.popup-toolbar').boundingBox()).height, 28);
     assert.equal((await balance.locator('.language-bar').boundingBox()).height, 28);
