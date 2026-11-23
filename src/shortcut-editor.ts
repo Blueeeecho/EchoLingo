@@ -44,9 +44,9 @@ export function createShortcutEditor(context: Context) {
   let auxclickTimer: ReturnType<typeof setTimeout> | undefined;
   const inputs = new Map<ShortcutAction, HTMLInputElement>(), buttons = new Map<ShortcutAction, HTMLButtonElement>();
   const registrationNotes = new Map<ShortcutAction, HTMLElement>();
-  const jump = document.createElement('button'); jump.type = 'button'; jump.className = 'secondary-button'; jump.id = 'open-shortcut-settings'; jump.textContent = '快捷键设置';
+  const jump = document.createElement('button'); jump.type = 'button'; jump.className = 'text-button'; jump.id = 'open-shortcut-settings'; jump.textContent = '修改划词键';
   jump.addEventListener('click', () => { const input = inputs.get('selection'); revealSettingsTarget(input ?? null); input?.scrollIntoView({ block: 'center' }); input?.focus({ preventScroll: true }); });
-  document.querySelector('#view-settings .section-heading')?.append(jump);
+  document.querySelector('#settings-panel-general .settings-category-heading')?.append(jump);
   const feedback = document.createElement('p'); feedback.className = 'shortcut-feedback'; feedback.id = 'shortcut-feedback';
   feedback.setAttribute('role', 'status'); feedback.setAttribute('aria-live', 'polite');
   let feedbackAction: ShortcutAction | null = null;
@@ -56,11 +56,11 @@ export function createShortcutEditor(context: Context) {
   };
   saveButton.textContent = '保存手动修改';
   const help = form.nextElementSibling;
-  if (help instanceof HTMLElement) help.textContent = '录制后松开按键即保存。Esc 取消。未生效的组合会自动重试，也可一键更换。' + (windows
+  if (help instanceof HTMLElement) help.textContent = '录制时可按 Esc 取消。未生效的组合会自动重试，也可一键更换。' + (windows
     ? 'Alt+D、Alt+S 在本应用运行时优先，退出后交还其他程序。其他组合若被占用会保留原绑定。'
     : 'macOS 不能强制覆盖其他应用已经注册的全局快捷键。被占用时请更换组合，或退出占用它的应用。');
   const intro = form.closest('.settings-card')?.querySelector('.settings-card-heading p');
-  if (intro) intro.textContent = '自定义选词翻译、无感 OCR 和独立截图编辑的全局快捷键。';
+  if (intro) intro.textContent = '点「录制」，按下组合键后松开即可保存。';
   form.addEventListener('submit', (event) => event.preventDefault());
   const status = (message: string, error = false) => {
     const note = !error && message.startsWith('已记录 ') && session?.candidate

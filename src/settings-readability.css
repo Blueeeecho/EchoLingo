@@ -17,7 +17,6 @@
 :is(#view-settings, #view-services) .section-heading { gap: 16px; flex-wrap: wrap; }
 body:is([data-view="settings"], [data-view="services"]) .management-header { font-size: 14px; }
 :is(#view-settings, #view-services) .section-heading h1 { font-size: 24px; }
-#view-settings .settings-card { padding: 22px; margin-bottom: 20px; }
 #view-settings .settings-card-heading { align-items: flex-start; flex-wrap: wrap; gap: 12px 20px; margin-bottom: 18px; }
 #view-settings .settings-card-heading > div { flex: 1 1 240px; min-width: 0; }
 #view-settings .settings-card-heading h2 { font-size: 17px; line-height: 1.5; margin-bottom: 8px; }
@@ -58,10 +57,10 @@ body:is([data-view="settings"], [data-view="services"]) .management-header { fon
 #view-settings .provider-title { flex-wrap: wrap; }
 #view-settings .provider-details { white-space: normal; overflow-wrap: anywhere; }
 #view-settings .provider-controls { flex-wrap: wrap; gap: 12px; }
-#view-settings .preference-row { gap: 16px; margin-bottom: 22px; }
+#view-settings .preference-row { gap: 16px; }
 #view-settings .preference-row > span { min-width: 0; }
 #view-settings .preference-row select { flex: 0 1 210px; }
-#view-settings .ocr-active-row select { max-width: 70%; }
+#view-settings .ocr-active-row select { flex-basis: 290px; max-width: 70%; }
 #view-settings .permission-actions { flex-wrap: wrap; gap: 10px 16px; margin-bottom: 12px; }
 #view-settings .permission-row { flex-wrap: wrap; gap: 12px; }
 #view-settings .permission-row > div:first-child { flex-wrap: wrap; }
@@ -114,12 +113,10 @@ body:is([data-view="settings"], [data-view="services"]) .management-header { fon
 
 /* Reflow instead of shrinking text when the native window is narrow. */
 @media (max-width: 900px) {
-  #view-settings .settings-grid { grid-template-columns: minmax(0, 1fr); gap: 0; }
   #view-services .service-manager { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); }
   #view-services .service-manager-nav { grid-column: 1 / -1; flex-direction: row; flex-wrap: wrap; }
 }
 @media (max-width: 640px) {
-  #view-settings .settings-card { padding: 18px; }
   #view-settings .provider-controls { width: 100%; margin-left: 0; justify-content: flex-end; }
   #view-settings .provider-controls > .switch { margin-right: auto; }
   #view-settings .ocr-active-row { flex-wrap: wrap; }

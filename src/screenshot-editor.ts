@@ -147,7 +147,7 @@ function render(): boolean {
 function clearGesture(restorePreview = true): void {
   const restore = restorePreview && !!gesture && rendered === null;
   if (gesture && canvas.hasPointerCapture(gesture.pointerId)) canvas.releasePointerCapture(gesture.pointerId);
-  gesture = null; $('#gesture-rect').setAttribute('visibility', 'hidden'); $('#gesture-line').setAttribute('visibility', 'hidden');
+  gesture = null; $('#gesture-rect').setAttribute('visibility', 'hidden');
   if (restore && model && original) render();
 }
 function cancelText(): void { const restore = textOpen() && editingIndex !== null; textDialog.hidden = true; textInput.value = ''; textPoint = null; editingIndex = null; composing = false; imeEscape = false; if (restore) render(); controls(); }
@@ -345,10 +345,8 @@ function chooseTool(next: Tool): void {
 }
 function clearPendingPreview(): void {
   cancelPointerRender();
-  $('#gesture-rect').setAttribute('visibility', 'hidden'); $('#gesture-line').setAttribute('visibility', 'hidden');
-  $('#pending-ink').setAttribute('points', '');
+  $('#gesture-rect').setAttribute('visibility', 'hidden');
   const preview = $<HTMLCanvasElement>('#annotation-preview'); preview.hidden = true; preview.width = preview.height = 1;
-  blankPreviewSource.width = blankPreviewSource.height = 1;
 }
 function draftStyle(scale: number): DraftStyle {
   return { color: $<HTMLInputElement>('#edit-color').value, width: Number($<HTMLSelectElement>('#edit-width').value),
@@ -360,7 +358,6 @@ function previewRegion(start: Point, end: Point, size: { width: number; height: 
   preview.style.stroke = color; preview.style.strokeWidth = '1'; preview.style.strokeDasharray = 'none'; preview.style.fill = 'none';
   for (const [key, value] of Object.entries(selectionRect(start, end, size))) preview.setAttribute(key, String(value));
 }
-const blankPreviewSource = document.createElement('canvas');
 function previewPendingStroke(event: PointerEvent): void {
   const p = pendingStroke, selected = selectionSession; if (!p || !selected) return;
   const bounds = canvas.getBoundingClientRect();
@@ -375,8 +372,7 @@ function previewPendingStroke(event: PointerEvent): void {
   const preview = $<HTMLCanvasElement>('#annotation-preview');
   // The transparent preview is rendered by the exact final annotation renderer.
   // It is never exported or stored in the model/undo history.
-  blankPreviewSource.width = selected.width; blankPreviewSource.height = selected.height;
-  renderScreenshot(preview, blankPreviewSource, selected, [op]); preview.hidden = false;
+  renderScreenshot(preview, null, selected, [op]); preview.hidden = false;
 }
 function placeSelectionFrame(): void {
   const overlay = session?.overlay; if (!overlay) return;
