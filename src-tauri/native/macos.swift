@@ -88,7 +88,10 @@ final class SelectionTrace {
     private var probeTermination: [String: Any]?
     private var clipboardTermination: SelectionCopyTermination?
     var hasIssuedCopy: Bool { copyIssued }
-    init(publish: Bool = true) {
+    fileprivate var requiresCopyPreview = false
+    fileprivate let allowSelectionCopyPreview: Bool
+    init(publish: Bool = true, allowSelectionCopyPreview: Bool = false) {
+        self.allowSelectionCopyPreview = allowSelectionCopyPreview
         self.publish = publish
         Self.lock.lock()
         if publish { Self.nextAttempt += 1 }
@@ -209,6 +212,19 @@ extension SelectionRequestSource {
             windowID: try values.decodeIfPresent(CGWindowID.self, forKey: .windowID),
             launchIdentity: try values.decodeIfPresent(String.self, forKey: .launchIdentity),
             axWindowToken: try values.decodeIfPresent(String.self, forKey: .axWindowToken))
+    }
+}
+
+// The user's opt-in is an action option, not part of the stored window identity.
+struct SelectedTextRequest: Decodable {
+    let source: SelectionRequestSource
+    let allowSelectionCopyPreview: Bool
+
+    private enum Keys: String, CodingKey { case allowSelectionCopyPreview }
+    init(from decoder: Decoder) throws {
+        source = try SelectionRequestSource(from: decoder)
+        allowSelectionCopyPreview = try decoder.container(keyedBy: Keys.self)
+            .decodeIfPresent(Bool.self, forKey: .allowSelectionCopyPreview) ?? false
     }
 }
 
@@ -984,7 +1000,10 @@ func selectionProbeAllowsCompatibility(_ result: SelectionProbeResult, knownUnsa
 
 // Caught only by the explicit selection action; it is not permission to post
 // an event without an independently captured and revalidated window ticket.
-struct SelectionCompatibilityRequired: Error { let reason: String }
+struct SelectionCompatibilityRequired: Error {
+    let reason: String
+    var requiresCopyPreview = false
+}
 
 // A previously absent AX focus can appear while a custom application's tree
 // initializes. It is not permission to copy through a changed focus. Only the
@@ -1228,6 +1247,12 @@ func selectionOptionalPluralRecoveryDisposition(_ result: SelectionProbeResult, 
     guard readonlySelectionContainer(candidateRole) else { return .rejected("optionalPluralNonDocumentCandidate") }
     guard windowAndSelectionVerified else { return .rejected("optionalPluralSelectionUnverified") }
     return .text(text)
+}
+
+func selectionOptionalCopyPreviewAllowed(_ result: SelectionProbeResult, optedIn: Bool,
+                                         contextVerified: Bool, blockedTarget: Bool,
+                                         emptyEditor: Bool, anchoredFocusWindow: Bool) -> Bool {
+    result == .none && optedIn && contextVerified && !blockedTarget && !emptyEditor && anchoredFocusWindow
 }
 
 func selectionOwningWindow(_ element: AXUIElement, role: String? = nil,
@@ -1753,9 +1778,20 @@ func recoverySelection(originalFocus: AXUIElement?, source: SelectionApplication
     }
     if observedContextChange { throw requestSourceFailure ?? NativeError("CANCELLED: 原取词窗口或焦点已改变，请重新选择。") }
     if optionalPluralRootFailure {
-        // This separate terminal branch cannot reach compatibility Copy, even
-        // on none/resourceLimit. Full traversal + a stable document selection
-        // is the only success; all existing source/security checks still apply.
+        // This separate terminal branch normally remains read-only. The only
+        // exception is opted-in local review after a complete, anchored walk
+        // with no positive text. Partial or unsafe evidence never copies.
+        if selectionOptionalCopyPreviewAllowed(result,
+            optedIn: trace.allowSelectionCopyPreview,
+            contextVerified: !hardContextFailure, blockedTarget: knownBlockedTarget,
+            emptyEditor: knownEmptyEditor, anchoredFocusWindow: originalFocus != nil && source.requestSource?.axWindowToken != nil),
+           let ticket = sourceWindowTicket, let ticketWindow = ticket.focusedWindow,
+           let initial = initialWindow.value, CFEqual(ticketWindow, initial),
+           contextIsCurrent(), selectionQueryBudgetAvailable(deadline),
+           selectionCopyTicket(source: source, matching: ticket) == ticket,
+           !IsSecureEventInputEnabled(), selectionQueryBudgetAvailable(deadline) {
+            throw SelectionCompatibilityRequired(reason: "optionalPluralCopyPreview", requiresCopyPreview: true)
+        }
         switch selectionOptionalPluralRecoveryDisposition(result, contextVerified: !hardContextFailure,
             blockedTarget: knownBlockedTarget, candidateRole: selectedCandidateRole,
             windowAndSelectionVerified: mixedWindowVerified) {
@@ -1963,14 +1999,31 @@ func requireSelectionCopyContext(source: SelectionApplicationSnapshot, originalF
     return focus.value
 }
 
+@available(macOS 15.4, *)
+func selectionCopyPreviewAccessAllowed(_ behavior: NSPasteboard.AccessBehavior) -> Bool {
+    behavior == .alwaysAllow
+}
+
+func requireSelectionCopyPreviewAccess(_ pasteboard: NSPasteboard, enabled: Bool) throws {
+    // A permission prompt can activate another window and invalidate capture.
+    // Only explicitly non-prompting access is safe; unknown behaviors fail too.
+    if #available(macOS 15.4, *), enabled, !selectionCopyPreviewAccessAllowed(pasteboard.accessBehavior) {
+        throw NativeError("CLIPBOARD_PREVIEW_ACCESS: 无法在不弹出系统授权的情况下读取剪贴板。请手动复制并粘贴到翻译框，或使用截图翻译。")
+    }
+}
+
 struct SavedPasteboard {
     let items: [NSPasteboardItem]
-    init(_ pasteboard: NSPasteboard) throws {
+    init(_ pasteboard: NSPasteboard, requiresCopyPreview: Bool = false) throws {
         // Materialize every representation before sending Cmd+C. Keeping the
         // original NSPasteboardItem alone would retain a lazy provider that can
         // become invalid as soon as the source application's clipboard changes.
         var copies = [NSPasteboardItem]()
-        let originals = pasteboard.pasteboardItems ?? []
+        let readableItems = pasteboard.pasteboardItems
+        let originals = readableItems ?? []
+        if requiresCopyPreview && readableItems == nil {
+            throw NativeError("CLIPBOARD_PREVIEW_ACCESS: 无法确认原剪贴板内容；未发送复制。请手动复制并粘贴，或使用截图翻译。")
+        }
         if originals.isEmpty && !(pasteboard.types ?? []).isEmpty {
             throw NativeError("CLIPBOARD: Clipboard representations cannot be materialized safely. Use screenshot or clipboard translation instead.")
         }
@@ -2010,7 +2063,7 @@ enum SelectionCopyObservation: Equatable {
 // Observations, not attribution: a generation change cannot identify its writer.
 // Keep only fixed reasons and bounded relative counters, never clipboard data.
 enum SelectionCopyStopReason: String {
-    case readGenerationChanged, candidateGenerationChanged, candidateCleared
+    case readGenerationChanged, candidateGenerationChanged, observedGenerationChanged, candidateCleared
     case unchangedTimeout, unfinishedTimeout, stableText, stableEmpty
 }
 
@@ -2038,6 +2091,7 @@ struct SelectionCopyTermination {
 // after accepting a text candidate; it may belong to a newer user operation.
 struct SelectionCopyCompletion {
     let initialCount: Int
+    let requiresCopyPreview: Bool
     private(set) var candidateCount: Int?
     private var candidateText: String?
     private var stableSince: TimeInterval?
@@ -2046,8 +2100,9 @@ struct SelectionCopyCompletion {
     private(set) var termination: SelectionCopyTermination?
     static let settleInterval: TimeInterval = 0.02
 
-    init(initialCount: Int) {
+    init(initialCount: Int, requiresCopyPreview: Bool = false) {
         self.initialCount = initialCount
+        self.requiresCopyPreview = requiresCopyPreview
     }
 
     mutating func observe(countBefore: Int, text: String?, countAfter: Int,
@@ -2060,6 +2115,7 @@ struct SelectionCopyCompletion {
         case .superseded:
             if countBefore != countAfter { reason = .readGenerationChanged }
             else if let candidateCount, candidateCount != countAfter { reason = .candidateGenerationChanged }
+            else if let observedCount, observedCount != countAfter { reason = .observedGenerationChanged }
             else { reason = .candidateCleared }
         case .unchangedTimeout: reason = .unchangedTimeout
         case .unfinishedTimeout: reason = .unfinishedTimeout
@@ -2078,6 +2134,8 @@ struct SelectionCopyCompletion {
                                   now: TimeInterval, expired: Bool) -> SelectionCopyObservation {
         guard countBefore == countAfter else { return .superseded }
         if let candidateCount, candidateCount != countAfter { return .superseded }
+        // Do not follow a second observed write in the more conservative review path.
+        if requiresCopyPreview, let observedCount, observedCount != countAfter { return .superseded }
         guard countAfter != initialCount else { return expired ? .unchangedTimeout : .waiting }
         if observedCount != countAfter {
             observedCount = countAfter
@@ -2148,11 +2206,13 @@ func requireSelectionModifiersReleased() throws {
     }
 }
 
-func copiedSelection(_ pasteboard: NSPasteboard, initialCount: Int, trace: SelectionTrace? = nil) throws -> (changeCount: Int, text: String?) {
-    var completion = SelectionCopyCompletion(initialCount: initialCount)
+func copiedSelection(_ pasteboard: NSPasteboard, initialCount: Int, trace: SelectionTrace? = nil,
+                     requiresCopyPreview: Bool = false) throws -> (changeCount: Int, text: String?) {
+    var completion = SelectionCopyCompletion(initialCount: initialCount, requiresCopyPreview: requiresCopyPreview)
     defer { if let stop = completion.termination { trace?.recordClipboardStop(stop) } }
     let deadline = ProcessInfo.processInfo.systemUptime + 1.2
     while true {
+        try requireSelectionCopyPreviewAccess(pasteboard, enabled: requiresCopyPreview)
         let before = pasteboard.changeCount
         let text = before == initialCount ? nil : pasteboard.string(forType: .string)
         let after = pasteboard.changeCount
@@ -2170,13 +2230,15 @@ func copiedSelection(_ pasteboard: NSPasteboard, initialCount: Int, trace: Selec
     }
 }
 
-func selection(requestSource: SelectionRequestSource? = nil) throws -> String {
+func selection(requestSource: SelectionRequestSource? = nil, allowSelectionCopyPreview: Bool = false) throws -> [String: Any] {
     defer { SelectionRequestWindowStore.remove(requestSource?.axWindowToken) }
-    let trace = SelectionTrace()
+    let trace = SelectionTrace(allowSelectionCopyPreview: allowSelectionCopyPreview)
     do {
         let text = try captureSelectedText(trace: trace, requestSource: requestSource)
         trace.finish()
-        return text
+        var response: [String: Any] = ["ok": true, "text": text]
+        if trace.requiresCopyPreview { response["requiresCopyPreview"] = true }
+        return response
     } catch let error as NativeError {
         trace.finish(errorCategory: error.message.split(separator: ":", maxSplits: 1).first.map(String.init) ?? "NATIVE")
         throw error
@@ -2225,6 +2287,7 @@ func captureSelectedTextInSource(source: SelectionApplicationSnapshot, originalF
                                 initialTicket: SelectionCopyTicket?, trace: SelectionTrace) throws -> String {
     let originalFocus = originalFocusQuery.value
     var compatibilityTicket: SelectionCopyTicket?
+    var requiresCopyPreview = false
     do {
         do {
             if let text = try accessibilitySelection(element: originalFocus, bundleIdentifier: source.bundleIdentifier,
@@ -2242,6 +2305,7 @@ func captureSelectedTextInSource(source: SelectionApplicationSnapshot, originalF
     } catch let requested as SelectionCompatibilityRequired {
         guard let initialTicket else { throw unavailableSelectionError(trace: trace, reason: "initialWindowUnavailable") }
         compatibilityTicket = initialTicket
+        requiresCopyPreview = requested.requiresCopyPreview
         trace.record("copy-compatibility", ["decision": requested.reason, "copyStrategy": "windowTicket"])
     }
     let modifiers: CGEventFlags = [.maskCommand, .maskControl, .maskAlternate, .maskShift]
@@ -2265,9 +2329,10 @@ func captureSelectedTextInSource(source: SelectionApplicationSnapshot, originalF
         guard compatibilityTicket != nil else { throw unavailableSelectionError(trace: trace, reason: "unexpectedContainerEmpty") }
     }
     let pasteboard = NSPasteboard.general
+    try requireSelectionCopyPreviewAccess(pasteboard, enabled: requiresCopyPreview)
     trace.record("clipboard-snapshot")
     let initialCount = pasteboard.changeCount
-    let saved = try SavedPasteboard(pasteboard)
+    let saved = try SavedPasteboard(pasteboard, requiresCopyPreview: requiresCopyPreview)
     guard pasteboard.changeCount == initialCount else {
         throw NativeError("CLIPBOARD_CHANGED: The clipboard changed while its formats were being preserved. Retry.")
     }
@@ -2290,6 +2355,7 @@ func captureSelectedTextInSource(source: SelectionApplicationSnapshot, originalF
         guard !IsSecureEventInputEnabled() else { throw unavailableSelectionError(trace: trace, reason: "secureInputActive") }
         guard selectionCopyTicket(source: source, matching: ticket) == ticket else { throw unavailableSelectionError(trace: trace, reason: "sourceWindowChanged") }
     }
+    try requireSelectionCopyPreviewAccess(pasteboard, enabled: requiresCopyPreview)
     try requireSelectionModifiersReleased()
     guard pasteboard.changeCount == initialCount else {
         throw NativeError("CLIPBOARD_CHANGED: The clipboard changed during the final target check; its newer contents were preserved. Retry.")
@@ -2306,7 +2372,9 @@ func captureSelectedTextInSource(source: SelectionApplicationSnapshot, originalF
     }
     trace.record("copy-wait", ["copyIssued": true, "copyStrategy": compatibilityTicket == nil ? "verifiedFocus" : "windowTicket"])
     let copied: (changeCount: Int, text: String?)
-    do { copied = try copiedSelection(pasteboard, initialCount: initialCount, trace: trace) }
+    do {
+        copied = try copiedSelection(pasteboard, initialCount: initialCount, trace: trace, requiresCopyPreview: requiresCopyPreview)
+    }
     catch let error as NativeError where compatibilityTicket != nil && error.message.hasPrefix("NO_SELECTION:") {
         // An ignored PID-directed command is not evidence of an empty selection.
         // Keep this failure visible, and never retry via a second event route.
@@ -2320,6 +2388,7 @@ func captureSelectedTextInSource(source: SelectionApplicationSnapshot, originalF
         _ = try requireSelectionCopyContext(source: source, originalFocus: originalFocus,
             ticket: compatibilityTicket, trace: trace, phase: "foreground-after-copy")
     } catch { contextError = error }
+    try requireSelectionCopyPreviewAccess(pasteboard, enabled: requiresCopyPreview)
     trace.record("clipboard-restore")
     try saved.restore(pasteboard, ifUnchangedSince: copied.changeCount)
     if let contextError {
@@ -2329,7 +2398,8 @@ func captureSelectedTextInSource(source: SelectionApplicationSnapshot, originalF
     guard let text = copied.text, !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
         throw NativeError("NO_SELECTION: The selection did not contain plain text. Try screenshot OCR.")
     }
-    trace.record("copy-completed", ["decision": "text"])
+    trace.requiresCopyPreview = requiresCopyPreview
+    trace.record("copy-completed", ["decision": requiresCopyPreview ? "localReview" : "text"])
     return text
 }
 
@@ -3018,6 +3088,21 @@ func selectionOptionalPluralRecoverySelfTest() throws {
     }
     // Generated metadata reproduces the proven failing shape, not user text.
     try expect(eligible())
+    let noOptIn = try JSONDecoder().decode(SelectedTextRequest.self,
+        from: Data(#"{"pid":42,"bundleIdentifier":"fixture","axWindowToken":"00000000-0000-0000-0000-000000000001"}"#.utf8))
+    let optIn = try JSONDecoder().decode(SelectedTextRequest.self,
+        from: Data(#"{"pid":42,"bundleIdentifier":"fixture","axWindowToken":"00000000-0000-0000-0000-000000000001","allowSelectionCopyPreview":true}"#.utf8))
+    try expect(!noOptIn.allowSelectionCopyPreview && optIn.allowSelectionCopyPreview && noOptIn.source == optIn.source)
+    func preview(_ result: SelectionProbeResult = .none, optedIn: Bool = true, context: Bool = true,
+                 blocked: Bool = false, empty: Bool = false, anchored: Bool = true) -> Bool {
+        selectionOptionalCopyPreviewAllowed(result, optedIn: optedIn, contextVerified: context,
+            blockedTarget: blocked, emptyEditor: empty, anchoredFocusWindow: anchored)
+    }
+    try expect(preview() && !preview(optedIn: false) && !preview(context: false)
+        && !preview(blocked: true) && !preview(empty: true) && !preview(anchored: false))
+    for result in [SelectionProbeResult.incomplete, .resourceLimit, .ambiguous, .stale, .text("synthetic")] {
+        try expect(!preview(result))
+    }
     try expect(selectionRangesQuery(status: .failure, value: nil).state == "invalid")
     try expect(!eligible(allowed: false) && !eligible(bounded: false))
     for role in ["AXWindow", "AXWebArea", "AXDocument", "AXTextArea", "AXTextField", "AXStaticText", "AXButton"] {
@@ -4003,6 +4088,14 @@ func selectionQueryPolicySelfTest() throws {
 }
 
 func selectionCopyPolicySelfTest() throws {
+    if #available(macOS 15.4, *) {
+        guard selectionCopyPreviewAccessAllowed(.alwaysAllow),
+              !selectionCopyPreviewAccessAllowed(.alwaysDeny),
+              !selectionCopyPreviewAccessAllowed(.ask),
+              !selectionCopyPreviewAccessAllowed(.default) else {
+            throw NativeError("SELF_TEST: Copy preview must not prompt or proceed under denied/unknown access.")
+        }
+    }
     var unchanged = SelectionCopyCompletion(initialCount: 10)
     guard unchanged.observe(countBefore: 10, text: "old clipboard text", countAfter: 10, now: 0, expired: false) == .waiting,
           unchanged.observe(countBefore: 10, text: "old clipboard text", countAfter: 10, now: 1.2, expired: true) == .unchangedTimeout else {
@@ -4015,6 +4108,12 @@ func selectionCopyPolicySelfTest() throws {
           deferred.observe(countBefore: 12, text: "selected fixture", countAfter: 12, now: 0.13, expired: false)
             == .completed(changeCount: 12, text: "selected fixture") else {
         throw NativeError("SELF_TEST: A clear-then-write clipboard copy completed too soon or lost its text.")
+    }
+    var preview = SelectionCopyCompletion(initialCount: 10, requiresCopyPreview: true)
+    guard preview.observe(countBefore: 11, text: nil, countAfter: 11, now: 0.01, expired: false) == .waiting,
+          preview.observe(countBefore: 12, text: "newer user fixture", countAfter: 12, now: 0.02, expired: false) == .superseded,
+          preview.termination?.reason == .observedGenerationChanged else {
+        throw NativeError("SELF_TEST: Optional Copy preview followed a second observed clipboard generation.")
     }
     var newer = SelectionCopyCompletion(initialCount: 10)
     guard newer.observe(countBefore: 11, text: "selected fixture", countAfter: 11, now: 0.1, expired: false) == .waiting,
@@ -5995,16 +6094,12 @@ func nativeResponse(mode: String, input: Data = Data()) -> [String: Any] {
             let fixture = try JSONDecoder().decode(SelectionSourceBridgeFixture.self, from: input)
             return ["ok": true, "diagnostics": try verifySelectionSourceBridgeFixture(fixture)]
         case "--selected-text":
-            let source: SelectionRequestSource?
-            if input.isEmpty { source = nil }
-            else {
-                guard let decoded = try? JSONDecoder().decode(SelectionRequestSource.self, from: input),
-                      validSelectionRequestSource(decoded) else {
-                    throw NativeError("NATIVE_INPUT: Invalid selection request source.")
-                }
-                source = decoded
+            if input.isEmpty { return try selection() }
+            guard let request = try? JSONDecoder().decode(SelectedTextRequest.self, from: input),
+                  validSelectionRequestSource(request.source) else {
+                throw NativeError("NATIVE_INPUT: Invalid selection request source.")
             }
-            return ["ok": true, "text": try selection(requestSource: source)]
+            return try selection(requestSource: request.source, allowSelectionCopyPreview: request.allowSelectionCopyPreview)
         case "--selection-diagnostics": return ["ok": true, "diagnostics": SelectionTrace.lastSnapshot()]
         case "--selection-policy-self-test":
             try selectionPolicySelfTest()

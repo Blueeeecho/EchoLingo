@@ -181,6 +181,7 @@ pub struct Settings {
     pub shortcut_defaults_version: u8,
     pub shortcuts: Shortcuts,
     pub windows_selection_strategy: WindowsSelectionStrategy,
+    pub macos_selection_copy_preview: bool,
     pub save_history: bool,
     pub automatic_update_checks: bool,
     pub include_prerelease_updates: bool,
@@ -202,6 +203,7 @@ impl Default for Settings {
             shortcut_defaults_version: 2,
             shortcuts: Shortcuts::default(),
             windows_selection_strategy: WindowsSelectionStrategy::Copy,
+            macos_selection_copy_preview: false,
             save_history: true,
             automatic_update_checks: false,
             // Explicit channel preference for the 0.2.0 internal build, whose
@@ -457,6 +459,19 @@ mod tests {
         );
         assert_eq!(roundtrip, saved);
     }
+    #[test]
+    fn macos_selection_copy_preview_requires_explicit_opt_in() {
+        let legacy: Settings = serde_json::from_value(serde_json::json!({})).unwrap();
+        assert!(!legacy.macos_selection_copy_preview);
+        let opted_in: Settings =
+            serde_json::from_value(serde_json::json!({"macosSelectionCopyPreview": true})).unwrap();
+        assert!(opted_in.macos_selection_copy_preview);
+        assert_eq!(
+            serde_json::to_value(opted_in).unwrap()["macosSelectionCopyPreview"],
+            true
+        );
+    }
+
     #[test]
     fn selection_strategy_roundtrip_preserves_explicit_strict_choice_and_rejects_invalid_values() {
         for (choice, argument) in [

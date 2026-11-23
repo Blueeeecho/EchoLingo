@@ -33,7 +33,7 @@ class ClipboardTerminationContract(unittest.TestCase):
         self.assertIn("defer { if let stop = completion.termination { trace?.recordClipboardStop(stop) } }", loop)
         self.assertIn("systemUptime + 1.2", loop)
         self.assertIn("Thread.sleep(forTimeInterval: 0.005)", loop)
-        self.assertIn("copied = try copiedSelection(pasteboard, initialCount: initialCount, trace: trace)", SOURCE)
+        self.assertIn("copied = try copiedSelection(pasteboard, initialCount: initialCount, trace: trace, requiresCopyPreview: requiresCopyPreview)", SOURCE)
         for forbidden in ("clearContents", "restore(", "writeObjects", "postToPid"):
             self.assertNotIn(forbidden, loop)
 
@@ -47,6 +47,33 @@ class ClipboardTerminationContract(unittest.TestCase):
                       "guard countAfter != initialCount else { return expired ? .unchangedTimeout : .waiting }",
                       "} else if candidateCount != nil {", "return .unfinishedTimeout"):
             self.assertIn(guard, state)
+
+    def test_copy_preview_rejects_second_observed_generation_and_requires_restore(self):
+        state = section("struct SelectionCopyCompletion", "func requireSelectionFocus(")
+        self.assertIn("if requiresCopyPreview, let observedCount, observedCount != countAfter { return .superseded }", state)
+        capture = section("func captureSelectedTextInSource(", "struct OCRLayoutLine")
+        self.assertLess(capture.index("try saved.restore("), capture.index("trace.requiresCopyPreview = requiresCopyPreview"))
+        self.assertIn("Optional Copy preview followed a second observed clipboard generation", SOURCE)
+
+    def test_preview_permission_is_checked_at_each_clipboard_boundary(self):
+        guard = section("func selectionCopyPreviewAccessAllowed(", "struct SavedPasteboard")
+        self.assertIn("behavior == .alwaysAllow", guard)
+        self.assertIn("#available(macOS 15.4, *)", guard)
+        self.assertIn("enabled, !selectionCopyPreviewAccessAllowed(pasteboard.accessBehavior)", guard)
+        self.assertIn("CLIPBOARD_PREVIEW_ACCESS:", guard)
+        capture = section("func captureSelectedTextInSource(", "struct OCRLayoutLine")
+        verify = "try requireSelectionCopyPreviewAccess(pasteboard, enabled: requiresCopyPreview)"
+        self.assertLess(capture.index(verify), capture.index("let initialCount = pasteboard.changeCount"))
+        self.assertLess(capture.rindex(verify, 0, capture.index("try dispatch.postOnce")), capture.index("try dispatch.postOnce"))
+        self.assertTrue(capture.index("try dispatch.postOnce") < capture.rindex(verify) < capture.index("try saved.restore("))
+        poll = section("func copiedSelection(", "func selection(requestSource:")
+        self.assertLess(poll.index("while true"), poll.index(verify))
+        self.assertLess(poll.index(verify), poll.index("pasteboard.string(forType: .string)"))
+        snapshot = section("struct SavedPasteboard", "enum SelectionCopyObservation")
+        self.assertIn("requiresCopyPreview && readableItems == nil", snapshot)
+        fixture = section("func selectionCopyPolicySelfTest()", "// Exercise the same snapshot/restore")
+        for policy in (".alwaysAllow", ".alwaysDeny", ".ask", ".default"):
+            self.assertIn("selectionCopyPreviewAccessAllowed(" + policy + ")", fixture)
 
     def test_native_fixture_covers_all_outcomes_and_privacy_on_required_path(self):
         fixture = section("func selectionCopyPolicySelfTest()", "// Exercise the same snapshot/restore")

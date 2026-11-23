@@ -35,20 +35,28 @@ pub fn macos_selection_source() -> Result<Value, String> {
 #[cfg(target_os = "macos")]
 pub fn selected_text_from_source_cancelable(
     cancel: NativeCancel,
-    source: &Value,
-) -> Result<String, String> {
+    mut source: Value,
+    allow_selection_copy_preview: bool,
+) -> Result<(String, bool), String> {
     if cancelled(Some(&cancel)) {
         return Err(NATIVE_CANCELLED.into());
     }
+    source["allowSelectionCopyPreview"] = json!(allow_selection_copy_preview);
     let result = run("selected-text", Some(&source.to_string()));
     if cancelled(Some(&cancel)) {
         return Err(NATIVE_CANCELLED.into());
     }
-    result?
+    let response = result?;
+    let text = response
         .get("text")
         .and_then(Value::as_str)
-        .map(str::to_owned)
-        .ok_or_else(|| "NATIVE_PROTOCOL: Native helper returned no text field.".into())
+        .ok_or("NATIVE_PROTOCOL: Native helper returned no text field.")?;
+    let copy_preview = match response.get("requiresCopyPreview") {
+        None | Some(Value::Bool(false)) => false,
+        Some(Value::Bool(true)) if allow_selection_copy_preview && !text.trim().is_empty() => true,
+        _ => return Err("NATIVE_PROTOCOL: Invalid selection copy preview.".into()),
+    };
+    Ok((text.to_owned(), copy_preview))
 }
 #[cfg(target_os = "windows")]
 pub fn selected_text_with_strategy_cancelable(

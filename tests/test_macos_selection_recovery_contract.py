@@ -22,10 +22,10 @@ class MacSelectionRecoveryContract(unittest.TestCase):
                         action.index("tauri::async_runtime::spawn(async move"))
         self.assertIn("let expected_macos_source = macos_selection_source?;", action)
         self.assertIn("platform::selected_text_from_source_cancelable(", action)
-        self.assertIn('expected_macos_source.as_ref().ok_or("缺少原取词窗口")?', action)
+        self.assertIn('expected_macos_source.ok_or("缺少原取词窗口")?', action)
 
     def test_selection_cfg_branches_are_blocks_and_return_result(self):
-        selection = section(MAIN, 'let text = match worker_action.as_str() {', '"clipboard" => platform::clipboard_text(),')
+        selection = section(MAIN, 'let text = match worker_action.as_str() {', '"clipboard" => platform::clipboard_text()')
         # Rust must parse the complete token stream before cfg filtering. Two
         # adjacent attributed bare call expressions are not separate statements.
         # Explicit blocks are valid on every target and keep each Result as the
@@ -33,9 +33,9 @@ class MacSelectionRecoveryContract(unittest.TestCase):
         self.assertRegex(selection, r'#\[cfg\(target_os = "windows"\)\]\s*\{')
         self.assertRegex(selection, r'#\[cfg\(target_os = "macos"\)\]\s*\{')
         self.assertRegex(selection, r'#\[cfg\(not\(any\(target_os = "windows", target_os = "macos"\)\)\)\]\s*\{')
-        self.assertRegex(selection, r'platform::selected_text_with_strategy_cancelable\(cancel, strategy, attempt\)\s*\}')
+        self.assertRegex(selection, r'platform::selected_text_with_strategy_cancelable\(cancel, strategy, attempt\)\s*\.map\(\|text\| \(text, false\)\)\s*\}')
         self.assertRegex(selection, r'platform::selected_text_from_source_cancelable\([\s\S]*?\n\s*\)\s*\}')
-        self.assertRegex(selection, r'platform::selected_text_cancelable\(cancel\)\s*\}')
+        self.assertRegex(selection, r'platform::selected_text_cancelable\(cancel\)\.map\(\|text\| \(text, false\)\)\s*\}')
 
     def test_basic_workspace_snapshot_has_no_ax_or_content_read(self):
         snapshot = section(SWIFT, "func selectionRequestSourceSnapshot()", "func selectionRequestSourceForShortcut()")
@@ -103,7 +103,21 @@ class MacSelectionRecoveryContract(unittest.TestCase):
         bridge = section(PLATFORM, "pub fn selected_text_from_source_cancelable(", '#[cfg(target_os = "windows")]')
         self.assertIn('run("selected-text", Some(&source.to_string()))', bridge)
         self.assertEqual(bridge.count("cancelled(Some(&cancel))"), 2)
-        self.assertIn("selection(requestSource: source)", SWIFT)
+        self.assertIn("selection(requestSource: request.source", SWIFT)
+
+    def test_copy_preview_requires_opt_in_and_is_delivered_as_local_input(self):
+        bridge = section(PLATFORM, "pub fn selected_text_from_source_cancelable(", '#[cfg(target_os = "windows")]')
+        self.assertIn('source["allowSelectionCopyPreview"] = json!(allow_selection_copy_preview)', bridge)
+        self.assertIn('Some(Value::Bool(true)) if allow_selection_copy_preview && !text.trim().is_empty()', bridge)
+        self.assertIn('Invalid selection copy preview', bridge)
+        action = section(MAIN, "fn start_action(", "async fn hide_native_capture_window(")
+        self.assertEqual(action.count("settings.macos_selection_copy_preview"), 2)
+        self.assertIn("if copy_preview {", action)
+        self.assertIn("selection_copy_preview_payload(text, presentation.epoch)", action)
+        payload = section(MAIN, "fn selection_copy_preview_payload(", "fn empty_ocr_payload(")
+        self.assertIn('"mode": "input"', payload)
+        self.assertIn('"copyPreview": true', payload)
+        self.assertNotIn('"mode": "translate"', payload)
 
     def test_request_anchor_is_rechecked_before_ax_and_copy(self):
         capture = section(SWIFT, "func captureSelectedText(trace:", "func captureSelectedTextInSource(")

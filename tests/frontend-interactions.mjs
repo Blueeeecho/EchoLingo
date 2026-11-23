@@ -3677,6 +3677,7 @@ try {
   await goView('settings');
   await selectSettingsCategory('shortcuts');
   assert.equal(await page.locator('#windows-selection-settings').isVisible(), true);
+  assert.equal(await page.locator('#macos-selection-settings').isHidden(), true);
   assert.equal(await page.locator('#windows-selection-strategy').inputValue(), 'copy');
   const beforeStrategySave = await page.evaluate(() => structuredClone(window.__qa.settings));
   await selectSettingsCategory('shortcuts');
@@ -3921,6 +3922,14 @@ try {
   await goView('settings');
   await selectSettingsCategory('shortcuts');
   assert.equal(await page.locator('#windows-selection-settings').isHidden(), true);
+  const copyPreviewSetting = page.locator('#macos-selection-copy-preview');
+  assert.equal(await copyPreviewSetting.isVisible(), true);
+  assert.equal(await copyPreviewSetting.isChecked(), false);
+  assert.match(await copyPreviewSetting.getAttribute('aria-describedby'), /copy-preview-help/);
+  await copyPreviewSetting.check();
+  await page.waitForFunction(() => window.__qa.settings.macosSelectionCopyPreview === true);
+  await copyPreviewSetting.uncheck();
+  await page.waitForFunction(() => window.__qa.settings.macosSelectionCopyPreview === false);
   assert.deepEqual(errors, []);
   console.log('PASS: isolated Windows strategy settings default compatibility for old payloads; strict and copy save without changing providers/shortcuts/theme, navigation retains strict, failed save rolls back, and macOS hides the setting. Fake IPC only.');
   const retryUrl = new URL(testUrl);
@@ -4378,6 +4387,85 @@ try {
   }
   assert.deepEqual(errors, []);
   console.log('PASS: Windows/macOS capture, OCR and silent OCR quiet blank delivery clears earlier completed source/results, does not translate or copy, preserves pin, ignores repeats and old empty completions, and retains real provider/permission/clipboard error feedback. Mock IPC only.');
+  // Only the current macOS source-bound failure adds recovery help. It
+  // does not make native Copy/translation calls or alter input focus.
+  await page.setViewportSize({ width: 420, height: 460 });
+  await page.goto(testUrl);
+  await page.waitForFunction(() => document.querySelector('#footer-status')?.textContent === '准备就绪');
+  const selectionHint = page.locator('#selection-hint');
+  assert.equal(await selectionHint.isHidden(), true);
+  await page.evaluate(() => {
+    const q = window.__qa, task = q.nativeInputShow();
+    q.failedSelection = { text: '', mode: 'input', focusInput: true, selectionUnavailable: true,
+      deliveryId: 905, presentationEpoch: task.epoch };
+    q.pendingSource = structuredClone(q.failedSelection);
+    q.emit('source-text', structuredClone(q.failedSelection));
+  });
+  await page.waitForFunction(() => window.__qa.sourceAcks.includes(905) && document.activeElement.id === 'source-text');
+  await selectionHint.waitFor({ state: 'visible' });
+  assert.match(await selectionHint.textContent(), /⌘C.*翻译剪贴板/);
+  assert.equal(await page.locator('#source-text').getAttribute('aria-describedby'), 'selection-hint');
+  assert.equal(await page.locator('#toast').isHidden(), true);
+  assert.deepEqual(await page.evaluate(() => [window.__qa.translationRequests.length, window.__qa.copies.length]), [0, 0]);
+  await page.locator('.app-shell').screenshot({ path: 'test-results/macos-selection-unavailable.png' });
+  await page.evaluate(() => { document.documentElement.dataset.theme = 'dark'; });
+  await page.locator('.app-shell').screenshot({ path: 'test-results/macos-selection-unavailable-dark.png' });
+  await page.locator('#source-text').fill('Generated text pasted manually');
+  assert.equal(await selectionHint.isHidden(), true);
+  assert.equal(await page.locator('#source-text').getAttribute('aria-describedby'), null);
+  await page.evaluate(() => window.__qa.emit('source-text', { ...window.__qa.failedSelection, deliveryRetry: true }));
+  assert.equal(await selectionHint.isHidden(), true);
+  assert.equal(await page.locator('#source-text').inputValue(), 'Generated text pasted manually');
+  await page.evaluate(() => {
+    const q = window.__qa, task = q.nativeInputShow();
+    q.emit('source-text', { text: '', mode: 'input', focusInput: true, deliveryId: 906, presentationEpoch: task.epoch });
+  });
+  await page.waitForFunction(() => window.__qa.sourceAcks.includes(906));
+  assert.equal(await selectionHint.isHidden(), true);
+  assert.deepEqual(await page.evaluate(() => [window.__qa.translationRequests.length, window.__qa.copies.length]), [0, 0]);
+  console.log('PASS: current macOS selection failure offers explicit recovery without copying or translating; typing and newer deliveries retire the hint.');
+  await page.evaluate(() => {
+    const q = window.__qa, task = q.nativeInputShow();
+    q.copyPreview = { text: 'Generated preview content', mode: 'input', focusInput: true, copyPreview: true,
+      deliveryId: 907, presentationEpoch: task.epoch };
+    q.emit('source-text', structuredClone(q.copyPreview));
+  });
+  await page.waitForFunction(() => window.__qa.sourceAcks.includes(907) && document.activeElement.id === 'source-text');
+  assert.equal(await page.locator('#source-text').inputValue(), 'Generated preview content');
+  assert.equal(await page.locator('#source-text').getAttribute('aria-describedby'), 'selection-hint');
+  assert.match(await selectionHint.textContent(), /核对.*不会自动翻译/);
+  assert.deepEqual(await page.evaluate(() => [window.__qa.translationRequests.length, window.__qa.copies.length]), [0, 0]);
+  await page.locator('#source-text').press('Enter');
+  await page.waitForFunction(() => window.__qa.translationRequests.length === 1);
+  await page.evaluate(() => {
+    const q = window.__qa, task = q.nativeInputShow();
+    q.emit('source-text', { ...q.copyPreview, mode: 'translate', deliveryId: 908, presentationEpoch: task.epoch });
+  });
+  await page.waitForFunction(() => window.__qa.sourceAcks.includes(908));
+  assert.equal(await page.evaluate(() => window.__qa.translationRequests.length), 1, 'a preview-marked payload cannot auto-translate');
+  await page.locator('#source-text').fill('New explicit input');
+  await page.evaluate(() => window.__qa.emit('source-text', { ...window.__qa.copyPreview, deliveryRetry: true }));
+  assert.equal(await selectionHint.isHidden(), true);
+  assert.equal(await page.locator('#source-text').inputValue(), 'New explicit input');
+  await page.evaluate(() => {
+    const q = window.__qa, task = q.nativeInputShow();
+    q.copyAccess = { text: '', mode: 'input', focusInput: true, selectionCopyAccessRequired: true,
+      selectionUnavailable: true, deliveryId: 909, presentationEpoch: task.epoch };
+    q.emit('source-text', structuredClone(q.copyAccess));
+  });
+  await page.waitForFunction(() => window.__qa.sourceAcks.includes(909) && document.activeElement.id === 'source-text');
+  assert.match(await selectionHint.textContent(), /剪贴板权限.*⌘C.*⌘V.*截图翻译/);
+  assert.equal(await page.locator('#source-text').getAttribute('aria-describedby'), 'selection-hint');
+  assert.equal(await page.locator('#permission-guidance').isHidden(), true);
+  assert.equal(await page.locator('#toast').isHidden(), true);
+  assert.deepEqual(await page.evaluate(() => {
+    const q = window.__qa; return [q.permissionRequests.length, q.permissionSettings.length, q.translationRequests.length, q.copies.length];
+  }), [0, 0, 1, 0]);
+  await page.locator('#source-text').fill('After clipboard access hint');
+  await page.evaluate(() => window.__qa.emit('source-text', { ...window.__qa.copyAccess, deliveryRetry: true }));
+  assert.equal(await selectionHint.isHidden(), true);
+  assert.equal(await page.locator('#source-text').inputValue(), 'After clipboard access hint');
+  await page.setViewportSize({ width: 800, height: 600 });
   for (const enabled of [false, true]) {
     await page.goto(fixtureUrl(enabled ? 'inputDiagnosticsFixture=1' : ''));
     await page.waitForFunction(() => document.querySelector('#footer-status')?.textContent === '准备就绪');

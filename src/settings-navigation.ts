@@ -41,7 +41,7 @@ export function installSettingsNavigation(): void {
     general: [document.querySelector('#general-settings'), document.querySelector('#history-settings')],
     translation: [document.querySelector('#translation-settings'), document.querySelector('#free-setup-card')],
     capture: [document.querySelector('#ocr-settings'), document.querySelector('#screenshot-settings')],
-    shortcuts: [document.querySelector('#shortcut-settings'), document.querySelector('#windows-selection-settings')],
+    shortcuts: [document.querySelector('#shortcut-settings'), document.querySelector('#windows-selection-settings'), document.querySelector('#macos-selection-settings')],
     permissions: [document.querySelector('#mac-permission-card'), root.querySelector('.diagnostics-details')],
     about: [document.querySelector('#update-settings')],
   };
