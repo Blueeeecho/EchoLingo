@@ -2525,6 +2525,11 @@ fn action_failure_presentation(
     let mut source = empty_input_payload(presentation_epoch);
     if action == "selection" {
         source["focusInput"] = serde_json::json!(true);
+        if error.starts_with("SELECTION_UNAVAILABLE:") {
+            source["selectionUnavailable"] = serde_json::json!(true);
+        } else if error.starts_with("CLIPBOARD_PREVIEW_ACCESS:") {
+            source["selectionCopyAccessRequired"] = serde_json::json!(true);
+        }
     }
     if matches!(action, "capture" | "ocr" | "silentOcr" | "screenshot")
         && error.starts_with("PERMISSION:")
@@ -2616,6 +2621,9 @@ fn start_action(app: tauri::AppHandle, action: String) {
     } else {
         Ok(None)
     };
+    #[cfg(target_os = "macos")]
+    let allow_selection_copy_preview = action == "selection"
+        && locked(&state.settings).is_ok_and(|settings| settings.macos_selection_copy_preview);
     #[cfg(target_os = "windows")]
     if let Some((_, attempt)) = selection_attempt {
         platform::record_selection_source(attempt, source_snapshot.is_ok(), None);
@@ -2740,26 +2748,30 @@ fn start_action(app: tauri::AppHandle, action: String) {
                     {
                         let (strategy, attempt) = selection_attempt.ok_or("缺少取词任务")?;
                         platform::selected_text_with_strategy_cancelable(cancel, strategy, attempt)
+                            .map(|text| (text, false))
                     }
                     #[cfg(target_os = "macos")]
                     {
                         platform::selected_text_from_source_cancelable(
                             cancel,
-                            expected_macos_source.as_ref().ok_or("缺少原取词窗口")?,
+                            expected_macos_source.ok_or("缺少原取词窗口")?,
+                            allow_selection_copy_preview
+                                && locked(&state.settings)
+                                    .is_ok_and(|settings| settings.macos_selection_copy_preview),
                         )
                     }
                     #[cfg(not(any(target_os = "windows", target_os = "macos")))]
                     {
-                        platform::selected_text_cancelable(cancel)
+                        platform::selected_text_cancelable(cancel).map(|text| (text, false))
                     }
                 }
-                "clipboard" => platform::clipboard_text(),
+                "clipboard" => platform::clipboard_text().map(|text| (text, false)),
                 "capture" | "ocr" | "silentOcr" if cloud_ocr.is_some() => {
-                    platform::capture_image_cancelable(cancel)
+                    platform::capture_image_cancelable(cancel).map(|text| (text, false))
                 }
                 "capture" | "ocr" | "silentOcr" => {
                     ocr::record_invocation();
-                    platform::capture_ocr_cancelable(cancel)
+                    platform::capture_ocr_cancelable(cancel).map(|text| (text, false))
                 }
                 _ => Err("未知操作".into()),
             };
@@ -2790,7 +2802,7 @@ fn start_action(app: tauri::AppHandle, action: String) {
                 None,
             );
             finish_native_text(text, worker_request.cancelled() || source_changed)
-                .map(|text| (text, cloud_ocr))
+                .map(|(text, copy_preview)| (text, cloud_ocr, copy_preview))
         })
         .await
         .map_err(|_| "系统操作异常".to_string())
@@ -2803,7 +2815,7 @@ fn start_action(app: tauri::AppHandle, action: String) {
                 result.is_ok(),
                 result
                     .as_ref()
-                    .is_ok_and(|(text, _)| !text.trim().is_empty()),
+                    .is_ok_and(|(text, _, _)| !text.trim().is_empty()),
                 result.as_ref().err().map(String::as_str),
             );
         }
@@ -2821,8 +2833,8 @@ fn start_action(app: tauri::AppHandle, action: String) {
         if !native_request_is_current(&app, &request, presentation, keep_popup) {
             return;
         }
-        let result = match result {
-            Ok((text, Some(provider))) => {
+        let (result, copy_preview) = match result {
+            Ok((text, Some(provider), _)) => {
                 let key = load_ocr_key_async(
                     app.clone(),
                     provider.clone(),
@@ -2834,14 +2846,15 @@ fn start_action(app: tauri::AppHandle, action: String) {
                     return;
                 }
                 let state = app.state::<AppState>();
-                native_ocr_result(
+                let result = native_ocr_result(
                     request.cancellation(),
                     ocr::recognize(&state.client, &provider, key, &text),
                 )
-                .await
+                .await;
+                (result, false)
             }
-            Ok((text, None)) => Ok(text),
-            Err(error) => Err(error),
+            Ok((text, None, copy_preview)) => (Ok(text), copy_preview),
+            Err(error) => (Err(error), false),
         };
         if !native_request_is_current(&app, &request, presentation, keep_popup) {
             return;
@@ -2866,10 +2879,12 @@ fn start_action(app: tauri::AppHandle, action: String) {
             }
             match result {
                 Ok(text) if !text.trim().is_empty() => {
-                    emit_source_text(
-                        &app,
-                        captured_source_payload(&action, text, presentation.epoch, keep_popup),
-                    );
+                    let payload = if copy_preview {
+                        selection_copy_preview_payload(text, presentation.epoch)
+                    } else {
+                        captured_source_payload(&action, text, presentation.epoch, keep_popup)
+                    };
+                    emit_source_text(&app, payload);
                 }
                 Ok(_) if action == "selection" => {
                     // Alt+D is also the manual-input shortcut, including when
@@ -2994,6 +3009,14 @@ fn captured_source_payload(
         payload["captureOrigin"] = serde_json::json!("ocr");
     }
     payload
+}
+fn selection_copy_preview_payload(text: String, epoch: u64) -> serde_json::Value {
+    // Pasteboard generations are not writer identity. Keep provisional text in
+    // editable input; only an explicit user action may send it to a provider.
+    serde_json::json!({
+        "text": text, "mode": "input", "focusInput": true,
+        "copyPreview": true, "presentationEpoch": epoch,
+    })
 }
 fn empty_ocr_payload(epoch: u64, retained: bool) -> serde_json::Value {
     // Input mode clears source/results but does not translate empty text, show
@@ -4911,6 +4934,16 @@ mod tests {
         assert!(hint.error.unwrap().contains("拖选"));
     }
     #[test]
+    fn selection_copy_preview_does_not_request_automatic_translation() {
+        let payload = selection_copy_preview_payload("first\nsecond".into(), 54);
+        assert_eq!(payload["text"], "first\nsecond");
+        assert_eq!(payload["mode"], "input");
+        assert_eq!(payload["focusInput"], true);
+        assert_eq!(payload["copyPreview"], true);
+        assert_eq!(payload["presentationEpoch"], 54);
+        assert!(payload.get("captureOrigin").is_none());
+    }
+    #[test]
     fn copy_without_clipboard_update_opens_quiet_manual_input() {
         let error = "COPY_NO_UPDATE: The target did not update the clipboard";
         assert_eq!(visible_action_error("selection", error), None);
@@ -4927,12 +4960,31 @@ mod tests {
         );
     }
     #[test]
-    fn unverifiable_selection_opens_quiet_manual_input_without_permission_claim() {
+    fn unverifiable_selection_opens_manual_input_with_source_bound_guidance() {
         let error = "SELECTION_UNAVAILABLE: Native provider did not expose selection evidence";
         let failure = action_failure_presentation("selection", error, 45).unwrap();
-        assert_eq!(failure.source, empty_selection_payload(45));
+        let mut expected = empty_selection_payload(45);
+        expected["selectionUnavailable"] = serde_json::json!(true);
+        assert_eq!(failure.source, expected);
         assert_eq!(failure.error, None);
         assert!(failure.source.get("permissionRequired").is_none());
+        let unrelated = action_failure_presentation("capture", error, 45).unwrap();
+        assert!(unrelated.source.get("selectionUnavailable").is_none());
+    }
+    #[test]
+    fn copy_preview_access_failure_is_source_bound_and_does_not_request_permissions() {
+        let error = "CLIPBOARD_PREVIEW_ACCESS: fixed native classification";
+        let failure = action_failure_presentation("selection", error, 55).unwrap();
+        let mut expected = empty_selection_payload(55);
+        expected["selectionCopyAccessRequired"] = serde_json::json!(true);
+        assert_eq!(failure.source, expected);
+        assert_eq!(failure.error, None);
+        assert!(failure.source.get("permissionRequired").is_none());
+        assert!(action_failure_presentation("clipboard", error, 55)
+            .unwrap()
+            .source
+            .get("selectionCopyAccessRequired")
+            .is_none());
     }
     #[test]
     fn source_identity_failure_opens_manual_input_but_superseded_selection_stays_quiet() {

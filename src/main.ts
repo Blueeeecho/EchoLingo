@@ -40,6 +40,7 @@ const $ = <T extends HTMLElement = HTMLElement>(selector: string): T => {
   return element;
 };
 const source = $<HTMLTextAreaElement>('#source-text');
+const selectionHint = $('#selection-hint');
 const sourceLanguage = $<HTMLSelectElement>('#source-language');
 const targetLanguage = $<HTMLSelectElement>('#target-language');
 const historyLanguages = new HistoryLanguageSelection();
@@ -197,7 +198,7 @@ function setView(view: string, skipSystemStatusRefresh = false): void {
   if (!['translate', 'history', 'settings', 'services'].includes(view)) return;
   // Return to the draft's owning workspace before exposing its editor again.
   if (view !== 'translate' && suspendedModals.size) view = suspendedModalView;
-  if (view !== 'translate') endSourceInputSession();
+  if (view !== 'translate') { endSourceInputSession(); setSelectionHint(); }
   if (currentView === 'settings' && view !== 'settings') shortcutEditor.leave();
   if (view !== currentView) focusIntentRevision += 1;
   closeMoreMenu();
@@ -360,7 +361,7 @@ function applyTranslationPresentation(presentation: TranslationPresentation, sou
     // A capture may finish while its pinned popup remains usable. Snapshot
     // after cancelling the previous request so later edits/manual work win.
     visiblePopupUpdateBaseline = presentation.presented ? { epoch: presentation.epoch, generation } : null;
-    if (!presentation.presented) endSourceInputSession();
+    if (!presentation.presented) { endSourceInputSession(); setSelectionHint(); }
   }
   if (settingsReady && sourceDeliveryInbox.peek()) queueMicrotask(() => run(flushSourceDeliveries));
 }
@@ -386,8 +387,16 @@ function enforceSourceLimit(): void {
     toast('文字超过 20,000 字符，已截取前 20,000 字符。', 'error');
   }
 }
+function setSelectionHint(message = ''): void {
+  if (selectionHint.textContent === message && selectionHint.hidden === !message) return;
+  selectionHint.textContent = message;
+  selectionHint.hidden = !message;
+  if (message) source.setAttribute('aria-describedby', 'selection-hint');
+  else source.removeAttribute('aria-describedby');
+}
 function sourceEdited(): void {
   enforceSourceLimit();
+  setSelectionHint();
   clearPermissionGuidance();
   clearOriginalCapture();
   if (sourceComposing) scheduleSourceEditorResize();
@@ -453,6 +462,8 @@ async function receiveNativeSource(payload: SourceTextEvent, replay = false): Pr
 async function receiveCapturedText(payload: SourceTextEvent): Promise<void> {
   const presentationEpoch = payload.presentationEpoch ?? translationPresentation.epoch;
   if (presentationEpoch < translationPresentation.epoch) return;
+  const copyPreview = payload.copyPreview === true;
+  if (copyPreview && (!macDesktop || payload.mode !== 'input' || payload.focusInput !== true || !payload.text.trim())) return;
   if (payload.updateVisiblePopup && (currentView !== 'translate' || !translationPresentation.presented
     || payload.presentationEpoch !== translationPresentation.epoch || visiblePopupUpdateBaseline?.epoch !== presentationEpoch
     || visiblePopupUpdateBaseline.generation !== generation)) return;
@@ -471,6 +482,16 @@ async function receiveCapturedText(payload: SourceTextEvent): Promise<void> {
   if (document.activeElement instanceof HTMLElement && document.activeElement.closest('.app-shell')) document.activeElement.blur();
   if (payload.permissionRequired) showPermissionGuidance(payload.permissionRequired);
   if (payload.mode === 'input') $<HTMLDetailsElement>('#popup-services').open = false;
+  let selectionMessage = '';
+  if (copyPreview) selectionMessage = '请核对复制的文字。确认后点击「翻译」或按回车，不会自动翻译。';
+  else if (macDesktop && payload.mode === 'input' && payload.focusInput === true && !normalized && !payload.permissionRequired) {
+    if (payload.selectionCopyAccessRequired === true) {
+      selectionMessage = '复制预览需要剪贴板权限。请回原应用按 ⌘C，再到翻译框按 ⌘V，或用截图翻译。如果系统设置已列出 EchoLingo，也可在那里检查剪贴板权限。';
+    } else if (payload.selectionUnavailable === true) {
+      selectionMessage = '未能读取选区。回原应用按 ⌘C，再点菜单栏「翻译剪贴板」。';
+    }
+  }
+  if (selectionMessage) setSelectionHint(selectionMessage);
   // The popup layout is measured and shown before the translation ticket is
   // issued. Reserve the final-looking pane in that first measurement.
   const preparedLoading = payload.mode === 'translate' && source.value.trim()
@@ -492,7 +513,11 @@ async function receiveCapturedText(payload: SourceTextEvent): Promise<void> {
   endSourceInputSession();
   const inputSession = payload.focusInput ? beginSourceInputSession() : 0;
   recordPopupStage(presentationEpoch, 'domPrepared');
-  const clearUnstartedLoading = () => {
+  const clearUnpresentedSourceUi = () => {
+    if (selectionMessage && token === generation && intent === focusIntentRevision) {
+      setSelectionHint();
+      notifyLayout();
+    }
     if (preparedLoading !== null && $('#result-placeholder').firstChild === preparedLoading) {
       preparedTranslationEpoch = null;
       setResultPlaceholder(false);
@@ -504,13 +529,13 @@ async function receiveCapturedText(payload: SourceTextEvent): Promise<void> {
     const presentation = await panelLayout.presentPopup(presentationEpoch, Boolean(payload.focusInput), Boolean(payload.reuseVisiblePopup ?? payload.updateVisiblePopup));
     if (presentation) { applyTranslationPresentation(presentation); presentedEpoch = presentation.epoch; recordPopupStage(presentedEpoch, 'presentationComplete'); }
     else if (desktop) {
-      clearUnstartedLoading();
+      clearUnpresentedSourceUi();
       if (payload.mode === 'translate') recordInputDiagnostic('automaticDispatchSkipped', undefined, { epoch: presentationEpoch, generation: token }, 'presentationUnavailable');
       if (inputSession) endSourceInputSession(inputSession);
       return;
     }
   } catch (error) {
-    clearUnstartedLoading();
+    clearUnpresentedSourceUi();
     if (inputSession) endSourceInputSession(inputSession);
     if (payload.mode === 'translate') recordInputDiagnostic('automaticDispatchSkipped', undefined, { epoch: presentationEpoch, generation: token }, errorMessage(error).startsWith('CANCELLED:') ? 'presentationCancelled' : 'presentationFailed');
     if (errorMessage(error).startsWith('CANCELLED:')) return;
@@ -525,7 +550,7 @@ async function receiveCapturedText(payload: SourceTextEvent): Promise<void> {
     if (payload.mode === 'translate') recordInputDiagnostic('automaticDispatchSkipped', undefined, { epoch: presentationEpoch, generation: token },
       token !== generation ? 'generationChanged' : intent !== focusIntentRevision ? 'intentChanged' : currentView !== 'translate' ? 'viewChanged' : allModals.some(modalActive) ? 'modalActive' : 'presentationChanged');
     if (inputSession) endSourceInputSession(inputSession);
-    clearUnstartedLoading();
+    clearUnpresentedSourceUi();
     return;
   }
   // Source-bound failure guidance must follow successful presentation and the
@@ -535,7 +560,7 @@ async function receiveCapturedText(payload: SourceTextEvent): Promise<void> {
     preparedTranslationEpoch = null;
     if (settingsReady) {
       run(translate);
-      if (!translating) clearUnstartedLoading();
+      if (!translating) clearUnpresentedSourceUi();
     } else pendingTranslate = true;
   } else if (payload.mode === 'ocr') {
     status('文字识别完成');
@@ -615,6 +640,7 @@ function redirectSourceInputKey(event: KeyboardEvent): void {
 function requestInputFocus(request: InputFocusRequest = { epoch: translationPresentation.epoch, generation, intentRevision: focusIntentRevision }): void {
   if (request.epoch !== translationPresentation.epoch || request.generation !== generation || request.intentRevision !== focusIntentRevision) return;
   suspendConfigurationDialogs();
+  setSelectionHint();
   clearPermissionGuidance(); setView('translate');
   // This request may legitimately navigate from management to the editor.
   // Bind its frame after that navigation; queued requests retain their origin.
@@ -1262,6 +1288,10 @@ function renderSettings(): void {
   $('#windows-selection-settings').hidden = document.documentElement.dataset.platform !== 'windows';
   $<HTMLSelectElement>('#windows-selection-strategy').value = settings.windowsSelectionStrategy ?? 'copy';
   $<HTMLSelectElement>('#windows-selection-strategy').disabled = !settingsReady;
+  $('#macos-selection-settings').hidden = !macDesktop;
+  const macosSelectionCopyPreview = $<HTMLInputElement>('#macos-selection-copy-preview');
+  macosSelectionCopyPreview.checked = settings.macosSelectionCopyPreview === true;
+  macosSelectionCopyPreview.disabled = !settingsReady;
   $<HTMLSelectElement>('#theme-select').value = settings.theme;
   $<HTMLInputElement>('#save-history').checked = settings.saveHistory;
   $<HTMLInputElement>('#max-history').value = String(settings.maxHistory);
@@ -1869,6 +1899,11 @@ prefersDark.addEventListener('change', applyTheme);
 $<HTMLSelectElement>('#windows-selection-strategy').addEventListener('change', (event) => {
   const choice = (event.target as HTMLSelectElement).value === 'auto' ? 'auto' : 'copy';
   run(async () => { try { await updateSettings((next) => { next.windowsSelectionStrategy = choice; }); } catch (error) { renderSettings(); throw error; } });
+});
+$<HTMLInputElement>('#macos-selection-copy-preview').addEventListener('change', (event) => {
+  if (!macDesktop) return;
+  const enabled = (event.target as HTMLInputElement).checked;
+  run(async () => { try { await updateSettings((next) => { next.macosSelectionCopyPreview = enabled; }); } catch (error) { renderSettings(); throw error; } });
 });
 $<HTMLSelectElement>('#theme-select').addEventListener('change', (event) => {
   // Earlier queued saves re-render this control before our mutation executes.

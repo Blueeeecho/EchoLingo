@@ -118,7 +118,7 @@ class OptionalPluralRecoveryContract(unittest.TestCase):
                       'selectionMixedTextStillSelected(selectedText, current: currentText)',
                       'selectionMixedWindowMatches(', 'selectionCopyTicket(source: source, matching: ticket) == ticket'):
             self.assertIn(proof, recovery)
-        terminal = recovery[recovery.index('if optionalPluralRootFailure {\n        // This separate terminal branch'):]
+        terminal = recovery[recovery.rindex('if optionalPluralRootFailure {'):]
         self.assertLess(terminal.index('selectionOptionalPluralRecoveryDisposition('), terminal.index('switch selectionRecoveryDisposition('))
         self.assertIn('case .compatibility: throw unavailableSelectionError', terminal)
         for forbidden in ('NSPasteboard', 'postToPid', '.post(', 'kAXValueAttribute', 'activate('):
