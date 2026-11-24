@@ -8,6 +8,27 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class ScreenshotBackendContract(unittest.TestCase):
+    def test_f1_keeps_separate_native_hide_overlay_hide_and_policy_order(self):
+        main = (ROOT / 'src-tauri/src/main.rs').read_text()
+        screenshot = (ROOT / 'src-tauri/src/screenshot.rs').read_text()
+        f1 = screenshot.split('pub fn start_capture(', 1)[1].split('#[derive', 1)[0]
+        calls = [
+            'super::hide_native_capture_window(&app, &request, presentation)',
+            'super::screenshot_overlay::hide(&window)',
+            'super::verify_capture_application_policy(&app)',
+            'super::platform::select_screenshot_cancelable(',
+        ]
+        offsets = [f1.index(call) for call in calls]
+        self.assertEqual(offsets, sorted(offsets))
+        self.assertIn('async fn hide_native_capture_window(', main)
+        self.assertIn('async fn verify_capture_application_policy(', main)
+        hide = main.split('async fn hide_native_capture_window(', 1)[1].split('async fn wait_native_cancellation(', 1)[0]
+        self.assertIn('native_request_is_current(&handle, &request, presentation, false)', hide)
+        self.assertIn('platform::hide_webview_window(&window)', hide)
+        policy = main.split('async fn verify_capture_application_policy(', 1)[1].split('#[derive', 1)[0]
+        self.assertIn('run_on_main_thread(', policy)
+        self.assertIn('verify_application_policy(&handle, "beforeCapture")', policy)
+
     def assertCode(self, expected, source):
         self.assertIn(re.sub(r"\s+", "", expected), re.sub(r"\s+", "", source))
 
@@ -23,7 +44,7 @@ class ScreenshotBackendContract(unittest.TestCase):
 
     def test_capture_preparation_checks_visibility_before_hide_and_keeps_unknown_conservative(self):
         main = (ROOT / 'src-tauri/src/main.rs').read_text()
-        prepare = main.split('async fn prepare_native_capture_window(', 1)[1].split('async fn wait_native_cancellation(', 1)[0]
+        prepare = main.split('async fn prepare_native_capture_window(', 1)[1].split('async fn hide_native_capture_window(', 1)[0]
         self.assertEqual(prepare.count('run_on_main_thread'), 1)
         self.assertCode('if !native_request_is_current(&handle, &request, presentation, keep_popup)', prepare)
         self.assertCode('let settle = if keep_popup { false } else {', prepare)

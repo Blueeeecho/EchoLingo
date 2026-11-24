@@ -131,6 +131,20 @@ fn verify_application_policy(app: &tauri::AppHandle, phase: &'static str) -> Res
     Ok(())
 }
 
+// The F1 editor checks this after hiding its separate annotation overlay.
+#[cfg(target_os = "macos")]
+async fn verify_capture_application_policy(app: &tauri::AppHandle) -> Result<(), String> {
+    let (send, receive) = tokio::sync::oneshot::channel();
+    let handle = app.clone();
+    app.run_on_main_thread(move || {
+        let _ = send.send(verify_application_policy(&handle, "beforeCapture"));
+    })
+    .map_err(|_| "WINDOW_THREAD: Cannot verify capture startup policy.".to_string())?;
+    receive
+        .await
+        .map_err(|_| "WINDOW_THREAD: Capture startup policy check was interrupted.".to_string())?
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct OpenSettingsEvent {
@@ -2941,6 +2955,30 @@ async fn prepare_native_capture_window(
             verify_application_policy(&handle, "beforeCapture")?;
             Ok(settle)
         })();
+        let _ = send.send(result);
+    })
+    .map_err(|_| "WINDOW_THREAD: 无法准备截图窗口".to_string())?;
+    receive
+        .await
+        .map_err(|_| "WINDOW_THREAD: 截图窗口准备被中断".to_string())?
+}
+// Keep the F1 path separate: it hides the main window, then its own overlay.
+async fn hide_native_capture_window(
+    app: &tauri::AppHandle,
+    request: &native_tasks::Request,
+    presentation: translation_requests::Presentation,
+) -> Result<(), String> {
+    let (send, receive) = tokio::sync::oneshot::channel();
+    let handle = app.clone();
+    let request = request.clone();
+    app.run_on_main_thread(move || {
+        let result = if !native_request_is_current(&handle, &request, presentation, false) {
+            Err(translation_requests::CANCELLED.to_owned())
+        } else if let Some(window) = handle.get_webview_window("main") {
+            platform::hide_webview_window(&window)
+        } else {
+            Err("窗口不存在".into())
+        };
         let _ = send.send(result);
     })
     .map_err(|_| "WINDOW_THREAD: 无法准备截图窗口".to_string())?;
