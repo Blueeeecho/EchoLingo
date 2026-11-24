@@ -38,12 +38,12 @@ class MacSelectionRecoveryContract(unittest.TestCase):
         self.assertRegex(selection, r'platform::selected_text_cancelable\(cancel\)\.map\(\|text\| \(text, false\)\)\s*\}')
 
     def test_basic_workspace_snapshot_has_no_ax_or_content_read(self):
-        snapshot = section(SWIFT, "func selectionRequestSourceSnapshot()", "func selectionRequestSourceForShortcut()")
+        snapshot = section(SWIFT, "func selectionRequestSourceSnapshot(", "func selectionRequestSourceForShortcut()")
         for forbidden in ("AXUIElementCopy", "AXValue", "activate(", "NSPasteboard", "windowTitle"):
             self.assertNotIn(forbidden, snapshot)
         self.assertIn("NSWorkspace.shared.frontmostApplication", snapshot)
         self.assertIn("application.launchDate", snapshot)
-        self.assertIn("selectionCGCopyTicket(source: source)?.windowID", snapshot)
+        self.assertIn("selectionCGCopyTicket(source: source, trace: cgTrace)?.windowID", snapshot)
 
     def test_exceptional_shortcut_anchor_has_no_text_and_checks_window_twice(self):
         snapshot = section(SWIFT, "func selectionRequestSourceForShortcut()", "func selectionRequestSourceMatches(")
@@ -84,7 +84,7 @@ class MacSelectionRecoveryContract(unittest.TestCase):
     def test_source_failure_feedback_does_not_remove_supersession_guard(self):
         self.assertIn("fn source_identity_failure_opens_manual_input_but_superseded_selection_stays_quiet()", MAIN)
         self.assertIn("finish_native_text(text, worker_request.cancelled() || source_changed)", MAIN)
-        action = section(MAIN, "fn start_action(", "async fn hide_native_capture_window(")
+        action = section(MAIN, "fn start_action(", "async fn prepare_native_capture_window(")
         self.assertLess(action.index("if !native_request_is_current(&app, &request, presentation, keep_popup)"),
                         action.index("match result {\n                Ok(text)"))
 
@@ -95,7 +95,12 @@ class MacSelectionRecoveryContract(unittest.TestCase):
         self.assertNotIn('"selection-source"', lock)
 
     def test_selection_skip_delay_does_not_remove_copy_modifier_guards(self):
-        self.assertIn('if worker_action != "selection" {', MAIN)
+        action = section(MAIN, "fn start_action(", "async fn prepare_native_capture_window(")
+        capture = section(MAIN, "fn is_capture_action(", "fn native_action_result_is_current(")
+        self.assertIn('let capture = is_capture_action(&action);', action)
+        self.assertNotIn('"selection"', capture)
+        self.assertIn('if capture && (!keep_popup || cfg!(target_os = "macos"))', action)
+        self.assertIn("if needs_compositor_settle {", action)
         self.assertGreaterEqual(SWIFT.count("try requireSelectionModifiersReleased()"), 2)
         self.assertIn('trace.record("modifier-release")', SWIFT)
 
@@ -110,7 +115,7 @@ class MacSelectionRecoveryContract(unittest.TestCase):
         self.assertIn('source["allowSelectionCopyPreview"] = json!(allow_selection_copy_preview)', bridge)
         self.assertIn('Some(Value::Bool(true)) if allow_selection_copy_preview && !text.trim().is_empty()', bridge)
         self.assertIn('Invalid selection copy preview', bridge)
-        action = section(MAIN, "fn start_action(", "async fn hide_native_capture_window(")
+        action = section(MAIN, "fn start_action(", "async fn prepare_native_capture_window(")
         self.assertEqual(action.count("settings.macos_selection_copy_preview"), 2)
         self.assertIn("if copy_preview {", action)
         self.assertIn("selection_copy_preview_payload(text, presentation.epoch)", action)

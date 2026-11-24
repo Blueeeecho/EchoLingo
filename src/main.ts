@@ -1290,7 +1290,7 @@ function renderSettings(): void {
   $<HTMLSelectElement>('#windows-selection-strategy').disabled = !settingsReady;
   $('#macos-selection-settings').hidden = !macDesktop;
   const macosSelectionCopyPreview = $<HTMLInputElement>('#macos-selection-copy-preview');
-  macosSelectionCopyPreview.checked = settings.macosSelectionCopyPreview === true;
+  macosSelectionCopyPreview.checked = macDesktop && settings.macosSelectionCopyPreview !== false;
   macosSelectionCopyPreview.disabled = !settingsReady;
   $<HTMLSelectElement>('#theme-select').value = settings.theme;
   $<HTMLInputElement>('#save-history').checked = settings.saveHistory;

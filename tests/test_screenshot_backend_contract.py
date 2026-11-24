@@ -13,13 +13,26 @@ class ScreenshotBackendContract(unittest.TestCase):
 
     def test_f1_branches_before_ocr_and_never_enters_text_pipeline(self):
         main = (ROOT / 'src-tauri/src/main.rs').read_text()
-        body = main.split('fn start_action(', 1)[1].split('async fn hide_native_capture_window', 1)[0]
+        body = main.split('fn start_action(', 1)[1].split('async fn prepare_native_capture_window', 1)[0]
         self.assertLess(body.index('screenshot::start_capture(app)'), body.index('cloud_ocr'))
         screenshot = (ROOT / 'src-tauri/src/screenshot.rs').read_text()
         self.assertIn('platform::select_screenshot_cancelable', screenshot)
         self.assertIn('platform::capture_selected_region_cancelable', screenshot)
         for forbidden in ['ocr::recognize(', 'load_ocr_key', 'finish_translation(', 'history.json', 'reqwest::', 'platform::capture_ocr']:
             self.assertNotIn(forbidden, screenshot)
+
+    def test_capture_preparation_checks_visibility_before_hide_and_keeps_unknown_conservative(self):
+        main = (ROOT / 'src-tauri/src/main.rs').read_text()
+        prepare = main.split('async fn prepare_native_capture_window(', 1)[1].split('async fn wait_native_cancellation(', 1)[0]
+        self.assertEqual(prepare.count('run_on_main_thread'), 1)
+        self.assertCode('if !native_request_is_current(&handle, &request, presentation, keep_popup)', prepare)
+        self.assertCode('let settle = if keep_popup { false } else {', prepare)
+        self.assertCode('#[cfg(target_os = "macos")] let already_hidden = matches!(window.is_visible(), Ok(false));', prepare)
+        self.assertCode('#[cfg(not(target_os = "macos"))] let already_hidden = false;', prepare)
+        self.assertLess(prepare.index('window.is_visible()'), prepare.index('platform::hide_webview_window(&window)?'))
+        self.assertLess(prepare.index('platform::hide_webview_window(&window)?'), prepare.index('verify_application_policy(&handle, "beforeCapture")?'))
+        self.assertLess(prepare.index('verify_application_policy(&handle, "beforeCapture")?'), prepare.index('send.send(result)'))
+        self.assertCode('platform::hide_webview_window(&window)?; !already_hidden', prepare)
 
     def test_screenshot_window_has_no_general_file_or_clipboard_plugin_permissions(self):
         config = json.loads((ROOT / 'src-tauri/tauri.conf.json').read_text())

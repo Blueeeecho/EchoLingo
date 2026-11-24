@@ -29,6 +29,7 @@ try {
       shortcuts: { selection: 'Alt+D', capture: 'Alt+S', ocr: 'Alt+Shift+S', silentOcr: 'Alt+C', input: 'Alt+A', screenshot: 'F1' },
       saveHistory: true, theme: 'light', maxHistory: 20, autoHideSeconds: 0, ocrProviders: [], activeOcrProviderId: null,
     };
+    if (new URL(location.href).searchParams.has('copyPreviewDisabledFixture')) state.macosSelectionCopyPreview = false;
     if (new URL(location.href).searchParams.has('persistedLanguageFixture')) { state.sourceLanguage = 'fr'; state.targetLanguage = 'zh-Hans'; }
     if (new URL(location.href).searchParams.has('twoShortcutDefaultsFixture')) state.shortcuts = { selection: 'Alt+D', capture: '', ocr: '', silentOcr: 'Alt+S', input: '', screenshot: 'F1' };
     if (new URL(location.href).searchParams.has('serviceManagerFixture')) {
@@ -3924,12 +3925,17 @@ try {
   assert.equal(await page.locator('#windows-selection-settings').isHidden(), true);
   const copyPreviewSetting = page.locator('#macos-selection-copy-preview');
   assert.equal(await copyPreviewSetting.isVisible(), true);
-  assert.equal(await copyPreviewSetting.isChecked(), false);
+  assert.equal(await copyPreviewSetting.isChecked(), true, 'missing Mac Copy Preview setting uses the current on default');
   assert.match(await copyPreviewSetting.getAttribute('aria-describedby'), /copy-preview-help/);
-  await copyPreviewSetting.check();
-  await page.waitForFunction(() => window.__qa.settings.macosSelectionCopyPreview === true);
   await copyPreviewSetting.uncheck();
   await page.waitForFunction(() => window.__qa.settings.macosSelectionCopyPreview === false);
+  await page.goto(fixtureUrl({ copyPreviewDisabledFixture: 1 }));
+  await page.waitForFunction(() => document.querySelector('#footer-status')?.textContent === '准备就绪');
+  await goView('settings');
+  await selectSettingsCategory('shortcuts');
+  assert.equal(await copyPreviewSetting.isChecked(), false, 'persisted false is respected at startup');
+  await copyPreviewSetting.check();
+  await page.waitForFunction(() => window.__qa.settings.macosSelectionCopyPreview === true);
   assert.deepEqual(errors, []);
   console.log('PASS: isolated Windows strategy settings default compatibility for old payloads; strict and copy save without changing providers/shortcuts/theme, navigation retains strict, failed save rolls back, and macOS hides the setting. Fake IPC only.');
   const retryUrl = new URL(testUrl);
