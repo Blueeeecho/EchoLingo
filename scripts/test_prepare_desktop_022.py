@@ -131,8 +131,11 @@ class VersionCLIContracts(unittest.TestCase):
                 tail25=b'"0.2.25"), default=VERSION)'
                 self.assertEqual(with25.count(tail25),1)
                 with26=with25.replace(tail25,b'"0.2.25", "0.2.26"), default=VERSION)',1)
+                tail26=b'"0.2.26"), default=VERSION)'
+                self.assertEqual(with26.count(tail26),1)
+                with27=with26.replace(tail26,b'"0.2.26", "0.2.27"), default=VERSION)',1)
                 current=(ROOT/path).read_bytes().replace(b'\r\n',b'\n')
-                self.assertIn(current,(released,with23,with24,with25,with26))
+                self.assertIn(current,(released,with23,with24,with25,with26,with27))
 
     def test_version_cli_reaches_real_validation_and_rejects_unknown_version(self):
         with tempfile.TemporaryDirectory() as directory:

@@ -79,12 +79,12 @@ class StaticContracts(unittest.TestCase):
                 expected=subprocess.check_output(['git','show',R.REVIEWED_SOURCE+':'+name],cwd=ROOT)
                 current=(ROOT/name).read_bytes().replace(b'\r\n',b'\n')
                 approved_version_cli_fixtures={
-                    'scripts/test_prepare_desktop_022.py': 'e4a4ec764a97f301264bf92f22a1eec4758003ecef97653140c51c4c782a2e42',
-                    'scripts/test_prepare_desktop_023.py': '93adfc93be95dfaa7e15954428f64aeff4064042f0c21ed09535c5d40a699620',
-                    'scripts/test_prepare_desktop_024.py': '95fe20000fce5c73055a93f0455ef1c87bd9f2b2e4d99f51dc1e8e536a2d3eab',
+                    'scripts/test_prepare_desktop_022.py': ('e4a4ec764a97f301264bf92f22a1eec4758003ecef97653140c51c4c782a2e42', '495a498da2fc47ec47112a98bdc2c9cf62aa3778c8071b9de83e5b65b091d9d4'),
+                    'scripts/test_prepare_desktop_023.py': ('93adfc93be95dfaa7e15954428f64aeff4064042f0c21ed09535c5d40a699620', 'b041a2ff3a2a60ddff7ca3aafb982cec8e3ee4f9503e6a578d31001a302670a8'),
+                    'scripts/test_prepare_desktop_024.py': ('95fe20000fce5c73055a93f0455ef1c87bd9f2b2e4d99f51dc1e8e536a2d3eab', '1872ef75ab00bf6b721bee606476c59b703456b422dbedee04f68ee9e315c906'),
                 }
                 if name in approved_version_cli_fixtures and current != expected:
-                    self.assertEqual(hashlib.sha256(current).hexdigest(),approved_version_cli_fixtures[name])
+                    self.assertIn(hashlib.sha256(current).hexdigest(),approved_version_cli_fixtures[name])
                 else:
                     self.assertEqual(current,expected)
     def test_explicit_same_installer_and_original_script(self):
@@ -146,8 +146,11 @@ class VersionCLIContracts(unittest.TestCase):
                 tail25=b'"0.2.25"), default=VERSION)'
                 self.assertEqual(released.count(tail25),1)
                 with26=released.replace(tail25,b'"0.2.25", "0.2.26"), default=VERSION)',1)
+                tail26=b'"0.2.26"), default=VERSION)'
+                self.assertEqual(with26.count(tail26),1)
+                with27=with26.replace(tail26,b'"0.2.26", "0.2.27"), default=VERSION)',1)
                 current=(ROOT/path).read_bytes().replace(b'\r\n',b'\n')
-                self.assertIn(current,(released,with26))
+                self.assertIn(current,(released,with26,with27))
 
     def test_version_cli_reaches_real_validation_and_rejects_unknown_version(self):
         with tempfile.TemporaryDirectory() as directory:
