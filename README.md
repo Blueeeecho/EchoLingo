@@ -5,8 +5,8 @@
 <p align="center">一款安静轻量的桌面划词翻译、框选 OCR 与截图工具。</p>
 <p align="center">
   <a href="https://blueeeecho.github.io/EchoLingo/">官网</a> ·
-  <a href="#下载与安装">下载 0.2.26</a> ·
-  <a href="https://github.com/Blueeeecho/EchoLingo/releases/tag/0.2.26">更新日志</a> ·
+  <a href="#下载与安装">下载 0.2.27</a> ·
+  <a href="https://github.com/Blueeeecho/EchoLingo/releases/tag/0.2.27">更新日志</a> ·
   <a href="https://github.com/Blueeeecho/EchoLingo/issues">反馈与建议</a>
 </p>
 
@@ -31,14 +31,14 @@
 
 ## 下载与安装
 
-当前最新内测版为 **[0.2.26](https://github.com/Blueeeecho/EchoLingo/releases/tag/0.2.26)**：
+当前最新内测版为 **[0.2.27](https://github.com/Blueeeecho/EchoLingo/releases/tag/0.2.27)**：
 
 | 平台 | 下载 | 系统要求 |
 | :--- | :--- | :--- |
-| **Windows (x64)** | [免安装压缩包 (.zip)](https://github.com/Blueeeecho/EchoLingo/releases/download/0.2.26/EchoLingo_0.2.26_windows_x64-unpack.zip)（推荐） · [安装版 (.exe)](https://github.com/Blueeeecho/EchoLingo/releases/download/0.2.26/EchoLingo_0.2.26_windows_x64-setup.exe) | Windows 10 1809+ / Windows 11（需 WebView2） |
-| **macOS (Apple 芯片)** | [安装包 (.dmg)](https://github.com/Blueeeecho/EchoLingo/releases/download/0.2.26/EchoLingo_0.2.26_macos_arm64.dmg) | macOS 12+（Apple 系统翻译需 macOS 26+） |
+| **Windows (x64)** | [免安装压缩包 (.zip)](https://github.com/Blueeeecho/EchoLingo/releases/download/0.2.27/EchoLingo_0.2.27_windows_x64-unpack.zip)（推荐） · [安装版 (.exe)](https://github.com/Blueeeecho/EchoLingo/releases/download/0.2.27/EchoLingo_0.2.27_windows_x64-setup.exe) | Windows 10 1809+ / Windows 11（需 WebView2） |
+| **macOS (Apple 芯片)** | [安装包 (.dmg)](https://github.com/Blueeeecho/EchoLingo/releases/download/0.2.27/EchoLingo_0.2.27_macos_arm64.dmg) | macOS 12+（Apple 系统翻译需 macOS 26+） |
 
-> 提示：当前为内测预发布版，暂未购买商业签名与 Apple 公证。升级前请先完全退出旧版；如果 macOS 首次打开提示无法验证开发者，请参考 [macOS 首次安装说明](docs/macos-install.zh-CN.md)。校验与归档：[SHA256SUMS.txt](https://github.com/Blueeeecho/EchoLingo/releases/download/0.2.26/SHA256SUMS.txt) · [发布清单](https://github.com/Blueeeecho/EchoLingo/releases/download/0.2.26/RELEASE-MANIFEST.json) · [0.2.26 源码](https://github.com/Blueeeecho/EchoLingo/tree/0.2.26)。
+> 提示：当前为内测预发布版，暂未购买商业签名与 Apple 公证。升级前请先完全退出旧版；如果 macOS 首次打开提示无法验证开发者，请参考 [macOS 首次安装说明](docs/macos-install.zh-CN.md)。校验与归档：[SHA256SUMS.txt](https://github.com/Blueeeecho/EchoLingo/releases/download/0.2.27/SHA256SUMS.txt) · [发布清单](https://github.com/Blueeeecho/EchoLingo/releases/download/0.2.27/RELEASE-MANIFEST.json) · [0.2.27 源码](https://github.com/Blueeeecho/EchoLingo/tree/0.2.27)。
 
 ## 文档与开发
 
