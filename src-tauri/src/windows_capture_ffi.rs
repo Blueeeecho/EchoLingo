@@ -269,6 +269,7 @@ unsafe extern "system" {
     pub fn CurrentThreadId() -> u32;
     pub fn OpenEventW(access: u32, inherit: i32, name: *const u16) -> H;
     pub fn WaitForSingleObject(handle: H, ms: u32) -> u32;
+    pub fn GetLastError() -> u32;
     pub fn CloseHandle(handle: H) -> i32;
 }
 #[link(name = "dwmapi")]

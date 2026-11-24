@@ -97,6 +97,10 @@ fn capture_drag_extent(origin: isize, x: i32, y: i32) -> (u32, u32) {
 }
 
 struct Shared {
+    diagnostic_enabled: AtomicBool,
+    diagnostic_token: AtomicU64,
+    ready_events: AtomicU32,
+    ready_error: AtomicU32,
     thread: AtomicU32,
     token: AtomicU64,
     child: AtomicU32,
@@ -119,6 +123,10 @@ struct Shared {
 impl Default for Shared {
     fn default() -> Self {
         Self {
+            diagnostic_enabled: AtomicBool::new(false),
+            diagnostic_token: AtomicU64::new(0),
+            ready_events: AtomicU32::new(0),
+            ready_error: AtomicU32::new(0),
             thread: AtomicU32::new(0),
             token: AtomicU64::new(0),
             child: AtomicU32::new(0),
@@ -270,6 +278,7 @@ mod native {
         ) -> *mut c_void;
         pub fn SetEvent(event: *mut c_void) -> i32;
         pub fn ResetEvent(event: *mut c_void) -> i32;
+        pub fn GetLastError() -> u32;
         pub fn CloseHandle(handle: *mut c_void) -> i32;
         pub fn WaitForSingleObject(event: *mut c_void, milliseconds: u32) -> u32;
     }
@@ -349,23 +358,42 @@ pub fn control(message: u32, word: usize, parameter: isize) -> bool {
         return true;
     }
     if message == READY {
+        let observe = |bit| {
+            if s.diagnostic_enabled.load(Ordering::SeqCst) {
+                s.ready_events.fetch_or(bit, Ordering::SeqCst);
+            }
+        };
+        observe(1);
         if s.closing.load(Ordering::SeqCst) {
+            observe(2);
             return true;
         }
         let mut pid = 0;
-        if s.refreshed.load(Ordering::SeqCst) == 1
-            && s.child.load(Ordering::SeqCst) != 0
-            && unsafe { native::GetWindowThreadProcessId(target as _, &mut pid) } != 0
-            && endpoint_matches(
-                s.target.load(Ordering::SeqCst),
-                target,
-                s.child.load(Ordering::SeqCst),
-                pid,
-            )
-        {
+        if s.refreshed.load(Ordering::SeqCst) != 1 {
+            observe(4);
+        } else if s.child.load(Ordering::SeqCst) == 0 {
+            observe(8);
+        } else if unsafe { native::GetWindowThreadProcessId(target as _, &mut pid) } == 0 {
+            observe(16);
+        } else if !endpoint_matches(
+            s.target.load(Ordering::SeqCst),
+            target,
+            s.child.load(Ordering::SeqCst),
+            pid,
+        ) {
+            observe(32);
+        } else {
             s.target.store(target, Ordering::SeqCst);
             if !post(target, READY_ACK, token, 0) {
+                let code = unsafe { native::GetLastError() };
+                if s.diagnostic_enabled.load(Ordering::SeqCst)
+                    && s.ready_events.fetch_or(128, Ordering::SeqCst) & 128 == 0
+                {
+                    s.ready_error.store(code, Ordering::SeqCst);
+                }
                 s.failed.store(true, Ordering::SeqCst);
+            } else {
+                observe(64);
             }
         }
         return true;
@@ -562,6 +590,14 @@ impl Session {
         s.move_pending.store(false, Ordering::SeqCst);
         s.closing.store(false, Ordering::SeqCst);
         s.end_requested.store(false, Ordering::SeqCst);
+        s.diagnostic_token.store(0, Ordering::SeqCst);
+        s.diagnostic_enabled.store(
+            std::env::var_os("ECHOLINGO_CAPTURE_DIAGNOSTICS").is_some_and(|v| v == "1"),
+            Ordering::SeqCst,
+        );
+        s.ready_events.store(0, Ordering::SeqCst);
+        s.ready_error.store(0, Ordering::SeqCst);
+        s.diagnostic_token.store(token, Ordering::SeqCst);
         s.token.store(token, Ordering::SeqCst);
         let mut session = Self {
             token,
@@ -595,6 +631,20 @@ impl Session {
         if s.token.load(Ordering::SeqCst) == self.token {
             s.child.store(pid, Ordering::SeqCst);
         }
+    }
+    // No identities leave this accessor; an older session cannot read its successor.
+    pub fn ready_diagnostics(&self) -> Option<(u32, u32)> {
+        let s = shared();
+        if !s.diagnostic_enabled.load(Ordering::SeqCst)
+            || s.diagnostic_token.load(Ordering::SeqCst) != self.token
+        {
+            return None;
+        }
+        let result = (
+            s.ready_events.load(Ordering::SeqCst),
+            s.ready_error.load(Ordering::SeqCst),
+        );
+        (s.diagnostic_token.load(Ordering::SeqCst) == self.token).then_some(result)
     }
     pub fn close(&mut self) {
         if self.closed {

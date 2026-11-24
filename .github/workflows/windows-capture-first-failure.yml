@@ -1,0 +1,107 @@
+name: Bounded Windows capture first-failure diagnostics
+on:
+  push:
+    branches: [fix/windows-capture-first-failure]
+    paths: ['src-tauri/**', 'tests/windows-native-capture-harness.rs', 'scripts/windows-capture-first-failure.ps1', '.github/workflows/windows-capture-first-failure.yml']
+permissions:
+  contents: read
+  actions: read
+jobs:
+  diagnose:
+    runs-on: windows-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Require exact diagnostic scope
+        shell: pwsh
+        run: |
+          $allowed=@('src-tauri/build.rs','src-tauri/src/windows_capture_diagnostics.rs','src-tauri/src/windows_capture_native.rs','src-tauri/src/windows_capture_input.rs','src-tauri/src/windows_capture_ffi.rs','tests/windows-native-capture-harness.rs','scripts/windows-capture-first-failure.ps1','.github/workflows/windows-capture-first-failure.yml','docs/diagnostics/windows-capture-first-failure.md')
+          $changed=@(git diff --name-only 15dd281bb8379f9bb6e211770ce123833b6252f9 HEAD)
+          if ($LASTEXITCODE -ne 0) { throw 'SOURCE_UNAVAILABLE' }
+          foreach($p in $changed){if($p -notin $allowed){throw "UNREVIEWED_SCOPE: $p"}}
+          New-Item -ItemType Directory -Force "$env:RUNNER_TEMP/first-failure" | Out-Null
+      - name: Compile and test diagnostics and production native child
+        shell: pwsh
+        run: |
+          rustc --edition=2021 --test src-tauri/src/windows_capture_diagnostics.rs -o "$env:RUNNER_TEMP/diagnostic-tests.exe"
+          if($LASTEXITCODE -ne 0){throw 'DIAGNOSTIC_COMPILE'}
+          & "$env:RUNNER_TEMP/diagnostic-tests.exe"
+          if($LASTEXITCODE -ne 0){throw 'DIAGNOSTIC_TEST'}
+          rustc --edition=2021 --test tests/windows-native-capture-harness.rs -o "$env:RUNNER_TEMP/host-tests.exe"
+          if($LASTEXITCODE -ne 0){throw 'HOST_COMPILE'}
+          & "$env:RUNNER_TEMP/host-tests.exe"
+          if($LASTEXITCODE -ne 0){throw 'HOST_TEST'}
+          cargo build --manifest-path src-tauri/native-capture/Cargo.toml --release --locked --target-dir "$env:RUNNER_TEMP/diagnostic-child"
+          if($LASTEXITCODE -ne 0){throw 'CHILD_BUILD'}
+          rustc --edition=2021 tests/windows-native-capture-harness.rs -O -o "$env:RUNNER_TEMP/diagnostic-host.exe"
+          if($LASTEXITCODE -ne 0){throw 'HOST_BUILD'}
+      - name: Run original native continuity prelude once
+        id: continuity
+        continue-on-error: true
+        shell: powershell
+        env:
+          ECHOLINGO_CAPTURE_DIAGNOSTICS: '1'
+        run: |
+          $output=@(& powershell.exe -NoProfile -STA -ExecutionPolicy Bypass -File tests/windows-native-capture-smoke.ps1 -NativeCapturePath "$env:RUNNER_TEMP/diagnostic-child/release/echolingo-native-capture.exe" -HarnessPath "$env:RUNNER_TEMP/diagnostic-host.exe" -IsolatedTestSession 2>&1)
+          $code=$LASTEXITCODE
+          $output | Out-File "$env:RUNNER_TEMP/first-failure/native-continuity.log" -Encoding utf8
+          exit $code
+      - name: Run unchanged ten-case native F1 fixture once
+        id: native
+        continue-on-error: true
+        shell: powershell
+        env:
+          ECHOLINGO_CAPTURE_DIAGNOSTICS: '1'
+        run: |
+          $child="$env:RUNNER_TEMP/diagnostic-child/release/echolingo-native-capture.exe"
+          [ordered]@{source=(git rev-parse HEAD);childSha256=(Get-FileHash $child -Algorithm SHA256).Hash.ToLowerInvariant();diagnosticOnly=$true;packagedApplication=$false} | ConvertTo-Json | Set-Content "$env:RUNNER_TEMP/first-failure/native-identity.json" -Encoding utf8
+          $output=@(& powershell.exe -NoProfile -STA -ExecutionPolicy Bypass -File tests/windows-screenshot-window-smoke.ps1 -NativeCapturePath $child -HarnessPath "$env:RUNNER_TEMP/diagnostic-host.exe" -IsolatedTestSession 2>&1)
+          $code=$LASTEXITCODE
+          $output | Out-File "$env:RUNNER_TEMP/first-failure/native.log" -Encoding utf8
+          exit $code
+      - name: Download verified immutable failed-normal-CI application evidence
+        if: always()
+        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b
+        with:
+          script: |
+            const fs=require('fs'),crypto=require('crypto'),path=require('path');
+            if(context.repo.owner!=='Blueeeecho'||context.repo.repo!=='EchoLingo')throw Error('REPOSITORY');
+            const a=(await github.rest.actions.getArtifact({...context.repo,artifact_id:14490524679})).data;
+            const sha='a811d61715d451df7f2b783084fd461c2c84bbc93d16721a98ba6ee662218e7b';
+            if(a.expired||a.name!=='EchoLingo-Windows-offline-evidence'||a.workflow_run?.id!==44439900726||a.workflow_run?.head_sha!=='15dd281bb8379f9bb6e211770ce123833b6252f9'||a.digest!==`sha256:${sha}`||a.size_in_bytes!==19007048)throw Error('ARTIFACT_PROVENANCE');
+            const b=Buffer.from((await github.rest.actions.downloadArtifact({...context.repo,artifact_id:a.id,archive_format:'zip'})).data);
+            if(b.length!==19007048||crypto.createHash('sha256').update(b).digest('hex')!==sha)throw Error('ARCHIVE_BYTES');
+            fs.writeFileSync(path.join(process.env.RUNNER_TEMP,'immutable-evidence.zip'),b);
+      - name: Observe Notepad to WPF to F1 boundaries on exact unchanged application once
+        id: clipboard
+        if: always()
+        continue-on-error: true
+        shell: powershell
+        run: |
+          $ErrorActionPreference='Stop'
+          Expand-Archive "$env:RUNNER_TEMP/immutable-evidence.zip" "$env:RUNNER_TEMP/immutable-evidence"
+          $apps=@(Get-ChildItem "$env:RUNNER_TEMP/immutable-evidence" -Recurse -Filter echolingo.exe)
+          if($apps.Count -ne 1){throw 'ONE_IMMUTABLE_APPLICATION_REQUIRED'}
+          $app=$apps[0].FullName
+          if((Get-FileHash $app -Algorithm SHA256).Hash.ToLowerInvariant() -ne '68b71145f1d77d03311133ad15161147101720c85d8c821d7e0470d976d96c8a'){throw 'APP_BYTES'}
+          $bytes=[IO.File]::ReadAllBytes($app);$capture=New-Object byte[] 476672
+          [Array]::Copy($bytes,5972797,$capture,0,476672)
+          $native="$env:RUNNER_TEMP/immutable-native.exe";[IO.File]::WriteAllBytes($native,$capture)
+          & powershell.exe -NoProfile -STA -ExecutionPolicy Bypass -File scripts/windows-capture-first-failure.ps1 -ApplicationPath $app -NativeCapturePath $native -OutputDirectory "$env:RUNNER_TEMP/first-failure/clipboard"
+          exit $LASTEXITCODE
+      - name: Retain first results including failures
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: Windows-capture-first-failure
+          path: ${{ runner.temp }}/first-failure
+          if-no-files-found: error
+      - name: Require all diagnostic paths to pass without retries
+        if: always()
+        shell: pwsh
+        run: |
+          if('${{ steps.continuity.outcome }}' -ne 'success' -or '${{ steps.native.outcome }}' -ne 'success' -or '${{ steps.clipboard.outcome }}' -ne 'success'){throw 'DIAGNOSTIC_FAILURE_RETAINED; not release acceptance'}
