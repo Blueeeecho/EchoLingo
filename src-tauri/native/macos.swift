@@ -315,7 +315,7 @@ enum SelectionRequestWindowStore {
     }
 }
 
-func selectionRequestSourceSnapshot() throws -> SelectionRequestSource {
+func selectionRequestSourceSnapshot(cgTrace: SelectionTrace? = nil) throws -> SelectionRequestSource {
     try onMainThread {
         guard let application = NSWorkspace.shared.frontmostApplication,
               application.processIdentifier > 0,
@@ -325,7 +325,7 @@ func selectionRequestSourceSnapshot() throws -> SelectionRequestSource {
         }
         let source = SelectionApplicationSnapshot(pid: application.processIdentifier, bundleIdentifier: bundle)
         return SelectionRequestSource(pid: application.processIdentifier, bundleIdentifier: bundle,
-            windowID: selectionCGCopyTicket(source: source)?.windowID,
+            windowID: selectionCGCopyTicket(source: source, trace: cgTrace)?.windowID,
             launchIdentity: selectionLaunchIdentity(application.launchDate?.timeIntervalSince1970))
     }
 }
@@ -367,9 +367,19 @@ func selectionRequestAXRejection<Window>(_ retained: Window?, _ current: Window?
     return same(retained, current) ? nil : .axWindowMismatch
 }
 
-func requireSelectionRequestSource(_ expected: SelectionRequestSource?, trace: SelectionTrace? = nil) throws {
-    guard let expected else { return }
-    var rejection = selectionRequestSourceRejection(expected, try? selectionRequestSourceSnapshot())
+enum SelectionRequestSourceProof {
+    case noCGTicket
+    case cg(SelectionCopyTicket)
+}
+
+@discardableResult
+func requireSelectionRequestSource(_ expected: SelectionRequestSource?, trace: SelectionTrace? = nil,
+                                   traceInitialCGTicket: Bool = false,
+                                   readSnapshot: (SelectionTrace?) throws -> SelectionRequestSource = selectionRequestSourceSnapshot)
+    throws -> SelectionRequestSourceProof {
+    guard let expected else { return .noCGTicket }
+    let current = try? readSnapshot(traceInitialCGTicket && expected.windowID != nil ? trace : nil)
+    var rejection = selectionRequestSourceRejection(expected, current)
     if rejection == nil, expected.windowID == nil {
         if let window = SelectionRequestWindowStore.window(for: expected) {
             let current = focusedSelectionWindow(applicationPID: expected.pid, trace: trace,
@@ -380,6 +390,10 @@ func requireSelectionRequestSource(_ expected: SelectionRequestSource?, trace: S
     trace?.record("request-source-recheck", ["requestSourceAnchored": true, "requestSourceMatches": rejection == nil,
         "requestSourceReason": rejection?.rawValue ?? "verified"])
     guard rejection == nil else { throw NativeError("SOURCE_CHANGED: 无法确认原取词窗口，请在原应用重新选词后重试。") }
+    if let current, expected.windowID != nil, let windowID = current.windowID {
+        return .cg(SelectionCopyTicket(pid: current.pid, bundleIdentifier: current.bundleIdentifier, windowID: windowID))
+    }
+    return .noCGTicket
 }
 
 struct SelectionApplicationSnapshot {
@@ -2252,7 +2266,7 @@ func captureSelectedText(trace: SelectionTrace, requestSource: SelectionRequestS
     trace.record("accessibility-preflight", ["accessibilityGranted": AXIsProcessTrusted(),
         "requestSourceAnchored": requestSource != nil, "secureInputEnabled": IsSecureEventInputEnabled()])
     try requireAccessibility()
-    try requireSelectionRequestSource(requestSource, trace: trace)
+    let requestProof = try requireSelectionRequestSource(requestSource, trace: trace, traceInitialCGTicket: true)
     var source = selectionApplicationSnapshot(trace: trace, phase: "foreground-initial")
     source.requestSource = requestSource
     let foregroundPID = source.pid
@@ -2270,7 +2284,12 @@ func captureSelectedText(trace: SelectionTrace, requestSource: SelectionRequestS
         // adopting it: the shortcut's AX identity remains the authority.
         _ = selectionCGCopyTicket(source: source, trace: trace)
     }
-    let initialTicket = selectionCopyTicket(source: source, trace: trace)
+    let initialTicket: SelectionCopyTicket?
+    switch requestProof {
+    // The fresh post-queue WindowServer observation already proved this CG ticket.
+    case .cg(let verifiedTicket): initialTicket = verifiedTicket
+    case .noCGTicket: initialTicket = selectionCopyTicket(source: source, trace: trace)
+    }
     let originalFocusQuery = focusedElementQuery(applicationPID: foregroundPID, trace: trace, phase: "focus-initial")
     do {
         return try captureSelectedTextInSource(source: source, originalFocusQuery: originalFocusQuery,
@@ -2760,6 +2779,23 @@ func selectionSourceAnchorSelfTest() throws {
         guard selectionRequestSourceMatches(original, current) == accepted else {
             throw NativeError("SELF_TEST: Queued selection adopted a newer app/window/process instance.")
         }
+        let trace = SelectionTrace(publish: false)
+        var reads = 0
+        let proof = try? requireSelectionRequestSource(original, trace: trace, traceInitialCGTicket: true) { cgTrace in
+            guard cgTrace === trace else { throw NativeError("SELF_TEST: Initial CG ticket lost its diagnostics.") }
+            reads += 1
+            return current
+        }
+        guard reads == 1 else { throw NativeError("SELF_TEST: Initial source proof did not use one fresh snapshot.") }
+        if accepted, case .cg(let ticket)? = proof,
+           ticket == SelectionCopyTicket(pid: original.pid, bundleIdentifier: original.bundleIdentifier, windowID: 7) { continue }
+        if !accepted, proof == nil { continue }
+        throw NativeError("SELF_TEST: Initial CG ticket did not preserve the verified window identity.")
+    }
+    guard case .noCGTicket? = try? requireSelectionRequestSource(nil, readSnapshot: { _ in
+        throw NativeError("SELF_TEST: An unanchored selection must not sample a request source.")
+    }) else {
+        throw NativeError("SELF_TEST: An unanchored selection did not preserve the successful no-anchor check.")
     }
     let unavailableWindow = SelectionRequestSource(pid: 42, bundleIdentifier: "fixture.source", windowID: nil, launchIdentity: selectionLaunchIdentity(100))
     guard selectionRequestSourceMatches(unavailableWindow, original) else {

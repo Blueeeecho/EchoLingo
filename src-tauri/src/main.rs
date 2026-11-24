@@ -131,6 +131,7 @@ fn verify_application_policy(app: &tauri::AppHandle, phase: &'static str) -> Res
     Ok(())
 }
 
+// The F1 editor checks this after hiding its separate annotation overlay.
 #[cfg(target_os = "macos")]
 async fn verify_capture_application_policy(app: &tauri::AppHandle) -> Result<(), String> {
     let (send, receive) = tokio::sync::oneshot::channel();
@@ -2646,28 +2647,23 @@ fn start_action(app: tauri::AppHandle, action: String) {
     };
     record_popup_health(&app, presentation.epoch, "nativeActionPrepared", None);
     tauri::async_runtime::spawn(async move {
-        if capture && !keep_popup {
-            // Native window work stays on the UI thread, outside the short
-            // controller publication lock. Await its acknowledgement before
-            // any helper can capture an unhidden own window.
-            if let Err(error) = hide_native_capture_window(&app, &request, presentation).await {
-                publish_native_result(&app, &request, presentation, keep_popup, || {
-                    if let Some(message) = visible_action_error(&action, &error) {
-                        emit_presented_action_error(&app, presentation, message);
-                    }
-                });
-                return;
+        #[allow(unused_variables)] // Windows has no compositor sleep.
+        let needs_compositor_settle = if capture && (!keep_popup || cfg!(target_os = "macos")) {
+            // Await the UI-thread hide and policy check before capturing.
+            match prepare_native_capture_window(&app, &request, presentation, keep_popup).await {
+                Ok(settle) => settle,
+                Err(error) => {
+                    publish_native_result(&app, &request, presentation, keep_popup, || {
+                        if let Some(message) = visible_action_error(&action, &error) {
+                            emit_presented_action_error(&app, presentation, message);
+                        }
+                    });
+                    return;
+                }
             }
-        }
-        #[cfg(target_os = "macos")]
-        if capture {
-            if let Err(error) = verify_capture_application_policy(&app).await {
-                publish_native_result(&app, &request, presentation, keep_popup, || {
-                    emit_presented_action_error(&app, presentation, error);
-                });
-                return;
-            }
-        }
+        } else {
+            false
+        };
         let worker_app = app.clone();
         let worker_request = request.clone();
         let worker_action = action.clone();
@@ -2724,12 +2720,9 @@ fn start_action(app: tauri::AppHandle, action: String) {
                 None
             };
             #[cfg(not(target_os = "windows"))]
-            if worker_action != "selection" {
-                // Only yield briefly when hiding our own window before capture so
-                // WindowServer finishes compositing; clipboard/pinned OCR need no delay.
-                if capture && !keep_popup {
-                    std::thread::sleep(Duration::from_millis(30));
-                }
+            if needs_compositor_settle {
+                // A visible or unknown window still needs time to leave the compositor.
+                std::thread::sleep(Duration::from_millis(30));
             }
             if worker_request.cancelled() {
                 return Err(translation_requests::CANCELLED.into());
@@ -2933,6 +2926,43 @@ fn start_action(app: tauri::AppHandle, action: String) {
         });
     });
 }
+async fn prepare_native_capture_window(
+    app: &tauri::AppHandle,
+    request: &native_tasks::Request,
+    presentation: translation_requests::Presentation,
+    keep_popup: bool,
+) -> Result<bool, String> {
+    let (send, receive) = tokio::sync::oneshot::channel();
+    let handle = app.clone();
+    let request = request.clone();
+    app.run_on_main_thread(move || {
+        let result = (|| {
+            if !native_request_is_current(&handle, &request, presentation, keep_popup) {
+                return Err(translation_requests::CANCELLED.to_owned());
+            }
+            let settle = if keep_popup {
+                false
+            } else {
+                let window = handle.get_webview_window("main").ok_or("窗口不存在")?;
+                #[cfg(target_os = "macos")]
+                let already_hidden = matches!(window.is_visible(), Ok(false));
+                #[cfg(not(target_os = "macos"))]
+                let already_hidden = false;
+                platform::hide_webview_window(&window)?;
+                !already_hidden
+            };
+            #[cfg(target_os = "macos")]
+            verify_application_policy(&handle, "beforeCapture")?;
+            Ok(settle)
+        })();
+        let _ = send.send(result);
+    })
+    .map_err(|_| "WINDOW_THREAD: 无法准备截图窗口".to_string())?;
+    receive
+        .await
+        .map_err(|_| "WINDOW_THREAD: 截图窗口准备被中断".to_string())?
+}
+// Keep the F1 path separate: it hides the main window, then its own overlay.
 async fn hide_native_capture_window(
     app: &tauri::AppHandle,
     request: &native_tasks::Request,

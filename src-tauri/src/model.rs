@@ -203,7 +203,9 @@ impl Default for Settings {
             shortcut_defaults_version: 2,
             shortcuts: Shortcuts::default(),
             windows_selection_strategy: WindowsSelectionStrategy::Copy,
-            macos_selection_copy_preview: false,
+            // Missing settings may pick the current default; a serialized
+            // false may be an explicit opt-out and must stay false.
+            macos_selection_copy_preview: cfg!(target_os = "macos"),
             save_history: true,
             automatic_update_checks: false,
             // Explicit channel preference for the 0.2.0 internal build, whose
@@ -460,16 +462,24 @@ mod tests {
         assert_eq!(roundtrip, saved);
     }
     #[test]
-    fn macos_selection_copy_preview_requires_explicit_opt_in() {
-        let legacy: Settings = serde_json::from_value(serde_json::json!({})).unwrap();
-        assert!(!legacy.macos_selection_copy_preview);
-        let opted_in: Settings =
-            serde_json::from_value(serde_json::json!({"macosSelectionCopyPreview": true})).unwrap();
-        assert!(opted_in.macos_selection_copy_preview);
-        assert_eq!(
-            serde_json::to_value(opted_in).unwrap()["macosSelectionCopyPreview"],
-            true
-        );
+    fn macos_selection_copy_preview_defaults_only_on_macos_and_preserves_saved_choices() {
+        let missing: Settings = serde_json::from_value(serde_json::json!({})).unwrap();
+        for settings in [Settings::default(), missing] {
+            assert_eq!(
+                settings.macos_selection_copy_preview,
+                cfg!(target_os = "macos")
+            );
+        }
+        for choice in [false, true] {
+            let saved: Settings =
+                serde_json::from_value(serde_json::json!({"macosSelectionCopyPreview": choice}))
+                    .unwrap();
+            assert_eq!(saved.macos_selection_copy_preview, choice);
+            assert_eq!(
+                serde_json::to_value(saved).unwrap()["macosSelectionCopyPreview"],
+                choice
+            );
+        }
     }
 
     #[test]
