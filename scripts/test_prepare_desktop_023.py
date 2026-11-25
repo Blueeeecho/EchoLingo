@@ -69,6 +69,8 @@ class StaticContracts(unittest.TestCase):
     def test_historical_and_normal_gates_unchanged(self):
         for name in ('scripts/prepare-desktop-release.py','scripts/publish-desktop-release.cjs','scripts/test-desktop-release.cjs','scripts/test_prepare_desktop_release.py','.github/workflows/release-desktop.yml','.github/workflows/ci.yml','scripts/windows-offline-translation-test.ps1','.github/workflows/release-desktop-021.yml','scripts/prepare-desktop-021.py','scripts/publish-desktop-021.cjs','scripts/test_prepare_desktop_021.py','scripts/test-desktop-021.cjs','.github/workflows/release-desktop-022.yml','scripts/prepare-desktop-022.py','scripts/publish-desktop-022.cjs','scripts/test-desktop-022.cjs'):
             expected=subprocess.check_output(['git','show',R.REVIEWED_SOURCE+':'+name],cwd=ROOT)
+            if load('retired_release_workflows','retired_release_workflows.py').skip_byte_freeze(self, name):
+                continue
             current=(ROOT/name).read_bytes().replace(b'\r\n',b'\n')
             if name == '.github/workflows/ci.yml' and current != expected:
                 self.assertEqual(hashlib.sha256(current).hexdigest(),'e056c7d9579ffffff69a9a6ed4eda31fdafd453c7af237d3dba104406ed7fd2c',name)

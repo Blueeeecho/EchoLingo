@@ -408,10 +408,58 @@ impl Write for BoundedWriter {
         Ok(())
     }
 }
+pub(crate) fn png_base64_payload(image: &RgbaImage) -> Result<String, String> {
+    Ok(base64::engine::general_purpose::STANDARD.encode(encode(image)?))
+}
 fn encode(image: &RgbaImage) -> Result<Vec<u8>, String> {
+    // Fast is already the encoder default. Adaptive picks a filter per row and
+    // keeps smooth screenshots small, but it dominates encode time on noisy
+    // frames. Those frames use one Up filter instead. Pixels stay lossless.
+    let filter = if incompressible_sample(image) {
+        image::codecs::png::FilterType::Up
+    } else {
+        image::codecs::png::FilterType::Adaptive
+    };
+    encode_with(image, image::codecs::png::CompressionType::Fast, filter)
+}
+fn incompressible_sample(image: &RgbaImage) -> bool {
+    let width = image.width();
+    let height = image.height();
+    if width < 32 || height < 32 {
+        return false;
+    }
+    let step_x = (width / 64).max(1);
+    let step_y = (height / 8).max(1);
+    let raw = image.as_raw();
+    let stride = width as usize * 4;
+    let mut deltas = Vec::with_capacity(512);
+    let mut y = step_y / 2;
+    while y < height {
+        let row = &raw[(y as usize) * stride..][..stride];
+        let mut x = 0;
+        while x + step_x < width {
+            let left = (x as usize) * 4;
+            let right = ((x + step_x) as usize) * 4;
+            deltas.push((row[left] as i16 - row[right] as i16).unsigned_abs());
+            x += step_x;
+        }
+        y += step_y;
+    }
+    // Median ignores a few hard edges in an otherwise flat UI screenshot.
+    if deltas.len() < 32 {
+        return false;
+    }
+    deltas.sort_unstable();
+    deltas[deltas.len() / 2] >= 48
+}
+fn encode_with(
+    image: &RgbaImage,
+    compression: image::codecs::png::CompressionType,
+    filter: image::codecs::png::FilterType,
+) -> Result<Vec<u8>, String> {
     let mut output = BoundedWriter(Vec::new());
-    // Pixels only: no original EXIF, text, ICC metadata or editing layers.
-    image::codecs::png::PngEncoder::new(&mut output)
+    // No ICC, EXIF, text, or editing layers are passed to the encoder.
+    image::codecs::png::PngEncoder::new_with_quality(&mut output, compression, filter)
         .write_image(
             image.as_raw(),
             image.width(),
@@ -441,7 +489,7 @@ fn make_session(
         kind: "image",
         revision: 0,
         id,
-        png_base64: Arc::new(base64::engine::general_purpose::STANDARD.encode(encode(&pixels)?)),
+        png_base64: Arc::new(png_base64_payload(&pixels)?),
         width: pixels.width(),
         height: pixels.height(),
         captured_at,
@@ -1547,6 +1595,186 @@ fn app_emit_selection(app: &tauri::AppHandle, selection: &SelectionSession) -> R
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn png_payload_roundtrip_keeps_pixels_and_strips_to_png() {
+        let image = RgbaImage::from_fn(2, 2, |x, y| image::Rgba([x as u8, y as u8, 3, 255]));
+        let payload = png_base64_payload(&image).unwrap();
+        let decoded = from_base64(&payload, true).unwrap();
+        assert_eq!(decoded.as_raw(), image.as_raw());
+        let png = base64::engine::general_purpose::STANDARD
+            .decode(payload)
+            .unwrap();
+        assert!(png_has_no_descriptive_chunks(&png));
+    }
+    #[test]
+    fn smooth_screenshots_stay_adaptive_and_noise_uses_one_filter() {
+        let ui = synthetic_ui(1280, 720);
+        let gradient = synthetic_gradient(1920, 1080);
+        let noise = synthetic_noise(1920, 1080);
+        assert!(!incompressible_sample(&ui));
+        assert!(!incompressible_sample(&gradient));
+        assert!(incompressible_sample(&noise));
+        assert!(!incompressible_sample(&RgbaImage::from_pixel(
+            2,
+            2,
+            image::Rgba([1, 2, 3, 255])
+        )));
+        let ui_png = encode(&ui).unwrap();
+        assert_eq!(
+            ui_png,
+            encode_with(
+                &ui,
+                image::codecs::png::CompressionType::Fast,
+                image::codecs::png::FilterType::Adaptive
+            )
+            .unwrap()
+        );
+        let noise_png = encode(&noise).unwrap();
+        assert_eq!(
+            noise_png,
+            encode_with(
+                &noise,
+                image::codecs::png::CompressionType::Fast,
+                image::codecs::png::FilterType::Up
+            )
+            .unwrap()
+        );
+        for (name, image, png) in [("ui", &ui, &ui_png), ("noise", &noise, &noise_png)] {
+            assert_eq!(decode(png, true).unwrap().as_raw(), image.as_raw(), "{name}");
+            assert!(png_has_no_descriptive_chunks(png), "{name}");
+        }
+    }
+    fn png_has_no_descriptive_chunks(png: &[u8]) -> bool {
+        const FORBIDDEN: &[&[u8]] = &[
+            b"tEXt", b"zTXt", b"iTXt", b"iCCP", b"eXIf", b"tIME", b"sPLT",
+        ];
+        if png.len() < 8 || &png[..8] != b"\x89PNG\r\n\x1a\n" {
+            return false;
+        }
+        let mut offset = 8;
+        while offset + 12 <= png.len() {
+            let len = u32::from_be_bytes(png[offset..offset + 4].try_into().unwrap()) as usize;
+            let kind = &png[offset + 4..offset + 8];
+            if FORBIDDEN.contains(&kind) {
+                return false;
+            }
+            offset = offset.saturating_add(12).saturating_add(len);
+            if kind == b"IEND" {
+                return true;
+            }
+        }
+        false
+    }
+    #[test]
+    #[ignore = "compare PNG strategies; cargo test --profile perf png_strategy_compare -- --ignored --nocapture"]
+    fn png_strategy_compare() {
+        use image::codecs::png::{CompressionType, FilterType};
+        use std::time::Instant;
+        let images = [
+            ("ui_1280x720", synthetic_ui(1280, 720)),
+            ("gradient_1920x1080", synthetic_gradient(1920, 1080)),
+            ("noisy_1920x1080", synthetic_noise(1920, 1080)),
+            ("gradient_2560x1440", synthetic_gradient(2560, 1440)),
+        ];
+        let strategies = [
+            ("fast_adaptive", CompressionType::Fast, FilterType::Adaptive),
+            ("fast_sub", CompressionType::Fast, FilterType::Sub),
+            ("fast_up", CompressionType::Fast, FilterType::Up),
+            ("fast_nofilter", CompressionType::Fast, FilterType::NoFilter),
+            ("fast_paeth", CompressionType::Fast, FilterType::Paeth),
+        ];
+        for (image_name, image) in &images {
+            for (strategy, compression, filter) in strategies {
+                let encoded = encode_with(image, compression, filter).expect(strategy);
+                let decoded = decode(&encoded, true).unwrap();
+                assert_eq!(decoded.as_raw(), image.as_raw(), "{image_name} {strategy}");
+                assert!(png_has_no_descriptive_chunks(&encoded), "{image_name} {strategy}");
+            }
+            for (_, compression, filter) in strategies {
+                encode_with(image, compression, filter).unwrap();
+            }
+            let runs = if image.width() >= 2560 { 5 } else { 7 };
+            let mut samples = vec![Vec::new(); strategies.len()];
+            let mut sizes = vec![0usize; strategies.len()];
+            let mut product = Vec::with_capacity(runs);
+            for _ in 0..runs {
+                let started = Instant::now();
+                let encoded = encode(image).unwrap();
+                product.push((started.elapsed().as_nanos(), encoded.len()));
+                for (index, (_, compression, filter)) in strategies.iter().enumerate() {
+                    let started = Instant::now();
+                    let encoded = encode_with(image, *compression, *filter).unwrap();
+                    samples[index].push(started.elapsed().as_nanos());
+                    sizes[index] = encoded.len();
+                }
+            }
+            let mut ordered: Vec<u128> = product.iter().map(|(time, _)| *time).collect();
+            ordered.sort_unstable();
+            let rank = |q: f64| {
+                let at = ((q * ordered.len() as f64).ceil() as usize)
+                    .saturating_sub(1)
+                    .min(ordered.len() - 1);
+                ordered[at] as f64 / 1_000.0
+            };
+            println!(
+                "PNG image={image_name} strategy=product n={} unit=us min={:.1} median={:.1} p95={:.1} max={:.1} png_bytes={}",
+                ordered.len(),
+                ordered[0] as f64 / 1_000.0,
+                rank(0.50),
+                rank(0.95),
+                *ordered.last().unwrap() as f64 / 1_000.0,
+                product[0].1
+            );
+            for (index, (strategy, _, _)) in strategies.iter().enumerate() {
+                let mut ordered = samples[index].clone();
+                ordered.sort_unstable();
+                let rank = |q: f64| {
+                    let at = ((q * ordered.len() as f64).ceil() as usize)
+                        .saturating_sub(1)
+                        .min(ordered.len() - 1);
+                    ordered[at] as f64 / 1_000.0
+                };
+                println!(
+                    "PNG image={image_name} strategy={strategy} n={} unit=us min={:.1} median={:.1} p95={:.1} max={:.1} png_bytes={}",
+                    ordered.len(),
+                    ordered[0] as f64 / 1_000.0,
+                    rank(0.50),
+                    rank(0.95),
+                    *ordered.last().unwrap() as f64 / 1_000.0,
+                    sizes[index]
+                );
+            }
+        }
+    }
+    fn synthetic_ui(width: u32, height: u32) -> RgbaImage {
+        RgbaImage::from_fn(width, height, |x, y| {
+            let band = (y / 18) % 5;
+            let column = if x % 90 < 8 { 1 } else { 0 };
+            let color = match (band + column) % 4 {
+                0 => [248, 248, 246, 255],
+                1 => [32, 36, 42, 255],
+                2 => [228, 93, 104, 255],
+                _ => [23, 101, 199, 255],
+            };
+            image::Rgba(color)
+        })
+    }
+    fn synthetic_gradient(width: u32, height: u32) -> RgbaImage {
+        RgbaImage::from_fn(width, height, |x, y| {
+            image::Rgba([
+                (x.wrapping_mul(255) / width.max(1)) as u8,
+                (y.wrapping_mul(255) / height.max(1)) as u8,
+                40,
+                255,
+            ])
+        })
+    }
+    fn synthetic_noise(width: u32, height: u32) -> RgbaImage {
+        RgbaImage::from_fn(width, height, |x, y| {
+            let pixel = (x.wrapping_mul(13) ^ y.wrapping_mul(7)) as u8;
+            image::Rgba([pixel, pixel.wrapping_add(20), 40, 255])
+        })
+    }
     #[test]
     fn save_result_preserves_independent_effect_outcomes() {
         for copied in [false, true] {

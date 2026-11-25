@@ -56,3 +56,12 @@ codegen-units = 1
 lto = true
 opt-level = "s"
 strip = true
+
+# Optimized measurement profile. Default release stays abort+fat-LTO and is not
+# used for `cargo test`. This profile only runs when asked for by name.
+[profile.perf]
+inherits = "release"
+panic = "unwind"
+lto = false
+codegen-units = 16
+strip = false

@@ -1,13 +1,9 @@
 name: Validate and publish desktop 0.2.24
 on:
   workflow_dispatch:
-  pull_request:
-    branches: [main]
-    paths: [package.json, .github/workflows/release-desktop-024.yml, 'scripts/*desktop-024*', scripts/test_prepare_desktop_024.py, docs/releases/0.2.24.zh-CN.md]
-  push:
-    branches: [main]
-    paths: [package.json, .github/workflows/release-desktop-024.yml, 'scripts/*desktop-024*', scripts/test_prepare_desktop_024.py, docs/releases/0.2.24.zh-CN.md]
-# Windows runner locale must not reinterpret UTF-8 source or helper output.
+# Automatic push/pull_request publication is retired for this already-shipped
+# version. workflow_dispatch remains so the same jobs can be rebuilt by hand.
+# The current release workflow is release-desktop-027.yml.
 env:
   PYTHONUTF8: '1'
 permissions:
