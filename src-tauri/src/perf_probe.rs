@@ -240,3 +240,196 @@ struct NopWaker;
 impl std::task::Wake for NopWaker {
     fn wake(self: std::sync::Arc<Self>) {}
 }
+
+#[tokio::test]
+#[ignore = "loopback only; cargo test --profile perf translation_wait_probe -- --ignored --nocapture"]
+async fn translation_wait_probe() {
+    let mut hops = Vec::with_capacity(31);
+    for _ in 0..5 {
+        tokio::task::spawn_blocking(|| ()).await.unwrap();
+    }
+    for _ in 0..31 {
+        let started = Instant::now();
+        tokio::task::spawn_blocking(|| ()).await.unwrap();
+        hops.push(started.elapsed().as_nanos());
+    }
+    report("blocking_pool_empty_hop", &hops);
+
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = std::thread::spawn(move || keep_alive_json_server(listener, 2));
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(3))
+        .connect_timeout(std::time::Duration::from_secs(1))
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .unwrap();
+    let mut provider = crate::model::Provider {
+        id: "probe".into(),
+        name: "probe".into(),
+        kind: "openai".into(),
+        base_url: format!("http://{address}/v1"),
+        model: "fixture-model".into(),
+        region: String::new(),
+        enabled: true,
+        prompt: "Translate to {target}.".into(),
+        has_key: false,
+    };
+    let mut request_times = Vec::new();
+    for _ in 0..2 {
+        let started = Instant::now();
+        let result = crate::translation::translate_one(
+            &client,
+            &provider,
+            Ok("fixture-credential".into()),
+            "fixture",
+            "en",
+            "zh-Hans",
+        )
+        .await;
+        request_times.push(started.elapsed().as_nanos());
+        assert_eq!(result.text, "fixture-answer");
+        assert!(result.error.is_none());
+    }
+    let accepts = server.join().unwrap();
+    println!(
+        "PERF name=loopback_translate_connections accepts={accepts} expected=1 unit=count"
+    );
+    report("loopback_translate_one_pair", &request_times);
+    assert_eq!(accepts, 1, "shared client opened a new TCP connection per request");
+
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    provider.base_url = format!("http://{address}/v1");
+    let server = std::thread::spawn(move || delayed_sse_server(listener));
+    let first = std::sync::Arc::new(std::sync::Mutex::new(None::<std::time::Duration>));
+    let started = Instant::now();
+    let seen = first.clone();
+    let result = crate::translation::translate_one_streaming(
+        &client,
+        &provider,
+        Ok("fixture-credential".into()),
+        "fixture",
+        "en",
+        "zh-Hans",
+        move |_| {
+            let mut slot = seen.lock().unwrap();
+            if slot.is_none() {
+                *slot = Some(started.elapsed());
+            }
+        },
+    )
+    .await;
+    server.join().unwrap();
+    let first = first.lock().unwrap().unwrap();
+    println!(
+        "PERF name=loopback_sse_first_progress unit=us value={:.1}",
+        first.as_secs_f64() * 1_000_000.0
+    );
+    println!(
+        "PERF name=loopback_sse_complete unit=us value={:.1}",
+        started.elapsed().as_secs_f64() * 1_000_000.0
+    );
+    assert!(result.error.is_none(), "{:?}", result.error);
+    assert!(first + std::time::Duration::from_millis(40) < started.elapsed());
+}
+
+fn read_http(stream: &mut std::net::TcpStream) -> std::io::Result<(usize, Vec<u8>)> {
+    use std::io::Read;
+    let mut bytes = Vec::new();
+    let header_end = loop {
+        let mut chunk = [0_u8; 2048];
+        let count = stream.read(&mut chunk)?;
+        if count == 0 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::UnexpectedEof,
+                "closed",
+            ));
+        }
+        bytes.extend_from_slice(&chunk[..count]);
+        if let Some(index) = bytes.windows(4).position(|part| part == b"\r\n\r\n") {
+            break index + 4;
+        }
+        if bytes.len() > 65_536 {
+            return Err(std::io::Error::other("header too large"));
+        }
+    };
+    let headers = std::str::from_utf8(&bytes[..header_end]).unwrap_or("");
+    let length = headers
+        .lines()
+        .find_map(|line| {
+            let (name, value) = line.split_once(':')?;
+            name.eq_ignore_ascii_case("content-length")
+                .then(|| value.trim().parse::<usize>().ok())
+                .flatten()
+        })
+        .unwrap_or(0);
+    while bytes.len() < header_end + length {
+        let mut chunk = [0_u8; 2048];
+        let count = stream.read(&mut chunk)?;
+        if count == 0 {
+            break;
+        }
+        bytes.extend_from_slice(&chunk[..count]);
+    }
+    Ok((header_end, bytes))
+}
+
+fn keep_alive_json_server(listener: std::net::TcpListener, requests: usize) -> usize {
+    use std::io::Write;
+    listener.set_nonblocking(true).unwrap();
+    let mut accepts = 0usize;
+    let mut served = 0usize;
+    let mut streams = Vec::new();
+    let deadline = Instant::now() + std::time::Duration::from_secs(3);
+    while served < requests && Instant::now() < deadline {
+        if let Ok((stream, _)) = listener.accept() {
+            stream.set_nonblocking(false).unwrap();
+            stream
+                .set_read_timeout(Some(std::time::Duration::from_millis(200)))
+                .unwrap();
+            accepts += 1;
+            streams.push(stream);
+        }
+        for stream in &mut streams {
+            if served >= requests {
+                break;
+            }
+            if read_http(stream).is_err() {
+                continue;
+            }
+            let body = br#"{"choices":[{"message":{"content":"fixture-answer"}}]}"#;
+            let _ = write!(
+                stream,
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: keep-alive\r\n\r\n",
+                body.len()
+            );
+            let _ = stream.write_all(body);
+            let _ = stream.flush();
+            served += 1;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(2));
+    }
+    accepts
+}
+
+fn delayed_sse_server(listener: std::net::TcpListener) {
+    use std::io::Write;
+    let (mut stream, _) = listener.accept().unwrap();
+    let _ = read_http(&mut stream);
+    let first = b"data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"fixture-answer\"},\"finish_reason\":null}]}\n\n";
+    let _ = write!(
+        stream,
+        "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n{:x}\r\n",
+        first.len()
+    );
+    let _ = stream.write_all(first);
+    let _ = stream.write_all(b"\r\n");
+    let _ = stream.flush();
+    std::thread::sleep(std::time::Duration::from_millis(80));
+    let tail = b"data: {\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n";
+    let _ = write!(stream, "{:x}\r\n", tail.len());
+    let _ = stream.write_all(tail);
+    let _ = stream.write_all(b"\r\n0\r\n\r\n");
+    let _ = stream.flush();
+}
