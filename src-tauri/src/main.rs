@@ -687,12 +687,21 @@ fn ocr_deletion_accounts(p: &ocr::OcrProvider) -> Vec<String> {
     accounts.push(format!("ocr-{}", p.id));
     accounts
 }
+fn require_main_window(label: &str) -> Result<(), String> {
+    if label == "main" {
+        Ok(())
+    } else {
+        Err("此操作只能在主窗口使用".into())
+    }
+}
 #[tauri::command]
 async fn set_ocr_api_key(
+    window: tauri::WebviewWindow,
     app: tauri::AppHandle,
     provider_id: String,
     key: String,
 ) -> Result<(), String> {
+    require_main_window(window.label())?;
     tauri::async_runtime::spawn_blocking(move || {
         let state = app.state::<AppState>();
         let provider = locked(&state.settings)?
@@ -720,7 +729,12 @@ async fn set_ocr_api_key(
     .map_err(|_| "保存 OCR 密钥任务被中断".to_string())?
 }
 #[tauri::command]
-async fn delete_ocr_api_key(app: tauri::AppHandle, provider_id: String) -> Result<(), String> {
+async fn delete_ocr_api_key(
+    window: tauri::WebviewWindow,
+    app: tauri::AppHandle,
+    provider_id: String,
+) -> Result<(), String> {
+    require_main_window(window.label())?;
     tauri::async_runtime::spawn_blocking(move || {
         let state = app.state::<AppState>();
         let provider = locked(&state.settings)?
@@ -739,10 +753,12 @@ async fn delete_ocr_api_key(app: tauri::AppHandle, provider_id: String) -> Resul
 }
 #[tauri::command]
 async fn test_ocr_provider(
+    window: tauri::WebviewWindow,
     app: tauri::AppHandle,
     state: State<'_, AppState>,
     provider_id: String,
 ) -> Result<String, String> {
+    require_main_window(window.label())?;
     let _permit = state
         .translation_busy
         .try_acquire()
@@ -1355,11 +1371,13 @@ fn inactive_retry_actions(
 
 #[tauri::command]
 fn save_settings(
+    window: tauri::WebviewWindow,
     app: tauri::AppHandle,
     state: State<AppState>,
     mut settings: Settings,
     retry_shortcut_actions: Option<Vec<String>>,
 ) -> Result<(), String> {
+    require_main_window(window.label())?;
     let _maintenance = state
         .shortcut_maintenance
         .try_enter()
@@ -1534,10 +1552,12 @@ fn persist_settings_and_history(
 }
 #[tauri::command]
 async fn set_api_key(
+    window: tauri::WebviewWindow,
     app: tauri::AppHandle,
     provider_id: String,
     key: String,
 ) -> Result<(), String> {
+    require_main_window(window.label())?;
     tauri::async_runtime::spawn_blocking(move || {
         let state = app.state::<AppState>();
         let provider = locked(&state.settings)?
@@ -1566,7 +1586,12 @@ async fn set_api_key(
     .map_err(|_| "保存密钥任务被中断".to_string())?
 }
 #[tauri::command]
-async fn delete_api_key(app: tauri::AppHandle, provider_id: String) -> Result<(), String> {
+async fn delete_api_key(
+    window: tauri::WebviewWindow,
+    app: tauri::AppHandle,
+    provider_id: String,
+) -> Result<(), String> {
+    require_main_window(window.label())?;
     tauri::async_runtime::spawn_blocking(move || {
         let state = app.state::<AppState>();
         let provider = locked(&state.settings)?
@@ -1888,12 +1913,39 @@ fn trim_history<T: Borrow<HistoryEntry>>(history: &mut Vec<T>, max: usize) {
         }
     }
 }
+
+/// Drop history that exceeds the loaded limit, then replace history.json.
+/// A failed write leaves the original file in place and stops startup, so the
+/// next launch retries instead of continuing with a trimmed memory copy.
+fn persist_trimmed_startup_history(
+    path: &Path,
+    history: &mut Vec<HistoryEntry>,
+    max_history: usize,
+) -> Result<(), String> {
+    let file_len = fs::metadata(path).map(|meta| meta.len() as usize).unwrap_or(0);
+    if history.len() <= max_history && file_len <= MAX_HISTORY_BYTES {
+        return Ok(());
+    }
+    let original_ids: Vec<String> = history.iter().map(|entry| entry.id.clone()).collect();
+    trim_history(history, max_history);
+    let changed = history.len() != original_ids.len()
+        || history
+            .iter()
+            .zip(&original_ids)
+            .any(|(entry, id)| entry.id != *id);
+    if !changed {
+        return Ok(());
+    }
+    write_json(path, history)
+}
 #[tauri::command]
 async fn test_provider(
+    window: tauri::WebviewWindow,
     app: tauri::AppHandle,
     state: State<'_, AppState>,
     provider_id: String,
 ) -> Result<String, String> {
+    require_main_window(window.label())?;
     let _permit = state
         .translation_busy
         .try_acquire()
@@ -1920,11 +1972,20 @@ async fn test_provider(
     }
 }
 #[tauri::command]
-fn get_history(state: State<AppState>) -> Result<Vec<HistoryEntry>, String> {
+fn get_history(
+    window: tauri::WebviewWindow,
+    state: State<AppState>,
+) -> Result<Vec<HistoryEntry>, String> {
+    require_main_window(window.label())?;
     Ok(locked(&state.history)?.clone())
 }
 #[tauri::command]
-async fn toggle_favorite(app: tauri::AppHandle, id: String) -> Result<(), String> {
+async fn toggle_favorite(
+    window: tauri::WebviewWindow,
+    app: tauri::AppHandle,
+    id: String,
+) -> Result<(), String> {
+    require_main_window(window.label())?;
     tauri::async_runtime::spawn_blocking(move || {
         let state = app.state::<AppState>();
         let mut h = locked(&state.history)?;
@@ -1942,7 +2003,12 @@ async fn toggle_favorite(app: tauri::AppHandle, id: String) -> Result<(), String
     .map_err(|_| "收藏操作被中断".to_string())?
 }
 #[tauri::command]
-async fn delete_history(app: tauri::AppHandle, id: Option<String>) -> Result<(), String> {
+async fn delete_history(
+    window: tauri::WebviewWindow,
+    app: tauri::AppHandle,
+    id: Option<String>,
+) -> Result<(), String> {
+    require_main_window(window.label())?;
     tauri::async_runtime::spawn_blocking(move || {
         let state = app.state::<AppState>();
         // Clearing history must not be undone by an older in-flight request.
@@ -3693,10 +3759,7 @@ fn main() {
                 "历史文件",
                 &mut warnings,
             )?;
-            let history_bytes = fs::metadata(&history_path).map_or(0, |m| m.len() as usize);
-            if history.len() > settings.max_history || history_bytes > MAX_HISTORY_BYTES {
-                trim_history(&mut history, settings.max_history);
-            }
+            persist_trimmed_startup_history(&history_path, &mut history, settings.max_history)?;
             let client = reqwest::Client::builder()
                 .timeout(Duration::from_secs(45))
                 .connect_timeout(Duration::from_secs(12))
@@ -5645,5 +5708,126 @@ mod tests {
             h.iter().map(|h| h.id.as_str()).collect::<Vec<_>>(),
             vec!["new", "favorite"]
         );
+    }
+    fn fixture_entry(id: &str, text: &str, favorite: bool) -> HistoryEntry {
+        HistoryEntry {
+            id: id.into(),
+            text: text.into(),
+            source_language: "en".into(),
+            target_language: "zh-Hans".into(),
+            results: vec![],
+            created_at: 0,
+            favorite,
+        }
+    }
+    fn temp_dir(label: &str) -> PathBuf {
+        let directory = std::env::temp_dir().join(format!(
+            "echolingo-{label}-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir(&directory).unwrap();
+        directory
+    }
+    #[test]
+    fn startup_history_trim_rewrites_disk_and_drops_removed_text() {
+        let directory = temp_dir("startup-history");
+        let path = directory.join("history.json");
+        let history = vec![
+            fixture_entry("keep-me", "visible source", true),
+            fixture_entry("drop-me", "secret leftover", false),
+            fixture_entry("drop-too", "second leftover", false),
+        ];
+        write_json(&path, &history).unwrap();
+        let mut loaded = history;
+        persist_trimmed_startup_history(&path, &mut loaded, 1).unwrap();
+        assert_eq!(loaded.len(), 1);
+        assert_eq!(loaded[0].id, "keep-me");
+        let bytes = fs::read(&path).unwrap();
+        let saved: Vec<HistoryEntry> = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(saved.len(), 1);
+        assert_eq!(saved[0].id, "keep-me");
+        let text = String::from_utf8(bytes).unwrap();
+        assert!(!text.contains("secret leftover"));
+        assert!(!text.contains("second leftover"));
+        assert!(!text.contains("drop-me"));
+        fs::remove_dir_all(directory).unwrap();
+    }
+    #[test]
+    fn startup_history_trim_leaves_an_already_small_file_untouched() {
+        let directory = temp_dir("startup-history-same");
+        let path = directory.join("history.json");
+        write_json(&path, &vec![fixture_entry("only", "plain", false)]).unwrap();
+        let before = fs::read(&path).unwrap();
+        let mut loaded: Vec<HistoryEntry> = serde_json::from_slice(&before).unwrap();
+        persist_trimmed_startup_history(&path, &mut loaded, 20).unwrap();
+        assert_eq!(fs::read(&path).unwrap(), before);
+        fs::remove_dir_all(directory).unwrap();
+    }
+    #[test]
+    fn startup_history_trim_does_not_create_a_missing_file() {
+        let directory = temp_dir("startup-history-missing");
+        let path = directory.join("history.json");
+        let mut loaded = Vec::new();
+        persist_trimmed_startup_history(&path, &mut loaded, 20).unwrap();
+        assert!(!path.exists());
+        fs::remove_dir_all(directory).unwrap();
+    }
+    #[test]
+    fn startup_history_trim_write_failure_keeps_the_original_and_stops() {
+        let directory = temp_dir("startup-history-fail");
+        let path = directory.join("history.json");
+        fs::create_dir(&path).unwrap();
+        let mut loaded = vec![
+            fixture_entry("a", "alpha", false),
+            fixture_entry("b", "beta", false),
+        ];
+        assert!(persist_trimmed_startup_history(&path, &mut loaded, 1).is_err());
+        assert!(path.is_dir());
+        fs::remove_dir_all(directory).unwrap();
+    }
+    #[test]
+    fn main_window_commands_reject_screenshot_editor_and_pins() {
+        assert!(require_main_window("main").is_ok());
+        for label in ["screenshot-editor", "screenshot-pin-1", "screenshot-pin-extra", ""] {
+            let error = require_main_window(label).unwrap_err();
+            assert!(error.contains("主窗口"), "{label}: {error}");
+        }
+    }
+    #[test]
+    fn screenshot_windows_keep_image_copy_and_do_not_call_credential_commands() {
+        let editor = include_str!("../../src/screenshot-editor.ts");
+        let pin = include_str!("../../src/pinned-screenshot.ts");
+        let settings = include_str!("../../src/screenshot-settings.ts");
+        for source in [editor, pin, settings] {
+            for command in [
+                "set_api_key",
+                "delete_api_key",
+                "set_ocr_api_key",
+                "delete_ocr_api_key",
+                "save_settings",
+                "get_history",
+                "toggle_favorite",
+                "delete_history",
+                "test_provider",
+                "test_ocr_provider",
+            ] {
+                assert!(
+                    !source.contains(&format!("'{command}'"))
+                        && !source.contains(&format!("\"{command}\"")),
+                    "{command} is not a screenshot-window call"
+                );
+            }
+        }
+        assert!(editor.contains("'copy_screenshot_image'"));
+        assert!(editor.contains("'pin_screenshot_image'"));
+        assert!(editor.contains("'save_screenshot_image'"));
+        assert!(pin.contains("'close_pinned_screenshot'"));
+        assert!(pin.contains("'start_pinned_screenshot_drag'"));
+        assert!(!editor.contains("'copy_text'"));
+        assert!(!pin.contains("'copy_text'"));
     }
 }

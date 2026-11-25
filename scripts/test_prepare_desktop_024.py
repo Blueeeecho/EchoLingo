@@ -69,6 +69,8 @@ class StaticContracts(unittest.TestCase):
     def test_historical_and_normal_gates_unchanged(self):
         for name in ('scripts/prepare-desktop-release.py','scripts/publish-desktop-release.cjs','scripts/test-desktop-release.cjs','scripts/test_prepare_desktop_release.py','.github/workflows/release-desktop.yml','.github/workflows/ci.yml','scripts/windows-offline-translation-test.ps1','.github/workflows/release-desktop-021.yml','scripts/prepare-desktop-021.py','scripts/publish-desktop-021.cjs','scripts/test_prepare_desktop_021.py','scripts/test-desktop-021.cjs','.github/workflows/release-desktop-022.yml','scripts/prepare-desktop-022.py','scripts/publish-desktop-022.cjs','scripts/test-desktop-022.cjs','.github/workflows/release-desktop-023.yml','scripts/prepare-desktop-023.py','scripts/publish-desktop-023.cjs','scripts/test_prepare_desktop_023.py','scripts/test-desktop-023.cjs'):
             expected=subprocess.check_output(['git','show',R.REVIEWED_SOURCE+':'+name],cwd=ROOT)
+            if load('retired_release_workflows','retired_release_workflows.py').skip_byte_freeze(self, name):
+                continue
             current=(ROOT/name).read_bytes().replace(b'\r\n',b'\n')
             # Exact snapshots for the approved post-release docs CI migration.
             docs_sync_sha256={

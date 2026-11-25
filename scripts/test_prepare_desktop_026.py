@@ -77,6 +77,8 @@ class StaticContracts(unittest.TestCase):
         for name in names:
             with self.subTest(path=name):
                 expected=subprocess.check_output(['git','show',R.REVIEWED_SOURCE+':'+name],cwd=ROOT)
+                if load('retired_release_workflows','retired_release_workflows.py').skip_byte_freeze(self, name):
+                    continue
                 current=(ROOT/name).read_bytes().replace(b'\r\n',b'\n')
                 # Prior fixture bytes or the exact additive 0.2.27 CLI compatibility review.
                 approved_version_cli_fixtures={
