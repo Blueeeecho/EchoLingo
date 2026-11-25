@@ -408,6 +408,9 @@ impl Write for BoundedWriter {
         Ok(())
     }
 }
+pub(crate) fn png_base64_payload(image: &RgbaImage) -> Result<String, String> {
+    Ok(base64::engine::general_purpose::STANDARD.encode(encode(image)?))
+}
 fn encode(image: &RgbaImage) -> Result<Vec<u8>, String> {
     let mut output = BoundedWriter(Vec::new());
     // Pixels only: no original EXIF, text, ICC metadata or editing layers.
@@ -441,7 +444,7 @@ fn make_session(
         kind: "image",
         revision: 0,
         id,
-        png_base64: Arc::new(base64::engine::general_purpose::STANDARD.encode(encode(&pixels)?)),
+        png_base64: Arc::new(png_base64_payload(&pixels)?),
         width: pixels.width(),
         height: pixels.height(),
         captured_at,
@@ -1547,6 +1550,13 @@ fn app_emit_selection(app: &tauri::AppHandle, selection: &SelectionSession) -> R
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn png_payload_roundtrip_keeps_pixels_and_strips_to_png() {
+        let image = RgbaImage::from_fn(2, 2, |x, y| image::Rgba([x as u8, y as u8, 3, 255]));
+        let payload = png_base64_payload(&image).unwrap();
+        let decoded = from_base64(&payload, true).unwrap();
+        assert_eq!(decoded.as_raw(), image.as_raw());
+    }
     #[test]
     fn save_result_preserves_independent_effect_outcomes() {
         for copied in [false, true] {

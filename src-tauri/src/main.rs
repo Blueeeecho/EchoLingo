@@ -29,6 +29,8 @@ mod source_delivery;
 mod startup_launch;
 mod startup_storage;
 #[cfg(test)]
+mod perf_probe;
+#[cfg(test)]
 mod storage_tests;
 #[cfg(any(target_os = "macos", test))]
 mod system_translation_gate;
